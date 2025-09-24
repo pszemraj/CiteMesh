@@ -432,7 +432,7 @@ class CitationGraphBuilder:
     def _compute_similarity_layout(
         self, graph: nx.DiGraph
     ) -> Dict[str, Tuple[float, float]]:
-        """Compute similarity-based layout using force simulation and similarity."""
+        """Compute similarity-based layout using proper force-directed simulation."""
         n = graph.number_of_nodes()
         if n <= 2:
             # Simple layout for very few nodes
@@ -441,139 +441,101 @@ class CitationGraphBuilder:
                 return {nodes[0]: (400, 300)}
             return {nodes[0]: (300, 300), nodes[1]: (500, 300)}
 
-        # Find the root paper (node with highest centrality or most connections)
-        centrality = nx.degree_centrality(graph)
-        root = max(centrality.keys(), key=lambda k: centrality[k])
-
-        # Build layered structure based on distance from root
-        layers = self._compute_layers_from_root(graph, root)
-
-        # Compute positions using radial layout with force adjustments
-        positions = self._radial_force_layout(graph, layers, root)
-
-        # Apply similarity-based adjustments
+        # Compute similarity matrix for positioning
         similarity = self.compute_similarity_matrix(graph)
-        positions = self._apply_similarity_forces(positions, similarity, graph)
-
+        
+        # Initialize with random positions spread across full viewport
+        nodes = list(graph.nodes())
+        np.random.seed(42)
+        positions = {}
+        for i, node in enumerate(nodes):
+            # Wide random initialization to avoid clustering
+            x = np.random.uniform(50, 750)
+            y = np.random.uniform(50, 550)
+            positions[node] = (x, y)
+        
+        # Apply force-directed simulation based on similarity
+        positions = self._apply_similarity_force_simulation(positions, similarity, graph)
+        
         return self._scale_positions(positions, width=800, height=600, padding=50)
 
-    def _compute_layers_from_root(self, graph: nx.DiGraph, root: str) -> Dict[str, int]:
-        """Compute layer assignment for each node based on distance from root."""
-        # Use undirected for distance calculation
-        undirected = graph.to_undirected()
-
-        # BFS to compute layers
-        layers = {root: 0}
-        visited = {root}
-        queue = [(root, 0)]
-
-        while queue:
-            node, layer = queue.pop(0)
-            for neighbor in undirected.neighbors(node):
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    layers[neighbor] = layer + 1
-                    queue.append((neighbor, layer + 1))
-
-        # Assign remaining nodes to outer layer
-        max_layer = max(layers.values()) if layers else 0
-        for node in graph.nodes():
-            if node not in layers:
-                layers[node] = max_layer + 1
-
-        return layers
-
-    def _radial_force_layout(
-        self, graph: nx.DiGraph, layers: Dict[str, int], root: str
-    ) -> Dict[str, Tuple[float, float]]:
-        """Create radial layout with nodes arranged in concentric circles."""
-        positions = {}
-        center_x, center_y = 400, 300
-
-        # Group nodes by layer
-        layer_nodes = {}
-        for node, layer in layers.items():
-            if layer not in layer_nodes:
-                layer_nodes[layer] = []
-            layer_nodes[layer].append(node)
-
-        # Position root at center
-        positions[root] = (center_x, center_y)
-
-        # Position each layer in concentric circles
-        for layer, nodes in sorted(layer_nodes.items()):
-            if layer == 0:
-                continue  # Root already positioned
-
-            # Calculate radius based on layer
-            radius = 120 * layer  # Increased spacing
-            n_nodes = len(nodes)
-
-            # Sort nodes by citation count for better positioning
-            nodes_sorted = sorted(
-                nodes,
-                key=lambda x: graph.nodes[x].get("citation_count", 0),
-                reverse=True,
-            )
-
-            # Position nodes evenly around the circle
-            for i, node in enumerate(nodes_sorted):
-                angle = 2 * math.pi * i / n_nodes
-                x = center_x + radius * math.cos(angle)
-                y = center_y + radius * math.sin(angle)
-
-                # Add small random perturbation to avoid perfect circles
-                x += np.random.uniform(-10, 10)
-                y += np.random.uniform(-10, 10)
-
-                positions[node] = (x, y)
-
-        return positions
-
-    def _apply_similarity_forces(
+    def _apply_similarity_force_simulation(
         self, positions: Dict, similarity: np.ndarray, graph: nx.DiGraph
     ) -> Dict[str, Tuple[float, float]]:
-        """Apply force-based adjustments based on paper similarity."""
+        """Apply force-directed simulation where similarity drives attraction."""
         nodes = list(graph.nodes())
-
-        # Convert positions to array for easier manipulation
-        pos_array = np.array([positions[node] for node in nodes])
-
-        # Apply several iterations of force simulation
-        for iteration in range(50):
-            forces = np.zeros_like(pos_array)
-
-            for i, node_i in enumerate(nodes):
-                for j, node_j in enumerate(nodes):
-                    if i >= j:
-                        continue
-
-                    # Calculate current distance
-                    diff = pos_array[j] - pos_array[i]
-                    dist = np.linalg.norm(diff)
-
-                    if dist < 1e-6:
-                        continue
-
-                    # Normalize direction
-                    direction = diff / dist
-
-                    # Ideal distance based on similarity (high similarity = close)
+        n = len(nodes)
+        node_to_idx = {node: i for i, node in enumerate(nodes)}
+        
+        # Convert positions to array
+        pos = np.array([positions[node] for node in nodes])
+        
+        # Get node sizes for collision detection
+        citations = [graph.nodes[node].get('citation_count', 0) for node in nodes]
+        max_citations = max(citations) if citations else 1
+        node_sizes = np.array([5 + 20 * (c / max_citations) ** 0.5 for c in citations])
+        
+        # Force simulation parameters
+        iterations = 800
+        temperature = 200.0
+        cooling_rate = 0.995
+        
+        for iteration in range(iterations):
+            forces = np.zeros_like(pos)
+            
+            # Calculate pairwise forces
+            for i in range(n):
+                for j in range(i + 1, n):
+                    # Vector from i to j
+                    delta = pos[j] - pos[i]
+                    distance = np.linalg.norm(delta)
+                    
+                    if distance < 0.01:
+                        # Random push to separate
+                        delta = np.random.randn(2) * 20
+                        distance = 0.01
+                    
+                    direction = delta / distance
+                    
+                    # Strong repulsion force for all nodes
+                    # Use Coulomb's law-like repulsion
+                    repulsion_strength = 20000
+                    repulsion = repulsion_strength / (distance * distance + 100)
+                    forces[i] -= direction * repulsion
+                    forces[j] += direction * repulsion
+                    
+                    # Attraction force ONLY for significant similarity
                     sim = similarity[i, j]
-                    ideal_dist = 50 + (1 - sim) * 200  # Range: 50-250
-
-                    # Spring force to ideal distance
-                    force_magnitude = 0.01 * (dist - ideal_dist)
-
-                    # Apply force
-                    forces[i] += force_magnitude * direction
-                    forces[j] -= force_magnitude * direction
-
-            # Apply forces with damping
-            pos_array += forces * 0.5
-
+                    if sim > 0.1:  # Only attract if similarity is meaningful
+                        # Exponential attraction for high similarity
+                        attraction_strength = 1000 * (sim ** 2) * temperature / 200
+                        
+                        # Pull together if far apart
+                        if distance > 50:
+                            attraction = attraction_strength * np.log(distance / 50)
+                            forces[i] += direction * attraction
+                            forces[j] -= direction * attraction
+            
+            # Apply forces with temperature-based scaling
+            displacement = forces * (temperature / 200) * 0.1
+            
+            # Limit displacement
+            max_displacement = temperature * 0.3
+            disp_magnitude = np.linalg.norm(displacement, axis=1, keepdims=True)
+            displacement = np.where(
+                disp_magnitude > max_displacement,
+                displacement * max_displacement / (disp_magnitude + 1e-10),
+                displacement
+            )
+            
+            # Update positions
+            pos += displacement
+            
+            # Cool down
+            temperature *= cooling_rate
+        
         # Convert back to dictionary
-        return {node: tuple(pos_array[i]) for i, node in enumerate(nodes)}
+        return {node: tuple(pos[i]) for i, node in enumerate(nodes)}
 
     def _scale_positions(
         self, positions: Dict, width: int, height: int, padding: int
@@ -764,16 +726,39 @@ class CitationGraphBuilder:
                 physics=False if layout_style == LayoutStyle.SIMILARITY else True,
             )
 
-        # Add edges
-        for source, target, attrs in graph.edges(data=True):
-            edge_type = attrs.get("type", "cites")
-            color = "#3b82f6" if edge_type == "cited_by" else "#ef4444"
-            net.add_edge(
-                source,
-                target,
-                color={"color": color, "opacity": 0.5},
-                arrows={"to": {"enabled": True, "scaleFactor": 0.5}},
-            )
+        # Add edges based on similarity (reference tool style)
+        if layout_style == LayoutStyle.SIMILARITY:
+            # For similarity layout, show edges between similar papers
+            nodes_list = list(graph.nodes())
+            similarity = self.compute_similarity_matrix(graph)
+            
+            # Add edges for papers with high similarity
+            for i, node1 in enumerate(nodes_list):
+                for j, node2 in enumerate(nodes_list[i+1:], start=i+1):
+                    sim = similarity[i, j]
+                    # Only show edges for significant similarity
+                    if sim > 0.15:  # Threshold for edge display
+                        # Edge opacity and width based on similarity
+                        opacity = min(0.6, sim)
+                        width = 1 + sim * 2
+                        net.add_edge(
+                            node1,
+                            node2,
+                            color={"color": "#94a3b8", "opacity": opacity},
+                            width=width,
+                            arrows={"to": {"enabled": False}},  # No arrows for similarity
+                        )
+        else:
+            # For force layout, show traditional citation edges
+            for source, target, attrs in graph.edges(data=True):
+                edge_type = attrs.get("type", "cites")
+                color = "#3b82f6" if edge_type == "cited_by" else "#ef4444"
+                net.add_edge(
+                    source,
+                    target,
+                    color={"color": color, "opacity": 0.5},
+                    arrows={"to": {"enabled": True, "scaleFactor": 0.5}},
+                )
 
         # Configure physics and layout
         if layout_style == LayoutStyle.FORCE:
@@ -785,27 +770,11 @@ class CitationGraphBuilder:
             # Enable navigation buttons for force layout
             net.show_buttons(filter_=["physics", "layout", "interaction"])
         else:
-            # For similarity layout, use gentle physics to maintain structure
+            # For similarity layout, disable physics since we computed positions
             net.set_options("""
             {
                 "physics": {
-                    "enabled": true,
-                    "stabilization": {
-                        "enabled": true,
-                        "iterations": 200,
-                        "updateInterval": 10,
-                        "fit": true
-                    },
-                    "solver": "forceAtlas2Based",
-                    "forceAtlas2Based": {
-                        "theta": 0.5,
-                        "gravitationalConstant": -50,
-                        "centralGravity": 0.005,
-                        "springConstant": 0.08,
-                        "springLength": 100,
-                        "damping": 0.4,
-                        "avoidOverlap": 0.5
-                    }
+                    "enabled": false
                 },
                 "interaction": {
                     "dragNodes": true,
@@ -816,22 +785,24 @@ class CitationGraphBuilder:
                     "hover": true,
                     "tooltipDelay": 200
                 },
-                "layout": {
-                    "randomSeed": 42,
-                    "improvedLayout": true,
-                    "clusterThreshold": 150,
-                    "hierarchical": {
-                        "enabled": false
-                    }
-                },
                 "edges": {
                     "smooth": {
-                        "type": "dynamic",
+                        "type": "continuous",
                         "roundness": 0.5
-                    }
+                    },
+                    "color": {
+                        "opacity": 0.3
+                    },
+                    "width": 1
                 },
-                "configure": {
-                    "enabled": false
+                "nodes": {
+                    "borderWidth": 0,
+                    "shadow": {
+                        "enabled": true,
+                        "size": 3,
+                        "x": 2,
+                        "y": 2
+                    }
                 }
             }
             """)
