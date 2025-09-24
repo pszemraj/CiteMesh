@@ -432,110 +432,111 @@ class CitationGraphBuilder:
     def _compute_similarity_layout(
         self, graph: nx.DiGraph
     ) -> Dict[str, Tuple[float, float]]:
-        """Compute similarity-based layout using proper force-directed simulation."""
+        """Compute similarity-based layout matching Connected Papers style."""
         n = graph.number_of_nodes()
         if n <= 2:
-            # Simple layout for very few nodes
             nodes = list(graph.nodes())
             if n == 1:
                 return {nodes[0]: (400, 300)}
             return {nodes[0]: (300, 300), nodes[1]: (500, 300)}
 
-        # Compute similarity matrix for positioning
+        # Compute similarity matrix based on bibliographic coupling and co-citation
         similarity = self.compute_similarity_matrix(graph)
-        
-        # Initialize with random positions spread across full viewport
-        nodes = list(graph.nodes())
-        np.random.seed(42)
-        positions = {}
-        for i, node in enumerate(nodes):
-            # Wide random initialization to avoid clustering
-            x = np.random.uniform(50, 750)
-            y = np.random.uniform(50, 550)
-            positions[node] = (x, y)
-        
-        # Apply force-directed simulation based on similarity
-        positions = self._apply_similarity_force_simulation(positions, similarity, graph)
-        
-        return self._scale_positions(positions, width=800, height=600, padding=50)
 
-    def _apply_similarity_force_simulation(
-        self, positions: Dict, similarity: np.ndarray, graph: nx.DiGraph
-    ) -> Dict[str, Tuple[float, float]]:
-        """Apply force-directed simulation where similarity drives attraction."""
+        # Use spring layout as initial positions for better starting point
+        pos_dict = nx.spring_layout(graph, k=1 / math.sqrt(n), iterations=50, seed=42)
+
+        # Convert to our coordinate system
         nodes = list(graph.nodes())
-        n = len(nodes)
-        node_to_idx = {node: i for i, node in enumerate(nodes)}
-        
-        # Convert positions to array
-        pos = np.array([positions[node] for node in nodes])
-        
-        # Get node sizes for collision detection
-        citations = [graph.nodes[node].get('citation_count', 0) for node in nodes]
-        max_citations = max(citations) if citations else 1
-        node_sizes = np.array([5 + 20 * (c / max_citations) ** 0.5 for c in citations])
-        
-        # Force simulation parameters
-        iterations = 800
-        temperature = 200.0
-        cooling_rate = 0.995
-        
+        positions = np.array([list(pos_dict[node]) for node in nodes])
+        positions = positions * 400 + [400, 300]  # Scale and center
+
+        # Force-directed simulation matching Connected Papers layout
+        iterations = 1000
+        dt = 0.02
+        damping = 0.9
+        velocities = np.zeros_like(positions)
+
+        # Get citation counts for node importance
+        citations = np.array(
+            [graph.nodes[node].get("citation_count", 0) for node in nodes]
+        )
+        max_cit = max(citations) if citations.any() else 1
+        importance = np.sqrt(citations / max_cit + 0.1)  # Importance factor
+
         for iteration in range(iterations):
-            forces = np.zeros_like(pos)
-            
-            # Calculate pairwise forces
+            forces = np.zeros_like(positions)
+
+            # Calculate all pairwise forces
             for i in range(n):
                 for j in range(i + 1, n):
                     # Vector from i to j
-                    delta = pos[j] - pos[i]
-                    distance = np.linalg.norm(delta)
-                    
-                    if distance < 0.01:
-                        # Random push to separate
-                        delta = np.random.randn(2) * 20
-                        distance = 0.01
-                    
-                    direction = delta / distance
-                    
-                    # Strong repulsion force for all nodes
-                    # Use Coulomb's law-like repulsion
-                    repulsion_strength = 20000
-                    repulsion = repulsion_strength / (distance * distance + 100)
-                    forces[i] -= direction * repulsion
-                    forces[j] += direction * repulsion
-                    
-                    # Attraction force ONLY for significant similarity
+                    diff = positions[j] - positions[i]
+                    dist = np.linalg.norm(diff)
+
+                    if dist < 1e-6:
+                        diff = np.random.randn(2) * 1
+                        dist = 1
+
+                    unit_vec = diff / dist
+
+                    # Repulsive force - stronger to prevent overlap
+                    # Scale by importance so important papers get more space
+                    rep_factor = (importance[i] + importance[j]) / 2
+                    min_distance = (
+                        20 + 30 * rep_factor
+                    )  # Minimum distance based on importance
+
+                    if dist < min_distance * 3:  # Only repel when relatively close
+                        repulsion = 8000.0 * rep_factor / (dist + 10)
+                        forces[i] -= unit_vec * repulsion
+                        forces[j] += unit_vec * repulsion
+
+                    # Attractive force based on similarity
                     sim = similarity[i, j]
-                    if sim > 0.1:  # Only attract if similarity is meaningful
-                        # Exponential attraction for high similarity
-                        attraction_strength = 1000 * (sim ** 2) * temperature / 200
-                        
-                        # Pull together if far apart
-                        if distance > 50:
-                            attraction = attraction_strength * np.log(distance / 50)
-                            forces[i] += direction * attraction
-                            forces[j] -= direction * attraction
-            
-            # Apply forces with temperature-based scaling
-            displacement = forces * (temperature / 200) * 0.1
-            
-            # Limit displacement
-            max_displacement = temperature * 0.3
-            disp_magnitude = np.linalg.norm(displacement, axis=1, keepdims=True)
-            displacement = np.where(
-                disp_magnitude > max_displacement,
-                displacement * max_displacement / (disp_magnitude + 1e-10),
-                displacement
+                    if sim > 0.05:  # Only meaningful similarities
+                        # Stronger attraction for high similarity
+                        ideal_distance = (
+                            80 + 150 * (1 - sim) ** 2
+                        )  # Closer for high similarity
+                        if dist > ideal_distance:
+                            # Pull together if too far
+                            spring_force = 2.0 * sim * (dist - ideal_distance)
+                            forces[i] += unit_vec * spring_force
+                            forces[j] -= unit_vec * spring_force
+                        elif dist < ideal_distance * 0.8:
+                            # Push apart if too close
+                            spring_force = 1.0 * sim * (ideal_distance - dist)
+                            forces[i] -= unit_vec * spring_force
+                            forces[j] += unit_vec * spring_force
+
+            # Very gentle centering to keep graph cohesive
+            center = np.array([400, 300])
+            for i in range(n):
+                to_center = center - positions[i]
+                dist_to_center = np.linalg.norm(to_center)
+                if dist_to_center > 250:  # Only if very far from center
+                    forces[i] += to_center * 0.01
+
+            # Update velocities and positions
+            velocities = velocities * damping + forces * dt
+
+            # Limit maximum velocity
+            speed = np.linalg.norm(velocities, axis=1, keepdims=True)
+            max_speed = 50
+            velocities = np.where(
+                speed > max_speed, velocities * max_speed / (speed + 1e-10), velocities
             )
-            
-            # Update positions
-            pos += displacement
-            
-            # Cool down
-            temperature *= cooling_rate
-        
+
+            positions += velocities * dt
+
+            # Cool down in final iterations
+            if iteration > iterations * 0.8:
+                velocities *= 0.92
+
         # Convert back to dictionary
-        return {node: tuple(pos[i]) for i, node in enumerate(nodes)}
+        pos_dict = {nodes[i]: tuple(positions[i]) for i in range(n)}
+        return self._scale_positions(pos_dict, width=800, height=600, padding=50)
 
     def _scale_positions(
         self, positions: Dict, width: int, height: int, padding: int
@@ -731,10 +732,10 @@ class CitationGraphBuilder:
             # For similarity layout, show edges between similar papers
             nodes_list = list(graph.nodes())
             similarity = self.compute_similarity_matrix(graph)
-            
+
             # Add edges for papers with high similarity
             for i, node1 in enumerate(nodes_list):
-                for j, node2 in enumerate(nodes_list[i+1:], start=i+1):
+                for j, node2 in enumerate(nodes_list[i + 1 :], start=i + 1):
                     sim = similarity[i, j]
                     # Only show edges for significant similarity
                     if sim > 0.15:  # Threshold for edge display
@@ -746,7 +747,9 @@ class CitationGraphBuilder:
                             node2,
                             color={"color": "#94a3b8", "opacity": opacity},
                             width=width,
-                            arrows={"to": {"enabled": False}},  # No arrows for similarity
+                            arrows={
+                                "to": {"enabled": False}
+                            },  # No arrows for similarity
                         )
         else:
             # For force layout, show traditional citation edges
