@@ -23,6 +23,7 @@ import networkx as nx
 from pyvis.network import Network
 from semanticscholar import SemanticScholar
 from semanticscholar.Paper import Paper
+from tqdm import tqdm
 
 
 class EdgeType(Enum):
@@ -239,7 +240,10 @@ class CitationGraphBuilder:
                         paper.paperId, limit=max_citations
                     )
 
-                    for i, citation in enumerate(citations):
+                    citation_list = list(citations)
+                    for i, citation in enumerate(
+                        tqdm(citation_list, desc="Processing citations", leave=False)
+                    ):
                         # Citation object stores citingPaper as dict accessible via __getitem__
                         try:
                             citing_paper_data = citation["citingPaper"]
@@ -268,7 +272,10 @@ class CitationGraphBuilder:
                         paper.paperId, limit=max_references
                     )
 
-                    for i, reference in enumerate(references):
+                    reference_list = list(references)
+                    for i, reference in enumerate(
+                        tqdm(reference_list, desc="Processing references", leave=False)
+                    ):
                         # Reference object stores citedPaper as dict accessible via __getitem__
                         try:
                             cited_paper_data = reference["citedPaper"]
@@ -536,7 +543,7 @@ def parse_arguments() -> argparse.Namespace:
         "--depth",
         type=int,
         default=1,
-        help="Maximum traversal depth in the citation network",
+        help="Maximum traversal depth in the citation network (default: 1 for performance)",
     )
 
     parser.add_argument(
@@ -633,6 +640,11 @@ def main() -> int:
     try:
         # Build graph
         builder = CitationGraphBuilder(rate_limit=args.rate_limit)
+
+        print(f"Building citation graph for {args.paper_id}...")
+        print(
+            f"Settings: depth={args.depth}, max_citations={args.max_citations}, max_references={args.max_references}"
+        )
 
         graph = builder.build(
             paper_id=args.paper_id,
