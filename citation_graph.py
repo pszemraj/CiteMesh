@@ -100,7 +100,7 @@ class CitationGraphBuilder:
         """
         self.client = SemanticScholar()
         self.config = config or GraphConfig()
-        self.rate_limit = max(0.1, rate_limit)  # Enforce minimum rate limit
+        self.rate_limit = max(0.0, rate_limit)  # Allow zero rate limit
         self.logger = logging.getLogger(__name__)
         self._paper_cache: Dict[str, PaperNode] = {}
 
@@ -121,6 +121,11 @@ class CitationGraphBuilder:
         if paper.authors:
             authors = [a.name for a in paper.authors[:5] if a.name]
 
+        # Extract DOI from externalIds if available
+        doi = None
+        if hasattr(paper, "externalIds") and paper.externalIds:
+            doi = paper.externalIds.get("DOI")
+
         node = PaperNode(
             id=paper.paperId,
             title=paper.title or "Unknown Title",
@@ -129,11 +134,53 @@ class CitationGraphBuilder:
             authors=authors,
             abstract=paper.abstract[:500] if paper.abstract else None,
             venue=paper.venue,
-            doi=paper.doi,
+            doi=doi,
             url=paper.url,
         )
 
         self._paper_cache[paper.paperId] = node
+        return node
+
+    def _create_node_from_dict(self, paper_dict: dict) -> PaperNode:
+        """Create a PaperNode from a dictionary (e.g., from Citation/Reference objects)."""
+        paper_id = paper_dict.get("paperId")
+
+        # Cache check
+        if paper_id and paper_id in self._paper_cache:
+            return self._paper_cache[paper_id]
+
+        authors = []
+        if "authors" in paper_dict and paper_dict["authors"]:
+            # Authors may be dicts or objects
+            authors_data = paper_dict["authors"][:5]
+            for a in authors_data:
+                if isinstance(a, dict):
+                    if a.get("name"):
+                        authors.append(a["name"])
+                elif hasattr(a, "name") and a.name:
+                    authors.append(a.name)
+
+        # Extract DOI from externalIds if available
+        doi = None
+        if "externalIds" in paper_dict and paper_dict["externalIds"]:
+            doi = paper_dict["externalIds"].get("DOI")
+
+        node = PaperNode(
+            id=paper_id,
+            title=paper_dict.get("title", "Unknown Title"),
+            year=paper_dict.get("year"),
+            citation_count=paper_dict.get("citationCount"),
+            authors=authors,
+            abstract=paper_dict.get("abstract", "")[:500]
+            if paper_dict.get("abstract")
+            else None,
+            venue=paper_dict.get("venue"),
+            doi=doi,
+            url=paper_dict.get("url"),
+        )
+
+        if paper_id:
+            self._paper_cache[paper_id] = node
         return node
 
     def build(
@@ -193,22 +240,27 @@ class CitationGraphBuilder:
                     )
 
                     for i, citation in enumerate(citations):
-                        if citation.citingPaper:
-                            citing_node = self._create_node_from_paper(
-                                citation.citingPaper
-                            )
-                            graph.add_node(citing_node.id, **asdict(citing_node))
-                            graph.add_edge(
-                                citing_node.id,
-                                node.id,
-                                type=EdgeType.CITED_BY,
-                                color=EdgeType.CITED_BY.value,
-                                weight=1,
-                            )
+                        # Citation object stores citingPaper as dict accessible via __getitem__
+                        try:
+                            citing_paper_data = citation["citingPaper"]
+                            if citing_paper_data and citing_paper_data.get("paperId"):
+                                citing_node = self._create_node_from_dict(
+                                    citing_paper_data
+                                )
+                                graph.add_node(citing_node.id, **asdict(citing_node))
+                                graph.add_edge(
+                                    citing_node.id,
+                                    node.id,
+                                    type=EdgeType.CITED_BY,
+                                    color=EdgeType.CITED_BY.value,
+                                    weight=1,
+                                )
 
-                            # Recursive fetch for important papers
-                            if current_depth < depth - 1 and i < 5:
-                                fetch_and_add(citing_node.id, current_depth + 1)
+                                # Recursive fetch for important papers
+                                if current_depth < depth - 1 and i < 5:
+                                    fetch_and_add(citing_node.id, current_depth + 1)
+                        except (KeyError, TypeError):
+                            self.logger.debug("Citation missing citingPaper data")
 
                 # Fetch references
                 if max_references > 0:
@@ -217,22 +269,27 @@ class CitationGraphBuilder:
                     )
 
                     for i, reference in enumerate(references):
-                        if reference.citedPaper:
-                            cited_node = self._create_node_from_paper(
-                                reference.citedPaper
-                            )
-                            graph.add_node(cited_node.id, **asdict(cited_node))
-                            graph.add_edge(
-                                node.id,
-                                cited_node.id,
-                                type=EdgeType.CITES,
-                                color=EdgeType.CITES.value,
-                                weight=1,
-                            )
+                        # Reference object stores citedPaper as dict accessible via __getitem__
+                        try:
+                            cited_paper_data = reference["citedPaper"]
+                            if cited_paper_data and cited_paper_data.get("paperId"):
+                                cited_node = self._create_node_from_dict(
+                                    cited_paper_data
+                                )
+                                graph.add_node(cited_node.id, **asdict(cited_node))
+                                graph.add_edge(
+                                    node.id,
+                                    cited_node.id,
+                                    type=EdgeType.CITES,
+                                    color=EdgeType.CITES.value,
+                                    weight=1,
+                                )
 
-                            # Recursive fetch for important papers
-                            if current_depth < depth - 1 and i < 5:
-                                fetch_and_add(cited_node.id, current_depth + 1)
+                                # Recursive fetch for important papers
+                                if current_depth < depth - 1 and i < 5:
+                                    fetch_and_add(cited_node.id, current_depth + 1)
+                        except (KeyError, TypeError):
+                            self.logger.debug("Reference missing citedPaper data")
 
                 return node.id
 
@@ -299,7 +356,7 @@ class CitationGraphBuilder:
         # Clustering coefficient
         try:
             stats.avg_clustering = nx.average_clustering(graph.to_undirected())
-        except:
+        except Exception:
             stats.avg_clustering = 0.0
 
         # Diameter (only for strongly connected component)
@@ -308,7 +365,7 @@ class CitationGraphBuilder:
             subgraph = graph.subgraph(largest_cc)
             if nx.is_strongly_connected(subgraph):
                 stats.diameter = nx.diameter(subgraph)
-        except:
+        except Exception:
             pass
 
         # Most cited papers (highest in-degree)
