@@ -642,8 +642,8 @@ class CitationGraphBuilder:
                 title=hover,
                 size=size,
                 color=color,
-                x=x,
-                y=y,
+                x=float(x),  # Convert numpy float to Python float
+                y=float(y),  # Convert numpy float to Python float
                 physics=False if layout_style == LayoutStyle.SIMILARITY else True,
             )
 
@@ -665,8 +665,12 @@ class CitationGraphBuilder:
                 central_gravity=self.config.central_gravity,
                 spring_length=self.config.spring_length,
             )
+            # Enable navigation buttons for force layout
+            net.show_buttons(filter_=["physics", "layout", "interaction"])
         else:
             # Minimal physics for similarity layout
+            # Note: show_buttons must be called before set_options for similarity layout
+            net.show_buttons(filter_=["physics", "layout", "interaction"])
             net.set_options("""
             {
                 "physics": {
@@ -679,9 +683,6 @@ class CitationGraphBuilder:
                 }
             }
             """)
-
-        # Enable navigation buttons
-        net.show_buttons(filter_=["physics", "layout", "interaction"])
 
         # Save
         net.save_graph(str(output_path))
