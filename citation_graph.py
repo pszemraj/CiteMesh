@@ -25,7 +25,6 @@ import networkx as nx
 import numpy as np
 from pyvis.network import Network
 from semanticscholar import SemanticScholar
-from sklearn.manifold import MDS, TSNE
 from tqdm import tqdm
 
 
@@ -433,7 +432,7 @@ class CitationGraphBuilder:
     def _compute_similarity_layout(
         self, graph: nx.DiGraph
     ) -> Dict[str, Tuple[float, float]]:
-        """Compute similarity-based layout using dimensionality reduction."""
+        """Compute similarity-based layout using force simulation and similarity."""
         n = graph.number_of_nodes()
         if n <= 2:
             # Simple layout for very few nodes
@@ -442,32 +441,139 @@ class CitationGraphBuilder:
                 return {nodes[0]: (400, 300)}
             return {nodes[0]: (300, 300), nodes[1]: (500, 300)}
 
-        # Compute similarity matrix
+        # Find the root paper (node with highest centrality or most connections)
+        centrality = nx.degree_centrality(graph)
+        root = max(centrality.keys(), key=lambda k: centrality[k])
+
+        # Build layered structure based on distance from root
+        layers = self._compute_layers_from_root(graph, root)
+
+        # Compute positions using radial layout with force adjustments
+        positions = self._radial_force_layout(graph, layers, root)
+
+        # Apply similarity-based adjustments
         similarity = self.compute_similarity_matrix(graph)
-        distance = 1 - similarity
-
-        # Use dimensionality reduction
-        if n > 30:
-            # t-SNE for many nodes
-            tsne = TSNE(
-                n_components=2,
-                metric="precomputed",
-                init="random",
-                perplexity=min(30, n - 1),
-                max_iter=1000,
-                random_state=42,
-            )
-            coords = tsne.fit_transform(distance)
-        else:
-            # MDS for fewer nodes (preserves distances better)
-            mds = MDS(n_components=2, dissimilarity="precomputed", random_state=42)
-            coords = mds.fit_transform(distance)
-
-        # Convert to position dictionary
-        nodes = list(graph.nodes())
-        positions = {nodes[i]: (coords[i, 0], coords[i, 1]) for i in range(len(nodes))}
+        positions = self._apply_similarity_forces(positions, similarity, graph)
 
         return self._scale_positions(positions, width=800, height=600, padding=50)
+
+    def _compute_layers_from_root(self, graph: nx.DiGraph, root: str) -> Dict[str, int]:
+        """Compute layer assignment for each node based on distance from root."""
+        # Use undirected for distance calculation
+        undirected = graph.to_undirected()
+
+        # BFS to compute layers
+        layers = {root: 0}
+        visited = {root}
+        queue = [(root, 0)]
+
+        while queue:
+            node, layer = queue.pop(0)
+            for neighbor in undirected.neighbors(node):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    layers[neighbor] = layer + 1
+                    queue.append((neighbor, layer + 1))
+
+        # Assign remaining nodes to outer layer
+        max_layer = max(layers.values()) if layers else 0
+        for node in graph.nodes():
+            if node not in layers:
+                layers[node] = max_layer + 1
+
+        return layers
+
+    def _radial_force_layout(
+        self, graph: nx.DiGraph, layers: Dict[str, int], root: str
+    ) -> Dict[str, Tuple[float, float]]:
+        """Create radial layout with nodes arranged in concentric circles."""
+        positions = {}
+        center_x, center_y = 400, 300
+
+        # Group nodes by layer
+        layer_nodes = {}
+        for node, layer in layers.items():
+            if layer not in layer_nodes:
+                layer_nodes[layer] = []
+            layer_nodes[layer].append(node)
+
+        # Position root at center
+        positions[root] = (center_x, center_y)
+
+        # Position each layer in concentric circles
+        for layer, nodes in sorted(layer_nodes.items()):
+            if layer == 0:
+                continue  # Root already positioned
+
+            # Calculate radius based on layer
+            radius = 120 * layer  # Increased spacing
+            n_nodes = len(nodes)
+
+            # Sort nodes by citation count for better positioning
+            nodes_sorted = sorted(
+                nodes,
+                key=lambda x: graph.nodes[x].get("citation_count", 0),
+                reverse=True,
+            )
+
+            # Position nodes evenly around the circle
+            for i, node in enumerate(nodes_sorted):
+                angle = 2 * math.pi * i / n_nodes
+                x = center_x + radius * math.cos(angle)
+                y = center_y + radius * math.sin(angle)
+
+                # Add small random perturbation to avoid perfect circles
+                x += np.random.uniform(-10, 10)
+                y += np.random.uniform(-10, 10)
+
+                positions[node] = (x, y)
+
+        return positions
+
+    def _apply_similarity_forces(
+        self, positions: Dict, similarity: np.ndarray, graph: nx.DiGraph
+    ) -> Dict[str, Tuple[float, float]]:
+        """Apply force-based adjustments based on paper similarity."""
+        nodes = list(graph.nodes())
+
+        # Convert positions to array for easier manipulation
+        pos_array = np.array([positions[node] for node in nodes])
+
+        # Apply several iterations of force simulation
+        for iteration in range(50):
+            forces = np.zeros_like(pos_array)
+
+            for i, node_i in enumerate(nodes):
+                for j, node_j in enumerate(nodes):
+                    if i >= j:
+                        continue
+
+                    # Calculate current distance
+                    diff = pos_array[j] - pos_array[i]
+                    dist = np.linalg.norm(diff)
+
+                    if dist < 1e-6:
+                        continue
+
+                    # Normalize direction
+                    direction = diff / dist
+
+                    # Ideal distance based on similarity (high similarity = close)
+                    sim = similarity[i, j]
+                    ideal_dist = 50 + (1 - sim) * 200  # Range: 50-250
+
+                    # Spring force to ideal distance
+                    force_magnitude = 0.01 * (dist - ideal_dist)
+
+                    # Apply force
+                    forces[i] += force_magnitude * direction
+                    forces[j] -= force_magnitude * direction
+
+            # Apply forces with damping
+            pos_array += forces * 0.5
+
+        # Convert back to dictionary
+        return {node: tuple(pos_array[i]) for i, node in enumerate(nodes)}
 
     def _scale_positions(
         self, positions: Dict, width: int, height: int, padding: int
@@ -583,7 +689,11 @@ class CitationGraphBuilder:
         positions = self.compute_layout(graph, layout_style)
 
         # Get visual scales
-        years = [d.get("year", 2020) for _, d in graph.nodes(data=True)]
+        years = [
+            d.get("year")
+            for _, d in graph.nodes(data=True)
+            if d.get("year") is not None
+        ]
         min_year = min(years) if years else 2020
         max_year = max(years) if years else 2024
 
@@ -607,26 +717,33 @@ class CitationGraphBuilder:
         for node_id, attrs in graph.nodes(data=True):
             x, y = positions[node_id]
 
-            # Size based on citations
+            # Size based on citations - more dramatic scaling
             cit_count = attrs.get("citation_count", 0)
             if cit_count == 0:
-                size = 8
+                size = 5
             elif cit_count <= citation_percentiles[0]:
-                size = 12
+                size = 8
             elif cit_count <= citation_percentiles[1]:
-                size = 18
+                size = 12
             elif cit_count <= citation_percentiles[2]:
-                size = 24
-            else:
+                size = 20
+            elif cit_count <= citation_percentiles[3]:
                 size = 30
+            else:
+                # Scale logarithmically for very high citations
+                size = min(
+                    50, 30 + math.log10(cit_count / citation_percentiles[3]) * 10
+                )
 
-            # Color based on year (blue gradient)
+            # Color based on year - stronger gradient from light to dark
             if attrs.get("year"):
                 year_norm = (attrs["year"] - min_year) / max(max_year - min_year, 1)
-                lightness = 75 - year_norm * 35  # 75% to 40%
-                color = f"hsl(210, 60%, {lightness}%)"
+                # Older papers lighter, newer papers darker (more prominent)
+                lightness = 80 - year_norm * 50  # 80% to 30%
+                saturation = 20 + year_norm * 60  # 20% to 80%
+                color = f"hsl(200, {saturation}%, {lightness}%)"
             else:
-                color = "hsl(210, 30%, 60%)"
+                color = "hsl(200, 30%, 70%)"
 
             # Create hover text
             hover = f"""<div style='max-width: 300px'>
@@ -658,7 +775,7 @@ class CitationGraphBuilder:
                 arrows={"to": {"enabled": True, "scaleFactor": 0.5}},
             )
 
-        # Configure physics
+        # Configure physics and layout
         if layout_style == LayoutStyle.FORCE:
             net.barnes_hut(
                 gravity=self.config.gravity,
@@ -668,18 +785,53 @@ class CitationGraphBuilder:
             # Enable navigation buttons for force layout
             net.show_buttons(filter_=["physics", "layout", "interaction"])
         else:
-            # Minimal physics for similarity layout
-            # Note: show_buttons must be called before set_options for similarity layout
-            net.show_buttons(filter_=["physics", "layout", "interaction"])
+            # For similarity layout, use gentle physics to maintain structure
             net.set_options("""
             {
                 "physics": {
-                    "enabled": false
+                    "enabled": true,
+                    "stabilization": {
+                        "enabled": true,
+                        "iterations": 200,
+                        "updateInterval": 10,
+                        "fit": true
+                    },
+                    "solver": "forceAtlas2Based",
+                    "forceAtlas2Based": {
+                        "theta": 0.5,
+                        "gravitationalConstant": -50,
+                        "centralGravity": 0.005,
+                        "springConstant": 0.08,
+                        "springLength": 100,
+                        "damping": 0.4,
+                        "avoidOverlap": 0.5
+                    }
                 },
                 "interaction": {
                     "dragNodes": true,
                     "dragView": true,
-                    "zoomView": true
+                    "zoomView": true,
+                    "navigationButtons": true,
+                    "keyboard": true,
+                    "hover": true,
+                    "tooltipDelay": 200
+                },
+                "layout": {
+                    "randomSeed": 42,
+                    "improvedLayout": true,
+                    "clusterThreshold": 150,
+                    "hierarchical": {
+                        "enabled": false
+                    }
+                },
+                "edges": {
+                    "smooth": {
+                        "type": "dynamic",
+                        "roundness": 0.5
+                    }
+                },
+                "configure": {
+                    "enabled": false
                 }
             }
             """)
