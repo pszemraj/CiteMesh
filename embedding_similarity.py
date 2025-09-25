@@ -16,6 +16,7 @@ import torch
 from semanticscholar import SemanticScholar
 from datasets import load_dataset
 from joblib import Memory
+from tqdm import tqdm
 
 # Set up joblib memory cache
 memory = Memory("cache/joblib_cache", verbose=0)
@@ -116,25 +117,25 @@ def compute_embeddings_cached(texts: tuple, model_name: str) -> torch.Tensor:
     all_embeddings = []
     texts = list(texts)  # Convert tuple back to list for processing
 
-    for i in range(0, len(texts), batch_size):
+    for i in tqdm(range(0, len(texts), batch_size), desc="Encoding batches"):
         batch = texts[i : i + batch_size]
         # Use encode_document for EmbeddingGemma papers
         if hasattr(model, "encode_document"):
-            batch_embeddings = model.encode_document(
-                batch, convert_to_tensor=True, show_progress_bar=False
+            batch_embeddings = model.encode_document(batch, convert_to_numpy=True)
+            # L2 normalize for EmbeddingGemma as per requirements
+            batch_embeddings = batch_embeddings / np.linalg.norm(
+                batch_embeddings, axis=1, keepdims=True
             )
+            batch_embeddings = torch.from_numpy(batch_embeddings)
         else:
             batch_embeddings = model.encode(
                 batch, convert_to_tensor=True, show_progress_bar=False
             )
         all_embeddings.append(batch_embeddings)
 
-        if (i // batch_size) % 10 == 0 and i > 0:
-            print(f"  Processed {i + len(batch)}/{len(texts)} papers...")
-
     # Combine all embeddings
     embeddings = torch.cat(all_embeddings, dim=0)
-    print(f"Computed {len(embeddings)} embeddings")
+    print(f"Computed {len(texts)} embeddings")
     return embeddings
 
 
@@ -188,11 +189,12 @@ class EmbeddingPapersBuilder:
 
         print("Computing embeddings for abstracts...")
 
-        # Prepare texts for embedding (title + abstract)
+        # Prepare texts for embedding (EmbeddingGemma document format)
         texts = []
         for paper_id in self.paper_ids:
             paper = self.papers[paper_id]
-            text = f"{paper['title']}. {paper['abstract']}"
+            # Use EmbeddingGemma document format: title | text
+            text = f"title: {paper['title']} | text: {paper['abstract']}"
             texts.append(text)
 
         # Use cached computation (convert to tuple for hashing)
@@ -216,24 +218,34 @@ class EmbeddingPapersBuilder:
                 "Embeddings not computed. Call compute_embeddings() first."
             )
 
-        # Encode query (EmbeddingGemma has special encode_query)
+        # Encode query properly for EmbeddingGemma
         if hasattr(self.model, "encode_query"):
+            # Format as task-specific query for retrieval
+            query_prompt = f"task: search result | query: {query_text}"
             query_embedding = self.model.encode_query(
-                query_text, convert_to_tensor=True
+                query_prompt, convert_to_numpy=True
             )
+            # L2 normalize for EmbeddingGemma
+            query_embedding = query_embedding / np.linalg.norm(query_embedding)
+            query_embedding = torch.from_numpy(query_embedding)
         else:
             query_embedding = self.model.encode(query_text, convert_to_tensor=True)
 
         # Compute cosine similarities
         similarities = util.pytorch_cos_sim(query_embedding, self.embeddings)[0]
 
-        # Get top-k most similar papers
-        top_results = torch.topk(similarities, min(top_k, len(similarities)))
+        # Get top-k most similar papers (excluding exact match if present)
+        top_results = torch.topk(similarities, min(top_k + 1, len(similarities)))
 
         results = []
         for score, idx in zip(top_results.values, top_results.indices):
             paper_id = self.paper_ids[idx.item()]
+            # Skip self-similarity (score > 0.999 indicates same paper)
+            if score.item() > 0.999:
+                continue
             results.append((paper_id, score.item()))
+            if len(results) >= top_k:
+                break
 
         return results
 
@@ -291,7 +303,7 @@ class EmbeddingPapersBuilder:
             )
 
         # Compute pairwise similarities for edges
-        print("Computing pairwise similarities...")
+        # Computing pairwise similarities with progress bar
 
         # Get embeddings for papers in graph
         paper_indices = []
@@ -301,7 +313,7 @@ class EmbeddingPapersBuilder:
                 paper_indices.append(idx)
 
         # Add edges based on similarity
-        for i, (paper1_id, _) in enumerate(seed_papers):
+        for i, (paper1_id, _) in enumerate(tqdm(seed_papers, desc="Computing edges")):
             for j, (paper2_id, _) in enumerate(seed_papers):
                 if i >= j:  # Skip self and duplicates
                     continue
