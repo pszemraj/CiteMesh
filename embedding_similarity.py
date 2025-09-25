@@ -62,10 +62,18 @@ class EmbeddingPapersBuilder:
         # Load from HuggingFace
         try:
             # Try the ML-focused subset first (smaller, faster)
-            dataset = load_dataset("CShorten/ML-ArXiv-Papers", split="train", streaming=True)
-        except:
+            # Use split="train[:2%]" for testing
+            dataset = load_dataset("CShorten/ML-ArXiv-Papers", split="train[:2%]")
+            print(f"Loaded ML-ArXiv-Papers dataset")
+        except Exception as e:
+            print(f"Failed to load ML-ArXiv-Papers: {e}")
             # Fallback to smaller abstracts dataset
-            dataset = load_dataset("gfissore/arxiv-abstracts-2021", split="train", streaming=True)
+            try:
+                dataset = load_dataset("gfissore/arxiv-abstracts-2021", split="train[:1%]")
+                print(f"Loaded arxiv-abstracts-2021 dataset")
+            except Exception as e2:
+                print(f"Failed to load arxiv-abstracts-2021: {e2}")
+                raise
         
         papers_loaded = 0
         for paper in dataset:
@@ -73,18 +81,19 @@ class EmbeddingPapersBuilder:
                 break
                 
             # Filter by categories if specified
-            if categories and hasattr(paper, 'categories'):
+            if categories and 'categories' in paper:
                 paper_cats = paper.get('categories', '').split()
                 if not any(cat in paper_cats for cat in categories):
                     continue
             
-            paper_id = paper.get('id', f"paper_{papers_loaded}")
+            # Get paper ID - different field names in different datasets
+            paper_id = paper.get('id', paper.get('paper_id', f"paper_{papers_loaded}"))
             
             # Store paper metadata
             self.papers[paper_id] = {
                 'title': paper.get('title', 'Unknown'),
-                'abstract': paper.get('abstract', ''),
-                'authors': paper.get('authors', []),
+                'abstract': paper.get('abstract', paper.get('summary', '')),
+                'authors': paper.get('authors', paper.get('authors_parsed', [])),
                 'year': self._extract_year(paper),
                 'categories': paper.get('categories', ''),
             }

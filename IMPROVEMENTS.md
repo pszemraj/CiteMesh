@@ -152,8 +152,47 @@ python embedding_similarity.py "attention mechanisms in neural networks" -p 50
 python embedding_similarity.py "arxiv:1706.03762" -m google/embeddinggemma-300m
 ```
 
+## New Approach: Hybrid Citation + Semantic Similarity
+
+### hybrid_similarity.py
+
+The ultimate solution combining both approaches:
+
+1. **Citation relationships from Semantic Scholar**
+   - Fetches real citations and references
+   - Provides ground-truth bibliographic connections
+   - Limited by API rate limits but provides quality
+
+2. **Semantic similarity from embeddings**
+   - Uses sentence transformers on abstracts
+   - Finds conceptually similar papers
+   - Supplements citation data with semantic matches
+
+3. **Hybrid edge weighting**
+   - 40% semantic similarity (embeddings)
+   - 30% citation similarity (shared context)
+   - 30% temporal similarity (publication year)
+
+**Features:**
+- Downloads ArXiv corpus for background semantic search
+- Caches embeddings and metadata for performance
+- Visualizes different relationship types with colors
+- Combines best of both citation and semantic approaches
+
+**Usage:**
+```bash
+# Run with balanced hybrid approach
+python hybrid_similarity.py "arxiv:1706.03762" -c 2000 -p 40 --max-semantic 10
+
+# Use with smaller corpus for faster testing
+python hybrid_similarity.py "arxiv:1706.03762" -c 500 -p 30 --max-semantic 5
+```
+
+**Note:** The Semantic Scholar API may experience timeouts. If this happens, the embedding_similarity.py fallback provides pure semantic similarity without API dependencies.
+
 ## Bottom Line
 
-Two approaches available:
-1. **citation_graph.py**: Traditional approach using citations/references (API-limited)
+Three approaches available:
+1. **citation_graph.py**: Traditional approach using citations/references (simple, API-limited)
 2. **embedding_similarity.py**: Modern approach using embeddings (no API limits, true semantic similarity)
+3. **hybrid_similarity.py**: Best of both - combines citations with semantic similarity (recommended when API is available)
