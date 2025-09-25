@@ -110,13 +110,13 @@ def build_mesh_graph(
             # Co-citation similarity (papers cited together are related)
             # Simulate by year proximity and citation count similarity
             year_diff = abs(year1 - year2)
-            
+
             # Strong temporal penalty - papers >5 years apart rarely connect
             if year_diff > 5:
                 year_sim = 0.1
             else:
                 year_sim = 1.0 - (year_diff / 5.0) * 0.8
-            
+
             # Citation similarity with log scale to handle order of magnitude differences
             if cit1 > 0 and cit2 > 0:
                 log_cit1 = np.log10(cit1 + 1)
@@ -124,11 +124,13 @@ def build_mesh_graph(
                 cit_sim = 1.0 - abs(log_cit1 - log_cit2) / max(log_cit1, log_cit2)
             else:
                 cit_sim = 0.3
-            
+
             # Bibliographic coupling simulation (papers citing same works)
             # Random component simulates shared references
-            bib_coupling = np.random.random() * 0.8 if year_diff < 3 else np.random.random() * 0.3
-            
+            bib_coupling = (
+                np.random.random() * 0.8 if year_diff < 3 else np.random.random() * 0.3
+            )
+
             # Combined similarity matching Connected Papers algorithm
             similarity = 0.3 * year_sim + 0.3 * cit_sim + 0.4 * bib_coupling
 

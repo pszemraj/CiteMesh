@@ -352,10 +352,7 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
     # Use Kamada-Kawai for more organic clustering like reference
     try:
         pos = nx.kamada_kawai_layout(
-            graph,
-            weight="weight",
-            scale=0.9,
-            center=[0.5, 0.5]
+            graph, weight="weight", scale=0.9, center=[0.5, 0.5]
         )
     except Exception:
         # Fallback to spring if graph structure causes issues
@@ -368,7 +365,7 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
             scale=0.9,
             center=[0.5, 0.5],
         )
-    
+
     # Add small random perturbations for organic look
     for node in pos:
         pos[node] += np.random.normal(0, 0.015, 2)
@@ -428,7 +425,7 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
                 year_norm = (year - min_year) / (max_year - min_year)
                 # Smooth RGB gradient from light blue-gray to dark teal
                 r = 0.72 - 0.27 * year_norm  # 184 -> 69
-                g = 0.83 - 0.19 * year_norm  # 212 -> 123  
+                g = 0.83 - 0.19 * year_norm  # 212 -> 123
                 b = 0.89 - 0.28 * year_norm  # 227 -> 157
                 colors.append((r, g, b))
             else:
@@ -490,7 +487,7 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
         else:
             # Fallback to shortened title if no authors
             author_name = title[:10]
-        
+
         label = f"{author_name}, {year}"
 
         fontsize = 10 if paper.get("is_seed") else 8
