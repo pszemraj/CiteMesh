@@ -19,13 +19,15 @@ from datasets import load_dataset
 
 class EmbeddingPapersBuilder:
     def __init__(
-        self, model_name: str = "all-MiniLM-L6-v2", cache_dir: Path = Path("cache")
+        self,
+        model_name: str = "google/embeddinggemma-300m",
+        cache_dir: Path = Path("cache"),
     ):
         """
         Initialize with sentence transformer model.
 
         Args:
-            model_name: HuggingFace model name (could use google/embeddinggemma-300m)
+            model_name: HuggingFace model name (default: google/embeddinggemma-300m)
             cache_dir: Directory for caching embeddings
         """
         self.model = SentenceTransformer(model_name)
@@ -157,9 +159,15 @@ class EmbeddingPapersBuilder:
 
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            batch_embeddings = self.model.encode(
-                batch, convert_to_tensor=True, show_progress_bar=False
-            )
+            # Use encode_document for EmbeddingGemma papers
+            if hasattr(self.model, "encode_document"):
+                batch_embeddings = self.model.encode_document(
+                    batch, convert_to_tensor=True, show_progress_bar=False
+                )
+            else:
+                batch_embeddings = self.model.encode(
+                    batch, convert_to_tensor=True, show_progress_bar=False
+                )
             all_embeddings.append(batch_embeddings)
 
             if (i // batch_size) % 10 == 0:
@@ -191,8 +199,13 @@ class EmbeddingPapersBuilder:
                 "Embeddings not computed. Call compute_embeddings() first."
             )
 
-        # Encode query
-        query_embedding = self.model.encode(query_text, convert_to_tensor=True)
+        # Encode query (EmbeddingGemma has special encode_query)
+        if hasattr(self.model, "encode_query"):
+            query_embedding = self.model.encode_query(
+                query_text, convert_to_tensor=True
+            )
+        else:
+            query_embedding = self.model.encode(query_text, convert_to_tensor=True)
 
         # Compute cosine similarities
         similarities = util.pytorch_cos_sim(query_embedding, self.embeddings)[0]
@@ -438,8 +451,8 @@ def main():
     parser.add_argument(
         "-m",
         "--model",
-        default="all-MiniLM-L6-v2",
-        help="Sentence transformer model (or google/embeddinggemma-300m)",
+        default="google/embeddinggemma-300m",
+        help="Sentence transformer model",
     )
     parser.add_argument("-s", "--similarity-threshold", type=float, default=0.4)
     parser.add_argument("-i", "--iterations", type=int, default=200)
