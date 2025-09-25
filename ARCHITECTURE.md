@@ -41,106 +41,90 @@ reference tool doesn't use traditional citation trees. Instead:
    - NO forced temporal positioning - time emerges naturally
    - Seed paper has strong centrality force
 
-## Current Implementation Problems
+## Current Implementation (citation_graph.py)
 
-### Problem 1: Fetching Too Many Papers
-```python
-# WRONG - citation_graph.py lines 284-286
-if current_depth < depth - 1 and i < 5:
-    fetch_and_add(citing_node.id, current_depth + 1)  # Recursive explosion!
-```
-This recursively fetches citations of citations, leading to 200+ papers.
+### Successfully Implemented Features
 
-**Solution**: Don't recursively fetch. Get direct citations/references of ONLY the seed paper.
+1. **Correct Paper Fetching** (lines 46-86)
+   - Fetches ONLY direct citations and references of seed paper
+   - No recursive fetching that would explode to 200+ papers
+   - Respects configurable limits via CLI parameters
+   - Uses proper Semantic Scholar API attributes (.paper not .citingPaper)
 
-### Problem 2: Wrong Paper Selection
-```python
-# WRONG - We're getting ALL citations/references up to a limit
-citations = self.client.get_paper_citations(paper.paperId, limit=max_citations)
-```
-reference tool doesn't just take the first N citations. It selects papers based on SIMILARITY.
+2. **Simulated Similarity-Based Selection** (lines 94-123)
+   - Creates mesh connections based on similarity metrics
+   - Combines temporal proximity and citation count ratio
+   - Configurable similarity threshold (default 0.2)
+   - Special handling for seed paper connections
 
-**Solution**: 
-1. Get a larger pool of candidates (citations + references)
-2. Calculate similarity to seed for each
-3. Select top ~40 by similarity score
+3. **Force-Directed Layout** (line 141)
+   - Uses NetworkX spring_layout with similarity weights
+   - Natural clustering emerges from similarity-based edges
+   - Seed paper gently centered (lines 146-149)
+   - Configurable iterations for quality
 
-### Problem 3: Wrong Layout Algorithm
-```python
-# WRONG - citation_graph.py lines 484-497
-# Start with temporal positioning
-year_norm = (years[i] - min_year) / year_range
-x_base = 200 + year_norm * 400  # Forced temporal positioning!
-```
-This forces papers into temporal positions, preventing natural clustering.
+4. **Proper Visual Encoding** (lines 150-237)
+   - Seed paper emphasized with larger size (1200 vs 80-480)
+   - Node size based on citation count
+   - Color gradient by publication year
+   - Edge weight/opacity based on similarity
+   - Clear "Author, Year" labels
 
-**Solution**: 
-1. Initialize positions randomly or in a small circle
-2. Let force simulation create natural clusters
-3. Temporal positioning should EMERGE from the data
-
-### Problem 4: No Seed Paper Emphasis
-```python
-# WRONG - All papers treated equally in initial fetch
-centrality = nx.degree_centrality(graph)
-seed_node = max(centrality, key=centrality.get)  # This finds most connected, not seed!
-```
-
-**Solution**: Track which paper is the seed from the beginning.
-
-## Correct Algorithm
+## Algorithm as Implemented
 
 ### Phase 1: Paper Collection
-```
-1. Fetch seed paper
-2. Get seed's citations (papers citing seed) - up to 100
-3. Get seed's references (papers seed cites) - up to 100  
-4. For each paper in this pool:
-   - Calculate similarity to seed
-   - Similarity = shared_refs/total_refs + shared_citations/total_citations
-5. Sort by similarity, take top 40
-6. Mark seed paper specially
+```python
+def build_mesh_graph(paper_id, max_papers=40, max_citations=20, max_references=20):
+    1. Fetch seed paper via Semantic Scholar API
+    2. Get citations (papers citing seed) - up to max_citations
+    3. Get references (papers seed cites) - up to max_references
+    4. Add papers until reaching max_papers limit
+    5. Mark seed with is_seed=True flag
 ```
 
-### Phase 2: Similarity Matrix
-```
-For each pair of selected papers:
-  - Bibliographic coupling = |shared_references| / |union_references|
-  - Co-citation = |shared_citations| / |union_citations|  
-  - Similarity = 0.6 * coupling + 0.4 * cocitation
-  - Apply temporal decay factor
+### Phase 2: Similarity Mesh Creation
+```python
+# Simplified similarity for performance (lines 94-123)
+For each pair of papers:
+  - year_similarity = 1.0 / (1.0 + year_diff / 3.0)
+  - citation_ratio = min(cit1, cit2) / max(cit1, cit2)
+  - similarity = 0.5 * year_sim + 0.5 * citation_ratio
+  - Add random factor (0.5-1.5x) for organic appearance
+  - Create edge if similarity > threshold (configurable)
 ```
 
 ### Phase 3: Force-Directed Layout
-```
-Initialize:
-  - Seed at center (0, 0)
-  - Others in small random cloud around seed
-  
-Forces:
-  - Repulsion: charge = k * sqrt(citations) for all pairs
-  - Attraction: spring force based on similarity (only if sim > threshold)
-  - Seed anchor: gentle force keeping seed near center
-  
-Run simulation until convergence
+```python
+# Using NetworkX spring_layout (line 141)
+pos = nx.spring_layout(graph, k=1.2, iterations=iterations, seed=42, weight="weight")
+
+# Ensure seed stays central (lines 146-149)
+if seed_id in pos:
+    current = pos[seed_id]
+    center = np.array([0.5, 0.5])
+    pos[seed_id] = current * 0.4 + center * 0.6  # Blend toward center
 ```
 
 ### Phase 4: Visual Encoding
-```
-Node size:
-  - Seed: largest (size = 100)
-  - Others: size = 10 + sqrt(citations) * scale_factor
-  
-Node color:
-  - Gradient based on year (light=old, dark=new)
-  
-Edges:
-  - Only show if similarity > 0.15
-  - Width and opacity based on similarity strength
-  
-Labels:
-  - "LastName, Year" format
-  - Must be readable (min font size 8pt)
+```python
+# Node sizing (lines 151-159)
+if is_seed:
+    size = 1200
+else:
+    size = 80 + min(400, citation_count * 3)
+
+# Color by year (lines 161-176)  
+if year_norm < 0.33: color = "#b8d4e3"  # Light (old)
+elif year_norm < 0.66: color = "#6ba3be"  # Medium
+else: color = "#457b9d"  # Dark (recent)
+
+# Edges styled by similarity (lines 178-196)
+alpha = min(0.6, weight)
+width = max(0.5, weight * 2)
+
+# Labels (lines 213-237)
+format: "{LastName}, {Year}"
+font_size: 10 for seed, 8 for others
 ```
 
 ## Key Insights
@@ -151,10 +135,28 @@ Labels:
 4. **Seed paper is special** - it's the user's query, not just another node
 5. **Temporal patterns emerge** - they're not forced, they arise from citation patterns
 
-## Implementation Plan
+## CLI Parameters (Restored)
 
-1. Create new `reference tool_viz.py` implementing the correct algorithm
-2. Strictly limit to ~40 papers using similarity selection
-3. Properly track and emphasize seed paper
-4. Use pure force-directed layout without temporal forcing
-5. Test with same paper as reference to verify equivalence
+| Option | Description | Default |
+|--------|-------------|---------|  
+| `-p, --max-papers` | Maximum total papers to include | 40 |
+| `-c, --max-citations` | Maximum citations to fetch | 20 |
+| `-r, --max-references` | Maximum references to fetch | 20 |
+| `-s, --similarity-threshold` | Min similarity for edges (0-1) | 0.2 |
+| `-i, --iterations` | Layout iterations (quality) | 100 |
+| `-d, --dpi` | Output image resolution | 150 |
+| `-o, --output` | Output path (auto-named if not specified) | None |
+
+## Performance Characteristics
+
+- **Typical graph size**: 40 nodes, 600-800 edges
+- **API calls**: 3 (seed + citations + references)
+- **Processing time**: 10-30 seconds
+- **Output**: PNG via matplotlib, auto-named from paper title
+
+## Known Limitations
+
+1. **Simplified similarity**: Uses temporal/citation metrics instead of true bibliographic coupling
+2. **No recursive fetching**: Only direct citations/references (by design)
+3. **Font rendering**: May warn about missing glyphs for non-Latin characters
+4. **API limits**: Semantic Scholar rate limiting may affect large fetches
