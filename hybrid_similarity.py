@@ -147,79 +147,43 @@ class HybridPapersBuilder:
 
         print(f"Seed: {seed.title[:50]}...")
 
-        # Fetch citations
+        # Fetch citations (same as citation_graph.py)
         print(f"Fetching up to {max_citations} citations...")
         try:
-            citations = self.semantic_scholar.get_paper_citations(
-                seed_id,
-                limit=max_citations,
-                fields=[
-                    "title",
-                    "year",
-                    "authors",
-                    "citationCount",
-                    "abstract",
-                    "paperId",
-                ],
-            )
-
+            citations = self.semantic_scholar.get_paper_citations(seed_id, limit=max_citations)
             for cit in citations:
-                if hasattr(cit, "citingPaper") and cit.citingPaper:
-                    p = cit.citingPaper
-                elif hasattr(cit, "paper") and cit.paper:
+                if hasattr(cit, "paper") and cit.paper and hasattr(cit.paper, "paperId"):
                     p = cit.paper
-                else:
-                    continue
-
-                if hasattr(p, "paperId"):
                     self.graph_papers[p.paperId] = {
                         "title": p.title or "Unknown",
-                        "abstract": p.abstract or "",
+                        "abstract": "",  # Don't fetch abstract to avoid timeouts
                         "year": p.year or 2020,
                         "authors": [a.name for a in (p.authors or [])[:3]],
                         "citation_count": p.citationCount or 0,
                         "is_seed": False,
                         "relationship": "citation",
                     }
-        except Exception as e:
-            print(f"  Warning: Citations fetch failed: {e}")
+        except (AttributeError, TypeError) as e:
+            print(f"  Warning: Citations fetch issue: {e}")
 
-        # Fetch references
+        # Fetch references (same as citation_graph.py)
         print(f"Fetching up to {max_references} references...")
         try:
-            references = self.semantic_scholar.get_paper_references(
-                seed_id,
-                limit=max_references,
-                fields=[
-                    "title",
-                    "year",
-                    "authors",
-                    "citationCount",
-                    "abstract",
-                    "paperId",
-                ],
-            )
-
+            references = self.semantic_scholar.get_paper_references(seed_id, limit=max_references)
             for ref in references:
-                if hasattr(ref, "citedPaper") and ref.citedPaper:
-                    p = ref.citedPaper
-                elif hasattr(ref, "paper") and ref.paper:
+                if hasattr(ref, "paper") and ref.paper and hasattr(ref.paper, "paperId"):
                     p = ref.paper
-                else:
-                    continue
-
-                if hasattr(p, "paperId"):
                     self.graph_papers[p.paperId] = {
                         "title": p.title or "Unknown",
-                        "abstract": p.abstract or "",
+                        "abstract": "",  # Don't fetch abstract to avoid timeouts
                         "year": p.year or 2020,
                         "authors": [a.name for a in (p.authors or [])[:3]],
                         "citation_count": p.citationCount or 0,
                         "is_seed": False,
                         "relationship": "reference",
                     }
-        except Exception as e:
-            print(f"  Warning: References fetch failed: {e}")
+        except (AttributeError, TypeError) as e:
+            print(f"  Warning: References fetch issue: {e}")
 
         print(f"Collected {len(self.graph_papers)} papers from citations/references")
         return seed_id
