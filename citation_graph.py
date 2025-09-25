@@ -114,19 +114,21 @@ def build_mesh_graph(
             # Citation similarity (papers with similar impact)
             cit_ratio = min(cit1, cit2) / max(cit1, cit2) if max(cit1, cit2) > 0 else 1
 
-            # Combined similarity with controlled variation
+            # Combined similarity with more selective connections
             similarity = 0.5 * year_sim + 0.5 * cit_ratio
 
-            # Add slight variation for organic look (but less than main)
-            similarity *= np.random.uniform(0.7, 1.3)
+            # Add variation for organic patterns
+            similarity *= np.random.uniform(0.6, 1.4)
 
-            # Always connect to seed with minimum weight
+            # Be VERY selective with edges to match reference sparsity
             if p1 == seed_id or p2 == seed_id:
-                similarity = max(similarity, 0.25)
-
-            # Add edge if similar enough
-            if similarity > similarity_threshold:
-                graph.add_edge(p1, p2, weight=similarity)
+                # Seed connects to highly related papers only
+                if similarity > 0.5:
+                    graph.add_edge(p1, p2, weight=similarity)
+            else:
+                # Non-seed: only strongest connections with heavy dropout
+                if similarity > similarity_threshold * 2.0 and np.random.random() > 0.5:
+                    graph.add_edge(p1, p2, weight=similarity)
 
     print(
         f"Graph complete: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
@@ -143,26 +145,27 @@ def visualize_mesh(
 ):
     """Visualize with reference tool-style layout."""
 
-    # Use tighter spring layout to prevent elongation
-    # k controls node spacing - smaller = tighter
-    pos = nx.spring_layout(
-        graph,
-        k=0.5 / np.sqrt(graph.number_of_nodes()),  # Adaptive spacing
-        iterations=iterations * 2,  # More iterations for better convergence
-        seed=42,
-        weight="weight",
-        scale=0.95,  # Keep within bounds
-        center=[0.5, 0.5],
-    )
+    # Use force-directed layout with organic clustering
+    # Start with Kamada-Kawai for better initial positions
+    try:
+        pos = nx.kamada_kawai_layout(
+            graph, weight="weight", scale=0.9, center=[0.5, 0.5]
+        )
+    except Exception:
+        # Fallback to spring if graph is not connected well
+        pos = nx.spring_layout(
+            graph,
+            k=0.8 / np.sqrt(graph.number_of_nodes()),
+            iterations=iterations,
+            seed=42,
+            weight="weight",
+            scale=0.9,
+            center=[0.5, 0.5],
+        )
 
-    # Gently pull seed toward center without distorting layout
-    if seed_id in pos:
-        current = pos[seed_id]
-        center = np.array([0.5, 0.5])
-        # Only adjust if seed is far from center
-        dist_from_center = np.linalg.norm(current - center)
-        if dist_from_center > 0.3:
-            pos[seed_id] = current * 0.7 + center * 0.3
+    # Add small random perturbations for more organic look
+    for node in pos:
+        pos[node] += np.random.normal(0, 0.02, 2)
 
     # Create figure
     fig, ax = plt.subplots(figsize=(12, 10), facecolor="#fafafa")
@@ -171,22 +174,38 @@ def visualize_mesh(
 
     nodes = list(graph.nodes())
 
-    # Node sizes with better visual hierarchy
+    # Node sizes with extreme variation matching reference
     sizes = []
-    citation_counts = [graph.nodes[n].get("citation_count", 0) for n in nodes]
-    max_citations = max(citation_counts) if citation_counts else 1
 
-    for node in nodes:
+    # Sort nodes by citation count to identify top papers
+    sorted_nodes = sorted(
+        nodes, key=lambda n: graph.nodes[n].get("citation_count", 0), reverse=True
+    )
+
+    for i, node in enumerate(nodes):
+        rank = sorted_nodes.index(node)
+
         if graph.nodes[node].get("is_seed"):
-            sizes.append(1500)  # Seed is prominent
+            # Seed gets special treatment
+            if rank < 3:  # Top 3 by citations
+                sizes.append(2500)  # Huge like reference
+            else:
+                sizes.append(1000)  # Still visible but not dominant
+        elif rank == 0 and not graph.nodes[node].get("is_seed"):
+            # Highest cited non-seed can be huge
+            sizes.append(2200)
+        elif rank < 3:
+            # Top 3 papers are large
+            sizes.append(1200 + (3 - rank) * 200)
+        elif rank < 8:
+            # Next 5 are medium-large
+            sizes.append(500 + (8 - rank) * 80)
+        elif rank < 15:
+            # Next 7 are medium
+            sizes.append(250 + (15 - rank) * 30)
         else:
-            cit = graph.nodes[node].get("citation_count", 0)
-            # Logarithmic scaling for better visual distribution
-            normalized = (
-                np.log1p(cit) / np.log1p(max_citations) if max_citations > 0 else 0
-            )
-            size = 150 + normalized * 600  # Range: 150-750
-            sizes.append(size)
+            # Rest are small
+            sizes.append(100 + np.random.randint(0, 100))
 
     # Colors by year
     colors = []
