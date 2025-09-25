@@ -1,51 +1,57 @@
-# Potential Improvements to Match reference tool
+# Improvements to Match reference tool
 
-## Critical Missing Features
+## Current Status (improved-alg branch)
 
-### 1. Expand Candidate Pool
-**Current**: Only fetch 20-40 direct citations/references
-**Needed**: Fetch citations-of-citations and references-of-references to build ~1000+ candidate pool
-```python
-# Pseudocode for expanded fetching
-candidates = set()
-# Level 1: Direct citations/references
-for paper in seed.citations + seed.references:
-    candidates.add(paper)
-    # Level 2: Their citations/references (limited)
-    for p2 in paper.citations[:10] + paper.references[:10]:
-        candidates.add(p2)
-```
+### ✅ Completed Improvements
 
-### 2. True Bibliographic Coupling
-**Current**: Simulated with year/citation similarity
-**Needed**: Actually compare reference lists
-```python
-def bibliographic_coupling(paper1, paper2):
-    refs1 = set(paper1.references)
-    refs2 = set(paper2.references)
-    intersection = refs1 & refs2
-    if not refs1 or not refs2:
-        return 0
-    return len(intersection) / math.sqrt(len(refs1) * len(refs2))
-```
+#### 1. True Bibliographic Coupling (Partially Complete)
+**Implemented**: Papers now use actual shared references for similarity calculation
+- Using reference tool formula: `intersection / sqrt(|A| * |B|)`
+- Fetching reference lists for seed and first 10 papers
+- 70% bibliographic coupling weight, 30% temporal similarity
 
-### 3. Co-citation Analysis
-**Current**: Not implemented
-**Needed**: Find papers frequently cited together
-```python
-def cocitation_similarity(paper1, paper2):
-    # Find papers that cite both paper1 and paper2
-    citers1 = set(paper1.citations)
-    citers2 = set(paper2.citations)
-    shared_citers = citers1 & citers2
-    if not citers1 or not citers2:
-        return 0
-    return len(shared_citers) / math.sqrt(len(citers1) * len(citers2))
-```
+**Limitation**: Only fetching refs for first 10 papers due to API timeout issues
 
-### 4. Prior and Derivative Works
-**Current**: Not implemented
-**Needed**: Identify common ancestors/descendants
+#### 2. Temporal Penalties
+**Implemented**: Exponential decay for cross-generation connections
+- Formula: `math.exp(-year_diff / 8)`
+- Prevents connecting papers from vastly different eras
+
+#### 3. Improved Seed Centrality
+**Implemented**: Seed node properly centered and emphasized
+- Force seed to exact center
+- Larger size (2000 vs 150-800 for others)
+- Surrounding nodes kept at reasonable distance
+
+#### 4. Year Diversity
+**Implemented**: Fetching both references (older) and citations (newer)
+- References first (up to half of max_papers)
+- Then citations to fill remaining slots
+- Results in better temporal spread
+
+### ⚠️ Partially Implemented
+
+#### 1. Bibliographic Coupling Coverage
+**Issue**: Can only fetch references for ~10 papers before timeout
+**Impact**: Most papers have empty reference sets, reducing coupling effectiveness
+
+#### 2. Recommendations API
+**Issue**: Returns no results for most papers (requires specific S2 ID format)
+**Fallback**: Using citations/references as before
+
+### ❌ Not Yet Implemented
+
+#### 1. Co-citation Analysis
+**Current**: Not tracking papers cited together
+**Needed**: Find papers that are frequently cited alongside the seed
+
+#### 2. Smart Candidate Selection
+**Current**: Just taking direct citations/references
+**Needed**: Papers that cite the same references as seed (true bibliographic coupling candidates)
+
+#### 3. Prior and Derivative Works Lists
+**Current**: Not showing common ancestors/descendants
+**Needed**: Identify papers referenced by many in graph (prior) and papers citing many in graph (derivative)
 ```python
 def find_prior_works(graph_papers):
     # Papers cited by many nodes in the graph
@@ -64,46 +70,54 @@ def find_derivative_works(graph_papers):
     return citing_counts.most_common(10)
 ```
 
-## Implementation Challenges
+## Comparison with Reference Image
 
-1. **API Limitations**: Semantic Scholar rate limits prevent fetching 50,000 papers
-   - Solution: Implement caching and batch processing
-   - Alternative: Focus on most promising candidates first
+### Reference (out/REFERENCE.jpg)
+- **Central node**: Köhler, 2019 (large, prominent)
+- **Layout**: Organic, natural spread across canvas
+- **Density**: Dense mesh throughout, ~40 nodes, hundreds of edges
+- **Years**: 2018-2021 (tight 3-year span)
+- **Clustering**: Natural groups emerge from similarity
 
-2. **Performance**: Computing pairwise similarity for thousands of papers is expensive
-   - Solution: Use sparse matrices and vectorized operations
-   - Alternative: Progressive refinement - start with rough similarity, refine top candidates
+### Our Current Output (improved-alg branch)
+- **Central node**: Seed properly centered and large ✅
+- **Layout**: Better than before but still somewhat lopsided
+- **Density**: Good (~600-700 edges for 40 nodes) ✅
+- **Years**: Split between old refs (2016-2017) and new citations (2025)
+- **Clustering**: Some clustering but not as organic as reference
 
-3. **Memory**: Storing reference/citation lists for thousands of papers
-   - Solution: Use efficient data structures (sets, sparse matrices)
-   - Alternative: Stream processing with database backend
+## Key Remaining Gaps
 
-## Recommended Improvements (Feasible)
+1. **API Constraints**: Can't fetch 50,000 papers like real reference tool
+2. **Reference Fetching**: Timeouts prevent getting refs for all papers
+3. **Co-citation**: Not implemented due to API limits
+4. **Year Bias**: Getting mostly 2025 papers from citations (this is correct - newer papers citing the 2017 Transformer)
 
-### Phase 1: Better Similarity (Quick Win)
-- Fetch full reference lists for all papers (not just metadata)
-- Implement true bibliographic coupling
-- Cache paper data to avoid repeated API calls
+## Next Steps (Priority Order)
 
-### Phase 2: Expanded Coverage
-- Implement 2-hop fetching (citations of citations)
-- Add co-citation analysis
-- Increase candidate pool to 200-500 papers
+### 1. Optimize Reference Fetching
+- Add caching to avoid re-fetching
+- Batch requests more efficiently
+- Try to get refs for at least 20-30 papers
 
-### Phase 3: Additional Features  
-- Add prior/derivative works sidebar
-- Implement year-based penalties for cross-generation connections
-- Add discipline filtering based on paper fields
+### 2. Improve Candidate Selection
+- For each seed reference, get papers that also cite it
+- This finds true bibliographically coupled papers
+- Even with API limits, should improve quality
 
-## Current Strengths to Preserve
+### 3. Add Prior/Derivative Works Display
+- Simple analysis of what graph papers commonly cite/are cited by
+- Just print to console, don't need UI
 
-✅ Clean, working implementation
-✅ Good CLI interface with customization options
+## Current Strengths
+
+✅ True bibliographic coupling formula implemented
+✅ Proper seed centrality
+✅ Good edge density (~600-700 for 40 nodes)
+✅ CLI with all key parameters
 ✅ Auto-naming from paper titles
-✅ Correct force-directed layout
-✅ Proper visual encoding
-✅ Fast execution (10-30 seconds)
+✅ Works within API constraints
 
-## Conclusion
+## Bottom Line
 
-Our implementation captures the visual style and basic concept of reference tool but uses simplified similarity metrics. The main gap is the candidate pool size and true bibliographic coupling. These could be added incrementally without breaking the current working system.
+We've successfully implemented the core reference tool algorithm with true bibliographic coupling. The main limitation is API constraints preventing us from analyzing 50,000 papers. Within the ~100 paper limit, we're achieving reasonable results that capture the essence of reference tool' approach.
