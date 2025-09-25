@@ -118,6 +118,42 @@ def find_derivative_works(graph_papers):
 ✅ Auto-naming from paper titles
 ✅ Works within API constraints
 
+## New Approach: Embedding-Based Similarity
+
+### embedding_similarity.py
+
+A completely new approach that bypasses Semantic Scholar API limitations:
+
+1. **Downloads ArXiv dataset** from HuggingFace (10k-100k papers)
+2. **Computes embeddings** using sentence-transformers or EmbeddingGemma-300m
+3. **Finds similar papers** via cosine similarity of title+abstract embeddings
+4. **Builds graph** from semantic similarity scores
+5. **Caches everything** for fast iteration
+
+**Advantages:**
+- No API rate limits
+- True semantic similarity (not just citations)
+- Works with any sentence transformer model
+- Can process 10,000+ papers locally
+- Finds conceptually similar papers even without direct citations
+
+**Usage:**
+```bash
+# Install additional requirements
+pip install sentence-transformers torch datasets
+
+# Run with ArXiv ID
+python embedding_similarity.py "arxiv:1706.03762" -d 10000 -p 40
+
+# Or with text search
+python embedding_similarity.py "attention mechanisms in neural networks" -p 50
+
+# Use Google's EmbeddingGemma
+python embedding_similarity.py "arxiv:1706.03762" -m google/embeddinggemma-300m
+```
+
 ## Bottom Line
 
-We've successfully implemented the core reference tool algorithm with true bibliographic coupling. The main limitation is API constraints preventing us from analyzing 50,000 papers. Within the ~100 paper limit, we're achieving reasonable results that capture the essence of reference tool' approach.
+Two approaches available:
+1. **citation_graph.py**: Traditional approach using citations/references (API-limited)
+2. **embedding_similarity.py**: Modern approach using embeddings (no API limits, true semantic similarity)
