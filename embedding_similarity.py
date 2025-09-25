@@ -348,16 +348,29 @@ class EmbeddingPapersBuilder:
 def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
     """Visualize the similarity graph."""
 
-    # Tighter spring layout for better clustering
-    pos = nx.spring_layout(
-        graph,
-        k=0.8 / np.sqrt(graph.number_of_nodes()),  # Adaptive spacing
-        iterations=iterations,
-        seed=42,
-        weight="weight",
-        scale=0.9,
-        center=[0.5, 0.5],
-    )
+    # Use Kamada-Kawai for more organic clustering like reference
+    try:
+        pos = nx.kamada_kawai_layout(
+            graph,
+            weight="weight",
+            scale=0.9,
+            center=[0.5, 0.5]
+        )
+    except Exception:
+        # Fallback to spring if graph structure causes issues
+        pos = nx.spring_layout(
+            graph,
+            k=1.2 / np.sqrt(graph.number_of_nodes()),  # More spacing
+            iterations=iterations,
+            seed=42,
+            weight="weight",
+            scale=0.9,
+            center=[0.5, 0.5],
+        )
+    
+    # Add small random perturbations for organic look
+    for node in pos:
+        pos[node] += np.random.normal(0, 0.015, 2)
 
     # Find and gently center seed node
     seed_nodes = [n for n in graph.nodes() if graph.nodes[n].get("is_seed", False)]
@@ -404,7 +417,7 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
             else:  # Small nodes
                 sizes.append(80 + np.random.randint(0, 80))
 
-            # Color by year
+            # Smooth color gradient by year (matching reference)
             year = graph.nodes[node].get("year", 2020)
             years = [graph.nodes[n].get("year", 2020) for n in nodes]
             min_year = min(years) if years else 2020
@@ -412,17 +425,13 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
 
             if max_year > min_year:
                 year_norm = (year - min_year) / (max_year - min_year)
-                # Continuous color gradient
-                if year_norm < 0.25:
-                    colors.append("#caf0f8")
-                elif year_norm < 0.5:
-                    colors.append("#90e0ef")
-                elif year_norm < 0.75:
-                    colors.append("#00b4d8")
-                else:
-                    colors.append("#0077b6")
+                # Smooth RGB gradient from light blue-gray to dark teal
+                r = 0.72 - 0.27 * year_norm  # 184 -> 69
+                g = 0.83 - 0.19 * year_norm  # 212 -> 123  
+                b = 0.89 - 0.28 * year_norm  # 227 -> 157
+                colors.append((r, g, b))
             else:
-                colors.append("#90e0ef")
+                colors.append((0.56, 0.73, 0.82))  # Default medium blue
 
     # Draw edges
     for edge in graph.edges(data=True):
@@ -467,7 +476,21 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
         title = paper.get("title", "Unknown")
         year = paper.get("year", "")
 
-        label = f"{title[:20]}..., {year}" if len(title) > 20 else f"{title}, {year}"
+        # Use author last name like reference (e.g., "Köhler, 2019")
+        authors = paper.get("authors", [])
+        if authors:
+            # Extract first author's last name
+            if isinstance(authors[0], str):
+                # Try to get last name from string
+                author_parts = authors[0].split()
+                author_name = author_parts[-1] if author_parts else "Unknown"
+            else:
+                author_name = "Unknown"
+        else:
+            # Fallback to shortened title if no authors
+            author_name = title[:10]
+        
+        label = f"{author_name}, {year}"
 
         fontsize = 10 if paper.get("is_seed") else 8
         fontweight = "bold" if paper.get("is_seed") else "normal"

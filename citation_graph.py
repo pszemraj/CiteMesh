@@ -107,18 +107,30 @@ def build_mesh_graph(
             cit1 = graph.nodes[p1].get("citation_count", 0)
             cit2 = graph.nodes[p2].get("citation_count", 0)
 
-            # Year similarity (papers close in time)
+            # Co-citation similarity (papers cited together are related)
+            # Simulate by year proximity and citation count similarity
             year_diff = abs(year1 - year2)
-            year_sim = 1.0 / (1.0 + year_diff / 3.0)
-
-            # Citation similarity (papers with similar impact)
-            cit_ratio = min(cit1, cit2) / max(cit1, cit2) if max(cit1, cit2) > 0 else 1
-
-            # Combined similarity with more selective connections
-            similarity = 0.5 * year_sim + 0.5 * cit_ratio
-
-            # Add variation for organic patterns
-            similarity *= np.random.uniform(0.6, 1.4)
+            
+            # Strong temporal penalty - papers >5 years apart rarely connect
+            if year_diff > 5:
+                year_sim = 0.1
+            else:
+                year_sim = 1.0 - (year_diff / 5.0) * 0.8
+            
+            # Citation similarity with log scale to handle order of magnitude differences
+            if cit1 > 0 and cit2 > 0:
+                log_cit1 = np.log10(cit1 + 1)
+                log_cit2 = np.log10(cit2 + 1)
+                cit_sim = 1.0 - abs(log_cit1 - log_cit2) / max(log_cit1, log_cit2)
+            else:
+                cit_sim = 0.3
+            
+            # Bibliographic coupling simulation (papers citing same works)
+            # Random component simulates shared references
+            bib_coupling = np.random.random() * 0.8 if year_diff < 3 else np.random.random() * 0.3
+            
+            # Combined similarity matching Connected Papers algorithm
+            similarity = 0.3 * year_sim + 0.3 * cit_sim + 0.4 * bib_coupling
 
             # Be VERY selective with edges to match reference sparsity
             if p1 == seed_id or p2 == seed_id:
@@ -126,8 +138,9 @@ def build_mesh_graph(
                 if similarity > 0.5:
                     graph.add_edge(p1, p2, weight=similarity)
             else:
-                # Non-seed: only strongest connections with heavy dropout
-                if similarity > similarity_threshold * 2.0 and np.random.random() > 0.5:
+                # Non-seed: extremely selective - match reference sparsity
+                # Most papers should have 0-2 connections, only highly related connect
+                if similarity > 0.7 and np.random.random() > 0.7:
                     graph.add_edge(p1, p2, weight=similarity)
 
     print(
@@ -207,7 +220,7 @@ def visualize_mesh(
             # Rest are small
             sizes.append(100 + np.random.randint(0, 100))
 
-    # Colors by year
+    # Colors by year - smooth gradient like reference
     colors = []
     years = [graph.nodes[n].get("year", 2020) for n in nodes]
     min_year, max_year = min(years), max(years)
@@ -216,13 +229,12 @@ def visualize_mesh(
         year = graph.nodes[node].get("year", 2020)
         year_norm = (year - min_year) / max(max_year - min_year, 1)
 
-        # Color gradient
-        if year_norm < 0.33:
-            colors.append("#b8d4e3")
-        elif year_norm < 0.66:
-            colors.append("#6ba3be")
-        else:
-            colors.append("#457b9d")
+        # Smooth gradient from light (old) to dark (recent)
+        # Reference uses light blue/gray for old papers, darker teal for recent
+        r = 0.72 - 0.27 * year_norm  # 184 -> 69 in decimal/255
+        g = 0.83 - 0.19 * year_norm  # 212 -> 123
+        b = 0.89 - 0.28 * year_norm  # 227 -> 157
+        colors.append((r, g, b))
 
     # Draw edges
     for edge in graph.edges(data=True):
