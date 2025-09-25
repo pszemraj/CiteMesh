@@ -12,10 +12,32 @@ A tool for creating Connected Papers-style citation graph visualizations from ac
 - Dense mesh structure with edges between all similar papers
 - Organic clustering reveals research areas and relationships
 
+## Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/paper-graph-vis.git
+cd paper-graph-vis
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Generate your first visualization
+python citation_graph.py "arxiv:1706.03762"  # Transformer paper
+
+# View the output
+open out/final_visualization.png  # macOS
+# or
+xdg-open out/final_visualization.png  # Linux
+```
+
 ## Installation
 
 ```bash
-# Install required packages
+# Install from requirements.txt
+pip install -r requirements.txt
+
+# Or install packages directly
 pip install networkx matplotlib semanticscholar numpy
 ```
 
@@ -24,16 +46,25 @@ pip install networkx matplotlib semanticscholar numpy
 ### Basic Usage
 
 ```bash
-# Generate a Connected Papers-style mesh visualization
-python citation_graph.py "10.48550/arXiv.2507.11412"
+# Generate visualization using different paper ID formats:
 
-# Using different paper identifiers
-python citation_graph.py "arxiv:2507.11412"
-python citation_graph.py "10.1145/3133956.3134029" 
+# arXiv ID (with or without version)
+python citation_graph.py "arxiv:1706.03762"         # Attention Is All You Need
+python citation_graph.py "arxiv:1810.04805"         # BERT paper
+
+# DOI
+python citation_graph.py "10.1038/nature14539"      # Deep learning review
+python citation_graph.py "10.1145/3133956.3134029"  # Spectre attacks
+
+# Semantic Scholar ID 
 python citation_graph.py "649def34f8be52c8b66281af98ae884c09aef38b"
+
+# Specify custom output path
+python citation_graph.py "arxiv:2005.14165" -o my_graph.png
+python citation_graph.py "arxiv:2005.14165" --output results/gpt3.png
 ```
 
-This will create `out/final_visualization.png` with a mesh graph showing ~40 papers connected by similarity.
+This will create `out/final_visualization.png` (or your specified path) with a mesh graph showing ~40 papers connected by similarity.
 
 ### Algorithm Overview
 
@@ -55,12 +86,24 @@ The visualizer implements the Connected Papers algorithm:
 - **Layout**: Force-directed creates organic clustering of related papers
 - **Seed Paper**: Shown larger to indicate starting point
 
+### Command-Line Options
+
+```bash
+python citation_graph.py -h  # Show help with all options
+```
+
+| Option | Description | Default |
+|--------|-------------|---------|  
+| `paper_id` | Paper identifier (DOI, arXiv ID, or S2 ID) | Required |
+| `-o, --output` | Output PNG file path | `out/final_visualization.png` |
+| `-h, --help` | Show help message | - |
+
 ### Key Parameters
 
 - **Max Papers**: ~40 papers selected by relevance
 - **Similarity Threshold**: 0.2 (papers below this aren't connected)
 - **Similarity Weights**: 50% temporal proximity, 50% citation ratio
-- **Output**: Direct PNG at `out/final_visualization.png`
+- **Output Format**: PNG image via matplotlib
 
 ## Performance Notes
 

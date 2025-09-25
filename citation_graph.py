@@ -247,10 +247,19 @@ def visualize_mesh(graph: nx.Graph, seed_id: str, output_path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("paper_id")
+    parser = argparse.ArgumentParser(
+        description="Generate Connected Papers-style citation graph visualization",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument(
-        "-o", "--output", type=Path, default=Path("out/final_visualization.png")
+        "paper_id", help="Paper identifier (DOI, arXiv ID, or Semantic Scholar ID)"
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=Path("out/final_visualization.png"),
+        help="Output PNG file path",
     )
     args = parser.parse_args()
 
