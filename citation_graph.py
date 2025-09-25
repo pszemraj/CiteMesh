@@ -717,15 +717,22 @@ class CitationGraphBuilder:
                 Authors: {", ".join(attrs.get("authors", [])[:3])}
             </div>"""
 
+            # Create label showing first author and year (reference tool style)
+            authors = attrs.get("authors", [])
+            first_author = authors[0].split()[-1] if authors else "Unknown"
+            year = attrs.get("year", "")
+            label = f"{first_author}, {year}" if year else first_author
+            
             net.add_node(
                 node_id,
-                label=self._truncate_title(attrs.get("title", "Unknown")),
+                label=label,  # Show author, year instead of title
                 title=hover,
                 size=size,
                 color=color,
                 x=float(x),  # Convert numpy float to Python float
                 y=float(y),  # Convert numpy float to Python float
                 physics=False if layout_style == LayoutStyle.SIMILARITY else True,
+                font={"size": 12, "color": "#2d3748"},  # Visible labels
             )
 
         # Add edges based on similarity (reference tool style)
