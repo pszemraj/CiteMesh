@@ -882,7 +882,15 @@ class CitationGraphBuilder:
                         "size": 3,
                         "x": 2,
                         "y": 2
-                    }
+                    },
+                    "font": {
+                        "size": 14,
+                        "color": "#1a202c",
+                        "bold": true,
+                        "strokeWidth": 2,
+                        "strokeColor": "#ffffff"
+                    },
+                    "labelHighlightBold": true
                 }
             }
             """)
