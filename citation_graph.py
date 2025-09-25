@@ -27,14 +27,15 @@ def build_mesh_graph(
 
     # Get seed with proper fields including references
     seed = client.get_paper(
-        paper_id, fields=["title", "year", "authors", "citationCount", "paperId", "references"]
+        paper_id,
+        fields=["title", "year", "authors", "citationCount", "paperId", "references"],
     )
     if not seed:
         raise ValueError("Paper not found")
 
     seed_id = seed.paperId
     print(f"Building mesh graph for: {seed.title[:50]}...")
-    
+
     # Extract seed's references for bibliographic coupling
     seed_ref_ids = set()
     if seed.references:
@@ -81,15 +82,17 @@ def build_mesh_graph(
                     ref_ids = set()
                     if papers_added <= 10:
                         try:
-                            full_paper = client.get_paper(p.paperId, fields=["references"])
+                            full_paper = client.get_paper(
+                                p.paperId, fields=["references"]
+                            )
                             if full_paper and full_paper.references:
                                 for ref in full_paper.references[:30]:
                                     if hasattr(ref, "paperId") and ref.paperId:
                                         ref_ids.add(ref.paperId)
-                        except:
+                        except Exception:
                             pass
                     papers_with_refs[p.paperId] = ref_ids
-                    
+
                     graph.add_node(
                         p.paperId,
                         title=p.title or "Unknown",
@@ -127,15 +130,17 @@ def build_mesh_graph(
                     ref_ids = set()
                     if papers_added <= 10:
                         try:
-                            full_paper = client.get_paper(p.paperId, fields=["references"])
+                            full_paper = client.get_paper(
+                                p.paperId, fields=["references"]
+                            )
                             if full_paper and full_paper.references:
                                 for ref in full_paper.references[:30]:
                                     if hasattr(ref, "paperId") and ref.paperId:
                                         ref_ids.add(ref.paperId)
-                        except:
+                        except Exception:
                             pass
                     papers_with_refs[p.paperId] = ref_ids
-                    
+
                     graph.add_node(
                         p.paperId,
                         title=p.title or "Unknown",
@@ -171,15 +176,17 @@ def build_mesh_graph(
                     ref_ids = set()
                     if papers_added <= 10:
                         try:
-                            full_paper = client.get_paper(p.paperId, fields=["references"])
+                            full_paper = client.get_paper(
+                                p.paperId, fields=["references"]
+                            )
                             if full_paper and full_paper.references:
                                 for ref in full_paper.references[:30]:
                                     if hasattr(ref, "paperId") and ref.paperId:
                                         ref_ids.add(ref.paperId)
-                        except:
+                        except Exception:
                             pass
                     papers_with_refs[p.paperId] = ref_ids
-                    
+
                     graph.add_node(
                         p.paperId,
                         title=p.title or "Unknown",
@@ -205,7 +212,7 @@ def build_mesh_graph(
             # Get reference sets
             refs1 = papers_with_refs.get(p1, set())
             refs2 = papers_with_refs.get(p2, set())
-            
+
             # Bibliographic coupling: normalized shared references
             if refs1 and refs2:
                 shared = len(refs1 & refs2)
@@ -213,16 +220,16 @@ def build_mesh_graph(
                 biblio_coupling = shared / math.sqrt(len(refs1) * len(refs2))
             else:
                 biblio_coupling = 0
-            
+
             # Temporal similarity (penalty for cross-generation)
             year1 = graph.nodes[p1].get("year", 2020)
             year2 = graph.nodes[p2].get("year", 2020)
             year_diff = abs(year1 - year2)
             temporal_factor = math.exp(-year_diff / 8)  # Exponential decay
-            
+
             # Combined similarity (70% bibliographic, 30% temporal)
             similarity = biblio_coupling * 0.7 + temporal_factor * 0.3
-            
+
             # Special case: always connect to seed with minimum weight
             if p1 == seed_id or p2 == seed_id:
                 similarity = max(similarity, similarity_threshold * 0.8)
