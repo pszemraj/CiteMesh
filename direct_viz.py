@@ -81,17 +81,17 @@ def visualize_direct(graph, output_path, builder):
                     
                     # Edge styling based on similarity
                     if sim > 0.3:
-                        alpha = 0.5
-                        linewidth = 1.5
+                        alpha = 0.7
+                        linewidth = 2.0
                         color = '#64748b'
                     elif sim > 0.2:
+                        alpha = 0.5
+                        linewidth = 1.5
+                        color = '#94a3b8'
+                    else:
                         alpha = 0.3
                         linewidth = 1.0
                         color = '#94a3b8'
-                    else:
-                        alpha = 0.2
-                        linewidth = 0.5
-                        color = '#cbd5e1'
                     
                     ax.plot([pos1[0], pos2[0]], [pos1[1], pos2[1]], 
                            color=color, alpha=alpha, linewidth=linewidth, zorder=1)
@@ -123,8 +123,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("paper_id", help="Paper ID (DOI, arXiv ID, or S2 ID)")
     parser.add_argument("-o", "--output", type=Path, default=Path("out/direct_viz.png"))
-    parser.add_argument("--max-citations", type=int, default=30)
-    parser.add_argument("--max-references", type=int, default=30)
+    parser.add_argument("--max-citations", type=int, default=10)
+    parser.add_argument("--max-references", type=int, default=10)
     parser.add_argument("--depth", type=int, default=1)
     args = parser.parse_args()
     
