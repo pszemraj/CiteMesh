@@ -11,11 +11,68 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
 import math
-import pickle
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional
 from sentence_transformers import SentenceTransformer, util
 from semanticscholar import SemanticScholar
 from datasets import load_dataset
+from joblib import Memory
+
+# Set up joblib memory cache
+memory = Memory("cache/joblib_cache", verbose=0)
+
+
+@memory.cache
+def load_arxiv_corpus_cached(dataset_split: str, max_papers: Optional[int]) -> Dict:
+    """Load and cache ArXiv corpus."""
+    papers = {}
+
+    try:
+        dataset = load_dataset("CShorten/ML-ArXiv-Papers", split=dataset_split)
+        print(f"Using ML-ArXiv-Papers dataset (split: {dataset_split})")
+    except Exception:
+        try:
+            dataset = load_dataset("gfissore/arxiv-abstracts-2021", split=dataset_split)
+            print(f"Using arxiv-abstracts-2021 dataset (split: {dataset_split})")
+        except Exception:
+            print("Warning: Could not load ArXiv dataset")
+            return papers
+
+    for i, paper in enumerate(dataset):
+        if max_papers and i >= max_papers:
+            break
+
+        paper_id = paper.get("id", paper.get("paper_id", f"arxiv_{i}"))
+
+        # Extract year
+        year = 2020
+        if "year" in paper and paper["year"]:
+            year = int(paper["year"])
+        elif "update_date" in paper:
+            try:
+                year = int(paper["update_date"][:4])
+            except (ValueError, IndexError):
+                pass
+
+        papers[paper_id] = {
+            "title": paper.get("title", "Unknown"),
+            "abstract": paper.get("abstract", paper.get("summary", "")),
+            "year": year,
+            "authors": paper.get("authors", []),
+        }
+
+        if (i + 1) % 1000 == 0:
+            print(f"  Loaded {i + 1} papers...")
+
+    return papers
+
+
+@memory.cache
+def compute_embeddings_hybrid_cached(
+    paper_ids: tuple, embeddings_list: tuple, model_name: str
+) -> tuple:
+    """Cache embeddings computation."""
+    # Simply return the data in cacheable format
+    return (paper_ids, embeddings_list)
 
 
 class HybridPapersBuilder:
@@ -33,14 +90,7 @@ class HybridPapersBuilder:
         """
         self.semantic_scholar = SemanticScholar()
         self.sentence_model = SentenceTransformer(model_name)
-        self.cache_dir = cache_dir
-        self.cache_dir.mkdir(exist_ok=True)
-
-        # Cache files
-        self.arxiv_cache = self.cache_dir / "arxiv_papers.pkl"
-        self.embeddings_cache = (
-            self.cache_dir / f"{model_name.replace('/', '_')}_embeddings.pkl"
-        )
+        self.model_name = model_name
 
         # Data storage
         self.arxiv_papers = {}  # Background corpus for finding similar papers
@@ -57,51 +107,20 @@ class HybridPapersBuilder:
             dataset_split: HuggingFace dataset split specification
         """
 
-        if self.arxiv_cache.exists():
-            print("Loading ArXiv corpus from cache...")
-            with open(self.arxiv_cache, "rb") as f:
-                self.arxiv_papers = pickle.load(f)
-            print(f"Loaded {len(self.arxiv_papers)} papers from cache")
-            return
+        print("Loading ArXiv corpus...")
+        self.arxiv_papers = load_arxiv_corpus_cached(dataset_split, max_papers)
+        print(f"Loaded {len(self.arxiv_papers)} papers")
 
-        print(f"Loading ArXiv corpus (up to {max_papers} papers)...")
-
-        try:
-            dataset = load_dataset("CShorten/ML-ArXiv-Papers", split=dataset_split)
-            print(f"Using ML-ArXiv-Papers dataset (split: {dataset_split})")
-        except Exception:
-            try:
-                dataset = load_dataset(
-                    "gfissore/arxiv-abstracts-2021", split=dataset_split
-                )
-                print(f"Using arxiv-abstracts-2021 dataset (split: {dataset_split})")
-            except Exception:
-                print(
-                    "Warning: Could not load ArXiv dataset, semantic search will be limited"
-                )
-                return
-
-        for i, paper in enumerate(dataset):
-            if max_papers and i >= max_papers:
-                break
-
-            paper_id = paper.get("id", paper.get("paper_id", f"arxiv_{i}"))
-
-            self.arxiv_papers[paper_id] = {
-                "title": paper.get("title", "Unknown"),
-                "abstract": paper.get("abstract", paper.get("summary", "")),
-                "year": self._extract_year(paper),
-                "authors": paper.get("authors", []),
-            }
-
-            if (i + 1) % 1000 == 0:
-                print(f"  Loaded {i + 1} papers...")
-
-        print(f"Loaded {len(self.arxiv_papers)} ArXiv papers")
-
-        # Cache for next time
-        with open(self.arxiv_cache, "wb") as f:
-            pickle.dump(self.arxiv_papers, f)
+    def _cache_embeddings(self):
+        """Helper to trigger joblib caching of embeddings."""
+        # Convert embeddings dict to cacheable format
+        paper_ids = list(self.embeddings.keys())
+        embeddings_list = [self.embeddings[pid] for pid in paper_ids]
+        cached_data = compute_embeddings_hybrid_cached(
+            tuple(paper_ids), tuple(embeddings_list), self.model_name
+        )
+        # Restore from cache format
+        self.embeddings = dict(zip(cached_data[0], cached_data[1]))
 
     def _extract_year(self, paper: dict) -> int:
         """Extract year from paper metadata."""
@@ -150,9 +169,15 @@ class HybridPapersBuilder:
         # Fetch citations (same as citation_graph.py)
         print(f"Fetching up to {max_citations} citations...")
         try:
-            citations = self.semantic_scholar.get_paper_citations(seed_id, limit=max_citations)
+            citations = self.semantic_scholar.get_paper_citations(
+                seed_id, limit=max_citations
+            )
             for cit in citations:
-                if hasattr(cit, "paper") and cit.paper and hasattr(cit.paper, "paperId"):
+                if (
+                    hasattr(cit, "paper")
+                    and cit.paper
+                    and hasattr(cit.paper, "paperId")
+                ):
                     p = cit.paper
                     self.graph_papers[p.paperId] = {
                         "title": p.title or "Unknown",
@@ -169,9 +194,15 @@ class HybridPapersBuilder:
         # Fetch references (same as citation_graph.py)
         print(f"Fetching up to {max_references} references...")
         try:
-            references = self.semantic_scholar.get_paper_references(seed_id, limit=max_references)
+            references = self.semantic_scholar.get_paper_references(
+                seed_id, limit=max_references
+            )
             for ref in references:
-                if hasattr(ref, "paper") and ref.paper and hasattr(ref.paper, "paperId"):
+                if (
+                    hasattr(ref, "paper")
+                    and ref.paper
+                    and hasattr(ref.paper, "paperId")
+                ):
                     p = ref.paper
                     self.graph_papers[p.paperId] = {
                         "title": p.title or "Unknown",
@@ -190,12 +221,6 @@ class HybridPapersBuilder:
 
     def compute_embeddings(self):
         """Compute embeddings for all papers (both graph and corpus)."""
-
-        if self.embeddings_cache.exists():
-            print("Loading embeddings from cache...")
-            with open(self.embeddings_cache, "rb") as f:
-                self.embeddings = pickle.load(f)
-            return
 
         print("Computing embeddings for all papers...")
 
@@ -238,9 +263,8 @@ class HybridPapersBuilder:
 
         print(f"Computed embeddings for {len(self.embeddings)} papers")
 
-        # Cache embeddings
-        with open(self.embeddings_cache, "wb") as f:
-            pickle.dump(self.embeddings, f)
+        # Cache embeddings using joblib
+        self._cache_embeddings()
 
     def find_semantically_similar(
         self, seed_id: str, top_k: int = 10
