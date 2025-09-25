@@ -116,10 +116,10 @@ def build_mesh_graph(
 
             # Combined similarity
             similarity = 0.6 * year_sim + 0.4 * cit_ratio
-            
+
             # Add variation but reduce overall
             similarity *= np.random.uniform(0.3, 0.8)
-            
+
             # Special case: always connect to seed with some weight
             if p1 == seed_id or p2 == seed_id:
                 similarity = max(similarity, similarity_threshold * 0.8)
