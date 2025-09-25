@@ -432,7 +432,13 @@ class CitationGraphBuilder:
     def _compute_similarity_layout(
         self, graph: nx.DiGraph
     ) -> Dict[str, Tuple[float, float]]:
-        """Compute similarity-based layout matching reference tool style."""
+        """Compute similarity-based layout matching reference tool style.
+        
+        Uses a d3-style force simulation where:
+        - All nodes repel each other (charge force)
+        - Similar papers attract (link force based on similarity)
+        - No artificial centering to allow natural clustering
+        """
         n = graph.number_of_nodes()
         if n <= 2:
             nodes = list(graph.nodes())
@@ -443,96 +449,89 @@ class CitationGraphBuilder:
         # Compute similarity matrix based on bibliographic coupling and co-citation
         similarity = self.compute_similarity_matrix(graph)
 
-        # Use spring layout as initial positions for better starting point
-        pos_dict = nx.spring_layout(graph, k=1 / math.sqrt(n), iterations=50, seed=42)
-
-        # Convert to our coordinate system
+        # Initialize positions randomly across the canvas
         nodes = list(graph.nodes())
-        positions = np.array([list(pos_dict[node]) for node in nodes])
-        positions = positions * 400 + [400, 300]  # Scale and center
+        np.random.seed(42)
+        # Wider initial spread to avoid initial clustering
+        positions = np.random.uniform(-300, 300, (n, 2)) + [400, 300]
 
-        # Force-directed simulation matching reference tool layout
-        iterations = 1000
-        dt = 0.02
-        damping = 0.9
+        # D3-style force simulation parameters
         velocities = np.zeros_like(positions)
-
-        # Get citation counts for node importance
-        citations = np.array(
-            [graph.nodes[node].get("citation_count", 0) for node in nodes]
-        )
+        alpha = 1.0  # Initial temperature
+        alpha_decay = 0.005  # How fast temperature decreases
+        alpha_min = 0.001  # Stop when alpha is this small
+        velocity_decay = 0.6  # Friction
+        
+        # Node properties for forces
+        citations = np.array([graph.nodes[node].get("citation_count", 0) for node in nodes])
         max_cit = max(citations) if citations.any() else 1
-        importance = np.sqrt(citations / max_cit + 0.1)  # Importance factor
+        # Node mass affects how much they move (heavier = less movement)
+        masses = 1 + np.sqrt(citations / max_cit)
 
-        for iteration in range(iterations):
+        # Run force simulation until convergence
+        while alpha > alpha_min:
             forces = np.zeros_like(positions)
-
-            # Calculate all pairwise forces
+            
+            # 1. Many-body force (charge/repulsion between all nodes)
             for i in range(n):
                 for j in range(i + 1, n):
-                    # Vector from i to j
-                    diff = positions[j] - positions[i]
-                    dist = np.linalg.norm(diff)
-
-                    if dist < 1e-6:
-                        diff = np.random.randn(2) * 1
-                        dist = 1
-
-                    unit_vec = diff / dist
-
-                    # Repulsive force - stronger to prevent overlap
-                    # Scale by importance so important papers get more space
-                    rep_factor = (importance[i] + importance[j]) / 2
-                    min_distance = (
-                        20 + 30 * rep_factor
-                    )  # Minimum distance based on importance
-
-                    if dist < min_distance * 3:  # Only repel when relatively close
-                        repulsion = 8000.0 * rep_factor / (dist + 10)
-                        forces[i] -= unit_vec * repulsion
-                        forces[j] += unit_vec * repulsion
-
-                    # Attractive force based on similarity
+                    delta = positions[j] - positions[i]
+                    dist_sq = np.sum(delta ** 2)
+                    
+                    if dist_sq < 1:
+                        dist_sq = 1
+                        delta = np.random.randn(2) * 0.1
+                    
+                    # Barnes-Hut approximation: F = k * q1 * q2 / r^2
+                    # Charge proportional to sqrt of citations (bigger nodes push harder)
+                    charge_i = 30 * np.sqrt(masses[i])
+                    charge_j = 30 * np.sqrt(masses[j])
+                    force_magnitude = charge_i * charge_j / dist_sq
+                    
+                    force_vector = delta / np.sqrt(dist_sq) * force_magnitude
+                    forces[i] -= force_vector
+                    forces[j] += force_vector
+            
+            # 2. Link force (attraction based on similarity)
+            for i in range(n):
+                for j in range(i + 1, n):
                     sim = similarity[i, j]
-                    if sim > 0.05:  # Only meaningful similarities
-                        # Stronger attraction for high similarity
-                        ideal_distance = (
-                            80 + 150 * (1 - sim) ** 2
-                        )  # Closer for high similarity
-                        if dist > ideal_distance:
-                            # Pull together if too far
-                            spring_force = 2.0 * sim * (dist - ideal_distance)
-                            forces[i] += unit_vec * spring_force
-                            forces[j] -= unit_vec * spring_force
-                        elif dist < ideal_distance * 0.8:
-                            # Push apart if too close
-                            spring_force = 1.0 * sim * (ideal_distance - dist)
-                            forces[i] -= unit_vec * spring_force
-                            forces[j] += unit_vec * spring_force
-
-            # Very gentle centering to keep graph cohesive
+                    if sim > 0.1:  # Only connect papers with meaningful similarity
+                        delta = positions[j] - positions[i]
+                        dist = np.linalg.norm(delta)
+                        
+                        # Spring force with rest length based on similarity
+                        # High similarity = short rest length (30-100)
+                        # Low similarity = long rest length (100-300)
+                        rest_length = 30 + 270 * (1 - sim)
+                        
+                        if dist > 0:
+                            # F = k * (distance - rest_length)
+                            # Strength proportional to similarity
+                            spring_constant = sim * 0.3
+                            force_magnitude = spring_constant * (dist - rest_length)
+                            force_vector = delta / dist * force_magnitude
+                            
+                            # Apply force inversely proportional to mass
+                            forces[i] += force_vector / masses[i]
+                            forces[j] -= force_vector / masses[j]
+            
+            # 3. Weak centering force (prevent drift)
             center = np.array([400, 300])
             for i in range(n):
                 to_center = center - positions[i]
-                dist_to_center = np.linalg.norm(to_center)
-                if dist_to_center > 250:  # Only if very far from center
-                    forces[i] += to_center * 0.01
-
+                # Very weak force, just to keep graph from drifting
+                forces[i] += to_center * 0.0001
+            
             # Update velocities and positions
-            velocities = velocities * damping + forces * dt
-
-            # Limit maximum velocity
-            speed = np.linalg.norm(velocities, axis=1, keepdims=True)
-            max_speed = 50
-            velocities = np.where(
-                speed > max_speed, velocities * max_speed / (speed + 1e-10), velocities
-            )
-
-            positions += velocities * dt
-
-            # Cool down in final iterations
-            if iteration > iterations * 0.8:
-                velocities *= 0.92
+            velocities += forces * alpha
+            velocities *= velocity_decay  # Friction
+            positions += velocities
+            
+            # Cool down
+            alpha -= alpha_decay
+            if alpha < 0:
+                alpha = 0
 
         # Convert back to dictionary
         pos_dict = {nodes[i]: tuple(positions[i]) for i in range(n)}
