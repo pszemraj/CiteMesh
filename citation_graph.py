@@ -10,7 +10,6 @@ import networkx as nx
 from semanticscholar import SemanticScholar
 from pathlib import Path
 import argparse
-import math
 
 
 def build_mesh_graph(
@@ -20,23 +19,12 @@ def build_mesh_graph(
     max_references: int = 20,
     similarity_threshold: float = 0.2,
 ):
-    """Build graph with mesh connections based on simulated similarity."""
+    """Build graph with mesh connections using recommendations API."""
 
     client = SemanticScholar()
 
-    # Get seed with references for bibliographic coupling
-    seed = client.get_paper(
-        paper_id,
-        fields=[
-            "title",
-            "year",
-            "authors",
-            "citationCount",
-            "references",
-            "citations",
-            "paperId",
-        ],
-    )
+    # Get seed with proper fields
+    seed = client.get_paper(paper_id, fields=['title', 'year', 'authors', 'citationCount', 'paperId'])
     if not seed:
         raise ValueError("Paper not found")
 
@@ -45,13 +33,6 @@ def build_mesh_graph(
 
     graph = nx.Graph()
 
-    # Extract seed's reference IDs for bibliographic coupling
-    seed_ref_ids = set()
-    if seed.references:
-        for ref in seed.references[:100]:  # API limit
-            if hasattr(ref, "paperId") and ref.paperId:
-                seed_ref_ids.add(ref.paperId)
-
     # Add seed
     graph.add_node(
         seed_id,
@@ -59,135 +40,132 @@ def build_mesh_graph(
         year=seed.year or 2020,
         authors=[a.name for a in (seed.authors or [])[:3]],
         citation_count=seed.citationCount or 0,
-        reference_ids=seed_ref_ids,
         is_seed=True,
     )
 
     papers_added = 1
     paper_list = [seed_id]
 
-    # Collect papers
-    print("Collecting papers...")
-
-    # Add citations
+    # Collect papers using recommendations API for better similarity
+    print("Collecting similar papers via recommendations API...")
+    
+    # Get recommended similar papers (requires full S2 ID, not arxiv format)
     try:
-        citations = client.get_paper_citations(
-            seed_id,
-            limit=max_citations,
-            fields=["title", "year", "authors", "citationCount", "paperId"],
+        # Try recommendations first
+        recommendations = client.get_recommended_papers(
+            seed_id, 
+            fields=['title', 'year', 'authors', 'citationCount', 'paperId'],
+            limit=max_papers - 1  # -1 for seed
         )
-        for cit in citations:
-            if papers_added >= max_papers:
-                break
-            if hasattr(cit, "citingPaper") and cit.citingPaper:
-                p = cit.citingPaper
-            elif hasattr(cit, "paper") and cit.paper:
-                p = cit.paper
-            else:
-                continue
+        
+        if recommendations:
+            print(f"Found {len(recommendations)} recommended papers")
+            for p in recommendations:
+                if papers_added >= max_papers:
+                    break
+                if hasattr(p, "paperId"):
+                    graph.add_node(
+                        p.paperId,
+                        title=p.title or "Unknown",
+                        year=p.year or 2020,
+                        authors=[a.name for a in (p.authors or [])[:3]],
+                        citation_count=p.citationCount or 0,
+                        is_seed=False,
+                    )
+                    paper_list.append(p.paperId)
+                    papers_added += 1
+        else:
+            raise Exception("No recommendations returned")
+    except Exception as e:
+        print(f"Recommendations API not available: {e}")
+        # Fallback to citations
+        try:
+            citations = client.get_paper_citations(seed_id, limit=max_citations,
+                                                  fields=['title', 'year', 'authors', 'citationCount', 'paperId'])
+            for cit in citations:
+                if papers_added >= max_papers:
+                    break
+                if hasattr(cit, "citingPaper") and cit.citingPaper:
+                    p = cit.citingPaper
+                elif hasattr(cit, "paper") and cit.paper:
+                    p = cit.paper
+                else:
+                    continue
+                    
+                if hasattr(p, "paperId"):
+                    graph.add_node(
+                        p.paperId,
+                        title=p.title or "Unknown",
+                        year=p.year or 2020,
+                        authors=[a.name for a in (p.authors or [])[:3]],
+                        citation_count=p.citationCount or 0,
+                        is_seed=False,
+                    )
+                    paper_list.append(p.paperId)
+                    papers_added += 1
+        except (AttributeError, TypeError):
+            pass
 
-            if hasattr(p, "paperId"):
-                # Fetch this paper's references for coupling
-                ref_ids = set()
-                # Only fetch refs for first 15 papers to avoid timeout
-                if papers_added <= 15:
-                    full_paper = client.get_paper(p.paperId, fields=["references"])
-                    if full_paper and full_paper.references:
-                        for ref in full_paper.references[:30]:  # Limit
-                            if hasattr(ref, "paperId") and ref.paperId:
-                                ref_ids.add(ref.paperId)
-
-                graph.add_node(
-                    p.paperId,
-                    title=p.title or "Unknown",
-                    year=p.year or 2020,
-                    authors=[a.name for a in (p.authors or [])[:3]],
-                    citation_count=p.citationCount or 0,
-                    reference_ids=ref_ids,
-                    is_seed=False,
-                )
-                paper_list.append(p.paperId)
-                papers_added += 1
-    except (AttributeError, TypeError):
-        pass
-
-    # Add references
-    try:
-        references = client.get_paper_references(
-            seed_id,
-            limit=max_references,
-            fields=["title", "year", "authors", "citationCount", "paperId"],
-        )
-        for ref in references:
-            if papers_added >= max_papers:
-                break
-            if hasattr(ref, "citedPaper") and ref.citedPaper:
-                p = ref.citedPaper
-            elif hasattr(ref, "paper") and ref.paper:
-                p = ref.paper
-            else:
-                continue
-
-            if hasattr(p, "paperId"):
-                # Fetch this paper's references for coupling
-                ref_ids = set()
-                # Only fetch refs for first 15 papers to avoid timeout
-                if papers_added <= 15:
-                    full_paper = client.get_paper(p.paperId, fields=["references"])
-                    if full_paper and full_paper.references:
-                        for ref in full_paper.references[:30]:  # Limit
-                            if hasattr(ref, "paperId") and ref.paperId:
-                                ref_ids.add(ref.paperId)
-
-                graph.add_node(
-                    p.paperId,
-                    title=p.title or "Unknown",
-                    year=p.year or 2020,
-                    authors=[a.name for a in (p.authors or [])[:3]],
-                    citation_count=p.citationCount or 0,
-                    reference_ids=ref_ids,
-                    is_seed=False,
-                )
-                paper_list.append(p.paperId)
-                papers_added += 1
-    except (AttributeError, TypeError):
-        pass
+        # Add references as fallback
+        try:
+            references = client.get_paper_references(seed_id, limit=max_references,
+                                                    fields=['title', 'year', 'authors', 'citationCount', 'paperId'])
+            for ref in references:
+                if papers_added >= max_papers:
+                    break
+                if hasattr(ref, "citedPaper") and ref.citedPaper:
+                    p = ref.citedPaper
+                elif hasattr(ref, "paper") and ref.paper:
+                    p = ref.paper
+                else:
+                    continue
+                    
+                if hasattr(p, "paperId"):
+                    graph.add_node(
+                        p.paperId,
+                        title=p.title or "Unknown",
+                        year=p.year or 2020,
+                        authors=[a.name for a in (p.authors or [])[:3]],
+                        citation_count=p.citationCount or 0,
+                        is_seed=False,
+                    )
+                    paper_list.append(p.paperId)
+                    papers_added += 1
+        except (AttributeError, TypeError):
+            pass
 
     print(f"Collected {len(paper_list)} papers")
 
-    # Create mesh using bibliographic coupling
-    print("Creating similarity mesh with bibliographic coupling...")
+    # Create mesh by simulating similarity
+    # Papers close in time and citation count are considered similar
+    print("Creating similarity mesh...")
 
     for i, p1 in enumerate(paper_list):
         for j in range(i + 1, len(paper_list)):
             p2 = paper_list[j]
 
-            # Get reference sets
-            refs1 = graph.nodes[p1].get("reference_ids", set())
-            refs2 = graph.nodes[p2].get("reference_ids", set())
-
-            # Bibliographic coupling: shared references
-            if refs1 and refs2:
-                intersection = len(refs1 & refs2)
-                normalization = math.sqrt(len(refs1) * len(refs2))
-                biblio_coupling = (
-                    intersection / normalization if normalization > 0 else 0
-                )
-            else:
-                biblio_coupling = 0
-
-            # Temporal similarity for recency bias
+            # Simulate similarity based on year and citations
             year1 = graph.nodes[p1].get("year", 2020)
             year2 = graph.nodes[p2].get("year", 2020)
-            year_diff = abs(year1 - year2)
-            temporal_sim = max(0, 1.0 - year_diff / 10.0)
+            cit1 = graph.nodes[p1].get("citation_count", 0)
+            cit2 = graph.nodes[p2].get("citation_count", 0)
 
-            # Combined similarity (70% bibliographic, 30% temporal)
-            similarity = 0.7 * biblio_coupling + 0.3 * temporal_sim
+            # Year similarity (papers close in time)
+            year_diff = abs(year1 - year2)
+            year_sim = 1.0 / (1.0 + year_diff / 3.0)
+
+            # Citation similarity (papers with similar impact)
+            cit_ratio = min(cit1, cit2) / max(cit1, cit2) if max(cit1, cit2) > 0 else 1
+
+            # Combined similarity
+            similarity = 0.5 * year_sim + 0.5 * cit_ratio
+
+            # Add random factor to create more organic patterns
+            similarity *= np.random.uniform(0.5, 1.5)
 
             # Special case: always connect to seed with some weight
             if p1 == seed_id or p2 == seed_id:
-                similarity = max(similarity, similarity_threshold * 0.8)
+                similarity = max(similarity, 0.2)
 
             # Add edge if similar enough
             if similarity > similarity_threshold:
