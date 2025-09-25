@@ -135,12 +135,12 @@ def build_mesh_graph(
             # Be VERY selective with edges to match reference sparsity
             if p1 == seed_id or p2 == seed_id:
                 # Seed connects to highly related papers only
-                if similarity > 0.5:
+                if similarity > 0.45:  # Balanced threshold
                     graph.add_edge(p1, p2, weight=similarity)
             else:
                 # Non-seed: extremely selective - match reference sparsity
                 # Most papers should have 0-2 connections, only highly related connect
-                if similarity > 0.7 and np.random.random() > 0.7:
+                if similarity > 0.65 and np.random.random() > 0.7:
                     graph.add_edge(p1, p2, weight=similarity)
 
     print(
