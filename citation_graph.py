@@ -12,7 +12,13 @@ from pathlib import Path
 import argparse
 
 
-def build_mesh_graph(paper_id: str, max_papers: int = 40):
+def build_mesh_graph(
+    paper_id: str,
+    max_papers: int = 40,
+    max_citations: int = 20,
+    max_references: int = 20,
+    similarity_threshold: float = 0.2,
+):
     """Build graph with mesh connections based on simulated similarity."""
 
     client = SemanticScholar()
@@ -45,7 +51,7 @@ def build_mesh_graph(paper_id: str, max_papers: int = 40):
 
     # Add citations
     try:
-        citations = client.get_paper_citations(seed_id, limit=20)
+        citations = client.get_paper_citations(seed_id, limit=max_citations)
         for cit in citations:
             if papers_added >= max_papers:
                 break
@@ -66,7 +72,7 @@ def build_mesh_graph(paper_id: str, max_papers: int = 40):
 
     # Add references
     try:
-        references = client.get_paper_references(seed_id, limit=20)
+        references = client.get_paper_references(seed_id, limit=max_references)
         for ref in references:
             if papers_added >= max_papers:
                 break
@@ -119,7 +125,7 @@ def build_mesh_graph(paper_id: str, max_papers: int = 40):
                 similarity = max(similarity, 0.2)
 
             # Add edge if similar enough
-            if similarity > 0.2:
+            if similarity > similarity_threshold:
                 graph.add_edge(p1, p2, weight=similarity)
 
     print(
@@ -128,11 +134,19 @@ def build_mesh_graph(paper_id: str, max_papers: int = 40):
     return graph, seed_id
 
 
-def visualize_mesh(graph: nx.Graph, seed_id: str, output_path: Path):
+def visualize_mesh(
+    graph: nx.Graph,
+    seed_id: str,
+    output_path: Path,
+    iterations: int = 100,
+    dpi: int = 150,
+):
     """Visualize with Connected Papers-style layout."""
 
     # Use spring layout with custom parameters
-    pos = nx.spring_layout(graph, k=1.2, iterations=100, seed=42, weight="weight")
+    pos = nx.spring_layout(
+        graph, k=1.2, iterations=iterations, seed=42, weight="weight"
+    )
 
     # Ensure seed is more central
     if seed_id in pos:
@@ -241,7 +255,7 @@ def visualize_mesh(graph: nx.Graph, seed_id: str, output_path: Path):
     ax.set_title(f"Connected Papers Style: {title}...", fontsize=14, pad=20)
 
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="#fafafa")
+    plt.savefig(output_path, dpi=dpi, bbox_inches="tight", facecolor="#fafafa")
     plt.close()
     print(f"Saved to {output_path}")
 
@@ -258,13 +272,79 @@ def main():
         "-o",
         "--output",
         type=Path,
-        default=Path("out/final_visualization.png"),
-        help="Output PNG file path",
+        default=None,
+        help="Output PNG file path (auto-named if not specified)",
+    )
+    parser.add_argument(
+        "-p",
+        "--max-papers",
+        type=int,
+        default=40,
+        help="Maximum total papers to include in graph",
+    )
+    parser.add_argument(
+        "-c",
+        "--max-citations",
+        type=int,
+        default=20,
+        help="Maximum citations to fetch per paper",
+    )
+    parser.add_argument(
+        "-r",
+        "--max-references",
+        type=int,
+        default=20,
+        help="Maximum references to fetch per paper",
+    )
+    parser.add_argument(
+        "-s",
+        "--similarity-threshold",
+        type=float,
+        default=0.2,
+        help="Minimum similarity score for edge creation (0-1)",
+    )
+    parser.add_argument(
+        "-i",
+        "--iterations",
+        type=int,
+        default=100,
+        help="Layout algorithm iterations (higher = better quality)",
+    )
+    parser.add_argument(
+        "-d",
+        "--dpi",
+        type=int,
+        default=150,
+        help="Output image DPI resolution",
     )
     args = parser.parse_args()
 
-    graph, seed_id = build_mesh_graph(args.paper_id, max_papers=40)
-    visualize_mesh(graph, seed_id, args.output)
+    # Build graph
+    graph, seed_id = build_mesh_graph(
+        args.paper_id,
+        max_papers=args.max_papers,
+        max_citations=args.max_citations,
+        max_references=args.max_references,
+        similarity_threshold=args.similarity_threshold,
+    )
+
+    # Auto-generate filename if not specified
+    if args.output is None:
+        import re
+
+        title = graph.nodes[seed_id].get("title", "unknown")
+        # Create safe filename from title
+        safe_title = re.sub(r"[^\w\s-]", "", title[:60]).strip()
+        safe_title = re.sub(r"[-\s]+", "-", safe_title).lower()
+        output_path = Path("out") / f"{safe_title}.png"
+        output_path.parent.mkdir(exist_ok=True)
+    else:
+        output_path = args.output
+        output_path.parent.mkdir(exist_ok=True)
+
+    visualize_mesh(
+        graph, seed_id, output_path, iterations=args.iterations, dpi=args.dpi
+    )
 
 
 if __name__ == "__main__":
