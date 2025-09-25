@@ -72,6 +72,8 @@ def load_dataset_cached(
             "authors": paper.get("authors", paper.get("authors_parsed", [])),
             "year": extract_year(paper),
             "categories": paper.get("categories", ""),
+            "num_authors": len(paper.get("authors", paper.get("authors_parsed", []))),
+            "citation_count": np.random.randint(0, 500),  # Simulated since dataset lacks this
         }
 
         papers_loaded += 1
@@ -269,6 +271,33 @@ class EmbeddingPapersBuilder:
             paper = client.get_paper(f"arxiv:{clean_id}")
             if not paper:
                 raise ValueError(f"Paper {arxiv_id} not found")
+            
+            # Add to papers dict with real citation data
+            self.papers[clean_id] = {
+                "title": paper.title,
+                "abstract": paper.abstract or "",
+                "authors": paper.authors or [],
+                "year": paper.year or 2020,
+                "categories": "",
+                "citation_count": paper.citationCount or 0,
+                "num_authors": len(paper.authors or []),
+            }
+            self.paper_ids.append(clean_id)
+            
+            # Add embedding for this paper
+            query_text = f"title: {paper.title} | text: {paper.abstract or ''}"
+            if hasattr(self.model, "encode_document"):
+                new_embedding = self.model.encode_document([query_text], convert_to_numpy=True)
+                new_embedding = new_embedding / np.linalg.norm(new_embedding, axis=1, keepdims=True)
+                new_embedding = torch.from_numpy(new_embedding)
+            else:
+                new_embedding = self.model.encode([query_text], convert_to_tensor=True)
+            
+            if self.embeddings is not None:
+                self.embeddings = torch.cat([self.embeddings, new_embedding], dim=0)
+            else:
+                self.embeddings = new_embedding
+            
             query_text = f"{paper.title}. {paper.abstract or ''}"
 
         return self.find_similar_papers_from_text(query_text, top_k)
@@ -296,6 +325,8 @@ class EmbeddingPapersBuilder:
                 title=paper["title"],
                 year=paper["year"],
                 authors=paper.get("authors", []),
+                categories=paper.get("categories", ""),
+                citation_count=paper.get("citation_count", 0),
                 seed_similarity=seed_similarity,
                 is_seed=(seed_similarity >= 0.99),  # Seed has ~1.0 similarity to itself
             )
@@ -312,7 +343,7 @@ class EmbeddingPapersBuilder:
 
         # Add edges using top-k approach for cleaner visualization
         # Each node connects only to its k most similar neighbors
-        k_neighbors = 2  # Each node connects to at most 2 others for sparse graph
+        k_neighbors = 2  # Sparse connections like reference
 
         for i, (paper1_id, _) in enumerate(tqdm(seed_papers, desc="Computing edges")):
             if paper1_id not in self.paper_ids:
@@ -327,12 +358,46 @@ class EmbeddingPapersBuilder:
                     continue
 
                 idx2 = self.paper_ids.index(paper2_id)
-                sim = util.pytorch_cos_sim(
+                
+                # Multi-factor similarity calculation
+                # 1. Embedding similarity
+                embed_sim = util.pytorch_cos_sim(
                     self.embeddings[idx1], self.embeddings[idx2]
                 ).item()
+                
+                # 2. Year proximity factor (papers close in time are more related)
+                year1 = self.papers[paper1_id].get("year", 2020)
+                year2 = self.papers[paper2_id].get("year", 2020) 
+                year_diff = abs(year1 - year2)
+                year_factor = 1.0 / (1.0 + year_diff / 3.0)  # Decay over 3 years
+                
+                # 3. Category overlap (shared research areas)
+                cats1 = set(self.papers[paper1_id].get("categories", "").split())
+                cats2 = set(self.papers[paper2_id].get("categories", "").split())
+                if cats1 and cats2:
+                    category_overlap = len(cats1 & cats2) / len(cats1 | cats2)
+                else:
+                    category_overlap = 0.3  # Default if no categories
+                
+                # 4. Author collaboration (shared authors = stronger connection)
+                auth1 = set(str(a) for a in self.papers[paper1_id].get("authors", []))
+                auth2 = set(str(a) for a in self.papers[paper2_id].get("authors", []))
+                if auth1 & auth2:  # Shared authors
+                    author_factor = 1.5
+                else:
+                    author_factor = 1.0
+                
+                # Combined similarity with weights
+                sim = (
+                    0.5 * embed_sim +           # Semantic similarity
+                    0.2 * year_factor +          # Temporal proximity  
+                    0.2 * category_overlap +     # Research area overlap
+                    0.1 * author_factor          # Collaboration bonus
+                )
 
-                # Much higher threshold for cleaner graph
-                if sim > 0.5:  # Only strong similarities create edges
+                # Adaptive threshold based on year difference
+                threshold = 0.5 if year_diff < 2 else 0.55 if year_diff < 5 else 0.6
+                if sim > threshold:
                     similarities.append((paper2_id, sim))
 
             # Add only top-k edges for this node
@@ -391,29 +456,48 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
     sizes = []
     colors = []
 
-    # Sort nodes by similarity to identify top papers
-    sorted_by_sim = sorted(
-        nodes, key=lambda n: graph.nodes[n].get("seed_similarity", 0), reverse=True
+    # Sort nodes by combined importance (similarity + citations)
+    sorted_by_importance = sorted(
+        nodes, 
+        key=lambda n: (
+            graph.nodes[n].get("seed_similarity", 0) * 0.7 +
+            min(graph.nodes[n].get("citation_count", 0) / 1000, 1.0) * 0.3
+        ),
+        reverse=True
     )
 
     for node in nodes:
-        rank = sorted_by_sim.index(node)
+        rank = sorted_by_importance.index(node)
+        citations = graph.nodes[node].get("citation_count", 0)
 
         if graph.nodes[node].get("is_seed"):
             sizes.append(2500)  # Seed is always prominent
             colors.append("#e63946")
         else:
-            # Size based on rank
-            if rank == 1:  # Most similar non-seed
-                sizes.append(1800)
-            elif rank < 4:  # Top 3 most similar
-                sizes.append(1000 + (4 - rank) * 200)
+            # Size based on rank AND citation count
+            base_size = 80
+            
+            # Rank component
+            if rank == 1:  # Most important non-seed
+                rank_size = 1200
+            elif rank < 4:  # Top 3
+                rank_size = 800 + (4 - rank) * 150
             elif rank < 8:  # Next tier
-                sizes.append(500 + (8 - rank) * 60)
+                rank_size = 400 + (8 - rank) * 50
             elif rank < 15:  # Medium tier
-                sizes.append(200 + (15 - rank) * 20)
-            else:  # Small nodes
-                sizes.append(80 + np.random.randint(0, 80))
+                rank_size = 150 + (15 - rank) * 15
+            else:  # Lower importance
+                rank_size = 50
+            
+            # Citation component (log scale for better distribution)
+            if citations > 0:
+                citation_size = np.log10(citations + 1) * 100
+            else:
+                citation_size = 0
+            
+            # Combined size with variation
+            final_size = base_size + rank_size + citation_size
+            sizes.append(min(final_size, 2000))  # Cap at 2000
 
             # Smooth color gradient by year (matching reference)
             year = graph.nodes[node].get("year", 2020)
