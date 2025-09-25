@@ -88,12 +88,14 @@ def build_mesh_graph(
 
             if hasattr(p, "paperId"):
                 # Fetch this paper's references for coupling
-                full_paper = client.get_paper(p.paperId, fields=["references"])
                 ref_ids = set()
-                if full_paper and full_paper.references:
-                    for ref in full_paper.references[:50]:  # Limit
-                        if hasattr(ref, "paperId") and ref.paperId:
-                            ref_ids.add(ref.paperId)
+                # Only fetch refs for first 15 papers to avoid timeout
+                if papers_added <= 15:
+                    full_paper = client.get_paper(p.paperId, fields=["references"])
+                    if full_paper and full_paper.references:
+                        for ref in full_paper.references[:30]:  # Limit
+                            if hasattr(ref, "paperId") and ref.paperId:
+                                ref_ids.add(ref.paperId)
 
                 graph.add_node(
                     p.paperId,
@@ -128,12 +130,14 @@ def build_mesh_graph(
 
             if hasattr(p, "paperId"):
                 # Fetch this paper's references for coupling
-                full_paper = client.get_paper(p.paperId, fields=["references"])
                 ref_ids = set()
-                if full_paper and full_paper.references:
-                    for ref in full_paper.references[:50]:  # Limit
-                        if hasattr(ref, "paperId") and ref.paperId:
-                            ref_ids.add(ref.paperId)
+                # Only fetch refs for first 15 papers to avoid timeout
+                if papers_added <= 15:
+                    full_paper = client.get_paper(p.paperId, fields=["references"])
+                    if full_paper and full_paper.references:
+                        for ref in full_paper.references[:30]:  # Limit
+                            if hasattr(ref, "paperId") and ref.paperId:
+                                ref_ids.add(ref.paperId)
 
                 graph.add_node(
                     p.paperId,
