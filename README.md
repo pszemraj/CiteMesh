@@ -22,13 +22,13 @@ cd paper-graph-vis
 # Install dependencies
 pip install -r requirements.txt
 
-# Generate your first visualization
-python citation_graph.py "arxiv:1706.03762"  # Transformer paper
+# Generate your first visualization (auto-names output)
+python citation_graph.py "arxiv:1706.03762"  # Creates: out/attention-is-all-you-need.png
 
 # View the output
-open out/final_visualization.png  # macOS
+open out/*.png  # macOS - opens the generated file
 # or
-xdg-open out/final_visualization.png  # Linux
+xdg-open out/*.png  # Linux
 ```
 
 ## Installation
@@ -46,25 +46,25 @@ pip install networkx matplotlib semanticscholar numpy
 ### Basic Usage
 
 ```bash
-# Generate visualization using different paper ID formats:
+# Generate visualization with auto-named output (recommended)
+python citation_graph.py "arxiv:1706.03762"         # Creates: out/attention-is-all-you-need.png
+python citation_graph.py "arxiv:1810.04805"         # Creates: out/bert-pre-training-of-deep-bidirectional.png
 
-# arXiv ID (with or without version)
-python citation_graph.py "arxiv:1706.03762"         # Attention Is All You Need
-python citation_graph.py "arxiv:1810.04805"         # BERT paper
+# Custom output path
+python citation_graph.py "10.1038/nature14539" -o my_deep_learning.png
 
-# DOI
-python citation_graph.py "10.1038/nature14539"      # Deep learning review
-python citation_graph.py "10.1145/3133956.3134029"  # Spectre attacks
+# Quick visualization with fewer papers for faster results
+python citation_graph.py "arxiv:2005.14165" -p 20 -i 50
 
-# Semantic Scholar ID 
-python citation_graph.py "649def34f8be52c8b66281af98ae884c09aef38b"
+# High-quality visualization with more papers and iterations
+python citation_graph.py "arxiv:1706.03762" -p 60 -i 200 -d 300
 
-# Specify custom output path
-python citation_graph.py "arxiv:2005.14165" -o my_graph.png
-python citation_graph.py "arxiv:2005.14165" --output results/gpt3.png
+# Adjust similarity threshold for denser/sparser mesh
+python citation_graph.py "10.1145/3133956.3134029" -s 0.3  # Stricter (fewer edges)
+python citation_graph.py "10.1145/3133956.3134029" -s 0.1  # Looser (more edges)
 ```
 
-This will create `out/final_visualization.png` (or your specified path) with a mesh graph showing ~40 papers connected by similarity.
+This will create an auto-named PNG file in the `out/` directory (or your specified path) with a mesh graph showing papers connected by similarity.
 
 ### Algorithm Overview
 
@@ -95,15 +95,22 @@ python citation_graph.py -h  # Show help with all options
 | Option | Description | Default |
 |--------|-------------|---------|  
 | `paper_id` | Paper identifier (DOI, arXiv ID, or S2 ID) | Required |
-| `-o, --output` | Output PNG file path | `out/final_visualization.png` |
+| `-o, --output` | Output PNG file path | Auto-named from title |
+| `-p, --max-papers` | Maximum total papers to include | 40 |
+| `-c, --max-citations` | Maximum citations to fetch | 20 |
+| `-r, --max-references` | Maximum references to fetch | 20 |
+| `-s, --similarity-threshold` | Min similarity for edges (0-1) | 0.2 |
+| `-i, --iterations` | Layout iterations (quality) | 100 |
+| `-d, --dpi` | Output image resolution | 150 |
 | `-h, --help` | Show help message | - |
 
 ### Key Parameters
 
-- **Max Papers**: ~40 papers selected by relevance
-- **Similarity Threshold**: 0.2 (papers below this aren't connected)
+- **Max Papers**: 40 papers selected by relevance (adjustable with `-p`)
+- **Similarity Threshold**: 0.2 minimum for edge creation (adjustable with `-s`)
 - **Similarity Weights**: 50% temporal proximity, 50% citation ratio
-- **Output Format**: PNG image via matplotlib
+- **Output Format**: PNG image via matplotlib (resolution adjustable with `-d`)
+- **Auto-naming**: Output files automatically named from paper title when `-o` not specified
 
 ## Performance Notes
 
@@ -115,7 +122,7 @@ python citation_graph.py -h  # Show help with all options
 
 ## Output
 
-Generates a PNG image at `out/final_visualization.png` with:
+Generates a PNG image (auto-named from paper title) with:
 - Connected Papers-style mesh visualization
 - ~40 most relevant papers
 - Dense connectivity (typically 500-800 edges)
