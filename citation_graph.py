@@ -788,7 +788,7 @@ class CitationGraphBuilder:
                 x=float(x),  # Convert numpy float to Python float
                 y=float(y),  # Convert numpy float to Python float
                 physics=False if layout_style == LayoutStyle.SIMILARITY else True,
-                font={"size": 12, "color": "#2d3748"},  # Visible labels
+                font={"size": 14, "color": "#1a202c", "bold": True},  # More visible labels
             )
 
         # Add edges based on similarity (Connected Papers style)
@@ -802,18 +802,31 @@ class CitationGraphBuilder:
                 for j, node2 in enumerate(nodes_list[i + 1 :], start=i + 1):
                     sim = similarity[i, j]
                     # Only show edges for significant similarity
-                    if sim > 0.15:  # Threshold for edge display
-                        # Edge opacity and width based on similarity
-                        opacity = min(0.6, sim)
-                        width = 1 + sim * 2
+                    if sim > 0.1:  # Lower threshold to show more connections
+                        # Edge styling based on similarity strength
+                        if sim > 0.3:
+                            # Strong connection
+                            color = "#64748b"
+                            width = 2
+                            opacity = 0.7
+                        elif sim > 0.2:
+                            # Medium connection
+                            color = "#94a3b8"
+                            width = 1.5
+                            opacity = 0.5
+                        else:
+                            # Weak connection
+                            color = "#cbd5e1"
+                            width = 1
+                            opacity = 0.4
+                        
                         net.add_edge(
                             node1,
                             node2,
-                            color={"color": "#94a3b8", "opacity": opacity},
+                            color={"color": color, "opacity": opacity},
                             width=width,
-                            arrows={
-                                "to": {"enabled": False}
-                            },  # No arrows for similarity
+                            smooth={"type": "continuous"},
+                            arrows={"to": {"enabled": False}},  # No arrows for similarity
                         )
         else:
             # For force layout, show traditional citation edges
