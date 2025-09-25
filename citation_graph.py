@@ -434,10 +434,10 @@ class CitationGraphBuilder:
     ) -> Dict[str, Tuple[float, float]]:
         """Compute similarity-based layout matching Connected Papers style.
         
-        Uses a d3-style force simulation where:
-        - All nodes repel each other (charge force)
-        - Similar papers attract (link force based on similarity)
-        - No artificial centering to allow natural clustering
+        Key insights from Connected Papers:
+        1. Papers cluster by similarity AND temporal proximity 
+        2. Seed/root paper gets central position
+        3. Layout emerges from data structure, not forced randomness
         """
         n = graph.number_of_nodes()
         if n <= 2:
@@ -448,25 +448,72 @@ class CitationGraphBuilder:
 
         # Compute similarity matrix based on bibliographic coupling and co-citation
         similarity = self.compute_similarity_matrix(graph)
-
-        # Initialize positions randomly across the canvas
         nodes = list(graph.nodes())
+        
+        # Find the seed/root paper (highest centrality or first paper)
+        # In practice, this is often the paper the user searched for
+        centrality = nx.degree_centrality(graph)
+        seed_node = max(centrality, key=centrality.get)
+        seed_idx = nodes.index(seed_node)
+        
+        # Get temporal information
+        years = []
+        for node in nodes:
+            year = graph.nodes[node].get("year")
+            years.append(year if year is not None else 2020)
+        years = np.array(years)
+        min_year, max_year = years.min(), years.max()
+        year_range = max(max_year - min_year, 1)
+        
+        # Initialize positions with temporal bias
         np.random.seed(42)
-        # Wider initial spread to avoid initial clustering
-        positions = np.random.uniform(-300, 300, (n, 2)) + [400, 300]
+        positions = np.zeros((n, 2))
+        node_to_idx = {node: i for i, node in enumerate(nodes)}
+        
+        # Place seed paper near center
+        positions[seed_idx] = [400, 300]
+        
+        # Position other papers based on:
+        # 1. Similarity to seed
+        # 2. Temporal position (left=older, right=newer)
+        # 3. Similarity to other papers
+        for i, node in enumerate(nodes):
+            if i == seed_idx:
+                continue
+                
+            # Start with temporal positioning
+            year_norm = (years[i] - min_year) / year_range
+            x_base = 200 + year_norm * 400  # Spread from 200 to 600 based on year
+            
+            # Add similarity-based offset from temporal line
+            sim_to_seed = similarity[i, seed_idx]
+            
+            # Higher similarity to seed = closer to center Y
+            y_offset = (1 - sim_to_seed) * 200 * (1 if np.random.random() > 0.5 else -1)
+            
+            positions[i] = [x_base, 300 + y_offset]
+            
+            # Add small jitter to avoid exact overlaps
+            positions[i] += np.random.uniform(-20, 20, 2)
 
         # D3-style force simulation parameters
         velocities = np.zeros_like(positions)
-        alpha = 1.0  # Initial temperature
-        alpha_decay = 0.005  # How fast temperature decreases
-        alpha_min = 0.001  # Stop when alpha is this small
-        velocity_decay = 0.6  # Friction
+        alpha = 0.6  # Lower temperature to preserve initial positions
+        alpha_decay = 0.008  # Moderate cooling
+        alpha_min = 0.001  # Run until stable
+        velocity_decay = 0.5  # Moderate friction
         
         # Node properties for forces
         citations = np.array([graph.nodes[node].get("citation_count", 0) for node in nodes])
         max_cit = max(citations) if citations.any() else 1
         # Node mass affects how much they move (heavier = less movement)
-        masses = 1 + np.sqrt(citations / max_cit)
+        # Seed paper should be heavier to stay central
+        masses = np.ones(n)
+        for i in range(n):
+            if i == seed_idx:
+                masses[i] = 3.0  # Seed is much heavier
+            else:
+                masses[i] = 1 + np.sqrt(citations[i] / max_cit)
 
         # Run force simulation until convergence
         while alpha > alpha_min:
@@ -482,10 +529,14 @@ class CitationGraphBuilder:
                         dist_sq = 1
                         delta = np.random.randn(2) * 0.1
                     
+                    # Papers with high similarity should repel less
+                    sim = similarity[i, j]
+                    repulsion_modifier = 1.0 - sim * 0.7  # High similarity = less repulsion
+                    
                     # Barnes-Hut approximation: F = k * q1 * q2 / r^2
                     # Charge proportional to sqrt of citations (bigger nodes push harder)
-                    charge_i = 30 * np.sqrt(masses[i])
-                    charge_j = 30 * np.sqrt(masses[j])
+                    charge_i = 30 * np.sqrt(masses[i]) * repulsion_modifier
+                    charge_j = 30 * np.sqrt(masses[j]) * repulsion_modifier
                     force_magnitude = charge_i * charge_j / dist_sq
                     
                     force_vector = delta / np.sqrt(dist_sq) * force_magnitude
@@ -496,18 +547,16 @@ class CitationGraphBuilder:
             for i in range(n):
                 for j in range(i + 1, n):
                     sim = similarity[i, j]
-                    if sim > 0.05:  # Lower threshold to create more connections
+                    if sim > 0.05:  # Threshold for creating connections
                         delta = positions[j] - positions[i]
                         dist = np.linalg.norm(delta)
                         
-                        # Strong clustering for high similarity papers
-                        if sim > 0.3:  # High similarity - pull together strongly
-                            # Very short rest length for tight clusters
-                            rest_length = 20 + 30 * (1 - sim)
-                            spring_constant = sim * 1.0  # Strong attraction
-                        else:  # Medium similarity - gentle attraction
-                            rest_length = 100 + 200 * (1 - sim)
-                            spring_constant = sim * 0.2
+                        # Rest length based on similarity - very similar papers should be close
+                        # Connected Papers seems to use ~50-100 pixels for highly similar papers
+                        rest_length = 50 + (1 - sim) * 150  # 50 to 200 based on similarity
+                        
+                        # Spring strength proportional to similarity
+                        spring_constant = sim * 0.5
                         
                         if dist > 0:
                             # F = k * (distance - rest_length)
@@ -518,12 +567,19 @@ class CitationGraphBuilder:
                             forces[i] += force_vector / masses[i]
                             forces[j] -= force_vector / masses[j]
             
-            # 3. Weak centering force (prevent drift)
-            center = np.array([400, 300])
+            # 3. Temporal anchoring force (keep papers in temporal regions)
             for i in range(n):
-                to_center = center - positions[i]
-                # Very weak force, just to keep graph from drifting
-                forces[i] += to_center * 0.0001
+                if i == seed_idx:
+                    # Anchor seed to center
+                    anchor = np.array([400, 300])
+                    to_anchor = anchor - positions[i]
+                    forces[i] += to_anchor * 0.01
+                else:
+                    # Gentle force to keep papers in their temporal region
+                    year_norm = (years[i] - min_year) / year_range
+                    x_target = 200 + year_norm * 400
+                    x_force = (x_target - positions[i, 0]) * 0.001
+                    forces[i, 0] += x_force
             
             # Update velocities and positions
             velocities += forces * alpha
