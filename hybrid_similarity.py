@@ -46,7 +46,7 @@ class HybridPapersBuilder:
         self.embeddings = {}  # Paper ID -> embedding
 
     def load_arxiv_corpus(
-        self, max_papers: int = 5000, dataset_split: str = "train[:2%]"
+        self, max_papers: int = None, dataset_split: str = "train[:2%]"
     ):
         """Load ArXiv corpus for semantic similarity matching.
 
@@ -80,7 +80,7 @@ class HybridPapersBuilder:
                 return
 
         for i, paper in enumerate(dataset):
-            if i >= max_papers:
+            if max_papers and i >= max_papers:
                 break
 
             paper_id = paper.get("id", paper.get("paper_id", f"arxiv_{i}"))
@@ -248,7 +248,7 @@ class HybridPapersBuilder:
 
             for pid in batch_ids:
                 paper = all_papers[pid]
-                text = f"{paper['title']}. {paper.get('abstract', '')[:500]}"
+                text = f"{paper['title']}. {paper.get('abstract', '')}"
                 batch_texts.append(text)
 
             # Compute batch embeddings
@@ -551,7 +551,7 @@ def main():
         "-c",
         "--corpus-size",
         type=int,
-        default=2000,
+        default=None,
         help="Max papers to process from ArXiv corpus",
     )
     parser.add_argument(

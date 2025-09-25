@@ -42,7 +42,7 @@ class EmbeddingPapersBuilder:
 
     def load_arxiv_dataset(
         self,
-        max_papers: int = 10000,
+        max_papers: int = None,
         categories: List[str] = None,
         dataset_split: str = "train[:2%]",
     ):
@@ -50,11 +50,12 @@ class EmbeddingPapersBuilder:
         Load ArXiv dataset from HuggingFace.
 
         Args:
-            max_papers: Maximum number of papers to load
+            max_papers: Maximum number of papers to load (None = no limit)
             categories: Filter by ArXiv categories (e.g., ['cs.CL', 'cs.AI'])
             dataset_split: HuggingFace dataset split specification (e.g., 'train[:2%]', 'train', 'train[:1000]')
         """
-        print(f"Loading ArXiv dataset (up to {max_papers} papers)...")
+        limit_str = f" (up to {max_papers} papers)" if max_papers else ""
+        print(f"Loading ArXiv dataset{limit_str}...")
 
         # Try to load from cache first
         if self.papers_cache.exists() and self.embeddings_cache.exists():
@@ -87,7 +88,7 @@ class EmbeddingPapersBuilder:
 
         papers_loaded = 0
         for paper in dataset:
-            if papers_loaded >= max_papers:
+            if max_papers and papers_loaded >= max_papers:
                 break
 
             # Filter by categories if specified
@@ -146,9 +147,7 @@ class EmbeddingPapersBuilder:
         self.paper_ids = []
 
         for paper_id, paper in self.papers.items():
-            text = (
-                f"{paper['title']}. {paper['abstract'][:1000]}"  # Limit abstract length
-            )
+            text = f"{paper['title']}. {paper['abstract']}"
             texts.append(text)
             self.paper_ids.append(paper_id)
 
@@ -428,7 +427,7 @@ def main():
         "-d",
         "--dataset-size",
         type=int,
-        default=10000,
+        default=None,
         help="Max number of papers to process from dataset",
     )
     parser.add_argument(
