@@ -78,17 +78,18 @@ def build_mesh_graph(
             raise Exception("No recommendations returned")
     except Exception as e:
         print(f"Recommendations API not available: {e}")
-        # Fallback to citations
+        # Fallback: Get both citations AND references for better year diversity
+        # First get some references (older foundational papers)
         try:
-            citations = client.get_paper_citations(seed_id, limit=max_citations,
-                                                  fields=['title', 'year', 'authors', 'citationCount', 'paperId'])
-            for cit in citations:
-                if papers_added >= max_papers:
+            references = client.get_paper_references(seed_id, limit=max_references//2,
+                                                    fields=['title', 'year', 'authors', 'citationCount', 'paperId'])
+            for ref in references:
+                if papers_added >= max_papers // 2:  # Half from references
                     break
-                if hasattr(cit, "citingPaper") and cit.citingPaper:
-                    p = cit.citingPaper
-                elif hasattr(cit, "paper") and cit.paper:
-                    p = cit.paper
+                if hasattr(ref, "citedPaper") and ref.citedPaper:
+                    p = ref.citedPaper
+                elif hasattr(ref, "paper") and ref.paper:
+                    p = ref.paper
                 else:
                     continue
                     
@@ -105,18 +106,18 @@ def build_mesh_graph(
                     papers_added += 1
         except (AttributeError, TypeError):
             pass
-
-        # Add references as fallback
+            
+        # Then add citations (newer derivative works)
         try:
-            references = client.get_paper_references(seed_id, limit=max_references,
-                                                    fields=['title', 'year', 'authors', 'citationCount', 'paperId'])
-            for ref in references:
+            citations = client.get_paper_citations(seed_id, limit=max_citations,
+                                                  fields=['title', 'year', 'authors', 'citationCount', 'paperId'])
+            for cit in citations:
                 if papers_added >= max_papers:
                     break
-                if hasattr(ref, "citedPaper") and ref.citedPaper:
-                    p = ref.citedPaper
-                elif hasattr(ref, "paper") and ref.paper:
-                    p = ref.paper
+                if hasattr(cit, "citingPaper") and cit.citingPaper:
+                    p = cit.citingPaper
+                elif hasattr(cit, "paper") and cit.paper:
+                    p = cit.paper
                 else:
                     continue
                     
@@ -191,11 +192,24 @@ def visualize_mesh(
         graph, k=1.2, iterations=iterations, seed=42, weight="weight"
     )
 
-    # Ensure seed is more central
+    # Force seed to be central and keep it there
     if seed_id in pos:
-        current = pos[seed_id]
+        # Strong centering for seed
         center = np.array([0.5, 0.5])
-        pos[seed_id] = current * 0.4 + center * 0.6
+        pos[seed_id] = center  # Force exact center
+        
+        # Adjust other nodes to be around seed
+        for node in pos:
+            if node != seed_id:
+                # Pull nodes slightly toward center to create tighter cluster
+                current = pos[node]
+                direction = current - center
+                # Keep nodes at reasonable distance from seed
+                dist = np.linalg.norm(direction)
+                if dist > 0.4:  # Too far, bring closer
+                    pos[node] = center + direction * (0.4 / dist)
+                elif dist < 0.1:  # Too close, push away
+                    pos[node] = center + direction * (0.15 / dist)
 
     # Create figure
     fig, ax = plt.subplots(figsize=(12, 10), facecolor="#fafafa")
@@ -208,10 +222,11 @@ def visualize_mesh(
     sizes = []
     for node in nodes:
         if graph.nodes[node].get("is_seed"):
-            sizes.append(1200)
+            sizes.append(2000)  # Make seed much larger
         else:
             cit = graph.nodes[node].get("citation_count", 0)
-            size = 80 + min(400, cit * 3)
+            # Scale based on citations but keep reasonable range
+            size = 150 + min(600, np.sqrt(cit) * 30)
             sizes.append(size)
 
     # Colors by year
