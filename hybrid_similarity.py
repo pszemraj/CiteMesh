@@ -16,6 +16,7 @@ from sentence_transformers import SentenceTransformer, util
 from semanticscholar import SemanticScholar
 from datasets import load_dataset
 from joblib import Memory
+from tqdm import tqdm
 
 # Set up joblib memory cache
 memory = Memory("cache/joblib_cache", verbose=0)
@@ -37,7 +38,9 @@ def load_arxiv_corpus_cached(dataset_split: str, max_papers: Optional[int]) -> D
             print("Warning: Could not load ArXiv dataset")
             return papers
 
-    for i, paper in enumerate(dataset):
+    for i, paper in enumerate(
+        tqdm(dataset, desc="Loading papers", total=max_papers or len(dataset))
+    ):
         if max_papers and i >= max_papers:
             break
 
@@ -59,9 +62,6 @@ def load_arxiv_corpus_cached(dataset_split: str, max_papers: Optional[int]) -> D
             "year": year,
             "authors": paper.get("authors", []),
         }
-
-        if (i + 1) % 1000 == 0:
-            print(f"  Loaded {i + 1} papers...")
 
     return papers
 
@@ -133,10 +133,18 @@ class HybridPapersBuilder:
         """
         print("Fetching citations and references for seed paper...")
 
-        # Get seed paper (without abstract to avoid timeout)
+        # Get seed paper with more fields for better analysis
         seed = self.semantic_scholar.get_paper(
             paper_id,
-            fields=["title", "year", "authors", "citationCount", "paperId"],
+            fields=[
+                "title",
+                "year",
+                "authors",
+                "citationCount",
+                "paperId",
+                "fieldsOfStudy",
+                "abstract",
+            ],
         )
 
         if not seed:
@@ -144,24 +152,27 @@ class HybridPapersBuilder:
 
         seed_id = seed.paperId
 
-        # Store seed paper
+        # Store seed paper with all metadata
         self.graph_papers[seed_id] = {
             "title": seed.title,
-            "abstract": "",  # We'll fetch from ArXiv corpus if available
+            "abstract": seed.abstract or "",
             "year": seed.year or 2020,
-            "authors": [a.name for a in (seed.authors or [])[:3]],
+            "authors": [a.name for a in (seed.authors or [])[:5]],  # Keep more authors
             "citation_count": seed.citationCount or 0,
+            "fields": seed.fieldsOfStudy or [],
             "is_seed": True,
         }
 
         print(f"Seed: {seed.title[:50]}...")
 
-        # Fetch citations (same as citation_graph.py)
+        # Fetch citations with intelligent filtering
         print(f"Fetching up to {max_citations} citations...")
         try:
             citations = self.semantic_scholar.get_paper_citations(
-                seed_id, limit=max_citations
+                seed_id,
+                limit=max_citations * 2,  # Fetch extra to filter
             )
+            citation_papers = []
             for cit in citations:
                 if (
                     hasattr(cit, "paper")
@@ -169,15 +180,24 @@ class HybridPapersBuilder:
                     and hasattr(cit.paper, "paperId")
                 ):
                     p = cit.paper
-                    self.graph_papers[p.paperId] = {
-                        "title": p.title or "Unknown",
-                        "abstract": "",  # Don't fetch abstract to avoid timeouts
-                        "year": p.year or 2020,
-                        "authors": [a.name for a in (p.authors or [])[:3]],
-                        "citation_count": p.citationCount or 0,
-                        "is_seed": False,
-                        "relationship": "citation",
-                    }
+                    # Calculate relevance score based on year and citations
+                    year_diff = abs((seed.year or 2020) - (p.year or 2020))
+                    relevance = (p.citationCount or 0) / (1 + year_diff)
+                    citation_papers.append((p, relevance))
+
+            # Sort by relevance and take top citations
+            citation_papers.sort(key=lambda x: x[1], reverse=True)
+            for p, relevance in citation_papers[:max_citations]:
+                self.graph_papers[p.paperId] = {
+                    "title": p.title or "Unknown",
+                    "abstract": "",  # Will fetch if needed
+                    "year": p.year or 2020,
+                    "authors": [a.name for a in (p.authors or [])[:3]],
+                    "citation_count": p.citationCount or 0,
+                    "is_seed": False,
+                    "relationship": "citation",
+                    "relevance_score": relevance,
+                }
         except (AttributeError, TypeError) as e:
             print(f"  Warning: Citations fetch issue: {e}")
 
@@ -259,7 +279,7 @@ class HybridPapersBuilder:
         print(f"Computed embeddings for {len(self.embeddings)} papers")
 
     def find_semantically_similar(
-        self, seed_id: str, top_k: int = 10
+        self, seed_id: str, top_k: int = 10, fetch_metadata: bool = True
     ) -> List[Tuple[str, float]]:
         """
         Find papers from ArXiv corpus that are semantically similar to seed.
@@ -297,16 +317,33 @@ class HybridPapersBuilder:
         similar_papers.sort(key=lambda x: x[1], reverse=True)
         top_similar = similar_papers[:top_k]
 
-        # Add to graph papers
-        for paper_id, sim_score in top_similar:
+        # Add to graph papers with optional metadata fetch
+        print(f"Fetching metadata for top {len(top_similar)} semantic matches...")
+        for i, (paper_id, sim_score) in enumerate(top_similar):
             if paper_id in self.arxiv_papers:
                 paper = self.arxiv_papers[paper_id]
+
+                # Try to get citation data from Semantic Scholar if similar enough
+                citation_count = 0
+                if (
+                    fetch_metadata and sim_score > 0.6 and i < 5
+                ):  # Only for very similar papers
+                    try:
+                        # Try to fetch from S2 using arxiv ID
+                        s2_paper = self.semantic_scholar.get_paper(
+                            f"arxiv:{paper_id}", fields=["citationCount"]
+                        )
+                        if s2_paper:
+                            citation_count = s2_paper.citationCount or 0
+                    except Exception:
+                        pass  # Use default 0
+
                 self.graph_papers[paper_id] = {
                     "title": paper["title"],
                     "abstract": paper.get("abstract", ""),
                     "year": paper["year"],
                     "authors": paper.get("authors", []),
-                    "citation_count": 0,  # Unknown from ArXiv
+                    "citation_count": citation_count,
                     "is_seed": False,
                     "relationship": "semantic",
                     "semantic_similarity": sim_score,
@@ -315,6 +352,42 @@ class HybridPapersBuilder:
         print(f"Added {len(top_similar)} semantically similar papers")
         return top_similar
 
+    def analyze_co_citations(self) -> Dict[str, Dict[str, float]]:
+        """Analyze co-citation patterns between papers."""
+        co_citations = {}
+
+        # Papers that are both citations or both references likely share themes
+        citation_papers = [
+            p
+            for p, d in self.graph_papers.items()
+            if d.get("relationship") == "citation"
+        ]
+        reference_papers = [
+            p
+            for p, d in self.graph_papers.items()
+            if d.get("relationship") == "reference"
+        ]
+
+        # Co-citation strength for papers in same group
+        for group in [citation_papers, reference_papers]:
+            for p1 in group:
+                if p1 not in co_citations:
+                    co_citations[p1] = {}
+                for p2 in group:
+                    if p1 != p2:
+                        # Base co-citation score
+                        score = 0.3
+
+                        # Boost if similar years (likely same research wave)
+                        y1 = self.graph_papers[p1].get("year", 2020)
+                        y2 = self.graph_papers[p2].get("year", 2020)
+                        if abs(y1 - y2) < 2:
+                            score += 0.2
+
+                        co_citations[p1][p2] = score
+
+        return co_citations
+
     def build_hybrid_graph(
         self, seed_id: str, similarity_threshold: float = 0.3
     ) -> nx.Graph:
@@ -322,8 +395,13 @@ class HybridPapersBuilder:
         Build graph with hybrid similarity:
         - Citation relationships (from Semantic Scholar)
         - Semantic similarity (from embeddings)
+        - Co-citation and bibliographic coupling
+        - Multi-factor similarity scoring
         """
         graph = nx.Graph()
+
+        # Analyze co-citation patterns
+        co_citations = self.analyze_co_citations()
 
         # Add all nodes
         for paper_id, paper in self.graph_papers.items():
@@ -348,59 +426,143 @@ class HybridPapersBuilder:
                 p2_id = paper_ids[j]
 
                 # Initialize similarity components
-                citation_similarity = 0
+                paper1 = self.graph_papers[p1_id]
+                paper2 = self.graph_papers[p2_id]
+
+                # 1. Semantic similarity from embeddings
                 semantic_similarity = 0
-
-                # Citation-based similarity
-                rel1 = self.graph_papers[p1_id].get("relationship", "")
-                rel2 = self.graph_papers[p2_id].get("relationship", "")
-
-                # Papers from same source (both citations or both references) are more similar
-                if rel1 == rel2 and rel1 in ["citation", "reference"]:
-                    citation_similarity = 0.3
-
-                # Temporal similarity
-                year1 = self.graph_papers[p1_id]["year"]
-                year2 = self.graph_papers[p2_id]["year"]
-                year_diff = abs(year1 - year2)
-                temporal_similarity = math.exp(-year_diff / 5)
-
-                # Semantic similarity from embeddings
                 if p1_id in self.embeddings and p2_id in self.embeddings:
                     semantic_similarity = util.pytorch_cos_sim(
                         self.embeddings[p1_id], self.embeddings[p2_id]
                     ).item()
 
-                # Combine similarities (hybrid approach)
-                # Weight: 40% semantic, 30% citation, 30% temporal
-                combined_similarity = (
-                    0.4 * semantic_similarity
-                    + 0.3 * citation_similarity
-                    + 0.3 * temporal_similarity
-                )
+                # 2. Co-citation similarity
+                co_citation_similarity = 0
+                if p1_id in co_citations and p2_id in co_citations[p1_id]:
+                    co_citation_similarity = co_citations[p1_id][p2_id]
 
-                # Always connect to seed
-                if p1_id == seed_id or p2_id == seed_id:
-                    combined_similarity = max(
-                        combined_similarity, similarity_threshold * 0.8
+                # 3. Temporal similarity with stronger decay
+                year1 = paper1["year"]
+                year2 = paper2["year"]
+                year_diff = abs(year1 - year2)
+                if year_diff < 2:
+                    temporal_similarity = 1.0
+                elif year_diff < 5:
+                    temporal_similarity = 0.7 - (year_diff - 2) * 0.15
+                else:
+                    temporal_similarity = 0.2 * math.exp(-(year_diff - 5) / 3)
+
+                # 4. Author overlap (collaboration indicator)
+                auth1 = set(paper1.get("authors", []))
+                auth2 = set(paper2.get("authors", []))
+                author_overlap = 1.2 if auth1 & auth2 else 1.0
+
+                # 5. Field similarity (if available)
+                field_similarity = 0
+                fields1 = set(paper1.get("fields", []))
+                fields2 = set(paper2.get("fields", []))
+                if fields1 and fields2:
+                    field_similarity = len(fields1 & fields2) / len(fields1 | fields2)
+
+                # 6. Citation count similarity (papers with similar impact)
+                cit1 = paper1.get("citation_count", 0)
+                cit2 = paper2.get("citation_count", 0)
+                if cit1 > 0 and cit2 > 0:
+                    citation_ratio = min(cit1, cit2) / max(cit1, cit2)
+                else:
+                    citation_ratio = 0.5
+
+                # Intelligent combination based on relationship types
+                rel1 = paper1.get("relationship", "")
+                rel2 = paper2.get("relationship", "")
+
+                if rel1 == "semantic" and rel2 == "semantic":
+                    # Both from embeddings - weight semantic heavily
+                    combined_similarity = (
+                        0.6 * semantic_similarity
+                        + 0.2 * temporal_similarity
+                        + 0.1 * field_similarity
+                        + 0.1 * citation_ratio
+                    )
+                elif rel1 in ["citation", "reference"] and rel2 in [
+                    "citation",
+                    "reference",
+                ]:
+                    # Both from citations - use co-citation
+                    combined_similarity = (
+                        0.3 * semantic_similarity
+                        + 0.3 * co_citation_similarity
+                        + 0.2 * temporal_similarity
+                        + 0.1 * field_similarity
+                        + 0.1 * citation_ratio
+                    )
+                else:
+                    # Mixed - balanced approach
+                    combined_similarity = (
+                        0.4 * semantic_similarity
+                        + 0.2 * co_citation_similarity
+                        + 0.2 * temporal_similarity
+                        + 0.1 * field_similarity
+                        + 0.1 * citation_ratio
                     )
 
+                # Apply author overlap bonus
+                combined_similarity *= author_overlap
+
+                # Special handling for seed connections
+                if p1_id == seed_id or p2_id == seed_id:
+                    # Always connect highly similar papers to seed
+                    if semantic_similarity > 0.7 or co_citation_similarity > 0.4:
+                        combined_similarity = max(
+                            combined_similarity, similarity_threshold * 1.2
+                        )
+                    # But be selective - seed shouldn't connect to everything
+                    elif combined_similarity < similarity_threshold * 0.7:
+                        continue
+
+                # Adaptive threshold based on relationship types
+                if rel1 == rel2:  # Same relationship type
+                    threshold = similarity_threshold * 0.9
+                else:
+                    threshold = similarity_threshold
+
                 # Add edge if similar enough
-                if combined_similarity > similarity_threshold:
-                    graph.add_edge(p1_id, p2_id, weight=combined_similarity)
-                    edge_count += 1
+                if combined_similarity > threshold:
+                    # Limit edges per node for cleaner graph
+                    p1_edges = len([e for e in graph.edges() if p1_id in e])
+                    p2_edges = len([e for e in graph.edges() if p2_id in e])
+
+                    if p1_edges < 5 and p2_edges < 5:  # Max 5 connections per node
+                        graph.add_edge(p1_id, p2_id, weight=combined_similarity)
+                        edge_count += 1
 
         print(f"Graph complete: {graph.number_of_nodes()} nodes, {edge_count} edges")
         return graph
 
 
-def visualize_hybrid_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
-    """Visualize the hybrid similarity graph."""
+def visualize_hybrid_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
+    """Visualize the hybrid similarity graph with all improvements."""
 
-    # Spring layout with similarity weights
-    pos = nx.spring_layout(
-        graph, k=1.5, iterations=iterations, seed=42, weight="weight"
-    )
+    # Use Kamada-Kawai for organic clustering like reference
+    try:
+        pos = nx.kamada_kawai_layout(
+            graph, weight="weight", scale=0.9, center=[0.5, 0.5]
+        )
+    except Exception:
+        # Fallback to spring if graph structure causes issues
+        pos = nx.spring_layout(
+            graph,
+            k=1.2 / np.sqrt(graph.number_of_nodes()),
+            iterations=iterations,
+            seed=42,
+            weight="weight",
+            scale=0.9,
+            center=[0.5, 0.5],
+        )
+
+    # Add small random perturbations for organic look
+    for node in pos:
+        pos[node] += np.random.normal(0, 0.015, 2)
 
     # Find and center seed node
     seed_nodes = [n for n in graph.nodes() if graph.nodes[n].get("is_seed", False)]
@@ -417,29 +579,88 @@ def visualize_hybrid_graph(graph: nx.Graph, output_path: Path, iterations: int =
 
     nodes = list(graph.nodes())
 
-    # Node sizes based on citation count
+    # Node sizes with extreme variation (citation + relationship importance)
     sizes = []
+    # Sort by citation count for ranking
+    sorted_by_citations = sorted(
+        nodes, key=lambda n: graph.nodes[n].get("citation_count", 0), reverse=True
+    )
+
     for node in nodes:
         if graph.nodes[node].get("is_seed"):
-            sizes.append(2000)
+            sizes.append(2500)  # Seed is always largest
         else:
+            # Rank-based sizing like reference
+            rank = sorted_by_citations.index(node)
             cit = graph.nodes[node].get("citation_count", 0)
-            size = 200 + min(800, np.sqrt(cit) * 30)
-            sizes.append(size)
+            rel = graph.nodes[node].get("relationship", "")
 
-    # Colors by relationship type and year
+            # Base size on rank
+            if rank == 0:  # Highest cited non-seed
+                base_size = 1800
+            elif rank < 3:
+                base_size = 1200 - rank * 150
+            elif rank < 8:
+                base_size = 600 - rank * 40
+            elif rank < 15:
+                base_size = 300 - rank * 10
+            else:
+                base_size = 100
+
+            # Bonus for semantic matches (they're specifically chosen)
+            if rel == "semantic":
+                base_size *= 1.3
+
+            # Add citation-based variation
+            if cit > 0:
+                citation_bonus = min(200, np.log10(cit + 1) * 50)
+            else:
+                citation_bonus = 0
+
+            sizes.append(min(base_size + citation_bonus, 2200))
+
+    # Smooth color gradient by year (like reference) with relationship hints
     colors = []
+    years = [graph.nodes[n].get("year", 2020) for n in nodes]
+    min_year = min(years) if years else 2020
+    max_year = max(years) if years else 2020
+
     for node in nodes:
         if graph.nodes[node].get("is_seed"):
             colors.append("#e63946")  # Red for seed
-        elif graph.nodes[node].get("relationship") == "semantic":
-            colors.append("#f77f00")  # Orange for semantic matches
-        elif graph.nodes[node].get("relationship") == "citation":
-            colors.append("#06ffa5")  # Green for citations
-        elif graph.nodes[node].get("relationship") == "reference":
-            colors.append("#0077b6")  # Blue for references
         else:
-            colors.append("#94a3b8")  # Gray for unknown
+            year = graph.nodes[node].get("year", 2020)
+            rel = graph.nodes[node].get("relationship", "")
+
+            # Base color on year gradient
+            if max_year > min_year:
+                year_norm = (year - min_year) / (max_year - min_year)
+            else:
+                year_norm = 0.5
+
+            # Different gradients for different relationships
+            if rel == "semantic":
+                # Orange gradient for semantic matches
+                r = 0.95 - 0.15 * year_norm
+                g = 0.5 - 0.1 * year_norm
+                b = 0.1 + 0.1 * year_norm
+            elif rel == "citation":
+                # Green gradient for citations
+                r = 0.2 + 0.2 * year_norm
+                g = 0.85 - 0.15 * year_norm
+                b = 0.4 + 0.2 * year_norm
+            elif rel == "reference":
+                # Blue gradient for references
+                r = 0.2 + 0.15 * year_norm
+                g = 0.5 + 0.15 * year_norm
+                b = 0.85 - 0.15 * year_norm
+            else:
+                # Gray-blue gradient for others
+                r = 0.58 + 0.14 * year_norm
+                g = 0.64 + 0.15 * year_norm
+                b = 0.72 - 0.1 * year_norm
+
+            colors.append((r, g, b))
 
     # Draw edges
     for edge in graph.edges(data=True):
@@ -449,8 +670,9 @@ def visualize_hybrid_graph(graph: nx.Graph, output_path: Path, iterations: int =
         p1 = pos[n1]
         p2 = pos[n2]
 
-        alpha = min(0.6, weight * 1.5)
-        width = max(0.5, weight * 4)
+        # Very thin, subtle edges like reference
+        alpha = min(0.3, weight * 0.6)
+        width = max(0.3, weight * 2)
 
         ax.plot(
             [p1[0], p2[0]],
