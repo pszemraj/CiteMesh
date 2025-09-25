@@ -112,17 +112,17 @@ def build_mesh_graph(
             year_sim = 1.0 / (1.0 + year_diff / 3.0)
 
             # Citation similarity (papers with similar impact)
-            cit_ratio = min(cit1, cit2) / max(cit1, cit2) if max(cit1, cit2) > 0 else 0
+            cit_ratio = min(cit1, cit2) / max(cit1, cit2) if max(cit1, cit2) > 0 else 1
 
-            # Combined similarity
-            similarity = 0.6 * year_sim + 0.4 * cit_ratio
+            # Combined similarity with controlled variation
+            similarity = 0.5 * year_sim + 0.5 * cit_ratio
 
-            # Add variation but reduce overall
-            similarity *= np.random.uniform(0.3, 0.8)
+            # Add slight variation for organic look (but less than main)
+            similarity *= np.random.uniform(0.7, 1.3)
 
-            # Special case: always connect to seed with some weight
+            # Always connect to seed with minimum weight
             if p1 == seed_id or p2 == seed_id:
-                similarity = max(similarity, similarity_threshold * 0.8)
+                similarity = max(similarity, 0.25)
 
             # Add edge if similar enough
             if similarity > similarity_threshold:
@@ -143,16 +143,26 @@ def visualize_mesh(
 ):
     """Visualize with Connected Papers-style layout."""
 
-    # Use spring layout with custom parameters
+    # Use tighter spring layout to prevent elongation
+    # k controls node spacing - smaller = tighter
     pos = nx.spring_layout(
-        graph, k=1.2, iterations=iterations, seed=42, weight="weight"
+        graph,
+        k=0.5 / np.sqrt(graph.number_of_nodes()),  # Adaptive spacing
+        iterations=iterations * 2,  # More iterations for better convergence
+        seed=42,
+        weight="weight",
+        scale=0.95,  # Keep within bounds
+        center=[0.5, 0.5],
     )
 
-    # Ensure seed is more central
+    # Gently pull seed toward center without distorting layout
     if seed_id in pos:
         current = pos[seed_id]
         center = np.array([0.5, 0.5])
-        pos[seed_id] = current * 0.4 + center * 0.6
+        # Only adjust if seed is far from center
+        dist_from_center = np.linalg.norm(current - center)
+        if dist_from_center > 0.3:
+            pos[seed_id] = current * 0.7 + center * 0.3
 
     # Create figure
     fig, ax = plt.subplots(figsize=(12, 10), facecolor="#fafafa")
@@ -161,14 +171,21 @@ def visualize_mesh(
 
     nodes = list(graph.nodes())
 
-    # Node sizes
+    # Node sizes with better visual hierarchy
     sizes = []
+    citation_counts = [graph.nodes[n].get("citation_count", 0) for n in nodes]
+    max_citations = max(citation_counts) if citation_counts else 1
+
     for node in nodes:
         if graph.nodes[node].get("is_seed"):
-            sizes.append(1200)
+            sizes.append(1500)  # Seed is prominent
         else:
             cit = graph.nodes[node].get("citation_count", 0)
-            size = 80 + min(400, cit * 3)
+            # Logarithmic scaling for better visual distribution
+            normalized = (
+                np.log1p(cit) / np.log1p(max_citations) if max_citations > 0 else 0
+            )
+            size = 150 + normalized * 600  # Range: 150-750
             sizes.append(size)
 
     # Colors by year
@@ -333,8 +350,8 @@ def main():
         import re
 
         title = graph.nodes[seed_id].get("title", "unknown")
-        # Create safe filename from title
-        safe_title = re.sub(r"[^\w\s-]", "", title[:60]).strip()
+        # Create safe filename from title (max 40 chars)
+        safe_title = re.sub(r"[^\w\s-]", "", title[:40]).strip()
         safe_title = re.sub(r"[-\s]+", "-", safe_title).lower()
         output_path = Path("out") / f"{safe_title}.png"
         output_path.parent.mkdir(exist_ok=True)

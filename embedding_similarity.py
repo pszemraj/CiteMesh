@@ -54,7 +54,7 @@ def load_dataset_cached(
             raise
 
     papers_loaded = 0
-    for paper in dataset:
+    for paper in tqdm(dataset, desc="Loading papers", total=max_papers or len(dataset)):
         if max_papers and papers_loaded >= max_papers:
             break
 
@@ -75,8 +75,6 @@ def load_dataset_cached(
         }
 
         papers_loaded += 1
-        if papers_loaded % 1000 == 0:
-            print(f"  Loaded {papers_loaded} papers...")
 
     return papers
 
@@ -312,22 +310,34 @@ class EmbeddingPapersBuilder:
                 idx = self.paper_ids.index(paper_id)
                 paper_indices.append(idx)
 
-        # Add edges based on similarity
+        # Add edges using top-k approach for cleaner visualization
+        # Each node connects only to its k most similar neighbors
+        k_neighbors = 5  # Each node connects to at most 5 others
+
         for i, (paper1_id, _) in enumerate(tqdm(seed_papers, desc="Computing edges")):
+            if paper1_id not in self.paper_ids:
+                continue
+
+            idx1 = self.paper_ids.index(paper1_id)
+            similarities = []
+
+            # Compute similarities to all other papers
             for j, (paper2_id, _) in enumerate(seed_papers):
-                if i >= j:  # Skip self and duplicates
+                if i >= j or paper2_id not in self.paper_ids:
                     continue
 
-                if paper1_id in self.paper_ids and paper2_id in self.paper_ids:
-                    idx1 = self.paper_ids.index(paper1_id)
-                    idx2 = self.paper_ids.index(paper2_id)
+                idx2 = self.paper_ids.index(paper2_id)
+                sim = util.pytorch_cos_sim(
+                    self.embeddings[idx1], self.embeddings[idx2]
+                ).item()
 
-                    sim = util.pytorch_cos_sim(
-                        self.embeddings[idx1], self.embeddings[idx2]
-                    ).item()
+                if sim > similarity_threshold:
+                    similarities.append((paper2_id, sim))
 
-                    if sim > similarity_threshold:
-                        graph.add_edge(paper1_id, paper2_id, weight=sim)
+            # Add only top-k edges for this node
+            similarities.sort(key=lambda x: x[1], reverse=True)
+            for paper2_id, sim in similarities[:k_neighbors]:
+                graph.add_edge(paper1_id, paper2_id, weight=sim)
 
         print(
             f"Graph complete: {graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges"
@@ -338,18 +348,26 @@ class EmbeddingPapersBuilder:
 def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
     """Visualize the similarity graph."""
 
-    # Spring layout with similarity weights
+    # Tighter spring layout for better clustering
     pos = nx.spring_layout(
-        graph, k=1.5, iterations=iterations, seed=42, weight="weight"
+        graph,
+        k=0.8 / np.sqrt(graph.number_of_nodes()),  # Adaptive spacing
+        iterations=iterations,
+        seed=42,
+        weight="weight",
+        scale=0.9,
+        center=[0.5, 0.5],
     )
 
-    # Find and center seed node
+    # Find and gently center seed node
     seed_nodes = [n for n in graph.nodes() if graph.nodes[n].get("is_seed", False)]
     if seed_nodes:
         seed_id = seed_nodes[0]
         center = np.array([0.5, 0.5])
         current = pos[seed_id]
-        pos[seed_id] = current * 0.5 + center * 0.5
+        # Only adjust if far from center
+        if np.linalg.norm(current - center) > 0.2:
+            pos[seed_id] = current * 0.8 + center * 0.2
 
     # Create figure
     fig, ax = plt.subplots(figsize=(14, 10), facecolor="#fafafa")
@@ -358,37 +376,46 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
 
     nodes = list(graph.nodes())
 
-    # Node sizes and colors
+    # Node sizes based on importance (similarity + connectivity)
     sizes = []
     colors = []
+
+    # Calculate importance scores
+    degree_centrality = nx.degree_centrality(graph)
+
     for node in nodes:
         if graph.nodes[node].get("is_seed"):
-            sizes.append(2000)
+            sizes.append(1800)
             colors.append("#e63946")
         else:
-            # Size based on similarity to seed
+            # Size based on similarity to seed AND connectivity
             sim = graph.nodes[node].get("seed_similarity", 0.5)
-            sizes.append(200 + sim * 800)
+            centrality = degree_centrality.get(node, 0)
 
-            # Color by year
+            # Combined importance score
+            importance = 0.7 * sim + 0.3 * centrality
+            size = 200 + importance * 1000  # Range: 200-1200
+            sizes.append(size)
+
+            # Color by year with better gradient
             year = graph.nodes[node].get("year", 2020)
             years = [graph.nodes[n].get("year", 2020) for n in nodes]
             min_year = min(years) if years else 2020
             max_year = max(years) if years else 2020
 
-            year_norm = (
-                (year - min_year) / max(max_year - min_year, 1)
-                if max_year > min_year
-                else 0.5
-            )
-
-            # Color gradient by year
-            if year_norm < 0.33:
-                colors.append("#caf0f8")
-            elif year_norm < 0.66:
-                colors.append("#90e0ef")
+            if max_year > min_year:
+                year_norm = (year - min_year) / (max_year - min_year)
+                # Continuous color gradient
+                if year_norm < 0.25:
+                    colors.append("#caf0f8")
+                elif year_norm < 0.5:
+                    colors.append("#90e0ef")
+                elif year_norm < 0.75:
+                    colors.append("#00b4d8")
+                else:
+                    colors.append("#0077b6")
             else:
-                colors.append("#0077b6")
+                colors.append("#90e0ef")
 
     # Draw edges
     for edge in graph.edges(data=True):
@@ -398,8 +425,9 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
         p1 = pos[n1]
         p2 = pos[n2]
 
-        alpha = min(0.6, weight)
-        width = max(0.3, weight * 3)
+        # Thinner, more subtle edges
+        alpha = min(0.4, weight * 0.6)
+        width = max(0.2, weight * 2)
 
         ax.plot(
             [p1[0], p2[0]],
@@ -464,7 +492,11 @@ def main():
     )
     parser.add_argument("paper_id", help="ArXiv ID or search text")
     parser.add_argument(
-        "-o", "--output", type=Path, default=Path("out/embedding_graph.png")
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Output path (auto-generates from paper title if not specified)",
     )
     parser.add_argument("-p", "--max-papers", type=int, default=40)
     parser.add_argument(
@@ -520,9 +552,38 @@ def main():
     # Build and visualize graph
     graph = builder.build_similarity_graph(similar_papers, args.similarity_threshold)
 
+    # Auto-generate safe filename if not specified
+    if args.output is None:
+        import re
+
+        # Get seed paper title
+        if similar_papers:
+            seed_id = similar_papers[0][0]  # First paper is usually the seed
+            if seed_id in builder.papers:
+                title = builder.papers[seed_id]["title"]
+            else:
+                # Fetch from Semantic Scholar if needed
+                clean_id = (
+                    args.paper_id.replace("arxiv:", "")
+                    .replace("v1", "")
+                    .replace("v2", "")
+                )
+                client = SemanticScholar()
+                paper = client.get_paper(f"arxiv:{clean_id}")
+                title = paper.title if paper else "unknown"
+        else:
+            title = "embedding_graph"
+
+        # Create safe filename (max 40 chars from title)
+        safe_title = re.sub(r"[^\w\s-]", "", title[:40]).strip()
+        safe_title = re.sub(r"[-\s]+", "-", safe_title).lower()
+        output_path = Path("out") / f"{safe_title}.png"
+    else:
+        output_path = args.output
+
     # Create output directory
-    args.output.parent.mkdir(exist_ok=True)
-    visualize_graph(graph, args.output, args.iterations)
+    output_path.parent.mkdir(exist_ok=True)
+    visualize_graph(graph, output_path, args.iterations)
 
 
 if __name__ == "__main__":
