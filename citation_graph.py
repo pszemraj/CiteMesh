@@ -496,19 +496,21 @@ class CitationGraphBuilder:
             for i in range(n):
                 for j in range(i + 1, n):
                     sim = similarity[i, j]
-                    if sim > 0.1:  # Only connect papers with meaningful similarity
+                    if sim > 0.05:  # Lower threshold to create more connections
                         delta = positions[j] - positions[i]
                         dist = np.linalg.norm(delta)
                         
-                        # Spring force with rest length based on similarity
-                        # High similarity = short rest length (30-100)
-                        # Low similarity = long rest length (100-300)
-                        rest_length = 30 + 270 * (1 - sim)
+                        # Strong clustering for high similarity papers
+                        if sim > 0.3:  # High similarity - pull together strongly
+                            # Very short rest length for tight clusters
+                            rest_length = 20 + 30 * (1 - sim)
+                            spring_constant = sim * 1.0  # Strong attraction
+                        else:  # Medium similarity - gentle attraction
+                            rest_length = 100 + 200 * (1 - sim)
+                            spring_constant = sim * 0.2
                         
                         if dist > 0:
                             # F = k * (distance - rest_length)
-                            # Strength proportional to similarity
-                            spring_constant = sim * 0.3
                             force_magnitude = spring_constant * (dist - rest_length)
                             force_vector = delta / dist * force_magnitude
                             
