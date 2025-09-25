@@ -287,6 +287,10 @@ class HybridPapersBuilder:
                 seed_embedding, self.embeddings[paper_id]
             ).item()
 
+            # Skip self-similarity
+            if similarity > 0.999:
+                continue
+
             similar_papers.append((paper_id, similarity))
 
         # Sort by similarity and return top-k
