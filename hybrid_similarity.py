@@ -20,13 +20,15 @@ from datasets import load_dataset
 
 class HybridPapersBuilder:
     def __init__(
-        self, model_name: str = "all-MiniLM-L6-v2", cache_dir: Path = Path("cache")
+        self,
+        model_name: str = "google/embeddinggemma-300m",
+        cache_dir: Path = Path("cache"),
     ):
         """
         Initialize with both Semantic Scholar and sentence transformer.
 
         Args:
-            model_name: HuggingFace model name for embeddings
+            model_name: HuggingFace model name for embeddings (default: google/embeddinggemma-300m)
             cache_dir: Directory for caching
         """
         self.semantic_scholar = SemanticScholar()
@@ -251,10 +253,15 @@ class HybridPapersBuilder:
                 text = f"{paper['title']}. {paper.get('abstract', '')}"
                 batch_texts.append(text)
 
-            # Compute batch embeddings
-            batch_embeddings = self.sentence_model.encode(
-                batch_texts, convert_to_tensor=True, show_progress_bar=False
-            )
+            # Compute batch embeddings (EmbeddingGemma has special encode_document)
+            if hasattr(self.sentence_model, "encode_document"):
+                batch_embeddings = self.sentence_model.encode_document(
+                    batch_texts, convert_to_tensor=True, show_progress_bar=False
+                )
+            else:
+                batch_embeddings = self.sentence_model.encode(
+                    batch_texts, convert_to_tensor=True, show_progress_bar=False
+                )
 
             # Store embeddings
             for j, pid in enumerate(batch_ids):
@@ -561,7 +568,10 @@ def main():
     )
     parser.add_argument("-s", "--similarity-threshold", type=float, default=0.35)
     parser.add_argument(
-        "-m", "--model", default="all-MiniLM-L6-v2", help="Sentence transformer model"
+        "-m",
+        "--model",
+        default="google/embeddinggemma-300m",
+        help="Sentence transformer model",
     )
     parser.add_argument("-i", "--iterations", type=int, default=200)
     parser.add_argument(
