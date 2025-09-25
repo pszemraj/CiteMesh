@@ -66,13 +66,8 @@ def load_arxiv_corpus_cached(dataset_split: str, max_papers: Optional[int]) -> D
     return papers
 
 
-@memory.cache
-def compute_embeddings_hybrid_cached(
-    paper_ids: tuple, embeddings_list: tuple, model_name: str
-) -> tuple:
-    """Cache embeddings computation."""
-    # Simply return the data in cacheable format
-    return (paper_ids, embeddings_list)
+# Removed embedding caching - not needed for hybrid approach
+# ArXiv corpus caching is sufficient
 
 
 class HybridPapersBuilder:
@@ -89,8 +84,8 @@ class HybridPapersBuilder:
             cache_dir: Directory for caching
         """
         self.semantic_scholar = SemanticScholar()
-        self.sentence_model = SentenceTransformer(model_name)
         self.model_name = model_name
+        self.sentence_model = None  # Lazy load when needed
 
         # Data storage
         self.arxiv_papers = {}  # Background corpus for finding similar papers
@@ -113,14 +108,9 @@ class HybridPapersBuilder:
 
     def _cache_embeddings(self):
         """Helper to trigger joblib caching of embeddings."""
-        # Convert embeddings dict to cacheable format
-        paper_ids = list(self.embeddings.keys())
-        embeddings_list = [self.embeddings[pid] for pid in paper_ids]
-        cached_data = compute_embeddings_hybrid_cached(
-            tuple(paper_ids), tuple(embeddings_list), self.model_name
-        )
-        # Restore from cache format
-        self.embeddings = dict(zip(cached_data[0], cached_data[1]))
+        # For hybrid, we don't actually need to cache embeddings separately
+        # since they're computed fresh each time from the cached ArXiv corpus
+        pass
 
     def _extract_year(self, paper: dict) -> int:
         """Extract year from paper metadata."""
@@ -143,10 +133,10 @@ class HybridPapersBuilder:
         """
         print("Fetching citations and references for seed paper...")
 
-        # Get seed paper with abstract
+        # Get seed paper (without abstract to avoid timeout)
         seed = self.semantic_scholar.get_paper(
             paper_id,
-            fields=["title", "year", "authors", "citationCount", "abstract", "paperId"],
+            fields=["title", "year", "authors", "citationCount", "paperId"],
         )
 
         if not seed:
@@ -157,7 +147,7 @@ class HybridPapersBuilder:
         # Store seed paper
         self.graph_papers[seed_id] = {
             "title": seed.title,
-            "abstract": seed.abstract or "",
+            "abstract": "",  # We'll fetch from ArXiv corpus if available
             "year": seed.year or 2020,
             "authors": [a.name for a in (seed.authors or [])[:3]],
             "citation_count": seed.citationCount or 0,
@@ -222,6 +212,11 @@ class HybridPapersBuilder:
     def compute_embeddings(self):
         """Compute embeddings for all papers (both graph and corpus)."""
 
+        # Lazy load model
+        if self.sentence_model is None:
+            print(f"Loading sentence transformer model: {self.model_name}")
+            self.sentence_model = SentenceTransformer(self.model_name)
+
         print("Computing embeddings for all papers...")
 
         # Combine graph papers and ArXiv corpus
@@ -262,9 +257,6 @@ class HybridPapersBuilder:
                 )
 
         print(f"Computed embeddings for {len(self.embeddings)} papers")
-
-        # Cache embeddings using joblib
-        self._cache_embeddings()
 
     def find_semantically_similar(
         self, seed_id: str, top_k: int = 10
