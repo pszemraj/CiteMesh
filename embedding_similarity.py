@@ -312,7 +312,7 @@ class EmbeddingPapersBuilder:
 
         # Add edges using top-k approach for cleaner visualization
         # Each node connects only to its k most similar neighbors
-        k_neighbors = 3  # Each node connects to at most 3 others for cleaner look
+        k_neighbors = 2  # Each node connects to at most 2 others for sparse graph
 
         for i, (paper1_id, _) in enumerate(tqdm(seed_papers, desc="Computing edges")):
             if paper1_id not in self.paper_ids:
@@ -331,7 +331,8 @@ class EmbeddingPapersBuilder:
                     self.embeddings[idx1], self.embeddings[idx2]
                 ).item()
 
-                if sim > similarity_threshold:
+                # Much higher threshold for cleaner graph
+                if sim > 0.5:  # Only strong similarities create edges
                     similarities.append((paper2_id, sim))
 
             # Add only top-k edges for this node
@@ -345,7 +346,7 @@ class EmbeddingPapersBuilder:
         return graph
 
 
-def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
+def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
     """Visualize the similarity graph."""
 
     # Use Kamada-Kawai for more organic clustering like reference
@@ -441,9 +442,9 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
         p1 = pos[n1]
         p2 = pos[n2]
 
-        # Thinner, more subtle edges
-        alpha = min(0.4, weight * 0.6)
-        width = max(0.2, weight * 2)
+        # Very thin, subtle edges like reference
+        alpha = min(0.3, weight * 0.5)  # More transparent
+        width = max(0.3, weight * 1.5)  # Thinner lines
 
         ax.plot(
             [p1[0], p2[0]],
