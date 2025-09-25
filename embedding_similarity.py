@@ -312,7 +312,7 @@ class EmbeddingPapersBuilder:
 
         # Add edges using top-k approach for cleaner visualization
         # Each node connects only to its k most similar neighbors
-        k_neighbors = 5  # Each node connects to at most 5 others
+        k_neighbors = 3  # Each node connects to at most 3 others for cleaner look
 
         for i, (paper1_id, _) in enumerate(tqdm(seed_papers, desc="Computing edges")):
             if paper1_id not in self.paper_ids:
@@ -376,28 +376,35 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 200):
 
     nodes = list(graph.nodes())
 
-    # Node sizes based on importance (similarity + connectivity)
+    # Node sizes with extreme variation matching reference
     sizes = []
     colors = []
 
-    # Calculate importance scores
-    degree_centrality = nx.degree_centrality(graph)
+    # Sort nodes by similarity to identify top papers
+    sorted_by_sim = sorted(
+        nodes, key=lambda n: graph.nodes[n].get("seed_similarity", 0), reverse=True
+    )
 
     for node in nodes:
+        rank = sorted_by_sim.index(node)
+
         if graph.nodes[node].get("is_seed"):
-            sizes.append(1800)
+            sizes.append(2500)  # Seed is always prominent
             colors.append("#e63946")
         else:
-            # Size based on similarity to seed AND connectivity
-            sim = graph.nodes[node].get("seed_similarity", 0.5)
-            centrality = degree_centrality.get(node, 0)
+            # Size based on rank
+            if rank == 1:  # Most similar non-seed
+                sizes.append(1800)
+            elif rank < 4:  # Top 3 most similar
+                sizes.append(1000 + (4 - rank) * 200)
+            elif rank < 8:  # Next tier
+                sizes.append(500 + (8 - rank) * 60)
+            elif rank < 15:  # Medium tier
+                sizes.append(200 + (15 - rank) * 20)
+            else:  # Small nodes
+                sizes.append(80 + np.random.randint(0, 80))
 
-            # Combined importance score
-            importance = 0.7 * sim + 0.3 * centrality
-            size = 200 + importance * 1000  # Range: 200-1200
-            sizes.append(size)
-
-            # Color by year with better gradient
+            # Color by year
             year = graph.nodes[node].get("year", 2020)
             years = [graph.nodes[n].get("year", 2020) for n in nodes]
             min_year = min(years) if years else 2020
