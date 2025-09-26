@@ -1,17 +1,3 @@
-# REPO SPECIFIC
-# Output directory - keep directory but ignore contents except .gitkeep and reference
-out/*
-!out/.gitkeep
-!out/REFERENCE.jpg
-
-# Don't ignore HTML/JSON in root if they're example files
-# But generally ignore generated outputs
-*.html
-*.json
-*.graphml
-*.gexf
-*.png
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
