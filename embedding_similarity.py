@@ -1,8 +1,27 @@
 #!/usr/bin/env python3
 """
 Embedding-based similarity for Connected Papers visualization.
-Uses sentence transformers on abstracts to find semantically similar papers.
-Now with proper joblib caching instead of pickle.
+
+This module finds semantically similar papers using sentence transformers
+on abstracts and titles. It goes beyond simple citation relationships to
+discover papers with similar content, even if they don't cite each other.
+
+Key Features:
+    - Multi-factor similarity: embeddings, year, categories, authors
+    - Caches embeddings with joblib for performance
+    - Integrates real citation data from Semantic Scholar
+    - Top-k edge selection for sparse, meaningful graphs
+    - Author-based labels matching Connected Papers style
+    - Smooth color gradients by publication year
+
+Example:
+    Find papers similar to BERT:
+
+    $ python embedding_similarity.py "arxiv:1810.04805" -p 30
+
+    Use a specific model:
+
+    $ python embedding_similarity.py "arxiv:1810.04805" --model "all-MiniLM-L6-v2"
 """
 
 import numpy as np
@@ -10,7 +29,7 @@ import networkx as nx
 import matplotlib.pyplot as plt
 from pathlib import Path
 import argparse
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 from sentence_transformers import SentenceTransformer, util
 import torch
 from semanticscholar import SemanticScholar
@@ -25,19 +44,31 @@ memory = Memory("cache/joblib_cache", verbose=0)
 @memory.cache
 def load_dataset_cached(
     dataset_split: str, max_papers: Optional[int], categories: Optional[tuple]
-) -> Dict:
+) -> Dict[str, Dict[str, Any]]:
     """
-    Load and cache ArXiv dataset.
+    Load and cache ArXiv dataset from HuggingFace.
+
+    Uses joblib caching to avoid reloading the dataset on subsequent runs.
+    Tries multiple dataset sources in order of preference.
 
     Args:
-        dataset_split: HuggingFace dataset split specification
-        max_papers: Maximum number of papers to load
-        categories: Filter by ArXiv categories
+        dataset_split: HuggingFace dataset split specification (e.g., "train[:2%]")
+        max_papers: Maximum number of papers to load (None for all)
+        categories: Filter by ArXiv categories (e.g., ("cs.CL", "cs.AI"))
 
     Returns:
-        Dictionary of paper_id -> paper metadata
+        Dictionary mapping paper_id to paper metadata including:
+            - title: Paper title
+            - abstract: Paper abstract text
+            - authors: List of author names
+            - year: Publication year
+            - categories: ArXiv categories
+            - citation_count: Simulated citation count
+
+    Raises:
+        Exception: If no dataset can be loaded
     """
-    papers = {}
+    papers: Dict[str, Dict[str, Any]] = {}
 
     try:
         # Try the ML-focused subset first (smaller, faster)
@@ -83,8 +114,25 @@ def load_dataset_cached(
     return papers
 
 
-def extract_year(paper: dict) -> int:
-    """Extract year from paper metadata."""
+def extract_year(paper: Dict[str, Any]) -> int:
+    """
+    Extract publication year from paper metadata.
+
+    Tries multiple fields and formats to find the year, including
+    parsing ArXiv IDs which encode year in the first digits.
+
+    Args:
+        paper: Paper metadata dictionary
+
+    Returns:
+        Publication year as integer, defaults to 2020 if not found
+
+    Examples:
+        >>> extract_year({"year": 2021})
+        2021
+        >>> extract_year({"id": "1706.03762"})
+        2017
+    """
     if "year" in paper:
         return int(paper["year"]) if paper["year"] else 2020
     if "update_date" in paper:
@@ -102,14 +150,22 @@ def extract_year(paper: dict) -> int:
 @memory.cache
 def compute_embeddings_cached(texts: tuple, model_name: str) -> torch.Tensor:
     """
-    Compute and cache embeddings.
+    Compute and cache text embeddings using sentence transformers.
+
+    Uses joblib caching to avoid recomputing embeddings for the same texts.
+    Handles both standard models and EmbeddingGemma models with proper
+    L2 normalization.
 
     Args:
-        texts: Tuple of text strings to embed
+        texts: Tuple of text strings to embed (tuple for hashability)
         model_name: Name of the sentence transformer model
 
     Returns:
-        Tensor of embeddings
+        Tensor of shape (num_texts, embedding_dim) with embeddings
+
+    Note:
+        EmbeddingGemma models require special encoding methods and
+        L2 normalization which this function handles automatically.
     """
     print(f"Computing embeddings with {model_name}...")
     model = SentenceTransformer(model_name)
@@ -142,30 +198,44 @@ def compute_embeddings_cached(texts: tuple, model_name: str) -> torch.Tensor:
 
 
 class EmbeddingPapersBuilder:
+    """
+    Builder class for creating embedding-based paper similarity graphs.
+
+    This class handles the full pipeline from loading papers, computing
+    embeddings, finding similar papers, and building the visualization graph.
+
+    Attributes:
+        model: SentenceTransformer model for computing embeddings
+        model_name: Name of the model being used
+        papers: Dictionary of loaded papers
+        embeddings: Computed embeddings for all papers
+        paper_ids: List of paper IDs in same order as embeddings
+    """
+
     def __init__(
         self,
         model_name: str = "google/embeddinggemma-300m",
         cache_dir: Path = Path("cache"),
-    ):
+    ) -> None:
         """
         Initialize with sentence transformer model.
 
         Args:
-            model_name: HuggingFace model name (default: google/embeddinggemma-300m)
+            model_name: HuggingFace model name
             cache_dir: Directory for caching embeddings (used by joblib)
         """
-        self.model = SentenceTransformer(model_name)
-        self.model_name = model_name
-        self.papers = {}
-        self.embeddings = None
-        self.paper_ids = []
+        self.model: SentenceTransformer = SentenceTransformer(model_name)
+        self.model_name: str = model_name
+        self.papers: Dict[str, Dict[str, Any]] = {}
+        self.embeddings: Optional[torch.Tensor] = None
+        self.paper_ids: List[str] = []
 
     def load_arxiv_dataset(
         self,
-        max_papers: int = None,
-        categories: List[str] = None,
+        max_papers: Optional[int] = None,
+        categories: Optional[List[str]] = None,
         dataset_split: str = "train[:2%]",
-    ):
+    ) -> None:
         """
         Load ArXiv dataset from HuggingFace.
 
@@ -183,8 +253,13 @@ class EmbeddingPapersBuilder:
         self.paper_ids = list(self.papers.keys())
         print(f"Loaded {len(self.papers)} papers")
 
-    def compute_embeddings(self):
-        """Compute embeddings for all paper abstracts."""
+    def compute_embeddings(self) -> None:
+        """
+        Compute embeddings for all paper abstracts.
+
+        Uses cached computation if available. Formats texts appropriately
+        for EmbeddingGemma models with "title: X | text: Y" format.
+        """
         if self.embeddings is not None and len(self.embeddings) > 0:
             print("Embeddings already computed")
             return
@@ -213,7 +288,10 @@ class EmbeddingPapersBuilder:
             top_k: Number of similar papers to return
 
         Returns:
-            List of (paper_id, similarity_score) tuples
+            List of (paper_id, similarity_score) tuples sorted by similarity
+
+        Raises:
+            ValueError: If embeddings not computed yet
         """
         if self.embeddings is None:
             raise ValueError(
@@ -312,11 +390,18 @@ class EmbeddingPapersBuilder:
         self, seed_papers: List[Tuple[str, float]], similarity_threshold: float = 0.3
     ) -> nx.Graph:
         """
-        Build graph from similar papers.
+        Build graph from similar papers with multi-factor similarity.
+
+        Creates edges based on embedding similarity, year proximity,
+        category overlap, and author collaboration. Uses top-k approach
+        for sparse graphs.
 
         Args:
             seed_papers: List of (paper_id, similarity_to_seed) tuples
             similarity_threshold: Minimum similarity for edge creation
+
+        Returns:
+            NetworkX graph with papers as nodes and similarity edges
         """
         graph = nx.Graph()
 
@@ -417,8 +502,24 @@ class EmbeddingPapersBuilder:
         return graph
 
 
-def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
-    """Visualize the similarity graph."""
+def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300) -> None:
+    """
+    Visualize the similarity graph with Connected Papers style.
+
+    Creates a high-quality visualization with smooth gradients, extreme
+    size variation, and organic clustering using Kamada-Kawai layout.
+
+    Args:
+        graph: NetworkX graph from build_similarity_graph
+        output_path: Path for output PNG file
+        iterations: Number of layout iterations (unused for Kamada-Kawai)
+
+    Visual Encodings:
+        - Node size: Based on similarity rank and citation count
+        - Node color: Smooth RGB gradient by year
+        - Edge style: Very thin and subtle
+        - Labels: Author surname + year format
+    """
 
     # Use Kamada-Kawai for more organic clustering like reference
     try:
@@ -603,7 +704,13 @@ def visualize_graph(graph: nx.Graph, output_path: Path, iterations: int = 300):
     print(f"Saved to {output_path}")
 
 
-def main():
+def main() -> None:
+    """
+    Main entry point for command-line usage.
+
+    Handles argument parsing, dataset loading, embedding computation,
+    similarity search, and visualization generation.
+    """
     parser = argparse.ArgumentParser(
         description="Generate embedding-based similarity graph",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

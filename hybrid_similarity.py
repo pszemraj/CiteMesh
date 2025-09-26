@@ -127,9 +127,22 @@ class HybridPapersBuilder:
         self, paper_id: str, max_citations: int = 20, max_references: int = 20
     ) -> str:
         """
-        Get citations and references from Semantic Scholar.
+        Fetch citations and references from Semantic Scholar.
+
+        Implements intelligent filtering based on relevance scores
+        to select the most important papers from citations.
         Also fetches abstracts for embedding computation.
-        Returns the seed paper ID.
+
+        Args:
+            paper_id: Semantic Scholar paper ID, DOI, or ArXiv ID
+            max_citations: Maximum citations to fetch
+            max_references: Maximum references to fetch
+
+        Returns:
+            Seed paper ID for reference
+
+        Raises:
+            ValueError: If seed paper not found
         """
         print("Fetching citations and references for seed paper...")
 
