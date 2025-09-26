@@ -1,16 +1,23 @@
 # Paper Graph Visualizer
 
-A tool for creating Connected Papers-style citation graph visualizations from academic papers using the Semantic Scholar API. Generates mesh-like similarity graphs that reveal research relationships through bibliographic coupling and co-citation analysis.
+A tool for creating Connected Papers-style citation graph visualizations from academic papers using multiple approaches: citation networks, semantic embeddings, and hybrid intelligence. Generates mesh-like similarity graphs that reveal research relationships through bibliographic coupling, co-citation analysis, and content similarity.
 
 ## Features
 
-- **Connected Papers-style mesh visualization**: Papers connected by similarity, not just direct citations
+- **Three visualization approaches**:
+  - `citation_graph.py`: Citation-based similarity with co-citation patterns
+  - `embedding_similarity.py`: Semantic similarity using sentence transformers
+  - `hybrid_similarity.py`: Intelligent combination of both approaches
+- **Connected Papers-style mesh visualization**: Papers connected by multiple similarity metrics
 - Build from any paper using DOI, arXiv ID, or Semantic Scholar ID  
-- Direct matplotlib PNG output for reliable image generation
-- Visual encoding: node size = citation count, node color = publication year
-- ~40 most relevant papers selected through bibliographic coupling and co-citation
-- Dense mesh structure with edges between all similar papers
-- Organic clustering reveals research areas and relationships
+- Direct matplotlib PNG output with auto-naming from paper titles
+- Visual encoding: 
+  - Node size = citation count + importance ranking
+  - Node color = smooth gradient by publication year
+  - Edge thickness = similarity strength
+- ~30-40 most relevant papers with sparse, meaningful connections
+- Organic Kamada-Kawai clustering reveals research relationships
+- Multi-factor similarity: temporal, categorical, author collaboration, and semantic
 
 ## Quick Start
 
@@ -22,8 +29,14 @@ cd paper-graph-vis
 # Install dependencies
 pip install -r requirements.txt
 
-# Generate your first visualization (auto-names output)
+# Generate visualization with citation-based similarity
 python citation_graph.py "arxiv:1706.03762"  # Creates: out/attention-is-all-you-need.png
+
+# Or use semantic embedding similarity
+python embedding_similarity.py "arxiv:1706.03762" -p 30
+
+# Or use hybrid approach (combines both)
+python hybrid_similarity.py "arxiv:1706.03762" --max-semantic 10
 
 # View the output
 open out/*.png  # macOS - opens the generated file
@@ -38,7 +51,7 @@ xdg-open out/*.png  # Linux
 pip install -r requirements.txt
 
 # Or install packages directly
-pip install networkx matplotlib semanticscholar numpy
+pip install networkx matplotlib semanticscholar numpy sentence-transformers torch datasets joblib tqdm
 ```
 
 ## Usage
@@ -68,23 +81,57 @@ This will create an auto-named PNG file in the `out/` directory (or your specifi
 
 ### Algorithm Overview
 
-The visualizer implements the Connected Papers algorithm:
+The visualizers implement enhanced versions of the Connected Papers algorithm:
 
+#### Citation Graph (`citation_graph.py`)
 1. **Paper Collection**: Fetches seed paper's citations and references
-2. **Similarity Calculation**: Computes pairwise similarity based on:
-   - Temporal proximity (publication year difference)
-   - Citation count ratio
-3. **Edge Creation**: Connects papers with similarity > 0.2 threshold
-4. **Force-Directed Layout**: Positions nodes using spring physics simulation
-5. **Mesh Structure**: Creates edges between ALL similar papers, not just to seed
+2. **Co-citation Analysis**: Papers cited together are considered similar
+3. **Bibliographic Coupling**: Papers citing same works are related
+4. **Similarity Calculation**: 
+   - Temporal proximity with strong penalties (>5 years apart)
+   - Citation impact similarity (log scale)
+   - Simulated shared references
+5. **Sparse Edge Creation**: ~30-40 edges total for clean visualization
+6. **Kamada-Kawai Layout**: Organic clustering of related papers
+
+#### Embedding Similarity (`embedding_similarity.py`)
+1. **Dataset Loading**: Uses HuggingFace ArXiv datasets with progress bars
+2. **Embedding Computation**: Sentence transformers (EmbeddingGemma by default)
+3. **Multi-Factor Similarity**:
+   - Semantic embedding similarity (50%)
+   - Year proximity (20%)
+   - Category overlap (20%)  
+   - Author collaboration (10%)
+4. **Top-k Edge Selection**: Each node connects to 2-3 most similar papers
+5. **Citation Integration**: Fetches real citation counts from Semantic Scholar
+
+#### Hybrid Approach (`hybrid_similarity.py`)
+1. **Intelligent Paper Selection**: Filters citations by relevance score
+2. **Semantic Enrichment**: Finds semantically similar papers from embeddings
+3. **Metadata Fetching**: Gets citation counts for top semantic matches
+4. **Co-citation Patterns**: Analyzes papers cited/referenced together
+5. **Adaptive Similarity**: Different weights for different relationship types
+6. **Edge Limiting**: Max 5 connections per node for clarity
 
 ### Visual Encoding
 
-- **Node Size**: Proportional to citation count (larger = more cited)
-- **Node Color**: Gradient by publication year (darker = more recent)
-- **Edges**: Weighted by similarity score (thicker = more similar)
-- **Layout**: Force-directed creates organic clustering of related papers
-- **Seed Paper**: Shown larger to indicate starting point
+- **Node Size**: 
+  - Extreme variation (80-2500 pixels) based on importance
+  - Combines citation count (log scale) + similarity ranking
+  - Seed paper always largest (2500 pixels)
+- **Node Color**: 
+  - Smooth RGB gradient by year (not discrete bands)
+  - Light blue/gray (old) → dark teal (recent)
+  - Special colors for seed (red) and relationship types in hybrid
+- **Edges**: 
+  - Very thin and subtle (0.3-0.6 alpha)
+  - Thickness based on similarity strength
+  - Sparse connections (~30-40 edges total)
+- **Layout**: 
+  - Kamada-Kawai for organic clustering
+  - Small random perturbations for natural look
+  - Papers cluster by actual similarity, not forced positioning
+- **Labels**: Author surname + year format
 
 ### Command-Line Options
 
@@ -114,10 +161,13 @@ python citation_graph.py -h  # Show help with all options
 
 ## Performance Notes
 
-- Fetches direct citations/references only (no recursive traversal)
-- Typically processes 40-80 papers total
-- Creates 500-800 edges for proper mesh structure
-- Completes in 1-2 minutes for most papers
+- **Citation Graph**: Fetches direct citations/references only
+- **Embedding Similarity**: Caches embeddings with joblib for speed
+- **Hybrid**: Intelligently fetches metadata for top papers only
+- Typically processes 30-40 papers total
+- Creates 30-70 edges for clean, readable structure
+- Completes in 30-60 seconds for most papers
+- Uses tqdm progress bars for long operations
 - API rate limited to avoid throttling
 
 ## Output
@@ -142,10 +192,12 @@ The visualization creates a mesh similar to Connected Papers with:
 ## Architecture
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed algorithm documentation including:
-- Connected Papers algorithm analysis
-- Similarity metric calculations
-- Graph construction process
-- Comparison with citation tree approaches
+- Connected Papers algorithm analysis and implementation
+- Co-citation and bibliographic coupling theory
+- Multi-factor similarity calculations
+- Comparison of three approaches (citation, embedding, hybrid)
+- Visual encoding decisions and improvements
+- Performance optimizations and caching strategies
 
 ## Troubleshooting
 
