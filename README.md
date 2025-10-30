@@ -1,23 +1,25 @@
-# Paper Graph Visualizer
+# Paper Graph Visualizer (CiteMesh)
 
 A tool for creating Connected Papers-style citation graph visualizations from academic papers using multiple approaches: citation networks, semantic embeddings, and hybrid intelligence. Generates mesh-like similarity graphs that reveal research relationships through bibliographic coupling, co-citation analysis, and content similarity.
 
 ## Features
 
-- **Three visualization approaches**:
-  - `citation_graph.py`: Citation-based similarity with co-citation patterns
-  - `embedding_similarity.py`: Semantic similarity using sentence transformers
-  - `hybrid_similarity.py`: Intelligent combination of both approaches
+- **Unified CLI with three strategies**:
+  - `citation`: Citation-based similarity with **real bibliographic coupling** (shared references)
+  - `embedding`: Semantic similarity using sentence transformers
+  - `hybrid`: Intelligent combination of both approaches
 - **Connected Papers-style mesh visualization**: Papers connected by multiple similarity metrics
-- Build from any paper using DOI, arXiv ID, or Semantic Scholar ID  
+- **Real bibliographic coupling**: Uses actual shared references (not simulated)
+- Build from any paper using DOI, arXiv ID, or Semantic Scholar ID
 - Direct matplotlib PNG output with auto-naming from paper titles
-- Visual encoding: 
+- Visual encoding:
   - Node size = citation count + importance ranking
   - Node color = smooth gradient by publication year
   - Edge thickness = similarity strength
 - ~30-40 most relevant papers with sparse, meaningful connections
 - Organic Kamada-Kawai clustering reveals research relationships
 - Multi-factor similarity: temporal, categorical, author collaboration, and semantic
+- **Type-safe architecture** with validated data models
 
 ## Quick Start
 
@@ -29,14 +31,13 @@ cd paper-graph-vis
 # Install dependencies
 pip install -r requirements.txt
 
-# Generate visualization with citation-based similarity
+# Unified CLI (recommended)
+python citemesh.py build "arxiv:1706.03762" --strategy citation
+python citemesh.py build "arxiv:1706.03762" --strategy embedding
+python citemesh.py build "arxiv:1706.03762" --strategy hybrid
+
+# Legacy scripts (still work for backward compatibility)
 python citation_graph.py "arxiv:1706.03762"  # Creates: out/attention-is-all-you-need.png
-
-# Or use semantic embedding similarity
-python embedding_similarity.py "arxiv:1706.03762" -p 30
-
-# Or use hybrid approach (combines both)
-python hybrid_similarity.py "arxiv:1706.03762" --max-semantic 10
 
 # View the output
 open out/*.png  # macOS - opens the generated file
@@ -56,28 +57,47 @@ pip install networkx matplotlib semanticscholar numpy sentence-transformers torc
 
 ## Usage
 
-### Basic Usage
+### Unified CLI (Recommended)
 
 ```bash
-# Generate visualization with auto-named output (recommended)
-python citation_graph.py "arxiv:1706.03762"         # Creates: out/attention-is-all-you-need.png
-python citation_graph.py "arxiv:1810.04805"         # Creates: out/bert-pre-training-of-deep-bidirectional.png
+# Citation strategy - uses real bibliographic coupling
+python citemesh.py build "arxiv:1706.03762" --strategy citation
+
+# Embedding strategy - semantic similarity without API limits
+python citemesh.py build "arxiv:1706.03762" --strategy embedding
+
+# Hybrid strategy - combines both approaches
+python citemesh.py build "arxiv:1706.03762" --strategy hybrid
 
 # Custom output path
-python citation_graph.py "10.1038/nature14539" -o my_deep_learning.png
+python citemesh.py build "10.1038/nature14539" --strategy citation -o my_graph.png
 
-# Quick visualization with fewer papers for faster results
-python citation_graph.py "arxiv:2005.14165" -p 20 -i 50
+# Quick test with fewer papers
+python citemesh.py build "arxiv:2005.14165" --strategy citation -p 20
 
-# High-quality visualization with more papers and iterations
-python citation_graph.py "arxiv:1706.03762" -p 60 -i 200 -d 300
+# High-quality with more iterations
+python citemesh.py build "arxiv:1706.03762" --strategy citation -i 200 -d 300
 
-# Adjust similarity threshold for denser/sparser mesh
-python citation_graph.py "10.1145/3133956.3134029" -s 0.3  # Stricter (fewer edges)
-python citation_graph.py "10.1145/3133956.3134029" -s 0.1  # Looser (more edges)
+# See all options
+python citemesh.py build --help
 ```
 
-This will create an auto-named PNG file in the `out/` directory (or your specified path) with a mesh graph showing papers connected by similarity.
+### Legacy Scripts (Backward Compatible)
+
+The original scripts still work and use the new unified architecture:
+
+```bash
+# Citation-based (auto-named output)
+python citation_graph.py "arxiv:1706.03762"  # Creates: out/attention-is-all-you-need.png
+
+# Embedding-based
+python embedding_similarity.py "arxiv:1810.04805" -p 30
+
+# Hybrid
+python hybrid_similarity.py "arxiv:1706.03762" --max-semantic 10
+```
+
+Output files are auto-named from paper titles and saved to `out/` directory.
 
 ### Algorithm Overview
 
