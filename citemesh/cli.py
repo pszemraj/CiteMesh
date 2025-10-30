@@ -11,14 +11,28 @@ import logging
 import sys
 from pathlib import Path
 
+from rich.console import Console
+from rich.logging import RichHandler
+
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from citemesh.visualization import generate_output_path, visualize_graph
 
-# Configure logging
+console = Console(stderr=True)
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=logging.INFO,
+    format="%(message)s",
+    datefmt="[%X]",
+    handlers=[
+        RichHandler(
+            console=console,
+            show_time=False,
+            show_path=False,
+            rich_tracebacks=False,
+            markup=True,
+        )
+    ],
 )
 logger = logging.getLogger(__name__)
 

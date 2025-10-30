@@ -5,11 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "citemesh"
 version = "1.0.0"
-description = "Connected Papers-style citation graph visualization with multiple similarity strategies"
+description = "Intuitive citation graph visualization with multiple similarity strategies"
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "CiteMesh Contributors" }]
+authors = [{ name = "Peter Szemraj", email = "peterszemeraj+dev@gmail.com" }]
+maintainers = [
+    { name = "Peter Szemraj", email = "peterszemeraj+dev@gmail.com" },
+]
 keywords = [
     "citation-analysis",
     "graph-visualization",
@@ -39,6 +42,7 @@ dependencies = [
     "joblib>=1.3.0",
     "tqdm>=4.66.0",
     "pyyaml>=6.0",
+    "rich>=13.7.0",
 ]
 
 [project.optional-dependencies]

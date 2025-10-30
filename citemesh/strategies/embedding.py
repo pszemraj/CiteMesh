@@ -215,7 +215,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         use_streaming = ":" not in self.dataset_split and self.corpus_size is None
 
         if use_streaming:
-            logger.info("Streaming ArXiv corpus for semantic matches...")
+            logger.info(
+                "Streaming ArXiv corpus for semantic matches (disables joblib cache)..."
+            )
             candidates = self._select_candidates_streaming(seed_embedding)
         else:
             self._load_corpus()

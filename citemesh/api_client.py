@@ -5,8 +5,11 @@ This module wraps the Semantic Scholar API with retry logic, caching,
 and better error handling to improve reliability.
 """
 
+import hashlib
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, List, Optional
 
 from semanticscholar import SemanticScholar
@@ -15,11 +18,18 @@ from semanticscholar.SemanticScholarException import ObjectNotFoundException
 from citemesh.config import API_CONFIG
 from citemesh.models import Author, Paper
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+REFERENCE_CACHE_DIR = Path("cache") / "reference_ids"
+REFERENCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+REFERENCE_CACHE_VERSION = 1
+
+
+def _reference_cache_path(paper_id: str) -> Path:
+    digest = hashlib.sha1(paper_id.encode("utf-8")).hexdigest()
+    return REFERENCE_CACHE_DIR / f"{digest}.json"
 
 
 class SemanticScholarClient:
@@ -270,6 +280,19 @@ class SemanticScholarClient:
         Returns:
             List of referenced paper IDs
         """
+        cache_path = _reference_cache_path(paper_id)
+        if cache_path.exists():
+            try:
+                data = json.loads(cache_path.read_text())
+                if data.get("version") == REFERENCE_CACHE_VERSION:
+                    refs = data.get("references", [])
+                    logger.debug(
+                        "Loaded %d cached references for %s", len(refs), paper_id
+                    )
+                    return refs
+            except json.JSONDecodeError:
+                cache_path.unlink(missing_ok=True)
+
         try:
             self._rate_limit()
             references = self.client.get_paper_references(paper_id, fields=["paperId"])
@@ -286,8 +309,28 @@ class SemanticScholarClient:
                 ):
                     ref_ids.append(ref.paper.paperId)
 
+            try:
+                cache_path.write_text(
+                    json.dumps(
+                        {
+                            "paper_id": paper_id,
+                            "references": ref_ids,
+                            "version": REFERENCE_CACHE_VERSION,
+                        }
+                    )
+                )
+            except OSError as exc:
+                logger.debug(
+                    "Failed to persist reference cache for %s: %s", paper_id, exc
+                )
+
             return ref_ids
 
+        except TypeError:
+            logger.debug(
+                "Reference payload missing for %s (treating as empty)", paper_id
+            )
+            return []
         except ObjectNotFoundException:
             logger.warning(f"Paper not found for reference IDs: {paper_id}")
             return []
