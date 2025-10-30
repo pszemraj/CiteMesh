@@ -31,6 +31,7 @@ def build_citation_graph(args):
         max_references=args.max_references,
         similarity_threshold=args.similarity_threshold,
         fetch_references=not args.no_references,
+        random_seed=args.seed,
     )
 
     graph, seed_id = builder.build_graph(args.paper_id)
@@ -45,6 +46,7 @@ def build_embedding_graph(args):
         dataset_split=args.dataset_split,
         corpus_size=args.corpus_size,
         top_k=args.top_k,
+        random_seed=args.seed,
     )
 
     graph, seed_id = builder.build_graph(args.paper_id)
@@ -60,6 +62,7 @@ def build_hybrid_graph(args):
         max_semantic=args.max_semantic,
         model_name=args.model,
         dataset_split=args.dataset_split,
+        random_seed=args.seed,
     )
 
     graph, seed_id = builder.build_graph(args.paper_id)
@@ -143,6 +146,13 @@ Examples:
         type=int,
         default=150,
         help="Output image resolution (default: 150)",
+    )
+
+    build_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility (default: None = non-deterministic)",
     )
 
     # Citation strategy arguments
