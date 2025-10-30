@@ -211,7 +211,7 @@ The visualization creates a mesh similar to Connected Papers with:
 
 ## Architecture
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed algorithm documentation including:
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed algorithm documentation including:
 - Connected Papers algorithm analysis and implementation
 - Co-citation and bibliographic coupling theory
 - Multi-factor similarity calculations
