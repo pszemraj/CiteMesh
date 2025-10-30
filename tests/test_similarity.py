@@ -2,8 +2,8 @@
 Tests for similarity calculations.
 """
 
-from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.models import Paper
+from citemesh.strategies.base import GraphBuilderStrategy
 
 
 class TestSimilarityFunctions:

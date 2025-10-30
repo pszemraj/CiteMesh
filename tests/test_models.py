@@ -3,7 +3,8 @@ Tests for data models.
 """
 
 import pytest
-from citemesh.models import Paper, Author
+
+from citemesh.models import Author, Paper
 
 
 class TestAuthor:

@@ -1,6 +1,8 @@
 # local files
 out/*
 cache/*
+*.yaml
+!config.yaml.example
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

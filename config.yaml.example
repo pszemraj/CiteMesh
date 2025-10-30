@@ -1,0 +1,126 @@
+# CiteMesh Configuration File
+# Copy this to config.yaml and customize as needed
+# All parameters are optional - defaults are used if not specified
+
+# ============================================================================
+# Global Settings
+# ============================================================================
+random_seed: null  # Set to an integer (e.g., 42) for reproducible results
+
+# ============================================================================
+# Citation Strategy Configuration
+# ============================================================================
+citation:
+  # Similarity component weights (must sum to 1.0)
+  temporal_weight: 0.3       # Weight for temporal proximity
+  citation_weight: 0.3       # Weight for citation count similarity
+  bibliographic_weight: 0.4  # Weight for shared references (bibliographic coupling)
+
+  # Edge creation thresholds
+  seed_edge_threshold: 0.45        # Lower threshold for seed paper edges
+  normal_edge_threshold: 0.65      # Higher threshold for non-seed edges
+  random_edge_probability: 0.7     # Probability to create edge above threshold (for sparsity)
+
+  # Temporal similarity parameters
+  max_year_diff: 5     # Papers >5 years apart get strong penalty
+  year_decay: 8.0      # Exponential decay factor for year differences
+
+# ============================================================================
+# Embedding Strategy Configuration
+# ============================================================================
+embedding:
+  # Multi-factor similarity weights (must sum to 1.0)
+  semantic_weight: 0.5    # Weight for embedding cosine similarity
+  temporal_weight: 0.2    # Weight for publication year proximity
+  category_weight: 0.2    # Weight for ArXiv category overlap
+  author_weight: 0.1      # Weight for author collaboration
+
+  # Bonus multipliers
+  shared_author_bonus: 1.5  # Multiply similarity if papers share authors
+
+  # Temporal scaling
+  temporal_scale: 3.0  # Divisor for year difference in temporal factor
+
+  # Graph sparsity control
+  top_k_neighbors: 2   # Keep only top-k most similar neighbors per node
+
+# ============================================================================
+# Hybrid Strategy Configuration
+# ============================================================================
+hybrid:
+  # Adaptive weights based on relationship type
+  # When both papers from semantic search:
+  both_semantic:
+    semantic_weight: 0.6
+    temporal_weight: 0.2
+    citation_weight: 0.1
+    bibliographic_weight: 0.1
+
+  # When both papers from citation network:
+  both_citation:
+    semantic_weight: 0.3
+    temporal_weight: 0.3
+    citation_weight: 0.2
+    bibliographic_weight: 0.2
+
+  # When papers from different sources (mixed):
+  mixed:
+    semantic_weight: 0.4
+    temporal_weight: 0.3
+    citation_weight: 0.2
+    bibliographic_weight: 0.1
+
+  # Co-citation analysis bonus
+  co_citation_bonus: 0.25  # Bonus when papers are cited together
+
+  # Edge thresholds
+  citation_edge_threshold: 0.45
+  semantic_edge_threshold: 0.35
+
+# ============================================================================
+# Visualization Configuration
+# ============================================================================
+visualization:
+  # Node sizing
+  min_node_size: 80         # Minimum node diameter (pixels)
+  max_node_size: 2500       # Maximum node diameter (pixels)
+  seed_node_size: 2500      # Fixed size for seed paper (always largest)
+  base_size_factor: 1.2     # Base scaling for citation count influence
+  rank_bonus_factor: 0.3    # Additional sizing based on similarity rank
+
+  # Color gradient (year-based)
+  old_color: [0.7, 0.75, 0.8]     # RGB for old papers (light blue-gray)
+  recent_color: [0.0, 0.5, 0.5]   # RGB for recent papers (dark teal)
+  seed_color: [0.9, 0.2, 0.2]     # RGB for seed paper (red)
+
+  # Edge styling
+  min_edge_alpha: 0.3       # Minimum edge transparency
+  max_edge_alpha: 0.6       # Maximum edge transparency
+  min_edge_width: 0.5       # Minimum edge width
+  max_edge_width: 3.0       # Maximum edge width
+
+  # Layout parameters
+  default_iterations: 100   # Kamada-Kawai layout iterations
+  random_jitter: 0.05       # Random perturbation factor for organic look
+
+  # Output settings
+  default_dpi: 150          # Image resolution
+  figsize_base: 12          # Base figure size (will be scaled)
+
+# ============================================================================
+# API Configuration
+# ============================================================================
+api:
+  max_retries: 3            # Maximum API retry attempts
+  retry_delay: 2.0          # Initial retry delay (seconds, with exponential backoff)
+  request_delay: 0.5        # Minimum delay between requests (rate limiting)
+
+# ============================================================================
+# Notes for Experimentation
+# ============================================================================
+# - To emphasize recent papers: increase citation.temporal_weight
+# - To focus on semantic content: increase embedding.semantic_weight
+# - For denser graphs: lower edge thresholds or increase random_edge_probability
+# - For sparser graphs: increase top_k_neighbors or raise thresholds
+# - Always ensure weights within each group sum to 1.0
+# - Set random_seed to any integer for reproducible results across runs

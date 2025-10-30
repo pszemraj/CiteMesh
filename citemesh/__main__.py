@@ -1,9 +1,7 @@
-#!/usr/bin/env python3
 """
-CiteMesh: Unified CLI for Connected Papers-style visualizations.
+CiteMesh CLI entry point for module execution.
 
-This is the main entry point for the refactored CiteMesh package,
-providing a single interface to all graph building strategies.
+This allows running: python -m citemesh build "arxiv:123" --strategy citation
 """
 
 import argparse
@@ -31,6 +29,7 @@ def build_citation_graph(args):
         max_references=args.max_references,
         similarity_threshold=args.similarity_threshold,
         fetch_references=not args.no_references,
+        random_seed=args.seed,
     )
 
     graph, seed_id = builder.build_graph(args.paper_id)
@@ -45,6 +44,7 @@ def build_embedding_graph(args):
         dataset_split=args.dataset_split,
         corpus_size=args.corpus_size,
         top_k=args.top_k,
+        random_seed=args.seed,
     )
 
     graph, seed_id = builder.build_graph(args.paper_id)
@@ -60,6 +60,7 @@ def build_hybrid_graph(args):
         max_semantic=args.max_semantic,
         model_name=args.model,
         dataset_split=args.dataset_split,
+        random_seed=args.seed,
     )
 
     graph, seed_id = builder.build_graph(args.paper_id)
@@ -74,19 +75,19 @@ def main():
         epilog="""
 Examples:
   # Citation-based graph (fast, uses S2 API)
-  python citemesh.py build "arxiv:1706.03762" --strategy citation
+  citemesh build "arxiv:1706.03762" --strategy citation
 
   # Embedding-based graph (semantic similarity)
-  python citemesh.py build "arxiv:1706.03762" --strategy embedding
+  citemesh build "arxiv:1706.03762" --strategy embedding
 
   # Hybrid approach (combines both)
-  python citemesh.py build "arxiv:1706.03762" --strategy hybrid
+  citemesh build "arxiv:1706.03762" --strategy hybrid
 
   # Custom output path
-  python citemesh.py build "10.1038/nature14539" -o my_graph.png
+  citemesh build "10.1038/nature14539" -o my_graph.png
 
   # Quick test with fewer papers
-  python citemesh.py build "arxiv:1810.04805" -p 20 --strategy citation
+  citemesh build "arxiv:1810.04805" -p 20 --strategy citation
         """,
     )
 
@@ -145,6 +146,13 @@ Examples:
         help="Output image resolution (default: 150)",
     )
 
+    build_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducibility (default: None = non-deterministic)",
+    )
+
     # Citation strategy arguments
     citation_group = build_parser.add_argument_group("citation strategy options")
     citation_group.add_argument(
@@ -190,8 +198,8 @@ Examples:
     embedding_group.add_argument(
         "--dataset-split",
         type=str,
-        default="train[:2%%]",
-        help="ArXiv dataset split (default: train[:2%%])",
+        default="train[:2%]",
+        help="ArXiv dataset split (default: train[:2%])",
     )
 
     embedding_group.add_argument(

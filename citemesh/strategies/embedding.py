@@ -5,19 +5,20 @@ This strategy uses semantic similarity from sentence transformers
 to find conceptually similar papers without relying on citations.
 """
 
+import logging
 from typing import Dict, Optional, Tuple
+
 import numpy as np
 import torch
-from sentence_transformers import SentenceTransformer, util
 from datasets import load_dataset
 from joblib import Memory
+from sentence_transformers import SentenceTransformer, util
 from tqdm import tqdm
 
-from citemesh.strategies.base import GraphBuilderStrategy
-from citemesh.models import Paper, Author
 from citemesh.api_client import get_client
 from citemesh.config import EMBEDDING_CONFIG
-import logging
+from citemesh.models import Author, Paper
+from citemesh.strategies.base import GraphBuilderStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +124,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         dataset_split: str = "train[:2%]",
         corpus_size: Optional[int] = None,
         top_k: int = 2,
+        random_seed: int = None,
     ):
         """
         Initialize embedding graph builder.
@@ -133,8 +135,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             dataset_split: HuggingFace dataset split
             corpus_size: Maximum papers to load from corpus (None = all in split)
             top_k: Number of most similar neighbors per node
+            random_seed: Random seed for reproducibility
         """
-        super().__init__(max_papers)
+        super().__init__(max_papers, random_seed)
         self.model_name = model_name
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size

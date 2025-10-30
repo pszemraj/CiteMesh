@@ -5,13 +5,17 @@ This module defines the interface that all graph building strategies must implem
 enabling the Strategy pattern for different similarity computation approaches.
 """
 
-from abc import ABC, abstractmethod
-from typing import Dict, Tuple
-import networkx as nx
-from citemesh.models import Paper
-from citemesh.config import TEMPORAL_CONFIG
-import numpy as np
 import math
+import random
+from abc import ABC, abstractmethod
+from typing import Dict, Optional, Tuple
+
+import networkx as nx
+import numpy as np
+import torch
+
+from citemesh.config import TEMPORAL_CONFIG
+from citemesh.models import Paper
 
 
 class GraphBuilderStrategy(ABC):
@@ -23,15 +27,25 @@ class GraphBuilderStrategy(ABC):
     computing similarity, while the base class handles common graph construction logic.
     """
 
-    def __init__(self, max_papers: int = 40):
+    def __init__(self, max_papers: int = 40, random_seed: Optional[int] = None):
         """
         Initialize the graph builder.
 
         Args:
             max_papers: Maximum number of papers to include in graph
+            random_seed: Random seed for reproducibility (None = non-deterministic)
         """
         self.max_papers = max_papers
+        self.random_seed = random_seed
         self.papers: Dict[str, Paper] = {}  # paper_id -> Paper object
+
+        # Set random seeds for reproducibility
+        if random_seed is not None:
+            np.random.seed(random_seed)
+            random.seed(random_seed)
+            torch.manual_seed(random_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(random_seed)
 
     @abstractmethod
     def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:

@@ -5,13 +5,15 @@ This strategy builds similarity graphs using citation relationships,
 bibliographic coupling (shared references), and co-citation analysis.
 """
 
-from typing import Dict
-import numpy as np
-from citemesh.strategies.base import GraphBuilderStrategy
-from citemesh.models import Paper
-from citemesh.api_client import get_client, SemanticScholarClient
-from citemesh.config import CITATION_CONFIG
 import logging
+from typing import Dict
+
+import numpy as np
+
+from citemesh.api_client import SemanticScholarClient, get_client
+from citemesh.config import CITATION_CONFIG
+from citemesh.models import Paper
+from citemesh.strategies.base import GraphBuilderStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         max_references: int = 20,
         similarity_threshold: float = 0.2,
         fetch_references: bool = True,
+        random_seed: int = None,
     ):
         """
         Initialize citation graph builder.
@@ -44,8 +47,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             max_references: Maximum referenced papers to fetch
             similarity_threshold: Minimum similarity for edges
             fetch_references: Whether to fetch reference lists (enables real bibliographic coupling)
+            random_seed: Random seed for reproducibility
         """
-        super().__init__(max_papers)
+        super().__init__(max_papers, random_seed)
         self.max_citations = max_citations
         self.max_references = max_references
         self.similarity_threshold = similarity_threshold

@@ -9,11 +9,11 @@ For new projects, use the unified CLI: python citemesh.py build --strategy embed
 """
 
 import argparse
-from pathlib import Path
 import logging
+from pathlib import Path
 
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
-from citemesh.visualization import visualize_graph, generate_output_path
+from citemesh.visualization import generate_output_path, visualize_graph
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

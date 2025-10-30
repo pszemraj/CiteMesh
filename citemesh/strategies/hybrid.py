@@ -5,13 +5,14 @@ Combines citation relationships with semantic similarity for
 comprehensive paper discovery.
 """
 
+import logging
 from typing import Dict
+
+from citemesh.config import HYBRID_CONFIG
+from citemesh.models import Paper
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
-from citemesh.models import Paper
-from citemesh.config import HYBRID_CONFIG
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_semantic: int = 10,
         model_name: str = "google/embeddinggemma-300m",
         dataset_split: str = "train[:2%]",
+        random_seed: int = None,
     ):
         """
         Initialize hybrid graph builder.
@@ -45,23 +47,26 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             max_semantic: Maximum papers from semantic search
             model_name: Embedding model name
             dataset_split: ArXiv dataset split
+            random_seed: Random seed for reproducibility
         """
-        super().__init__(max_papers)
+        super().__init__(max_papers, random_seed)
         self.max_semantic = max_semantic
 
-        # Create citation and embedding builders
+        # Create citation and embedding builders (with same seed for consistency)
         citation_papers = max_papers - max_semantic
         self.citation_builder = CitationGraphBuilder(
             max_papers=citation_papers,
             max_citations=max_citations,
             max_references=max_references,
             fetch_references=True,  # Enable real bibliographic coupling
+            random_seed=random_seed,
         )
 
         self.embedding_builder = EmbeddingGraphBuilder(
             max_papers=max_semantic,
             model_name=model_name,
             dataset_split=dataset_split,
+            random_seed=random_seed,
         )
 
         # Track paper sources for adaptive similarity

@@ -8,7 +8,7 @@ multiple strategies: citation networks, semantic embeddings, or hybrid approache
 __version__ = "2.0.0"
 __author__ = "CiteMesh Contributors"
 
-from citemesh.models import Paper, Author
+from citemesh.models import Author, Paper
 from citemesh.strategies.base import GraphBuilderStrategy
 
 __all__ = ["Paper", "Author", "GraphBuilderStrategy"]

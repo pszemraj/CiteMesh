@@ -5,12 +5,14 @@ This module wraps the Semantic Scholar API with retry logic, caching,
 and better error handling to improve reliability.
 """
 
-from typing import Optional, List, Any
-from semanticscholar import SemanticScholar
-from citemesh.models import Paper, Author
-from citemesh.config import API_CONFIG
-import time
 import logging
+import time
+from typing import Any, List, Optional
+
+from semanticscholar import SemanticScholar
+
+from citemesh.config import API_CONFIG
+from citemesh.models import Author, Paper
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

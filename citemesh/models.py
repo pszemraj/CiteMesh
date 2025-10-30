@@ -6,8 +6,8 @@ providing type safety, validation, and encapsulation of paper-related logic.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Set
 from datetime import datetime
+from typing import List, Optional, Set
 
 
 @dataclass

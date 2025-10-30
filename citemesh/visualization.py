@@ -5,13 +5,15 @@ This module provides a single implementation of the Connected Papers-style
 visualization that all strategies can use, eliminating code duplication.
 """
 
+import logging
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
+
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+
 from citemesh.config import VIZ_CONFIG
-import logging
 
 logger = logging.getLogger(__name__)
 
