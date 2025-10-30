@@ -25,8 +25,10 @@ python citemesh.py build "arxiv:1706.03762" --strategy citation
 python citemesh.py build "arxiv:1706.03762" --strategy embedding
 python citemesh.py build "arxiv:1706.03762" --strategy hybrid
 
-# Legacy scripts (backward compatible, use unified architecture)
+# Legacy scripts (backward compatible, all use unified architecture)
 python citation_graph.py "arxiv:1706.03762"
+python embedding_similarity.py "arxiv:1706.03762"
+python hybrid_similarity.py "arxiv:1706.03762"
 
 # Test with quick visualization
 python citemesh.py build "arxiv:1706.03762" --strategy citation -p 20 -i 50
