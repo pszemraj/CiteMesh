@@ -74,19 +74,19 @@ def main():
         epilog="""
 Examples:
   # Citation-based graph (fast, uses S2 API)
-  python citemesh.py build "arxiv:1706.03762" --strategy citation
+  citemesh build "arxiv:1706.03762" --strategy citation
 
   # Embedding-based graph (semantic similarity)
-  python citemesh.py build "arxiv:1706.03762" --strategy embedding
+  citemesh build "arxiv:1706.03762" --strategy embedding
 
   # Hybrid approach (combines both)
-  python citemesh.py build "arxiv:1706.03762" --strategy hybrid
+  citemesh build "arxiv:1706.03762" --strategy hybrid
 
   # Custom output path
-  python citemesh.py build "10.1038/nature14539" -o my_graph.png
+  citemesh build "10.1038/nature14539" -o my_graph.png
 
   # Quick test with fewer papers
-  python citemesh.py build "arxiv:1810.04805" -p 20 --strategy citation
+  citemesh build "arxiv:1810.04805" -p 20 --strategy citation
         """,
     )
 

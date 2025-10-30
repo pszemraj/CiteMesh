@@ -45,7 +45,7 @@ dev = [
 ]
 
 [project.scripts]
-citemesh = "citemesh.__main__:main"
+citemesh = "citemesh.cli:main"
 
 [project.urls]
 Repository = "https://github.com/yourusername/paper-graph-vis"
