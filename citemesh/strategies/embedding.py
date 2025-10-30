@@ -121,7 +121,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self,
         max_papers: int = 40,
         model_name: str = "google/embeddinggemma-300m",
-        dataset_split: str = "train[:2%]",
+        dataset_split: str = "train",  # Full training set by default (~117k papers)
         corpus_size: Optional[int] = None,
         top_k: int = 2,
         random_seed: int = None,
@@ -245,14 +245,22 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if seed_paper.paper_id in papers:
             self.embeddings[seed_paper.paper_id] = seed_embedding
 
-        # Fetch citation counts from S2 for top papers
-        logger.info("Fetching citation counts from Semantic Scholar...")
-        for paper_id in list(papers.keys())[:20]:  # Only top 20 to avoid timeouts
+        # Optionally fetch citation counts from S2 for top papers
+        # NOTE: This is the ONLY S2 API dependency in embedding strategy
+        # Can be disabled for pure offline operation
+        logger.info("Fetching citation counts from Semantic Scholar (optional)...")
+        for paper_id in list(papers.keys())[
+            :10
+        ]:  # Reduced to top 10 to minimize API calls
             if paper_id == "query":
                 continue
-            s2_paper = self.client.get_paper(paper_id)
-            if s2_paper:
-                papers[paper_id].citation_count = s2_paper.citation_count
+            try:
+                s2_paper = self.client.get_paper(paper_id)
+                if s2_paper:
+                    papers[paper_id].citation_count = s2_paper.citation_count
+            except Exception as e:
+                logger.warning(f"Could not fetch citation count for {paper_id}: {e}")
+                # Continue with citation_count=0 from ArXiv data
 
         return papers
 

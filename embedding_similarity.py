@@ -51,8 +51,8 @@ def main() -> None:
     parser.add_argument(
         "--dataset-split",
         type=str,
-        default="train[:2%]",
-        help="Dataset split specification (e.g., 'train[:2%%]')",
+        default="train",
+        help="Dataset split specification (default: train = full ~117k papers)",
     )
 
     parser.add_argument(

@@ -198,8 +198,8 @@ Examples:
     embedding_group.add_argument(
         "--dataset-split",
         type=str,
-        default="train[:2%]",
-        help="ArXiv dataset split (default: train[:2%])",
+        default="train",
+        help="ArXiv dataset split (default: train = full ~117k papers)",
     )
 
     embedding_group.add_argument(

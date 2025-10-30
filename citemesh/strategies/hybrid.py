@@ -34,7 +34,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_references: int = 15,
         max_semantic: int = 10,
         model_name: str = "google/embeddinggemma-300m",
-        dataset_split: str = "train[:2%]",
+        dataset_split: str = "train",  # Full training set by default (~117k papers)
         random_seed: int = None,
     ):
         """
