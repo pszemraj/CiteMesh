@@ -17,8 +17,8 @@ CiteMesh (Paper Graph Visualizer) creates Connected Papers-style citation graph 
 
 ### Development
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Install package
+pip install -e .
 
 # Run CLI
 citemesh build "arxiv:1706.03762" --strategy citation
@@ -128,9 +128,9 @@ paper-graph-vis/
 ├── out/                       # Generated PNG visualizations (auto-named)
 ├── cache/
 │   └── joblib_cache/          # Cached embeddings and datasets
-├── requirements.txt           # Dependencies (matplotlib, networkx, semanticscholar, etc.)
+├── pyproject.toml             # Package config and dependencies
 ├── README.md                  # User-facing documentation
-└── ARCHITECTURE.md            # Algorithm analysis and Connected Papers theory
+└── docs/                      # Documentation directory
 ```
 
 ## Key Implementation Notes

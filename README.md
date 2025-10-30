@@ -28,8 +28,8 @@ A tool for creating Connected Papers-style citation graph visualizations from ac
 git clone https://github.com/yourusername/paper-graph-vis.git
 cd paper-graph-vis
 
-# Install dependencies
-pip install -r requirements.txt
+# Install package
+pip install -e .
 
 # Build graphs using the CLI
 citemesh build "arxiv:1706.03762" --strategy citation
@@ -49,9 +49,6 @@ xdg-open out/*.png  # Linux
 git clone https://github.com/yourusername/paper-graph-vis.git
 cd paper-graph-vis
 pip install -e .
-
-# Or install dependencies only
-pip install -r requirements.txt
 ```
 
 ## Usage
