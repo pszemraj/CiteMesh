@@ -5,12 +5,13 @@
 This repository now contains three distinct approaches to creating Connected Papers-style visualizations, each with different strengths:
 
 1. **citation_graph.py**: Pure citation-based similarity with co-citation patterns
-2. **embedding_similarity.py**: Semantic similarity using sentence transformers  
+2. **embedding_similarity.py**: Semantic similarity using sentence transformers
 3. **hybrid_similarity.py**: Intelligent combination of both approaches
 
 ## Reference Image Analysis (out/REFERENCE.jpg)
 
 ### Visual Characteristics
+
 1. **Node Count**: ~40 papers (not 200+)
 2. **Central Paper**: One dominant node (Köhler, 2019) - significantly larger than others
 3. **Layout Pattern**: Organic, asymmetric clustering - NOT circular, NOT grid-based
@@ -71,6 +72,7 @@ Connected Papers doesn't use traditional citation trees. Instead:
    - Configurable limits via CLI parameters
 
 2. **Co-citation and Bibliographic Coupling**
+
    ```python
    # Papers >5 years apart rarely connect
    if year_diff > 5:
@@ -88,10 +90,11 @@ Connected Papers doesn't use traditional citation trees. Instead:
    - Random perturbations for natural look
 
 4. **Smooth Visual Gradients**
+
    ```python
    # Continuous RGB gradient (not discrete bands)
    r = 0.72 - 0.27 * year_norm  # 184 -> 69
-   g = 0.83 - 0.19 * year_norm  # 212 -> 123  
+   g = 0.83 - 0.19 * year_norm  # 212 -> 123
    b = 0.89 - 0.28 * year_norm  # 227 -> 157
    ```
 
@@ -103,10 +106,11 @@ Connected Papers doesn't use traditional citation trees. Instead:
    - Joblib caching for embeddings
 
 2. **Multi-Factor Similarity**
+
    ```python
    similarity = (
        0.5 * embed_sim +        # Semantic similarity
-       0.2 * year_factor +      # Temporal proximity  
+       0.2 * year_factor +      # Temporal proximity
        0.2 * category_overlap + # Research area overlap
        0.1 * author_factor      # Collaboration bonus
    )
@@ -120,9 +124,10 @@ Connected Papers doesn't use traditional citation trees. Instead:
    - Each node connects to only 2-3 most similar
    - Results in sparse, meaningful graphs
 
-### hybrid_similarity.py Features  
+### hybrid_similarity.py Features
 
 1. **Intelligent Paper Filtering**
+
    ```python
    # Relevance scoring for citations
    year_diff = abs(seed.year - p.year)
@@ -131,6 +136,7 @@ Connected Papers doesn't use traditional citation trees. Instead:
    ```
 
 2. **Co-citation Analysis**
+
    ```python
    def analyze_co_citations():
        # Papers cited together are related
@@ -140,6 +146,7 @@ Connected Papers doesn't use traditional citation trees. Instead:
    ```
 
 3. **Adaptive Weight Combination**
+
    ```python
    if rel1 == "semantic" and rel2 == "semantic":
        # Both from embeddings - weight semantic heavily
@@ -156,13 +163,14 @@ Connected Papers doesn't use traditional citation trees. Instead:
 ## Algorithm Comparison
 
 ### Citation Graph Algorithm
+
 ```python
 # Phase 1: Paper Collection
 1. Fetch seed paper via Semantic Scholar API
 2. Get citations and references
 3. Limit to max_papers (30-40)
 
-# Phase 2: Similarity Calculation  
+# Phase 2: Similarity Calculation
 - year_sim = strong penalty for papers >5 years apart
 - cit_sim = log scale similarity for citation counts
 - bib_coupling = simulated shared references
@@ -175,6 +183,7 @@ Connected Papers doesn't use traditional citation trees. Instead:
 ```
 
 ### Embedding Similarity Algorithm
+
 ```python
 # Phase 1: Dataset Loading
 1. Load ArXiv dataset with tqdm progress
@@ -193,7 +202,8 @@ Connected Papers doesn't use traditional citation trees. Instead:
 ```
 
 ### Hybrid Algorithm
-```python  
+
+```python
 # Phase 1: Intelligent Collection
 1. Fetch seed with full metadata (abstract, fields)
 2. Filter citations by relevance score
@@ -213,6 +223,7 @@ Connected Papers doesn't use traditional citation trees. Instead:
 ```
 
 ### Visual Encoding (All Scripts)
+
 ```python
 # Node Sizing - Extreme Variation
 if is_seed:
@@ -220,7 +231,7 @@ if is_seed:
 else:
     # Rank-based with citation bonus
     if rank == 0: base = 1800
-    elif rank < 3: base = 1200 - rank * 150  
+    elif rank < 3: base = 1200 - rank * 150
     elif rank < 8: base = 600 - rank * 40
     else: base = 100
     # Add log-scale citation bonus
@@ -251,15 +262,15 @@ for node in pos:
 
 ## CLI Parameters (Restored)
 
-| Option | Description | Default |
-|--------|-------------|---------|  
-| `-p, --max-papers` | Maximum total papers to include | 40 |
-| `-c, --max-citations` | Maximum citations to fetch | 20 |
-| `-r, --max-references` | Maximum references to fetch | 20 |
-| `-s, --similarity-threshold` | Min similarity for edges (0-1) | 0.2 |
-| `-i, --iterations` | Layout iterations (quality) | 100 |
-| `-d, --dpi` | Output image resolution | 150 |
-| `-o, --output` | Output path (auto-named if not specified) | None |
+| Option                       | Description                               | Default |
+| ---------------------------- | ----------------------------------------- | ------- |
+| `-p, --max-papers`           | Maximum total papers to include           | 40      |
+| `-c, --max-citations`        | Maximum citations to fetch                | 20      |
+| `-r, --max-references`       | Maximum references to fetch               | 20      |
+| `-s, --similarity-threshold` | Min similarity for edges (0-1)            | 0.2     |
+| `-i, --iterations`           | Layout iterations (quality)               | 100     |
+| `-d, --dpi`                  | Output image resolution                   | 150     |
+| `-o, --output`               | Output path (auto-named if not specified) | None    |
 
 ## Performance Characteristics
 
@@ -270,11 +281,11 @@ for node in pos:
 
 ## Performance Characteristics
 
-| Approach | Nodes | Edges | Time | Best For |
-|----------|-------|-------|------|----------|
-| Citation | 30-40 | 30-40 | 30s | Papers with good S2 coverage |
-| Embedding | 30-35 | 50-70 | 45s | Exploring semantic relationships |
-| Hybrid | 35-45 | 40-60 | 60s | Comprehensive analysis |
+| Approach  | Nodes | Edges | Time | Best For                         |
+| --------- | ----- | ----- | ---- | -------------------------------- |
+| Citation  | 30-40 | 30-40 | 30s  | Papers with good S2 coverage     |
+| Embedding | 30-35 | 50-70 | 45s  | Exploring semantic relationships |
+| Hybrid    | 35-45 | 40-60 | 60s  | Comprehensive analysis           |
 
 ## Key Improvements Over Original
 

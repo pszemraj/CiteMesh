@@ -5,7 +5,9 @@
 ### ✅ Completed Improvements
 
 #### 1. True Bibliographic Coupling (Partially Complete)
+
 **Implemented**: Papers now use actual shared references for similarity calculation
+
 - Using Connected Papers formula: `intersection / sqrt(|A| * |B|)`
 - Fetching reference lists for seed and first 10 papers
 - 70% bibliographic coupling weight, 30% temporal similarity
@@ -13,18 +15,24 @@
 **Limitation**: Only fetching refs for first 10 papers due to API timeout issues
 
 #### 2. Temporal Penalties
+
 **Implemented**: Exponential decay for cross-generation connections
+
 - Formula: `math.exp(-year_diff / 8)`
 - Prevents connecting papers from vastly different eras
 
 #### 3. Improved Seed Centrality
+
 **Implemented**: Seed node properly centered and emphasized
+
 - Force seed to exact center
 - Larger size (2000 vs 150-800 for others)
 - Surrounding nodes kept at reasonable distance
 
 #### 4. Year Diversity
+
 **Implemented**: Fetching both references (older) and citations (newer)
+
 - References first (up to half of max_papers)
 - Then citations to fill remaining slots
 - Results in better temporal spread
@@ -32,26 +40,32 @@
 ### ⚠️ Partially Implemented
 
 #### 1. Bibliographic Coupling Coverage
+
 **Issue**: Can only fetch references for ~10 papers before timeout
 **Impact**: Most papers have empty reference sets, reducing coupling effectiveness
 
 #### 2. Recommendations API
+
 **Issue**: Returns no results for most papers (requires specific S2 ID format)
 **Fallback**: Using citations/references as before
 
 ### ❌ Not Yet Implemented
 
 #### 1. Co-citation Analysis
+
 **Current**: Not tracking papers cited together
 **Needed**: Find papers that are frequently cited alongside the seed
 
 #### 2. Smart Candidate Selection
+
 **Current**: Just taking direct citations/references
 **Needed**: Papers that cite the same references as seed (true bibliographic coupling candidates)
 
 #### 3. Prior and Derivative Works Lists
+
 **Current**: Not showing common ancestors/descendants
 **Needed**: Identify papers referenced by many in graph (prior) and papers citing many in graph (derivative)
+
 ```python
 def find_prior_works(graph_papers):
     # Papers cited by many nodes in the graph
@@ -73,6 +87,7 @@ def find_derivative_works(graph_papers):
 ## Comparison with Reference Image
 
 ### Reference (out/REFERENCE.jpg)
+
 - **Central node**: Köhler, 2019 (large, prominent)
 - **Layout**: Organic, natural spread across canvas
 - **Density**: Dense mesh throughout, ~40 nodes, hundreds of edges
@@ -80,6 +95,7 @@ def find_derivative_works(graph_papers):
 - **Clustering**: Natural groups emerge from similarity
 
 ### Our Current Output (improved-alg branch)
+
 - **Central node**: Seed properly centered and large ✅
 - **Layout**: Better than before but still somewhat lopsided
 - **Density**: Good (~600-700 edges for 40 nodes) ✅
@@ -96,16 +112,19 @@ def find_derivative_works(graph_papers):
 ## Next Steps (Priority Order)
 
 ### 1. Optimize Reference Fetching
+
 - Add caching to avoid re-fetching
 - Batch requests more efficiently
 - Try to get refs for at least 20-30 papers
 
 ### 2. Improve Candidate Selection
+
 - For each seed reference, get papers that also cite it
 - This finds true bibliographically coupled papers
 - Even with API limits, should improve quality
 
 ### 3. Add Prior/Derivative Works Display
+
 - Simple analysis of what graph papers commonly cite/are cited by
 - Just print to console, don't need UI
 
@@ -131,6 +150,7 @@ A completely new approach that bypasses Semantic Scholar API limitations:
 5. **Caches everything** for fast iteration
 
 **Advantages:**
+
 - No API rate limits
 - True semantic similarity (not just citations)
 - Works with any sentence transformer model
@@ -138,6 +158,7 @@ A completely new approach that bypasses Semantic Scholar API limitations:
 - Finds conceptually similar papers even without direct citations
 
 **Usage:**
+
 ```bash
 # Install additional requirements
 pip install sentence-transformers torch datasets
@@ -174,12 +195,14 @@ The ultimate solution combining both approaches:
    - 30% temporal similarity (publication year)
 
 **Features:**
+
 - Downloads ArXiv corpus for background semantic search
 - Caches embeddings and metadata for performance
 - Visualizes different relationship types with colors
 - Combines best of both citation and semantic approaches
 
 **Usage:**
+
 ```bash
 # Run with balanced hybrid approach
 python hybrid_similarity.py "arxiv:1706.03762" -c 2000 -p 40 --max-semantic 10
@@ -193,6 +216,7 @@ python hybrid_similarity.py "arxiv:1706.03762" -c 500 -p 30 --max-semantic 5
 ## Bottom Line
 
 Three approaches available:
+
 1. **citation_graph.py**: Traditional approach using citations/references (simple, API-limited)
 2. **embedding_similarity.py**: Modern approach using embeddings (no API limits, true semantic similarity)
 3. **hybrid_similarity.py**: Best of both - combines citations with semantic similarity (recommended when API is available)
