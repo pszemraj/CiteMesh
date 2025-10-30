@@ -21,9 +21,9 @@ CiteMesh (Paper Graph Visualizer) creates Connected Papers-style citation graph 
 pip install -r requirements.txt
 
 # Run unified CLI (recommended)
-python citemesh.py build "arxiv:1706.03762" --strategy citation
-python citemesh.py build "arxiv:1706.03762" --strategy embedding
-python citemesh.py build "arxiv:1706.03762" --strategy hybrid
+citemesh build "arxiv:1706.03762" --strategy citation
+citemesh build "arxiv:1706.03762" --strategy embedding
+citemesh build "arxiv:1706.03762" --strategy hybrid
 
 # Legacy scripts (backward compatible, all use unified architecture)
 python citation_graph.py "arxiv:1706.03762"
@@ -31,7 +31,7 @@ python embedding_similarity.py "arxiv:1706.03762"
 python hybrid_similarity.py "arxiv:1706.03762"
 
 # Test with quick visualization
-python citemesh.py build "arxiv:1706.03762" --strategy citation -p 20 -i 50
+citemesh build "arxiv:1706.03762" --strategy citation -p 20 -i 50
 ```
 
 ### Testing

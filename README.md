@@ -32,9 +32,9 @@ cd paper-graph-vis
 pip install -r requirements.txt
 
 # Unified CLI (recommended)
-python citemesh.py build "arxiv:1706.03762" --strategy citation
-python citemesh.py build "arxiv:1706.03762" --strategy embedding
-python citemesh.py build "arxiv:1706.03762" --strategy hybrid
+citemesh build "arxiv:1706.03762" --strategy citation
+citemesh build "arxiv:1706.03762" --strategy embedding
+citemesh build "arxiv:1706.03762" --strategy hybrid
 
 # Legacy scripts (still work for backward compatibility)
 python citation_graph.py "arxiv:1706.03762"  # Creates: out/attention-is-all-you-need.png
@@ -61,25 +61,25 @@ pip install networkx matplotlib semanticscholar numpy sentence-transformers torc
 
 ```bash
 # Citation strategy - uses real bibliographic coupling
-python citemesh.py build "arxiv:1706.03762" --strategy citation
+citemesh build "arxiv:1706.03762" --strategy citation
 
 # Embedding strategy - semantic similarity without API limits
-python citemesh.py build "arxiv:1706.03762" --strategy embedding
+citemesh build "arxiv:1706.03762" --strategy embedding
 
 # Hybrid strategy - combines both approaches
-python citemesh.py build "arxiv:1706.03762" --strategy hybrid
+citemesh build "arxiv:1706.03762" --strategy hybrid
 
 # Custom output path
-python citemesh.py build "10.1038/nature14539" --strategy citation -o my_graph.png
+citemesh build "10.1038/nature14539" --strategy citation -o my_graph.png
 
 # Quick test with fewer papers
-python citemesh.py build "arxiv:2005.14165" --strategy citation -p 20
+citemesh build "arxiv:2005.14165" --strategy citation -p 20
 
 # High-quality with more iterations
-python citemesh.py build "arxiv:1706.03762" --strategy citation -i 200 -d 300
+citemesh build "arxiv:1706.03762" --strategy citation -i 200 -d 300
 
 # See all options
-python citemesh.py build --help
+citemesh build --help
 ```
 
 ### Legacy Scripts (Backward Compatible)
