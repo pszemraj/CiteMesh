@@ -20,15 +20,10 @@ CiteMesh (Paper Graph Visualizer) creates Connected Papers-style citation graph 
 # Install dependencies
 pip install -r requirements.txt
 
-# Run unified CLI (recommended)
+# Run CLI
 citemesh build "arxiv:1706.03762" --strategy citation
 citemesh build "arxiv:1706.03762" --strategy embedding
 citemesh build "arxiv:1706.03762" --strategy hybrid
-
-# Legacy scripts (backward compatible, all use unified architecture)
-python citation_graph.py "arxiv:1706.03762"
-python embedding_similarity.py "arxiv:1706.03762"
-python hybrid_similarity.py "arxiv:1706.03762"
 
 # Test with quick visualization
 citemesh build "arxiv:1706.03762" --strategy citation -p 20 -i 50
@@ -126,9 +121,10 @@ All three scripts implement consistent visual encoding:
 
 ```
 paper-graph-vis/
-├── citation_graph.py          # Citation-based similarity (main algorithm)
-├── embedding_similarity.py    # Semantic similarity approach
-├── hybrid_similarity.py       # Combined approach
+├── citemesh/                  # Main package
+│   ├── cli.py                # CLI entry point
+│   ├── strategies/           # Strategy implementations
+│   └── ...
 ├── out/                       # Generated PNG visualizations (auto-named)
 ├── cache/
 │   └── joblib_cache/          # Cached embeddings and datasets
@@ -174,10 +170,10 @@ All three scripts share similar CLI parameters:
 -d, --dpi N                # Output image resolution (default: 150)
 ```
 
-Specific to each approach:
-- **citation_graph.py**: `-c/--max-citations`, `-r/--max-references`, `-s/--similarity-threshold`
-- **embedding_similarity.py**: `-m/--model`, `-d/--dataset-papers`, `-k/--top-k`
-- **hybrid_similarity.py**: `--max-semantic`, `-c/--corpus-size`
+Strategy-specific options:
+- **Citation**: `-c/--max-citations`, `-r/--max-references`, `-t/--similarity-threshold`
+- **Embedding**: `-m/--model`, `--dataset-split`, `--corpus-size`, `-k/--top-k`
+- **Hybrid**: `--max-semantic`, `--dataset-split`
 
 ## Testing Approaches
 
@@ -204,4 +200,4 @@ See ARCHITECTURE.md for detailed algorithm analysis including the reference imag
 2. **Maintain sparse edges** - aim for 30-70 edges total, not 500-800
 3. **Preserve auto-naming** - output files should be named from paper title when `-o` not specified
 4. **Keep joblib caching** - embedding computation is expensive, caching is critical
-5. **Limit corpus size** - embedding_similarity.py defaults to reasonable dataset splits (train[:2%])
+5. **Use full corpus** - embedding strategy defaults to full training set (~117k papers) for GPU utilization

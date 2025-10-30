@@ -31,13 +31,10 @@ cd paper-graph-vis
 # Install dependencies
 pip install -r requirements.txt
 
-# Unified CLI (recommended)
+# Build graphs using the CLI
 citemesh build "arxiv:1706.03762" --strategy citation
 citemesh build "arxiv:1706.03762" --strategy embedding
 citemesh build "arxiv:1706.03762" --strategy hybrid
-
-# Legacy scripts (still work for backward compatibility)
-python citation_graph.py "arxiv:1706.03762"  # Creates: out/attention-is-all-you-need.png
 
 # View the output
 open out/*.png  # macOS - opens the generated file
@@ -48,16 +45,16 @@ xdg-open out/*.png  # Linux
 ## Installation
 
 ```bash
-# Install from requirements.txt
-pip install -r requirements.txt
+# Clone and install
+git clone https://github.com/yourusername/paper-graph-vis.git
+cd paper-graph-vis
+pip install -e .
 
-# Or install packages directly
-pip install networkx matplotlib semanticscholar numpy sentence-transformers torch datasets joblib tqdm
+# Or install dependencies only
+pip install -r requirements.txt
 ```
 
 ## Usage
-
-### Unified CLI (Recommended)
 
 ```bash
 # Citation strategy - uses real bibliographic coupling
@@ -78,23 +75,11 @@ citemesh build "arxiv:2005.14165" --strategy citation -p 20
 # High-quality with more iterations
 citemesh build "arxiv:1706.03762" --strategy citation -i 200 -d 300
 
+# Reproducible builds with seed
+citemesh build "arxiv:1706.03762" --strategy citation --seed 42
+
 # See all options
 citemesh build --help
-```
-
-### Legacy Scripts (Backward Compatible)
-
-The original scripts still work and use the new unified architecture:
-
-```bash
-# Citation-based (auto-named output)
-python citation_graph.py "arxiv:1706.03762"  # Creates: out/attention-is-all-you-need.png
-
-# Embedding-based
-python embedding_similarity.py "arxiv:1810.04805" -p 30
-
-# Hybrid
-python hybrid_similarity.py "arxiv:1706.03762" --max-semantic 10
 ```
 
 Output files are auto-named from paper titles and saved to `out/` directory.
@@ -103,7 +88,7 @@ Output files are auto-named from paper titles and saved to `out/` directory.
 
 The visualizers implement enhanced versions of the Connected Papers algorithm:
 
-#### Citation Graph (`citation_graph.py`)
+#### Citation Strategy
 1. **Paper Collection**: Fetches seed paper's citations and references
 2. **Co-citation Analysis**: Papers cited together are considered similar
 3. **Bibliographic Coupling**: Papers citing same works are related
@@ -114,7 +99,7 @@ The visualizers implement enhanced versions of the Connected Papers algorithm:
 5. **Sparse Edge Creation**: ~30-40 edges total for clean visualization
 6. **Kamada-Kawai Layout**: Organic clustering of related papers
 
-#### Embedding Similarity (`embedding_similarity.py`)
+#### Embedding Strategy
 1. **Dataset Loading**: Uses HuggingFace ArXiv datasets with progress bars
 2. **Embedding Computation**: Sentence transformers (EmbeddingGemma by default)
 3. **Multi-Factor Similarity**:
@@ -125,7 +110,7 @@ The visualizers implement enhanced versions of the Connected Papers algorithm:
 4. **Top-k Edge Selection**: Each node connects to 2-3 most similar papers
 5. **Citation Integration**: Fetches real citation counts from Semantic Scholar
 
-#### Hybrid Approach (`hybrid_similarity.py`)
+#### Hybrid Strategy
 1. **Intelligent Paper Selection**: Filters citations by relevance score
 2. **Semantic Enrichment**: Finds semantically similar papers from embeddings
 3. **Metadata Fetching**: Gets citation counts for top semantic matches
@@ -152,24 +137,6 @@ The visualizers implement enhanced versions of the Connected Papers algorithm:
   - Small random perturbations for natural look
   - Papers cluster by actual similarity, not forced positioning
 - **Labels**: Author surname + year format
-
-### Command-Line Options
-
-```bash
-python citation_graph.py -h  # Show help with all options
-```
-
-| Option | Description | Default |
-|--------|-------------|---------|  
-| `paper_id` | Paper identifier (DOI, arXiv ID, or S2 ID) | Required |
-| `-o, --output` | Output PNG file path | Auto-named from title |
-| `-p, --max-papers` | Maximum total papers to include | 40 |
-| `-c, --max-citations` | Maximum citations to fetch | 20 |
-| `-r, --max-references` | Maximum references to fetch | 20 |
-| `-s, --similarity-threshold` | Min similarity for edges (0-1) | 0.2 |
-| `-i, --iterations` | Layout iterations (quality) | 100 |
-| `-d, --dpi` | Output image resolution | 150 |
-| `-h, --help` | Show help message | - |
 
 ### Key Parameters
 
@@ -231,13 +198,13 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed algorithm document
 
 ```bash
 # Transformer architecture paper
-python citation_graph.py "arxiv:1706.03762"
+citemesh build "arxiv:1706.03762" --strategy citation
 
-# BERT paper  
-python citation_graph.py "arxiv:1810.04805"
+# BERT paper
+citemesh build "arxiv:1810.04805" --strategy embedding
 
 # Any paper by DOI
-python citation_graph.py "10.1145/3133956.3134029"
+citemesh build "10.1145/3133956.3134029" --strategy hybrid
 ```
 
 ## License
