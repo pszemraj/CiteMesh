@@ -200,8 +200,8 @@ Examples:
     embedding_group.add_argument(
         "--dataset-split",
         type=str,
-        default="train[:2%%]",
-        help="ArXiv dataset split (default: train[:2%%])",
+        default="train",
+        help="ArXiv dataset split (default: train = full ~117k papers)",
     )
 
     embedding_group.add_argument(
@@ -270,9 +270,11 @@ Examples:
 
         except Exception as e:
             logger.error(f"Failed to build graph: {e}")
-            import traceback
+            # Only show full traceback in debug mode
+            if logging.getLogger().level == logging.DEBUG:
+                import traceback
 
-            traceback.print_exc()
+                traceback.print_exc()
             sys.exit(1)
 
 
