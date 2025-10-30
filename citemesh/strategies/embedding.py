@@ -5,14 +5,14 @@ This strategy uses semantic similarity from sentence transformers
 to find conceptually similar papers without relying on citations.
 """
 
+import heapq
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-import torch
 from datasets import load_dataset
 from joblib import Memory
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 from citemesh.api_client import get_client
@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 
 # Set up joblib cache
 memory = Memory("cache/joblib_cache", verbose=0)
+
+STREAMING_BATCH_SIZE = 32
+CANDIDATE_MULTIPLIER = 4
 
 
 @memory.cache
@@ -101,7 +104,10 @@ def compute_embeddings_cached(texts: tuple, model_name: str) -> np.ndarray:
     """
     model = SentenceTransformer(model_name)
     embeddings = model.encode(
-        list(texts), convert_to_tensor=False, show_progress_bar=True
+        list(texts),
+        convert_to_tensor=False,
+        normalize_embeddings=True,
+        show_progress_bar=True,
     )
     return embeddings
 
@@ -172,10 +178,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         Returns:
             Dictionary of paper_id -> Paper objects
         """
-        papers = {}
+        papers: Dict[str, Paper] = {}
+        self.embeddings = {}
 
-        # Load corpus and model
-        self._load_corpus()
+        # Load model (corpus loaded lazily depending on mode)
         self._load_model()
 
         # Try to get seed from Semantic Scholar first
@@ -194,75 +200,259 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             seed_paper = Paper(paper_id="query", title=seed_id, year=2020, is_seed=True)
             papers["query"] = seed_paper
 
-        # Compute seed embedding
+        # Compute normalized seed embedding
         logger.info("Computing seed embedding...")
-        seed_embedding = self.model.encode([seed_text], convert_to_tensor=False)[0]
+        seed_embedding = self.model.encode(
+            [seed_text],
+            convert_to_tensor=False,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )[0]
+        self.embeddings[seed_paper.paper_id] = seed_embedding
 
-        # Compute corpus embeddings
-        logger.info("Computing corpus embeddings...")
-        corpus_ids = list(self.arxiv_corpus.keys())
-        corpus_texts = [
-            f"{self.arxiv_corpus[pid]['title']}. {self.arxiv_corpus[pid]['abstract']}"
-            for pid in corpus_ids
-        ]
+        # Decide whether to use streaming based on split and corpus_size
+        use_streaming = ":" not in self.dataset_split and self.corpus_size is None
 
-        # Use cached computation
-        corpus_embeddings = compute_embeddings_cached(
-            tuple(corpus_texts), self.model_name
-        )
+        if use_streaming:
+            logger.info("Streaming ArXiv corpus for semantic matches...")
+            candidates = self._select_candidates_streaming(seed_embedding)
+        else:
+            self._load_corpus()
+            candidates = self._select_candidates_from_loaded(seed_embedding)
 
-        # Find most similar papers
-        logger.info(f"Finding top {self.max_papers} most similar papers...")
-        similarities = util.cos_sim(seed_embedding, corpus_embeddings)[0]
-        top_indices = torch.topk(
-            similarities, k=min(self.max_papers, len(corpus_ids))
-        ).indices
+        # Convert candidates to Paper objects
+        added = 0
+        for paper_id, metadata, embedding in candidates:
+            if paper_id in papers:
+                continue
 
-        # Convert to Paper objects
-        for idx in top_indices:
-            idx = int(idx)
-            paper_id = corpus_ids[idx]
-            paper_data = self.arxiv_corpus[paper_id]
-
-            # Create Author objects
-            authors = [Author(name=name) for name in paper_data["authors"][:3]]
+            authors = [Author(name=name) for name in metadata.get("authors", [])[:3]]
 
             paper = Paper(
                 paper_id=paper_id,
-                title=paper_data["title"],
-                year=paper_data["year"],
+                title=metadata.get("title", "Unknown"),
+                year=metadata.get("year", 2020),
                 authors=authors,
-                abstract=paper_data["abstract"],
-                categories=paper_data.get("categories", []),
-                citation_count=0,  # ArXiv data doesn't have citation counts
+                abstract=metadata.get("abstract", ""),
+                categories=metadata.get("categories", []),
+                citation_count=0,  # ArXiv data lacks citation counts
                 is_seed=False,
             )
 
             papers[paper_id] = paper
-            self.embeddings[paper_id] = corpus_embeddings[idx]
+            self.embeddings[paper_id] = embedding
 
-        # Store seed embedding
-        if seed_paper.paper_id in papers:
-            self.embeddings[seed_paper.paper_id] = seed_embedding
+            added += 1
+            if added >= self.max_papers:
+                break
 
-        # Optionally fetch citation counts from S2 for top papers
-        # NOTE: This is the ONLY S2 API dependency in embedding strategy
-        # Can be disabled for pure offline operation
-        logger.info("Fetching citation counts from Semantic Scholar (optional)...")
-        for paper_id in list(papers.keys())[
-            :10
-        ]:  # Reduced to top 10 to minimize API calls
-            if paper_id == "query":
+        self._update_citation_counts(papers)
+        return papers
+
+    def _select_candidates_from_loaded(
+        self, seed_embedding: np.ndarray
+    ) -> List[Tuple[str, Dict, np.ndarray]]:
+        """
+        Select top candidates from an in-memory corpus.
+
+        Args:
+            seed_embedding: Normalized seed embedding vector
+
+        Returns:
+            List of (paper_id, metadata, embedding) tuples sorted by similarity
+        """
+        if not self.arxiv_corpus:
+            return []
+
+        print("Computing corpus embeddings (cached)...")
+
+        corpus_items = list(self.arxiv_corpus.items())
+        corpus_texts = [
+            f"{metadata['title']}. {metadata['abstract']}"
+            for _, metadata in corpus_items
+        ]
+
+        embeddings_array = np.asarray(
+            compute_embeddings_cached(tuple(corpus_texts), self.model_name)
+        )
+
+        similarities = embeddings_array @ seed_embedding
+        top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(corpus_items))
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+
+        candidates: List[Tuple[str, Dict, np.ndarray]] = []
+        for idx in top_indices:
+            paper_id, metadata = corpus_items[int(idx)]
+            candidates.append((paper_id, metadata, embeddings_array[int(idx)]))
+
+        return candidates
+
+    def _select_candidates_streaming(
+        self, seed_embedding: np.ndarray
+    ) -> List[Tuple[str, Dict, np.ndarray]]:
+        """
+        Stream dataset and keep top candidates in a bounded heap.
+
+        Args:
+            seed_embedding: Normalized seed embedding vector
+
+        Returns:
+            List of (paper_id, metadata, embedding) tuples sorted by similarity
+        """
+        dataset_names = [
+            "CShorten/ML-ArXiv-Papers",
+            "gfissore/arxiv-abstracts-2021",
+        ]
+
+        max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
+        heap: List[Tuple[float, str, Dict, np.ndarray]] = []
+        last_exception: Optional[Exception] = None
+
+        for dataset_name in dataset_names:
+            try:
+                dataset = load_dataset(
+                    dataset_name, split=self.dataset_split, streaming=True
+                )
+            except Exception as exc:
+                logger.warning(f"Could not stream dataset {dataset_name}: {exc}")
+                last_exception = exc
                 continue
+
+            batch: List[Tuple[Dict, str]] = []
+            for idx, raw_record in enumerate(dataset):
+                if self.corpus_size and idx >= self.corpus_size:
+                    break
+
+                metadata = self._extract_paper_metadata(raw_record, idx)
+                text = f"{metadata['title']}. {metadata['abstract']}"
+                batch.append((metadata, text))
+
+                if len(batch) >= STREAMING_BATCH_SIZE:
+                    self._process_stream_batch(
+                        batch, seed_embedding, heap, max_candidates
+                    )
+                    batch = []
+
+            if batch:
+                self._process_stream_batch(batch, seed_embedding, heap, max_candidates)
+
+            if heap:
+                break  # Successfully collected candidates
+
+        if not heap:
+            if last_exception:
+                raise last_exception
+            return []
+
+        top_candidates = sorted(heap, key=lambda item: item[0], reverse=True)
+        limited = top_candidates[: self.max_papers * CANDIDATE_MULTIPLIER]
+
+        return [
+            (paper_id, metadata, embedding)
+            for _, paper_id, metadata, embedding in limited
+        ]
+
+    def _process_stream_batch(
+        self,
+        batch: List[Tuple[Dict, str]],
+        seed_embedding: np.ndarray,
+        heap: List[Tuple[float, str, Dict, np.ndarray]],
+        max_candidates: int,
+    ) -> None:
+        """
+        Encode a batch of records and push to candidate heap.
+
+        Args:
+            batch: List of (metadata, text) tuples
+            seed_embedding: Normalized seed embedding vector
+            heap: Min-heap storing top candidates
+            max_candidates: Maximum heap size
+        """
+        texts = [text for _, text in batch]
+        embeddings = self.model.encode(
+            texts,
+            convert_to_tensor=False,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+
+        for (metadata, _), embedding in zip(batch, embeddings):
+            similarity = float(np.dot(seed_embedding, embedding))
+            candidate = (similarity, metadata["paper_id"], metadata, embedding)
+
+            if len(heap) < max_candidates:
+                heapq.heappush(heap, candidate)
+            elif similarity > heap[0][0]:
+                heapq.heapreplace(heap, candidate)
+
+    def _extract_paper_metadata(self, paper: Dict, fallback_index: int) -> Dict:
+        """
+        Normalize dataset record into metadata dictionary.
+
+        Args:
+            paper: Raw dataset record
+            fallback_index: Index used to generate ID if missing
+
+        Returns:
+            Dictionary with normalized fields
+        """
+        paper_id = (
+            paper.get("id")
+            or paper.get("paper_id")
+            or paper.get("paperId")
+            or f"arxiv_{fallback_index}"
+        )
+
+        year = 2020
+        if paper.get("year"):
+            try:
+                year = int(paper["year"])
+            except (TypeError, ValueError):
+                pass
+        elif paper.get("update_date"):
+            try:
+                year = int(str(paper["update_date"])[:4])
+            except (TypeError, ValueError):
+                pass
+
+        authors_data = paper.get("authors", [])
+        if isinstance(authors_data, str):
+            authors_data = [authors_data]
+
+        categories = paper.get("categories", [])
+        if isinstance(categories, str):
+            categories = [categories]
+
+        return {
+            "paper_id": paper_id,
+            "title": paper.get("title", "Unknown"),
+            "abstract": paper.get("abstract", paper.get("summary", "")),
+            "year": year,
+            "authors": authors_data or [],
+            "categories": categories or [],
+        }
+
+    def _update_citation_counts(self, papers: Dict[str, Paper]) -> None:
+        """
+        Optionally enrich top papers with citation counts from Semantic Scholar.
+
+        Args:
+            papers: Dictionary of collected papers (including seed)
+        """
+        logger.info("Fetching citation counts from Semantic Scholar (optional)...")
+
+        for paper_id, paper in list(papers.items())[:10]:
+            if paper.is_seed or paper_id == "query":
+                continue
+            if isinstance(paper_id, str) and paper_id.startswith("arxiv_"):
+                continue
+
             try:
                 s2_paper = self.client.get_paper(paper_id)
                 if s2_paper:
-                    papers[paper_id].citation_count = s2_paper.citation_count
-            except Exception as e:
-                logger.warning(f"Could not fetch citation count for {paper_id}: {e}")
-                # Continue with citation_count=0 from ArXiv data
-
-        return papers
+                    paper.citation_count = s2_paper.citation_count
+            except Exception as exc:
+                logger.warning(f"Could not fetch citation count for {paper_id}: {exc}")
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """
@@ -285,7 +475,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if paper1.paper_id in self.embeddings and paper2.paper_id in self.embeddings:
             emb1 = self.embeddings[paper1.paper_id]
             emb2 = self.embeddings[paper2.paper_id]
-            semantic_sim = float(util.cos_sim(emb1, emb2)[0][0])
+            semantic_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
         else:
             semantic_sim = 0.0
 

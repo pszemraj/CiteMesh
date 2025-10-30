@@ -38,6 +38,7 @@ class GraphBuilderStrategy(ABC):
         self.max_papers = max_papers
         self.random_seed = random_seed
         self.papers: Dict[str, Paper] = {}  # paper_id -> Paper object
+        self._collection_summary: Optional[str] = None
 
         # Set random seeds for reproducibility
         if random_seed is not None:
@@ -97,6 +98,19 @@ class GraphBuilderStrategy(ABC):
         """
         return similarity > 0.0
 
+    def get_collection_summary(self) -> Optional[str]:
+        """
+        Optional one-line summary describing collected papers.
+
+        Subclasses can set this to surface additional detail (e.g., reference counts)
+        that should be shown to users on stdout.
+        """
+        return self._collection_summary
+
+    def _set_collection_summary(self, summary: str) -> None:
+        """Allow subclasses to provide a collection summary."""
+        self._collection_summary = summary
+
     def build_graph(self, seed_id: str, **kwargs) -> Tuple[nx.Graph, str]:
         """
         Build the complete similarity graph.
@@ -124,7 +138,11 @@ class GraphBuilderStrategy(ABC):
 
         actual_seed_id = seed_paper.paper_id
 
-        print(f"Collected {len(self.papers)} papers")
+        summary = self.get_collection_summary()
+        if summary:
+            print(summary)
+        else:
+            print(f"Collected {len(self.papers)} papers")
         print(f"Seed paper: {seed_paper.title[:50]}...")
 
         # Step 2: Create graph with nodes

@@ -10,6 +10,7 @@ import time
 from typing import Any, List, Optional
 
 from semanticscholar import SemanticScholar
+from semanticscholar.SemanticScholarException import ObjectNotFoundException
 
 from citemesh.config import API_CONFIG
 from citemesh.models import Author, Paper
@@ -158,6 +159,9 @@ class SemanticScholarClient:
 
                 return paper
 
+            except ObjectNotFoundException:
+                logger.warning(f"Paper not found: {paper_id}")
+                return None
             except Exception as e:
                 if attempt < API_CONFIG.max_retries - 1:
                     wait_time = API_CONFIG.retry_delay * (2**attempt)
@@ -207,6 +211,8 @@ class SemanticScholarClient:
                 if len(papers) >= limit:
                     break
 
+        except ObjectNotFoundException:
+            logger.warning(f"Paper not found for citations: {paper_id}")
         except Exception as e:
             logger.warning(f"Failed to fetch citations for {paper_id}: {e}")
 
@@ -245,6 +251,8 @@ class SemanticScholarClient:
                 if len(papers) >= limit:
                     break
 
+        except ObjectNotFoundException:
+            logger.warning(f"Paper not found for references: {paper_id}")
         except Exception as e:
             logger.warning(f"Failed to fetch references for {paper_id}: {e}")
 
@@ -278,6 +286,9 @@ class SemanticScholarClient:
 
             return ref_ids
 
+        except ObjectNotFoundException:
+            logger.warning(f"Paper not found for reference IDs: {paper_id}")
+            return []
         except Exception as e:
             logger.warning(f"Failed to fetch reference IDs for {paper_id}: {e}")
             return []

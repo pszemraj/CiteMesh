@@ -138,10 +138,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                     refs = self._get_references(paper.paper_id)
                     paper.references = refs
 
-        logger.info(
+        reference_lists = len(self.reference_cache)
+        summary = (
             f"Collected {len(papers)} papers "
-            f"({len(self.reference_cache)} with reference lists)"
+            f"({reference_lists} with reference lists)"
         )
+        logger.info(summary)
+        self._set_collection_summary(summary)
 
         return papers
 

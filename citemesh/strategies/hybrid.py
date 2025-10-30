@@ -8,6 +8,9 @@ comprehensive paper discovery.
 import logging
 from typing import Dict
 
+import networkx as nx
+import numpy as np
+
 from citemesh.config import HYBRID_CONFIG
 from citemesh.models import Paper
 from citemesh.strategies.base import GraphBuilderStrategy
@@ -83,6 +86,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             Combined dictionary of papers
         """
         papers = {}
+        self.paper_sources = {}
 
         # Step 1: Collect from citations
         logger.info("Collecting papers via citations...")
@@ -144,11 +148,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             paper1.paper_id in self.embedding_builder.embeddings
             and paper2.paper_id in self.embedding_builder.embeddings
         ):
-            from sentence_transformers import util
-
             emb1 = self.embedding_builder.embeddings[paper1.paper_id]
             emb2 = self.embedding_builder.embeddings[paper2.paper_id]
-            embed_sim = float(util.cos_sim(emb1, emb2)[0][0])
+            embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
 
         # Adaptive weighting
         if source1 == "semantic" and source2 == "semantic":
@@ -184,6 +186,43 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             similarity += HYBRID_CONFIG.co_citation_boost
 
         return min(similarity, 1.0)  # Cap at 1.0
+
+    def build_graph(self, seed_id: str, **kwargs):
+        """
+        Build graph and enforce per-node edge limits for readability.
+
+        Args:
+            seed_id: Seed paper identifier
+
+        Returns:
+            Tuple of (graph, seed_id)
+        """
+        graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+
+        max_edges = HYBRID_CONFIG.max_edges_per_node
+        if not max_edges or max_edges <= 0:
+            return graph, actual_seed_id
+
+        limited_graph = nx.Graph()
+        limited_graph.add_nodes_from(graph.nodes(data=True))
+
+        edge_counts = {node: 0 for node in graph.nodes()}
+        # Sort edges by weight descending so strongest connections are kept
+        sorted_edges = sorted(
+            graph.edges(data=True),
+            key=lambda item: item[2].get("weight", 0.0),
+            reverse=True,
+        )
+
+        for u, v, data in sorted_edges:
+            if edge_counts[u] >= max_edges or edge_counts[v] >= max_edges:
+                continue
+
+            limited_graph.add_edge(u, v, **data)
+            edge_counts[u] += 1
+            edge_counts[v] += 1
+
+        return limited_graph, actual_seed_id
 
     def should_create_edge(
         self, paper1: Paper, paper2: Paper, similarity: float
