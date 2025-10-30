@@ -215,7 +215,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
 
         for u, v, data in sorted_edges:
-            if edge_counts[u] >= max_edges or edge_counts[v] >= max_edges:
+            if edge_counts[u] >= max_edges and edge_counts[v] >= max_edges:
                 continue
 
             limited_graph.add_edge(u, v, **data)

@@ -7,6 +7,7 @@ to find conceptually similar papers without relying on citations.
 
 import heapq
 import logging
+import sys
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -308,6 +309,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         heap: List[Tuple[float, str, Dict, np.ndarray]] = []
         last_exception: Optional[Exception] = None
 
+        progress_enabled = sys.stderr.isatty()
+
         for dataset_name in dataset_names:
             try:
                 dataset = load_dataset(
@@ -324,6 +327,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 desc=f"Streaming {dataset_name}",
                 unit="papers",
                 dynamic_ncols=True,
+                disable=not progress_enabled,
             ) as progress:
                 batch: List[Tuple[Dict, str]] = []
                 for idx, raw_record in enumerate(dataset):
@@ -454,18 +458,40 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         logger.info("Fetching citation counts from Semantic Scholar (optional)...")
 
-        for paper_id, paper in list(papers.items())[:10]:
-            if paper.is_seed or paper_id == "query":
-                continue
-            if isinstance(paper_id, str) and paper_id.startswith("arxiv_"):
-                continue
+        targets = [
+            (pid, paper)
+            for pid, paper in list(papers.items())[:10]
+            if not paper.is_seed
+            and pid != "query"
+            and not (isinstance(pid, str) and pid.startswith("arxiv_"))
+        ]
 
+        if not targets:
+            return
+
+        progress_enabled = sys.stderr.isatty()
+        iterator = (
+            tqdm(
+                targets,
+                desc="Citation metadata",
+                unit="papers",
+                leave=False,
+                dynamic_ncols=True,
+            )
+            if progress_enabled
+            else targets
+        )
+
+        for paper_id, paper in iterator:
             try:
                 s2_paper = self.client.get_paper(paper_id)
                 if s2_paper:
                     paper.citation_count = s2_paper.citation_count
             except Exception as exc:
                 logger.warning(f"Could not fetch citation count for {paper_id}: {exc}")
+
+        if progress_enabled:
+            iterator.close()
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

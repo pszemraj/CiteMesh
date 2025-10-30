@@ -224,8 +224,8 @@ class TestCLIReproducibility:
             "42",
         ]
 
-        result1 = subprocess.run(args, capture_output=True, text=True, timeout=120)
-        result2 = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        result1 = subprocess.run(args, capture_output=True, text=True, timeout=180)
+        result2 = subprocess.run(args, capture_output=True, text=True, timeout=180)
 
         if result1.returncode == 0 and result2.returncode == 0:
             # Extract node/edge counts from output

@@ -6,9 +6,11 @@ bibliographic coupling (shared references), and co-citation analysis.
 """
 
 import logging
+import sys
 from typing import Dict
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from citemesh.api_client import SemanticScholarClient, get_client
 from citemesh.config import CITATION_CONFIG
@@ -107,8 +109,24 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         references = self.client.get_paper_references(
             seed.paper_id, limit=self.max_references
         )
+        progress_enabled = sys.stderr.isatty()
 
-        for paper in references:
+        if references:
+            ref_iterator = (
+                tqdm(
+                    references,
+                    desc="Downloading references",
+                    unit="papers",
+                    leave=False,
+                    dynamic_ncols=True,
+                )
+                if progress_enabled
+                else references
+            )
+        else:
+            ref_iterator = []
+
+        for paper in ref_iterator:
             if len(papers) >= self.max_papers:
                 break
             papers[paper.paper_id] = paper
@@ -117,6 +135,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             if self.fetch_references and paper.paper_id not in self.reference_cache:
                 refs = self._get_references(paper.paper_id)
                 paper.references = refs
+
+        if references and progress_enabled:
+            ref_iterator.close()
 
         # Step 3: Fetch citations (newer papers)
         remaining = self.max_papers - len(papers)
@@ -128,7 +149,22 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 seed.paper_id, limit=min(remaining, self.max_citations)
             )
 
-            for paper in citations:
+            if citations:
+                cit_iterator = (
+                    tqdm(
+                        citations,
+                        desc="Downloading citations",
+                        unit="papers",
+                        leave=False,
+                        dynamic_ncols=True,
+                    )
+                    if progress_enabled
+                    else citations
+                )
+            else:
+                cit_iterator = []
+
+            for paper in cit_iterator:
                 if len(papers) >= self.max_papers:
                     break
                 papers[paper.paper_id] = paper
@@ -137,6 +173,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 if self.fetch_references and paper.paper_id not in self.reference_cache:
                     refs = self._get_references(paper.paper_id)
                     paper.references = refs
+
+            if citations and progress_enabled:
+                cit_iterator.close()
 
         reference_lists = len(self.reference_cache)
         summary = (
