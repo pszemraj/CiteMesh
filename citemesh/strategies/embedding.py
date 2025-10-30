@@ -13,7 +13,7 @@ import numpy as np
 from datasets import load_dataset
 from joblib import Memory
 from sentence_transformers import SentenceTransformer
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from citemesh.api_client import get_client
 from citemesh.config import EMBEDDING_CONFIG
@@ -318,23 +318,36 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 last_exception = exc
                 continue
 
-            batch: List[Tuple[Dict, str]] = []
-            for idx, raw_record in enumerate(dataset):
-                if self.corpus_size and idx >= self.corpus_size:
-                    break
+            progress_total = self.corpus_size if self.corpus_size else None
+            with tqdm(
+                total=progress_total,
+                desc=f"Streaming {dataset_name}",
+                unit="papers",
+                dynamic_ncols=True,
+            ) as progress:
+                batch: List[Tuple[Dict, str]] = []
+                for idx, raw_record in enumerate(dataset):
+                    if self.corpus_size and idx >= self.corpus_size:
+                        break
 
-                metadata = self._extract_paper_metadata(raw_record, idx)
-                text = f"{metadata['title']}. {metadata['abstract']}"
-                batch.append((metadata, text))
+                    metadata = self._extract_paper_metadata(raw_record, idx)
+                    text = f"{metadata['title']}. {metadata['abstract']}"
+                    batch.append((metadata, text))
+                    progress.update(1)
 
-                if len(batch) >= STREAMING_BATCH_SIZE:
+                    if len(batch) >= STREAMING_BATCH_SIZE:
+                        self._process_stream_batch(
+                            batch, seed_embedding, heap, max_candidates
+                        )
+                        batch = []
+
+                if batch:
                     self._process_stream_batch(
                         batch, seed_embedding, heap, max_candidates
                     )
-                    batch = []
 
-            if batch:
-                self._process_stream_batch(batch, seed_embedding, heap, max_candidates)
+                if progress_total is None:
+                    progress.set_postfix_str(f"processed {progress.n}")
 
             if heap:
                 break  # Successfully collected candidates
