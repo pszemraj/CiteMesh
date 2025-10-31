@@ -13,7 +13,9 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 
-from citemesh.config import VIZ_CONFIG
+from citemesh.core import VIZ_CONFIG
+
+from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +71,7 @@ def _choose_metadata_anchor(
 
 
 def add_metadata_box(
-    ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.ndarray]
+    ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.ndarray], theme: Theme
 ) -> None:
     """
     Render a small metadata block in the plot corner.
@@ -105,6 +107,9 @@ def add_metadata_box(
 
     x, y, ha, va = _choose_metadata_anchor(pos)
 
+    facecolor = "#2d3748" if theme.name == "dark" else "#ffffff"
+    text_color = "#f0f0f0" if theme.name == "dark" else theme.text_color
+
     ax.text(
         x,
         y,
@@ -113,8 +118,10 @@ def add_metadata_box(
         fontsize=8,
         ha=ha,
         va=va,
-        bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8, linewidth=0),
-        color="#2d3748",
+        bbox=dict(
+            boxstyle="round,pad=0.4", facecolor=facecolor, alpha=0.8, linewidth=0
+        ),
+        color=text_color,
     )
 
 
@@ -175,7 +182,7 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
 
 
 def compute_node_colors(
-    graph: nx.Graph, seed_id: str
+    graph: nx.Graph, seed_id: str, theme: Theme
 ) -> Tuple[List[Tuple[float, float, float]], int, int]:
     """
     Compute smooth color gradient by publication year.
@@ -194,13 +201,18 @@ def compute_node_colors(
 
     colors = []
     for node in nodes:
-        # Seed paper gets special red color
+        # Seed paper gets special color
         if node == seed_id:
-            colors.append(VIZ_CONFIG.seed_color)
+            colors.append(theme.seed_color)
             continue
 
         year = graph.nodes[node].get("year", 2020)
-        color = VIZ_CONFIG.compute_node_color(year, min_year, max_year)
+        if max_year == min_year:
+            norm = 0.5
+        else:
+            norm = (year - min_year) / (max_year - min_year)
+
+        color = theme.interpolate(norm)
         colors.append(color)
 
     return colors, min_year, max_year
@@ -246,7 +258,7 @@ def compute_layout(graph: nx.Graph, iterations: int = 100) -> Dict[str, np.ndarr
     return pos
 
 
-def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict) -> None:
+def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict, theme: Theme) -> None:
     """
     Draw edges with varying thickness and opacity based on weight.
 
@@ -268,7 +280,7 @@ def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict) -> None:
         ax.plot(
             [p1[0], p2[0]],
             [p1[1], p2[1]],
-            color=VIZ_CONFIG.edge_base_color,
+            color=theme.edge_color,
             alpha=alpha,
             linewidth=width,
             zorder=1,
@@ -281,6 +293,7 @@ def draw_nodes(
     pos: Dict,
     sizes: List[float],
     colors: List[Tuple[float, float, float]],
+    theme: Theme,
 ) -> None:
     """
     Draw nodes with computed sizes and colors.
@@ -302,13 +315,15 @@ def draw_nodes(
             s=sizes[i],
             c=[colors[i]],
             alpha=0.9,
-            edgecolors="white",
+            edgecolors=theme.text_color,
             linewidth=2,
             zorder=2,
         )
 
 
-def draw_labels(ax: plt.Axes, graph: nx.Graph, pos: Dict, seed_id: str) -> None:
+def draw_labels(
+    ax: plt.Axes, graph: nx.Graph, pos: Dict, seed_id: str, theme: Theme
+) -> None:
     """
     Draw paper labels in "Author, Year" format.
 
@@ -345,7 +360,7 @@ def draw_labels(ax: plt.Axes, graph: nx.Graph, pos: Dict, seed_id: str) -> None:
             va="top",
             fontsize=fontsize,
             fontweight=fontweight,
-            color="#2d3748",
+            color=theme.text_color,
         )
 
 
@@ -356,6 +371,7 @@ def visualize_graph(
     iterations: int = 100,
     dpi: int = None,
     metadata: Optional[Dict[str, Any]] = None,
+    theme_name: str = "light",
 ) -> None:
     """
     Create CiteMesh visualization.
@@ -380,32 +396,39 @@ def visualize_graph(
     if dpi is None:
         dpi = VIZ_CONFIG.dpi
 
+    theme = get_theme(theme_name)
+
     # Compute layout
     pos = compute_layout(graph, iterations)
 
     # Compute visual properties
     sizes = compute_node_sizes(graph)
-    colors, min_year, max_year = compute_node_colors(graph, seed_id)
+    colors, _, _ = compute_node_colors(graph, seed_id, theme)
 
     # Create figure
-    fig, ax = plt.subplots(
-        figsize=VIZ_CONFIG.figure_size, facecolor=VIZ_CONFIG.background_color
-    )
+    fig, ax = plt.subplots(figsize=VIZ_CONFIG.figure_size, facecolor=theme.background)
     ax.set_aspect("equal")
     ax.axis("off")
+    fig.patch.set_facecolor(theme.background)
+    ax.set_facecolor(theme.background)
 
     # Draw graph components
-    draw_edges(ax, graph, pos)
-    draw_nodes(ax, graph, pos, sizes, colors)
-    draw_labels(ax, graph, pos, seed_id)
+    draw_edges(ax, graph, pos, theme)
+    draw_nodes(ax, graph, pos, sizes, colors, theme)
+    draw_labels(ax, graph, pos, seed_id, theme)
 
     # Add title
     title = graph.nodes[seed_id].get("title", "Unknown")[:60]
-    ax.set_title(f"CiteMesh Visualization: {title}...", fontsize=14, pad=20)
+    ax.set_title(
+        f"CiteMesh Visualization: {title}...",
+        fontsize=14,
+        pad=20,
+        color=theme.text_color,
+    )
 
     # Add metadata annotation if requested **after** title so we can reference it
     if metadata:
-        add_metadata_box(ax, metadata, pos)
+        add_metadata_box(ax, metadata, pos, theme)
 
     # Save figure
     plt.tight_layout()
@@ -413,7 +436,7 @@ def visualize_graph(
         output_path,
         dpi=dpi,
         bbox_inches="tight",
-        facecolor=VIZ_CONFIG.background_color,
+        facecolor=theme.background,
     )
     plt.close()
 

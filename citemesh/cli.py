@@ -18,7 +18,11 @@ from rich.logging import RichHandler
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
-from citemesh.visualization import generate_output_path, visualize_graph
+from citemesh.visualization import (
+    GraphExporter,
+    generate_output_path,
+    visualize_graph,
+)
 
 console = Console(stderr=True)
 logging.basicConfig(
@@ -36,6 +40,8 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+EXPORT_FORMATS = ("png", "html", "plotly", "json", "graphml")
 
 
 def build_citation_graph(args):
@@ -62,6 +68,7 @@ def build_embedding_graph(args):
         corpus_size=args.corpus_size,
         top_k=args.top_k,
         random_seed=args.seed,
+        use_streaming=args.streaming,
     )
 
     graph, seed_id = builder.build_graph(args.paper_id)
@@ -137,6 +144,21 @@ Examples:
         type=str,
         default=None,
         help="Output PNG file path (auto-named if not specified)",
+    )
+
+    build_parser.add_argument(
+        "--export",
+        "-e",
+        choices=["png", "html", "plotly", "json", "graphml", "all"],
+        default="png",
+        help="Export format (default: png)",
+    )
+
+    build_parser.add_argument(
+        "--theme",
+        choices=["light", "dark", "solarized", "auto"],
+        default="light",
+        help="Visualization theme to use",
     )
 
     build_parser.add_argument(
@@ -234,6 +256,12 @@ Examples:
         help="Top-k neighbors per node (default: 2)",
     )
 
+    embedding_group.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Stream HuggingFace dataset instead of loading it into memory",
+    )
+
     # Hybrid strategy arguments
     hybrid_group = build_parser.add_argument_group("hybrid strategy options")
     hybrid_group.add_argument(
@@ -264,15 +292,56 @@ Examples:
                 logger.error(f"Unknown strategy: {args.strategy}")
                 sys.exit(1)
 
-            # Determine output path
+            # Determine output paths
             if args.output:
-                output_path = Path(args.output)
+                base_output_path = Path(args.output)
             else:
-                output_path = generate_output_path(graph, seed_id)
+                base_output_path = generate_output_path(graph, seed_id)
 
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_dir = base_output_path.parent
+            if output_dir and not output_dir.exists():
+                output_dir.mkdir(parents=True, exist_ok=True)
 
-            # Visualize
+            selected_formats = (
+                list(EXPORT_FORMATS) if args.export == "all" else [args.export]
+            )
+
+            extension_map = {
+                "png": ".png",
+                "html": ".html",
+                "plotly": ".plotly.html",
+                "json": ".json",
+                "graphml": ".graphml",
+            }
+
+            explicit_suffix = base_output_path.suffix.lower()
+            base_name = (
+                base_output_path.stem
+                if base_output_path.suffix
+                else base_output_path.name
+            )
+
+            output_paths = {}
+            for fmt in selected_formats:
+                ext = extension_map[fmt]
+
+                if args.output and len(selected_formats) == 1:
+                    if base_output_path.suffix and (
+                        base_output_path.name.endswith(ext) or ext == explicit_suffix
+                    ):
+                        path = base_output_path
+                    elif base_output_path.suffix:
+                        path = output_dir / f"{base_name}{ext}"
+                    else:
+                        path = base_output_path.with_name(
+                            f"{base_output_path.name}{ext}"
+                        )
+                else:
+                    path = output_dir / f"{base_name}{ext}"
+
+                output_paths[fmt] = path
+
+            # Visualize / export
             logger.info("Creating visualization...")
             metadata = {
                 "paper_id": args.paper_id,
@@ -281,18 +350,44 @@ Examples:
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "nodes": graph.number_of_nodes(),
                 "edges": graph.number_of_edges(),
+                "theme": args.theme,
             }
 
-            visualize_graph(
+            exporter = GraphExporter(
                 graph,
                 seed_id,
-                output_path,
-                iterations=args.iterations,
-                dpi=args.dpi,
                 metadata=metadata,
+                theme_name=args.theme,
             )
 
-            logger.info(f"✓ Graph saved to {output_path}")
+            if "png" in output_paths:
+                visualize_graph(
+                    graph,
+                    seed_id,
+                    output_paths["png"],
+                    iterations=args.iterations,
+                    dpi=args.dpi,
+                    metadata=metadata,
+                    theme_name=args.theme,
+                )
+                logger.info(f"✓ PNG saved to {output_paths['png']}")
+
+            if "html" in output_paths:
+                exporter.to_interactive_html(output_paths["html"], theme=args.theme)
+                logger.info(f"✓ Interactive HTML saved to {output_paths['html']}")
+
+            if "plotly" in output_paths:
+                exporter.to_plotly_html(output_paths["plotly"], theme=args.theme)
+                logger.info(f"✓ Plotly HTML saved to {output_paths['plotly']}")
+
+            if "json" in output_paths:
+                exporter.to_json(output_paths["json"])
+                logger.info(f"✓ Graph JSON saved to {output_paths['json']}")
+
+            if "graphml" in output_paths:
+                exporter.to_graphml(output_paths["graphml"])
+                logger.info(f"✓ GraphML saved to {output_paths['graphml']}")
+
             logger.info(
                 f"  Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}"
             )

@@ -95,23 +95,27 @@ class TestCLIExecution:
     @pytest.mark.slow
     def test_citation_no_references_faster(self):
         """Test --no-references flag works and is faster."""
-        result = subprocess.run(
-            [
-                "citemesh",
-                "build",
-                "arxiv:1810.04805",
-                "--strategy",
-                "citation",
-                "-p",
-                "5",
-                "--no-references",
-                "--seed",
-                "99",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "test_cli_no_refs.png"
+            result = subprocess.run(
+                [
+                    "citemesh",
+                    "build",
+                    "arxiv:1810.04805",
+                    "--strategy",
+                    "citation",
+                    "-p",
+                    "5",
+                    "--no-references",
+                    "--seed",
+                    "99",
+                    "-o",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
         # May timeout due to S2 API rate limits, skip in that case
         if result.returncode == 0:
             assert "0 with reference lists" in result.stdout
@@ -119,26 +123,30 @@ class TestCLIExecution:
     @pytest.mark.slow
     def test_embedding_strategy_runs(self):
         """Test embedding strategy with tiny dataset."""
-        result = subprocess.run(
-            [
-                "citemesh",
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "embedding",
-                "-p",
-                "5",
-                "--dataset-split",
-                "train[:100]",  # Tiny for speed
-                "--seed",
-                "42",
-                "-m",
-                "all-MiniLM-L6-v2",  # Fast model
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "test_cli_embedding.png"
+            result = subprocess.run(
+                [
+                    "citemesh",
+                    "build",
+                    "arxiv:1706.03762",
+                    "--strategy",
+                    "embedding",
+                    "-p",
+                    "5",
+                    "--dataset-split",
+                    "train[:100]",  # Tiny for speed
+                    "--seed",
+                    "42",
+                    "-m",
+                    "all-MiniLM-L6-v2",  # Fast model
+                    "-o",
+                    str(output),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
         # May fail due to S2 API rate limits, but should not crash
         if result.returncode == 0:
             assert "Computing corpus embeddings" in result.stdout
