@@ -46,6 +46,8 @@ When `--export all` is used, CiteMesh writes every supported format using consis
 - `--corpus-size`: maximum number of papers to load from dataset
 - `--top-k`, `-k`: number of edges to keep per node (top semantic neighbors)
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards (disabled by default)
+  
+  _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts and keeps activations in float32.
 
 ### Hybrid Strategy
 

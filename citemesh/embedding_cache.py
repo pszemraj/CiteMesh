@@ -8,7 +8,7 @@ import hashlib
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Callable, Dict, Iterable, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -51,6 +51,7 @@ class EmbeddingCache:
         model,
         batch_size: int = 32,
         show_progress: bool = True,
+        text_builder: Optional[Callable[[Dict[str, object]], str]] = None,
     ) -> Dict[str, np.ndarray]:
         """
         Return embeddings for provided papers, computing only the missing ones.
@@ -66,6 +67,7 @@ class EmbeddingCache:
 
         cached_embeddings: Dict[str, np.ndarray] = {}
         papers_to_embed: list[Tuple[str, Dict, str]] = []
+        builder = text_builder or _build_text
 
         items = list(papers.items())
         progress_enabled = show_progress and sys.stderr.isatty() and len(items) > 50
@@ -77,7 +79,7 @@ class EmbeddingCache:
             cursor = conn.cursor()
 
             for paper_id, metadata in iterator:
-                text = _build_text(metadata)
+                text = builder(metadata)
                 text_hash = self._text_hash(text)
 
                 row = cursor.execute(
@@ -96,7 +98,7 @@ class EmbeddingCache:
             if not papers_to_embed:
                 return cached_embeddings
 
-            texts = [_build_text(meta) for _, meta, _ in papers_to_embed]
+            texts = [builder(meta) for _, meta, _ in papers_to_embed]
             embeddings_array = model.encode(
                 texts,
                 batch_size=batch_size,

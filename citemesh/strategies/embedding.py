@@ -20,6 +20,7 @@ from citemesh.api_client import get_client
 from citemesh.cache_utils import get_cache_dir
 from citemesh.config import EMBEDDING_CONFIG
 from citemesh.embedding_cache import EmbeddingCache
+from citemesh.embedding_models import get_embedding_model_profile
 from citemesh.models import Author, Paper
 from citemesh.strategies.base import GraphBuilderStrategy
 
@@ -137,12 +138,21 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.client = get_client()
         self.embedding_cache = EmbeddingCache(model_name=model_name)
         self.use_streaming = use_streaming
+        self.model_profile = get_embedding_model_profile(model_name)
+        self._profile_logged = False
 
     def _load_model(self):
         """Lazy load sentence transformer model."""
         if self.model is None:
             logger.info(f"Loading embedding model: {self.model_name}")
             self.model = SentenceTransformer(self.model_name)
+            if not self.model_profile.float16_supported:
+                logger.info(
+                    f"{self.model_name} does not support float16 activations; defaulting to float32."
+                )
+            if self.model_profile.notes and not self._profile_logged:
+                logger.info(self.model_profile.notes)
+                self._profile_logged = True
 
     def _load_corpus(self):
         """Load ArXiv corpus if not already loaded."""
@@ -172,11 +182,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         # Try to get seed from Semantic Scholar first
         seed_paper = self.client.get_paper(seed_id)
 
+        seed_metadata: Dict[str, str] = {}
+
         if seed_paper:
             # Found via S2 API
             seed_paper.is_seed = True
             papers[seed_paper.paper_id] = seed_paper
-            seed_text = f"{seed_paper.title}. {seed_paper.abstract}"
+            seed_title = (seed_paper.title or "").strip()
+            seed_abstract = (seed_paper.abstract or "").strip()
+            pieces = [part for part in (seed_title, seed_abstract) if part]
+            seed_text = ". ".join(pieces) if pieces else seed_id
+            seed_metadata = {
+                "title": seed_title,
+                "abstract": seed_abstract,
+            }
         else:
             # Treat as text query
             logger.info(f"Using '{seed_id}' as text query")
@@ -184,11 +203,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             # Create dummy seed paper
             seed_paper = Paper(paper_id="query", title=seed_id, year=2020, is_seed=True)
             papers["query"] = seed_paper
+            seed_metadata = {"title": seed_id, "abstract": ""}
 
         # Compute normalized seed embedding
         logger.info("Computing seed embedding...")
+        formatted_seed_text = self.model_profile.format_query(
+            seed_text, seed_metadata
+        )
         seed_embedding = self.model.encode(
-            [seed_text],
+            [formatted_seed_text],
             convert_to_tensor=False,
             normalize_embeddings=True,
             show_progress_bar=False,
@@ -265,6 +288,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.model,
             batch_size=STREAMING_BATCH_SIZE,
             show_progress=sys.stderr.isatty(),
+            text_builder=self.model_profile.format_document,
         )
 
         if not embeddings_dict:
@@ -336,14 +360,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 dynamic_ncols=True,
                 disable=not progress_enabled,
             ) as progress:
-                batch: List[Tuple[Dict, str]] = []
+                batch: List[Dict] = []
                 for idx, raw_record in enumerate(dataset):
                     if self.corpus_size and idx >= self.corpus_size:
                         break
 
                     metadata = self._extract_paper_metadata(raw_record, idx)
-                    text = f"{metadata['title']}. {metadata['abstract']}"
-                    batch.append((metadata, text))
+                    batch.append(metadata)
                     progress.update(1)
 
                     if len(batch) >= STREAMING_BATCH_SIZE:
@@ -378,7 +401,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
     def _process_stream_batch(
         self,
-        batch: List[Tuple[Dict, str]],
+        batch: List[Dict],
         seed_embedding: np.ndarray,
         heap: List[Tuple[float, str, Dict, np.ndarray]],
         max_candidates: int,
@@ -387,23 +410,25 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         Encode a batch of records and push to candidate heap.
 
         Args:
-            batch: List of (metadata, text) tuples
+            batch: List of metadata dictionaries
             seed_embedding: Normalized seed embedding vector
             heap: Min-heap storing top candidates
             max_candidates: Maximum heap size
         """
-        batch_map = {metadata["paper_id"]: metadata for metadata, _ in batch}
+        batch_map = {metadata["paper_id"]: metadata for metadata in batch}
         embeddings = self.embedding_cache.get_embeddings(
             batch_map,
             self.model,
             batch_size=len(batch_map) or STREAMING_BATCH_SIZE,
             show_progress=False,
+            text_builder=self.model_profile.format_document,
         )
 
-        for metadata, _ in batch:
-            embedding = embeddings.get(metadata["paper_id"])
-            if embedding is None:
+        for metadata in batch:
+            raw_embedding = embeddings.get(metadata["paper_id"])
+            if raw_embedding is None:
                 continue
+            embedding = np.asarray(raw_embedding, dtype=np.float32)
 
             similarity = float(np.dot(seed_embedding, embedding))
             candidate = (similarity, metadata["paper_id"], metadata, embedding)
