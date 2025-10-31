@@ -14,8 +14,7 @@ import networkx as nx
 import numpy as np
 import torch
 
-from citemesh.config import TEMPORAL_CONFIG
-from citemesh.models import Paper
+from citemesh.core import TEMPORAL_CONFIG, Paper
 
 
 class GraphBuilderStrategy(ABC):
