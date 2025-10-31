@@ -1,6 +1,6 @@
 # Paper Graph Visualizer (CiteMesh)
 
-A tool for creating Connected Papers-style citation graph visualizations from academic papers using multiple approaches: citation networks, semantic embeddings, and hybrid intelligence. Generates mesh-like similarity graphs that reveal research relationships through bibliographic coupling, co-citation analysis, and content similarity.
+A tool for creating CiteMesh citation graph visualizations from academic papers using multiple approaches: citation networks, semantic embeddings, and hybrid intelligence. Generates mesh-like similarity graphs that reveal research relationships through bibliographic coupling, co-citation analysis, and content similarity.
 
 ## Features
 
@@ -8,7 +8,7 @@ A tool for creating Connected Papers-style citation graph visualizations from ac
   - `citation`: Citation-based similarity with **real bibliographic coupling** (shared references)
   - `embedding`: Semantic similarity using sentence transformers
   - `hybrid`: Intelligent combination of both approaches
-- **Connected Papers-style mesh visualization**: Papers connected by multiple similarity metrics
+- **CiteMesh visualization**: Papers connected by multiple similarity metrics
 - **Real bibliographic coupling**: Uses actual shared references (not simulated)
 - Build from any paper using DOI, arXiv ID, or Semantic Scholar ID
 - Direct matplotlib PNG output with auto-naming from paper titles
@@ -83,7 +83,7 @@ Output files are auto-named from paper titles and saved to `out/` directory.
 
 ### Algorithm Overview
 
-The visualizers implement enhanced versions of the Connected Papers algorithm:
+The visualizers implement enhanced versions of classical citation-network algorithms augmented with embeddings:
 
 #### Citation Strategy
 1. **Paper Collection**: Fetches seed paper's citations and references
@@ -157,7 +157,7 @@ The visualizers implement enhanced versions of the Connected Papers algorithm:
 ## Output
 
 Generates a PNG image (auto-named from paper title) with:
-- Connected Papers-style mesh visualization
+- CiteMesh visualization
 - ~40 most relevant papers
 - Dense connectivity (typically 500-800 edges)
 - Organic clustering showing research relationships
@@ -166,7 +166,7 @@ Generates a PNG image (auto-named from paper title) with:
 
 ## Example Output
 
-The visualization creates a mesh similar to Connected Papers with:
+The visualization creates a CiteMesh network with:
 - Central seed paper (your searched paper)
 - Surrounding papers positioned by similarity
 - Dense mesh of edges between related papers
@@ -176,7 +176,7 @@ The visualization creates a mesh similar to Connected Papers with:
 ## Architecture
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed algorithm documentation including:
-- Connected Papers algorithm analysis and implementation
+- Citation-network analysis and implementation notes
 - Co-citation and bibliographic coupling theory
 - Multi-factor similarity calculations
 - Comparison of three approaches (citation, embedding, hybrid)

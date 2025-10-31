@@ -1,8 +1,8 @@
-# Connected Papers Architecture Analysis
+# CiteMesh Architecture Analysis
 
 ## Latest Implementation Status (2025-09-25)
 
-This repository now contains three distinct approaches to creating Connected Papers-style visualizations, each with different strengths:
+This repository now contains three distinct approaches to creating CiteMesh visualizations, each with different strengths:
 
 1. **citation_graph.py**: Pure citation-based similarity with co-citation patterns
 2. **embedding_similarity.py**: Semantic similarity using sentence transformers
@@ -23,7 +23,7 @@ This repository now contains three distinct approaches to creating Connected Pap
 
 ### Why This Layout Emerges (Not Random!)
 
-Connected Papers doesn't use traditional citation trees. Instead:
+Citation meshes don't use traditional citation trees. Instead:
 
 1. **Similarity Graph** (not citation graph):
    - Edges represent similarity, NOT direct citations
@@ -254,7 +254,7 @@ for node in pos:
 
 ## Key Insights
 
-1. **Connected Papers is NOT a citation tree visualizer** - it's a similarity graph
+1. **CiteMesh is NOT a citation tree visualizer** - it's a similarity graph
 2. **The layout is data-driven** - clustering emerges from actual paper relationships
 3. **Limited scope is intentional** - ~40 papers is optimal for readability
 4. **Seed paper is special** - it's the user's query, not just another node

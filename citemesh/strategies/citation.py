@@ -190,7 +190,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         """
         Compute similarity using temporal, citation, and bibliographic factors.
 
-        This implements the real Connected Papers algorithm:
+        This implements the bibliography overlap scoring used in citation meshes:
         - Temporal proximity (with strong penalties for distant papers)
         - Citation impact similarity (log scale)
         - Bibliographic coupling (shared references)
@@ -235,7 +235,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         """
         Decide whether to create edge based on similarity and sparsity goals.
 
-        Implements selective edge creation to match Connected Papers sparsity:
+        Implements selective edge creation to match CiteMesh sparsity:
         - Seed connects to highly similar papers
         - Other papers connect only if very similar and probabilistically
 

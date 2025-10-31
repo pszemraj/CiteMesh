@@ -1,7 +1,7 @@
 """
 Unified graph visualization for CiteMesh.
 
-This module provides a single implementation of the Connected Papers-style
+This module provides a single implementation of the CiteMesh-style
 visualization that all strategies can use, eliminating code duplication.
 """
 
@@ -18,7 +18,9 @@ from citemesh.config import VIZ_CONFIG
 logger = logging.getLogger(__name__)
 
 
-def _choose_metadata_anchor(pos: Dict[str, np.ndarray]) -> Tuple[float, float, str, str]:
+def _choose_metadata_anchor(
+    pos: Dict[str, np.ndarray],
+) -> Tuple[float, float, str, str]:
     """
     Choose which corner to place the metadata box in based on node density.
 
@@ -66,7 +68,9 @@ def _choose_metadata_anchor(pos: Dict[str, np.ndarray]) -> Tuple[float, float, s
     return x, y, ha, va
 
 
-def add_metadata_box(ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.ndarray]) -> None:
+def add_metadata_box(
+    ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.ndarray]
+) -> None:
     """
     Render a small metadata block in the plot corner.
 
@@ -116,7 +120,7 @@ def add_metadata_box(ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.n
 
 def compute_node_sizes(graph: nx.Graph) -> List[float]:
     """
-    Compute node sizes with extreme variation matching Connected Papers style.
+    Compute node sizes with extreme variation matching CiteMesh style.
 
     Args:
         graph: NetworkX graph with paper nodes
@@ -354,7 +358,7 @@ def visualize_graph(
     metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Create Connected Papers-style visualization.
+    Create CiteMesh visualization.
 
     This is the unified visualization function used by all strategies.
 
@@ -397,7 +401,7 @@ def visualize_graph(
 
     # Add title
     title = graph.nodes[seed_id].get("title", "Unknown")[:60]
-    ax.set_title(f"Connected Papers Style: {title}...", fontsize=14, pad=20)
+    ax.set_title(f"CiteMesh Visualization: {title}...", fontsize=14, pad=20)
 
     # Add metadata annotation if requested **after** title so we can reference it
     if metadata:

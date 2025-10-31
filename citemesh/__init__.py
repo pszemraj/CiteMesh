@@ -1,5 +1,5 @@
 """
-CiteMesh: Connected Papers-style citation graph visualization.
+CiteMesh: Citation mesh visualization toolkit.
 
 A unified package for creating academic paper similarity graphs using
 multiple strategies: citation networks, semantic embeddings, or hybrid approaches.

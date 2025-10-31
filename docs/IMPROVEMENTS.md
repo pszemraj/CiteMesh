@@ -1,4 +1,4 @@
-# Improvements to Match Connected Papers
+# Improvements over Traditional Citation Meshes
 
 ## Current Status (improved-alg branch)
 
@@ -8,7 +8,7 @@
 
 **Implemented**: Papers now use actual shared references for similarity calculation
 
-- Using Connected Papers formula: `intersection / sqrt(|A| * |B|)`
+- Using the bibliography overlap formula popularized by citation meshes: `intersection / sqrt(|A| * |B|)`
 - Fetching reference lists for seed and first 10 papers
 - 70% bibliographic coupling weight, 30% temporal similarity
 
@@ -104,7 +104,7 @@ def find_derivative_works(graph_papers):
 
 ## Key Remaining Gaps
 
-1. **API Constraints**: Can't fetch 50,000 papers like real Connected Papers
+1. **API Constraints**: Can't fetch 50,000 papers like commercial citation tools
 2. **Reference Fetching**: Timeouts prevent getting refs for all papers
 3. **Co-citation**: Not implemented due to API limits
 4. **Year Bias**: Getting mostly 2025 papers from citations (this is correct - newer papers citing the 2017 Transformer)

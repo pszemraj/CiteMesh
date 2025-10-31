@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CiteMesh: Unified CLI for Connected Papers-style visualizations.
+CiteMesh: Unified CLI for CiteMesh visualizations.
 
 This is the main entry point for the refactored CiteMesh package,
 providing a single interface to all graph building strategies.
@@ -87,7 +87,7 @@ def build_hybrid_graph(args):
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="CiteMesh: Create Connected Papers-style citation graphs",
+        description="CiteMesh: Create citation graph visualizations",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
