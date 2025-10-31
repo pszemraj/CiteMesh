@@ -70,6 +70,38 @@ def _choose_metadata_anchor(
     return x, y, ha, va
 
 
+def _match_aspect_ratio(pos: Dict[str, np.ndarray], target_ratio: float) -> None:
+    """Adjust coordinates to better match the target aspect ratio."""
+
+    if not pos or target_ratio <= 0:
+        return
+
+    xs = np.array([coords[0] for coords in pos.values()])
+    ys = np.array([coords[1] for coords in pos.values()])
+
+    width = xs.max() - xs.min()
+    height = ys.max() - ys.min()
+
+    if width <= 0 or height <= 0:
+        return
+
+    current_ratio = width / height
+    if np.isclose(current_ratio, target_ratio, rtol=0.05):
+        return
+
+    center_x = (xs.max() + xs.min()) / 2.0
+    center_y = (ys.max() + ys.min()) / 2.0
+
+    if current_ratio < target_ratio:
+        scale = target_ratio / current_ratio
+        for node, coords in pos.items():
+            coords[0] = center_x + (coords[0] - center_x) * scale
+    else:
+        scale = current_ratio / target_ratio
+        for node, coords in pos.items():
+            coords[1] = center_y + (coords[1] - center_y) * scale
+
+
 def add_metadata_box(
     ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.ndarray], theme: Theme
 ) -> None:
@@ -83,7 +115,6 @@ def add_metadata_box(
     lines = []
     label_map = {
         "paper_id": "Query",
-        "seed_id": "Seed",
         "strategy": "Strategy",
         "timestamp": "Generated",
         "nodes": "Nodes",
@@ -97,7 +128,7 @@ def add_metadata_box(
 
     # Include any extra metadata fields not in the predefined map
     for key, value in metadata.items():
-        if key not in label_map and value is not None:
+        if key not in label_map and key not in {"seed_id", "theme"} and value is not None:
             lines.append(f"{key.replace('_', ' ').title()}: {value}")
 
     if not lines:
@@ -254,6 +285,10 @@ def compute_layout(graph: nx.Graph, iterations: int = 100) -> Dict[str, np.ndarr
     # Add small random perturbations for organic look
     for node in pos:
         pos[node] += np.random.normal(0, VIZ_CONFIG.perturbation_std, 2)
+
+    _match_aspect_ratio(
+        pos, target_ratio=VIZ_CONFIG.figure_size[0] / VIZ_CONFIG.figure_size[1]
+    )
 
     return pos
 

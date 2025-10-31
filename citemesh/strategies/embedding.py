@@ -15,6 +15,7 @@ from datasets import load_dataset
 from joblib import Memory
 from sentence_transformers import SentenceTransformer
 from tqdm.auto import tqdm
+import torch
 
 from citemesh.core import EMBEDDING_CONFIG, Author, Paper
 from citemesh.data import EmbeddingCache, get_cache_dir, get_embedding_model_profile
@@ -142,11 +143,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """Lazy load sentence transformer model."""
         if self.model is None:
             logger.info(f"Loading embedding model: {self.model_name}")
-            self.model = SentenceTransformer(self.model_name)
-            if not self.model_profile.float16_supported:
-                logger.info(
-                    f"{self.model_name} does not support float16 activations; defaulting to float32."
-                )
+
+            model_kwargs = None
+            dtype_name = None
+
+            if self.model_profile.preferred_dtype:
+                preferred = self.model_profile.preferred_dtype.lower()
+                if preferred == "bfloat16" and torch.cuda.is_available():
+                    model_kwargs = {"torch_dtype": torch.bfloat16}
+                    dtype_name = "bfloat16"
+                elif preferred == "bfloat16":
+                    logger.info(
+                        "Requested bfloat16 precision but CUDA is unavailable; using float32."
+                    )
+
+            self.model = SentenceTransformer(
+                self.model_name, model_kwargs=model_kwargs
+            )
+
+            if dtype_name:
+                logger.info(f"Using {dtype_name} precision for {self.model_name}.")
+
             if self.model_profile.notes and not self._profile_logged:
                 logger.info(self.model_profile.notes)
                 self._profile_logged = True

@@ -120,8 +120,9 @@ class VisualizationConfig:
     """Configuration for graph visualization."""
 
     # Figure settings
-    figure_size: Tuple[int, int] = (12, 10)
-    dpi: int = 150
+    # Default output size: 1440px tall at 200 DPI with golden-ratio width.
+    figure_size: Tuple[float, float] = (11.65, 7.2)
+    dpi: int = 200
     background_color: str = "#fafafa"
 
     # Node size parameters (in square pixels)
