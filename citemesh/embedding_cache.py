@@ -65,8 +65,8 @@ class EmbeddingCache:
 
         items = list(papers.items())
         progress_enabled = show_progress and sys.stderr.isatty() and len(items) > 50
-        iterator: Iterable[Tuple[str, Dict]] = (
-            tqdm(items, desc="Checking cache", unit="papers", disable=not progress_enabled)
+        iterator: Iterable[Tuple[str, Dict]] = tqdm(
+            items, desc="Checking cache", unit="papers", disable=not progress_enabled
         )
 
         with sqlite3.connect(self.db_path) as conn, h5py.File(self.h5_path, "a") as h5:

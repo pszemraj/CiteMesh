@@ -16,7 +16,11 @@ import networkx as nx
 
 from citemesh.models import Paper
 from citemesh.themes import Theme, get_theme
-from citemesh.visualization import compute_layout, compute_node_colors, compute_node_sizes
+from citemesh.visualization import (
+    compute_layout,
+    compute_node_colors,
+    compute_node_sizes,
+)
 
 
 class GraphExporter:
@@ -46,7 +50,10 @@ class GraphExporter:
         data = {
             "metadata": self.metadata,
             "seed_id": self.seed_id,
-            "nodes": [self._serialize_node(node, attrs) for node, attrs in self.graph.nodes(data=True)],
+            "nodes": [
+                self._serialize_node(node, attrs)
+                for node, attrs in self.graph.nodes(data=True)
+            ],
             "edges": [
                 {
                     "source": u,
@@ -72,7 +79,9 @@ class GraphExporter:
             export_graph.add_node(node, **cleaned)
 
         for u, v, data in self.graph.edges(data=True):
-            export_graph.add_edge(u, v, **{k: float(v) if k == "weight" else v for k, v in data.items()})
+            export_graph.add_edge(
+                u, v, **{k: float(v) if k == "weight" else v for k, v in data.items()}
+            )
 
         nx.write_graphml(export_graph, path)
 
@@ -145,7 +154,9 @@ class GraphExporter:
                     cats = ", ".join(html.escape(cat) for cat in paper.categories[:3])
                     tooltip_lines.append(f"Categories: {cats}")
             else:
-                tooltip_lines.append(html.escape(self.graph.nodes[node].get("title", "")))
+                tooltip_lines.append(
+                    html.escape(self.graph.nodes[node].get("title", ""))
+                )
 
             net.add_node(
                 node,
@@ -195,9 +206,7 @@ class GraphExporter:
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
         node_years = [self.graph.nodes[node].get("year", 0) for node in node_ids]
         node_labels = [
-            self.graph.nodes[node]
-            .get("paper")
-            .label
+            self.graph.nodes[node].get("paper").label
             if self.graph.nodes[node].get("paper")
             else self.graph.nodes[node].get("title", node)
             for node in node_ids
@@ -218,7 +227,9 @@ class GraphExporter:
                     )
                 )
             else:
-                hover_texts.append(html.escape(self.graph.nodes[node].get("title", node)))
+                hover_texts.append(
+                    html.escape(self.graph.nodes[node].get("title", node))
+                )
 
         node_trace = go.Scatter(
             x=node_x,

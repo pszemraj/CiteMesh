@@ -18,9 +18,9 @@ from tqdm.auto import tqdm
 
 from citemesh.api_client import get_client
 from citemesh.config import EMBEDDING_CONFIG
+from citemesh.embedding_cache import EmbeddingCache
 from citemesh.models import Author, Paper
 from citemesh.strategies.base import GraphBuilderStrategy
-from citemesh.embedding_cache import EmbeddingCache
 
 logger = logging.getLogger(__name__)
 
@@ -90,8 +90,6 @@ def load_arxiv_dataset_cached(
         }
 
     return papers
-
-
 
 
 class EmbeddingGraphBuilder(GraphBuilderStrategy):

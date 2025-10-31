@@ -27,9 +27,18 @@ class Theme:
 
     def interpolate(self, norm: float) -> Tuple[float, float, float]:
         """Linear interpolation between old and new node colors."""
-        r = self.node_color_old[0] + (self.node_color_new[0] - self.node_color_old[0]) * norm
-        g = self.node_color_old[1] + (self.node_color_new[1] - self.node_color_old[1]) * norm
-        b = self.node_color_old[2] + (self.node_color_new[2] - self.node_color_old[2]) * norm
+        r = (
+            self.node_color_old[0]
+            + (self.node_color_new[0] - self.node_color_old[0]) * norm
+        )
+        g = (
+            self.node_color_old[1]
+            + (self.node_color_new[1] - self.node_color_old[1]) * norm
+        )
+        b = (
+            self.node_color_old[2]
+            + (self.node_color_new[2] - self.node_color_old[2]) * norm
+        )
         return (r, g, b)
 
 
