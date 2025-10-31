@@ -17,6 +17,7 @@ from sentence_transformers import SentenceTransformer
 from tqdm.auto import tqdm
 
 from citemesh.api_client import get_client
+from citemesh.cache_utils import get_cache_dir
 from citemesh.config import EMBEDDING_CONFIG
 from citemesh.embedding_cache import EmbeddingCache
 from citemesh.models import Author, Paper
@@ -24,8 +25,8 @@ from citemesh.strategies.base import GraphBuilderStrategy
 
 logger = logging.getLogger(__name__)
 
-# Set up joblib cache
-memory = Memory("cache/joblib_cache", verbose=0)
+# Set up joblib cache in the user cache directory
+memory = Memory(str(get_cache_dir("joblib")), verbose=0)
 
 STREAMING_BATCH_SIZE = 32
 CANDIDATE_MULTIPLIER = 4

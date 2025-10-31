@@ -14,6 +14,8 @@ import h5py
 import numpy as np
 from tqdm.auto import tqdm
 
+from citemesh.cache_utils import get_cache_dir
+
 
 class EmbeddingCache:
     """
@@ -25,9 +27,11 @@ class EmbeddingCache:
 
     def __init__(
         self,
-        cache_dir: Path = Path("cache/embeddings"),
+        cache_dir: Optional[Path] = None,
         model_name: str = "google/embeddinggemma-300m",
     ):
+        if cache_dir is None:
+            cache_dir = get_cache_dir("embeddings")
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
