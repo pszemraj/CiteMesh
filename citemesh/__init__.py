@@ -5,7 +5,11 @@ A unified package for creating academic paper similarity graphs using
 multiple strategies: citation networks, semantic embeddings, or hybrid approaches.
 """
 
-__version__ = "2.0.0"
+try:
+    from ._version import version as __version__
+except ImportError:
+    __version__ = "0.0.dev0"
+
 __author__ = "CiteMesh Contributors"
 
 from citemesh.models import Author, Paper

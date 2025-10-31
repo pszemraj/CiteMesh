@@ -1,6 +1,7 @@
 # local files
 out/*
 cache/*
+citemesh/_version.py
 *.yaml
 !docs/config.yaml.example
 

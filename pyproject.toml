@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68.0.0", "wheel"]
+requires = ["setuptools>=68.0.0", "wheel", "setuptools-scm[toml]>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "citemesh"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Intuitive citation graph visualization with multiple similarity strategies"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -58,6 +58,11 @@ Issues = "https://github.com/yourusername/paper-graph-vis/issues"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["citemesh*"]
+
+[tool.setuptools_scm]
+write_to = "citemesh/_version.py"
+version_scheme = "no-guess-dev"
+local_scheme = "dirty-tag"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
