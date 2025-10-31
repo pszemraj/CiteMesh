@@ -7,7 +7,7 @@ visualization that all strategies can use, eliminating code duplication.
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -16,6 +16,102 @@ import numpy as np
 from citemesh.config import VIZ_CONFIG
 
 logger = logging.getLogger(__name__)
+
+
+def _choose_metadata_anchor(pos: Dict[str, np.ndarray]) -> Tuple[float, float, str, str]:
+    """
+    Choose which corner to place the metadata box in based on node density.
+
+    Args:
+        pos: Mapping of node -> position array
+
+    Returns:
+        Tuple of (x, y, horizontal_alignment, vertical_alignment) in axes coords.
+    """
+    if not pos:
+        return 0.02, 0.02, "left", "bottom"
+
+    coords = np.array(list(pos.values()))
+    xs = coords[:, 0]
+    ys = coords[:, 1]
+
+    min_x, max_x = xs.min(), xs.max()
+    min_y, max_y = ys.min(), ys.max()
+
+    span_x = max(max_x - min_x, 1e-6)
+    span_y = max(max_y - min_y, 1e-6)
+
+    norm_x = (xs - min_x) / span_x
+    norm_y = (ys - min_y) / span_y
+
+    corners = {
+        "lower_left": ((0.05, 0.05), "left", "bottom"),
+        "lower_right": ((0.95, 0.05), "right", "bottom"),
+        "upper_left": ((0.05, 0.95), "left", "top"),
+        "upper_right": ((0.95, 0.95), "right", "top"),
+    }
+
+    window = 0.22  # area around corner to gauge crowding
+    scores: Dict[str, float] = {}
+
+    for name, ((cx, cy), ha, va) in corners.items():
+        dist_x = np.abs(norm_x - cx)
+        dist_y = np.abs(norm_y - cy)
+        crowded = np.sum((dist_x < window) & (dist_y < window))
+        avg_distance = np.mean(dist_x + dist_y)
+        scores[name] = crowded + (1.0 - avg_distance)
+
+    best = min(scores, key=scores.get)
+    (x, y), ha, va = corners[best]
+    return x, y, ha, va
+
+
+def add_metadata_box(ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.ndarray]) -> None:
+    """
+    Render a small metadata block in the plot corner.
+
+    Args:
+        ax: Matplotlib axes
+        metadata: Dictionary of metadata key/value pairs
+    """
+    lines = []
+    label_map = {
+        "paper_id": "Query",
+        "seed_id": "Seed",
+        "strategy": "Strategy",
+        "timestamp": "Generated",
+        "nodes": "Nodes",
+        "edges": "Edges",
+    }
+
+    for key, label in label_map.items():
+        value = metadata.get(key)
+        if value is not None:
+            lines.append(f"{label}: {value}")
+
+    # Include any extra metadata fields not in the predefined map
+    for key, value in metadata.items():
+        if key not in label_map and value is not None:
+            lines.append(f"{key.replace('_', ' ').title()}: {value}")
+
+    if not lines:
+        return
+
+    text = "\n".join(lines)
+
+    x, y, ha, va = _choose_metadata_anchor(pos)
+
+    ax.text(
+        x,
+        y,
+        text,
+        transform=ax.transAxes,
+        fontsize=8,
+        ha=ha,
+        va=va,
+        bbox=dict(boxstyle="round,pad=0.4", facecolor="white", alpha=0.8, linewidth=0),
+        color="#2d3748",
+    )
 
 
 def compute_node_sizes(graph: nx.Graph) -> List[float]:
@@ -255,6 +351,7 @@ def visualize_graph(
     output_path: Path,
     iterations: int = 100,
     dpi: int = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Create Connected Papers-style visualization.
@@ -267,6 +364,7 @@ def visualize_graph(
         output_path: Path for output PNG file
         iterations: Number of layout iterations (higher = better quality)
         dpi: Output resolution (defaults to config value)
+        metadata: Optional info to annotate on the figure (auto-positioned)
 
     Visual Encodings:
         - Node size: Citation count + importance ranking (80-2500 pixels)
@@ -300,6 +398,10 @@ def visualize_graph(
     # Add title
     title = graph.nodes[seed_id].get("title", "Unknown")[:60]
     ax.set_title(f"Connected Papers Style: {title}...", fontsize=14, pad=20)
+
+    # Add metadata annotation if requested **after** title so we can reference it
+    if metadata:
+        add_metadata_box(ax, metadata, pos)
 
     # Save figure
     plt.tight_layout()

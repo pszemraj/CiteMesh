@@ -9,6 +9,7 @@ providing a single interface to all graph building strategies.
 import argparse
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
@@ -273,8 +274,22 @@ Examples:
 
             # Visualize
             logger.info("Creating visualization...")
+            metadata = {
+                "paper_id": args.paper_id,
+                "seed_id": seed_id,
+                "strategy": args.strategy,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "nodes": graph.number_of_nodes(),
+                "edges": graph.number_of_edges(),
+            }
+
             visualize_graph(
-                graph, seed_id, output_path, iterations=args.iterations, dpi=args.dpi
+                graph,
+                seed_id,
+                output_path,
+                iterations=args.iterations,
+                dpi=args.dpi,
+                metadata=metadata,
             )
 
             logger.info(f"✓ Graph saved to {output_path}")
