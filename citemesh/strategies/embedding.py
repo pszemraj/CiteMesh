@@ -20,6 +20,7 @@ from citemesh.api_client import get_client
 from citemesh.config import EMBEDDING_CONFIG
 from citemesh.models import Author, Paper
 from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.embedding_cache import EmbeddingCache
 
 logger = logging.getLogger(__name__)
 
@@ -91,26 +92,6 @@ def load_arxiv_dataset_cached(
     return papers
 
 
-@memory.cache
-def compute_embeddings_cached(texts: tuple, model_name: str) -> np.ndarray:
-    """
-    Compute and cache embeddings for texts.
-
-    Args:
-        texts: Tuple of texts (tuple for caching)
-        model_name: Model name for sentence transformer
-
-    Returns:
-        Numpy array of embeddings
-    """
-    model = SentenceTransformer(model_name)
-    embeddings = model.encode(
-        list(texts),
-        convert_to_tensor=False,
-        normalize_embeddings=True,
-        show_progress_bar=True,
-    )
-    return embeddings
 
 
 class EmbeddingGraphBuilder(GraphBuilderStrategy):
@@ -132,6 +113,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         corpus_size: Optional[int] = None,
         top_k: int = 2,
         random_seed: int = None,
+        use_streaming: bool = False,
     ):
         """
         Initialize embedding graph builder.
@@ -143,6 +125,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             corpus_size: Maximum papers to load from corpus (None = all in split)
             top_k: Number of most similar neighbors per node
             random_seed: Random seed for reproducibility
+            use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         """
         super().__init__(max_papers, random_seed)
         self.model_name = model_name
@@ -153,6 +136,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.arxiv_corpus: Dict[str, Dict] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
         self.client = get_client()
+        self.embedding_cache = EmbeddingCache(model_name=model_name)
+        self.use_streaming = use_streaming
 
     def _load_model(self):
         """Lazy load sentence transformer model."""
@@ -212,7 +197,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.embeddings[seed_paper.paper_id] = seed_embedding
 
         # Decide whether to use streaming based on split and corpus_size
-        use_streaming = ":" not in self.dataset_split and self.corpus_size is None
+        use_streaming = (
+            self.use_streaming
+            and ":" not in self.dataset_split
+            and self.corpus_size is None
+        )
 
         if use_streaming:
             logger.info(
@@ -267,25 +256,42 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not self.arxiv_corpus:
             return []
 
-        print("Computing corpus embeddings (cached)...")
+        print("Computing corpus embeddings (cache-enabled)...")
 
         corpus_items = list(self.arxiv_corpus.items())
-        corpus_texts = [
-            f"{metadata['title']}. {metadata['abstract']}"
-            for _, metadata in corpus_items
-        ]
+        metadata_map = {paper_id: metadata for paper_id, metadata in corpus_items}
 
-        embeddings_array = np.asarray(
-            compute_embeddings_cached(tuple(corpus_texts), self.model_name)
+        embeddings_dict = self.embedding_cache.get_embeddings(
+            metadata_map,
+            self.model,
+            batch_size=STREAMING_BATCH_SIZE,
+            show_progress=sys.stderr.isatty(),
         )
 
+        if not embeddings_dict:
+            return []
+
+        valid_items: List[Tuple[str, Dict]] = []
+        ordered_embeddings: List[np.ndarray] = []
+
+        for paper_id, metadata in corpus_items:
+            embedding = embeddings_dict.get(paper_id)
+            if embedding is None:
+                continue
+            valid_items.append((paper_id, metadata))
+            ordered_embeddings.append(np.asarray(embedding, dtype=np.float32))
+
+        if not ordered_embeddings:
+            return []
+
+        embeddings_array = np.vstack(ordered_embeddings)
         similarities = embeddings_array @ seed_embedding
-        top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(corpus_items))
+        top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(valid_items))
         top_indices = np.argsort(similarities)[::-1][:top_k]
 
         candidates: List[Tuple[str, Dict, np.ndarray]] = []
         for idx in top_indices:
-            paper_id, metadata = corpus_items[int(idx)]
+            paper_id, metadata = valid_items[int(idx)]
             candidates.append((paper_id, metadata, embeddings_array[int(idx)]))
 
         return candidates
@@ -387,15 +393,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             heap: Min-heap storing top candidates
             max_candidates: Maximum heap size
         """
-        texts = [text for _, text in batch]
-        embeddings = self.model.encode(
-            texts,
-            convert_to_tensor=False,
-            normalize_embeddings=True,
-            show_progress_bar=False,
+        batch_map = {metadata["paper_id"]: metadata for metadata, _ in batch}
+        embeddings = self.embedding_cache.get_embeddings(
+            batch_map,
+            self.model,
+            batch_size=len(batch_map) or STREAMING_BATCH_SIZE,
+            show_progress=False,
         )
 
-        for (metadata, _), embedding in zip(batch, embeddings):
+        for metadata, _ in batch:
+            embedding = embeddings.get(metadata["paper_id"])
+            if embedding is None:
+                continue
+
             similarity = float(np.dot(seed_embedding, embedding))
             candidate = (similarity, metadata["paper_id"], metadata, embedding)
 
