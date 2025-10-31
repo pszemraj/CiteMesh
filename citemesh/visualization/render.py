@@ -14,6 +14,7 @@ import networkx as nx
 import numpy as np
 
 from citemesh.core import VIZ_CONFIG
+
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)

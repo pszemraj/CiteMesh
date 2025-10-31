@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
-
 QueryFormatter = Callable[[str, Optional[Dict[str, str]]], str]
 DocumentFormatter = Callable[[Dict[str, str]], str]
 

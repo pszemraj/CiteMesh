@@ -15,8 +15,9 @@ from typing import Dict, Iterable, Optional
 import networkx as nx
 
 from citemesh.core import Paper
-from .themes import Theme, get_theme
+
 from .render import compute_layout, compute_node_colors, compute_node_sizes
+from .themes import Theme, get_theme
 
 
 class GraphExporter:

@@ -204,9 +204,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         # Compute normalized seed embedding
         logger.info("Computing seed embedding...")
-        formatted_seed_text = self.model_profile.format_query(
-            seed_text, seed_metadata
-        )
+        formatted_seed_text = self.model_profile.format_query(seed_text, seed_metadata)
         seed_embedding = self.model.encode(
             [formatted_seed_text],
             convert_to_tensor=False,
