@@ -13,7 +13,7 @@ This living document summarizes noteworthy changes from the initial script-based
 
 - All strategies feed a unified visualization pipeline: shared layout (Kamada-Kawai with spring fallback), node sizing tiers, and author-year labels.
 - Edge opacity and width scale with normalized weights, maintaining clarity even with hybrid similarity signals.
-- Integration tests route outputs to temporary paths so development runs don’t get confused with fixtures.
+- Integration tests route outputs to temporary paths so development runs don't get confused with fixtures.
 
 ## Persistent Caching
 

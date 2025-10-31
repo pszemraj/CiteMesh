@@ -17,16 +17,16 @@ Accepted identifiers:
 
 ## Core Options
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `--strategy`, `-s` | `citation`, `embedding`, or `hybrid` | `citation` |
-| `--max-papers`, `-p` | Maximum nodes in final graph | `40` |
-| `--iterations`, `-i` | Layout iterations (higher = smoother) | `100` |
-| `--dpi`, `-d` | PNG output resolution | `150` |
-| `--seed` | Random seed for reproducibility | none (non-deterministic) |
-| `--export`, `-e` | One or more of `png`, `html`, `plotly`, `json`, `graphml`, `all` | `png` |
-| `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
-| `--output`, `-o` | Base filename for exports | auto-generated from seed title |
+| Flag                 | Description                                                      | Default                        |
+| -------------------- | ---------------------------------------------------------------- | ------------------------------ |
+| `--strategy`, `-s`   | `citation`, `embedding`, or `hybrid`                             | `citation`                     |
+| `--max-papers`, `-p` | Maximum nodes in final graph                                     | `40`                           |
+| `--iterations`, `-i` | Layout iterations (higher = smoother)                            | `100`                          |
+| `--dpi`, `-d`        | PNG output resolution                                            | `150`                          |
+| `--seed`             | Random seed for reproducibility                                  | none (non-deterministic)       |
+| `--export`, `-e`     | One or more of `png`, `html`, `plotly`, `json`, `graphml`, `all` | `png`                          |
+| `--theme`            | `light`, `dark`, `solarized`, `auto`                             | `light`                        |
+| `--output`, `-o`     | Base filename for exports                                        | auto-generated from seed title |
 
 When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path and request multiple formats, the CLI appends the correct extension for each exported file.
 

@@ -39,11 +39,11 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 
 ### Strategy Implementations
 
-| Strategy | Responsibilities | Highlights |
-|----------|------------------|------------|
-| `citation` | Pulls seed, references, and citations from Semantic Scholar | Uses temporal, citation-impact, and real bibliographic coupling scores |
+| Strategy    | Responsibilities                                               | Highlights                                                                         |
+| ----------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses temporal, citation-impact, and real bibliographic coupling scores             |
 | `embedding` | Loads/streams HuggingFace ML-ArXiv corpus, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
-| `hybrid` | Starts with citation graph, enriches with semantic matches | Adjusts weightings based on relationship type, caps edges per node |
+| `hybrid`    | Starts with citation graph, enriches with semantic matches     | Adjusts weightings based on relationship type, caps edges per node                 |
 
 Each strategy can surface helpful logging by calling `_set_collection_summary`, which the CLI prints after graph construction.
 
@@ -57,7 +57,7 @@ Each strategy can surface helpful logging by calling `_set_collection_summary`, 
 
 - Computes layouts (Kamada-Kawai with spring fallback), node sizes, colors, labels, and metadata placement.
 - Uses theme-driven colors retrieved from `citemesh/themes.py`.
-- Writes to PNG via Matplotlib, applying the selected theme’s background and text colors.
+- Writes to PNG via Matplotlib, applying the selected theme's background and text colors.
 
 ### Themes (`citemesh/themes.py`)
 
