@@ -12,9 +12,8 @@ from typing import Dict
 import numpy as np
 from tqdm.auto import tqdm
 
-from citemesh.api_client import SemanticScholarClient, get_client
-from citemesh.config import CITATION_CONFIG
-from citemesh.models import Paper
+from citemesh.core import CITATION_CONFIG, Paper
+from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import GraphBuilderStrategy
 
 logger = logging.getLogger(__name__)

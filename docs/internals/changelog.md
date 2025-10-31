@@ -34,6 +34,7 @@ This living document summarizes noteworthy changes from the initial script-based
 - `--export all` simplifies multi-format workflows; individual options remain for targeted runs.
 - Strategy-specific flags (e.g., `--max-semantic`, `--dataset-split`) surface directly in `citemesh build --help`.
 - Tests verify CLI ergonomics (help text, invalid args) and run end-to-end builds with ephemeral outputs.
+- Package layout reorganized into `core/`, `data/`, `services/`, and `visualization/` modules for clearer ownership, with shims preserving legacy import paths.
 
 ## Future Opportunities
 

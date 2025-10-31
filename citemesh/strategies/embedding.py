@@ -16,12 +16,9 @@ from joblib import Memory
 from sentence_transformers import SentenceTransformer
 from tqdm.auto import tqdm
 
-from citemesh.api_client import get_client
-from citemesh.cache_utils import get_cache_dir
-from citemesh.config import EMBEDDING_CONFIG
-from citemesh.embedding_cache import EmbeddingCache
-from citemesh.embedding_models import get_embedding_model_profile
-from citemesh.models import Author, Paper
+from citemesh.core import EMBEDDING_CONFIG, Author, Paper
+from citemesh.data import EmbeddingCache, get_cache_dir, get_embedding_model_profile
+from citemesh.services import get_client
 from citemesh.strategies.base import GraphBuilderStrategy
 
 logger = logging.getLogger(__name__)

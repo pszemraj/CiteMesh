@@ -12,7 +12,7 @@ except ImportError:
 
 __author__ = "CiteMesh Contributors"
 
-from citemesh.models import Author, Paper
+from citemesh.core import Author, Paper
 from citemesh.strategies.base import GraphBuilderStrategy
 
 __all__ = ["Paper", "Author", "GraphBuilderStrategy"]

@@ -13,8 +13,8 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 
-from citemesh.config import VIZ_CONFIG
-from citemesh.themes import Theme, get_theme
+from citemesh.core import VIZ_CONFIG
+from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
 

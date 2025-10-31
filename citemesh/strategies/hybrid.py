@@ -11,8 +11,7 @@ from typing import Dict
 import networkx as nx
 import numpy as np
 
-from citemesh.config import HYBRID_CONFIG
-from citemesh.models import Paper
+from citemesh.core import HYBRID_CONFIG, Paper
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder

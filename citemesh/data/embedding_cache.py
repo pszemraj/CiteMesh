@@ -14,7 +14,7 @@ import h5py
 import numpy as np
 from tqdm.auto import tqdm
 
-from citemesh.cache_utils import get_cache_dir
+from .cache import get_cache_dir
 
 
 class EmbeddingCache:

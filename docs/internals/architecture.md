@@ -47,24 +47,24 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 
 Each strategy can surface helpful logging by calling `_set_collection_summary`, which the CLI prints after graph construction.
 
-### `citemesh/models.py`
+### `citemesh/core/models.py`
 
 - `Paper` and `Author` dataclasses encapsulate metadata and validation.
 - Provides helpers such as `.label`, `.first_author_surname`, `.category_overlap`, and `.shares_authors_with`.
 - Makes node attributes both ergonomic (full object) and serialisable (primitive fields).
 
-### Visualization (`citemesh/visualization.py`)
+### Visualization (`citemesh/visualization/render.py`)
 
 - Computes layouts (Kamada-Kawai with spring fallback), node sizes, colors, labels, and metadata placement.
-- Uses theme-driven colors retrieved from `citemesh/themes.py`.
+- Uses theme-driven colors retrieved from `citemesh/visualization/themes.py`.
 - Writes to PNG via Matplotlib, applying the selected theme's background and text colors.
 
-### Themes (`citemesh/themes.py`)
+### Themes (`citemesh/visualization/themes.py`)
 
 - Declares immutable `Theme` objects for `light`, `dark`, `solarized`, plus an `auto` detector.
 - Provides RGB interpolation for smooth gradients that both Matplotlib and HTML exporters share.
 
-### Exporter (`citemesh/export.py`)
+### Exporter (`citemesh/visualization/export.py`)
 
 - `GraphExporter` emits:
   - JSON snapshots of nodes/edges/metadata
@@ -76,9 +76,15 @@ Each strategy can surface helpful logging by calling `_set_collection_summary`, 
 
 ### Caching Support
 
-- `citemesh/cache_utils.py` picks a cross-platform cache directory (`~/.cache/citemesh`, `%LOCALAPPDATA%\CiteMesh`, etc.) and honours `CITEMESH_CACHE_DIR`.
-- `citemesh/embedding_cache.py` stores embeddings in SQLite (metadata) + HDF5 (vectors), keyed by model hash and content checksum to avoid stale results.
+- `citemesh/data/cache.py` picks a cross-platform cache directory (`~/.cache/citemesh`, `%LOCALAPPDATA%\CiteMesh`, etc.) and honours `CITEMESH_CACHE_DIR`.
+- `citemesh/data/embedding_cache.py` stores embeddings in SQLite (metadata) + HDF5 (vectors), keyed by model hash and content checksum to avoid stale results.
 - Joblib caches for HuggingFace corpora point to the same cache root, keeping the repository workspace clean.
+- `citemesh/data/model_profiles.py` captures per-model hints (e.g., EmbeddingGemma prompts) that the embedding strategy consumes.
+
+### Service Clients (`citemesh/services/semantic_scholar.py`)
+
+- Wraps the Semantic Scholar API with retries, rate limiting, and local caching of reference lists.
+- Exposes `get_client()` for strategies and re-exports the client in `citemesh.services` for convenience.
 
 ## External Dependencies
 
