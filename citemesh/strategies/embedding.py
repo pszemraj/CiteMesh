@@ -504,15 +504,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         Args:
             papers: Dictionary of collected papers (including seed)
         """
+        if ":" in self.dataset_split:
+            return
+
         logger.info("Fetching citation counts from Semantic Scholar (optional)...")
 
-        targets = [
-            (pid, paper)
-            for pid, paper in list(papers.items())[:10]
-            if not paper.is_seed
-            and pid != "query"
-            and not (isinstance(pid, str) and pid.startswith("arxiv_"))
-        ]
+        prioritized: List[Tuple[int, str, Paper]] = []
+        for idx, (pid, paper) in enumerate(papers.items()):
+            if paper.is_seed or pid == "query":
+                continue
+
+            needs_metadata = (
+                not paper.authors
+                or paper.first_author_surname == "Unknown"
+                or paper.title == "Unknown"
+            )
+
+            priority = 0 if needs_metadata else 1
+            prioritized.append((priority, pid, paper))
+
+        prioritized.sort(key=lambda item: (item[0], item[1]))
+        targets = [(pid, paper) for _, pid, paper in prioritized[:10]]
 
         if not targets:
             return
@@ -532,9 +544,31 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         for paper_id, paper in iterator:
             try:
-                s2_paper = self.client.get_paper(paper_id)
+                if (
+                    isinstance(paper_id, str)
+                    and paper_id.startswith("arxiv_")
+                    and ":" not in self.dataset_split
+                ):
+                    s2_paper = self.client.search_paper(paper.title)
+                else:
+                    s2_paper = self.client.get_paper(paper_id)
                 if s2_paper:
                     paper.citation_count = s2_paper.citation_count
+
+                    if s2_paper.title and paper.title == "Unknown":
+                        paper.title = s2_paper.title
+
+                    if s2_paper.year and paper.year != s2_paper.year:
+                        paper.year = s2_paper.year
+
+                    if s2_paper.authors:
+                        paper.authors = s2_paper.authors
+
+                    if s2_paper.categories:
+                        paper.categories = s2_paper.categories
+
+                    if s2_paper.abstract and not paper.abstract:
+                        paper.abstract = s2_paper.abstract
             except Exception as exc:
                 logger.warning(f"Could not fetch citation count for {paper_id}: {exc}")
 

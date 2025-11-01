@@ -189,6 +189,33 @@ class SemanticScholarClient:
 
         return None
 
+    def search_paper(self, query: str) -> Optional[Paper]:
+        """Search Semantic Scholar by title when a direct identifier is unavailable."""
+
+        if not query:
+            return None
+
+        fields = [
+            "paperId",
+            "title",
+            "year",
+            "authors",
+            "citationCount",
+            "abstract",
+            "fieldsOfStudy",
+        ]
+
+        try:
+            results = self.client.search_paper(query, limit=1, fields=fields)
+        except Exception as exc:
+            logger.warning(f"Semantic Scholar search failed for '{query[:60]}': {exc}")
+            return None
+
+        if not results or not getattr(results[0], "paperId", None):
+            return None
+
+        return self._convert_api_paper(results[0])
+
     def get_paper_citations(self, paper_id: str, limit: int = 20) -> List[Paper]:
         """
         Fetch papers that cite the given paper.

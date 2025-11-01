@@ -86,7 +86,7 @@ class GraphExporter:
         self,
         path: Path,
         theme: Optional[str] = None,
-        physics: bool = True,
+        physics: bool = False,
     ) -> None:
         """
         Create interactive HTML visualization with pyvis (vis.js).
@@ -104,6 +104,7 @@ class GraphExporter:
             ) from exc
 
         theme_obj = get_theme(theme) if theme else self.theme
+        pos = self._get_layout()
 
         net = Network(
             height="900px",
@@ -137,6 +138,7 @@ class GraphExporter:
             paper: Optional[Paper] = self.graph.nodes[node].get("paper")
             size = self._node_size(node)
             color = self._node_color_hex(node, theme_obj)
+            x_val, y_val = pos.get(node, (0.0, 0.0))
 
             label = paper.label if paper else self.graph.nodes[node].get("title", node)
 
@@ -162,11 +164,17 @@ class GraphExporter:
                 size=max(6, size / 30),
                 color=color,
                 borderWidth=3 if self.graph.nodes[node].get("is_seed") else 1,
+                x=float(x_val),
+                y=float(y_val),
+                physics=physics,
             )
 
         for u, v, data in self.graph.edges(data=True):
             weight = float(data.get("weight", 0.1))
             net.add_edge(u, v, value=max(0.1, weight * 5))
+
+        if not physics:
+            net.toggle_physics(False)
 
         net.save_graph(str(path))
 
