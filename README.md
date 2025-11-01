@@ -2,6 +2,9 @@
 
 Build exploration-friendly citation graphs from a single paper or query using citation, embedding, or hybrid strategies. CiteMesh ships as a single CLI with consistent visuals and export formats so you can jump between approaches without changing tools.
 
+![seq vs seq paper](docs/assets/example.png)
+> Example citemesh output for [Seq vs Seq: An Open Suite of Paired Encoders and Decoders](https://arxiv.org/abs/2507.11412)
+
 ## Quick Start
 
 ```bash
@@ -17,6 +20,8 @@ Create your first citation graph:
 # Example: hybrid graph with all exports in dark mode
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
+
+Run `citemesh build --help` for full CLI options.
 
 ## Why CiteMesh
 

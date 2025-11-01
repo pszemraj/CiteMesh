@@ -14,7 +14,7 @@ maintainers = [
     { name = "Peter Szemraj", email = "peterszemeraj+dev@gmail.com" },
 ]
 keywords = [
-    "citation-analysis",
+    "citation-graph",
     "graph-visualization",
     "semantic-similarity",
     "bibliometrics",
@@ -55,8 +55,8 @@ dev = ["pytest>=7.0.0", "ruff>=0.1.0"]
 citemesh = "citemesh.cli:main"
 
 [project.urls]
-Repository = "https://github.com/yourusername/paper-graph-vis"
-Issues = "https://github.com/yourusername/paper-graph-vis/issues"
+Repository = "https://github.com/pszemraj/citemesh"
+Issues = "https://github.com/pszemraj/citemesh/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
