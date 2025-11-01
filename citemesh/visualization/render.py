@@ -503,5 +503,7 @@ def generate_output_path(
     directory = output_dir / f"citemesh-{slug}"
     directory.mkdir(parents=True, exist_ok=True)
 
-    filename = f"{slug}.png"
+    short_slug_parts = slug.split("-")
+    short_slug = "-".join(part for part in short_slug_parts[:3] if part) or slug or "graph"
+    filename = f"{short_slug}.png"
     return directory / filename

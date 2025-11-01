@@ -5,13 +5,15 @@ Build exploration-friendly citation graphs from a single paper or query using ci
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/paper-graph-vis.git
-cd paper-graph-vis
+git clone https://github.com/pszemraj/citemesh.git
+cd citemesh
+# activate virtualenv
 pip install -e .
+```
 
-Example: hybrid graph with all exports in dark mode:
+Create your first citation graph:
 
-```bash
+```sh
 # Example: hybrid graph with all exports in dark mode
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
@@ -28,8 +30,10 @@ citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 
 - `citemesh build "<paper-id>" --strategy <citation|embedding|hybrid> [options]`
 - Identifiers: DOI (`10.1038/...`), arXiv (`arxiv:1706.03762` or `1706.03762`), Semantic Scholar Paper ID, or free-form text (embedding strategy).
-- `--export` accepts any combination of `png`, `html`, `plotly`, `json`, `graphml`, or `all`.
+- `--export` accepts one of `png`, `html`, `plotly`, `json`, `graphml`, or `all`.
 - `--theme` selects a colour palette for both static and interactive outputs.
+- Outputs are saved to `out/citemesh-<slug>/`, alongside a `parameters.json`
+  recording the CLI options used for that run.
 
 ## Documentation
 
