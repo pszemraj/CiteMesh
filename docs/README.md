@@ -6,6 +6,7 @@ Use this index to navigate the project documentation by topic.
 
 - [CLI Usage](guides/cli.md) - command-line options, export formats, and theming.
 - [Caching & Data](guides/caching.md) - where datasets, embeddings, and joblib results live, plus environment overrides.
+- [Hybrid Strategy](guides/hybrid.md) - default limits, semantic enrichment behaviour, and output bundles.
 
 ## Internals
 

@@ -7,6 +7,7 @@ providing a single interface to all graph building strategies.
 """
 
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime
@@ -391,6 +392,52 @@ Examples:
             logger.info(
                 f"  Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}"
             )
+
+            params = {
+                "paper_id": args.paper_id,
+                "strategy": args.strategy,
+                "timestamp": metadata["timestamp"],
+                "max_papers": args.max_papers,
+                "iterations": args.iterations,
+                "dpi": args.dpi,
+                "seed": args.seed,
+                "theme": args.theme,
+                "exports": selected_formats,
+                "output_directory": str(output_dir.resolve()),
+            }
+
+            if args.strategy in {"citation", "hybrid"}:
+                params.update(
+                    {
+                        "max_citations": args.max_citations,
+                        "max_references": args.max_references,
+                        "fetch_references": not args.no_references,
+                    }
+                )
+
+            if args.strategy in {"embedding", "hybrid"}:
+                params.update(
+                    {
+                        "model": getattr(args, "model", None),
+                        "dataset_split": getattr(args, "dataset_split", None),
+                        "corpus_size": getattr(args, "corpus_size", None),
+                    }
+                )
+
+            if args.strategy == "embedding":
+                params.update(
+                    {
+                        "top_k": args.top_k,
+                        "streaming": args.streaming,
+                    }
+                )
+
+            if args.strategy == "hybrid":
+                params.update({"max_semantic": args.max_semantic})
+
+            parameters_path = output_dir / "parameters.json"
+            parameters_path.write_text(json.dumps({k: v for k, v in params.items()}, indent=2, default=str))
+            logger.info(f"✓ Parameters saved to {parameters_path}")
 
         except Exception as e:
             logger.error(f"Failed to build graph: {e}")

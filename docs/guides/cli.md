@@ -62,6 +62,10 @@ When `--export all` is used, CiteMesh writes every supported format using consis
 - `json`: structured graph data with nodes, edges, metadata.
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools.
 
+Each run writes outputs into `out/citemesh-<slug>/` (unless you provide
+`--output`). The directory also contains a `parameters.json` file capturing the
+CLI options used for that run.
+
 ## Examples
 
 ```bash

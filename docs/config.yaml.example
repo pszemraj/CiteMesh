@@ -48,6 +48,11 @@ embedding:
 # Hybrid Strategy Configuration
 # ============================================================================
 hybrid:
+  defaults:
+    max_references: 20   # CLI override: --max-references
+    max_citations: 9     # CLI override: --max-citations
+    max_semantic: 10     # CLI override: --max-semantic
+
   # Adaptive weights based on relationship type
   # When both papers from semantic search:
   both_semantic:
@@ -104,8 +109,8 @@ visualization:
   random_jitter: 0.05       # Random perturbation factor for organic look
 
   # Output settings
-  default_dpi: 150          # Image resolution
-  figsize_base: 12          # Base figure size (will be scaled)
+  default_dpi: 200          # Image resolution for PNG export
+  default_height: 7.2       # Inches, width derived from golden ratio
 
 # ============================================================================
 # API Configuration
@@ -124,3 +129,4 @@ api:
 # - For sparser graphs: increase top_k_neighbors or raise thresholds
 # - Always ensure weights within each group sum to 1.0
 # - Set random_seed to any integer for reproducible results across runs
+# - Outputs default to out/citemesh-<slug>/ with parameters.json capturing CLI settings

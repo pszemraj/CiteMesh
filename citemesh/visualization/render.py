@@ -494,11 +494,14 @@ def generate_output_path(
     """
     title = graph.nodes[seed_id].get("title", "graph")
 
-    # Clean title for filename
-    filename = title.lower()
-    filename = "".join(c if c.isalnum() or c in " -" else "" for c in filename)
-    filename = "-".join(filename.split())[:50]  # Limit length
-    filename = f"{filename}.png"
+    # Clean title for filename/directory
+    slug = title.lower()
+    slug = "".join(c if c.isalnum() or c in " -" else "" for c in slug)
+    slug = "-".join(slug.split()) or "graph"
+    slug = slug[:50]
 
-    output_dir.mkdir(exist_ok=True)
-    return output_dir / filename
+    directory = output_dir / f"citemesh-{slug}"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{slug}.png"
+    return directory / filename
