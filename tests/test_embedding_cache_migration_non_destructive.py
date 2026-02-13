@@ -27,7 +27,12 @@ def test_legacy_h5_layout_is_backed_up_and_preserved(tmp_path) -> None:
         h5.create_dataset("legacy_payload", data=np.array([1, 2, 3], dtype=np.float32))
 
     with sqlite3.connect(cache.db_path) as conn:
-        conn.execute("INSERT INTO papers VALUES ('seed', 'seed', '', NULL, 'hash', 3, 2)")
+        conn.execute(
+            """
+            INSERT INTO papers (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx)
+            VALUES ('seed', 'seed', '', NULL, 'hash', 3, 2)
+            """
+        )
         conn.commit()
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
@@ -35,11 +40,16 @@ def test_legacy_h5_layout_is_backed_up_and_preserved(tmp_path) -> None:
     assert backups, "Expected a backup path for legacy HDF5 layout"
 
     with sqlite3.connect(reloaded.db_path) as conn:
-        assert conn.execute("SELECT row_idx FROM papers WHERE paper_id = 'seed'").fetchone()[
-            0
-        ] is None
+        assert (
+            conn.execute(
+                "SELECT row_idx FROM papers WHERE paper_id = 'seed'"
+            ).fetchone()[0]
+            is None
+        )
 
-    reloaded.get_embeddings({"seed": {"title": "Seed", "abstract": "x", "year": None}}, model)
+    reloaded.get_embeddings(
+        {"seed": {"title": "Seed", "abstract": "x", "year": None}}, model
+    )
 
     with h5py.File(reloaded.h5_path, "r") as h5:
         assert "embeddings" in h5
@@ -52,7 +62,9 @@ def test_clear_moves_cache_files_to_backups(tmp_path) -> None:
     """`clear()` should move cache files and rebuild a fresh empty schema."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="clear-recovery")
     model = _MockModel()
-    cache.get_embeddings({"seed": {"title": "Seed", "abstract": "x", "year": 2020}}, model)
+    cache.get_embeddings(
+        {"seed": {"title": "Seed", "abstract": "x", "year": 2020}}, model
+    )
 
     cache.clear()
 
@@ -61,4 +73,4 @@ def test_clear_moves_cache_files_to_backups(tmp_path) -> None:
     assert db_backups
     assert h5_backups
     assert cache.db_path.exists()
-    assert cache.h5_path.exists()
+    assert not cache.h5_path.exists()

@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import numpy as np
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 from citemesh.core import Paper
@@ -58,7 +58,9 @@ def test_citation_max_papers_is_total_node_cap_including_seed() -> None:
     client.get_paper_references.return_value = [
         _build_named_paper(f"r{i}") for i in range(1, 6)
     ]
-    client.get_paper_citations.return_value = [_build_named_paper(f"c{i}") for i in range(1, 6)]
+    client.get_paper_citations.return_value = [
+        _build_named_paper(f"c{i}") for i in range(1, 6)
+    ]
 
     builder = CitationGraphBuilder(
         max_papers=4,
@@ -76,7 +78,9 @@ def test_embedding_max_papers_is_total_node_cap_including_seed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Embedding strategy should include the seed within the max-papers cap."""
-    monkeypatch.setattr("citemesh.strategies.embedding._check_embedding_deps", lambda: None)
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
 
     builder = EmbeddingGraphBuilder(
         max_papers=3,
@@ -87,6 +91,7 @@ def test_embedding_max_papers_is_total_node_cap_including_seed(
     )
     builder.client.get_paper.return_value = _seed_paper()
     builder._load_model = lambda: None
+    builder._get_model_for_encoding = lambda: None
     builder._load_corpus = lambda: None
     builder._update_citation_counts = lambda _: None
     builder.arxiv_corpus = {
@@ -115,7 +120,9 @@ def test_hybrid_max_papers_is_total_node_cap_including_seed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid strategy should include the seed within the max-papers cap."""
-    monkeypatch.setattr("citemesh.strategies.embedding._check_embedding_deps", lambda: None)
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
 
     class FakeCitationBuilder:
         """Citation branch stub with explicit max-papers behavior."""
@@ -146,9 +153,15 @@ def test_hybrid_max_papers_is_total_node_cap_including_seed(
                 "s2": _build_named_paper("s2"),
             }
 
-    monkeypatch.setattr("citemesh.strategies.hybrid.CitationGraphBuilder", FakeCitationBuilder)
-    monkeypatch.setattr("citemesh.strategies.hybrid.EmbeddingGraphBuilder", FakeEmbeddingBuilder)
-    monkeypatch.setattr("citemesh.strategies.hybrid._check_embedding_deps", lambda: None)
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid.CitationGraphBuilder", FakeCitationBuilder
+    )
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid.EmbeddingGraphBuilder", FakeEmbeddingBuilder
+    )
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
+    )
 
     builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
     papers = builder.collect_papers("seed")

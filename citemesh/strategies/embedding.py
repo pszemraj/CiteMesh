@@ -11,7 +11,7 @@ import re
 import sys
 from contextlib import nullcontext
 from hashlib import sha1
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import networkx as nx
 import numpy as np
@@ -108,6 +108,11 @@ def _query_seed_id(query_text: str) -> str:
     """Build deterministic query-mode seed node identifier."""
     digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
     return f"query:{digest}"
+
+
+def _heap_tiebreak_key(paper_id: str) -> Tuple[int, ...]:
+    """Build a legacy-compatible heap tie-break key for paper identifiers."""
+    return tuple([-ord(ch) for ch in str(paper_id)] + [1])
 
 
 class _AutocastEncodeProxy:
@@ -844,7 +849,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             for idx, (paper_id, metadata) in enumerate(valid_items)
         ]
         scored_candidates.sort(
-            key=lambda item: deterministic_sort_key(item[0], item[1], stable_index=item[4])
+            key=lambda item: deterministic_sort_key(
+                item[0], item[1], stable_index=item[4]
+            )
         )
         top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(scored_candidates))
 
@@ -933,13 +940,25 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 raise last_exception
             return []
 
-        top_candidates = sorted(heap, key=lambda item: item[0])
+        top_candidates = sorted(
+            heap,
+            key=lambda item: (
+                item[0]
+                if isinstance(item[0], tuple)
+                else deterministic_sort_key(item[0], item[2], stable_index=0)
+            ),
+        )
         limited = top_candidates[: self.max_papers * CANDIDATE_MULTIPLIER]
 
-        return [
-            (paper_id, metadata, embedding)
-            for _, paper_id, metadata, embedding in limited
-        ]
+        normalized_candidates: list[tuple[str, Dict, np.ndarray]] = []
+        for candidate in limited:
+            if len(candidate) == 4:
+                _, paper_id, metadata, embedding = candidate
+            else:
+                _, _, paper_id, metadata, embedding = candidate
+            normalized_candidates.append((str(paper_id), metadata, embedding))
+
+        return normalized_candidates
 
     def _process_stream_batch(
         self,

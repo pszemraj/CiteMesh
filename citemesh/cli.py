@@ -343,9 +343,7 @@ Examples:
         "-p",
         type=_positive_int,
         default=40,
-        help=(
-            "Maximum papers in final graph (seed included; default: 40)"
-        ),
+        help=("Maximum papers in final graph (seed included; default: 40)"),
     )
 
     build_parser.add_argument(
@@ -591,11 +589,13 @@ Examples:
             )
 
         except Exception as e:
+            message = f"Failed to build graph: {e}"
             logger.error(
                 "Failed to build graph: %s",
                 e,
                 exc_info=logging.getLogger().level == logging.DEBUG,
             )
+            print(message, file=sys.stderr)
             sys.exit(1)
     elif args.command == "search":
         try:

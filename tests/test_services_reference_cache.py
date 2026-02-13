@@ -132,11 +132,20 @@ def test_atomic_reference_cache_write_preserves_existing_file_on_replace_error(
 ) -> None:
     """Atomic writes must keep valid cached data when filesystem rename fails."""
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
-    monkeypatch.setattr(s2.os, "replace", lambda *_args, **_kwargs: (_ for _ in ()).throw(
-        OSError("simulated replace failure")
-    ))
+    monkeypatch.setattr(
+        s2.os,
+        "replace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("simulated replace failure")
+        ),
+    )
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
+    client.client.get_paper_references = MagicMock(
+        side_effect=AssertionError(
+            "API should not be called on replace failure with valid cache"
+        )
+    )
 
     normalized = s2.normalize_paper_id("seed")
     cache_path = s2._reference_cache_path(normalized)
@@ -147,10 +156,6 @@ def test_atomic_reference_cache_write_preserves_existing_file_on_replace_error(
         "version": s2.REFERENCE_CACHE_VERSION,
     }
     cache_path.write_text(json.dumps(prior_payload))
-    client.client.get_paper_references = MagicMock(
-        return_value=[_make_reference_record("a"), _make_reference_record("b")]
-    )
-
     refs = client.get_reference_ids("seed")
-    assert refs == ["a", "b"]
+    assert refs == ["cached-ref"]
     assert json.loads(cache_path.read_text()) == prior_payload
