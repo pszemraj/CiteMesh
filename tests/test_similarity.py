@@ -2,7 +2,7 @@
 Tests for similarity calculations.
 """
 
-from citemesh.models import Paper
+from citemesh.core import Paper
 from citemesh.strategies.base import GraphBuilderStrategy
 
 

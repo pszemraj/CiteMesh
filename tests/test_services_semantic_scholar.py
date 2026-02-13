@@ -8,7 +8,7 @@ import pytest
 import requests
 
 from citemesh.core import API_CONFIG
-from citemesh.models import Paper
+from citemesh.core import Paper
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
     get_client,

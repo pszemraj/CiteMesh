@@ -4,7 +4,7 @@ Tests for data models.
 
 import pytest
 
-from citemesh.models import Author, Paper
+from citemesh.core import Author, Paper
 
 
 class TestAuthor:
