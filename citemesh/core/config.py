@@ -49,9 +49,6 @@ class EmbeddingSimilarityConfig:
     # Author collaboration bonus multiplier
     shared_author_bonus: float = 1.5
 
-    # Top-k neighbors per node
-    top_k_neighbors: int = 2
-
     def validate(self) -> None:
         """Ensure component weights are valid."""
         total = (

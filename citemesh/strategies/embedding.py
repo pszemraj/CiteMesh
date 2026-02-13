@@ -279,6 +279,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         _check_embedding_deps()
+        if top_k < 1:
+            raise ValueError("top_k must be at least 1")
         super().__init__(max_papers, random_seed)
         self.model_name = model_name
         self.dataset_split = dataset_split
@@ -706,30 +708,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         # Use base class to collect papers and create nodes
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
-        # Now filter edges to keep only top-k per node
-
-        # Compute all pairwise similarities (already done by base class)
-        # Now for each node, keep only top-k edges
+        # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
         filtered_graph = nx.Graph()
         filtered_graph.add_nodes_from(graph.nodes(data=True))
 
-        for node in graph.nodes():
-            # Get all edges for this node
-            edges = [
-                (node, neighbor, graph[node][neighbor]["weight"])
-                for neighbor in graph.neighbors(node)
-            ]
+        edge_counts = {node: 0 for node in graph.nodes()}
+        sorted_edges = sorted(
+            graph.edges(data=True),
+            key=lambda item: item[2].get("weight", 0.0),
+            reverse=True,
+        )
 
-            # Sort by weight and keep top-k
-            edges.sort(key=lambda x: x[2], reverse=True)
-            top_edges = edges[: EMBEDDING_CONFIG.top_k_neighbors]
-
-            for u, v, weight in top_edges:
-                filtered_graph.add_edge(u, v, weight=weight)
+        for u, v, data in sorted_edges:
+            if edge_counts[u] >= self.top_k or edge_counts[v] >= self.top_k:
+                continue
+            filtered_graph.add_edge(u, v, weight=data.get("weight", 0.0))
+            edge_counts[u] += 1
+            edge_counts[v] += 1
 
         logger.info(
             f"Filtered graph: {filtered_graph.number_of_nodes()} nodes, "
-            f"{filtered_graph.number_of_edges()} edges (top-{EMBEDDING_CONFIG.top_k_neighbors})"
+            f"{filtered_graph.number_of_edges()} edges (top-{self.top_k})"
         )
 
         return filtered_graph, actual_seed_id
