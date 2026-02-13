@@ -48,6 +48,8 @@ To force immediate rebuilds from scratch, pass `--force-rebuild-cache` with the 
 
 This makes iterative runs fast: after the first run, loading vectors becomes a disk-read operation even for large corpora.
 
+For CLI-level cache invalidation controls and flags, refer to [CLI Usage](../guides/cli.md).
+
 ## Joblib Dataset Cache
 
 ArXiv corpus loading is wrapped with joblib caching. The normalized corpus mapping (for a given split and paper cap) is cached under `joblib/`, so repeated runs can skip rebuilding that in-process structure.

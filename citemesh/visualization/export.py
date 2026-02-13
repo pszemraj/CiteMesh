@@ -11,9 +11,9 @@ import hashlib
 import html
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Iterable, Optional
-import re
 
 import networkx as nx
 
@@ -131,10 +131,7 @@ class GraphExporter:
                 u,
                 v,
                 **_ordered_attrs(
-                    {
-                        k: float(val) if k == "weight" else val
-                        for k, val in data.items()
-                    }
+                    {k: float(val) if k == "weight" else val for k, val in data.items()}
                 ),
             )
 

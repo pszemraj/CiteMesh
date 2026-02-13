@@ -8,13 +8,13 @@ import pytest
 import requests
 
 from citemesh.core import API_CONFIG, Paper
+from citemesh.services import semantic_scholar as semantic_module
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
     get_client,
     normalize_paper_id,
     reset_client,
 )
-from citemesh.services import semantic_scholar as semantic_module
 from tests.conftest import get_paper_id_normalization_cases
 
 
@@ -362,6 +362,7 @@ def test_close_and_reset_client_close_prior_session() -> None:
 
 def test_client_context_manager_closes_sessions() -> None:
     """Client context manager should close all owned sessions."""
+
     class _FakeRequestsSession:
         """Minimal request session with close tracking."""
 

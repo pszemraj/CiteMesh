@@ -13,9 +13,9 @@ import pytest
 
 from citemesh.core import Author, Paper
 from citemesh.visualization.export import (
+    GRAPHML_DETERMINISM_POLICY_STRICT,
     GRAPHML_LAYOUT_METADATA_KEY,
     GRAPHML_LAYOUT_VERSION_KEY,
-    GRAPHML_DETERMINISM_POLICY_STRICT,
     GraphExporter,
     _graphml_determinism_policy,
 )
@@ -42,7 +42,10 @@ def _canonicalize_graphml(path: Path) -> str:
         elif node.tag == f"{namespace}edge":
             node[:] = sorted(
                 node,
-                key=lambda item: (item.attrib.get("source", ""), item.attrib.get("target", "")),
+                key=lambda item: (
+                    item.attrib.get("source", ""),
+                    item.attrib.get("target", ""),
+                ),
             )
         elif node.tag == f"{namespace}graph":
             node[:] = sorted(

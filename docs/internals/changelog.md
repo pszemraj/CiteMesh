@@ -1,5 +1,7 @@
 # Changelog & Key Improvements
 
+This is a historical changelog.
+
 This living document summarizes noteworthy changes from the initial script-based prototypes to the current CiteMesh implementation.
 
 For current operational behavior, use the canonical guides:

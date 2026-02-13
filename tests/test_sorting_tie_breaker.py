@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from citemesh.strategies.base import deterministic_sort_key, select_capped_undirected_edges
+from citemesh.strategies.base import (
+    deterministic_sort_key,
+    select_capped_undirected_edges,
+)
 
 
 class _Tagged:

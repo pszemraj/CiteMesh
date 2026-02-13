@@ -320,7 +320,7 @@ Examples:
         "-o",
         type=str,
         default=None,
-        help="Output PNG file path (auto-named if not specified)",
+        help="Base output path used for selected export formats (auto-named if not specified)",
     )
 
     build_parser.add_argument(

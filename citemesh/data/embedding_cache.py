@@ -366,9 +366,7 @@ class EmbeddingCache:
         return row[0] if row else None
 
     @staticmethod
-    def _set_cache_metadata(
-        conn: sqlite3.Connection, key: str, value: str
-    ) -> None:
+    def _set_cache_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute(
             """
             INSERT INTO cache_metadata (key, value)
@@ -401,7 +399,10 @@ class EmbeddingCache:
                 return
 
         try:
-            with h5py.File(self.h5_path, "r") as h5, sqlite3.connect(self.db_path) as conn:
+            with (
+                h5py.File(self.h5_path, "r") as h5,
+                sqlite3.connect(self.db_path) as conn,
+            ):
                 if EMBEDDINGS_DATASET_NAME in h5:
                     self._reconcile_layout_metadata(conn)
                     conn.commit()

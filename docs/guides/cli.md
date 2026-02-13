@@ -39,7 +39,7 @@ Accepted identifiers:
 | `--include-timestamp`| Include generation time in output metadata                       | disabled                       |
 | `--export`, `-e`     | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all`     | `png`                          |
 | `--theme`            | `light`, `dark`, `solarized`, `auto`                             | `light`                        |
-| `--output`, `-o`     | Base filename for exports                                        | auto-generated in paper folder |
+| `--output`, `-o`     | Base output path for all selected export formats                   | auto-generated in paper folder |
 
 When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:50]>-<seed_hash8>/<strategy>.<ext>`.
 When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path, the CLI appends the correct extension for each exported format.
@@ -103,7 +103,12 @@ Numeric validation:
 
 Determinism notes:
 
-- `json` and `graphml` exports are deterministic by default.
+- `json` exports are deterministic (stable key order and indentation).
+- `graphml` export is deterministic when using NetworkX versions with stable GraphML writer ordering
+  (`>=2.8` → `strict_sorted_nodes_edges`). Older versions use a best-effort mode and embed intent
+  metadata in the GraphML:
+  - `citemesh_graphml_determinism`
+  - `citemesh_graphml_writer_version`
 - `png` and `plotly` are deterministic when using the same input graph and `--seed`.
 - Pyvis `html` export uses deterministic node/edge ordering in the generated file, but runtime force physics remain non-deterministic in-browser.
 

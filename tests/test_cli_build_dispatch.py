@@ -115,7 +115,10 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
     assert captured == expected_kwargs
 
 
-@pytest.mark.parametrize("strategy,builder_name", [("embedding", "EmbeddingGraphBuilder"), ("hybrid", "HybridGraphBuilder")])
+@pytest.mark.parametrize(
+    "strategy,builder_name",
+    [("embedding", "EmbeddingGraphBuilder"), ("hybrid", "HybridGraphBuilder")],
+)
 def test_force_rebuild_cache_passes_through_embedding_strategies(
     monkeypatch: pytest.MonkeyPatch,
     strategy: str,
