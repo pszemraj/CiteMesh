@@ -293,14 +293,20 @@ class GraphExporter:
     # Internal helpers
 
     def _sorted_nodes(self) -> list[tuple[str, Dict]]:
-        """Return nodes sorted by ID for deterministic serialization."""
+        """Return nodes sorted by ID for deterministic serialization.
+
+        :return list[tuple[str, Dict]]: Sorted ``(node_id, attrs)`` pairs.
+        """
         return sorted(
             self.graph.nodes(data=True),
             key=lambda item: str(item[0]),
         )
 
     def _sorted_edges(self) -> list[tuple[str, str, Dict]]:
-        """Return undirected edges with canonical endpoints in stable order."""
+        """Return undirected edges with canonical endpoints in stable order.
+
+        :return list[tuple[str, str, Dict]]: Sorted edge tuples in ``(u, v, attrs)`` form.
+        """
         canonicalized = []
         for u, v, attrs in self.graph.edges(data=True):
             left, right = (u, v) if str(u) <= str(v) else (v, u)

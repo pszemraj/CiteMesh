@@ -37,7 +37,12 @@ def _filename_safe(text: str, max_chars: int = MAX_TITLE_CHARS) -> str:
 
 
 def _seed_suffix(seed_id: str, length: int = 8) -> str:
-    """Build a short, stable suffix from the seed identifier."""
+    """Build a short, stable suffix from the seed identifier.
+
+    :param str seed_id: Seed paper identifier.
+    :param int length: Number of digest characters to keep.
+    :return str: Stable hex suffix used in auto-generated output directories.
+    """
     return sha1(seed_id.encode("utf-8")).hexdigest()[:length]
 
 

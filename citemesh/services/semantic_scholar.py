@@ -33,7 +33,11 @@ SEARCH_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 
 
 def _strip_arxiv_version(identifier: str) -> str:
-    """Strip trailing arXiv version suffixes (for example ``v5``)."""
+    """Strip trailing arXiv version suffixes.
+
+    :param str identifier: Raw arXiv identifier candidate.
+    :return str: Identifier without trailing ``v<digits>`` suffix.
+    """
     return re.sub(r"v\d+$", "", identifier.strip(), flags=re.IGNORECASE)
 
 
