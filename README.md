@@ -4,11 +4,24 @@ Build exploration-friendly citation graphs from a single paper or query using ci
 
 ## Quick Start
 
+### Install
+
+direct pip install:
+
 ```bash
-git clone <repository-url>
-cd paper-graph-vis
-pip install -e .
+pip install "git+https://github.com/pszemraj/CiteMesh.git"
 ```
+
+or clone and install in editable mode for development:
+
+```bash
+git clone https://github.com/pszemraj/CiteMesh.git && cd CiteMesh
+pip install -e ".[dev]"
+```
+
+Install with the `embeddings` extra to enable embedding-based graphs:
+
+### Use the CLI
 
 Example: hybrid graph with all exports in dark mode:
 
