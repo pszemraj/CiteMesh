@@ -347,7 +347,7 @@ Examples:
         "--dataset-split",
         type=str,
         default="train",
-        help="ArXiv dataset split (default: train = full ~117k papers)",
+        help="ArXiv dataset split (default: train = full snapshot split; combine with --corpus-size to cap runtime)",
     )
 
     embedding_group.add_argument(

@@ -65,6 +65,119 @@ def _check_embedding_deps() -> None:
 
 STREAMING_BATCH_SIZE = 32
 CANDIDATE_MULTIPLIER = 4
+ARXIV_DATASET_CANDIDATES = (
+    "librarian-bots/arxiv-metadata-snapshot",
+    "CShorten/ML-ArXiv-Papers",
+    "gfissore/arxiv-abstracts-2021",
+)
+
+
+def _parse_year(paper: Dict[str, Any]) -> Optional[int]:
+    """Extract publication year from dataset metadata.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :return Optional[int]: Parsed year or ``None`` if missing/invalid.
+    """
+    if paper.get("year"):
+        try:
+            return int(paper["year"])
+        except (TypeError, ValueError):
+            pass
+
+    update_date = paper.get("update_date")
+    if update_date:
+        try:
+            return int(str(update_date)[:4])
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
+def _parse_authors(authors_data: Any) -> List[str]:
+    """Normalize author metadata to a list of names.
+
+    :param Any authors_data: Raw ``authors`` field from dataset.
+    :return List[str]: Author names.
+    """
+    if isinstance(authors_data, str):
+        return [name.strip() for name in authors_data.split(",") if name.strip()]
+
+    if isinstance(authors_data, list):
+        author_names: List[str] = []
+        for author in authors_data:
+            if isinstance(author, str):
+                normalized = author.strip()
+                if normalized:
+                    author_names.append(normalized)
+                continue
+
+            if isinstance(author, dict):
+                name = author.get("name")
+                if isinstance(name, str):
+                    normalized = name.strip()
+                    if normalized:
+                        author_names.append(normalized)
+        return author_names
+
+    return []
+
+
+def _parse_categories(categories_data: Any) -> List[str]:
+    """Normalize category metadata to a list of arXiv category codes.
+
+    :param Any categories_data: Raw ``categories`` field from dataset.
+    :return List[str]: Category code list.
+    """
+    if isinstance(categories_data, str):
+        normalized = categories_data.replace(",", " ")
+        return [category.strip() for category in normalized.split() if category.strip()]
+
+    if isinstance(categories_data, list):
+        categories: List[str] = []
+        for raw_value in categories_data:
+            if isinstance(raw_value, str):
+                normalized = raw_value.replace(",", " ")
+                categories.extend(
+                    [
+                        category.strip()
+                        for category in normalized.split()
+                        if category.strip()
+                    ]
+                )
+        return categories
+
+    return []
+
+
+def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) -> Dict:
+    """Normalize a raw dataset record to embedding metadata fields.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :param int fallback_index: Index used for synthetic IDs when missing.
+    :return Dict: Normalized metadata used by embedding selection.
+    """
+    paper_id = (
+        paper.get("id")
+        or paper.get("paper_id")
+        or paper.get("paperId")
+        or f"arxiv_{fallback_index}"
+    )
+    title = paper.get("title", "Unknown")
+    if not isinstance(title, str) or not title.strip():
+        title = "Unknown"
+    abstract = paper.get("abstract", paper.get("summary", ""))
+    if not isinstance(abstract, str):
+        abstract = ""
+
+    return {
+        "paper_id": paper_id,
+        "title": title,
+        "abstract": abstract,
+        "year": _parse_year(paper),
+        "authors": _parse_authors(paper.get("authors", [])),
+        "categories": _parse_categories(paper.get("categories", [])),
+    }
 
 
 def load_arxiv_dataset_cached(
@@ -83,8 +196,7 @@ def load_arxiv_dataset_cached(
 
     dataset = None
     last_error: Optional[Exception] = None
-    dataset_names = ["CShorten/ML-ArXiv-Papers", "gfissore/arxiv-abstracts-2021"]
-    for dataset_name in dataset_names:
+    for dataset_name in ARXIV_DATASET_CANDIDATES:
         try:
             dataset = load_dataset(dataset_name, split=dataset_split)
             logger.info(f"Loaded {dataset_name} dataset (split: {dataset_split})")
@@ -112,30 +224,9 @@ def load_arxiv_dataset_cached(
         if max_papers and i >= max_papers:
             break
 
-        paper_id = paper.get("id", paper.get("paper_id", f"arxiv_{i}"))
-
-        # Extract year
-        year = None
-        if "year" in paper and paper["year"]:
-            year = int(paper["year"])
-        elif "update_date" in paper:
-            try:
-                year = int(str(paper["update_date"])[:4])
-            except (ValueError, IndexError):
-                pass
-
-        # Extract authors
-        authors_data = paper.get("authors", [])
-        if isinstance(authors_data, str):
-            authors_data = [authors_data]
-
-        papers[paper_id] = {
-            "title": paper.get("title", "Unknown"),
-            "abstract": paper.get("abstract", paper.get("summary", "")),
-            "year": year,
-            "authors": authors_data,
-            "categories": paper.get("categories", []),
-        }
+        metadata = _extract_dataset_paper_metadata(paper, i)
+        paper_id = metadata.pop("paper_id")
+        papers[paper_id] = metadata
 
     return papers
 
@@ -168,7 +259,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self,
         max_papers: int = 40,
         model_name: str = "google/embeddinggemma-300m",
-        dataset_split: str = "train",  # Full training set by default (~117k papers)
+        dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
         corpus_size: Optional[int] = None,
         top_k: int = 2,
         random_seed: Optional[int] = None,
@@ -397,13 +488,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         from datasets import load_dataset
 
-        dataset_names = [
-            "CShorten/ML-ArXiv-Papers",
-            "gfissore/arxiv-abstracts-2021",
-        ]
         last_exception: Optional[Exception] = None
 
-        for dataset_name in dataset_names:
+        for dataset_name in ARXIV_DATASET_CANDIDATES:
             try:
                 dataset = load_dataset(
                     dataset_name, split=self.dataset_split, streaming=True
@@ -510,41 +597,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int fallback_index: Index used to generate ID if missing
         :return Dict: Dictionary with normalized fields
         """
-        paper_id = (
-            paper.get("id")
-            or paper.get("paper_id")
-            or paper.get("paperId")
-            or f"arxiv_{fallback_index}"
-        )
-
-        year = None
-        if paper.get("year"):
-            try:
-                year = int(paper["year"])
-            except (TypeError, ValueError):
-                pass
-        elif paper.get("update_date"):
-            try:
-                year = int(str(paper["update_date"])[:4])
-            except (TypeError, ValueError):
-                pass
-
-        authors_data = paper.get("authors", [])
-        if isinstance(authors_data, str):
-            authors_data = [authors_data]
-
-        categories = paper.get("categories", [])
-        if isinstance(categories, str):
-            categories = [categories]
-
-        return {
-            "paper_id": paper_id,
-            "title": paper.get("title", "Unknown"),
-            "abstract": paper.get("abstract", paper.get("summary", "")),
-            "year": year,
-            "authors": authors_data or [],
-            "categories": categories or [],
-        }
+        return _extract_dataset_paper_metadata(paper, fallback_index)
 
     def _update_citation_counts(self, papers: Dict[str, Paper]) -> None:
         """

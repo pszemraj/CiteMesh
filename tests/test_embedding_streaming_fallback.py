@@ -28,7 +28,7 @@ def test_streaming_embedding_falls_back_to_secondary_dataset(
         dataset_name: str, split: str, streaming: bool = False
     ) -> list[dict[str, Any]]:
         load_calls.append((dataset_name, split, streaming))
-        if dataset_name == "CShorten/ML-ArXiv-Papers":
+        if dataset_name == "librarian-bots/arxiv-metadata-snapshot":
             raise RuntimeError("Primary source unavailable")
         return [
             {
@@ -76,8 +76,8 @@ def test_streaming_embedding_falls_back_to_secondary_dataset(
     candidates = builder._select_candidates_streaming(np.array([1.0], dtype=np.float32))
 
     assert [name for name, _, _ in load_calls] == [
+        "librarian-bots/arxiv-metadata-snapshot",
         "CShorten/ML-ArXiv-Papers",
-        "gfissore/arxiv-abstracts-2021",
     ]
     assert len(candidates) == 1
     assert candidates[0][0] == "fallback-paper"
