@@ -9,7 +9,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
 import requests
@@ -432,55 +432,12 @@ class SemanticScholarClient:
         :param int limit: Maximum number of citations to fetch
         :return List[Paper]: Citation Papers (may be empty).
         """
-        papers: List[Paper] = []
-        normalized_paper_id = normalize_paper_id(paper_id)
-
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                citations = self.client.get_paper_citations(
-                    normalized_paper_id, limit=limit
-                )
-                if not citations:
-                    return papers
-
-                for cit in citations:
-                    if (
-                        hasattr(cit, "paper")
-                        and cit.paper
-                        and hasattr(cit.paper, "paperId")
-                    ):
-                        paper = self._convert_api_paper(cit.paper)
-                        if paper:
-                            papers.append(paper)
-
-                    if len(papers) >= limit:
-                        break
-
-                return papers
-
-            except ObjectNotFoundException:
-                logger.warning("Paper not found for citations: %s", normalized_paper_id)
-                return papers
-            except Exception as exc:
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    logger.warning(
-                        "Failed to fetch citations for %s (attempt %s). Retrying in %ss",
-                        normalized_paper_id,
-                        attempt + 1,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                else:
-                    logger.warning(
-                        "Failed to fetch citations for %s after %s attempts: %s",
-                        normalized_paper_id,
-                        API_CONFIG.max_retries,
-                        exc,
-                    )
-
-        return papers
+        return self._get_related_papers(
+            paper_id=paper_id,
+            limit=limit,
+            fetch_method=self.client.get_paper_citations,
+            relation_label="citations",
+        )
 
     def get_paper_references(self, paper_id: str, limit: int = 20) -> List[Paper]:
         """
@@ -490,26 +447,45 @@ class SemanticScholarClient:
         :param int limit: Maximum number of references to fetch
         :return List[Paper]: List of Paper objects (may be shorter than limit)
         """
+        return self._get_related_papers(
+            paper_id=paper_id,
+            limit=limit,
+            fetch_method=self.client.get_paper_references,
+            relation_label="references",
+        )
+
+    def _get_related_papers(
+        self,
+        paper_id: str,
+        limit: int,
+        fetch_method: Callable[..., Any],
+        relation_label: str,
+    ) -> List[Paper]:
+        """Fetch and convert citation-like relation payloads with shared retry logic.
+
+        :param str paper_id: Raw paper identifier.
+        :param int limit: Maximum number of relation records to fetch.
+        :param Callable[..., Any] fetch_method: Semantic Scholar relation fetch method.
+        :param str relation_label: Human-readable label used in logs.
+        :return List[Paper]: Converted relation papers.
+        """
         papers: List[Paper] = []
         normalized_paper_id = normalize_paper_id(paper_id)
 
         for attempt in range(API_CONFIG.max_retries):
             try:
                 self._rate_limit()
-                references = self.client.get_paper_references(
-                    normalized_paper_id, limit=limit
-                )
-
-                if not references:
+                relation_records = fetch_method(normalized_paper_id, limit=limit)
+                if not relation_records:
                     return papers
 
-                for ref in references:
+                for record in relation_records:
                     if (
-                        hasattr(ref, "paper")
-                        and ref.paper
-                        and hasattr(ref.paper, "paperId")
+                        hasattr(record, "paper")
+                        and record.paper
+                        and hasattr(record.paper, "paperId")
                     ):
-                        paper = self._convert_api_paper(ref.paper)
+                        paper = self._convert_api_paper(record.paper)
                         if paper:
                             papers.append(paper)
 
@@ -520,14 +496,15 @@ class SemanticScholarClient:
 
             except ObjectNotFoundException:
                 logger.warning(
-                    "Paper not found for references: %s", normalized_paper_id
+                    "Paper not found for %s: %s", relation_label, normalized_paper_id
                 )
                 return papers
             except Exception as exc:
                 if attempt < API_CONFIG.max_retries - 1:
                     wait_time = self._retry_wait_time(exc, attempt)
                     logger.warning(
-                        "Failed to fetch references for %s (attempt %s). Retrying in %ss",
+                        "Failed to fetch %s for %s (attempt %s). Retrying in %ss",
+                        relation_label,
                         normalized_paper_id,
                         attempt + 1,
                         wait_time,
@@ -535,7 +512,8 @@ class SemanticScholarClient:
                     time.sleep(wait_time)
                 else:
                     logger.warning(
-                        "Failed to fetch references for %s after %s attempts: %s",
+                        "Failed to fetch %s for %s after %s attempts: %s",
+                        relation_label,
                         normalized_paper_id,
                         API_CONFIG.max_retries,
                         exc,
