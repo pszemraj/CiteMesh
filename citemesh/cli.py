@@ -456,10 +456,15 @@ Examples:
                 "edges": graph.number_of_edges(),
                 "theme": args.theme,
             }
-            shared_layout = compute_layout(
-                graph,
-                iterations=args.iterations,
-                layout_seed=args.seed,
+            layout_required = any(fmt in output_paths for fmt in ("png", "plotly"))
+            shared_layout = (
+                compute_layout(
+                    graph,
+                    iterations=args.iterations,
+                    layout_seed=args.seed,
+                )
+                if layout_required
+                else None
             )
 
             exporter = GraphExporter(

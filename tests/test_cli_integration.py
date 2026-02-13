@@ -425,3 +425,63 @@ class TestCLIReproducibility:
         assert captured["layout_seed"] == 123
         assert captured["exporter_layout"] is shared_layout
         assert captured["visualize_layout"] is shared_layout
+
+    def test_json_export_skips_layout_computation(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """JSON-only exports should not compute layout."""
+        graph = nx.Graph()
+        graph.add_node(
+            "seed",
+            title="Seed",
+            year=2020,
+            authors=[],
+            citation_count=0,
+            is_seed=True,
+        )
+
+        captured: dict[str, object] = {}
+
+        monkeypatch.setattr(
+            cli_module,
+            "build_recommendation_graph",
+            lambda args: (graph, "seed"),
+        )
+
+        def _fail_compute_layout(*args, **kwargs):
+            del args
+            del kwargs
+            raise AssertionError("compute_layout should not run for JSON-only export")
+
+        monkeypatch.setattr(cli_module, "compute_layout", _fail_compute_layout)
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                captured["exporter_layout"] = kwargs["layout"]
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "graph.json"
+            result = run_cli_command(
+                [
+                    "build",
+                    "arxiv:1706.03762",
+                    "--strategy",
+                    "recommendation",
+                    "--export",
+                    "json",
+                    "-o",
+                    str(output),
+                ],
+            )
+            assert output.exists()
+
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        assert captured["exporter_layout"] is None
