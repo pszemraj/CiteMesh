@@ -5,7 +5,7 @@ Build exploration-friendly citation graphs from a single paper or query using ci
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/paper-graph-vis.git
+git clone <repository-url>
 cd paper-graph-vis
 pip install -e .
 ```
@@ -35,8 +35,7 @@ citemesh search "attention mechanism"
 ## Essentials
 
 - `citemesh build "<paper-id>" --strategy <recommendation|citation|embedding|hybrid> [options]`
-- Identifiers: DOI (`10.1038/...`) or DOI URL (`https://doi.org/...`), arXiv (`arxiv:1706.03762`, `1706.03762`, or `https://arxiv.org/abs/...`), Semantic Scholar Paper ID, or free-form text (embedding strategy).
-- `--export` accepts any combination of `png`, `html`, `plotly`, `json`, `graphml`, or `all`.
+- See [CLI Usage](docs/guides/cli.md) for supported identifiers, full flag reference, and export behavior.
 - `--theme` selects a colour palette for both static and interactive outputs.
 
 ## API Key
@@ -47,8 +46,8 @@ Set `S2_API_KEY` for higher Semantic Scholar rate limits:
 export S2_API_KEY="your-semantic-scholar-key"
 ```
 
-- Without a key: lower request limits (historically ~100 requests / 5 minutes).
-- With a key: much higher throughput for discovery workflows (historically ~100 requests / second).
+- Without a key: conservative throttling is applied by default.
+- With a key: Semantic Scholar may grant a higher quota and better throughput.
 
 ## Documentation
 

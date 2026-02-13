@@ -32,11 +32,11 @@ Accepted identifiers:
 | `--iterations`, `-i` | Layout iterations (higher = smoother)                            | `100`                          |
 | `--dpi`, `-d`        | PNG output resolution                                            | `150`                          |
 | `--seed`             | Random seed for reproducibility                                  | none (non-deterministic)       |
-| `--export`, `-e`     | One or more of `png`, `html`, `plotly`, `json`, `graphml`, `all` | `png`                          |
+| `--export`, `-e`     | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all`     | `png`                          |
 | `--theme`            | `light`, `dark`, `solarized`, `auto`                             | `light`                        |
 | `--output`, `-o`     | Base filename for exports                                        | auto-generated from seed title |
 
-When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path and request multiple formats, the CLI appends the correct extension for each exported file.
+When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path, the CLI appends the correct extension for each exported format.
 Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`) are preserved; format extensions are appended without truncating the basename.
 
 ## Strategy-Specific Flags
@@ -91,7 +91,7 @@ citemesh build "arxiv:1810.04805" \
   --strategy embedding \
   -m all-MiniLM-L6-v2 \
   --dataset-split "train[:2%]" \
-  --export plotly json
+  --export plotly
 
 # Use a DOI and write outputs to a custom location
 citemesh build "10.1145/3133956.3134029" \

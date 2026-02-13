@@ -44,8 +44,6 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 | `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses temporal, citation-impact, and real bibliographic coupling scores             |
 | `embedding` | Loads/streams HuggingFace ML-ArXiv corpus, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
 | `recommendation` | Uses Semantic Scholar recommendations as the primary neighborhood signal  | Fast topical discovery, deterministic thresholded edge filtering                  |
-| `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses temporal, citation-impact, and real bibliographic coupling scores             |
-| `embedding` | Loads/streams HuggingFace ML-ArXiv corpus, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
 | `hybrid`    | Starts with citation graph, enriches with semantic matches     | Adjusts weightings based on relationship type, caps edges per node                 |
 
 Each strategy can surface helpful logging by calling `_set_collection_summary`, which the CLI prints after graph construction.
@@ -79,10 +77,9 @@ Each strategy can surface helpful logging by calling `_set_collection_summary`, 
 
 ### Caching Support
 
-- `citemesh/data/cache.py` picks a cross-platform cache directory (`~/.cache/citemesh`, `%LOCALAPPDATA%\CiteMesh`, etc.) and honours `CITEMESH_CACHE_DIR`.
-- `citemesh/data/embedding_cache.py` stores embeddings in SQLite (metadata) + HDF5 (vectors), keyed by model hash and content checksum to avoid stale results.
-- Joblib caches for HuggingFace corpora point to the same cache root, keeping the repository workspace clean.
-- `citemesh/data/model_profiles.py` captures per-model hints (e.g., EmbeddingGemma prompts) that the embedding strategy consumes.
+- `citemesh/data/cache.py` and `citemesh/data/embedding_cache.py` configure user-scoped storage for persistent graph artifacts and embedding vectors.
+- `citemesh/data/model_profiles.py` captures per-model metadata (for example, prompts and dtype hints) consumed by embedding strategies.
+- See [Caching Guide](../guides/caching.md) for full cache layout, invalidation rules, and cleanup commands.
 
 ### Service Clients (`citemesh/services/semantic_scholar.py`)
 

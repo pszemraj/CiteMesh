@@ -1,6 +1,6 @@
 # CiteMesh Documentation
 
-Use this index to navigate the project documentation by topic.
+Use this index to navigate the project documentation by topic. For each area, the linked file is the primary source of truth.
 
 ## Guides
 
