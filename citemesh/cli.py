@@ -337,6 +337,94 @@ def _clear_cache_directory(*, assume_yes: bool) -> int:
     return 0
 
 
+def _format_bytes(num_bytes: int) -> str:
+    """Format byte counts into readable binary units.
+
+    :param int num_bytes: Raw byte count.
+    :return str: Human-readable size string.
+    """
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    value = float(max(num_bytes, 0))
+    unit = units[0]
+    for candidate in units:
+        unit = candidate
+        if value < 1024.0 or candidate == units[-1]:
+            break
+        value /= 1024.0
+    if unit == "B":
+        return f"{int(value)} {unit}"
+    return f"{value:.1f} {unit}"
+
+
+def _scan_path_stats(path: Path) -> tuple[int, int]:
+    """Return file-count and total size stats for a path.
+
+    :param Path path: Directory or file path to scan.
+    :return tuple[int, int]: ``(file_count, size_bytes)`` totals.
+    """
+    if path.is_file():
+        try:
+            return 1, path.stat().st_size
+        except OSError:
+            return 1, 0
+
+    file_count = 0
+    size_bytes = 0
+    for candidate in path.rglob("*"):
+        if not candidate.is_file():
+            continue
+        file_count += 1
+        try:
+            size_bytes += candidate.stat().st_size
+        except OSError:
+            continue
+    return file_count, size_bytes
+
+
+def _scan_cache_directory() -> int:
+    """Scan the CiteMesh cache root and print a usage summary.
+
+    :return int: Process exit code (``0`` success, ``1`` failure).
+    """
+    raw_cache_root = get_cache_dir(create=False)
+    cache_root = raw_cache_root.expanduser().resolve()
+
+    if not cache_root.exists():
+        logger.info("Cache directory does not exist: %s", cache_root)
+        return 0
+    if not cache_root.is_dir():
+        logger.error("Cache path exists but is not a directory: %s", cache_root)
+        return 1
+
+    section_rows: list[tuple[str, int, int]] = []
+    for child in sorted(cache_root.iterdir(), key=lambda item: item.name):
+        files, size_bytes = _scan_path_stats(child)
+        section_rows.append((child.name, files, size_bytes))
+
+    total_files = sum(row[1] for row in section_rows)
+    total_bytes = sum(row[2] for row in section_rows)
+
+    output_console.print(f"[bold]Cache root:[/bold] {cache_root}")
+    table = Table(title="CiteMesh Cache Scan")
+    table.add_column("Section")
+    table.add_column("Files", justify="right")
+    table.add_column("Size", justify="right")
+
+    if section_rows:
+        for name, files, size_bytes in section_rows:
+            table.add_row(name, str(files), _format_bytes(size_bytes))
+    else:
+        table.add_row("(empty)", "0", "0 B")
+
+    table.add_row(
+        "[bold]TOTAL[/bold]",
+        f"[bold]{total_files}[/bold]",
+        f"[bold]{_format_bytes(total_bytes)}[/bold]",
+    )
+    output_console.print(table)
+    return 0
+
+
 def main() -> None:
     """Main CLI entry point."""
     _configure_logging()
@@ -580,6 +668,9 @@ Examples:
         action="store_true",
         help="Skip confirmation prompt and clear cache immediately",
     )
+    cache_subparsers.add_parser(
+        "scan", help="Scan cache usage (sections, file counts, and total size)"
+    )
 
     args = parser.parse_args()
 
@@ -731,13 +822,17 @@ Examples:
             logger.error(f"Search failed: {e}")
             sys.exit(1)
     elif args.command == "cache":
-        if args.cache_command != "clear":
+        if args.cache_command == "scan":
+            exit_code = _scan_cache_directory()
+            if exit_code != 0:
+                sys.exit(exit_code)
+        elif args.cache_command == "clear":
+            exit_code = _clear_cache_directory(assume_yes=bool(args.yes))
+            if exit_code != 0:
+                sys.exit(exit_code)
+        else:
             cache_parser.print_help()
             sys.exit(1)
-
-        exit_code = _clear_cache_directory(assume_yes=bool(args.yes))
-        if exit_code != 0:
-            sys.exit(exit_code)
 
 
 if __name__ == "__main__":

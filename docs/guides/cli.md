@@ -22,6 +22,12 @@ To clear the entire CiteMesh cache root from the CLI:
 citemesh cache clear --yes
 ```
 
+To inspect cache usage by top-level section:
+
+```bash
+citemesh cache scan
+```
+
 Accepted identifiers:
 
 - DOI (`10.1038/nature14539`)
@@ -165,6 +171,7 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 - **Slow embedding runs on first attempt**: the initial execution downloads HuggingFace data and computes embeddings. Subsequent runs reuse cached corpora and vectors.
 - **Missing exports**: double-check `--export` values; unknown strings are rejected by argparse.
 - **API limits**: set `S2_API_KEY` for higher Semantic Scholar rate limits, especially for recommendation and search heavy workflows.
+- **Inspect cache size**: run `citemesh cache scan` to see per-section file counts and bytes before cleanup.
 - **Reset local caches**: use `citemesh cache clear --yes` to remove the full CiteMesh cache root in one command.
 
 ```bash

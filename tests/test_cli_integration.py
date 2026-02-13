@@ -126,6 +126,7 @@ class TestCLIBasics:
         result = run_cli_command(["cache", "--help"])
         assert result.returncode == 0
         assert "clear" in result.stdout
+        assert "scan" in result.stdout
 
     def test_cache_clear_removes_configured_cache_root(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -146,6 +147,34 @@ class TestCLIBasics:
             f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
         assert not cache_root.exists()
+
+    def test_cache_scan_reports_usage_summary(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cache scan should print per-section and total usage stats.
+
+        :param Path tmp_path: Temporary directory fixture.
+        :param pytest.MonkeyPatch monkeypatch: Fixture used to set env vars.
+        :return None: Asserts scan output includes expected sections and totals.
+        """
+        cache_root = tmp_path / "citemesh-cache-root"
+        (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
+        (cache_root / "joblib").mkdir(parents=True, exist_ok=True)
+        (cache_root / "references").mkdir(parents=True, exist_ok=True)
+        (cache_root / "embeddings" / "vectors.bin").write_bytes(b"a" * 2048)
+        (cache_root / "references" / "payload.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
+
+        result = run_cli_command(["cache", "scan"])
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        assert "CiteMesh Cache Scan" in result.stdout
+        assert "embeddings" in result.stdout
+        assert "references" in result.stdout
+        assert "joblib" in result.stdout
+        assert "TOTAL" in result.stdout
+        assert "Cache root:" in result.stdout
 
     def test_seed_argument_exists(self) -> None:
         """Test --seed argument is exposed (caught bug: was implemented but not exposed)."""

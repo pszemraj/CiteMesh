@@ -67,6 +67,12 @@ The HuggingFace library also maintains its own cache (usually `~/.cache/huggingf
 
 ## Cleaning the Cache
 
+Inspect cache usage first:
+
+```bash
+citemesh cache scan
+```
+
 For a full cache reset via CLI:
 
 ```bash
