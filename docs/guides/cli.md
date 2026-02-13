@@ -50,7 +50,7 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 - Uses Semantic Scholar recommendations for fast, high-signal topical seeds.
 - Reuses:
   - `--similarity-threshold`, `-t` for edge filtering.
-  - `--no-references` to skip fetching references for the seed paper.
+  - `--no-references` to skip fetching references for the seed and recommendation neighbors.
 
 ### Citation Strategy
 

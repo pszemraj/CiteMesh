@@ -288,6 +288,7 @@ class SemanticScholarClient:
             categories = rec.get("fieldsOfStudy") or rec.get("fields") or []
             if isinstance(categories, str):
                 categories = [categories]
+            references = self._extract_reference_ids(rec.get("references"))
 
             return Paper(
                 paper_id=paper_id,
@@ -297,12 +298,69 @@ class SemanticScholarClient:
                 citation_count=rec.get("citationCount", 0) or 0,
                 abstract=rec.get("abstract") or "",
                 categories=categories,
-                references=[],
+                references=references,
                 is_seed=False,
             )
         except (TypeError, ValueError) as exc:
             logger.debug("Skipping malformed recommendation record: %s", exc)
             return None
+
+    @staticmethod
+    def _extract_reference_ids(raw_references: Any) -> List[str]:
+        """Extract reference IDs from recommendation/search payload shapes.
+
+        :param Any raw_references: Raw ``references`` payload from API response.
+        :return List[str]: Parsed reference ID list (order-preserving, deduplicated).
+        """
+        if not isinstance(raw_references, list):
+            return []
+
+        parsed: List[str] = []
+        seen: set[str] = set()
+
+        def _add_candidate(candidate: Optional[str]) -> None:
+            """Add a normalized reference ID if valid and unseen.
+
+            :param Optional[str] candidate: Candidate paper ID string.
+            :return None: Updates ``parsed`` in place.
+            """
+            if not candidate:
+                return
+            normalized = candidate.strip()
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            parsed.append(normalized)
+
+        for ref in raw_references:
+            if isinstance(ref, str):
+                _add_candidate(ref)
+                continue
+
+            if isinstance(ref, dict):
+                ref_id = ref.get("paperId") or ref.get("paper_id")
+                if isinstance(ref_id, str):
+                    _add_candidate(ref_id)
+                    continue
+
+                nested_paper = ref.get("paper")
+                if isinstance(nested_paper, dict):
+                    nested_id = nested_paper.get("paperId")
+                    if isinstance(nested_id, str):
+                        _add_candidate(nested_id)
+                continue
+
+            ref_id = getattr(ref, "paperId", None)
+            if isinstance(ref_id, str):
+                _add_candidate(ref_id)
+                continue
+
+            nested_paper = getattr(ref, "paper", None)
+            nested_id = getattr(nested_paper, "paperId", None)
+            if isinstance(nested_id, str):
+                _add_candidate(nested_id)
+
+        return parsed
 
     def _request_json(
         self, url: str, params: Dict[str, Any]

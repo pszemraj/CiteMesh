@@ -29,7 +29,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         """Initialize recommendation graph builder.
 
         :param int max_papers: Maximum papers to include in graph.
-        :param bool fetch_references: Whether to fetch references for seed.
+        :param bool fetch_references: Whether to fetch references for seed and recommended papers.
         :param float similarity_threshold: Threshold for edge creation.
         :param Optional[int] random_seed: Seed for reproducibility.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
@@ -39,6 +39,24 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.similarity_threshold = similarity_threshold
         self.client = client or get_client()
         self._abstract_index = AbstractSimilarityIndex()
+
+    def _hydrate_references(self, paper: Paper) -> None:
+        """Populate reference IDs for a paper when strategy settings require it.
+
+        :param Paper paper: Paper record to enrich.
+        :return None: Mutates ``paper.references`` in place when successful.
+        """
+        if not self.fetch_references or paper.references:
+            return
+
+        try:
+            paper.references = self.client.get_reference_ids(paper.paper_id)
+        except Exception as exc:
+            logger.debug(
+                "Could not fetch reference IDs for recommendation %s: %s",
+                paper.paper_id,
+                exc,
+            )
 
     def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """Collect recommendations for a seed paper.
@@ -80,12 +98,16 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
                 if (not existing.abstract and paper.abstract) or (
                     existing.title == "Unknown" and paper.title != "Unknown"
                 ):
+                    self._hydrate_references(paper)
                     papers[paper.paper_id] = paper
+                elif not existing.references:
+                    self._hydrate_references(existing)
                 continue
 
             if len(papers) >= self.max_papers:
                 break
 
+            self._hydrate_references(paper)
             papers[paper.paper_id] = paper
 
         logger.info("Collected %s papers from recommendations", len(papers))

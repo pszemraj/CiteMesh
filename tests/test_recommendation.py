@@ -106,13 +106,16 @@ class TestRecommendationGraphBuilder:
                 ),
             ]
         ]
+        mock_client.get_reference_ids.side_effect = lambda paper_id: [f"{paper_id}-ref"]
         mock_get_client.return_value = mock_client
 
-        builder = RecommendationGraphBuilder(max_papers=2)
+        builder = RecommendationGraphBuilder(max_papers=2, fetch_references=True)
         papers = builder.collect_papers("seed")
 
         assert "valid" in papers
         assert "missing_abstract" not in papers
+        assert papers["valid"].references == ["valid-ref"]
+        mock_client.get_reference_ids.assert_called_once_with("valid")
 
     @patch("citemesh.strategies.recommendation.get_client")
     def test_collect_and_build_with_unknown_year(

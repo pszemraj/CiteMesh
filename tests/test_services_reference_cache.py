@@ -94,6 +94,12 @@ def test_recommendation_and_search_payload_conversion() -> None:
                         "citationCount": 3,
                         "authors": [{"name": "Alice"}],
                         "fieldsOfStudy": ["cs.AI"],
+                        "references": [
+                            {"paperId": "r1"},
+                            {"paper": {"paperId": "r2"}},
+                            "r3",
+                            {"paperId": "r1"},
+                        ],
                     }
                 ]
             },
@@ -117,4 +123,5 @@ def test_recommendation_and_search_payload_conversion() -> None:
     search_results = client.search_papers("transformer", limit=1)
 
     assert [paper.paper_id for paper in recommendations] == ["rec1"]
+    assert recommendations[0].references == ["r1", "r2", "r3"]
     assert [paper.paper_id for paper in search_results] == ["search1"]
