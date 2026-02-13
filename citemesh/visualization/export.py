@@ -113,7 +113,7 @@ class GraphExporter:
             from pyvis.network import Network
         except ImportError as exc:
             raise RuntimeError(
-                "pyvis is required for HTML export. Install the 'pyvis' dependency."
+                "pyvis is required for HTML export. Install with: pip install citemesh[viz]."
             ) from exc
 
         theme_obj = get_theme(theme) if theme else self.theme
@@ -193,7 +193,7 @@ class GraphExporter:
             from plotly import graph_objects as go
         except ImportError as exc:
             raise RuntimeError(
-                "plotly is required for Plotly export. Install the 'plotly' dependency."
+                "plotly is required for Plotly export. Install with: pip install citemesh[viz]."
             ) from exc
 
         theme_obj = get_theme(theme) if theme else self.theme
