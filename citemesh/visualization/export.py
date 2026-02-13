@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 import networkx as nx
+from plotly import graph_objects as go
+from pyvis.network import Network
 
 from citemesh.core import Paper
 
@@ -98,13 +100,6 @@ class GraphExporter:
             theme: Optional override for theme.
             physics: Whether to enable force-directed physics.
         """
-        try:
-            from pyvis.network import Network
-        except ImportError as exc:
-            raise RuntimeError(
-                "pyvis is required for HTML export. Install the 'pyvis' dependency."
-            ) from exc
-
         theme_obj = get_theme(theme) if theme else self.theme
 
         net = Network(
@@ -174,13 +169,6 @@ class GraphExporter:
 
     def to_plotly_html(self, path: Path, theme: Optional[str] = None) -> None:
         """Create Plotly interactive visualization."""
-        try:
-            import plotly.graph_objects as go
-        except ImportError as exc:
-            raise RuntimeError(
-                "plotly is required for Plotly export. Install the 'plotly' dependency."
-            ) from exc
-
         theme_obj = get_theme(theme) if theme else self.theme
         pos = self._get_layout()
 

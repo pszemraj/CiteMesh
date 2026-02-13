@@ -1,18 +1,48 @@
-"""
-Integration tests for CLI functionality.
+"""Integration tests for CLI functionality."""
 
-These tests actually run the CLI and verify it works end-to-end,
-unlike the toy unit tests that never caught a single bug.
-"""
-
-import subprocess
+import io
+import sys
 import tempfile
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 import networkx as nx
 import pytest
 
+from citemesh import cli as cli_module
 from citemesh.visualization import generate_output_path
+
+
+def run_cli_command(args: list[str]) -> SimpleNamespace:
+    """Run the CLI in-process and capture stdout/stderr."""
+    previous_argv = sys.argv[:]
+    sys.argv = ["citemesh"] + list(args)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                cli_module.main()
+                returncode = 0
+            except SystemExit as exc:
+                code = exc.code
+                if isinstance(code, int):
+                    returncode = code
+                elif code is None:
+                    returncode = 0
+                else:
+                    returncode = 1
+    finally:
+        sys.argv = previous_argv
+
+    return SimpleNamespace(
+        returncode=returncode,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+    )
 
 
 class TestCLIBasics:
@@ -20,18 +50,14 @@ class TestCLIBasics:
 
     def test_cli_help_works(self):
         """Test CLI help command runs without error."""
-        result = subprocess.run(
-            ["citemesh", "--help"], capture_output=True, text=True, timeout=10
-        )
+        result = run_cli_command(["--help"])
         assert result.returncode == 0
         assert "CiteMesh" in result.stdout
         assert "build" in result.stdout
 
     def test_build_help_works(self):
         """Test build subcommand help."""
-        result = subprocess.run(
-            ["citemesh", "build", "--help"], capture_output=True, text=True, timeout=10
-        )
+        result = run_cli_command(["build", "--help"])
         assert result.returncode == 0
         assert "strategy" in result.stdout
         assert "recommendation" in result.stdout
@@ -41,29 +67,27 @@ class TestCLIBasics:
 
     def test_search_help_works(self):
         """Test search subcommand help."""
-        result = subprocess.run(
-            ["citemesh", "search", "--help"], capture_output=True, text=True, timeout=10
-        )
+        result = run_cli_command(["search", "--help"])
         assert result.returncode == 0
         assert "search" in result.stdout.lower()
         assert "--limit" in result.stdout
 
     def test_seed_argument_exists(self):
         """Test --seed argument is exposed (caught bug: was implemented but not exposed)."""
-        result = subprocess.run(
-            ["citemesh", "build", "--help"], capture_output=True, text=True, timeout=10
-        )
+        result = run_cli_command(["build", "--help"])
         assert result.returncode == 0
         assert "--seed" in result.stdout
         assert "reproducibility" in result.stdout.lower()
 
     def test_invalid_strategy_rejected(self):
         """Test invalid strategy name is rejected by argparse."""
-        result = subprocess.run(
-            ["citemesh", "build", "arxiv:1706.03762", "--strategy", "invalid"],
-            capture_output=True,
-            text=True,
-            timeout=10,
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "invalid",
+            ]
         )
         assert result.returncode != 0
         assert "invalid choice" in result.stderr.lower()
@@ -77,9 +101,8 @@ class TestCLIExecution:
         """Test citation strategy completes successfully with small graph."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_output.png"
-            result = subprocess.run(
+            result = run_cli_command(
                 [
-                    "citemesh",
                     "build",
                     "arxiv:1706.03762",
                     "--strategy",
@@ -95,9 +118,6 @@ class TestCLIExecution:
                     "-o",
                     str(output),
                 ],
-                capture_output=True,
-                text=True,
-                timeout=90,
             )
             assert result.returncode == 0, (
                 f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
@@ -110,9 +130,8 @@ class TestCLIExecution:
         """Test --no-references flag works and is faster."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_no_refs.png"
-            result = subprocess.run(
+            result = run_cli_command(
                 [
-                    "citemesh",
                     "build",
                     "arxiv:1810.04805",
                     "--strategy",
@@ -125,9 +144,6 @@ class TestCLIExecution:
                     "-o",
                     str(output),
                 ],
-                capture_output=True,
-                text=True,
-                timeout=120,
             )
         # May timeout due to S2 API rate limits, skip in that case
         if result.returncode == 0:
@@ -138,9 +154,8 @@ class TestCLIExecution:
         """Test embedding strategy with tiny dataset."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_embedding.png"
-            result = subprocess.run(
+            result = run_cli_command(
                 [
-                    "citemesh",
                     "build",
                     "arxiv:1706.03762",
                     "--strategy",
@@ -156,9 +171,6 @@ class TestCLIExecution:
                     "-o",
                     str(output),
                 ],
-                capture_output=True,
-                text=True,
-                timeout=120,
             )
         # May fail due to S2 API rate limits, but should not crash
         if result.returncode == 0:
@@ -174,9 +186,8 @@ class TestCLIErrorHandling:
     @pytest.mark.slow
     def test_invalid_paper_id_fails_cleanly(self):
         """Test invalid paper ID returns non-zero exit code with clean error."""
-        result = subprocess.run(
+        result = run_cli_command(
             [
-                "citemesh",
                 "build",
                 "this-is-not-a-real-paper-id-12345",
                 "--strategy",
@@ -184,9 +195,6 @@ class TestCLIErrorHandling:
                 "-p",
                 "5",
             ],
-            capture_output=True,
-            text=True,
-            timeout=120,  # Slow due to S2 retries with rate limits and exponential backoff
         )
         assert result.returncode != 0, "Should fail with non-zero exit code"
         assert "not found" in result.stderr.lower()
@@ -195,21 +203,14 @@ class TestCLIErrorHandling:
 
     def test_missing_required_argument_fails(self):
         """Test missing paper_id argument fails."""
-        result = subprocess.run(
-            ["citemesh", "build", "--strategy", "citation"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        result = run_cli_command(["build", "--strategy", "citation"])
         assert result.returncode != 0
         assert "required" in result.stderr.lower() or "error" in result.stderr.lower()
 
 
 def test_default_strategy_is_recommendation():
     """Default strategy should be recommendation."""
-    result = subprocess.run(
-        ["citemesh", "build", "--help"], capture_output=True, text=True, timeout=10
-    )
+    result = run_cli_command(["build", "--help"])
     assert result.returncode == 0
     assert "default: recommendation" in result.stdout
 
@@ -234,9 +235,7 @@ class TestCLIDefaults:
 
     def test_dataset_split_default_matches(self):
         """Test dataset-split default in CLI help matches strategy (caught bug: train[:2%] vs train)."""
-        result = subprocess.run(
-            ["citemesh", "build", "--help"], capture_output=True, text=True, timeout=10
-        )
+        result = run_cli_command(["build", "--help"])
         assert result.returncode == 0
         # Help should show full dataset default, not train[:2%]
         help_text = result.stdout.lower()
@@ -269,8 +268,8 @@ class TestCLIReproducibility:
             "42",
         ]
 
-        result1 = subprocess.run(args, capture_output=True, text=True, timeout=180)
-        result2 = subprocess.run(args, capture_output=True, text=True, timeout=180)
+        result1 = run_cli_command(args)
+        result2 = run_cli_command(args)
 
         if result1.returncode == 0 and result2.returncode == 0:
             # Extract node/edge counts from output
