@@ -17,43 +17,15 @@ import numpy as np
 
 from citemesh.core import VIZ_CONFIG
 
+from .ordering import (
+    canonicalize_graph_for_layout,
+    ordered_edges_with_data,
+    ordered_nodes,
+)
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
 MAX_TITLE_CHARS = 50
-
-
-def _ordered_nodes(graph: nx.Graph) -> List[str]:
-    """Return graph node IDs in canonical deterministic order."""
-    return sorted(graph.nodes(), key=str)
-
-
-def _ordered_edges_with_data(graph: nx.Graph) -> List[Tuple[str, str, Dict[str, Any]]]:
-    """Return canonicalized edge tuples with deterministic ordering."""
-    canonicalized = []
-    for left, right, attrs in graph.edges(data=True):
-        edge_left, edge_right = (
-            (left, right) if str(left) <= str(right) else (right, left)
-        )
-        canonicalized.append((edge_left, edge_right, dict(attrs)))
-
-    return sorted(
-        canonicalized,
-        key=lambda item: (str(item[0]), str(item[1])),
-    )
-
-
-def _canonicalize_graph_for_layout(graph: nx.Graph) -> nx.Graph:
-    """Create a graph copy with deterministic node/edge insertion ordering."""
-    canonical_graph = nx.Graph()
-
-    for node in _ordered_nodes(graph):
-        canonical_graph.add_node(node, **dict(graph.nodes[node]))
-
-    for left, right, attrs in _ordered_edges_with_data(graph):
-        canonical_graph.add_edge(left, right, **attrs)
-
-    return canonical_graph
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -201,7 +173,7 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
     :param nx.Graph graph: NetworkX graph with paper nodes
     :return List[float]: List of sizes (in square pixels) for each node
     """
-    nodes = _ordered_nodes(graph)
+    nodes = ordered_nodes(graph)
     sizes = []
     seed_nodes = {node for node in nodes if graph.nodes[node].get("is_seed")}
     sorted_nodes = sorted(
@@ -259,7 +231,7 @@ def compute_node_colors(
     :param Theme theme: Theme palette used for interpolation.
     :return Tuple[List[Tuple[float, float, float]], int, int]: Tuple of (color_list, min_year, max_year)
     """
-    nodes = _ordered_nodes(graph)
+    nodes = ordered_nodes(graph)
     years = [graph.nodes[n].get("year") for n in nodes if graph.nodes[n].get("year")]
     if years:
         min_year = min(years)
@@ -301,7 +273,7 @@ def compute_layout(
     :param Optional[int] layout_seed: Optional seed for deterministic layout perturbations/fallback.
     :return Dict[str, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
     """
-    canonical_graph = _canonicalize_graph_for_layout(graph)
+    canonical_graph = canonicalize_graph_for_layout(graph)
 
     try:
         pos = nx.kamada_kawai_layout(
@@ -343,7 +315,7 @@ def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict, theme: Theme) -> None:
     :param Theme theme: Theme palette for edge colors.
     :return None: Draws all edges onto the axes.
     """
-    for n1, n2, data in _ordered_edges_with_data(graph):
+    for n1, n2, data in ordered_edges_with_data(graph):
         weight = data.get("weight", 0.1)
         p1 = pos[n1]
         p2 = pos[n2]
@@ -382,7 +354,7 @@ def draw_nodes(
     :param Theme theme: Theme palette for edge outlines.
     :return None: Draws all nodes onto the axes.
     """
-    nodes = _ordered_nodes(graph)
+    nodes = ordered_nodes(graph)
 
     for i, node in enumerate(nodes):
         p = pos[node]
@@ -424,7 +396,7 @@ def draw_labels(
             return title
         return f"{title[: max_chars - 3].rstrip()}..."
 
-    for node in _ordered_nodes(graph):
+    for node in ordered_nodes(graph):
         p = pos[node]
 
         # Seed paper gets larger, bold label

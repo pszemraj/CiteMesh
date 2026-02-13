@@ -16,6 +16,7 @@ import networkx as nx
 
 from citemesh.core import Paper
 
+from .ordering import ordered_edges_with_data, ordered_nodes
 from .render import compute_layout, compute_node_colors, compute_node_sizes
 from .themes import Theme, get_theme
 
@@ -295,24 +296,17 @@ class GraphExporter:
 
         :return list[tuple[str, Dict]]: Sorted ``(node_id, attrs)`` pairs.
         """
-        return sorted(
-            self.graph.nodes(data=True),
-            key=lambda item: str(item[0]),
-        )
+        return [
+            (node_id, self.graph.nodes[node_id])
+            for node_id in ordered_nodes(self.graph)
+        ]
 
     def _sorted_edges(self) -> list[tuple[str, str, Dict]]:
         """Return undirected edges with canonical endpoints in stable order.
 
         :return list[tuple[str, str, Dict]]: Sorted edge tuples in ``(u, v, attrs)`` form.
         """
-        canonicalized = []
-        for u, v, attrs in self.graph.edges(data=True):
-            left, right = (u, v) if str(u) <= str(v) else (v, u)
-            canonicalized.append((left, right, attrs))
-        return sorted(
-            canonicalized,
-            key=lambda item: (str(item[0]), str(item[1])),
-        )
+        return ordered_edges_with_data(self.graph)
 
     def _get_layout(self) -> Dict[str, Iterable[float]]:
         """Compute or reuse cached graph layout.

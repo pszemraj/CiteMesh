@@ -262,46 +262,6 @@ def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
         return paper_id
 
 
-def build_citation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
-    """
-    Build graph using citation strategy.
-
-    :param argparse.Namespace args: Parsed CLI arguments.
-    :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
-    """
-    return _build_strategy_graph(args, strategy="citation")
-
-
-def build_recommendation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
-    """
-    Build graph using recommendation strategy.
-
-    :param argparse.Namespace args: Parsed CLI arguments.
-    :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
-    """
-    return _build_strategy_graph(args, strategy="recommendation")
-
-
-def build_embedding_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
-    """
-    Build graph using embedding strategy.
-
-    :param argparse.Namespace args: Parsed CLI arguments.
-    :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
-    """
-    return _build_strategy_graph(args, strategy="embedding")
-
-
-def build_hybrid_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
-    """
-    Build graph using hybrid strategy.
-
-    :param argparse.Namespace args: Parsed CLI arguments.
-    :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
-    """
-    return _build_strategy_graph(args, strategy="hybrid")
-
-
 def main() -> None:
     """Main CLI entry point."""
     _configure_logging()

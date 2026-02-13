@@ -56,6 +56,44 @@ def run_cli_command(args: list[str]) -> SimpleNamespace:
     )
 
 
+def _run_json_build_with_fake_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    builder_attr: str,
+    cli_args: list[str],
+    output_name: str,
+) -> dict[str, object]:
+    """Run a JSON export build command with a fake strategy builder.
+
+    :param pytest.MonkeyPatch monkeypatch: Test monkeypatch fixture.
+    :param str builder_attr: CLI module builder class attribute name to patch.
+    :param list[str] cli_args: CLI args prefix (without ``--export``/``-o``).
+    :param str output_name: Output filename used inside a temp directory.
+    :return dict[str, object]: Captured fake builder kwargs.
+    """
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        builder_attr,
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory({}, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / output_name
+        result = run_cli_command([*cli_args, "--export", "json", "-o", str(output)])
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        assert output.exists()
+
+    return captured
+
+
 class TestCLIBasics:
     """Test basic CLI functionality and argument parsing."""
 
@@ -169,85 +207,41 @@ class TestCLIExecution:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """CLI should pass ``--no-references`` through to citation builder config."""
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(
-            cli_module,
-            "CitationGraphBuilder",
-            build_fake_strategy_builder_factory(
-                captured, graph=build_seed_graph("seed")
-            ),
+        captured = _run_json_build_with_fake_builder(
+            monkeypatch,
+            builder_attr="CitationGraphBuilder",
+            cli_args=[
+                "build",
+                "arxiv:1810.04805",
+                "--strategy",
+                "citation",
+                "-p",
+                "5",
+                "--no-references",
+            ],
+            output_name="test_cli_no_refs.json",
         )
-        monkeypatch.setattr(
-            cli_module,
-            "GraphExporter",
-            build_fake_exporter_factory({}, methods=("to_json",)),
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "test_cli_no_refs.json"
-            result = run_cli_command(
-                [
-                    "build",
-                    "arxiv:1810.04805",
-                    "--strategy",
-                    "citation",
-                    "-p",
-                    "5",
-                    "--no-references",
-                    "--export",
-                    "json",
-                    "-o",
-                    str(output),
-                ],
-            )
-            assert result.returncode == 0, (
-                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-            )
-            assert output.exists()
-
         assert captured["fetch_references"] is False
 
     def test_embedding_strategy_passes_top_k(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """CLI should pass embedding-specific knobs through to embedding builder."""
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(
-            cli_module,
-            "EmbeddingGraphBuilder",
-            build_fake_strategy_builder_factory(
-                captured, graph=build_seed_graph("seed")
-            ),
+        captured = _run_json_build_with_fake_builder(
+            monkeypatch,
+            builder_attr="EmbeddingGraphBuilder",
+            cli_args=[
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--top-k",
+                "1",
+                "--truncate-dim",
+                "128",
+            ],
+            output_name="test_cli_embedding.json",
         )
-        monkeypatch.setattr(
-            cli_module,
-            "GraphExporter",
-            build_fake_exporter_factory({}, methods=("to_json",)),
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "test_cli_embedding.json"
-            result = run_cli_command(
-                [
-                    "build",
-                    "arxiv:1706.03762",
-                    "--strategy",
-                    "embedding",
-                    "--top-k",
-                    "1",
-                    "--truncate-dim",
-                    "128",
-                    "--export",
-                    "json",
-                    "-o",
-                    str(output),
-                ],
-            )
-            assert result.returncode == 0, (
-                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-            )
-            assert output.exists()
-
         assert captured["top_k"] == 1
         assert captured["truncate_dim"] == 128
 
@@ -255,87 +249,43 @@ class TestCLIExecution:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """CLI should pass ``--no-references`` through to hybrid builder config."""
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(
-            cli_module,
-            "HybridGraphBuilder",
-            build_fake_strategy_builder_factory(
-                captured, graph=build_seed_graph("seed")
-            ),
+        captured = _run_json_build_with_fake_builder(
+            monkeypatch,
+            builder_attr="HybridGraphBuilder",
+            cli_args=[
+                "build",
+                "arxiv:1810.04805",
+                "--strategy",
+                "hybrid",
+                "-p",
+                "5",
+                "--no-references",
+            ],
+            output_name="test_cli_hybrid_no_refs.json",
         )
-        monkeypatch.setattr(
-            cli_module,
-            "GraphExporter",
-            build_fake_exporter_factory({}, methods=("to_json",)),
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "test_cli_hybrid_no_refs.json"
-            result = run_cli_command(
-                [
-                    "build",
-                    "arxiv:1810.04805",
-                    "--strategy",
-                    "hybrid",
-                    "-p",
-                    "5",
-                    "--no-references",
-                    "--export",
-                    "json",
-                    "-o",
-                    str(output),
-                ],
-            )
-            assert result.returncode == 0, (
-                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-            )
-            assert output.exists()
-
         assert captured["fetch_references"] is False
 
     def test_hybrid_strategy_passes_embedding_knobs(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Hybrid builder should receive embedding/runtime-related CLI settings."""
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(
-            cli_module,
-            "HybridGraphBuilder",
-            build_fake_strategy_builder_factory(
-                captured, graph=build_seed_graph("seed")
-            ),
+        captured = _run_json_build_with_fake_builder(
+            monkeypatch,
+            builder_attr="HybridGraphBuilder",
+            cli_args=[
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--max-semantic",
+                "3",
+                "--truncate-dim",
+                "128",
+                "--streaming",
+                "--all-corpus",
+            ],
+            output_name="test_cli_hybrid_knobs.json",
         )
-        monkeypatch.setattr(
-            cli_module,
-            "GraphExporter",
-            build_fake_exporter_factory({}, methods=("to_json",)),
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "test_cli_hybrid_knobs.json"
-            result = run_cli_command(
-                [
-                    "build",
-                    "arxiv:1706.03762",
-                    "--strategy",
-                    "hybrid",
-                    "--max-semantic",
-                    "3",
-                    "--truncate-dim",
-                    "128",
-                    "--streaming",
-                    "--all-corpus",
-                    "--export",
-                    "json",
-                    "-o",
-                    str(output),
-                ],
-            )
-            assert result.returncode == 0, (
-                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-            )
-            assert output.exists()
-
         assert captured["max_semantic"] == 3
         assert captured["truncate_dim"] == 128
         assert captured["use_streaming"] is True
@@ -345,79 +295,35 @@ class TestCLIExecution:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Embedding CLI defaults should pass a bounded corpus size."""
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(
-            cli_module,
-            "EmbeddingGraphBuilder",
-            build_fake_strategy_builder_factory(
-                captured, graph=build_seed_graph("seed")
-            ),
+        captured = _run_json_build_with_fake_builder(
+            monkeypatch,
+            builder_attr="EmbeddingGraphBuilder",
+            cli_args=[
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+            ],
+            output_name="test_cli_embedding_defaults.json",
         )
-        monkeypatch.setattr(
-            cli_module,
-            "GraphExporter",
-            build_fake_exporter_factory({}, methods=("to_json",)),
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "test_cli_embedding_defaults.json"
-            result = run_cli_command(
-                [
-                    "build",
-                    "arxiv:1706.03762",
-                    "--strategy",
-                    "embedding",
-                    "--export",
-                    "json",
-                    "-o",
-                    str(output),
-                ],
-            )
-            assert result.returncode == 0, (
-                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-            )
-            assert output.exists()
-
         assert captured["corpus_size"] == 50000
 
     def test_embedding_all_corpus_removes_default_cap(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Embedding ``--all-corpus`` should pass an uncapped corpus size."""
-        captured: dict[str, object] = {}
-        monkeypatch.setattr(
-            cli_module,
-            "EmbeddingGraphBuilder",
-            build_fake_strategy_builder_factory(
-                captured, graph=build_seed_graph("seed")
-            ),
+        captured = _run_json_build_with_fake_builder(
+            monkeypatch,
+            builder_attr="EmbeddingGraphBuilder",
+            cli_args=[
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--all-corpus",
+            ],
+            output_name="test_cli_embedding_all_corpus.json",
         )
-        monkeypatch.setattr(
-            cli_module,
-            "GraphExporter",
-            build_fake_exporter_factory({}, methods=("to_json",)),
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "test_cli_embedding_all_corpus.json"
-            result = run_cli_command(
-                [
-                    "build",
-                    "arxiv:1706.03762",
-                    "--strategy",
-                    "embedding",
-                    "--all-corpus",
-                    "--export",
-                    "json",
-                    "-o",
-                    str(output),
-                ],
-            )
-            assert result.returncode == 0, (
-                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-            )
-            assert output.exists()
-
         assert captured["corpus_size"] is None
 
     def test_search_command_prints_results_to_stdout(
@@ -458,7 +364,7 @@ class TestCLIErrorHandling:
         """Invalid build errors should produce clean non-zero exits without traceback spam."""
         monkeypatch.setattr(
             cli_module,
-            "build_citation_graph",
+            "_build_strategy_graph",
             MagicMock(side_effect=ValueError("Seed paper not found")),
         )
 
@@ -564,8 +470,8 @@ class TestCLIReproducibility:
 
         monkeypatch.setattr(
             cli_module,
-            "build_recommendation_graph",
-            lambda args: (graph, "seed"),
+            "_build_strategy_graph",
+            lambda args, strategy: (graph, "seed"),
         )
 
         def _fake_compute_layout(graph_arg, iterations, layout_seed):
@@ -633,8 +539,8 @@ class TestCLIReproducibility:
 
         monkeypatch.setattr(
             cli_module,
-            "build_recommendation_graph",
-            lambda args: (graph, "seed"),
+            "_build_strategy_graph",
+            lambda args, strategy: (graph, "seed"),
         )
 
         def _fail_compute_layout(*args, **kwargs):
@@ -689,8 +595,8 @@ class TestCLIReproducibility:
 
         monkeypatch.setattr(
             cli_module,
-            "build_recommendation_graph",
-            lambda args: (graph, "seed"),
+            "_build_strategy_graph",
+            lambda args, strategy: (graph, "seed"),
         )
 
         monkeypatch.setattr(
@@ -740,8 +646,8 @@ class TestCLIReproducibility:
 
         monkeypatch.setattr(
             cli_module,
-            "build_recommendation_graph",
-            lambda args: (graph, "seed"),
+            "_build_strategy_graph",
+            lambda args, strategy: (graph, "seed"),
         )
 
         monkeypatch.setattr(
