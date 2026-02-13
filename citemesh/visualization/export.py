@@ -363,8 +363,25 @@ class GraphExporter:
         :param object raw_year: Raw year value from node metadata.
         :return int: Integer year when valid, otherwise ``0``.
         """
-        if isinstance(raw_year, int):
-            return raw_year
+        if isinstance(raw_year, bool):
+            return 0
+
+        # Accept native and NumPy integer-like values.
+        try:
+            import numbers
+
+            if isinstance(raw_year, numbers.Integral):
+                return int(raw_year)
+        except (TypeError, ValueError):
+            pass
+
+        # Some upstream callers may provide year as a numeric string.
+        if isinstance(raw_year, str):
+            try:
+                return int(raw_year)
+            except ValueError:
+                pass
+
         return 0
 
     @staticmethod
