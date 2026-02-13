@@ -6,10 +6,9 @@ visualization that all strategies can use, eliminating code duplication.
 """
 
 import logging
-from datetime import datetime
 from hashlib import sha1
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -26,6 +25,10 @@ from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
 MAX_TITLE_CHARS = 50
+MISSING_YEAR_FALLBACK_MIN = 2000
+MISSING_YEAR_FALLBACK_MAX = 2001
+KK_LAYOUT_DISTANCE_ATTR = "layout_distance"
+KK_LAYOUT_DISTANCE_EPSILON = 1e-6
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -62,13 +65,31 @@ def _seed_suffix(seed_id: str, length: int = 8) -> str:
     return sha1(seed_id.encode("utf-8")).hexdigest()[:length]
 
 
+def _similarity_to_layout_distance(raw_similarity: object) -> float:
+    """Map similarity-style edge weights to positive layout distances for KK.
+
+    :param object raw_similarity: Raw edge similarity value.
+    :return float: Strictly positive distance used by Kamada-Kawai.
+    """
+    try:
+        similarity = float(raw_similarity)
+    except (TypeError, ValueError):
+        similarity = 0.0
+
+    if not np.isfinite(similarity):
+        similarity = 0.0
+
+    similarity = max(similarity, 0.0)
+    return 1.0 / (KK_LAYOUT_DISTANCE_EPSILON + similarity)
+
+
 def _choose_metadata_anchor(
-    pos: Dict[str, np.ndarray],
+    pos: Dict[Hashable, np.ndarray],
 ) -> Tuple[float, float, str, str]:
     """
     Choose which corner to place the metadata box in based on node density.
 
-    :param Dict[str, np.ndarray] pos: Mapping of node -> position array
+    :param Dict[Hashable, np.ndarray] pos: Mapping of node -> position array
     :return Tuple[float, float, str, str]: Tuple of (x, y, horizontal_alignment, vertical_alignment) in axes coords.
     """
     if not pos:
@@ -110,14 +131,17 @@ def _choose_metadata_anchor(
 
 
 def add_metadata_box(
-    ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.ndarray], theme: Theme
+    ax: plt.Axes,
+    metadata: Dict[str, Any],
+    pos: Dict[Hashable, np.ndarray],
+    theme: Theme,
 ) -> None:
     """
     Render a small metadata block in the plot corner.
 
     :param plt.Axes ax: Matplotlib axes
     :param Dict[str, Any] metadata: Dictionary of metadata key/value pairs
-    :param Dict[str, np.ndarray] pos: Node position map.
+    :param Dict[Hashable, np.ndarray] pos: Node position map.
     :param Theme theme: Active theme (used for text colors).
     :return None: Draws metadata box directly to axes.
     """
@@ -237,8 +261,8 @@ def compute_node_colors(
         min_year = min(years)
         max_year = max(years)
     else:
-        min_year = 2000
-        max_year = datetime.now().year
+        min_year = MISSING_YEAR_FALLBACK_MIN
+        max_year = MISSING_YEAR_FALLBACK_MAX
 
     colors = []
     for node in nodes:
@@ -264,21 +288,27 @@ def compute_layout(
     graph: nx.Graph,
     iterations: int = 100,
     layout_seed: Optional[int] = None,
-) -> Dict[str, np.ndarray]:
+) -> Dict[Hashable, np.ndarray]:
     """
     Compute force-directed layout with organic clustering.
 
     :param nx.Graph graph: NetworkX graph
     :param int iterations: Number of iterations for spring layout
     :param Optional[int] layout_seed: Optional seed for deterministic layout perturbations/fallback.
-    :return Dict[str, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
+    :return Dict[Hashable, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
     """
     canonical_graph = canonicalize_graph_for_layout(graph)
+    for _, _, attrs in canonical_graph.edges(data=True):
+        # Kamada-Kawai interprets weights as path lengths (distances), not
+        # affinities; convert similarity weights so stronger links are shorter.
+        attrs[KK_LAYOUT_DISTANCE_ATTR] = _similarity_to_layout_distance(
+            attrs.get("weight", 0.0)
+        )
 
     try:
         pos = nx.kamada_kawai_layout(
             canonical_graph,
-            weight="weight",
+            weight=KK_LAYOUT_DISTANCE_ATTR,
             scale=VIZ_CONFIG.layout_scale,
             center=VIZ_CONFIG.layout_center,
         )
@@ -305,13 +335,15 @@ def compute_layout(
     return pos
 
 
-def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict, theme: Theme) -> None:
+def draw_edges(
+    ax: plt.Axes, graph: nx.Graph, pos: Dict[Hashable, np.ndarray], theme: Theme
+) -> None:
     """
     Draw edges with varying thickness and opacity based on weight.
 
     :param plt.Axes ax: Matplotlib axes
     :param nx.Graph graph: NetworkX graph
-    :param Dict pos: Node positions dictionary
+    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
     :param Theme theme: Theme palette for edge colors.
     :return None: Draws all edges onto the axes.
     """
@@ -338,7 +370,7 @@ def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict, theme: Theme) -> None:
 def draw_nodes(
     ax: plt.Axes,
     graph: nx.Graph,
-    pos: Dict,
+    pos: Dict[Hashable, np.ndarray],
     sizes: List[float],
     colors: List[Tuple[float, float, float]],
     theme: Theme,
@@ -348,7 +380,7 @@ def draw_nodes(
 
     :param plt.Axes ax: Matplotlib axes
     :param nx.Graph graph: NetworkX graph
-    :param Dict pos: Node positions dictionary
+    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
     :param List[float] sizes: List of node sizes
     :param List[Tuple[float, float, float]] colors: List of node colors (RGB tuples)
     :param Theme theme: Theme palette for edge outlines.
@@ -371,14 +403,18 @@ def draw_nodes(
 
 
 def draw_labels(
-    ax: plt.Axes, graph: nx.Graph, pos: Dict, seed_id: str, theme: Theme
+    ax: plt.Axes,
+    graph: nx.Graph,
+    pos: Dict[Hashable, np.ndarray],
+    seed_id: str,
+    theme: Theme,
 ) -> None:
     """
     Draw paper labels in "Author, Year" format.
 
     :param plt.Axes ax: Matplotlib axes
     :param nx.Graph graph: NetworkX graph
-    :param Dict pos: Node positions dictionary
+    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
     :param str seed_id: ID of seed paper (gets bold label)
     :param Theme theme: Theme palette for text color.
     :return None: Draws all node labels.
@@ -441,7 +477,7 @@ def visualize_graph(
     dpi: int = None,
     metadata: Optional[Dict[str, Any]] = None,
     theme_name: str = "light",
-    layout: Optional[Dict[str, np.ndarray]] = None,
+    layout: Optional[Dict[Hashable, np.ndarray]] = None,
     layout_seed: Optional[int] = None,
 ) -> None:
     """
@@ -454,7 +490,8 @@ def visualize_graph(
     :param int dpi: Output resolution (defaults to config value).
     :param Optional[Dict[str, Any]] metadata: Optional info to annotate on the figure (auto-positioned).
     :param str theme_name: Name of theme to render.
-    :param Optional[Dict[str, np.ndarray]] layout: Optional precomputed layout to reuse.
+    :param Optional[Dict[Hashable, np.ndarray]] layout: Optional precomputed layout to
+        reuse.
     :param Optional[int] layout_seed: Optional seed used when computing layout internally.
     :return None: Writes output image to the given path.
     """

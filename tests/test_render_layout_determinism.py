@@ -6,7 +6,13 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from citemesh.visualization.render import compute_layout, compute_node_sizes
+from citemesh.visualization.render import (
+    KK_LAYOUT_DISTANCE_ATTR,
+    compute_layout,
+    compute_node_colors,
+    compute_node_sizes,
+)
+from citemesh.visualization.themes import get_theme
 
 
 @pytest.mark.parametrize("layout_seed", [None, 123])
@@ -61,6 +67,49 @@ def test_compute_layout_is_stable_for_real_kamada_kawai() -> None:
 
     for node_id in sorted(graph_1.nodes()):
         assert np.allclose(pos_1[node_id], pos_2[node_id])
+
+
+def test_compute_layout_uses_distance_weights_for_kamada_kawai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kamada-Kawai should receive inverted similarity distances."""
+    captured: dict[str, object] = {}
+
+    def fake_kamada_kawai_layout(graph: nx.Graph, **kwargs):
+        captured["weight_attr"] = kwargs.get("weight")
+        distances = {}
+        for left, right, attrs in graph.edges(data=True):
+            edge_key = tuple(sorted((str(left), str(right))))
+            distances[edge_key] = attrs[KK_LAYOUT_DISTANCE_ATTR]
+        captured["distances"] = distances
+        return {node: np.array([0.0, 0.0], dtype=np.float64) for node in graph.nodes()}
+
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.kamada_kawai_layout",
+        fake_kamada_kawai_layout,
+    )
+
+    graph = nx.Graph()
+    graph.add_edge("seed", "high", weight=0.9)
+    graph.add_edge("seed", "low", weight=0.1)
+
+    compute_layout(graph, iterations=10, layout_seed=123)
+
+    assert captured["weight_attr"] == KK_LAYOUT_DISTANCE_ATTR
+    distances = captured["distances"]
+    assert isinstance(distances, dict)
+    assert distances[("high", "seed")] < distances[("low", "seed")]
+
+
+def test_compute_node_colors_uses_fixed_fallback_range_without_valid_years() -> None:
+    """All-missing-year graphs should use deterministic fallback bounds."""
+    graph = nx.Graph()
+    graph.add_node("seed", title="Seed", year=None, is_seed=True)
+    graph.add_node("neighbor", title="Neighbor", year=None, is_seed=False)
+
+    _, min_year, max_year = compute_node_colors(graph, "seed", get_theme("light"))
+    assert min_year == 2000
+    assert max_year == 2001
 
 
 def test_compute_node_sizes_are_stable_for_tied_citation_counts() -> None:

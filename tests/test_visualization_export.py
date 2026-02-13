@@ -407,11 +407,13 @@ def test_exporter_plotly_with_missing_year_data(
 ) -> None:
     """Plotly export should avoid None in marker colors when year data is missing."""
 
-    captured: dict[str, list[object]] = {}
+    captured: dict[str, object] = {}
 
     def fake_scatter(**kwargs) -> dict:
         if kwargs.get("mode") == "markers+text":
-            captured["marker"] = list(kwargs["marker"]["color"])
+            marker = dict(kwargs["marker"])
+            marker["color"] = list(marker["color"])
+            captured["marker"] = marker
         return {"type": "scatter", **kwargs}
 
     _install_fake_plotly(
@@ -450,9 +452,13 @@ def test_exporter_plotly_with_missing_year_data(
     exporter.to_plotly_html(out_path)
 
     assert out_path.exists()
-    marker_colors = captured["marker"]
+    marker = captured["marker"]
+    assert isinstance(marker, dict)
+    marker_colors = marker["color"]
     assert None not in marker_colors
-    assert 0 in marker_colors
+    assert 0 not in marker_colors
+    assert marker["cmin"] == 2000.0
+    assert marker["cmax"] == 2001.0
 
 
 def test_exporter_graphml_with_missing_year(tmp_path: Path) -> None:

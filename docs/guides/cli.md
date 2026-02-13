@@ -49,7 +49,8 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 Metadata timestamps are omitted by default for deterministic artifacts; use `--include-timestamp` to opt in.
 Numeric validation:
 - `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, and `search --limit` must be at least `1`.
-- `--max-citations`, `--max-references`, and `--max-semantic` must be at least `0`.
+- `--max-citations` and `--max-references` must be at least `0`.
+- `--max-semantic` must satisfy `0 <= max-semantic <= max-papers - 1` (hybrid strategy).
 - `--similarity-threshold` must be a finite float between `0.0` and `1.0`.
 
 ## Strategy-Specific Flags
@@ -92,6 +93,8 @@ Numeric validation:
 - Inherits citation flags for paper collection, including `--no-references`
 - Reuses embedding corpus/model knobs (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`)
 - `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
+  Hybrid reserves this capacity from citation collection (`citation_budget = max_papers - max_semantic`),
+  so valid values are `0` through `max-papers - 1`.
   If omitted, hybrid computes a safe default of `min(10, max-papers - 1)`.
 
 ## Export Formats

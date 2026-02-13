@@ -478,7 +478,11 @@ Examples:
         "--max-semantic",
         type=_non_negative_int,
         default=None,
-        help=("Maximum papers from semantic search (default: min(10, max-papers - 1))"),
+        help=(
+            "Maximum non-seed semantic papers to add. Reserves citation capacity via "
+            "max-papers - max-semantic and must be <= max-papers - 1 "
+            "(default: min(10, max-papers - 1))"
+        ),
     )
 
     # Search subcommand

@@ -2,27 +2,30 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Hashable, List, Tuple
 
 import networkx as nx
 
 
-def ordered_nodes(graph: nx.Graph) -> List[str]:
+def ordered_nodes(graph: nx.Graph) -> List[Hashable]:
     """Return graph node IDs in canonical deterministic order.
 
     :param nx.Graph graph: Graph whose node ordering should be canonicalized.
-    :return List[str]: Sorted node IDs.
+    :return List[Hashable]: Sorted node IDs.
     """
     return sorted(graph.nodes(), key=str)
 
 
-def ordered_edges_with_data(graph: nx.Graph) -> List[Tuple[str, str, Dict[str, Any]]]:
+def ordered_edges_with_data(
+    graph: nx.Graph,
+) -> List[Tuple[Hashable, Hashable, Dict[str, Any]]]:
     """Return canonicalized edge tuples with deterministic endpoint ordering.
 
     :param nx.Graph graph: Graph whose edges should be canonicalized.
-    :return List[Tuple[str, str, Dict[str, Any]]]: Sorted ``(u, v, attrs)`` tuples.
+    :return List[Tuple[Hashable, Hashable, Dict[str, Any]]]: Sorted
+        ``(u, v, attrs)`` tuples.
     """
-    canonicalized = []
+    canonicalized: List[Tuple[Hashable, Hashable, Dict[str, Any]]] = []
     for left, right, attrs in graph.edges(data=True):
         edge_left, edge_right = (
             (left, right) if str(left) <= str(right) else (right, left)

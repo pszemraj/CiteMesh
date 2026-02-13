@@ -13,14 +13,20 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
 
 import networkx as nx
 
 from citemesh.core import Paper
 
 from .ordering import ordered_edges_with_data, ordered_nodes
-from .render import compute_layout, compute_node_colors, compute_node_sizes
+from .render import (
+    MISSING_YEAR_FALLBACK_MAX,
+    MISSING_YEAR_FALLBACK_MIN,
+    compute_layout,
+    compute_node_colors,
+    compute_node_sizes,
+)
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
@@ -58,7 +64,7 @@ class GraphExporter:
         seed_id: str,
         metadata: Optional[Dict] = None,
         theme_name: str = "light",
-        layout: Optional[Dict[str, Iterable[float]]] = None,
+        layout: Optional[Dict[Hashable, Iterable[float]]] = None,
     ):
         """Create exporter bound to a graph and seed paper metadata.
 
@@ -66,15 +72,16 @@ class GraphExporter:
         :param str seed_id: Seed paper identifier.
         :param Optional[Dict] metadata: Optional metadata to include in outputs.
         :param str theme_name: Theme for visual color defaults.
-        :param Optional[Dict[str, Iterable[float]]] layout: Optional precomputed layout.
+        :param Optional[Dict[Hashable, Iterable[float]]] layout: Optional precomputed
+            layout.
         """
         self.graph = graph
         self.seed_id = seed_id
         self.metadata = metadata or {}
         self.theme = get_theme(theme_name)
         self._layout = layout
-        self._size_map: Optional[Dict[str, float]] = None
-        self._color_map_cache: Dict[str, Dict[str, tuple]] = {}
+        self._size_map: Optional[Dict[Hashable, float]] = None
+        self._color_map_cache: Dict[str, Dict[Hashable, tuple]] = {}
 
     # ------------------------------------------------------------------
     # Public export methods
@@ -257,9 +264,7 @@ class GraphExporter:
         node_x = [pos[node][0] for node in node_ids]
         node_y = [pos[node][1] for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
-        node_years = [
-            self._coerce_year(self.graph.nodes[node].get("year")) for node in node_ids
-        ]
+        node_years, year_min, year_max = self._plotly_year_scale(node_ids)
         node_labels = [
             self.graph.nodes[node].get("paper").label
             if self.graph.nodes[node].get("paper")
@@ -297,6 +302,8 @@ class GraphExporter:
             marker=dict(
                 size=node_sizes,
                 color=node_years,
+                cmin=year_min,
+                cmax=year_max,
                 colorscale="Plasma" if theme_obj.name == "dark" else "Viridis",
                 line=dict(width=2, color=theme_obj.text_color),
                 showscale=True,
@@ -338,36 +345,38 @@ class GraphExporter:
     # ------------------------------------------------------------------
     # Internal helpers
 
-    def _sorted_nodes(self) -> list[tuple[str, Dict]]:
+    def _sorted_nodes(self) -> list[tuple[Hashable, Dict[str, Any]]]:
         """Return nodes sorted by ID for deterministic serialization.
 
-        :return list[tuple[str, Dict]]: Sorted ``(node_id, attrs)`` pairs.
+        :return list[tuple[Hashable, Dict[str, Any]]]: Sorted ``(node_id, attrs)``
+            pairs.
         """
         return [
             (node_id, self.graph.nodes[node_id])
             for node_id in ordered_nodes(self.graph)
         ]
 
-    def _sorted_edges(self) -> list[tuple[str, str, Dict]]:
+    def _sorted_edges(self) -> list[tuple[Hashable, Hashable, Dict[str, Any]]]:
         """Return undirected edges with canonical endpoints in stable order.
 
-        :return list[tuple[str, str, Dict]]: Sorted edge tuples in ``(u, v, attrs)`` form.
+        :return list[tuple[Hashable, Hashable, Dict[str, Any]]]: Sorted edge tuples in
+            ``(u, v, attrs)`` form.
         """
         return ordered_edges_with_data(self.graph)
 
-    def _get_layout(self) -> Dict[str, Iterable[float]]:
+    def _get_layout(self) -> Dict[Hashable, Iterable[float]]:
         """Compute or reuse cached graph layout.
 
-        :return Dict[str, Iterable[float]]: Mapping of node ID to coordinates.
+        :return Dict[Hashable, Iterable[float]]: Mapping of node ID to coordinates.
         """
         if self._layout is None:
             self._layout = compute_layout(self.graph)
         return self._layout
 
-    def _node_size(self, node: str) -> float:
+    def _node_size(self, node: Hashable) -> float:
         """Compute cached node size for a node ID.
 
-        :param str node: Graph node identifier.
+        :param Hashable node: Graph node identifier.
         :return float: Cached node size.
         """
         if self._size_map is None:
@@ -378,10 +387,10 @@ class GraphExporter:
             }
         return float(self._size_map.get(node, 300.0))
 
-    def _node_color_hex(self, node: str, theme: Theme) -> str:
+    def _node_color_hex(self, node: Hashable, theme: Theme) -> str:
         """Convert computed node color to hex for export serializers.
 
-        :param str node: Graph node identifier.
+        :param Hashable node: Graph node identifier.
         :param Theme theme: Theme to use.
         :return str: Hex color string.
         """
@@ -418,6 +427,34 @@ class GraphExporter:
         digest = hashlib.sha1(digest_payload.encode("utf-8")).hexdigest()[:16]
         return f"citemesh-plotly-{digest}"
 
+    def _plotly_year_scale(
+        self, node_ids: list[Hashable]
+    ) -> Tuple[list[float], float, float]:
+        """Build deterministic Plotly marker years and explicit scale bounds.
+
+        :param list[Hashable] node_ids: Sorted node identifiers for the current graph.
+        :return Tuple[list[float], float, float]: Marker years, color-scale min, and
+            color-scale max.
+        """
+        raw_years = [
+            self._coerce_year(self.graph.nodes[node].get("year")) for node in node_ids
+        ]
+        valid_years = [year for year in raw_years if year > 0]
+
+        if valid_years:
+            year_min = float(min(valid_years))
+            year_max = float(max(valid_years))
+        else:
+            year_min = float(MISSING_YEAR_FALLBACK_MIN)
+            year_max = float(MISSING_YEAR_FALLBACK_MAX)
+
+        if year_max <= year_min:
+            year_max = year_min + 1.0
+
+        midpoint = (year_min + year_max) / 2.0
+        normalized_years = [float(year) if year > 0 else midpoint for year in raw_years]
+        return normalized_years, year_min, year_max
+
     @staticmethod
     def _coerce_year(raw_year: object) -> int:
         """Normalize optional year values for formats that disallow null years.
@@ -447,12 +484,12 @@ class GraphExporter:
         return 0
 
     @staticmethod
-    def _serialize_node(node_id: str, attrs: Dict) -> Dict:
+    def _serialize_node(node_id: Hashable, attrs: Dict[str, Any]) -> Dict[str, Any]:
         """Serialize node attributes into JSON/GraphML friendly dict.
 
-        :param str node_id: Graph node identifier.
-        :param Dict attrs: Raw node attributes.
-        :return Dict: JSON/GraphML-safe node payload.
+        :param Hashable node_id: Graph node identifier.
+        :param Dict[str, Any] attrs: Raw node attributes.
+        :return Dict[str, Any]: JSON/GraphML-safe node payload.
         """
         paper: Optional[Paper] = attrs.get("paper")
 

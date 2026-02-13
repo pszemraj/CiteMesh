@@ -57,9 +57,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int max_citations: Maximum citing papers from S2
         :param int max_references: Maximum referenced papers from S2
         :param bool fetch_references: Whether citation branch fetches reference lists.
-        :param Optional[int] max_semantic: Maximum papers from semantic search. When
-            omitted, defaults to ``min(10, max_papers - 1)`` so small ``max_papers``
-            values still work without extra flags.
+        :param Optional[int] max_semantic: Maximum non-seed semantic papers added during
+            enrichment. This reserves capacity from the citation branch
+            (``citation_budget = max_papers - max_semantic``), so values must satisfy
+            ``0 <= max_semantic <= max_papers - 1``. When omitted, defaults to
+            ``min(10, max_papers - 1)`` so small ``max_papers`` values still work
+            without extra flags.
         :param str model_name: Embedding model name
         :param str dataset_split: ArXiv dataset split
         :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
