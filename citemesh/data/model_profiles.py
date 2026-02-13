@@ -8,7 +8,7 @@ embedding checkpoints without hard-coding logic in the strategies.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 QueryFormatter = Callable[[str, Optional[Dict[str, str]]], str]
 DocumentFormatter = Callable[[Dict[str, str]], str]
@@ -49,6 +49,8 @@ class EmbeddingModelProfile:
     float16_supported: bool = True
     preferred_torch_dtype: Optional[str] = None
     use_cuda_autocast: bool = False
+    available_truncate_dims: Optional[Tuple[int, ...]] = None
+    recommended_truncate_dim: Optional[int] = None
     notes: Optional[str] = None
 
     def format_query(self, text: str, metadata: Optional[Dict[str, str]] = None) -> str:
@@ -103,6 +105,8 @@ EMBEDDING_MODEL_PROFILES = (
         float16_supported=False,
         preferred_torch_dtype="bfloat16",
         use_cuda_autocast=True,
+        available_truncate_dims=(768, 512, 256, 128),
+        recommended_truncate_dim=256,
         notes="Adds recommended query/document prompts for EmbeddingGemma.",
     ),
 )

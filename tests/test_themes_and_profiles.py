@@ -40,6 +40,8 @@ def test_model_profiles_match_expected_formatters() -> None:
     assert gemma.float16_supported is False
     assert gemma.preferred_torch_dtype == "bfloat16"
     assert gemma.use_cuda_autocast is True
+    assert gemma.available_truncate_dims == (768, 512, 256, 128)
+    assert gemma.recommended_truncate_dim == 256
     assert gemma.format_query("  attention  ").startswith(
         "task: search result | query:"
     )
@@ -52,5 +54,7 @@ def test_model_profiles_match_expected_formatters() -> None:
     assert default.name == "default"
     assert default.preferred_torch_dtype is None
     assert default.use_cuda_autocast is False
+    assert default.available_truncate_dims is None
+    assert default.recommended_truncate_dim is None
     assert default.format_query("plain") == "plain"
     assert default.format_document({"title": "T", "abstract": ""}) == "T"

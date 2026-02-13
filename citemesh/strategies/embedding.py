@@ -293,6 +293,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         model_name: str = "google/embeddinggemma-300m",
         dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
         corpus_size: Optional[int] = None,
+        truncate_dim: Optional[int] = None,
         top_k: int = 2,
         random_seed: Optional[int] = None,
         use_streaming: bool = False,
@@ -305,6 +306,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param str model_name: Sentence transformer model name
         :param str dataset_split: HuggingFace dataset split
         :param Optional[int] corpus_size: Maximum papers to load from corpus (None = all in split)
+        :param Optional[int] truncate_dim: Optional embedding truncation dimension. If ``None``,
+            uses profile defaults (e.g. EmbeddingGemma defaults to 256d MRL).
         :param int top_k: Number of most similar neighbors per node
         :param Optional[int] random_seed: Random seed for reproducibility
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
@@ -317,19 +320,94 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.model_name = model_name
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size
+        self.model_profile = get_embedding_model_profile(model_name)
+        self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
         self.top_k = top_k
         self.model = None
         self.arxiv_corpus: Dict[str, Dict] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
         self.client = client or get_client()
-        self.embedding_cache = EmbeddingCache(model_name=model_name)
+        self.embedding_cache = EmbeddingCache(
+            model_name=self._embedding_cache_namespace()
+        )
         self.use_streaming = use_streaming
-        self.model_profile = get_embedding_model_profile(model_name)
         self._profile_logged = False
+        self._dim_logged = False
         self._autocast_dtype: Optional[Any] = None
         self._autocast_device_type: Optional[str] = None
         self._autocast_enabled = False
         self._encode_model: Optional[Any] = None
+
+    def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
+        """Resolve effective embedding dimension from request + model profile defaults.
+
+        :param Optional[int] requested_dim: Requested truncate dimension from caller.
+        :return Optional[int]: Effective truncate dimension or ``None`` for full embeddings.
+        :raises ValueError: If dimension is invalid for the selected model profile.
+        """
+        if requested_dim is not None and requested_dim < 1:
+            raise ValueError("truncate_dim must be at least 1 when provided")
+
+        available_dims = self.model_profile.available_truncate_dims
+        if requested_dim is None:
+            return self.model_profile.recommended_truncate_dim
+
+        if available_dims and requested_dim not in available_dims:
+            formatted = ", ".join(str(dim) for dim in available_dims)
+            raise ValueError(
+                f"truncate_dim={requested_dim} is not supported for {self.model_name}. "
+                f"Expected one of: {formatted}"
+            )
+        return requested_dim
+
+    def _embedding_cache_namespace(self) -> str:
+        """Build cache namespace key for the active model + embedding dimension.
+
+        :return str: Namespace key used for embedding cache partitioning.
+        """
+        if self.truncate_dim is None:
+            return self.model_name
+        return f"{self.model_name}::truncate_dim={self.truncate_dim}"
+
+    def _log_dimension_policy(self) -> None:
+        """Emit one-time info log for active embedding dimensionality."""
+        if self._dim_logged:
+            return
+
+        available_dims = self.model_profile.available_truncate_dims
+        if available_dims:
+            selected_dim = (
+                self.truncate_dim
+                if self.truncate_dim is not None
+                else available_dims[0]
+            )
+            available_text = ", ".join(f"{dim}d" for dim in available_dims)
+            recommended_dim = self.model_profile.recommended_truncate_dim
+            if recommended_dim is not None:
+                logger.info(
+                    "%s embedding dimension: using %sd (recommended: %sd; available: %s).",
+                    self.model_name,
+                    selected_dim,
+                    recommended_dim,
+                    available_text,
+                )
+            else:
+                logger.info(
+                    "%s embedding dimension: using %sd (available: %s).",
+                    self.model_name,
+                    selected_dim,
+                    available_text,
+                )
+            self._dim_logged = True
+            return
+
+        if self.truncate_dim is not None:
+            logger.info(
+                "%s embedding dimension: using truncate_dim=%sd.",
+                self.model_name,
+                self.truncate_dim,
+            )
+            self._dim_logged = True
 
     def _reset_precision_runtime(self) -> None:
         """Clear runtime precision/autocast state."""
@@ -462,11 +540,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             logger.info(f"Loading embedding model: {self.model_name}")
             model_kwargs = self._resolve_model_kwargs()
+            st_kwargs: Dict[str, Any] = {}
             if model_kwargs:
-                self.model = SentenceTransformer(
-                    self.model_name,
-                    model_kwargs=model_kwargs,
-                )
+                st_kwargs["model_kwargs"] = model_kwargs
+            if self.truncate_dim is not None:
+                st_kwargs["truncate_dim"] = self.truncate_dim
+
+            if st_kwargs:
+                self.model = SentenceTransformer(self.model_name, **st_kwargs)
             else:
                 self.model = SentenceTransformer(self.model_name)
 
@@ -479,6 +560,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     "%s does not support float16 activations; using float32.",
                     self.model_name,
                 )
+            self._log_dimension_policy()
             if self.model_profile.notes and not self._profile_logged:
                 logger.info(self.model_profile.notes)
                 self._profile_logged = True

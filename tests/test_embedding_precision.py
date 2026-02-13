@@ -134,6 +134,9 @@ def test_embeddinggemma_uses_bf16_model_kwargs_and_autocast(
 
     assert init_log["model_name"] == "google/embeddinggemma-300m"
     assert init_log["kwargs"]["model_kwargs"]["torch_dtype"] is bf16_token
+    assert init_log["kwargs"]["truncate_dim"] == 256
+    assert builder.truncate_dim == 256
+    assert builder.embedding_cache.model_name.endswith("::truncate_dim=256")
     assert embeddings.shape == (1, 2)
     assert ("call", "cuda", bf16_token) in autocast_log
     assert ("enter",) in autocast_log
@@ -158,5 +161,20 @@ def test_embeddinggemma_falls_back_when_bf16_not_supported(
 
     assert init_log["model_name"] == "google/embeddinggemma-300m"
     assert "model_kwargs" not in init_log["kwargs"]
+    assert init_log["kwargs"]["truncate_dim"] == 256
     assert embeddings.shape == (1, 2)
     assert autocast_log == []
+
+
+def test_embeddinggemma_rejects_unsupported_truncate_dim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EmbeddingGemma should reject truncate dims outside its MRL-supported values."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    with pytest.raises(
+        ValueError,
+        match="truncate_dim=300 is not supported for google/embeddinggemma-300m",
+    ):
+        EmbeddingGraphBuilder(max_papers=1, truncate_dim=300, client=MagicMock())
