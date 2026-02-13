@@ -18,6 +18,7 @@ Treat this page as historical context, not the normative behavior spec.
 - Layout-based renders now share a unified pipeline: shared layout (Kamada-Kawai with spring fallback), node sizing tiers, and author-year labels.
 - Edge opacity and width scale with normalized weights, maintaining clarity even with hybrid similarity signals.
 - Integration tests route outputs to temporary paths so development runs don't get confused with fixtures.
+- Layout computation now canonicalizes node/edge insertion order, and node-size ranking now uses deterministic tie-breaking (`citation_count`, then node ID).
 
 ## Persistent Caching
 
@@ -33,6 +34,8 @@ Treat this page as historical context, not the normative behavior spec.
 - **Embedding**: combines semantic similarity with temporal/category/author factors; fetches citation counts for top matches to balance node sizing. EmbeddingGemma now defaults to 256d Matryoshka embeddings (with clear runtime logs and dim-specific cache names).
 - **Hybrid**: builds on the citation graph, injects semantic neighbors, and adjusts weights based on relationship provenance while capping per-node edges.
 - **Recommendation**: adds Semantic Scholar recommendation-based discovery with direct search endpoint and API-key-aware rate-limit handling. Reference-aware mode now requests reference payloads directly (with fallback hydration) so bibliographic coupling can contribute to scoring without unnecessary per-paper calls.
+- Citation and recommendation edge creation now use `--similarity-threshold` as the sole minimum edge gate.
+- Embedding streaming mode now fails fast on sliced split expressions (for example `train[:5%]`) with explicit guidance to use `--corpus-size`.
 
 ## CLI & Developer Experience
 

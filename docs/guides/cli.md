@@ -32,7 +32,7 @@ Accepted identifiers:
 | -------------------- | ---------------------------------------------------------------- | ------------------------------ |
 | `--strategy`, `-s`   | `recommendation`, `citation`, `embedding`, or `hybrid`           | `recommendation`               |
 | `--max-papers`, `-p` | Maximum nodes in final graph                                     | `40`                           |
-| `--iterations`, `-i` | Layout iterations (higher = smoother)                            | `100`                          |
+| `--spring-iterations`, `-i` | Iterations used only for spring-layout fallback                    | `100`                          |
 | `--dpi`, `-d`        | PNG output resolution                                            | `150`                          |
 | `--seed`             | Seed for layout computation used by layout-based exports (`png`, `plotly`) | deterministic built-in seed    |
 | `--include-timestamp`| Include generation time in output metadata                       | disabled                       |
@@ -51,7 +51,7 @@ Metadata timestamps are omitted by default for deterministic artifacts; use `--i
 
 ### Cross-Strategy Scope
 
-- `--similarity-threshold` applies to `recommendation` and `citation` strategies.
+- `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold.
 - `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
 - `embedding` and the embedding branch of `hybrid` use embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`).
 
@@ -60,14 +60,14 @@ Metadata timestamps are omitted by default for deterministic artifacts; use `--i
 - Recommended default.
 - Uses Semantic Scholar recommendations for fast, high-signal topical seeds.
 - Reuses:
-  - `--similarity-threshold`, `-t` for edge filtering.
+  - `--similarity-threshold`, `-t` as the minimum edge similarity threshold.
   - `--no-references` to skip fetching references for the seed and recommendation neighbors.
 
 ### Citation Strategy
 
 - `--max-citations`, `-c`: limit number of citing papers
 - `--max-references`, `-r`: limit number of referenced papers
-- `--similarity-threshold`, `-t`: minimum similarity score for citation edges
+- `--similarity-threshold`, `-t`: minimum edge similarity threshold
 - `--no-references`: skip fetching reference lists (speeds up runs, removes true bibliographic coupling)
 
 ### Embedding Strategy
@@ -78,7 +78,7 @@ Metadata timestamps are omitted by default for deterministic artifacts; use `--i
 - `--all-corpus`: remove the default cap and process the full selected split
 - `--top-k`, `-k`: strict per-node edge cap applied during embedding graph pruning
 - `--truncate-dim`: optional embedding output dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
-- `--streaming`: stream HuggingFace dataset instead of loading cached shards (works with capped or uncapped corpus runs)
+- `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`); use `--corpus-size` to cap runtime in streaming mode.
   
   _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts, defaults to `256d` Matryoshka embeddings (available: `768/512/256/128`), and logs the selected dimension at model load. It also prefers `bfloat16` model loading with CUDA autocast; if BF16 is unavailable, it falls back to float32.
 
@@ -95,6 +95,12 @@ Metadata timestamps are omitted by default for deterministic artifacts; use `--i
 - `plotly`: interactive Plotly graph (HTML) suitable for notebook/dashboard embedding.
 - `json`: structured graph data with nodes, edges, metadata.
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools.
+
+Determinism notes:
+
+- `json` and `graphml` exports are deterministic by default.
+- `png` and `plotly` are deterministic when using the same input graph and `--seed`.
+- Pyvis `html` export uses deterministic node/edge ordering in the generated file, but runtime force physics remain non-deterministic in-browser.
 
 Interactive exports require optional viz dependencies:
 
