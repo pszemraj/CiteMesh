@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -14,10 +15,16 @@ class _MockModel:
     """Minimal embedding model stub with deterministic encode output."""
 
     def encode(self, texts: list[str], **_kwargs: object) -> np.ndarray:
+        """Return deterministic embeddings for provided text batch.
+
+        :param list[str] texts: Input texts.
+        :param object _kwargs: Ignored keyword arguments.
+        :return np.ndarray: Deterministic embedding matrix.
+        """
         return np.array([[float(len(texts)), 1.0] for _ in texts], dtype=np.float32)
 
 
-def test_legacy_h5_layout_is_backed_up_and_preserved(tmp_path) -> None:
+def test_legacy_h5_layout_is_backed_up_and_preserved(tmp_path: Path) -> None:
     """Legacy cache files should be renamed for recovery instead of deleted."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
     model = _MockModel()
@@ -58,7 +65,7 @@ def test_legacy_h5_layout_is_backed_up_and_preserved(tmp_path) -> None:
     assert any(backup.exists() for backup in backups)
 
 
-def test_clear_moves_cache_files_to_backups(tmp_path) -> None:
+def test_clear_moves_cache_files_to_backups(tmp_path: Path) -> None:
     """`clear()` should move cache files and rebuild a fresh empty schema."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="clear-recovery")
     model = _MockModel()

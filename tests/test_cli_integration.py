@@ -6,6 +6,7 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import networkx as nx
@@ -558,7 +559,16 @@ class TestCLIReproducibility:
             lambda args, strategy: (graph, "seed"),
         )
 
-        def _fake_compute_layout(graph_arg, iterations, layout_seed):
+        def _fake_compute_layout(
+            graph_arg: nx.Graph, iterations: int, layout_seed: int | None
+        ) -> dict[str, tuple[float, float]]:
+            """Capture seeded layout call and return shared deterministic layout.
+
+            :param nx.Graph graph_arg: Input graph passed to layout routine.
+            :param int iterations: Requested iteration count.
+            :param int | None layout_seed: Optional deterministic seed value.
+            :return dict[str, tuple[float, float]]: Shared layout payload.
+            """
             del graph_arg
             del iterations
             captured["layout_seed"] = layout_seed
@@ -576,7 +586,14 @@ class TestCLIReproducibility:
             build_fake_exporter_factory(captured, methods=("to_json",)),
         )
 
-        def _fake_visualize(*args, **kwargs) -> None:
+        def _fake_visualize(*args: Any, **kwargs: Any) -> None:
+            """Capture shared layout forwarded to visualization helper.
+
+            :param Any args: Ignored positional arguments.
+            :param Any kwargs: Visualization keyword args.
+            :return None: Stores layout for assertions.
+            """
+            del args
             captured["visualize_layout"] = kwargs.get("layout")
 
         monkeypatch.setattr(cli_module, "visualize_graph", _fake_visualize)
@@ -627,7 +644,16 @@ class TestCLIReproducibility:
             lambda args, strategy: (graph, "seed"),
         )
 
-        def _fail_compute_layout(*args, **kwargs):
+        def _fail_compute_layout(
+            *args: Any, **kwargs: Any
+        ) -> dict[str, tuple[float, float]]:
+            """Raise assertion when layout is unexpectedly computed.
+
+            :param Any args: Ignored positional arguments.
+            :param Any kwargs: Ignored keyword arguments.
+            :raises AssertionError: Always raised to fail unexpected call.
+            :return dict[str, tuple[float, float]]: Never returned.
+            """
             del args
             del kwargs
             raise AssertionError("compute_layout should not run for JSON-only export")

@@ -9,6 +9,10 @@ from tests.conftest import build_fake_strategy_builder_factory, build_seed_graph
 
 
 def _dispatch_namespace() -> argparse.Namespace:
+    """Build argparse namespace fixture for strategy dispatch tests.
+
+    :return argparse.Namespace: Namespace mirroring parsed CLI arguments.
+    """
     return argparse.Namespace(
         paper_id="seed",
         max_papers=11,
@@ -99,7 +103,14 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
     builder_name: str,
     expected_kwargs: dict[str, object],
 ) -> None:
-    """Strategy dispatch should pass CLI arguments into the selected builder."""
+    """Strategy dispatch should pass CLI arguments into the selected builder.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch builder class.
+    :param str strategy: Strategy key passed to dispatch.
+    :param str builder_name: Builder attribute name patched on CLI module.
+    :param dict[str, object] expected_kwargs: Expected constructor kwargs.
+    :return None: Asserts dispatch behavior.
+    """
     captured: dict[str, object] = {}
     namespace = _dispatch_namespace()
 
@@ -124,7 +135,13 @@ def test_force_rebuild_cache_passes_through_embedding_strategies(
     strategy: str,
     builder_name: str,
 ) -> None:
-    """Forceful cache rebuild flag should pass through embedding builders."""
+    """Forceful cache rebuild flag should pass through embedding builders.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch builder class.
+    :param str strategy: Embedding-like strategy name.
+    :param str builder_name: Builder attribute name patched on CLI module.
+    :return None: Asserts force-rebuild argument threading.
+    """
     captured: dict[str, object] = {}
     namespace = _dispatch_namespace()
     namespace.force_rebuild_cache = True

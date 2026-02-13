@@ -12,6 +12,11 @@ class _Tagged:
     """Hashable identifier with stable string representation."""
 
     def __init__(self, label: str) -> None:
+        """Create tagged identifier wrapper.
+
+        :param str label: Stable string label.
+        :return None: Stores label for hash/str behavior.
+        """
         self.label = label
 
     def __hash__(self) -> int:

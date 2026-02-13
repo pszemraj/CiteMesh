@@ -17,7 +17,13 @@ from tests.conftest import build_top_k_papers
 
 def _make_constant_similarity_builder(
     builder_factory: Callable[[], object], monkeypatch: pytest.MonkeyPatch
-):
+) -> tuple[object, int]:
+    """Build strategy instance with deterministic always-on edge creation.
+
+    :param Callable[[], object] builder_factory: Strategy factory callable.
+    :param pytest.MonkeyPatch monkeypatch: Fixture for dependency patching.
+    :return tuple[object, int]: Patched builder and effective degree cap.
+    """
     builder = builder_factory()
     if isinstance(builder, EmbeddingGraphBuilder):
         cap = builder.top_k
@@ -32,17 +38,39 @@ def _make_constant_similarity_builder(
 
     papers = build_top_k_papers()
 
-    def fake_collect_papers(self, seed_id: str, **kwargs):
+    def fake_collect_papers(self, seed_id: str, **kwargs: object) -> dict[str, Paper]:
+        """Return deterministic paper set for graph construction.
+
+        :param object self: Strategy instance.
+        :param str seed_id: Seed paper identifier.
+        :param object kwargs: Ignored keyword arguments.
+        :return dict[str, Paper]: Deterministic paper mapping.
+        """
         del seed_id, kwargs
         return papers
 
     def always_true(self, paper1: Paper, paper2: Paper, similarity: float) -> bool:
+        """Always allow edge creation during pruning tests.
+
+        :param object self: Strategy instance.
+        :param Paper paper1: First paper.
+        :param Paper paper2: Second paper.
+        :param float similarity: Edge similarity value.
+        :return bool: Always ``True``.
+        """
         del paper1
         del paper2
         del similarity
         return True
 
     def constant_similarity(self, paper1: Paper, paper2: Paper) -> float:
+        """Return constant similarity for deterministic tie behavior.
+
+        :param object self: Strategy instance.
+        :param Paper paper1: First paper.
+        :param Paper paper2: Second paper.
+        :return float: Constant similarity score.
+        """
         del paper1
         del paper2
         return 1.0
@@ -63,7 +91,12 @@ def _make_constant_similarity_builder(
 def test_degree_capping_preserves_per_node_limit(
     builder_factory: Callable[[], object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Pruning should cap node degree deterministically for all relevant strategies."""
+    """Pruning should cap node degree deterministically for all relevant strategies.
+
+    :param Callable[[], object] builder_factory: Strategy factory callable.
+    :param pytest.MonkeyPatch monkeypatch: Fixture for dependency patching.
+    :return None: Asserts capped-graph invariants.
+    """
     builder, max_edges_per_node = _make_constant_similarity_builder(
         builder_factory, monkeypatch
     )

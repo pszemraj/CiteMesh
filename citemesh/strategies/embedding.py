@@ -105,7 +105,11 @@ def _canonicalize_embedding_paper_id(raw_id: Any) -> str:
 
 
 def _query_seed_id(query_text: str) -> str:
-    """Build deterministic query-mode seed node identifier."""
+    """Build deterministic query-mode seed node identifier.
+
+    :param str query_text: Raw user query text.
+    :return str: Stable hashed query seed identifier.
+    """
     digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
     return f"query:{digest}"
 
@@ -113,7 +117,13 @@ def _query_seed_id(query_text: str) -> str:
 def _stream_heap_key(
     similarity: float, paper_id: str, stable_index: int
 ) -> Tuple[float, Tuple[int, ...], int]:
-    """Build total-order key where larger tuples represent better candidates."""
+    """Build total-order key for streaming candidate heap ranking.
+
+    :param float similarity: Similarity score for candidate paper.
+    :param str paper_id: Candidate paper identifier.
+    :param int stable_index: Stable iteration index used as final tie-breaker.
+    :return Tuple[float, Tuple[int, ...], int]: Comparable heap key tuple.
+    """
     # Invert char ordinals so lexicographically smaller IDs compare as "better"
     # when similarity ties, without relying on heterogeneous direct comparisons.
     paper_key = tuple([-ord(ch) for ch in str(paper_id)] + [1])

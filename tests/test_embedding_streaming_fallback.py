@@ -31,6 +31,14 @@ def test_streaming_embedding_falls_back_to_secondary_dataset(
     def fake_load_dataset(
         dataset_name: str, split: str, streaming: bool = False
     ) -> list[dict[str, Any]]:
+        """Simulate dataset loader with primary-source failure then fallback success.
+
+        :param str dataset_name: Requested dataset identifier.
+        :param str split: Dataset split string.
+        :param bool streaming: Whether streaming mode is requested.
+        :return list[dict[str, Any]]: Mocked dataset records.
+        :raises RuntimeError: When primary dataset is requested.
+        """
         load_calls.append((dataset_name, split, streaming))
         if dataset_name == "librarian-bots/arxiv-metadata-snapshot":
             raise RuntimeError("Primary source unavailable")
@@ -55,6 +63,16 @@ def test_streaming_embedding_falls_back_to_secondary_dataset(
         max_candidates: int,
         seen_paper_ids: set[str],
     ) -> None:
+        """Push deterministic candidate records into the streaming heap.
+
+        :param EmbeddingGraphBuilder self: Builder instance.
+        :param list[dict[str, Any]] batch: Batch metadata payload.
+        :param np.ndarray seed_embedding: Seed embedding vector.
+        :param list[tuple] heap: Candidate min-heap.
+        :param int max_candidates: Heap capacity.
+        :param set[str] seen_paper_ids: Set of already-seen paper IDs.
+        :return None: Heap is mutated in-place.
+        """
         del seed_embedding
         del seen_paper_ids
         for metadata in batch:
@@ -118,6 +136,13 @@ def test_streaming_candidate_ties_use_paper_id_tiebreak(
     def fake_load_dataset(
         dataset_name: str, split: str, streaming: bool = False
     ) -> list[dict[str, Any]]:
+        """Return deterministic tiny dataset used for tie-break verification.
+
+        :param str dataset_name: Requested dataset identifier.
+        :param str split: Dataset split string.
+        :param bool streaming: Whether streaming mode is requested.
+        :return list[dict[str, Any]]: Mocked dataset records.
+        """
         del dataset_name
         del split
         del streaming
@@ -138,6 +163,16 @@ def test_streaming_candidate_ties_use_paper_id_tiebreak(
         max_candidates: int,
         seen_paper_ids: set[str],
     ) -> None:
+        """Push deterministic tie candidates into heap for ordering assertions.
+
+        :param EmbeddingGraphBuilder self: Builder instance.
+        :param list[dict[str, Any]] batch: Batch metadata payload.
+        :param np.ndarray seed_embedding: Seed embedding vector.
+        :param list[tuple] heap: Candidate min-heap.
+        :param int max_candidates: Heap capacity.
+        :param set[str] seen_paper_ids: Set of already-seen paper IDs.
+        :return None: Heap is mutated in-place.
+        """
         del self
         del seed_embedding
         del seen_paper_ids

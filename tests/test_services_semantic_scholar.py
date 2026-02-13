@@ -86,8 +86,13 @@ def _build_fake_semantic_scholar_api(
     class _FakeApi:
         """Minimal SemanticScholar wrapper stub."""
 
-        def __init__(self, *_, **__) -> None:
-            """Create fake API instance and track it when requested."""
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Create fake API instance and track it when requested.
+
+            :param object _args: Ignored positional constructor args.
+            :param object _kwargs: Ignored keyword constructor args.
+            :return None: Initializes fake API state.
+            """
             self.session = _FakeRequestsSession()
             self.closed = False
             if created is not None:
@@ -275,7 +280,12 @@ def test_normalize_paper_id_urls(raw_id: str, expected: str) -> None:
 def test_normalize_paper_id_handles_doi_prefixes_and_ports(
     raw_id: str, expected: str
 ) -> None:
-    """DOI forms with prefixes/ports should normalize to bare DOI IDs."""
+    """DOI forms with prefixes/ports should normalize to bare DOI IDs.
+
+    :param str raw_id: Raw DOI-like identifier.
+    :param str expected: Expected normalized DOI identifier.
+    :return None: Asserts normalization output.
+    """
     assert normalize_paper_id(raw_id) == expected
 
 
@@ -292,7 +302,12 @@ def test_normalize_paper_id_handles_doi_prefixes_and_ports(
 def test_normalize_paper_id_does_not_match_non_domains(
     raw_id: str, expected: str
 ) -> None:
-    """Host matching should only accept exact domains or proper subdomains."""
+    """Host matching should only accept exact domains or proper subdomains.
+
+    :param str raw_id: Raw URL identifier.
+    :param str expected: Expected unchanged identifier.
+    :return None: Asserts non-matching domains are left untouched.
+    """
     assert normalize_paper_id(raw_id) == expected
 
 
@@ -496,7 +511,12 @@ def test_direct_endpoint_limit_validation_rejects_non_integer() -> None:
 def test_get_recommended_papers_url_encodes_paper_id_path_segment(
     raw_id: str, expected_suffix: str
 ) -> None:
-    """Recommendation URL should treat paper_id as one encoded path token."""
+    """Recommendation URL should treat paper_id as one encoded path token.
+
+    :param str raw_id: Raw paper identifier.
+    :param str expected_suffix: Expected URL-encoded path suffix.
+    :return None: Asserts encoded URL composition.
+    """
     client = SemanticScholarClient(timeout=1)
     client._request_json = MagicMock(return_value={"recommendedPapers": []})
 

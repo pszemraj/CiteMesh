@@ -47,6 +47,10 @@ MIGRATION_STATE_CLEAR = "explicit_clear"
 
 
 def _metadata_table_create_sql() -> str:
+    """Return SQL DDL used to create cache metadata table.
+
+    :return str: SQL statement for ``cache_metadata`` table creation.
+    """
     return """
     CREATE TABLE IF NOT EXISTS cache_metadata (
         key TEXT PRIMARY KEY,
@@ -56,6 +60,10 @@ def _metadata_table_create_sql() -> str:
 
 
 def _now_timestamp() -> str:
+    """Build UTC timestamp token for backup file suffixes.
+
+    :return str: UTC timestamp in sortable ``YYYYMMDDTHHMMSS.ffffffZ`` format.
+    """
     return datetime.utcnow().strftime("%Y%m%dT%H%M%S.%fZ")
 
 
@@ -298,11 +306,21 @@ class EmbeddingCache:
             self._init_db()
 
     def _make_backup_path(self, target_path: Path, suffix: str) -> Path:
-        """Build a timestamped backup path for cache artifacts."""
+        """Build a backup path for a cache artifact.
+
+        :param Path target_path: Original cache file path.
+        :param str suffix: Backup suffix to append after original extension.
+        :return Path: Backup destination path.
+        """
         return target_path.with_suffix(f"{target_path.suffix}.{suffix}")
 
     def _backup_cache_file(self, target_path: Path, suffix: str) -> Optional[Path]:
-        """Move an existing cache artifact to a timestamped backup path."""
+        """Move cache artifact to a unique timestamped backup path.
+
+        :param Path target_path: Existing cache file path to move.
+        :param str suffix: Logical backup-state suffix.
+        :return Optional[Path]: Backup path when moved, otherwise ``None``.
+        """
         if not target_path.exists():
             return None
 
@@ -323,7 +341,10 @@ class EmbeddingCache:
 
     @contextmanager
     def _cache_lock(self) -> Iterator[None]:
-        """Serialize cache mutations across processes for this model namespace."""
+        """Serialize cache mutations across processes for this model namespace.
+
+        :return Iterator[None]: Context manager yielding once lock is acquired.
+        """
         lock = FileLock(
             str(self.lock_path), timeout=EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
         )
@@ -396,6 +417,13 @@ class EmbeddingCache:
 
     @staticmethod
     def _set_cache_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
+        """Insert or update a metadata key-value pair.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :param str key: Metadata key.
+        :param str value: Metadata value.
+        :return None: This method mutates DB state in-place.
+        """
         conn.execute(
             """
             INSERT INTO cache_metadata (key, value)
@@ -406,9 +434,18 @@ class EmbeddingCache:
         )
 
     def _invalidate_cached_row_indices(self, conn: sqlite3.Connection) -> None:
+        """Invalidate row-index pointers for all cached papers.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :return None: This method mutates DB state in-place.
+        """
         conn.execute("UPDATE papers SET row_idx = NULL")
 
     def _backup_incompatible_h5(self) -> Path:
+        """Back up incompatible HDF5 cache file and return backup path.
+
+        :return Path: Created backup path (or computed fallback path).
+        """
         return self._backup_cache_file(
             self.h5_path, MIGRATION_STATE_LEGACY_BACKUP
         ) or self._make_backup_path(
@@ -416,6 +453,11 @@ class EmbeddingCache:
         )
 
     def _reconcile_layout_metadata(self, conn: sqlite3.Connection) -> None:
+        """Write metadata keys for active matrix-layout migration state.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :return None: This method mutates DB state in-place.
+        """
         self._set_cache_metadata(conn, H5_LAYOUT_KEY, H5_LAYOUT_MATRIX_VERSION)
         self._set_cache_metadata(conn, MIGRATION_STATE_KEY, MIGRATION_STATE_ACTIVE)
 
@@ -494,7 +536,15 @@ class EmbeddingCache:
         embedding_dim: int,
         row_idx: int,
     ) -> Tuple[Any, ...]:
-        """Build metadata row tuple for SQLite upsert."""
+        """Build metadata row tuple for SQLite upsert.
+
+        :param str paper_id: Paper identifier.
+        :param Dict[str, object] metadata: Paper metadata payload.
+        :param str text_hash: Deterministic hash for encoded text.
+        :param int embedding_dim: Embedding vector width.
+        :param int row_idx: Row index inside matrix dataset.
+        :return Tuple[Any, ...]: SQLite upsert tuple matching ``papers`` columns.
+        """
         return (
             paper_id,
             metadata.get("title", ""),
@@ -535,7 +585,11 @@ class EmbeddingCache:
 
     @staticmethod
     def _get_embeddings_dataset(h5_file: h5py.File) -> Optional[h5py.Dataset]:
-        """Return matrix embedding dataset when available."""
+        """Return matrix embedding dataset when available.
+
+        :param h5py.File h5_file: Open HDF5 cache handle.
+        :return Optional[h5py.Dataset]: 2D embedding dataset or ``None``.
+        """
         dataset = h5_file.get(EMBEDDINGS_DATASET_NAME)
         if dataset is None:
             return None
@@ -613,6 +667,11 @@ def _build_text(metadata: Dict) -> str:
 
 
 def _chunked(values: Sequence[str], chunk_size: int) -> Iterable[List[str]]:
-    """Yield fixed-size chunks from a sequence."""
+    """Yield fixed-size chunks from a sequence.
+
+    :param Sequence[str] values: Sequence to split into chunks.
+    :param int chunk_size: Number of items per yielded chunk.
+    :return Iterable[List[str]]: Iterator over chunk lists.
+    """
     for start in range(0, len(values), chunk_size):
         yield list(values[start : start + chunk_size])

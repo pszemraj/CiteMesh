@@ -3,6 +3,7 @@
 import multiprocessing as mp
 import sqlite3
 import tempfile
+from pathlib import Path
 from queue import Empty
 from typing import Any
 
@@ -34,7 +35,13 @@ class _MockModel:
 def _multiprocess_cache_worker(
     cache_dir: str, worker_idx: int, queue: mp.Queue
 ) -> None:
-    """Write embeddings in a subprocess and report success/failure."""
+    """Write embeddings in subprocess and report success/failure via queue.
+
+    :param str cache_dir: Cache directory shared by workers.
+    :param int worker_idx: Worker index used to create unique paper IDs.
+    :param mp.Queue queue: Multiprocessing queue receiving status tuples.
+    :return None: Worker reports status via queue.
+    """
     try:
         cache = EmbeddingCache(cache_dir=cache_dir, model_name="process-lock-test")
         model = _MockModel()
@@ -132,7 +139,7 @@ def test_embedding_cache_reuses_row_for_text_updates() -> None:
     assert model.encode_calls == 2
 
 
-def test_embedding_cache_serializes_multiprocess_writes(tmp_path) -> None:
+def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
     """Concurrent processes should serialize writes without HDF5 lock failures."""
     queue: mp.Queue = mp.Queue()
     processes = [

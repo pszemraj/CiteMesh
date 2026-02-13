@@ -11,7 +11,11 @@ from citemesh.core import Paper
 
 
 def build_seed_graph(seed_id: str = "seed") -> nx.Graph:
-    """Create a minimal one-node graph for CLI strategy tests."""
+    """Create a minimal one-node graph for CLI strategy tests.
+
+    :param str seed_id: Seed-node identifier.
+    :return nx.Graph: Graph containing only the seed node.
+    """
     graph = nx.Graph()
     graph.add_node(
         seed_id,
@@ -25,7 +29,10 @@ def build_seed_graph(seed_id: str = "seed") -> nx.Graph:
 
 
 def build_top_k_papers() -> Dict[str, Paper]:
-    """Create a four-paper fixture used by degree capping tests."""
+    """Create a four-paper fixture used by degree capping tests.
+
+    :return Dict[str, Paper]: Deterministic paper mapping with one seed paper.
+    """
     papers = {
         "seed": Paper(paper_id="seed", title="Seed", year=2024, abstract="seed"),
         "a": Paper(paper_id="a", title="A", year=2024, abstract="alpha"),
@@ -42,15 +49,33 @@ def build_fake_strategy_builder_factory(
     graph: nx.Graph | None = None,
     seed_id: str = "seed",
 ) -> type:
-    """Build a fake strategy class that captures ctor kwargs."""
+    """Build fake strategy class that captures constructor kwargs.
+
+    :param Dict[str, Any] captured_kwargs: Sink for constructor kwargs.
+    :param nx.Graph | None graph: Optional graph returned by fake builder.
+    :param str seed_id: Seed ID returned alongside graph.
+    :return type: Fake strategy builder class.
+    """
 
     base_graph = graph if graph is not None else build_seed_graph(seed_id)
 
     class _FakeStrategyBuilder:
+        """Fake strategy builder used by CLI tests."""
+
         def __init__(self, **kwargs: Any) -> None:
+            """Capture provided constructor kwargs.
+
+            :param Any kwargs: Strategy constructor keyword arguments.
+            :return None: This initializer only stores kwargs for assertions.
+            """
             captured_kwargs.update(kwargs)
 
         def build_graph(self, _: str) -> tuple[nx.Graph, str]:
+            """Return configured graph and seed ID.
+
+            :param str _: Ignored input seed identifier.
+            :return tuple[nx.Graph, str]: Graph and normalized seed ID.
+            """
             return base_graph, seed_id
 
     return _FakeStrategyBuilder
@@ -59,29 +84,68 @@ def build_fake_strategy_builder_factory(
 def build_fake_exporter_factory(
     captured_data: Dict[str, Any], *, methods: Iterable[str] | None = None
 ) -> type:
-    """Build a fake exporter class that captures metadata/layout for assertions."""
+    """Build fake exporter class that captures metadata/layout for assertions.
+
+    :param Dict[str, Any] captured_data: Sink for exporter constructor payload.
+    :param Iterable[str] | None methods: Method names to enable on fake exporter.
+    :return type: Fake exporter class.
+    """
 
     requested_methods = set(methods or [])
 
     class _FakeExporter:
+        """Fake graph exporter used by CLI integration tests."""
+
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            """Capture exporter constructor metadata for assertions.
+
+            :param Any args: Positional constructor arguments.
+            :param Any kwargs: Keyword constructor arguments.
+            :return None: This initializer stores metadata only.
+            """
             captured_data["kwargs"] = kwargs
             captured_data["metadata"] = kwargs.get("metadata")
             captured_data["layout"] = kwargs.get("layout")
 
         def to_json(self, path: Path) -> None:
+            """Write minimal JSON payload when enabled.
+
+            :param Path path: Target output path.
+            :return None: Writes test artifact conditionally.
+            """
             if "to_json" in requested_methods or not requested_methods:
                 path.write_text("{}")
 
-        def to_interactive_html(self, path: Path, *_, **__) -> None:
+        def to_interactive_html(
+            self, path: Path, *_args: object, **_kwargs: object
+        ) -> None:
+            """Write minimal interactive HTML payload when enabled.
+
+            :param Path path: Target output path.
+            :param object _args: Ignored positional args.
+            :param object _kwargs: Ignored keyword args.
+            :return None: Writes test artifact conditionally.
+            """
             if "to_interactive_html" in requested_methods or not requested_methods:
                 path.write_text("<html/>")
 
-        def to_plotly_html(self, path: Path, *_, **__) -> None:
+        def to_plotly_html(self, path: Path, *_args: object, **_kwargs: object) -> None:
+            """Write minimal Plotly HTML payload when enabled.
+
+            :param Path path: Target output path.
+            :param object _args: Ignored positional args.
+            :param object _kwargs: Ignored keyword args.
+            :return None: Writes test artifact conditionally.
+            """
             if "to_plotly_html" in requested_methods or not requested_methods:
                 path.write_text("<html/>")
 
         def to_graphml(self, path: Path) -> None:
+            """Write minimal GraphML payload when enabled.
+
+            :param Path path: Target output path.
+            :return None: Writes test artifact conditionally.
+            """
             if "to_graphml" in requested_methods or not requested_methods:
                 path.write_text("<graphml/>")
 
@@ -89,7 +153,10 @@ def build_fake_exporter_factory(
 
 
 def get_paper_id_normalization_cases() -> List[tuple[str, str]]:
-    """Canonicalization scenarios reused across CLI and service tests."""
+    """Return shared paper-id normalization fixtures.
+
+    :return List[tuple[str, str]]: Pairs of raw ID and expected normalized ID.
+    """
     return [
         ("https://arxiv.org/abs/2508.14040", "arxiv:2508.14040"),
         ("https://arxiv.org/pdf/2508.14040.pdf", "arxiv:2508.14040"),

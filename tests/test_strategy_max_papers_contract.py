@@ -15,7 +15,11 @@ from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
 
 def _seed_paper(paper_id: str = "seed") -> Paper:
-    """Build a deterministic seed paper fixture."""
+    """Build a deterministic seed paper fixture.
+
+    :param str paper_id: Seed paper identifier.
+    :return Paper: Seed paper fixture.
+    """
     return Paper(
         paper_id=paper_id,
         title=f"Paper {paper_id}",
@@ -26,7 +30,11 @@ def _seed_paper(paper_id: str = "seed") -> Paper:
 
 
 def _build_named_paper(paper_id: str) -> Paper:
-    """Build a paper for deterministic graph expansion."""
+    """Build a paper for deterministic graph expansion.
+
+    :param str paper_id: Paper identifier.
+    :return Paper: Non-seed paper fixture.
+    """
     return Paper(
         paper_id=paper_id,
         title=f"Paper {paper_id}",
@@ -127,10 +135,23 @@ def test_hybrid_max_papers_is_total_node_cap_including_seed(
     class FakeCitationBuilder:
         """Citation branch stub with explicit max-papers behavior."""
 
-        def __init__(self, max_papers: int, *_, **__) -> None:
+        def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:
+            """Store citation branch cap for deterministic fixture behavior.
+
+            :param int max_papers: Max papers passed by hybrid builder.
+            :param object _args: Ignored positional arguments.
+            :param object _kwargs: Ignored keyword arguments.
+            :return None: Stores configured limit.
+            """
             self.max_papers = max_papers
 
         def collect_papers(self, seed_id: str, **_: object) -> dict[str, Paper]:
+            """Return deterministic citation branch papers.
+
+            :param str seed_id: Seed paper identifier.
+            :param object _: Ignored keyword arguments.
+            :return dict[str, Paper]: Deterministic citation-branch papers.
+            """
             _ = seed_id
             papers = {
                 "seed": _seed_paper(),
@@ -142,10 +163,23 @@ def test_hybrid_max_papers_is_total_node_cap_including_seed(
     class FakeEmbeddingBuilder:
         """Embedding branch stub with deterministic max-semantic output."""
 
-        def __init__(self, max_papers: int, *_, **__) -> None:
+        def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:
+            """Store embedding branch cap for deterministic fixture behavior.
+
+            :param int max_papers: Max papers passed by hybrid builder.
+            :param object _args: Ignored positional arguments.
+            :param object _kwargs: Ignored keyword arguments.
+            :return None: Stores configured limit.
+            """
             self.max_papers = max_papers
 
         def collect_papers(self, seed_id: str, **_: object) -> dict[str, Paper]:
+            """Return deterministic semantic papers used by hybrid merge path.
+
+            :param str seed_id: Seed paper identifier.
+            :param object _: Ignored keyword arguments.
+            :return dict[str, Paper]: Deterministic semantic-branch papers.
+            """
             _ = seed_id
             return {
                 "seed": _seed_paper(),

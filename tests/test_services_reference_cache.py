@@ -7,6 +7,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import SemanticScholarClient
 
@@ -20,8 +22,15 @@ def _make_reference_record(paper_id: str) -> SimpleNamespace:
     return SimpleNamespace(paper=SimpleNamespace(paperId=paper_id))
 
 
-def test_get_reference_ids_uses_valid_cache(tmp_path: Path, monkeypatch) -> None:
-    """Reference ID lookup should return cached payload without API call."""
+def test_get_reference_ids_uses_valid_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reference ID lookup should return cached payload without API call.
+
+    :param Path tmp_path: Temporary cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture for cache-path patching.
+    :return None: Asserts cached response path.
+    """
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
@@ -45,9 +54,14 @@ def test_get_reference_ids_uses_valid_cache(tmp_path: Path, monkeypatch) -> None
 
 
 def test_get_reference_ids_recovers_from_corrupt_cache(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Corrupt cache files should be discarded and rebuilt from API response."""
+    """Corrupt cache files should be discarded and rebuilt from API response.
+
+    :param Path tmp_path: Temporary cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture for cache-path patching.
+    :return None: Asserts rebuilt cache payload.
+    """
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
@@ -68,9 +82,14 @@ def test_get_reference_ids_recovers_from_corrupt_cache(
 
 
 def test_get_reference_ids_handles_type_error_as_empty(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Missing reference payloads should return an empty list."""
+    """Missing reference payloads should return an empty list.
+
+    :param Path tmp_path: Temporary cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture for cache-path patching.
+    :return None: Asserts empty fallback behavior.
+    """
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
@@ -128,9 +147,14 @@ def test_recommendation_and_search_payload_conversion() -> None:
 
 
 def test_atomic_reference_cache_write_preserves_existing_file_on_replace_error(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Atomic writes must keep valid cached data when filesystem rename fails."""
+    """Atomic writes must keep valid cached data when filesystem rename fails.
+
+    :param Path tmp_path: Temporary cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture for filesystem patching.
+    :return None: Asserts previous cache payload remains intact.
+    """
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     monkeypatch.setattr(
         s2.os,
