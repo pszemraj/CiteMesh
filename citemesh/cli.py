@@ -26,6 +26,7 @@ from citemesh.strategies.hybrid import HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.visualization import (
     GraphExporter,
+    compute_layout,
     generate_output_path,
     visualize_graph,
 )
@@ -403,18 +404,13 @@ Examples:
         try:
             # Build graph based on strategy
             logger.info(f"Building graph using {args.strategy} strategy...")
-
-            if args.strategy == "citation":
-                graph, seed_id = build_citation_graph(args)
-            elif args.strategy == "recommendation":
-                graph, seed_id = build_recommendation_graph(args)
-            elif args.strategy == "embedding":
-                graph, seed_id = build_embedding_graph(args)
-            elif args.strategy == "hybrid":
-                graph, seed_id = build_hybrid_graph(args)
-            else:
-                logger.error(f"Unknown strategy: {args.strategy}")
-                sys.exit(1)
+            strategy_builders = {
+                "citation": build_citation_graph,
+                "recommendation": build_recommendation_graph,
+                "embedding": build_embedding_graph,
+                "hybrid": build_hybrid_graph,
+            }
+            graph, seed_id = strategy_builders[args.strategy](args)
 
             # Determine output paths
             if args.output:
@@ -448,12 +444,18 @@ Examples:
                 "edges": graph.number_of_edges(),
                 "theme": args.theme,
             }
+            shared_layout = compute_layout(
+                graph,
+                iterations=args.iterations,
+                layout_seed=args.seed,
+            )
 
             exporter = GraphExporter(
                 graph,
                 seed_id,
                 metadata=metadata,
                 theme_name=args.theme,
+                layout=shared_layout,
             )
 
             if "png" in output_paths:
@@ -465,6 +467,7 @@ Examples:
                     dpi=args.dpi,
                     metadata=metadata,
                     theme_name=args.theme,
+                    layout=shared_layout,
                 )
                 logger.info(f"✓ PNG saved to {output_paths['png']}")
 

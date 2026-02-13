@@ -218,13 +218,18 @@ def compute_node_colors(
     return colors, min_year, max_year
 
 
-def compute_layout(graph: nx.Graph, iterations: int = 100) -> Dict[str, np.ndarray]:
+def compute_layout(
+    graph: nx.Graph,
+    iterations: int = 100,
+    layout_seed: Optional[int] = None,
+) -> Dict[str, np.ndarray]:
     """
     Compute force-directed layout with organic clustering.
 
     :param nx.Graph graph: NetworkX graph
     :param int iterations: Number of iterations for spring layout
-    :return Dict[str, np.ndarray]: Dictionary mapping node IDs to (x, y) positions
+    :param Optional[int] layout_seed: Optional seed for deterministic layout perturbations/fallback.
+    :return Dict[str, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
     """
     try:
         pos = nx.kamada_kawai_layout(
@@ -240,14 +245,14 @@ def compute_layout(graph: nx.Graph, iterations: int = 100) -> Dict[str, np.ndarr
             graph,
             k=k_value,
             iterations=iterations,
-            seed=42,
+            seed=42 if layout_seed is None else layout_seed,
             weight="weight",
             scale=VIZ_CONFIG.layout_scale,
             center=VIZ_CONFIG.layout_center,
         )
 
     # Add small deterministic perturbations for visual separation
-    rng = np.random.default_rng(0)
+    rng = np.random.default_rng(0 if layout_seed is None else layout_seed)
     for node in pos:
         pos[node] += rng.normal(0, VIZ_CONFIG.perturbation_std, 2)
 
@@ -390,6 +395,8 @@ def visualize_graph(
     dpi: int = None,
     metadata: Optional[Dict[str, Any]] = None,
     theme_name: str = "light",
+    layout: Optional[Dict[str, np.ndarray]] = None,
+    layout_seed: Optional[int] = None,
 ) -> None:
     """
     Create CiteMesh visualization.
@@ -398,9 +405,11 @@ def visualize_graph(
     :param str seed_id: ID of the seed paper
     :param Path output_path: Path for output PNG file
     :param int iterations: Number of layout iterations (higher = better quality)
-    :param int dpi: Output resolution (defaults to config value)
+    :param int dpi: Output resolution (defaults to config value).
     :param Optional[Dict[str, Any]] metadata: Optional info to annotate on the figure (auto-positioned) Visual Encodings: - Node size: Citation count + importance ranking (80-2500 pixels) - Node color: Smooth gradient by year (light → dark) - Edge thickness: Proportional to similarity weight - Edge opacity: Based on connection strength - Layout: Kamada-Kawai with organic perturbations
     :param str theme_name: Name of theme to render.
+    :param Optional[Dict[str, np.ndarray]] layout: Optional precomputed layout to reuse.
+    :param Optional[int] layout_seed: Optional seed used when computing layout internally.
     :return None: Writes output image to the given path.
     """
     if dpi is None:
@@ -409,7 +418,9 @@ def visualize_graph(
     theme = get_theme(theme_name)
 
     # Compute layout
-    pos = compute_layout(graph, iterations)
+    pos = layout if layout is not None else compute_layout(
+        graph, iterations, layout_seed=layout_seed
+    )
 
     # Compute visual properties
     sizes = compute_node_sizes(graph)
