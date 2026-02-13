@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import requests
 from semanticscholar import SemanticScholar
@@ -721,8 +721,9 @@ class SemanticScholarClient:
             fields = [*fields, "references"]
 
         normalized_paper_id = normalize_paper_id(paper_id)
+        encoded_paper_id = quote(normalized_paper_id, safe="")
         payload = self._request_json(
-            f"{RECOMMENDATION_BASE_URL}/{normalized_paper_id}",
+            f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
             {"fields": ",".join(fields), "limit": limit},
         )
         if not payload:

@@ -286,3 +286,23 @@ def test_get_recommended_papers_include_references_adds_field() -> None:
     params = client._request_json.call_args.args[1]
     fields = params["fields"].split(",")
     assert "references" in fields
+
+
+@pytest.mark.parametrize(
+    ("raw_id", "expected_suffix"),
+    [
+        ("10.1145/3133956.3134029", "10.1145%2F3133956.3134029"),
+        ("arxiv:math/0301234v1", "arxiv%3Amath%2F0301234"),
+    ],
+)
+def test_get_recommended_papers_url_encodes_paper_id_path_segment(
+    raw_id: str, expected_suffix: str
+) -> None:
+    """Recommendation URL should treat paper_id as one encoded path token."""
+    client = SemanticScholarClient(timeout=1)
+    client._request_json = MagicMock(return_value={"recommendedPapers": []})
+
+    client.get_recommended_papers(raw_id, limit=1)
+
+    url = client._request_json.call_args.args[0]
+    assert url.endswith(expected_suffix)
