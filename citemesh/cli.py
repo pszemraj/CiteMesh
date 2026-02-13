@@ -8,6 +8,7 @@ providing a single interface to all graph building strategies.
 
 import argparse
 import logging
+import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -59,6 +60,56 @@ def _configure_logging() -> None:
         ],
     )
     _LOGGING_CONFIGURED = True
+
+
+def _positive_int(value: str) -> int:
+    """Parse a positive integer CLI argument.
+
+    :param str value: Raw argparse value.
+    :return int: Parsed integer.
+    :raises argparse.ArgumentTypeError: If value is not >= 1.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return parsed
+
+
+def _non_negative_int(value: str) -> int:
+    """Parse a non-negative integer CLI argument.
+
+    :param str value: Raw argparse value.
+    :return int: Parsed integer.
+    :raises argparse.ArgumentTypeError: If value is negative.
+    """
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
+
+
+def _threshold_float(value: str) -> float:
+    """Parse similarity-threshold CLI argument constrained to [0, 1].
+
+    :param str value: Raw argparse value.
+    :return float: Parsed threshold value.
+    :raises argparse.ArgumentTypeError: If value is outside [0, 1].
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a float") from exc
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("must be a finite float")
+    if parsed < 0.0 or parsed > 1.0:
+        raise argparse.ArgumentTypeError("must be between 0.0 and 1.0")
+    return parsed
 
 
 EXPORT_FORMATS = ("png", "html", "plotly", "json", "graphml")
@@ -328,7 +379,7 @@ Examples:
     build_parser.add_argument(
         "--max-papers",
         "-p",
-        type=int,
+        type=_positive_int,
         default=40,
         help="Maximum papers to include (default: 40)",
     )
@@ -336,7 +387,7 @@ Examples:
     build_parser.add_argument(
         "--spring-iterations",
         "-i",
-        type=int,
+        type=_positive_int,
         default=100,
         help="Spring fallback layout iterations (default: 100)",
     )
@@ -344,7 +395,7 @@ Examples:
     build_parser.add_argument(
         "--dpi",
         "-d",
-        type=int,
+        type=_positive_int,
         default=150,
         help="Output image resolution (default: 150)",
     )
@@ -366,7 +417,7 @@ Examples:
     citation_group.add_argument(
         "--max-citations",
         "-c",
-        type=int,
+        type=_non_negative_int,
         default=20,
         help="Maximum citing papers to fetch (default: 20)",
     )
@@ -374,7 +425,7 @@ Examples:
     citation_group.add_argument(
         "--max-references",
         "-r",
-        type=int,
+        type=_non_negative_int,
         default=20,
         help="Maximum referenced papers to fetch (default: 20)",
     )
@@ -382,7 +433,7 @@ Examples:
     citation_group.add_argument(
         "--similarity-threshold",
         "-t",
-        type=float,
+        type=_threshold_float,
         default=0.2,
         help="Minimum edge similarity for citation/recommendation strategies (default: 0.2)",
     )
@@ -412,7 +463,7 @@ Examples:
 
     embedding_group.add_argument(
         "--corpus-size",
-        type=int,
+        type=_positive_int,
         default=50000,
         help=(
             "Maximum papers to load from corpus "
@@ -429,14 +480,14 @@ Examples:
     embedding_group.add_argument(
         "--top-k",
         "-k",
-        type=int,
+        type=_positive_int,
         default=2,
         help="Top-k neighbors per node (default: 2)",
     )
 
     embedding_group.add_argument(
         "--truncate-dim",
-        type=int,
+        type=_positive_int,
         default=None,
         help=(
             "Optional embedding output dimension truncation "
@@ -454,7 +505,7 @@ Examples:
     hybrid_group = build_parser.add_argument_group("hybrid strategy options")
     hybrid_group.add_argument(
         "--max-semantic",
-        type=int,
+        type=_non_negative_int,
         default=10,
         help="Maximum papers from semantic search (default: 10)",
     )
@@ -467,7 +518,7 @@ Examples:
     search_parser.add_argument(
         "--limit",
         "-n",
-        type=int,
+        type=_positive_int,
         default=10,
         help="Maximum results (default: 10)",
     )

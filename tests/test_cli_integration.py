@@ -103,6 +103,35 @@ class TestCLIBasics:
         assert result.returncode != 0
         assert "invalid choice" in result.stderr.lower()
 
+    @pytest.mark.parametrize(
+        ("args", "expected_error"),
+        [
+            (
+                ["build", "arxiv:1706.03762", "--max-papers", "0"],
+                "must be at least 1",
+            ),
+            (
+                ["build", "arxiv:1706.03762", "--similarity-threshold", "1.2"],
+                "must be between 0.0 and 1.0",
+            ),
+            (
+                ["build", "arxiv:1706.03762", "--similarity-threshold", "nan"],
+                "must be a finite float",
+            ),
+            (
+                ["search", "attention", "--limit", "0"],
+                "must be at least 1",
+            ),
+        ],
+    )
+    def test_cli_rejects_invalid_numeric_inputs(
+        self, args: list[str], expected_error: str
+    ) -> None:
+        """Argparse validators should reject out-of-range numeric values."""
+        result = run_cli_command(args)
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+
 
 class TestCLIExecution:
     """Test actual CLI execution with real (but small) workloads."""

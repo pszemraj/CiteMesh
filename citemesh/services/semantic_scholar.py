@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import numbers
 import os
 import re
 import threading
@@ -69,22 +70,45 @@ def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
     return candidate or None
 
 
+def _host_matches_domain(host: str, domain: str) -> bool:
+    """Check whether a parsed host belongs to an expected domain.
+
+    :param str host: Parsed hostname candidate.
+    :param str domain: Expected domain suffix.
+    :return bool: ``True`` when host is exactly ``domain`` or a valid subdomain.
+    """
+    normalized_host = host.lower().strip()
+    normalized_domain = domain.lower().strip()
+    return normalized_host == normalized_domain or normalized_host.endswith(
+        f".{normalized_domain}"
+    )
+
+
 def normalize_paper_id(paper_id: str) -> str:
     """
     Normalize paper identifiers (including arXiv/DOI URLs) for S2 API calls.
 
     :param str paper_id: Raw user-provided identifier (ID or URL).
     :return str: Canonical Semantic Scholar paper identifier string.
-    :raises ValueError: If the identifier is empty after trimming.
+    :raises ValueError: If the identifier is invalid or empty after trimming.
     """
+    if not isinstance(paper_id, str):
+        raise ValueError(f"Invalid paper ID: {paper_id}")
+
     normalized = paper_id.strip()
     if not normalized:
         raise ValueError(f"Invalid paper ID: {paper_id}")
 
     lowered = normalized.lower()
 
+    if lowered.startswith("doi:"):
+        suffix = unquote(normalized.split(":", 1)[1]).strip()
+        if not suffix:
+            raise ValueError(f"Invalid paper ID: {paper_id}")
+        return suffix
+
     if lowered.startswith("arxiv:"):
-        suffix = normalized.split(":", 1)[1].strip()
+        suffix = unquote(normalized.split(":", 1)[1]).strip()
         suffix = _strip_arxiv_version(suffix)
         if not suffix:
             raise ValueError(f"Invalid paper ID: {paper_id}")
@@ -92,24 +116,34 @@ def normalize_paper_id(paper_id: str) -> str:
 
     if lowered.startswith("http://") or lowered.startswith("https://"):
         parsed = urlparse(normalized)
-        host = parsed.netloc.lower()
+        host = (parsed.hostname or "").lower()
         path = unquote(parsed.path)
 
-        if host.endswith("arxiv.org"):
+        if _host_matches_domain(host, "arxiv.org"):
             arxiv_id = _extract_arxiv_identifier(path)
             if arxiv_id:
                 return f"arxiv:{arxiv_id}"
 
-        if host.endswith("doi.org"):
+        if _host_matches_domain(host, "doi.org"):
             doi_id = path.strip("/")
             if doi_id:
                 return doi_id
 
-    if lowered.startswith("arxiv.org/"):
+    # Support schemeless URL-like IDs such as doi.org/<id> or arxiv.org/abs/<id>.
+    if "://" not in lowered and "/" in lowered:
         parsed = urlparse(f"https://{normalized}")
-        arxiv_id = _extract_arxiv_identifier(unquote(parsed.path))
-        if arxiv_id:
-            return f"arxiv:{arxiv_id}"
+        host = (parsed.hostname or "").lower()
+        path = unquote(parsed.path)
+
+        if _host_matches_domain(host, "doi.org"):
+            doi_id = path.strip("/")
+            if doi_id:
+                return doi_id
+
+        if _host_matches_domain(host, "arxiv.org"):
+            arxiv_id = _extract_arxiv_identifier(path)
+            if arxiv_id:
+                return f"arxiv:{arxiv_id}"
 
     return normalized
 
@@ -122,6 +156,27 @@ def _reference_cache_path(paper_id: str) -> Path:
     """
     digest = hashlib.sha1(paper_id.encode("utf-8")).hexdigest()
     return REFERENCE_CACHE_DIR / f"{digest}.json"
+
+
+def _validate_integer_limit(
+    limit: int, field_name: str, allow_zero: bool = False
+) -> int:
+    """Validate API limit argument values and return normalized int.
+
+    :param int limit: Raw limit value supplied by caller.
+    :param str field_name: Parameter name used in error messages.
+    :param bool allow_zero: Whether zero is accepted as a disable switch.
+    :return int: Parsed integer limit value.
+    :raises ValueError: If value is non-integer or below the accepted minimum.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, numbers.Integral):
+        raise ValueError(f"{field_name} must be an integer, got {limit!r}")
+
+    parsed_limit = int(limit)
+    minimum = 0 if allow_zero else 1
+    if parsed_limit < minimum:
+        raise ValueError(f"{field_name} must be at least {minimum}, got {parsed_limit}")
+    return parsed_limit
 
 
 class SemanticScholarClient:
@@ -502,9 +557,13 @@ class SemanticScholarClient:
         :param int limit: Maximum number of citations to fetch
         :return List[Paper]: Citation Papers (may be empty).
         """
+        parsed_limit = _validate_integer_limit(limit, "limit", allow_zero=True)
+        if parsed_limit == 0:
+            return []
+
         return self._get_related_papers(
             paper_id=paper_id,
-            limit=limit,
+            limit=parsed_limit,
             fetch_method=self.client.get_paper_citations,
             relation_label="citations",
         )
@@ -517,9 +576,13 @@ class SemanticScholarClient:
         :param int limit: Maximum number of references to fetch
         :return List[Paper]: List of Paper objects (may be shorter than limit)
         """
+        parsed_limit = _validate_integer_limit(limit, "limit", allow_zero=True)
+        if parsed_limit == 0:
+            return []
+
         return self._get_related_papers(
             paper_id=paper_id,
-            limit=limit,
+            limit=parsed_limit,
             fetch_method=self.client.get_paper_references,
             relation_label="references",
         )
@@ -719,12 +782,13 @@ class SemanticScholarClient:
             ]
         if include_references and "references" not in fields:
             fields = [*fields, "references"]
+        parsed_limit = _validate_integer_limit(limit, "limit")
 
         normalized_paper_id = normalize_paper_id(paper_id)
         encoded_paper_id = quote(normalized_paper_id, safe="")
         payload = self._request_json(
             f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
-            {"fields": ",".join(fields), "limit": limit},
+            {"fields": ",".join(fields), "limit": parsed_limit},
         )
         if not payload:
             return []
@@ -746,6 +810,13 @@ class SemanticScholarClient:
         :param Optional[List[str]] fields: Optional fields list for API payload.
         :return List[Paper]: Search results.
         """
+        parsed_limit = _validate_integer_limit(limit, "limit")
+        if not isinstance(query, str):
+            raise ValueError("query must be a string")
+        normalized_query = query.strip()
+        if not normalized_query:
+            raise ValueError("query must not be empty")
+
         if fields is None:
             fields = [
                 "paperId",
@@ -759,7 +830,11 @@ class SemanticScholarClient:
 
         payload = self._request_json(
             SEARCH_BASE_URL,
-            {"query": query, "fields": ",".join(fields), "limit": limit},
+            {
+                "query": normalized_query,
+                "fields": ",".join(fields),
+                "limit": parsed_limit,
+            },
         )
         if not payload:
             return []

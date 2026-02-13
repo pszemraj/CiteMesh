@@ -220,6 +220,45 @@ def test_normalize_paper_id_urls(raw_id: str, expected: str) -> None:
     assert normalize_paper_id(raw_id) == expected
 
 
+@pytest.mark.parametrize(
+    ("raw_id", "expected"),
+    [
+        ("doi:10.1145/3133956.3134029", "10.1145/3133956.3134029"),
+        ("https://doi.org:443/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
+        ("doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
+        ("dx.doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
+    ],
+)
+def test_normalize_paper_id_handles_doi_prefixes_and_ports(
+    raw_id: str, expected: str
+) -> None:
+    """DOI forms with prefixes/ports should normalize to bare DOI IDs."""
+    assert normalize_paper_id(raw_id) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw_id", "expected"),
+    [
+        (
+            "https://notdoi.org/10.1145/3133956.3134029",
+            "https://notdoi.org/10.1145/3133956.3134029",
+        ),
+        ("https://fooarxiv.org/abs/1706.03762", "https://fooarxiv.org/abs/1706.03762"),
+    ],
+)
+def test_normalize_paper_id_does_not_match_non_domains(
+    raw_id: str, expected: str
+) -> None:
+    """Host matching should only accept exact domains or proper subdomains."""
+    assert normalize_paper_id(raw_id) == expected
+
+
+def test_normalize_paper_id_rejects_non_string_input() -> None:
+    """normalize_paper_id should fail with a clear error for non-string input."""
+    with pytest.raises(ValueError, match="Invalid paper ID"):
+        normalize_paper_id(None)  # type: ignore[arg-type]
+
+
 def test_get_paper_normalizes_arxiv_url_before_api_call() -> None:
     """get_paper should transform arXiv URLs before querying Semantic Scholar."""
     api_paper = SimpleNamespace(
@@ -286,6 +325,53 @@ def test_get_recommended_papers_include_references_adds_field() -> None:
     params = client._request_json.call_args.args[1]
     fields = params["fields"].split(",")
     assert "references" in fields
+
+
+def test_recommendation_and_search_limits_validate_positive() -> None:
+    """Direct endpoint helpers should reject non-positive limits."""
+    client = SemanticScholarClient(timeout=1)
+
+    with pytest.raises(ValueError, match="limit must be at least 1"):
+        client.get_recommended_papers("seed", limit=0)
+
+    with pytest.raises(ValueError, match="limit must be at least 1"):
+        client.search_papers("attention", limit=0)
+
+
+def test_search_rejects_blank_query() -> None:
+    """Search should reject empty or whitespace-only query strings."""
+    client = SemanticScholarClient(timeout=1)
+
+    with pytest.raises(ValueError, match="query must not be empty"):
+        client.search_papers("   ", limit=1)
+
+
+def test_search_rejects_non_string_query() -> None:
+    """Search should reject non-string query inputs with a clear message."""
+    client = SemanticScholarClient(timeout=1)
+
+    with pytest.raises(ValueError, match="query must be a string"):
+        client.search_papers(123, limit=1)  # type: ignore[arg-type]
+
+
+def test_relation_limit_validation_for_citations_and_references() -> None:
+    """Citation/reference helpers should allow zero to disable fetches."""
+    client = SemanticScholarClient(timeout=1)
+    client.client.get_paper_citations = MagicMock(return_value=[])
+    client.client.get_paper_references = MagicMock(return_value=[])
+
+    assert client.get_paper_citations("seed", limit=0) == []
+    assert client.get_paper_references("seed", limit=0) == []
+    client.client.get_paper_citations.assert_not_called()
+    client.client.get_paper_references.assert_not_called()
+
+
+def test_direct_endpoint_limit_validation_rejects_non_integer() -> None:
+    """Direct endpoint helpers should reject non-integer limit values."""
+    client = SemanticScholarClient(timeout=1)
+
+    with pytest.raises(ValueError, match="limit must be an integer"):
+        client.get_recommended_papers("seed", limit=True)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

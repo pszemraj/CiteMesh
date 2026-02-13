@@ -19,6 +19,7 @@ citemesh search "<query>" [--limit N]
 Accepted identifiers:
 
 - DOI (`10.1038/nature14539`)
+- DOI with prefix (`doi:10.1038/nature14539`)
 - DOI URL (`https://doi.org/10.1038/nature14539`)
 - arXiv ID (`arxiv:1706.03762`; version suffixes like `v5` are normalized away)
 - bare arXiv-like IDs (for example `1706.03762`) may work when Semantic Scholar resolves them
@@ -46,12 +47,15 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 
 `--seed` controls the shared layout path for `png` and `plotly` exports. Pyvis `html` exports use vis.js physics and do not consume this layout.
 Metadata timestamps are omitted by default for deterministic artifacts; use `--include-timestamp` to opt in.
+Numeric validation:
+- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, and `search --limit` must be at least `1`.
+- `--max-citations`, `--max-references`, and `--max-semantic` must be at least `0`.
 
 ## Strategy-Specific Flags
 
 ### Cross-Strategy Scope
 
-- `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold.
+- `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (`0.0` to `1.0`).
 - `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
 - `embedding` and the embedding branch of `hybrid` use embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`).
 
@@ -67,7 +71,7 @@ Metadata timestamps are omitted by default for deterministic artifacts; use `--i
 
 - `--max-citations`, `-c`: limit number of citing papers
 - `--max-references`, `-r`: limit number of referenced papers
-- `--similarity-threshold`, `-t`: minimum edge similarity threshold
+- `--similarity-threshold`, `-t`: minimum edge similarity threshold (`0.0` to `1.0`)
 - `--no-references`: skip fetching reference lists (speeds up runs, removes true bibliographic coupling)
 
 ### Embedding Strategy
