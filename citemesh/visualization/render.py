@@ -32,7 +32,11 @@ KK_LAYOUT_DISTANCE_EPSILON = 1e-6
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
-    """Normalize citation count values for deterministic ranking."""
+    """Normalize citation count values for deterministic ranking.
+
+    :param Mapping[str, Any] attrs: Raw node attributes mapping.
+    :return int: Non-negative citation count value.
+    """
     raw = attrs.get("citation_count", 0)
     if isinstance(raw, bool) or raw is None:
         return 0

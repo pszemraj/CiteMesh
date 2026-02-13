@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, Hashable
+
 import networkx as nx
 import numpy as np
 import pytest
@@ -19,10 +21,22 @@ from citemesh.visualization.themes import get_theme
 def test_compute_layout_perturbation_is_stable_across_node_order(
     monkeypatch: pytest.MonkeyPatch, layout_seed: int | None
 ) -> None:
-    """Node perturbations should map deterministically regardless of insertion order."""
+    """Node perturbations should map deterministically regardless of insertion order.
 
-    def fake_kamada_kawai_layout(graph: nx.Graph, **kwargs):
-        """Return identical base positions while preserving input iteration order."""
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch layout internals.
+    :param int | None layout_seed: Seed propagated to perturbation RNG.
+    :return None: Asserts stable node-wise perturbations.
+    """
+
+    def fake_kamada_kawai_layout(
+        graph: nx.Graph, **kwargs: Any
+    ) -> dict[Hashable, np.ndarray]:
+        """Return identical base positions while preserving input iteration order.
+
+        :param nx.Graph graph: Input graph passed by layout wrapper.
+        :param Any kwargs: Unused keyword args from NetworkX call site.
+        :return dict[Hashable, np.ndarray]: Zero-valued positions keyed by node.
+        """
         del kwargs
         return {node: np.array([0.0, 0.0], dtype=np.float64) for node in graph.nodes()}
 
@@ -72,10 +86,22 @@ def test_compute_layout_is_stable_for_real_kamada_kawai() -> None:
 def test_compute_layout_uses_distance_weights_for_kamada_kawai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kamada-Kawai should receive inverted similarity distances."""
+    """Kamada-Kawai should receive inverted similarity distances.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch layout internals.
+    :return None: Asserts monotonic distance mapping and weight attribute usage.
+    """
     captured: dict[str, object] = {}
 
-    def fake_kamada_kawai_layout(graph: nx.Graph, **kwargs):
+    def fake_kamada_kawai_layout(
+        graph: nx.Graph, **kwargs: Any
+    ) -> dict[Hashable, np.ndarray]:
+        """Capture KK distance payload and return fixed coordinates.
+
+        :param nx.Graph graph: Canonicalized graph passed to KK layout.
+        :param Any kwargs: Layout keyword arguments.
+        :return dict[Hashable, np.ndarray]: Deterministic node coordinates.
+        """
         captured["weight_attr"] = kwargs.get("weight")
         distances = {}
         for left, right, attrs in graph.edges(data=True):

@@ -7,6 +7,7 @@ import sys
 import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any, Callable
 
 import networkx as nx
 import pytest
@@ -25,7 +26,7 @@ def _install_fake_plotly(
     monkeypatch: pytest.MonkeyPatch,
     *,
     figure_cls: type,
-    scatter_factory=None,
+    scatter_factory: Callable[..., dict[str, object]] | None = None,
 ) -> None:
     """Install a minimal ``plotly`` module with configurable graph_objects types.
 
@@ -47,24 +48,43 @@ def _install_fake_plotly(
 class _BaseFakeFigure:
     """Reusable minimal Plotly ``Figure`` stand-in for exporter tests."""
 
-    def __init__(self, data, layout) -> None:
-        """Store figure payload for assertion helpers."""
+    def __init__(self, data: Any, layout: Any) -> None:
+        """Store figure payload for assertion helpers.
+
+        :param Any data: Figure trace payload.
+        :param Any layout: Figure layout payload.
+        :return None: Stores payload for later assertions.
+        """
         self.data = data
         self.layout = layout
 
-    def write_html(self, path: str, **kwargs) -> None:
-        """Write deterministic marker output and ignore optional kwargs."""
+    def write_html(self, path: str, **kwargs: Any) -> None:
+        """Write deterministic marker output and ignore optional kwargs.
+
+        :param str path: Output HTML path.
+        :param Any kwargs: Ignored Plotly write options.
+        :return None: Writes marker HTML output.
+        """
         del kwargs
         Path(path).write_text("<html>plotly</html>")
 
 
 def _canonicalize_graphml(path: Path) -> str:
-    """Return a deterministic textual representation for GraphML comparison."""
+    """Return a deterministic textual representation for GraphML comparison.
+
+    :param Path path: GraphML file path to normalize.
+    :return str: Canonicalized XML string for deterministic comparisons.
+    """
     document = ET.parse(path)
     root = document.getroot()
     namespace = "{http://graphml.graphdrawing.org/xmlns}"
 
     def _sorted_children(node: ET.Element) -> None:
+        """Recursively sort GraphML child elements for canonical comparison.
+
+        :param ET.Element node: XML element whose descendants are normalized.
+        :return None: Mutates element tree ordering in place.
+        """
         for child in node:
             _sorted_children(child)
 
@@ -181,7 +201,12 @@ def test_exporter_json_and_graphml_serialization(tmp_path: Path) -> None:
 def test_exporter_interactive_html_raises_without_pyvis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Interactive HTML export should error cleanly when pyvis is unavailable."""
+    """Interactive HTML export should error cleanly when pyvis is unavailable.
+
+    :param Path tmp_path: Temporary output directory fixture.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
+    :return None: Asserts missing dependency error handling.
+    """
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
@@ -195,14 +220,19 @@ def test_exporter_interactive_html_raises_without_pyvis(
 def test_exporter_interactive_html_with_fake_pyvis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Interactive HTML export should write output through a pyvis-compatible API."""
+    """Interactive HTML export should write output through a pyvis-compatible API.
+
+    :param Path tmp_path: Temporary output directory fixture.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
+    :return None: Asserts pyvis-compatible export behavior.
+    """
 
     class FakeNetwork:
         """Minimal pyvis Network stand-in."""
 
         instances = []
 
-        def __init__(self, **kwargs) -> None:
+        def __init__(self, **kwargs: Any) -> None:
             """Store creation kwargs for assertions.
 
             :param kwargs: Constructor arguments.
@@ -221,7 +251,7 @@ def test_exporter_interactive_html_with_fake_pyvis(
             """
             self.options = options
 
-        def add_node(self, node_id: str, **kwargs) -> None:
+        def add_node(self, node_id: str, **kwargs: Any) -> None:
             """Store node payload.
 
             :param str node_id: Node identifier.
@@ -229,7 +259,7 @@ def test_exporter_interactive_html_with_fake_pyvis(
             """
             self.nodes.append((node_id, kwargs))
 
-        def add_edge(self, source: str, target: str, **kwargs) -> None:
+        def add_edge(self, source: str, target: str, **kwargs: Any) -> None:
             """Store edge payload.
 
             :param str source: Source node.
@@ -303,7 +333,12 @@ def test_graphml_export_records_determinism_metadata(
 def test_exporter_plotly_raises_without_plotly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should error cleanly when plotly is unavailable."""
+    """Plotly export should error cleanly when plotly is unavailable.
+
+    :param Path tmp_path: Temporary output directory fixture.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
+    :return None: Asserts missing dependency error handling.
+    """
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
@@ -315,14 +350,19 @@ def test_exporter_plotly_raises_without_plotly(
 def test_exporter_plotly_with_fake_module(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should write output using a minimal graph_objects API."""
+    """Plotly export should write output using a minimal graph_objects API.
+
+    :param Path tmp_path: Temporary output directory fixture.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
+    :return None: Asserts minimal graph_objects compatibility.
+    """
 
     captured: dict[str, object] = {}
 
     class FakeFigure(_BaseFakeFigure):
         """Minimal plotly Figure stand-in."""
 
-        def __init__(self, data, layout) -> None:
+        def __init__(self, data: Any, layout: Any) -> None:
             """Store payload for assertions.
 
             :param data: Figure data traces.
@@ -348,16 +388,33 @@ def test_exporter_plotly_with_fake_module(
 def test_exporter_plotly_requires_div_id_support(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should fail fast when deterministic div_id is unsupported."""
+    """Plotly export should fail fast when deterministic div_id is unsupported.
+
+    :param Path tmp_path: Temporary output directory fixture.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
+    :return None: Asserts deterministic div_id capability enforcement.
+    """
 
     class FakeFigure:
         """Minimal plotly Figure stand-in that rejects ``div_id``."""
 
-        def __init__(self, data, layout) -> None:
+        def __init__(self, data: Any, layout: Any) -> None:
+            """Ignore constructor payload for this failure-path stub.
+
+            :param Any data: Unused figure data payload.
+            :param Any layout: Unused layout payload.
+            :return None: Discards constructor input.
+            """
             del data
             del layout
 
-        def write_html(self, path: str, **kwargs) -> None:
+        def write_html(self, path: str, **kwargs: Any) -> None:
+            """Raise when deterministic div id is passed.
+
+            :param str path: Unused output path.
+            :param Any kwargs: Plotly write options.
+            :return None: Raises ``TypeError`` for unsupported ``div_id``.
+            """
             del path
             if "div_id" in kwargs:
                 raise TypeError("div_id unsupported")
@@ -376,14 +433,24 @@ def test_exporter_plotly_requires_div_id_support(
 def test_exporter_plotly_uses_deterministic_div_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly HTML export should provide a stable div id when supported."""
+    """Plotly HTML export should provide a stable div id when supported.
+
+    :param Path tmp_path: Temporary output directory fixture.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
+    :return None: Asserts deterministic div_id propagation.
+    """
     captured: dict[str, object] = {}
 
     class FakeFigure(_BaseFakeFigure):
         """Minimal plotly Figure stand-in."""
 
-        def write_html(self, path: str, **kwargs) -> None:
-            """Capture div_id kwargs and write marker output."""
+        def write_html(self, path: str, **kwargs: Any) -> None:
+            """Capture div_id kwargs and write marker output.
+
+            :param str path: Output HTML path.
+            :param Any kwargs: Plotly write options.
+            :return None: Writes marker HTML output and stores kwargs.
+            """
             captured["kwargs"] = kwargs
             Path(path).write_text("<html>plotly</html>")
 
@@ -405,11 +472,21 @@ def test_exporter_plotly_uses_deterministic_div_id(
 def test_exporter_plotly_with_missing_year_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should avoid None in marker colors when year data is missing."""
+    """Plotly export should avoid None in marker colors when year data is missing.
+
+    :param Path tmp_path: Temporary output directory fixture.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
+    :return None: Asserts missing-year marker normalization and fixed bounds.
+    """
 
     captured: dict[str, object] = {}
 
-    def fake_scatter(**kwargs) -> dict:
+    def fake_scatter(**kwargs: Any) -> dict[str, object]:
+        """Capture marker configuration from fake Plotly scatter traces.
+
+        :param Any kwargs: Scatter keyword arguments.
+        :return dict[str, object]: Serialized scatter payload.
+        """
         if kwargs.get("mode") == "markers+text":
             marker = dict(kwargs["marker"])
             marker["color"] = list(marker["color"])
@@ -535,14 +612,24 @@ def test_exporter_json_and_graphml_ordering_is_stable(tmp_path: Path) -> None:
 def test_exporter_plotly_edge_order_is_stable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly edge trace ordering should follow canonicalized edge order."""
+    """Plotly edge trace ordering should follow canonicalized edge order.
+
+    :param Path tmp_path: Temporary output directory fixture.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
+    :return None: Asserts stable edge coordinate sequencing.
+    """
     captured: dict[str, object] = {}
 
     class FakeFigure(_BaseFakeFigure):
         """Minimal plotly Figure stand-in."""
 
-        def __init__(self, data, layout) -> None:
-            """Store payload for assertions."""
+        def __init__(self, data: Any, layout: Any) -> None:
+            """Store payload for assertions.
+
+            :param Any data: Figure trace payload.
+            :param Any layout: Figure layout payload.
+            :return None: Stores payload for later assertions.
+            """
             super().__init__(data, layout)
             captured["data"] = data
 

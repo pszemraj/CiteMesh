@@ -39,7 +39,10 @@ GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
 
 
 def _graphml_determinism_policy() -> str:
-    """Return determinism policy name for active NetworkX writer runtime."""
+    """Return determinism policy name for active NetworkX writer runtime.
+
+    :return str: Determinism policy identifier for current NetworkX version.
+    """
     major_minor = tuple(int(part) for part in re.findall(r"\d+", nx.__version__)[:2])
     if len(major_minor) < 2:
         return GRAPHML_DETERMINISM_POLICY_BEST_EFFORT
@@ -51,7 +54,11 @@ def _graphml_determinism_policy() -> str:
 
 
 def _ordered_attrs(attrs: Dict[str, object]) -> Dict[str, object]:
-    """Return a copy of mapping with deterministic key ordering."""
+    """Return a copy of mapping with deterministic key ordering.
+
+    :param Dict[str, object] attrs: Source attribute mapping.
+    :return Dict[str, object]: Copy with key order normalized by key string.
+    """
     return {key: attrs[key] for key in sorted(attrs, key=str)}
 
 
