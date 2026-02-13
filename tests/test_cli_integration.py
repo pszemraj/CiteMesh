@@ -6,6 +6,7 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import networkx as nx
 import pytest
@@ -129,11 +130,42 @@ class TestCLIExecution:
             assert output.exists(), "Output PNG file not created"
             assert output.stat().st_size > 1000, "Output file suspiciously small"
 
-    @pytest.mark.slow
-    def test_citation_no_references_faster(self) -> None:
-        """Test --no-references flag works and is faster."""
+    def test_citation_no_references_sets_builder_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLI should pass ``--no-references`` through to citation builder config."""
+        captured: dict[str, object] = {}
+
+        class _FakeCitationBuilder:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def build_graph(self, paper_id: str):
+                del paper_id
+                graph = nx.Graph()
+                graph.add_node(
+                    "seed",
+                    title="Seed",
+                    year=2020,
+                    authors=[],
+                    citation_count=0,
+                    is_seed=True,
+                )
+                return graph, "seed"
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                del kwargs
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "CitationGraphBuilder", _FakeCitationBuilder)
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "test_cli_no_refs.png"
+            output = Path(tmpdir) / "test_cli_no_refs.json"
             result = run_cli_command(
                 [
                     "build",
@@ -143,66 +175,100 @@ class TestCLIExecution:
                     "-p",
                     "5",
                     "--no-references",
-                    "--seed",
-                    "99",
+                    "--export",
+                    "json",
                     "-o",
                     str(output),
                 ],
             )
-        # May timeout due to S2 API rate limits, skip in that case
-        if result.returncode == 0:
-            assert "0 with reference lists" in result.stdout
+            assert result.returncode == 0, (
+                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+            )
+            assert output.exists()
 
-    @pytest.mark.slow
-    def test_embedding_strategy_runs(self) -> None:
-        """Test embedding strategy with tiny dataset."""
+        assert captured["fetch_references"] is False
+
+    def test_embedding_strategy_passes_top_k(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLI should pass ``--top-k`` to embedding builder."""
+        captured: dict[str, object] = {}
+
+        class _FakeEmbeddingBuilder:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def build_graph(self, paper_id: str):
+                del paper_id
+                graph = nx.Graph()
+                graph.add_node(
+                    "seed",
+                    title="Seed",
+                    year=2020,
+                    authors=[],
+                    citation_count=0,
+                    is_seed=True,
+                )
+                return graph, "seed"
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                del kwargs
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", _FakeEmbeddingBuilder)
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
         with tempfile.TemporaryDirectory() as tmpdir:
-            output = Path(tmpdir) / "test_cli_embedding.png"
+            output = Path(tmpdir) / "test_cli_embedding.json"
             result = run_cli_command(
                 [
                     "build",
                     "arxiv:1706.03762",
                     "--strategy",
                     "embedding",
-                    "-p",
-                    "5",
-                    "--dataset-split",
-                    "train[:100]",  # Tiny for speed
-                    "--seed",
-                    "42",
-                    "-m",
-                    "all-MiniLM-L6-v2",  # Fast model
+                    "--top-k",
+                    "1",
+                    "--export",
+                    "json",
                     "-o",
                     str(output),
                 ],
             )
-        # May fail due to S2 API rate limits, but should not crash
-        if result.returncode == 0:
-            assert "Computing corpus embeddings" in result.stdout
-        else:
-            # Acceptable failures: S2 rate limit, paper not in tiny corpus
-            assert "429" in result.stdout or "not found" in result.stderr.lower()
+            assert result.returncode == 0, (
+                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+            )
+            assert output.exists()
+
+        assert captured["top_k"] == 1
 
 
 class TestCLIErrorHandling:
     """Test error handling and exit codes."""
 
-    @pytest.mark.slow
-    def test_invalid_paper_id_fails_cleanly(self) -> None:
-        """Test invalid paper ID returns non-zero exit code with clean error."""
+    def test_invalid_paper_id_fails_cleanly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Invalid build errors should produce clean non-zero exits without traceback spam."""
+        monkeypatch.setattr(
+            cli_module,
+            "build_citation_graph",
+            MagicMock(side_effect=ValueError("Seed paper not found")),
+        )
+
         result = run_cli_command(
             [
                 "build",
                 "this-is-not-a-real-paper-id-12345",
                 "--strategy",
                 "citation",
-                "-p",
-                "5",
             ],
         )
         assert result.returncode != 0, "Should fail with non-zero exit code"
         assert "not found" in result.stderr.lower()
-        # Should NOT have traceback spam (caught bug: verbose tracebacks)
         assert "Traceback" not in result.stderr
 
     def test_missing_required_argument_fails(self) -> None:
@@ -251,43 +317,78 @@ class TestCLIDefaults:
 
 
 class TestCLIReproducibility:
-    """Test seed functionality for reproducible builds."""
+    """Test seed functionality for reproducible layout wiring."""
 
-    @pytest.mark.slow
-    def test_seed_produces_deterministic_output(self) -> None:
-        """Test same seed produces consistent results (node/edge counts)."""
-        args = [
-            "citemesh",
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "citation",
-            "-p",
-            "5",
-            "-c",
-            "3",
-            "-r",
-            "3",
-            "--seed",
-            "42",
-        ]
+    def test_seed_is_threaded_to_shared_layout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Build path should compute one seeded layout and share it with exporters."""
+        graph = nx.Graph()
+        graph.add_node(
+            "seed",
+            title="Seed",
+            year=2020,
+            authors=[],
+            citation_count=0,
+            is_seed=True,
+        )
 
-        result1 = run_cli_command(args)
-        result2 = run_cli_command(args)
+        shared_layout = {"seed": (0.0, 0.0)}
+        captured: dict[str, object] = {}
 
-        if result1.returncode == 0 and result2.returncode == 0:
-            # Extract node/edge counts from output
-            import re
+        monkeypatch.setattr(
+            cli_module,
+            "build_recommendation_graph",
+            lambda args: (graph, "seed"),
+        )
 
-            nodes1 = re.search(r"Nodes: (\d+)", result1.stdout)
-            edges1 = re.search(r"Edges: (\d+)", result1.stdout)
-            nodes2 = re.search(r"Nodes: (\d+)", result2.stdout)
-            edges2 = re.search(r"Edges: (\d+)", result2.stdout)
+        def _fake_compute_layout(graph_arg, iterations, layout_seed):
+            del graph_arg
+            del iterations
+            captured["layout_seed"] = layout_seed
+            return shared_layout
 
-            if all([nodes1, edges1, nodes2, edges2]):
-                assert nodes1.group(1) == nodes2.group(1), (
-                    "Node count not deterministic"
-                )
-                assert edges1.group(1) == edges2.group(1), (
-                    "Edge count not deterministic"
-                )
+        monkeypatch.setattr(
+            cli_module,
+            "compute_layout",
+            _fake_compute_layout,
+        )
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                captured["exporter_layout"] = kwargs["layout"]
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
+        def _fake_visualize(*args, **kwargs) -> None:
+            captured["visualize_layout"] = kwargs.get("layout")
+
+        monkeypatch.setattr(cli_module, "visualize_graph", _fake_visualize)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "seeded.png"
+            result = run_cli_command(
+                [
+                    "build",
+                    "arxiv:1706.03762",
+                    "--strategy",
+                    "recommendation",
+                    "--seed",
+                    "123",
+                    "--export",
+                    "png",
+                    "-o",
+                    str(output),
+                ],
+            )
+
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        assert captured["layout_seed"] == 123
+        assert captured["exporter_layout"] is shared_layout
+        assert captured["visualize_layout"] is shared_layout

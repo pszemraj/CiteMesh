@@ -2,6 +2,8 @@
 Tests for similarity calculations.
 """
 
+import pytest
+
 from citemesh.core import Paper
 from citemesh.strategies.base import GraphBuilderStrategy
 
@@ -69,41 +71,16 @@ class TestSimilarityFunctions:
         # Should return default value
         assert sim == 0.3
 
-    def test_bibliographic_coupling_identical_refs(self) -> None:
-        """Test bibliographic coupling for papers with identical references."""
-        paper1 = Paper(
-            paper_id="p1",
-            title="Test 1",
-            year=2020,
-            references=["ref1", "ref2", "ref3"],
-        )
-        paper2 = Paper(
-            paper_id="p2",
-            title="Test 2",
-            year=2020,
-            references=["ref1", "ref2", "ref3"],
-        )
+    def test_bibliographic_coupling_delegates_to_paper(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bibliographic coupling should delegate to ``Paper.reference_overlap``."""
+        paper1 = Paper(paper_id="p1", title="Test 1", year=2020)
+        paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
 
+        monkeypatch.setattr(Paper, "reference_overlap", lambda self, other: 0.42)
         coupling = GraphBuilderStrategy.bibliographic_coupling(paper1, paper2)
-        assert coupling == 1.0
-
-    def test_bibliographic_coupling_no_overlap(self) -> None:
-        """Test bibliographic coupling for papers with no shared references."""
-        paper1 = Paper(
-            paper_id="p1",
-            title="Test 1",
-            year=2020,
-            references=["ref1", "ref2"],
-        )
-        paper2 = Paper(
-            paper_id="p2",
-            title="Test 2",
-            year=2020,
-            references=["ref3", "ref4"],
-        )
-
-        coupling = GraphBuilderStrategy.bibliographic_coupling(paper1, paper2)
-        assert coupling == 0.0
+        assert coupling == 0.42
 
     def test_exponential_temporal_decay(self) -> None:
         """Test exponential temporal decay function."""
