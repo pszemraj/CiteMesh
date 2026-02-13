@@ -65,6 +65,7 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 - `--dataset-split`: HuggingFace split (`train`, `train[:5%]`, etc.)
 - `--corpus-size`: maximum number of papers to load from dataset
 - `--top-k`, `-k`: strict per-node edge cap applied during embedding graph pruning
+- `--truncate-dim`: optional embedding output dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards (disabled by default)
   
   _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts, defaults to `256d` Matryoshka embeddings (available: `768/512/256/128`), and logs the selected dimension at model load. It also prefers `bfloat16` model loading with CUDA autocast; if BF16 is unavailable, it falls back to float32.

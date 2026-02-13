@@ -192,7 +192,7 @@ class TestCLIExecution:
     def test_embedding_strategy_passes_top_k(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """CLI should pass ``--top-k`` to embedding builder."""
+        """CLI should pass embedding-specific knobs through to embedding builder."""
         captured: dict[str, object] = {}
 
         class _FakeEmbeddingBuilder:
@@ -233,6 +233,8 @@ class TestCLIExecution:
                     "embedding",
                     "--top-k",
                     "1",
+                    "--truncate-dim",
+                    "128",
                     "--export",
                     "json",
                     "-o",
@@ -245,6 +247,7 @@ class TestCLIExecution:
             assert output.exists()
 
         assert captured["top_k"] == 1
+        assert captured["truncate_dim"] == 128
 
     def test_search_command_prints_results_to_stdout(
         self, monkeypatch: pytest.MonkeyPatch

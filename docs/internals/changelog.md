@@ -37,6 +37,7 @@ For current operational behavior, use the canonical guides:
 
 - `--export all` simplifies multi-format workflows; individual options remain for targeted runs.
 - Strategy-specific flags (e.g., `--max-semantic`, `--dataset-split`) surface directly in `citemesh build --help`.
+- Embedding strategy now exposes `--truncate-dim` to override model-profile default embedding dimensions.
 - Tests verify CLI ergonomics (help text, invalid args) and run end-to-end builds with ephemeral outputs.
 - Package layout uses canonical modules (`core/`, `data/`, `services/`, `visualization/`); pre-release legacy import shims were removed.
 - Paper ID normalization now accepts arXiv/DOI URLs directly (for example `https://arxiv.org/abs/...`) and converts them to canonical IDs before API calls.

@@ -169,6 +169,7 @@ def build_embedding_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
         model_name=args.model,
         dataset_split=args.dataset_split,
         corpus_size=args.corpus_size,
+        truncate_dim=args.truncate_dim,
         top_k=args.top_k,
         random_seed=args.seed,
         use_streaming=args.streaming,
@@ -365,6 +366,16 @@ Examples:
         type=int,
         default=2,
         help="Top-k neighbors per node (default: 2)",
+    )
+
+    embedding_group.add_argument(
+        "--truncate-dim",
+        type=int,
+        default=None,
+        help=(
+            "Optional embedding output dimension truncation "
+            "(for EmbeddingGemma: 768, 512, 256, 128; default uses profile recommendation)"
+        ),
     )
 
     embedding_group.add_argument(
