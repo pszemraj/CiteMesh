@@ -307,6 +307,11 @@ Examples:
         default=None,
         help="Random seed for reproducibility (default: deterministic built-in seed)",
     )
+    build_parser.add_argument(
+        "--include-timestamp",
+        action="store_true",
+        help="Include generation timestamp in output metadata annotations",
+    )
 
     # Citation strategy arguments
     citation_group = build_parser.add_argument_group("citation strategy options")
@@ -464,11 +469,12 @@ Examples:
                 "paper_id": canonicalize_paper_id_for_metadata(args.paper_id),
                 "seed_id": seed_id,
                 "strategy": args.strategy,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
                 "nodes": graph.number_of_nodes(),
                 "edges": graph.number_of_edges(),
                 "theme": args.theme,
             }
+            if args.include_timestamp:
+                metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             layout_required = any(fmt in output_paths for fmt in ("png", "plotly"))
             shared_layout = (
                 compute_layout(

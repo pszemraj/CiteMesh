@@ -267,7 +267,7 @@ def compute_layout(
 
     # Add small deterministic perturbations for visual separation
     rng = np.random.default_rng(0 if layout_seed is None else layout_seed)
-    for node in pos:
+    for node in sorted(pos, key=str):
         pos[node] += rng.normal(0, VIZ_CONFIG.perturbation_std, 2)
 
     return pos

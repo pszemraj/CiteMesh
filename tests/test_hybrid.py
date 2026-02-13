@@ -2,6 +2,8 @@
 
 from types import MethodType
 
+import networkx as nx
+
 from citemesh.core import HYBRID_CONFIG, Paper
 from citemesh.strategies.hybrid import HybridGraphBuilder
 
@@ -49,3 +51,29 @@ def test_hybrid_pruning_enforces_node_degree_cap(monkeypatch) -> None:
     assert graph.number_of_nodes() == 4
     assert all(degree <= 1 for _, degree in graph.degree())
     assert graph.number_of_edges() == 2
+
+
+def test_hybrid_pruning_breaks_equal_weight_ties_deterministically(
+    monkeypatch,
+) -> None:
+    """Equal-weight hybrid pruning should use deterministic endpoint ordering."""
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=0)
+
+    graph = nx.Graph()
+    graph.add_node("seed", is_seed=True)
+    graph.add_node("a", is_seed=False)
+    graph.add_node("b", is_seed=False)
+    graph.add_node("c", is_seed=False)
+    graph.add_edge("seed", "b", weight=1.0)
+    graph.add_edge("a", "c", weight=1.0)
+    graph.add_edge("seed", "a", weight=1.0)
+    graph.add_edge("a", "b", weight=1.0)
+
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid.GraphBuilderStrategy.build_graph",
+        lambda self, seed_id, **kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 1)
+
+    out_graph, _ = builder.build_graph("seed")
+    assert set(out_graph.edges()) == {("a", "b")}

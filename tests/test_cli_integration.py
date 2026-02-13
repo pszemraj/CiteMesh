@@ -732,3 +732,114 @@ class TestCLIReproducibility:
             f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
         assert captured["exporter_layout"] is None
+
+    def test_metadata_omits_timestamp_by_default(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLI metadata should be deterministic by default (no timestamp key)."""
+        graph = nx.Graph()
+        graph.add_node(
+            "seed",
+            title="Seed",
+            year=2020,
+            authors=[],
+            citation_count=0,
+            is_seed=True,
+        )
+
+        captured: dict[str, object] = {}
+
+        monkeypatch.setattr(
+            cli_module,
+            "build_recommendation_graph",
+            lambda args: (graph, "seed"),
+        )
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                captured["metadata"] = kwargs["metadata"]
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "graph.json"
+            result = run_cli_command(
+                [
+                    "build",
+                    "arxiv:1706.03762",
+                    "--strategy",
+                    "recommendation",
+                    "--export",
+                    "json",
+                    "-o",
+                    str(output),
+                ],
+            )
+            assert output.exists()
+
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        metadata = captured["metadata"]
+        assert isinstance(metadata, dict)
+        assert "timestamp" not in metadata
+
+    def test_metadata_includes_timestamp_when_requested(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLI should include timestamp only when ``--include-timestamp`` is set."""
+        graph = nx.Graph()
+        graph.add_node(
+            "seed",
+            title="Seed",
+            year=2020,
+            authors=[],
+            citation_count=0,
+            is_seed=True,
+        )
+
+        captured: dict[str, object] = {}
+
+        monkeypatch.setattr(
+            cli_module,
+            "build_recommendation_graph",
+            lambda args: (graph, "seed"),
+        )
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                captured["metadata"] = kwargs["metadata"]
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "graph.json"
+            result = run_cli_command(
+                [
+                    "build",
+                    "arxiv:1706.03762",
+                    "--strategy",
+                    "recommendation",
+                    "--include-timestamp",
+                    "--export",
+                    "json",
+                    "-o",
+                    str(output),
+                ],
+            )
+            assert output.exists()
+
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        metadata = captured["metadata"]
+        assert isinstance(metadata, dict)
+        assert "timestamp" in metadata

@@ -960,8 +960,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         edge_counts = {node: 0 for node in graph.nodes()}
         sorted_edges = sorted(
             graph.edges(data=True),
-            key=lambda item: item[2].get("weight", 0.0),
-            reverse=True,
+            key=lambda item: (
+                -float(item[2].get("weight", 0.0)),
+                min(str(item[0]), str(item[1])),
+                max(str(item[0]), str(item[1])),
+            ),
         )
 
         for u, v, data in sorted_edges:

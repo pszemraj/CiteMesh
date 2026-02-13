@@ -52,12 +52,13 @@ class GraphExporter:
 
     def to_json(self, path: Path) -> None:
         """Export full graph with metadata as JSON."""
+        sorted_nodes = self._sorted_nodes()
+        sorted_edges = self._sorted_edges()
         data = {
             "metadata": self.metadata,
             "seed_id": self.seed_id,
             "nodes": [
-                self._serialize_node(node, attrs)
-                for node, attrs in self.graph.nodes(data=True)
+                self._serialize_node(node, attrs) for node, attrs in sorted_nodes
             ],
             "edges": [
                 {
@@ -65,7 +66,7 @@ class GraphExporter:
                     "target": v,
                     "weight": float(data.get("weight", 0.0)),
                 }
-                for u, v, data in self.graph.edges(data=True)
+                for u, v, data in sorted_edges
             ],
         }
         Path(path).write_text(json.dumps(data, indent=2))
@@ -73,8 +74,10 @@ class GraphExporter:
     def to_graphml(self, path: Path) -> None:
         """Export to GraphML for external tools such as Gephi or Cytoscape."""
         export_graph = nx.Graph()
+        sorted_nodes = self._sorted_nodes()
+        sorted_edges = self._sorted_edges()
 
-        for node, attrs in self.graph.nodes(data=True):
+        for node, attrs in sorted_nodes:
             cleaned = self._serialize_node(node, attrs)
             cleaned["year"] = self._coerce_year(cleaned.get("year"))
             if isinstance(cleaned.get("authors"), list):
@@ -84,7 +87,7 @@ class GraphExporter:
             cleaned["is_seed"] = int(bool(cleaned.get("is_seed")))
             export_graph.add_node(node, **cleaned)
 
-        for u, v, data in self.graph.edges(data=True):
+        for u, v, data in sorted_edges:
             export_graph.add_edge(
                 u,
                 v,
@@ -288,6 +291,24 @@ class GraphExporter:
 
     # ------------------------------------------------------------------
     # Internal helpers
+
+    def _sorted_nodes(self) -> list[tuple[str, Dict]]:
+        """Return nodes sorted by ID for deterministic serialization."""
+        return sorted(
+            self.graph.nodes(data=True),
+            key=lambda item: str(item[0]),
+        )
+
+    def _sorted_edges(self) -> list[tuple[str, str, Dict]]:
+        """Return undirected edges with canonical endpoints in stable order."""
+        canonicalized = []
+        for u, v, attrs in self.graph.edges(data=True):
+            left, right = (u, v) if str(u) <= str(v) else (v, u)
+            canonicalized.append((left, right, attrs))
+        return sorted(
+            canonicalized,
+            key=lambda item: (str(item[0]), str(item[1])),
+        )
 
     def _get_layout(self) -> Dict[str, Iterable[float]]:
         """Compute or reuse cached graph layout.

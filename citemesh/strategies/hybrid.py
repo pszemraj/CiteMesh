@@ -219,8 +219,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         # Sort edges by weight descending so strongest connections are kept
         sorted_edges = sorted(
             graph.edges(data=True),
-            key=lambda item: item[2].get("weight", 0.0),
-            reverse=True,
+            key=lambda item: (
+                -float(item[2].get("weight", 0.0)),
+                min(str(item[0]), str(item[1])),
+                max(str(item[0]), str(item[1])),
+            ),
         )
 
         edges_to_remove = []

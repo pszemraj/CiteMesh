@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import types
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import networkx as nx
@@ -327,3 +328,38 @@ def test_exporter_graphml_with_missing_year(tmp_path: Path) -> None:
 
     graphml = nx.read_graphml(graphml_path)
     assert str(graphml.nodes["missing-year"]["year"]) == "0"
+
+
+def test_exporter_json_and_graphml_ordering_is_stable(tmp_path: Path) -> None:
+    """Serialization should sort nodes/edges regardless of insertion order."""
+    graph = nx.Graph()
+    graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
+    graph.add_node("seed", title="Seed Paper", year=2020, authors=[], is_seed=True)
+    graph.add_node("a", title="Node A", year=2021, authors=[], citation_count=0)
+    graph.add_edge("z", "a", weight=0.5)
+    graph.add_edge("seed", "z", weight=0.7)
+
+    exporter = GraphExporter(graph, "seed")
+    json_path = tmp_path / "ordered.json"
+    graphml_path = tmp_path / "ordered.graphml"
+    exporter.to_json(json_path)
+    exporter.to_graphml(graphml_path)
+
+    payload = json.loads(json_path.read_text())
+    assert [node["id"] for node in payload["nodes"]] == ["a", "seed", "z"]
+    assert payload["edges"] == [
+        {"source": "a", "target": "z", "weight": pytest.approx(0.5)},
+        {"source": "seed", "target": "z", "weight": pytest.approx(0.7)},
+    ]
+
+    graphml_xml = ET.fromstring(graphml_path.read_text())
+    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
+    graph_element = graphml_xml.find("g:graph", ns)
+    assert graph_element is not None
+    node_ids = [node.attrib["id"] for node in graph_element.findall("g:node", ns)]
+    edge_pairs = [
+        (edge.attrib["source"], edge.attrib["target"])
+        for edge in graph_element.findall("g:edge", ns)
+    ]
+    assert node_ids == ["a", "seed", "z"]
+    assert edge_pairs == [("a", "z"), ("seed", "z")]
