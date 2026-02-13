@@ -397,40 +397,63 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         from datasets import load_dataset
 
-        dataset = load_dataset(
-            "CShorten/ML-ArXiv-Papers", split=self.dataset_split, streaming=True
-        )
+        dataset_names = [
+            "CShorten/ML-ArXiv-Papers",
+            "gfissore/arxiv-abstracts-2021",
+        ]
+        last_exception: Optional[Exception] = None
 
-        progress_total = self.corpus_size if self.corpus_size else None
-        with tqdm(
-            total=progress_total,
-            desc="Streaming CShorten/ML-ArXiv-Papers",
-            unit="papers",
-            dynamic_ncols=True,
-            disable=not progress_enabled,
-        ) as progress:
-            batch: List[Dict] = []
-            for idx, raw_record in enumerate(dataset):
-                if self.corpus_size and idx >= self.corpus_size:
-                    break
+        for dataset_name in dataset_names:
+            try:
+                dataset = load_dataset(
+                    dataset_name, split=self.dataset_split, streaming=True
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not stream dataset %s: %s. Trying fallback.",
+                    dataset_name,
+                    exc,
+                )
+                last_exception = exc
+                continue
 
-                metadata = self._extract_paper_metadata(raw_record, idx)
-                batch.append(metadata)
-                progress.update(1)
+            progress_total = self.corpus_size if self.corpus_size else None
+            with tqdm(
+                total=progress_total,
+                desc=f"Streaming {dataset_name}",
+                unit="papers",
+                dynamic_ncols=True,
+                disable=not progress_enabled,
+            ) as progress:
+                batch: List[Dict] = []
+                for idx, raw_record in enumerate(dataset):
+                    if self.corpus_size and idx >= self.corpus_size:
+                        break
 
-                if len(batch) >= STREAMING_BATCH_SIZE:
+                    metadata = self._extract_paper_metadata(raw_record, idx)
+                    batch.append(metadata)
+                    progress.update(1)
+
+                    if len(batch) >= STREAMING_BATCH_SIZE:
+                        self._process_stream_batch(
+                            batch, seed_embedding, heap, max_candidates
+                        )
+                        batch = []
+
+                if batch:
                     self._process_stream_batch(
                         batch, seed_embedding, heap, max_candidates
                     )
-                    batch = []
 
-            if batch:
-                self._process_stream_batch(batch, seed_embedding, heap, max_candidates)
+                if progress_total is None:
+                    progress.set_postfix_str(f"processed {progress.n}")
 
-            if progress_total is None:
-                progress.set_postfix_str(f"processed {progress.n}")
+            if heap:
+                break
 
         if not heap:
+            if last_exception:
+                raise last_exception
             return []
 
         top_candidates = sorted(heap, key=lambda item: item[0], reverse=True)
