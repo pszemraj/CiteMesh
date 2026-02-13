@@ -89,4 +89,10 @@ pip install -e .[dev]
 pytest
 ```
 
+Run slow integration smoke tests explicitly when needed:
+
+```bash
+pytest -m slow
+```
+
 MIT License - see [LICENSE](LICENSE).
