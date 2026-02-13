@@ -66,11 +66,3 @@ class AbstractSimilarityIndex:
             return 0.0
 
         return float((self._matrix[idx_a] @ self._matrix[idx_b].T).toarray()[0, 0])
-
-    @property
-    def is_ready(self) -> bool:
-        """Whether the index has enough papers to compute similarities.
-
-        :return bool: ``True`` when a fitted matrix exists.
-        """
-        return self._matrix is not None
