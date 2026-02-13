@@ -7,12 +7,10 @@ name = "citemesh"
 dynamic = ["version"]
 description = "Intuitive citation graph visualization with multiple similarity strategies"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Peter Szemraj", email = "peterszemeraj+dev@gmail.com" }]
-maintainers = [
-    { name = "Peter Szemraj", email = "peterszemeraj+dev@gmail.com" },
-]
+authors = [{ name = "Peter Szemraj", email = "peterszemraj+dev@gmail.com" }]
+maintainers = [{ name = "Peter Szemraj", email = "peterszemraj+dev@gmail.com" }]
 keywords = [
     "citation-analysis",
     "graph-visualization",
@@ -25,10 +23,10 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Information Analysis",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 
 dependencies = [
