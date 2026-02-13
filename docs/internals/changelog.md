@@ -55,8 +55,6 @@ Treat this page as historical context, not the normative behavior spec.
 - Default auto-generated outputs are grouped under per-paper folders with stable seed suffixes (`out/<safe-seed-title>-<seed-hash8>/`) to reduce collisions.
 - Interactive exporters (`pyvis`, `plotly`) moved to optional `.[viz]` dependencies.
 
-For exact current flag semantics and defaults, see the canonical [CLI Usage](../guides/cli.md) guide.
-
 ## Maintenance Consolidation
 
 - Removed dead configuration and helper surface that was no longer referenced (unused config fields/methods and stale similarity helper property).

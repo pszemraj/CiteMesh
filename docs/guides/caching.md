@@ -22,7 +22,7 @@ export CITEMESH_CACHE_DIR=/path/to/custom/cache
 citemesh cache root
 ├── embeddings/
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, hashes, dims, row_idx)
-│   └── embeddings_<model-hash>.h5 # HDF5 matrix dataset: embeddings[row_idx] -> vector
+│   ├── embeddings_<model-hash>.h5 # HDF5 matrix dataset: embeddings[row_idx] -> vector
 │   └── cache_<model-hash>.lock    # Inter-process file lock for cache mutation
 ├── joblib/
 │   └── ...                        # Normalized corpus payloads cached via joblib

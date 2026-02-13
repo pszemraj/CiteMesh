@@ -18,13 +18,6 @@ Use this index to navigate docs by topic and keep behavior definitions centraliz
 | Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |
 | Historical changes and release notes | [Internals: Changelog](internals/changelog.md) |
 
-## Quick Navigation
-
-- [CLI Usage](guides/cli.md) - canonical command-line behavior.
-- [Caching & Data](guides/caching.md) - canonical cache/storage behavior.
-- [Architecture](internals/architecture.md) - system structure and extension points.
-- [Changelog & Key Improvements](internals/changelog.md) - historical updates and future opportunities.
-
 ## Scope Notes
 
 Configuration is handled via CLI flags and environment variables.

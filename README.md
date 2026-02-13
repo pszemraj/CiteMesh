@@ -59,11 +59,14 @@ For complete CLI behavior (identifier normalization, defaults, strategy-specific
 - Persistent user-level caching for embeddings and corpora; re-runs are fast.
 - Typed models and strategy abstraction make extensions straightforward.
 
-## Canonical References
+## Documentation
+
+Use [docs/README.md](docs/README.md) as the documentation index and source-of-truth map.
 
 - CLI behavior (identifiers, flags, output naming, export behavior): [docs/guides/cli.md](docs/guides/cli.md)
-- Cache and storage behavior: [docs/guides/caching.md](docs/guides/caching.md)
-- Architecture and extension points: [docs/internals/architecture.md](docs/internals/architecture.md)
+- Cache/storage behavior and invalidation: [docs/guides/caching.md](docs/guides/caching.md)
+- Component boundaries and extension points: [docs/internals/architecture.md](docs/internals/architecture.md)
+- Historical context: [docs/internals/changelog.md](docs/internals/changelog.md)
 
 ## API Key
 
@@ -75,10 +78,6 @@ export S2_API_KEY="your-semantic-scholar-key"
 
 For API-related CLI behavior (retries, limits, identifier normalization), see:
 [docs/guides/cli.md](docs/guides/cli.md).
-
-## Documentation
-
-Use [docs/README.md](docs/README.md) as the documentation index and source-of-truth map.
 
 ## Development
 
@@ -94,9 +93,5 @@ Run slow integration smoke tests explicitly when needed:
 ```bash
 pytest -m slow
 ```
-
-CLI and cache behavior definitions are canonical in:
-[docs/guides/cli.md](docs/guides/cli.md) and
-[docs/guides/caching.md](docs/guides/caching.md).
 
 MIT License - see [LICENSE](LICENSE).
