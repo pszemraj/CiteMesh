@@ -35,9 +35,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_papers: int = 40,
         max_citations: int = 15,
         max_references: int = 15,
+        fetch_references: bool = True,
         max_semantic: int = 10,
         model_name: str = "google/embeddinggemma-300m",
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
+        corpus_size: Optional[int] = 50000,
+        truncate_dim: Optional[int] = None,
+        use_streaming: bool = False,
         random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
@@ -47,9 +51,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int max_papers: Maximum total papers
         :param int max_citations: Maximum citing papers from S2
         :param int max_references: Maximum referenced papers from S2
+        :param bool fetch_references: Whether citation branch fetches reference lists.
         :param int max_semantic: Maximum papers from semantic search
         :param str model_name: Embedding model name
         :param str dataset_split: ArXiv dataset split
+        :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
+        :param Optional[int] truncate_dim: Optional embedding dimension truncation.
+        :param bool use_streaming: Whether to stream the embedding corpus.
         :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
@@ -63,7 +71,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 max_papers=max_semantic,
                 model_name=model_name,
                 dataset_split=dataset_split,
+                corpus_size=corpus_size,
+                truncate_dim=truncate_dim,
                 random_seed=random_seed,
+                use_streaming=use_streaming,
                 client=self.client,
             )
         else:
@@ -75,7 +86,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             max_papers=citation_papers,
             max_citations=max_citations,
             max_references=max_references,
-            fetch_references=True,  # Enable real bibliographic coupling
+            fetch_references=fetch_references,
             random_seed=random_seed,
             client=self.client,
         )

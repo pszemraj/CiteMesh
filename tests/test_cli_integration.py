@@ -249,6 +249,239 @@ class TestCLIExecution:
         assert captured["top_k"] == 1
         assert captured["truncate_dim"] == 128
 
+    def test_hybrid_no_references_sets_builder_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """CLI should pass ``--no-references`` through to hybrid builder config."""
+        captured: dict[str, object] = {}
+
+        class _FakeHybridBuilder:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def build_graph(self, paper_id: str):
+                del paper_id
+                graph = nx.Graph()
+                graph.add_node(
+                    "seed",
+                    title="Seed",
+                    year=2020,
+                    authors=[],
+                    citation_count=0,
+                    is_seed=True,
+                )
+                return graph, "seed"
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                del kwargs
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "HybridGraphBuilder", _FakeHybridBuilder)
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "test_cli_hybrid_no_refs.json"
+            result = run_cli_command(
+                [
+                    "build",
+                    "arxiv:1810.04805",
+                    "--strategy",
+                    "hybrid",
+                    "-p",
+                    "5",
+                    "--no-references",
+                    "--export",
+                    "json",
+                    "-o",
+                    str(output),
+                ],
+            )
+            assert result.returncode == 0, (
+                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+            )
+            assert output.exists()
+
+        assert captured["fetch_references"] is False
+
+    def test_hybrid_strategy_passes_embedding_knobs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hybrid builder should receive embedding/runtime-related CLI settings."""
+        captured: dict[str, object] = {}
+
+        class _FakeHybridBuilder:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def build_graph(self, paper_id: str):
+                del paper_id
+                graph = nx.Graph()
+                graph.add_node(
+                    "seed",
+                    title="Seed",
+                    year=2020,
+                    authors=[],
+                    citation_count=0,
+                    is_seed=True,
+                )
+                return graph, "seed"
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                del kwargs
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "HybridGraphBuilder", _FakeHybridBuilder)
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "test_cli_hybrid_knobs.json"
+            result = run_cli_command(
+                [
+                    "build",
+                    "arxiv:1706.03762",
+                    "--strategy",
+                    "hybrid",
+                    "--max-semantic",
+                    "3",
+                    "--truncate-dim",
+                    "128",
+                    "--streaming",
+                    "--all-corpus",
+                    "--export",
+                    "json",
+                    "-o",
+                    str(output),
+                ],
+            )
+            assert result.returncode == 0, (
+                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+            )
+            assert output.exists()
+
+        assert captured["max_semantic"] == 3
+        assert captured["truncate_dim"] == 128
+        assert captured["use_streaming"] is True
+        assert captured["corpus_size"] is None
+
+    def test_embedding_strategy_defaults_to_bounded_corpus(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Embedding CLI defaults should pass a bounded corpus size."""
+        captured: dict[str, object] = {}
+
+        class _FakeEmbeddingBuilder:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def build_graph(self, paper_id: str):
+                del paper_id
+                graph = nx.Graph()
+                graph.add_node(
+                    "seed",
+                    title="Seed",
+                    year=2020,
+                    authors=[],
+                    citation_count=0,
+                    is_seed=True,
+                )
+                return graph, "seed"
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                del kwargs
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", _FakeEmbeddingBuilder)
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "test_cli_embedding_defaults.json"
+            result = run_cli_command(
+                [
+                    "build",
+                    "arxiv:1706.03762",
+                    "--strategy",
+                    "embedding",
+                    "--export",
+                    "json",
+                    "-o",
+                    str(output),
+                ],
+            )
+            assert result.returncode == 0, (
+                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+            )
+            assert output.exists()
+
+        assert captured["corpus_size"] == 50000
+
+    def test_embedding_all_corpus_removes_default_cap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Embedding ``--all-corpus`` should pass an uncapped corpus size."""
+        captured: dict[str, object] = {}
+
+        class _FakeEmbeddingBuilder:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+            def build_graph(self, paper_id: str):
+                del paper_id
+                graph = nx.Graph()
+                graph.add_node(
+                    "seed",
+                    title="Seed",
+                    year=2020,
+                    authors=[],
+                    citation_count=0,
+                    is_seed=True,
+                )
+                return graph, "seed"
+
+        class _FakeExporter:
+            def __init__(self, *args, **kwargs):
+                del args
+                del kwargs
+
+            def to_json(self, path: Path) -> None:
+                path.write_text("{}")
+
+        monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", _FakeEmbeddingBuilder)
+        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "test_cli_embedding_all_corpus.json"
+            result = run_cli_command(
+                [
+                    "build",
+                    "arxiv:1706.03762",
+                    "--strategy",
+                    "embedding",
+                    "--all-corpus",
+                    "--export",
+                    "json",
+                    "-o",
+                    str(output),
+                ],
+            )
+            assert result.returncode == 0, (
+                f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+            )
+            assert output.exists()
+
+        assert captured["corpus_size"] is None
+
     def test_search_command_prints_results_to_stdout(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -345,8 +578,22 @@ class TestCLIDefaults:
         assert "dataset-split" in help_text
         # Should mention full corpus or ~117k papers
         assert "train" in help_text
+        assert "50000" in help_text
+        assert "--all-corpus" in help_text
         # Should NOT have the old buggy default
         assert "[:2%]" not in help_text
+
+    def test_seed_help_text_matches_deterministic_default(self) -> None:
+        """Seed help text should describe deterministic default behavior."""
+        result = run_cli_command(["build", "--help"])
+        assert result.returncode == 0
+        assert "deterministic built-in seed" in result.stdout
+
+    def test_threshold_help_text_mentions_scope(self) -> None:
+        """Threshold help should clarify strategy scope."""
+        result = run_cli_command(["build", "--help"])
+        assert result.returncode == 0
+        assert "citation/recommendation" in result.stdout
 
 
 class TestCLIReproducibility:

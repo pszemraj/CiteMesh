@@ -292,7 +292,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         max_papers: int = 40,
         model_name: str = "google/embeddinggemma-300m",
         dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
-        corpus_size: Optional[int] = None,
+        corpus_size: Optional[int] = 50000,
         truncate_dim: Optional[int] = None,
         top_k: int = 2,
         random_seed: Optional[int] = None,
@@ -305,7 +305,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int max_papers: Maximum papers in final graph
         :param str model_name: Sentence transformer model name
         :param str dataset_split: HuggingFace dataset split
-        :param Optional[int] corpus_size: Maximum papers to load from corpus (None = all in split)
+        :param Optional[int] corpus_size: Maximum papers to load from corpus (``None`` = all in split)
         :param Optional[int] truncate_dim: Optional embedding truncation dimension. If ``None``,
             uses profile defaults (e.g. EmbeddingGemma defaults to 256d MRL).
         :param int top_k: Number of most similar neighbors per node
@@ -626,11 +626,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.embeddings[seed_paper.paper_id] = seed_embedding
 
         # Decide whether to use streaming based on split and corpus_size
-        use_streaming = (
-            self.use_streaming
-            and ":" not in self.dataset_split
-            and self.corpus_size is None
-        )
+        use_streaming = self.use_streaming and ":" not in self.dataset_split
 
         if use_streaming:
             logger.info(

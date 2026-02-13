@@ -168,7 +168,7 @@ def build_embedding_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
         max_papers=args.max_papers,
         model_name=args.model,
         dataset_split=args.dataset_split,
-        corpus_size=args.corpus_size,
+        corpus_size=None if args.all_corpus else args.corpus_size,
         truncate_dim=args.truncate_dim,
         top_k=args.top_k,
         random_seed=args.seed,
@@ -190,9 +190,13 @@ def build_hybrid_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
         max_papers=args.max_papers,
         max_citations=args.max_citations,
         max_references=args.max_references,
+        fetch_references=not args.no_references,
         max_semantic=args.max_semantic,
         model_name=args.model,
         dataset_split=args.dataset_split,
+        corpus_size=None if args.all_corpus else args.corpus_size,
+        truncate_dim=args.truncate_dim,
+        use_streaming=args.streaming,
         random_seed=args.seed,
     )
 
@@ -301,7 +305,7 @@ Examples:
         "--seed",
         type=int,
         default=None,
-        help="Random seed for reproducibility (default: None = non-deterministic)",
+        help="Random seed for reproducibility (default: deterministic built-in seed)",
     )
 
     # Citation strategy arguments
@@ -327,7 +331,7 @@ Examples:
         "-t",
         type=float,
         default=0.2,
-        help="Minimum similarity for edges (default: 0.2)",
+        help="Minimum similarity for citation/recommendation edges (default: 0.2)",
     )
 
     citation_group.add_argument(
@@ -356,8 +360,17 @@ Examples:
     embedding_group.add_argument(
         "--corpus-size",
         type=int,
-        default=None,
-        help="Maximum papers to load from corpus (default: all in split)",
+        default=50000,
+        help=(
+            "Maximum papers to load from corpus "
+            "(default: 50000; use --all-corpus to remove cap)"
+        ),
+    )
+
+    embedding_group.add_argument(
+        "--all-corpus",
+        action="store_true",
+        help="Disable corpus cap and process the full selected split",
     )
 
     embedding_group.add_argument(
