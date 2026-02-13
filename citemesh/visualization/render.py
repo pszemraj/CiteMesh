@@ -7,6 +7,7 @@ visualization that all strategies can use, eliminating code duplication.
 
 import logging
 from datetime import datetime
+from hashlib import sha1
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,6 +34,11 @@ def _filename_safe(text: str, max_chars: int = MAX_TITLE_CHARS) -> str:
     normalized = "".join(c if c.isalnum() or c in " -" else "" for c in normalized)
     slug = "-".join(normalized.split())[:max_chars].strip("-")
     return slug or "graph"
+
+
+def _seed_suffix(seed_id: str, length: int = 8) -> str:
+    """Build a short, stable suffix from the seed identifier."""
+    return sha1(seed_id.encode("utf-8")).hexdigest()[:length]
 
 
 def _choose_metadata_anchor(
@@ -493,7 +499,7 @@ def generate_output_path(
     :return Path: Path object for output file
     """
     title = graph.nodes[seed_id].get("title", "graph")
-    paper_dir = output_dir / _filename_safe(title)
+    paper_dir = output_dir / f"{_filename_safe(title)}-{_seed_suffix(seed_id)}"
     paper_dir.mkdir(parents=True, exist_ok=True)
 
     basename = _filename_safe(strategy, max_chars=32) if strategy else "graph"

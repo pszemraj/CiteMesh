@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -29,6 +30,11 @@ RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
 )
 SEARCH_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+
+
+def _strip_arxiv_version(identifier: str) -> str:
+    """Strip trailing arXiv version suffixes (for example ``v5``)."""
+    return re.sub(r"v\d+$", "", identifier.strip(), flags=re.IGNORECASE)
 
 
 def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
@@ -55,6 +61,7 @@ def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
         candidate = candidate[:-4]
     candidate = candidate.strip()
 
+    candidate = _strip_arxiv_version(candidate)
     return candidate or None
 
 
@@ -74,6 +81,7 @@ def normalize_paper_id(paper_id: str) -> str:
 
     if lowered.startswith("arxiv:"):
         suffix = normalized.split(":", 1)[1].strip()
+        suffix = _strip_arxiv_version(suffix)
         if not suffix:
             raise ValueError(f"Invalid paper ID: {paper_id}")
         return f"arxiv:{suffix}"

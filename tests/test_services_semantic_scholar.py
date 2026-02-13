@@ -215,6 +215,9 @@ def test_retries_on_rate_limit_for_references() -> None:
         ("https://arxiv.org/abs/2508.14040", "arxiv:2508.14040"),
         ("https://arxiv.org/pdf/2508.14040.pdf", "arxiv:2508.14040"),
         ("arXiv:2508.14040", "arxiv:2508.14040"),
+        ("arXiv:1706.03762v5", "arxiv:1706.03762"),
+        ("https://arxiv.org/abs/1706.03762v5", "arxiv:1706.03762"),
+        ("https://arxiv.org/pdf/1706.03762v5.pdf", "arxiv:1706.03762"),
         ("https://doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
     ],
 )

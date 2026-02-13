@@ -551,7 +551,7 @@ def test_default_strategy_is_recommendation() -> None:
 
 
 def test_generated_output_path_uses_paper_directory_and_strategy_basename() -> None:
-    """Generated path should use per-paper directory and strategy basename."""
+    """Generated path should include stable seed suffix and strategy basename."""
     graph = nx.Graph()
     graph.add_node("seed", title="Attention Is All You Need")
 
@@ -562,7 +562,7 @@ def test_generated_output_path_uses_paper_directory_and_strategy_basename() -> N
             output_dir=Path(tmpdir),
             strategy="recommendation",
         )
-        assert path.parent.name == "attention-is-all-you-need"
+        assert path.parent.name.startswith("attention-is-all-you-need-")
         assert path.name == "recommendation.png"
 
 

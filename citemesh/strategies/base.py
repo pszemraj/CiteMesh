@@ -5,6 +5,7 @@ This module defines the interface that all graph building strategies must implem
 enabling the Strategy pattern for different similarity computation approaches.
 """
 
+import logging
 import math
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple
@@ -13,6 +14,8 @@ import networkx as nx
 import numpy as np
 
 from citemesh.core import TEMPORAL_CONFIG, Paper
+
+logger = logging.getLogger(__name__)
 
 
 class GraphBuilderStrategy(ABC):
@@ -96,7 +99,7 @@ class GraphBuilderStrategy(ABC):
         :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
         """
         # Step 1: Collect papers
-        print(f"Collecting papers using {self.__class__.__name__}...")
+        logger.info("Collecting papers using %s...", self.__class__.__name__)
         self.papers = self.collect_papers(seed_id, **kwargs)
 
         if not self.papers:
@@ -111,10 +114,10 @@ class GraphBuilderStrategy(ABC):
 
         summary = self.get_collection_summary()
         if summary:
-            print(summary)
+            logger.info(summary)
         else:
-            print(f"Collected {len(self.papers)} papers")
-        print(f"Seed paper: {seed_paper.title[:50]}...")
+            logger.info("Collected %s papers", len(self.papers))
+        logger.info("Seed paper: %s...", seed_paper.title[:50])
 
         # Step 2: Create graph with nodes
         graph = nx.Graph()
@@ -131,7 +134,7 @@ class GraphBuilderStrategy(ABC):
             )
 
         # Step 3: Compute similarities and create edges
-        print("Computing similarities and creating edges...")
+        logger.info("Computing similarities and creating edges...")
         paper_list = list(self.papers.values())
         edges_created = 0
 
@@ -147,7 +150,11 @@ class GraphBuilderStrategy(ABC):
                     graph.add_edge(p1.paper_id, p2.paper_id, weight=similarity)
                     edges_created += 1
 
-        print(f"Graph complete: {graph.number_of_nodes()} nodes, {edges_created} edges")
+        logger.info(
+            "Graph complete: %s nodes, %s edges",
+            graph.number_of_nodes(),
+            edges_created,
+        )
         return graph, actual_seed_id
 
     # Utility methods for common similarity computations
