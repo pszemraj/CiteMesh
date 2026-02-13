@@ -32,7 +32,7 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 - Parses and validates all CLI arguments.
 - Resolves output filenames for requested export formats.
 - Computes one shared layout per build run (optionally seeded via `--seed`) when layout-consuming exports are requested, then reuses it across PNG/Plotly outputs.
-- Builds a metadata dictionary (paper id, strategy, node/edge counts, timestamp) passed to Matplotlib and structured exports.
+- Builds a metadata dictionary (paper id, strategy, node/edge counts, optional timestamp) passed to Matplotlib and structured exports.
 
 Authoritative flag/identifier behavior lives in [CLI Usage](../guides/cli.md).
 

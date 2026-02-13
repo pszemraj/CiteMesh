@@ -33,16 +33,18 @@ Accepted identifiers:
 | `--max-papers`, `-p` | Maximum nodes in final graph                                     | `40`                           |
 | `--iterations`, `-i` | Layout iterations (higher = smoother)                            | `100`                          |
 | `--dpi`, `-d`        | PNG output resolution                                            | `150`                          |
-| `--seed`             | Seed for layout computation used by layout-based exports (`png`, `plotly`) | none (uses default behavior)   |
+| `--seed`             | Seed for layout computation used by layout-based exports (`png`, `plotly`) | deterministic built-in seed    |
+| `--include-timestamp`| Include generation time in output metadata                       | disabled                       |
 | `--export`, `-e`     | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all`     | `png`                          |
 | `--theme`            | `light`, `dark`, `solarized`, `auto`                             | `light`                        |
 | `--output`, `-o`     | Base filename for exports                                        | auto-generated in paper folder |
 
-When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:50]>/<strategy>.<ext>`.
+When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:50]>-<seed_hash8>/<strategy>.<ext>`.
 When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path, the CLI appends the correct extension for each exported format.
 Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`) are preserved; format extensions are appended without truncating the basename.
 
 `--seed` controls the shared layout path for `png` and `plotly` exports. Pyvis `html` exports use vis.js physics and do not consume this layout.
+Metadata timestamps are omitted by default for deterministic artifacts; use `--include-timestamp` to opt in.
 
 ## Strategy-Specific Flags
 
@@ -58,23 +60,25 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 
 - `--max-citations`, `-c`: limit number of citing papers
 - `--max-references`, `-r`: limit number of referenced papers
-- `--similarity-threshold`, `-t`: minimum similarity score for edges
+- `--similarity-threshold`, `-t`: minimum similarity score for edges (citation/recommendation only)
 - `--no-references`: skip fetching reference lists (speeds up runs, removes true bibliographic coupling)
 
 ### Embedding Strategy
 
 - `--model`, `-m`: sentence-transformer model name (e.g., `all-MiniLM-L6-v2`, `google/embeddinggemma-300m`)
 - `--dataset-split`: HuggingFace split (`train`, `train[:5%]`, etc.)
-- `--corpus-size`: maximum number of papers to load from dataset
+- `--corpus-size`: maximum number of papers to load from dataset (default `50000`)
+- `--all-corpus`: remove the default cap and process the full selected split
 - `--top-k`, `-k`: strict per-node edge cap applied during embedding graph pruning
 - `--truncate-dim`: optional embedding output dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
-- `--streaming`: stream HuggingFace dataset instead of loading cached shards (disabled by default)
+- `--streaming`: stream HuggingFace dataset instead of loading cached shards (works with capped or uncapped corpus runs)
   
   _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts, defaults to `256d` Matryoshka embeddings (available: `768/512/256/128`), and logs the selected dimension at model load. It also prefers `bfloat16` model loading with CUDA autocast; if BF16 is unavailable, it falls back to float32.
 
 ### Hybrid Strategy
 
-- Inherits citation flags for paper collection
+- Inherits citation flags for paper collection, including `--no-references`
+- Reuses embedding corpus/model knobs (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`)
 - `--max-semantic`: number of semantic neighbors to add when enriching the citation graph
 
 ## Export Formats

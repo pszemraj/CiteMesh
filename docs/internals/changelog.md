@@ -42,10 +42,15 @@ Treat this page as historical context, not the normative behavior spec.
 - Tests verify CLI ergonomics (help text, invalid args) and run end-to-end builds with ephemeral outputs.
 - Package layout uses canonical modules (`core/`, `data/`, `services/`, `visualization/`); pre-release legacy import shims were removed.
 - Paper ID normalization now accepts arXiv/DOI URLs directly (for example `https://arxiv.org/abs/...`) and converts them to canonical IDs before API calls.
+- Paper ID normalization now strips arXiv version suffixes (for example `arxiv:1706.03762v5` -> `arxiv:1706.03762`).
 - Explicit output basenames with dots are now preserved across multi-export runs (for example `-o out/arxiv-2508.14040-example --export all`).
 - Embedding `--top-k` now enforces strict per-node edge caps during pruning.
 - CLI computes a single shared layout per run for layout-consuming exports and reuses it across PNG/Plotly outputs; `--seed` now consistently controls that shared layout path.
-- Default auto-generated outputs are grouped under per-paper folders (`out/<safe-seed-title>/`) instead of a flat `out/` namespace.
+- Embedding/hybrid CLI flows now default to a bounded semantic corpus (`--corpus-size 50000`) with explicit uncapped opt-in via `--all-corpus`.
+- Recommendation strategy requests reference payloads directly when enabled, reducing per-paper reference hydration calls.
+- Metadata timestamps are now opt-in via `--include-timestamp`, improving deterministic artifact generation by default.
+- Default auto-generated outputs are grouped under per-paper folders with stable seed suffixes (`out/<safe-seed-title>-<seed-hash8>/`) to reduce collisions.
+- Interactive exporters (`pyvis`, `plotly`) moved to optional `.[viz]` dependencies.
 
 ## Maintenance Consolidation
 

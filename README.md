@@ -27,6 +27,12 @@ Install embedding dependencies (needed for `--strategy embedding` and semantic e
 pip install -e ".[embeddings]"
 ```
 
+Install interactive visualization dependencies (needed for `--export html` and `--export plotly`):
+
+```bash
+pip install -e ".[viz]"
+```
+
 ### Use the CLI
 
 Example: hybrid graph with all exports in dark mode:
