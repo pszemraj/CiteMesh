@@ -31,7 +31,7 @@ Accepted identifiers:
 | `--max-papers`, `-p` | Maximum nodes in final graph                                     | `40`                           |
 | `--iterations`, `-i` | Layout iterations (higher = smoother)                            | `100`                          |
 | `--dpi`, `-d`        | PNG output resolution                                            | `150`                          |
-| `--seed`             | Random seed for reproducibility                                  | none (non-deterministic)       |
+| `--seed`             | Layout seed reused across exporters for reproducible positioning | none (uses default behavior)   |
 | `--export`, `-e`     | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all`     | `png`                          |
 | `--theme`            | `light`, `dark`, `solarized`, `auto`                             | `light`                        |
 | `--output`, `-o`     | Base filename for exports                                        | auto-generated from seed title |
@@ -59,7 +59,7 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 - `--model`, `-m`: sentence-transformer model name (e.g., `all-MiniLM-L6-v2`, `google/embeddinggemma-300m`)
 - `--dataset-split`: HuggingFace split (`train`, `train[:5%]`, etc.)
 - `--corpus-size`: maximum number of papers to load from dataset
-- `--top-k`, `-k`: number of edges to keep per node (top semantic neighbors)
+- `--top-k`, `-k`: strict per-node edge cap applied during embedding graph pruning
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards (disabled by default)
   
   _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts and keeps activations in float32.

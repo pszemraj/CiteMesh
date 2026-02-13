@@ -35,9 +35,17 @@ This living document summarizes noteworthy changes from the initial script-based
 - `--export all` simplifies multi-format workflows; individual options remain for targeted runs.
 - Strategy-specific flags (e.g., `--max-semantic`, `--dataset-split`) surface directly in `citemesh build --help`.
 - Tests verify CLI ergonomics (help text, invalid args) and run end-to-end builds with ephemeral outputs.
-- Package layout reorganized into `core/`, `data/`, `services/`, and `visualization/` modules for clearer ownership, with shims preserving legacy import paths.
+- Package layout uses canonical modules (`core/`, `data/`, `services/`, `visualization/`); pre-release legacy import shims were removed.
 - Paper ID normalization now accepts arXiv/DOI URLs directly (for example `https://arxiv.org/abs/...`) and converts them to canonical IDs before API calls.
 - Explicit output basenames with dots are now preserved across multi-export runs (for example `-o out/arxiv-2508.14040-example --export all`).
+- Embedding `--top-k` now enforces strict per-node edge caps during pruning.
+- CLI computes a single shared layout per run and reuses it across static/interactive exports; `--seed` now consistently controls that shared layout path.
+
+## Maintenance Consolidation
+
+- Removed dead configuration and helper surface that was no longer referenced (unused config fields/methods and stale similarity helper property).
+- Deduplicated Semantic Scholar citation/reference fetch loops via shared retry/convert logic.
+- Tightened test suite by removing flaky pass-without-assert slow branches and keeping one explicit slow smoke test.
 
 ## Future Opportunities
 

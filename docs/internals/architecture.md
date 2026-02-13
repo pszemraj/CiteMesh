@@ -29,12 +29,12 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 - Defines the `citemesh` console entry point.
 - Adds strategy-specific arguments (e.g., `--max-citations`, `--top-k`, `--max-semantic`).
 - Resolves output filenames for each requested export format.
+- Computes one shared layout per build run (optionally seeded via `--seed`) and reuses it across PNG/HTML/Plotly outputs.
 - Builds a metadata dictionary (paper id, strategy, node/edge counts, timestamp) passed to both Matplotlib and HTML exporters.
 
 ### `citemesh/strategies/base.py`
 
 - Implements the template method shared by all strategies.
-- Handles reproducibility by seeding NumPy, Python `random`, and Torch when `random_seed` is provided.
 - Provides `collect_papers` and `compute_similarity` hooks the concrete strategies override.
 
 ### Strategy Implementations
