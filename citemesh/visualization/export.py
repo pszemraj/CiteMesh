@@ -331,7 +331,11 @@ class GraphExporter:
 
     @staticmethod
     def _coerce_year(raw_year: object) -> int:
-        """Normalize optional year values for formats that disallow null years."""
+        """Normalize optional year values for formats that disallow null years.
+
+        :param object raw_year: Raw year value from node metadata.
+        :return int: Integer year when valid, otherwise ``0``.
+        """
         if isinstance(raw_year, int):
             return raw_year
         return 0
