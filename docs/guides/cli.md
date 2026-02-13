@@ -25,7 +25,7 @@ Accepted identifiers:
 - bare arXiv-like IDs (for example `1706.03762`) may work when Semantic Scholar resolves them
 - arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`; `vN` suffixes are normalized away)
 - Semantic Scholar Paper ID
-- Free-form text query (embedding strategy treats it as a search query)
+- Free-form text query (embedding strategy treats it as a text seed when S2 lookup fails)
 
 ## Core Options
 
@@ -48,8 +48,9 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 `--seed` controls the shared layout path for `png` and `plotly` exports. Pyvis `html` exports use vis.js physics and do not consume this layout.
 Metadata timestamps are omitted by default for deterministic artifacts; use `--include-timestamp` to opt in.
 Numeric validation:
-- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, and `search --limit` must be at least `1`.
+- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, and `search --limit` must be at least `1`.
 - `--max-citations`, `--max-references`, and `--max-semantic` must be at least `0`.
+- `--similarity-threshold` must be a finite float between `0.0` and `1.0`.
 
 ## Strategy-Specific Flags
 
@@ -63,9 +64,7 @@ Numeric validation:
 
 - Recommended default.
 - Uses Semantic Scholar recommendations for fast, high-signal topical seeds.
-- Reuses:
-  - `--similarity-threshold`, `-t` as the minimum edge similarity threshold.
-  - `--no-references` to skip fetching references for the seed and recommendation neighbors.
+- Uses cross-strategy controls from the section above (`--similarity-threshold`, `--no-references`).
 
 ### Citation Strategy
 

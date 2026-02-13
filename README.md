@@ -85,7 +85,7 @@ Use [docs/README.md](docs/README.md) as the documentation index and source-of-tr
 Install dev dependencies and run tests:
 
 ```bash
-pip install -e .[dev]
+pip install -e ".[dev]"
 pytest
 ```
 
@@ -94,5 +94,9 @@ Run slow integration smoke tests explicitly when needed:
 ```bash
 pytest -m slow
 ```
+
+CLI and cache behavior definitions are canonical in:
+[docs/guides/cli.md](docs/guides/cli.md) and
+[docs/guides/caching.md](docs/guides/caching.md).
 
 MIT License - see [LICENSE](LICENSE).

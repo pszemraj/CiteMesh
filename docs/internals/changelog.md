@@ -40,20 +40,19 @@ Treat this page as historical context, not the normative behavior spec.
 ## CLI & Developer Experience
 
 - `--export all` simplifies multi-format workflows; individual options remain for targeted runs.
-- Strategy-specific flags (e.g., `--max-semantic`, `--dataset-split`) surface directly in `citemesh build --help`.
-- Embedding strategy now exposes `--truncate-dim` to override model-profile default embedding dimensions.
-- Tests verify CLI ergonomics (help text, invalid args) and run end-to-end builds with ephemeral outputs.
+- CLI help and parser validation now surface strategy-specific controls clearly, and tests cover invalid-argument ergonomics plus end-to-end smoke paths with ephemeral outputs.
 - Package layout uses canonical modules (`core/`, `data/`, `services/`, `visualization/`); pre-release legacy import shims were removed.
-- Paper ID normalization now accepts arXiv/DOI URLs directly (for example `https://arxiv.org/abs/...`) and converts them to canonical IDs before API calls.
-- Paper ID normalization now strips arXiv version suffixes (for example `arxiv:1706.03762v5` -> `arxiv:1706.03762`).
-- Explicit output basenames with dots are now preserved across multi-export runs (for example `-o out/arxiv-2508.14040-example --export all`).
-- Embedding `--top-k` now enforces strict per-node edge caps during pruning.
-- CLI computes a single shared layout per run for layout-consuming exports and reuses it across PNG/Plotly outputs; `--seed` now consistently controls that shared layout path.
-- Embedding/hybrid CLI flows now default to a bounded semantic corpus (`--corpus-size 50000`) with explicit uncapped opt-in via `--all-corpus`.
+- Paper ID normalization now accepts arXiv/DOI URL forms and strips arXiv version suffixes before API calls.
+- Explicit output basenames with dots are preserved across multi-export runs.
+- Embedding `--top-k` enforces strict per-node edge caps during pruning.
+- CLI computes one shared layout per run for layout-consuming exports and reuses it across PNG/Plotly outputs.
+- Embedding/hybrid CLI flows default to a bounded semantic corpus with explicit uncapped opt-in.
 - Recommendation strategy requests reference payloads directly when enabled, reducing per-paper reference hydration calls.
 - Metadata timestamps are now opt-in via `--include-timestamp`, improving deterministic artifact generation by default.
 - Default auto-generated outputs are grouped under per-paper folders with stable seed suffixes (`out/<safe-seed-title>-<seed-hash8>/`) to reduce collisions.
 - Interactive exporters (`pyvis`, `plotly`) moved to optional `.[viz]` dependencies.
+
+For exact current flag semantics and defaults, see the canonical [CLI Usage](../guides/cli.md) guide.
 
 ## Maintenance Consolidation
 

@@ -31,7 +31,7 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 - Defines the `citemesh` console entry point.
 - Parses and validates all CLI arguments.
 - Resolves output filenames for requested export formats.
-- Computes one shared layout per build run (optionally seeded via `--seed`) when layout-consuming exports are requested, then reuses it across PNG/Plotly outputs.
+- Computes one shared layout per build run when layout-consuming exports are requested, then reuses it across PNG/Plotly outputs.
 - Builds a metadata dictionary (paper id, strategy, node/edge counts, optional timestamp) passed to Matplotlib and structured exports.
 
 Authoritative flag/identifier behavior lives in [CLI Usage](../guides/cli.md).
@@ -81,7 +81,7 @@ Each strategy can surface helpful collection summaries by calling `_set_collecti
 
 ### Caching Support
 
-- `citemesh/data/cache.py` and `citemesh/data/embedding_cache.py` configure user-scoped storage for persistent graph artifacts and embedding vectors.
+- `citemesh/data/cache.py` and `citemesh/data/embedding_cache.py` configure user-scoped storage for embedding vectors, normalized corpus caches, and reference-id caches.
 - `citemesh/data/model_profiles.py` captures per-model metadata (for example, prompts and dtype hints) consumed by embedding strategies.
 - See [Caching Guide](../guides/caching.md) for full cache layout, invalidation rules, and cleanup commands.
 

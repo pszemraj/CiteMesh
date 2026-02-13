@@ -12,6 +12,7 @@ Use this index to navigate docs by topic and keep behavior definitions centraliz
 
 | Topic | Canonical doc |
 | --- | --- |
+| Project overview, install, and quickstart | [Repository README](../README.md) |
 | CLI commands, flags, identifiers, output naming, export behavior | [Guides: CLI Usage](guides/cli.md) |
 | Cache layout, platform paths, overrides, invalidation | [Guides: Caching & Data](guides/caching.md) |
 | Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |

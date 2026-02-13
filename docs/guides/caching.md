@@ -6,7 +6,7 @@ CiteMesh uses persistent caches to avoid recomputing expensive datasets and embe
 
 By default, all project-specific caches live under:
 
-- **Linux**: `~/.cache/citemesh`
+- **Linux**: `${XDG_CACHE_HOME:-~/.cache}/citemesh`
 - **macOS**: `~/Library/Caches/citemesh`
 - **Windows**: `%LOCALAPPDATA%\CiteMesh` (or `%APPDATA%` if `LOCALAPPDATA` is unset)
 
@@ -61,7 +61,11 @@ The HuggingFace library also maintains its own cache (usually `~/.cache/huggingf
 To remove embeddings for a given model, delete the corresponding `.db` and `.h5` files inside `embeddings/`. You can safely regenerate them on the next run. For a full reset on Linux/macOS:
 
 ```bash
-rm -rf ~/.cache/citemesh
+# Linux
+rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/citemesh"
+
+# macOS
+rm -rf "$HOME/Library/Caches/citemesh"
 ```
 
 Or with a custom root:
