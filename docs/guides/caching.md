@@ -21,8 +21,8 @@ export CITEMESH_CACHE_DIR=/path/to/custom/cache
 ```
 citemesh cache root
 ├── embeddings/
-│   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, hashes, dims)
-│   └── embeddings_<model-hash>.h5 # HDF5 vectors
+│   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, hashes, dims, row_idx)
+│   └── embeddings_<model-hash>.h5 # HDF5 matrix dataset: embeddings[row_idx] -> vector
 ├── joblib/
 │   └── ...                        # Normalized corpus payloads cached via joblib
 └── references/
@@ -33,10 +33,14 @@ citemesh cache root
 
 ## Embedding Cache
 
-`EmbeddingCache` stores each paper's embedding only once per model. A new vector is computed when:
+`EmbeddingCache` stores each paper's embedding only once per model. Vectors are appended to a single resizable HDF5 matrix dataset, and SQLite tracks each paper's matrix row via `row_idx`.
+
+A new vector is computed when:
 
 - The paper is not yet in the cache, or
 - The combined text (`title + abstract`) has changed (detected via SHA-256 hash).
+
+Older per-paper HDF5 cache layouts are treated as legacy and reset automatically on first use so new runs can use matrix storage.
 
 This makes iterative runs fast: after the first run, loading vectors becomes a disk-read operation even for large corpora.
 
