@@ -17,7 +17,9 @@ citemesh search "<query>" [--limit N]
 Accepted identifiers:
 
 - DOI (`10.1038/nature14539`)
+- DOI URL (`https://doi.org/10.1038/nature14539`)
 - arXiv ID (`arxiv:1706.03762`, `1706.03762`)
+- arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`)
 - Semantic Scholar Paper ID
 - Free-form text query (embedding strategy treats it as a search query)
 
@@ -35,6 +37,7 @@ Accepted identifiers:
 | `--output`, `-o`     | Base filename for exports                                        | auto-generated from seed title |
 
 When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path and request multiple formats, the CLI appends the correct extension for each exported file.
+Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`) are preserved; format extensions are appended without truncating the basename.
 
 ## Strategy-Specific Flags
 
@@ -99,6 +102,9 @@ citemesh build "10.1145/3133956.3134029" \
 # Search for relevant recent papers and build a recommendation graph
 citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
+
+# Build directly from an arXiv URL
+citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --export all
 ```
 
 ## Troubleshooting Tips

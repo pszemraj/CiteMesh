@@ -342,6 +342,7 @@ def draw_labels(
     """
 
     def _shorten_title(title: str, max_chars: int = 34) -> str:
+        """Shorten long seed labels to keep static plots readable."""
         if len(title) <= max_chars:
             return title
         return f"{title[: max_chars - 3].rstrip()}..."

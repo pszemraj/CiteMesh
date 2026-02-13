@@ -39,6 +39,13 @@ def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
     - /abs/2508.14040
     - /pdf/2508.14040.pdf
     - legacy IDs like /abs/hep-th/9901001
+
+    Args:
+        raw_path: URL path component (for example ``/abs/2508.14040``).
+
+    Returns:
+        Canonical arXiv identifier suffix without prefix (for example
+        ``2508.14040``), or ``None`` when extraction fails.
     """
     segments = [segment for segment in raw_path.strip("/").split("/") if segment]
     if not segments:
@@ -61,7 +68,18 @@ def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
 
 
 def normalize_paper_id(paper_id: str) -> str:
-    """Normalize paper identifiers (including arXiv/DOI URLs) for S2 API calls."""
+    """
+    Normalize paper identifiers (including arXiv/DOI URLs) for S2 API calls.
+
+    Args:
+        paper_id: Raw user-provided identifier (ID or URL).
+
+    Returns:
+        Canonical Semantic Scholar paper identifier string.
+
+    Raises:
+        ValueError: If the identifier is empty after trimming.
+    """
     normalized = paper_id.strip()
     if not normalized:
         raise ValueError(f"Invalid paper ID: {paper_id}")

@@ -35,7 +35,7 @@ citemesh search "attention mechanism"
 ## Essentials
 
 - `citemesh build "<paper-id>" --strategy <recommendation|citation|embedding|hybrid> [options]`
-- Identifiers: DOI (`10.1038/...`), arXiv (`arxiv:1706.03762` or `1706.03762`), Semantic Scholar Paper ID, or free-form text (embedding strategy).
+- Identifiers: DOI (`10.1038/...`) or DOI URL (`https://doi.org/...`), arXiv (`arxiv:1706.03762`, `1706.03762`, or `https://arxiv.org/abs/...`), Semantic Scholar Paper ID, or free-form text (embedding strategy).
 - `--export` accepts any combination of `png`, `html`, `plotly`, `json`, `graphml`, or `all`.
 - `--theme` selects a colour palette for both static and interactive outputs.
 

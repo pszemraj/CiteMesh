@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
+import networkx as nx
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
@@ -67,6 +68,14 @@ def resolve_output_paths(
 
     Handles explicit user paths robustly, including names with dots that are not
     recognized export extensions (e.g. ``paper-2508.14040-example``).
+
+    Args:
+        base_output_path: Path provided by the user or auto-generated filename.
+        selected_formats: Export formats selected for this run.
+        explicit_output: True when the user provided ``--output``.
+
+    Returns:
+        Mapping of export format -> resolved output path.
     """
     base_str = str(base_output_path)
     matched_suffix = next(
@@ -102,15 +111,31 @@ def resolve_output_paths(
 
 
 def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
-    """Best-effort canonical paper ID for output metadata display."""
+    """
+    Best-effort canonical paper ID for output metadata display.
+
+    Args:
+        paper_id: Raw CLI paper identifier.
+
+    Returns:
+        Canonicalized identifier when possible; otherwise original input.
+    """
     try:
         return normalize_paper_id(paper_id)
     except ValueError:
         return paper_id
 
 
-def build_citation_graph(args):
-    """Build graph using citation strategy."""
+def build_citation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
+    """
+    Build graph using citation strategy.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Tuple of graph and normalized seed paper ID.
+    """
     builder = CitationGraphBuilder(
         max_papers=args.max_papers,
         max_citations=args.max_citations,
@@ -124,8 +149,16 @@ def build_citation_graph(args):
     return graph, seed_id
 
 
-def build_recommendation_graph(args):
-    """Build graph using recommendation strategy."""
+def build_recommendation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
+    """
+    Build graph using recommendation strategy.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Tuple of graph and normalized seed paper ID.
+    """
     builder = RecommendationGraphBuilder(
         max_papers=args.max_papers,
         fetch_references=not args.no_references,
@@ -137,8 +170,16 @@ def build_recommendation_graph(args):
     return graph, seed_id
 
 
-def build_embedding_graph(args):
-    """Build graph using embedding strategy."""
+def build_embedding_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
+    """
+    Build graph using embedding strategy.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Tuple of graph and normalized seed paper ID.
+    """
     builder = EmbeddingGraphBuilder(
         max_papers=args.max_papers,
         model_name=args.model,
@@ -153,8 +194,16 @@ def build_embedding_graph(args):
     return graph, seed_id
 
 
-def build_hybrid_graph(args):
-    """Build graph using hybrid strategy."""
+def build_hybrid_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
+    """
+    Build graph using hybrid strategy.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Tuple of graph and normalized seed paper ID.
+    """
     builder = HybridGraphBuilder(
         max_papers=args.max_papers,
         max_citations=args.max_citations,
@@ -169,7 +218,7 @@ def build_hybrid_graph(args):
     return graph, seed_id
 
 
-def main():
+def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
         description="CiteMesh: Create citation graph visualizations",
