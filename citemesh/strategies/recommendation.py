@@ -1,0 +1,94 @@
+"""Recommendation-based graph builder using Semantic Scholar recommendations API."""
+
+from __future__ import annotations
+
+import logging
+from typing import Dict, Optional
+
+from citemesh.core import Paper
+from citemesh.services import SemanticScholarClient, get_client
+from citemesh.similarity import AbstractSimilarityIndex
+from citemesh.strategies.base import GraphBuilderStrategy
+
+logger = logging.getLogger(__name__)
+
+
+class RecommendationGraphBuilder(GraphBuilderStrategy):
+    """
+    Build a graph from S2 recommendation neighbors.
+    """
+
+    def __init__(
+        self,
+        max_papers: int = 40,
+        fetch_references: bool = False,
+        similarity_threshold: float = 0.15,
+        random_seed: Optional[int] = None,
+        client: Optional[SemanticScholarClient] = None,
+    ):
+        super().__init__(max_papers=max_papers, random_seed=random_seed)
+        self.fetch_references = fetch_references
+        self.similarity_threshold = similarity_threshold
+        self.client = client or get_client()
+        self._abstract_index = AbstractSimilarityIndex()
+
+    def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
+        papers: Dict[str, Paper] = {}
+
+        logger.info("Fetching seed paper: %s", seed_id)
+        seed = self.client.get_paper(seed_id, fetch_references=self.fetch_references)
+        if not seed:
+            raise ValueError(f"Seed paper not found: {seed_id}")
+
+        seed.is_seed = True
+        papers[seed.paper_id] = seed
+
+        logger.info("Fetching recommendations for %s", seed.paper_id)
+        recommendations = self.client.get_recommended_papers(
+            seed.paper_id, limit=self.max_papers * 2
+        )
+
+        for paper in recommendations:
+            if len(papers) >= self.max_papers:
+                break
+
+            if not paper.abstract or not paper.title:
+                continue
+
+            # Seed paper is always kept; all recommendations get merged by ID.
+            papers[paper.paper_id] = paper
+
+        logger.info("Collected %s papers from recommendations", len(papers))
+        self._abstract_index.build(papers)
+        self._set_collection_summary(
+            f"Collected {len(papers)} papers from recommendations"
+        )
+        return papers
+
+    def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
+        """
+        Compute similarity combining topical and temporal signals.
+
+        60% abstract similarity, 15% temporal (when available), 25% bibliographic.
+        """
+        abstract_sim = self._abstract_index.similarity(paper1.paper_id, paper2.paper_id)
+        temporal_sim = self.temporal_similarity(paper1, paper2)
+
+        if paper1.references and paper2.references:
+            bib_similarity = self.bibliographic_coupling(paper1, paper2)
+            similarity = (
+                0.60 * abstract_sim + 0.15 * temporal_sim + 0.25 * bib_similarity
+            )
+        else:
+            similarity = 0.75 * abstract_sim + 0.25 * temporal_sim
+
+        return min(similarity, 1.0)
+
+    def should_create_edge(
+        self, paper1: Paper, paper2: Paper, similarity: float
+    ) -> bool:
+        if similarity < self.similarity_threshold:
+            return False
+        if paper1.is_seed or paper2.is_seed:
+            return similarity >= max(self.similarity_threshold, 0.2)
+        return similarity >= self.similarity_threshold * 1.5

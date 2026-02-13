@@ -1,11 +1,17 @@
 # CLI Usage Guide
 
-The `citemesh` command builds citation graphs using one of three strategies (`citation`, `embedding`, `hybrid`). This guide walks through common flags and workflows.
+The `citemesh` command builds paper graphs using one of four strategies (`recommendation`, `citation`, `embedding`, `hybrid`). This guide walks through common flags and workflows.
 
 ## Basic Invocation
 
 ```bash
 citemesh build "<paper-id>" [options]
+```
+
+You can also discover papers by keyword/title with:
+
+```bash
+citemesh search "<query>" [--limit N]
 ```
 
 Accepted identifiers:
@@ -19,7 +25,7 @@ Accepted identifiers:
 
 | Flag                 | Description                                                      | Default                        |
 | -------------------- | ---------------------------------------------------------------- | ------------------------------ |
-| `--strategy`, `-s`   | `citation`, `embedding`, or `hybrid`                             | `citation`                     |
+| `--strategy`, `-s`   | `recommendation`, `citation`, `embedding`, or `hybrid`           | `recommendation`               |
 | `--max-papers`, `-p` | Maximum nodes in final graph                                     | `40`                           |
 | `--iterations`, `-i` | Layout iterations (higher = smoother)                            | `100`                          |
 | `--dpi`, `-d`        | PNG output resolution                                            | `150`                          |
@@ -31,6 +37,12 @@ Accepted identifiers:
 When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path and request multiple formats, the CLI appends the correct extension for each exported file.
 
 ## Strategy-Specific Flags
+
+### Recommendation Strategy
+
+- Recommended default.
+- Uses Semantic Scholar recommendations for fast, high-signal topical seeds.
+- No extra flags in this release.
 
 ### Citation Strategy
 
@@ -83,6 +95,10 @@ citemesh build "10.1145/3133956.3134029" \
   --strategy citation \
   --export png \
   -o reports/attention-visualization.png
+
+# Search for relevant recent papers and build a recommendation graph
+citemesh search "attention mechanism transformers" --limit 5
+citemesh build "<paper-id-from-search>" --strategy recommendation
 ```
 
 ## Troubleshooting Tips
@@ -90,5 +106,10 @@ citemesh build "10.1145/3133956.3134029" \
 - **No results / paper not found**: confirm the identifier format and availability in Semantic Scholar. For embedding-only runs, free-form text can succeed even if the paper lacks metadata.
 - **Slow embedding runs on first attempt**: the initial execution downloads HuggingFace data and computes embeddings. Subsequent runs reuse cached corpora and vectors.
 - **Missing exports**: double-check `--export` values; unknown strings are rejected by argparse.
+- **API limits**: set `S2_API_KEY` for higher Semantic Scholar rate limits, especially for recommendation and search heavy workflows.
+
+```bash
+export S2_API_KEY="your-key-here"
+```
 
 For deeper architecture details or caching behavior, refer to the other documents in this directory.

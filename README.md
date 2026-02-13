@@ -8,6 +8,7 @@ Build exploration-friendly citation graphs from a single paper or query using ci
 git clone https://github.com/yourusername/paper-graph-vis.git
 cd paper-graph-vis
 pip install -e .
+```
 
 Example: hybrid graph with all exports in dark mode:
 
@@ -16,9 +17,16 @@ Example: hybrid graph with all exports in dark mode:
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
+Search by title/keyword first:
+
+```bash
+citemesh search "attention mechanism"
+```
+
 ## Why CiteMesh
 
 - One CLI for citation, embedding, and hybrid graphs.
+- Recommendation strategy is now the default discovery path and uses Semantic Scholar recommendations.
 - Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, JSON, GraphML.
 - Theme-aware visuals (light, dark, solarized, auto) shared across exporters.
 - Persistent user-level caching for embeddings and corpora; re-runs are fast.
@@ -26,10 +34,21 @@ citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 
 ## Essentials
 
-- `citemesh build "<paper-id>" --strategy <citation|embedding|hybrid> [options]`
+- `citemesh build "<paper-id>" --strategy <recommendation|citation|embedding|hybrid> [options]`
 - Identifiers: DOI (`10.1038/...`), arXiv (`arxiv:1706.03762` or `1706.03762`), Semantic Scholar Paper ID, or free-form text (embedding strategy).
 - `--export` accepts any combination of `png`, `html`, `plotly`, `json`, `graphml`, or `all`.
 - `--theme` selects a colour palette for both static and interactive outputs.
+
+## API Key
+
+Set `S2_API_KEY` for higher Semantic Scholar rate limits:
+
+```bash
+export S2_API_KEY="your-semantic-scholar-key"
+```
+
+- Without a key: lower request limits (historically ~100 requests / 5 minutes).
+- With a key: much higher throughput for discovery workflows (historically ~100 requests / second).
 
 ## Documentation
 

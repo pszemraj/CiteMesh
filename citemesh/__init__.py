@@ -14,5 +14,17 @@ __author__ = "CiteMesh Contributors"
 
 from citemesh.core import Author, Paper
 from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.citation import CitationGraphBuilder
+from citemesh.strategies.embedding import EmbeddingGraphBuilder
+from citemesh.strategies.hybrid import HybridGraphBuilder
+from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
-__all__ = ["Paper", "Author", "GraphBuilderStrategy"]
+__all__ = [
+    "Paper",
+    "Author",
+    "GraphBuilderStrategy",
+    "CitationGraphBuilder",
+    "RecommendationGraphBuilder",
+    "EmbeddingGraphBuilder",
+    "HybridGraphBuilder",
+]

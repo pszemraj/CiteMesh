@@ -1,6 +1,6 @@
 # CiteMesh Architecture
 
-The CLI orchestrates a consistent pipeline regardless of the strategy you choose (citation, embedding, or hybrid). This document describes the major components, how data flows between them, and where to hook in new functionality.
+The CLI orchestrates a consistent pipeline regardless of the strategy you choose (`recommendation`, `citation`, `embedding`, or `hybrid`). This document describes the major components, how data flows between them, and where to hook in new functionality.
 
 ## Execution Flow
 
@@ -41,6 +41,9 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 
 | Strategy    | Responsibilities                                               | Highlights                                                                         |
 | ----------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses temporal, citation-impact, and real bibliographic coupling scores             |
+| `embedding` | Loads/streams HuggingFace ML-ArXiv corpus, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
+| `recommendation` | Uses Semantic Scholar recommendations as the primary neighborhood signal  | Fast topical discovery, deterministic thresholded edge filtering                  |
 | `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses temporal, citation-impact, and real bibliographic coupling scores             |
 | `embedding` | Loads/streams HuggingFace ML-ArXiv corpus, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
 | `hybrid`    | Starts with citation graph, enriches with semantic matches     | Adjusts weightings based on relationship type, caps edges per node                 |

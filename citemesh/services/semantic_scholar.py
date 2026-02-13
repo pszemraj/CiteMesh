@@ -1,17 +1,17 @@
-"""
-Semantic Scholar API client with error handling and caching.
+"""Semantic Scholar API client with error handling and caching."""
 
-This module wraps the Semantic Scholar API with retry logic, caching,
-and better error handling to improve reliability.
-"""
+from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
+import requests
 from semanticscholar import SemanticScholar
 from semanticscholar.SemanticScholarException import ObjectNotFoundException
 
@@ -24,6 +24,10 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 REFERENCE_CACHE_DIR = get_cache_dir("references")
 REFERENCE_CACHE_VERSION = 1
+RECOMMENDATION_BASE_URL = (
+    "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
+)
+SEARCH_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
 
 
 def _reference_cache_path(paper_id: str) -> Path:
@@ -37,9 +41,9 @@ class SemanticScholarClient:
 
     This client provides:
     - Automatic retry on transient failures
-    - In-memory LRU caching for paper metadata
-    - Better error messages
-    - Rate limiting to avoid throttling
+    - Rate limiting
+    - Reference list cache
+    - Direct recommendation and search endpoint support
     """
 
     def __init__(self, timeout: float = API_CONFIG.default_timeout):
@@ -49,19 +53,74 @@ class SemanticScholarClient:
         Args:
             timeout: Request timeout in seconds
         """
-        self.client = SemanticScholar(timeout=timeout)
+        api_key = os.getenv("S2_API_KEY")
+
+        self.client = SemanticScholar(timeout=timeout, api_key=api_key)
         self.timeout = timeout
         self.last_request_time = 0.0
+        self._session = requests.Session()
+
+        if api_key:
+            self._session.headers["x-api-key"] = api_key
+            logger.info("Using Semantic Scholar API key from S2_API_KEY")
 
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests."""
         elapsed = time.time() - self.last_request_time
         min_interval = 1.0 / API_CONFIG.requests_per_second
-
         if elapsed < min_interval:
             time.sleep(min_interval - elapsed)
-
         self.last_request_time = time.time()
+
+    @staticmethod
+    def _is_rate_limit_error(error: Exception) -> bool:
+        return "429" in str(error)
+
+    def _retry_wait_time(self, error: Optional[Exception], attempt: int) -> float:
+        if error:
+            retry_after = self._get_retry_after(error)
+            if retry_after is not None:
+                return retry_after
+        if self._is_rate_limit_error(error) if error else False:
+            return API_CONFIG.retry_delay * (2**attempt) * 2
+        return API_CONFIG.retry_delay * (2**attempt)
+
+    @staticmethod
+    def _get_retry_after(error: Exception) -> Optional[float]:
+        """Extract Retry-After from library or HTTP errors."""
+        if isinstance(error, requests.RequestException) and error.response is not None:
+            header = error.response.headers.get("Retry-After")
+            if header:
+                try:
+                    return float(header)
+                except ValueError:
+                    pass
+            return None
+
+        for candidate in ("response",):
+            response = getattr(error, candidate, None)
+            if response is not None and hasattr(response, "headers"):
+                header = response.headers.get("Retry-After")  # type: ignore[attr-defined]
+                if header:
+                    try:
+                        return float(header)
+                    except ValueError:
+                        pass
+        return None
+
+    @staticmethod
+    def _safe_retry_after(response: requests.Response) -> float:
+        """Extract Retry-After from direct HTTP responses safely."""
+        header = response.headers.get("Retry-After")
+        if header:
+            try:
+                return float(header)
+            except ValueError:
+                logger.debug(
+                    "Ignoring invalid Retry-After value %s; using default delay",
+                    header,
+                )
+        return API_CONFIG.retry_delay
 
     def _convert_api_paper(self, api_paper: Any) -> Optional[Paper]:
         """
@@ -80,7 +139,7 @@ class SemanticScholarClient:
             # Extract authors
             authors = []
             if hasattr(api_paper, "authors") and api_paper.authors:
-                for author in api_paper.authors[:3]:  # Limit to first 3
+                for author in api_paper.authors[:3]:
                     if hasattr(author, "name") and author.name:
                         author_id = (
                             getattr(author, "authorId", None)
@@ -89,7 +148,6 @@ class SemanticScholarClient:
                         )
                         authors.append(Author(name=author.name, author_id=author_id))
 
-            # Extract fields/categories
             categories = []
             if hasattr(api_paper, "fields") and api_paper.fields:
                 categories = [f for f in api_paper.fields if f]
@@ -99,7 +157,7 @@ class SemanticScholarClient:
             return Paper(
                 paper_id=api_paper.paperId,
                 title=api_paper.title or "Unknown",
-                year=api_paper.year or 2020,
+                year=getattr(api_paper, "year", None),
                 authors=authors,
                 citation_count=api_paper.citationCount or 0,
                 abstract=getattr(api_paper, "abstract", "") or "",
@@ -108,9 +166,93 @@ class SemanticScholarClient:
                 is_seed=False,
             )
 
-        except Exception as e:
-            logger.warning(f"Failed to convert API paper: {e}")
+        except Exception as exc:
+            logger.warning("Failed to convert API paper: %s", exc)
             return None
+
+    def _convert_recommendation(self, rec: Dict[str, Any]) -> Optional[Paper]:
+        """Convert recommendation/search record dict to Paper."""
+        try:
+            paper_id = rec.get("paperId")
+            if not paper_id:
+                return None
+
+            authors = []
+            for author_data in rec.get("authors", [])[:3]:
+                if isinstance(author_data, dict):
+                    name = author_data.get("name")
+                    if name:
+                        authors.append(
+                            Author(
+                                name=name,
+                                author_id=author_data.get("authorId"),
+                            )
+                        )
+
+            categories = rec.get("fieldsOfStudy") or rec.get("fields") or []
+            if isinstance(categories, str):
+                categories = [categories]
+
+            return Paper(
+                paper_id=paper_id,
+                title=rec.get("title") or "Unknown",
+                year=rec.get("year"),
+                authors=authors,
+                citation_count=rec.get("citationCount", 0) or 0,
+                abstract=rec.get("abstract") or "",
+                categories=categories,
+                references=[],
+                is_seed=False,
+            )
+        except (TypeError, ValueError) as exc:
+            logger.debug("Skipping malformed recommendation record: %s", exc)
+            return None
+
+    def _request_json(
+        self, url: str, params: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Request JSON payload from direct Semantic Scholar REST endpoints."""
+        for attempt in range(API_CONFIG.max_retries):
+            try:
+                self._rate_limit()
+                response = self._session.get(url, params=params, timeout=self.timeout)
+
+                if response.status_code == 404:
+                    return None
+
+                if response.status_code == 429:
+                    retry_after = self._safe_retry_after(response)
+                    logger.warning(
+                        "Rate limited by Semantic Scholar. Waiting %ss before retry.",
+                        retry_after,
+                    )
+                    if attempt < API_CONFIG.max_retries - 1:
+                        time.sleep(retry_after)
+                        continue
+                    return None
+
+                response.raise_for_status()
+                return response.json()
+
+            except requests.RequestException as exc:
+                if attempt < API_CONFIG.max_retries - 1:
+                    wait_time = self._retry_wait_time(exc, attempt)
+                    logger.warning(
+                        "Request failed (attempt %s) for %s: %s. Retrying in %ss",
+                        attempt + 1,
+                        url,
+                        exc,
+                        wait_time,
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logger.error(
+                        "Failed to call %s after %s attempts: %s",
+                        url,
+                        API_CONFIG.max_retries,
+                        exc,
+                    )
+        return None
 
     def get_paper(
         self, paper_id: str, fetch_references: bool = False
@@ -124,20 +266,14 @@ class SemanticScholarClient:
 
         Returns:
             Paper object or None if not found
-
-        Raises:
-            ValueError: If paper_id is invalid
         """
         if not paper_id or not isinstance(paper_id, str):
             raise ValueError(f"Invalid paper ID: {paper_id}")
 
         paper_id = paper_id.strip()
-
         for attempt in range(API_CONFIG.max_retries):
             try:
                 self._rate_limit()
-
-                # Request specific fields to reduce payload
                 fields = [
                     "paperId",
                     "title",
@@ -147,19 +283,15 @@ class SemanticScholarClient:
                     "abstract",
                     "fieldsOfStudy",
                 ]
-
                 if fetch_references:
                     fields.append("references")
 
                 api_paper = self.client.get_paper(paper_id, fields=fields)
-
                 if not api_paper:
-                    logger.warning(f"Paper not found: {paper_id}")
+                    logger.warning("Paper not found: %s", paper_id)
                     return None
 
                 paper = self._convert_api_paper(api_paper)
-
-                # Extract references if requested
                 if fetch_references and paper and hasattr(api_paper, "references"):
                     if api_paper.references:
                         paper.references = [
@@ -167,23 +299,28 @@ class SemanticScholarClient:
                             for ref in api_paper.references
                             if hasattr(ref, "paperId") and ref.paperId
                         ]
-
                 return paper
 
             except ObjectNotFoundException:
-                logger.warning(f"Paper not found: {paper_id}")
+                logger.warning("Paper not found: %s", paper_id)
                 return None
-            except Exception as e:
+            except Exception as exc:
                 if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = API_CONFIG.retry_delay * (2**attempt)
+                    wait_time = self._retry_wait_time(exc, attempt)
                     logger.warning(
-                        f"Attempt {attempt + 1} failed for {paper_id}: {e}. "
-                        f"Retrying in {wait_time}s..."
+                        "Attempt %s failed for %s: %s. Retrying in %ss",
+                        attempt + 1,
+                        paper_id,
+                        exc,
+                        wait_time,
                     )
                     time.sleep(wait_time)
                 else:
                     logger.error(
-                        f"Failed to fetch paper {paper_id} after {API_CONFIG.max_retries} attempts: {e}"
+                        "Failed to fetch paper %s after %s attempts: %s",
+                        paper_id,
+                        API_CONFIG.max_retries,
+                        exc,
                     )
                     return None
 
@@ -196,36 +333,51 @@ class SemanticScholarClient:
         Args:
             paper_id: Paper identifier
             limit: Maximum number of citations to fetch
-
-        Returns:
-            List of Paper objects (may be shorter than limit)
         """
-        papers = []
+        papers: List[Paper] = []
 
-        try:
-            self._rate_limit()
-            citations = self.client.get_paper_citations(paper_id, limit=limit)
+        for attempt in range(API_CONFIG.max_retries):
+            try:
+                self._rate_limit()
+                citations = self.client.get_paper_citations(paper_id, limit=limit)
+                if not citations:
+                    return papers
 
-            if not citations:
+                for cit in citations:
+                    if (
+                        hasattr(cit, "paper")
+                        and cit.paper
+                        and hasattr(cit.paper, "paperId")
+                    ):
+                        paper = self._convert_api_paper(cit.paper)
+                        if paper:
+                            papers.append(paper)
+
+                    if len(papers) >= limit:
+                        break
+
                 return papers
 
-            for cit in citations:
-                if (
-                    hasattr(cit, "paper")
-                    and cit.paper
-                    and hasattr(cit.paper, "paperId")
-                ):
-                    paper = self._convert_api_paper(cit.paper)
-                    if paper:
-                        papers.append(paper)
-
-                if len(papers) >= limit:
-                    break
-
-        except ObjectNotFoundException:
-            logger.warning(f"Paper not found for citations: {paper_id}")
-        except Exception as e:
-            logger.warning(f"Failed to fetch citations for {paper_id}: {e}")
+            except ObjectNotFoundException:
+                logger.warning("Paper not found for citations: %s", paper_id)
+                return papers
+            except Exception as exc:
+                if attempt < API_CONFIG.max_retries - 1:
+                    wait_time = self._retry_wait_time(exc, attempt)
+                    logger.warning(
+                        "Failed to fetch citations for %s (attempt %s). Retrying in %ss",
+                        paper_id,
+                        attempt + 1,
+                        wait_time,
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logger.warning(
+                        "Failed to fetch citations for %s after %s attempts: %s",
+                        paper_id,
+                        API_CONFIG.max_retries,
+                        exc,
+                    )
 
         return papers
 
@@ -240,32 +392,51 @@ class SemanticScholarClient:
         Returns:
             List of Paper objects (may be shorter than limit)
         """
-        papers = []
+        papers: List[Paper] = []
 
-        try:
-            self._rate_limit()
-            references = self.client.get_paper_references(paper_id, limit=limit)
+        for attempt in range(API_CONFIG.max_retries):
+            try:
+                self._rate_limit()
+                references = self.client.get_paper_references(paper_id, limit=limit)
 
-            if not references:
+                if not references:
+                    return papers
+
+                for ref in references:
+                    if (
+                        hasattr(ref, "paper")
+                        and ref.paper
+                        and hasattr(ref.paper, "paperId")
+                    ):
+                        paper = self._convert_api_paper(ref.paper)
+                        if paper:
+                            papers.append(paper)
+
+                    if len(papers) >= limit:
+                        break
+
                 return papers
 
-            for ref in references:
-                if (
-                    hasattr(ref, "paper")
-                    and ref.paper
-                    and hasattr(ref.paper, "paperId")
-                ):
-                    paper = self._convert_api_paper(ref.paper)
-                    if paper:
-                        papers.append(paper)
-
-                if len(papers) >= limit:
-                    break
-
-        except ObjectNotFoundException:
-            logger.warning(f"Paper not found for references: {paper_id}")
-        except Exception as e:
-            logger.warning(f"Failed to fetch references for {paper_id}: {e}")
+            except ObjectNotFoundException:
+                logger.warning("Paper not found for references: %s", paper_id)
+                return papers
+            except Exception as exc:
+                if attempt < API_CONFIG.max_retries - 1:
+                    wait_time = self._retry_wait_time(exc, attempt)
+                    logger.warning(
+                        "Failed to fetch references for %s (attempt %s). Retrying in %ss",
+                        paper_id,
+                        attempt + 1,
+                        wait_time,
+                    )
+                    time.sleep(wait_time)
+                else:
+                    logger.warning(
+                        "Failed to fetch references for %s after %s attempts: %s",
+                        paper_id,
+                        API_CONFIG.max_retries,
+                        exc,
+                    )
 
         return papers
 
@@ -293,58 +464,158 @@ class SemanticScholarClient:
                 cache_path.unlink(missing_ok=True)
 
         try:
-            self._rate_limit()
-            references = self.client.get_paper_references(paper_id, fields=["paperId"])
-
-            if not references:
-                return []
-
-            ref_ids = []
-            for ref in references:
-                if (
-                    hasattr(ref, "paper")
-                    and ref.paper
-                    and hasattr(ref.paper, "paperId")
-                ):
-                    ref_ids.append(ref.paper.paperId)
-
-            try:
-                cache_path.write_text(
-                    json.dumps(
-                        {
-                            "paper_id": paper_id,
-                            "references": ref_ids,
-                            "version": REFERENCE_CACHE_VERSION,
-                        }
+            for attempt in range(API_CONFIG.max_retries):
+                try:
+                    self._rate_limit()
+                    references = self.client.get_paper_references(
+                        paper_id, fields=["paperId"]
                     )
-                )
-            except OSError as exc:
-                logger.debug(
-                    "Failed to persist reference cache for %s: %s", paper_id, exc
-                )
+                    if not references:
+                        return []
 
-            return ref_ids
+                    ref_ids: List[str] = []
+                    for ref in references:
+                        if (
+                            hasattr(ref, "paper")
+                            and ref.paper
+                            and hasattr(ref.paper, "paperId")
+                        ):
+                            ref_ids.append(ref.paper.paperId)
 
-        except TypeError:
-            logger.debug(
-                "Reference payload missing for %s (treating as empty)", paper_id
+                    try:
+                        cache_path.write_text(
+                            json.dumps(
+                                {
+                                    "paper_id": paper_id,
+                                    "references": ref_ids,
+                                    "version": REFERENCE_CACHE_VERSION,
+                                }
+                            )
+                        )
+                    except OSError as exc:
+                        logger.debug(
+                            "Failed to persist reference cache for %s: %s",
+                            paper_id,
+                            exc,
+                        )
+
+                    return ref_ids
+
+                except TypeError:
+                    logger.debug(
+                        "Reference payload missing for %s (treating as empty)", paper_id
+                    )
+                    return []
+                except ObjectNotFoundException:
+                    logger.warning("Paper not found for reference IDs: %s", paper_id)
+                    return []
+                except Exception as exc:
+                    if attempt < API_CONFIG.max_retries - 1:
+                        wait_time = self._retry_wait_time(exc, attempt)
+                        logger.warning(
+                            "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
+                            paper_id,
+                            attempt + 1,
+                            wait_time,
+                        )
+                        time.sleep(wait_time)
+                    else:
+                        logger.warning(
+                            "Failed to fetch reference IDs for %s after %s attempts: %s",
+                            paper_id,
+                            API_CONFIG.max_retries,
+                            exc,
+                        )
+                        return []
+
+        except Exception as exc:
+            logger.warning(
+                "Unexpected error fetching reference IDs for %s: %s", paper_id, exc
             )
             return []
-        except ObjectNotFoundException:
-            logger.warning(f"Paper not found for reference IDs: {paper_id}")
-            return []
-        except Exception as e:
-            logger.warning(f"Failed to fetch reference IDs for {paper_id}: {e}")
+
+    def get_recommended_papers(
+        self, paper_id: str, limit: int = 50, fields: Optional[List[str]] = None
+    ) -> List[Paper]:
+        """
+        Get semantically related papers using S2 recommendations.
+
+        Args:
+            paper_id: S2 paper ID
+            limit: Maximum recommendations
+            fields: API fields to return
+        """
+        if fields is None:
+            fields = [
+                "paperId",
+                "title",
+                "year",
+                "authors",
+                "citationCount",
+                "abstract",
+                "fieldsOfStudy",
+            ]
+
+        payload = self._request_json(
+            f"{RECOMMENDATION_BASE_URL}/{paper_id}",
+            {"fields": ",".join(fields), "limit": limit},
+        )
+        if not payload:
             return []
 
+        papers = []
+        for rec in payload.get("recommendedPapers", []):
+            paper = self._convert_recommendation(rec)
+            if paper:
+                papers.append(paper)
+        return papers
 
-# Global client instance with caching
+    def search_papers(
+        self, query: str, limit: int = 10, fields: Optional[List[str]] = None
+    ) -> List[Paper]:
+        """Search papers by title or keyword."""
+        if fields is None:
+            fields = [
+                "paperId",
+                "title",
+                "year",
+                "authors",
+                "citationCount",
+                "abstract",
+                "fieldsOfStudy",
+            ]
+
+        payload = self._request_json(
+            SEARCH_BASE_URL,
+            {"query": query, "fields": ",".join(fields), "limit": limit},
+        )
+        if not payload:
+            return []
+
+        papers = []
+        for rec in payload.get("data", []):
+            paper = self._convert_recommendation(rec)
+            if paper:
+                papers.append(paper)
+        return papers
+
+
 _client_instance: Optional[SemanticScholarClient] = None
+_client_lock = threading.Lock()
 
 
 def get_client() -> SemanticScholarClient:
     """Get or create the global API client instance."""
     global _client_instance
     if _client_instance is None:
-        _client_instance = SemanticScholarClient()
+        with _client_lock:
+            if _client_instance is None:
+                _client_instance = SemanticScholarClient()
     return _client_instance
+
+
+def reset_client() -> None:
+    """Reset cached client instance (for testing)."""
+    global _client_instance
+    with _client_lock:
+        _client_instance = None

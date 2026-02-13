@@ -28,6 +28,7 @@ This living document summarizes noteworthy changes from the initial script-based
 - **Citation**: uses real bibliographic coupling (shared reference lists) and temporal penalties; optional reference fetching skip for faster runs.
 - **Embedding**: combines semantic similarity with temporal/category/author factors; fetches citation counts for top matches to balance node sizing.
 - **Hybrid**: builds on the citation graph, injects semantic neighbors, and adjusts weights based on relationship provenance while capping per-node edges.
+- **Recommendation**: adds Semantic Scholar recommendation-based discovery with direct search endpoint and API-key-aware rate-limit handling.
 
 ## CLI & Developer Experience
 

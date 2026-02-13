@@ -14,10 +14,13 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.table import Table
 
+from citemesh.services import get_client
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
+from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.visualization import (
     GraphExporter,
     generate_output_path,
@@ -52,6 +55,19 @@ def build_citation_graph(args):
         max_references=args.max_references,
         similarity_threshold=args.similarity_threshold,
         fetch_references=not args.no_references,
+        random_seed=args.seed,
+    )
+
+    graph, seed_id = builder.build_graph(args.paper_id)
+    return graph, seed_id
+
+
+def build_recommendation_graph(args):
+    """Build graph using recommendation strategy."""
+    builder = RecommendationGraphBuilder(
+        max_papers=args.max_papers,
+        fetch_references=not args.no_references,
+        similarity_threshold=args.similarity_threshold,
         random_seed=args.seed,
     )
 
@@ -101,6 +117,9 @@ Examples:
   # Citation-based graph (fast, uses S2 API)
   citemesh build "arxiv:1706.03762" --strategy citation
 
+  # Recommendation graph (semantic-aware by default)
+  citemesh build "arxiv:1706.03762"
+
   # Embedding-based graph (semantic similarity)
   citemesh build "arxiv:1706.03762" --strategy embedding
 
@@ -132,9 +151,9 @@ Examples:
         "--strategy",
         "-s",
         type=str,
-        choices=["citation", "embedding", "hybrid"],
-        default="citation",
-        help="Graph building strategy (default: citation)",
+        choices=["recommendation", "citation", "embedding", "hybrid"],
+        default="recommendation",
+        help="Graph building strategy (default: recommendation)",
     )
 
     # Common arguments
@@ -271,6 +290,19 @@ Examples:
         help="Maximum papers from semantic search (default: 10)",
     )
 
+    # Search subcommand
+    search_parser = subparsers.add_parser(
+        "search", help="Search papers by title or keyword"
+    )
+    search_parser.add_argument("query", type=str, help="Search query")
+    search_parser.add_argument(
+        "--limit",
+        "-n",
+        type=int,
+        default=10,
+        help="Maximum results (default: 10)",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -284,6 +316,8 @@ Examples:
 
             if args.strategy == "citation":
                 graph, seed_id = build_citation_graph(args)
+            elif args.strategy == "recommendation":
+                graph, seed_id = build_recommendation_graph(args)
             elif args.strategy == "embedding":
                 graph, seed_id = build_embedding_graph(args)
             elif args.strategy == "hybrid":
@@ -296,7 +330,9 @@ Examples:
             if args.output:
                 base_output_path = Path(args.output)
             else:
-                base_output_path = generate_output_path(graph, seed_id)
+                base_output_path = generate_output_path(
+                    graph, seed_id, strategy=args.strategy
+                )
 
             output_dir = base_output_path.parent
             if output_dir and not output_dir.exists():
@@ -399,6 +435,49 @@ Examples:
                 import traceback
 
                 traceback.print_exc()
+            sys.exit(1)
+    elif args.command == "search":
+        try:
+            client = get_client()
+            logger.info(f"Searching for: {args.query}")
+            results = client.search_papers(args.query, limit=args.limit)
+
+            if not results:
+                logger.error("No results found.")
+                sys.exit(1)
+
+            table = Table(title=f"Search results for '{args.query}'")
+            table.add_column("#", style="dim", width=3)
+            table.add_column("ID", style="cyan", max_width=20)
+            table.add_column("Title", max_width=50)
+            table.add_column("Year", justify="right", width=6)
+            table.add_column("Citations", justify="right", width=10)
+            table.add_column("Authors", max_width=30)
+
+            for i, paper in enumerate(results, 1):
+                authors_str = ", ".join(a.name for a in paper.authors[:2])
+                if len(paper.authors) > 2:
+                    authors_str += " et al."
+
+                table.add_row(
+                    str(i),
+                    paper.paper_id[:18] + "..."
+                    if len(paper.paper_id) > 18
+                    else paper.paper_id,
+                    paper.title[:48] + "..." if len(paper.title) > 48 else paper.title,
+                    str(paper.year) if paper.year is not None else "",
+                    f"{paper.citation_count:,}",
+                    authors_str,
+                )
+
+            console.print(table)
+            console.print(
+                "\n[dim]Use the paper ID with:[/dim] "
+                'citemesh build "<ID>" --strategy recommendation'
+            )
+
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
             sys.exit(1)
 
 

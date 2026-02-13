@@ -9,7 +9,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import networkx as nx
 import pytest
+
+from citemesh.visualization import generate_output_path
 
 
 class TestCLIBasics:
@@ -31,9 +34,19 @@ class TestCLIBasics:
         )
         assert result.returncode == 0
         assert "strategy" in result.stdout
+        assert "recommendation" in result.stdout
         assert "citation" in result.stdout
         assert "embedding" in result.stdout
         assert "hybrid" in result.stdout
+
+    def test_search_help_works(self):
+        """Test search subcommand help."""
+        result = subprocess.run(
+            ["citemesh", "search", "--help"], capture_output=True, text=True, timeout=10
+        )
+        assert result.returncode == 0
+        assert "search" in result.stdout.lower()
+        assert "--limit" in result.stdout
 
     def test_seed_argument_exists(self):
         """Test --seed argument is exposed (caught bug: was implemented but not exposed)."""
@@ -190,6 +203,30 @@ class TestCLIErrorHandling:
         )
         assert result.returncode != 0
         assert "required" in result.stderr.lower() or "error" in result.stderr.lower()
+
+
+def test_default_strategy_is_recommendation():
+    """Default strategy should be recommendation."""
+    result = subprocess.run(
+        ["citemesh", "build", "--help"], capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 0
+    assert "default: recommendation" in result.stdout
+
+
+def test_generated_output_path_uses_strategy_suffix():
+    """Strategy name should be included in generated filenames."""
+    graph = nx.Graph()
+    graph.add_node("seed", title="Attention Is All You Need")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = generate_output_path(
+            graph,
+            seed_id="seed",
+            output_dir=Path(tmpdir),
+            strategy="recommendation",
+        )
+        assert path.name.endswith("-recommendation.png")
 
 
 class TestCLIDefaults:

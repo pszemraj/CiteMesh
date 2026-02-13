@@ -8,5 +8,15 @@ This module provides different approaches to building paper similarity graphs:
 """
 
 from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.citation import CitationGraphBuilder
+from citemesh.strategies.embedding import EmbeddingGraphBuilder
+from citemesh.strategies.hybrid import HybridGraphBuilder
+from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
-__all__ = ["GraphBuilderStrategy"]
+__all__ = [
+    "GraphBuilderStrategy",
+    "CitationGraphBuilder",
+    "RecommendationGraphBuilder",
+    "EmbeddingGraphBuilder",
+    "HybridGraphBuilder",
+]
