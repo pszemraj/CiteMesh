@@ -47,10 +47,10 @@ Authoritative flag/identifier behavior lives in [CLI Usage](../guides/cli.md).
 | ----------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses abstract similarity, temporal signal, citation impact, and bibliographic coupling |
 | `embedding` | Loads/streams the HuggingFace arXiv metadata snapshot, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
-| `recommendation` | Uses Semantic Scholar recommendations as the primary neighborhood signal  | Fast topical discovery, deterministic thresholded edge filtering                  |
+| `recommendation` | Uses Semantic Scholar recommendations as the primary neighborhood signal  | Fast topical discovery, deterministic thresholded edge filtering, optional reference-aware scoring |
 | `hybrid`    | Starts with citation graph, enriches with semantic matches     | Adjusts weightings based on relationship type, caps edges per node                 |
 
-Each strategy can surface helpful logging by calling `_set_collection_summary`, which the CLI prints after graph construction.
+Each strategy can surface helpful collection summaries by calling `_set_collection_summary`; these are emitted through the shared logger during graph construction.
 
 ### `citemesh/core/models.py`
 
@@ -95,6 +95,7 @@ Each strategy can surface helpful logging by calling `_set_collection_summary`, 
 - **Semantic Scholar API**: citation and hybrid strategies fetch paper metadata, references, and citations.
 - **HuggingFace Datasets**: embedding strategy loads the arXiv metadata snapshot corpus (offline after first download).
 - **SentenceTransformers**: embedding/hybrid strategies load configurable models via `SentenceTransformer`.
+- **Optional viz dependencies**: interactive exports (`html`, `plotly`) require the `.[viz]` extra.
 
 ## Output Handling
 

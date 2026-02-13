@@ -27,3 +27,4 @@ Use this index to navigate docs by topic and keep behavior definitions centraliz
 ## Scope Notes
 
 This repository does not currently load `config.yaml` at runtime; configuration is handled via CLI flags and environment variables.
+The top-level `README.md` is intentionally high-level; operational behavior should be maintained in the canonical docs listed above.

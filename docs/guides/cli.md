@@ -20,8 +20,9 @@ Accepted identifiers:
 
 - DOI (`10.1038/nature14539`)
 - DOI URL (`https://doi.org/10.1038/nature14539`)
-- arXiv ID (`arxiv:1706.03762`; bare IDs like `1706.03762` may work when Semantic Scholar resolves them)
-- arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`)
+- arXiv ID (`arxiv:1706.03762`; version suffixes like `v5` are normalized away)
+- bare arXiv-like IDs (for example `1706.03762`) may work when Semantic Scholar resolves them
+- arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`; `vN` suffixes are normalized away)
 - Semantic Scholar Paper ID
 - Free-form text query (embedding strategy treats it as a search query)
 
@@ -48,6 +49,12 @@ Metadata timestamps are omitted by default for deterministic artifacts; use `--i
 
 ## Strategy-Specific Flags
 
+### Cross-Strategy Scope
+
+- `--similarity-threshold` applies to `recommendation` and `citation` strategies.
+- `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
+- `embedding` and the embedding branch of `hybrid` use embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`).
+
 ### Recommendation Strategy
 
 - Recommended default.
@@ -60,7 +67,7 @@ Metadata timestamps are omitted by default for deterministic artifacts; use `--i
 
 - `--max-citations`, `-c`: limit number of citing papers
 - `--max-references`, `-r`: limit number of referenced papers
-- `--similarity-threshold`, `-t`: minimum similarity score for edges (citation/recommendation only)
+- `--similarity-threshold`, `-t`: minimum similarity score for citation edges
 - `--no-references`: skip fetching reference lists (speeds up runs, removes true bibliographic coupling)
 
 ### Embedding Strategy
@@ -88,6 +95,12 @@ Metadata timestamps are omitted by default for deterministic artifacts; use `--i
 - `plotly`: interactive Plotly graph (HTML) suitable for notebook/dashboard embedding.
 - `json`: structured graph data with nodes, edges, metadata.
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools.
+
+Interactive exports require optional viz dependencies:
+
+```bash
+pip install -e ".[viz]"
+```
 
 ## Examples
 

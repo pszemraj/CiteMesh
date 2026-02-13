@@ -38,7 +38,6 @@ pip install -e ".[viz]"
 Example: hybrid graph with all exports in dark mode:
 
 ```bash
-# Example: hybrid graph with all exports in dark mode
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
@@ -47,6 +46,9 @@ Search by title/keyword first:
 ```bash
 citemesh search "attention mechanism"
 ```
+
+For complete CLI behavior (identifier normalization, defaults, strategy-specific flags, and export semantics), use the canonical guide:
+[docs/guides/cli.md](docs/guides/cli.md).
 
 ## Why CiteMesh
 
