@@ -148,8 +148,10 @@ class Paper:
         :return float: Bibliographic coupling coefficient (0.0 to 1.0) Returns 0.0 if either paper has no references.
 
         Note:
-            References from Semantic Scholar are API-limited, so this score is an
-            estimate when only partial reference lists are available.
+            Semantic Scholar reference lists are API-limited and can be truncated.
+            When only partial lists are available, shared-reference overlap can be
+            inflated relative to full bibliographies, so treat this score as an
+            approximation.
         """
         if not self.references or not other.references:
             return 0.0
