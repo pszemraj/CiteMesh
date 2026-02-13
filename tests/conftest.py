@@ -96,6 +96,7 @@ def get_paper_id_normalization_cases() -> List[tuple[str, str]]:
         ("arXiv:2508.14040", "arxiv:2508.14040"),
         ("arXiv:1706.03762v5", "arxiv:1706.03762"),
         ("https://arxiv.org/abs/1706.03762v5", "arxiv:1706.03762"),
+        ("https://arxiv.org/abs/arXiv:1706.03762v5", "arxiv:1706.03762"),
         ("https://arxiv.org/pdf/1706.03762v5.pdf", "arxiv:1706.03762"),
         ("https://doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
     ]

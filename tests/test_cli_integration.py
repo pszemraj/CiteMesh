@@ -291,6 +291,26 @@ class TestCLIExecution:
         assert captured["use_streaming"] is True
         assert captured["corpus_size"] is None
 
+    def test_hybrid_omits_max_semantic_when_unspecified(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hybrid CLI should let strategy compute adaptive max-semantic default."""
+        captured = _run_json_build_with_fake_builder(
+            monkeypatch,
+            builder_attr="HybridGraphBuilder",
+            cli_args=[
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "-p",
+                "5",
+            ],
+            output_name="test_cli_hybrid_default_semantic.json",
+        )
+        assert captured["max_papers"] == 5
+        assert captured["max_semantic"] is None
+
     def test_embedding_strategy_defaults_to_bounded_corpus(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -21,6 +21,7 @@ from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder, _check_embedding_deps
 
 logger = logging.getLogger(__name__)
+DEFAULT_MAX_SEMANTIC = 10
 
 
 class HybridGraphBuilder(GraphBuilderStrategy):
@@ -39,7 +40,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_citations: int = 15,
         max_references: int = 15,
         fetch_references: bool = True,
-        max_semantic: int = 10,
+        max_semantic: Optional[int] = None,
         model_name: str = "google/embeddinggemma-300m",
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
         corpus_size: Optional[int] = 50000,
@@ -56,7 +57,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int max_citations: Maximum citing papers from S2
         :param int max_references: Maximum referenced papers from S2
         :param bool fetch_references: Whether citation branch fetches reference lists.
-        :param int max_semantic: Maximum papers from semantic search
+        :param Optional[int] max_semantic: Maximum papers from semantic search. When
+            omitted, defaults to ``min(10, max_papers - 1)`` so small ``max_papers``
+            values still work without extra flags.
         :param str model_name: Embedding model name
         :param str dataset_split: ArXiv dataset split
         :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
@@ -66,24 +69,29 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
-        if max_semantic < 0:
+        if max_semantic is None:
+            resolved_max_semantic = max(0, min(DEFAULT_MAX_SEMANTIC, max_papers - 1))
+        else:
+            resolved_max_semantic = max_semantic
+
+        if resolved_max_semantic < 0:
             raise ValueError("max_semantic must be non-negative")
-        if max_semantic >= max_papers:
+        if resolved_max_semantic >= max_papers:
             raise ValueError(
                 "max_semantic must be between 0 and max_papers - 1 "
-                f"(got max_semantic={max_semantic}, max_papers={max_papers})"
+                f"(got max_semantic={resolved_max_semantic}, max_papers={max_papers})"
             )
 
         super().__init__(max_papers, random_seed)
         self.client = client or get_client()
-        self.max_semantic = max_semantic
+        self.max_semantic = resolved_max_semantic
 
         if self.max_semantic > 0:
             _check_embedding_deps()
             self.embedding_builder = EmbeddingGraphBuilder(
                 # Embedding strategy budgets include the seed node; hybrid's
                 # max_semantic contract counts only added non-seed neighbors.
-                max_papers=max_semantic + 1,
+                max_papers=self.max_semantic + 1,
                 model_name=model_name,
                 dataset_split=dataset_split,
                 corpus_size=corpus_size,
@@ -97,7 +105,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             self.embedding_builder = None
 
         # Create citation and embedding builders (with same seed for consistency)
-        citation_papers = max_papers - max_semantic
+        citation_papers = max_papers - self.max_semantic
         self.citation_builder = CitationGraphBuilder(
             max_papers=citation_papers,
             max_citations=max_citations,

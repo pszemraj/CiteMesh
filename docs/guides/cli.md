@@ -23,7 +23,7 @@ Accepted identifiers:
 - DOI URL (`https://doi.org/10.1038/nature14539`)
 - arXiv ID (`arxiv:1706.03762`; version suffixes like `v5` are normalized away)
 - bare arXiv-like IDs (for example `1706.03762`) may work when Semantic Scholar resolves them
-- arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`; `vN` suffixes are normalized away)
+- arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/abs/arXiv:1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`; `vN` suffixes are normalized away)
 - Semantic Scholar Paper ID
 - Free-form text query (embedding strategy treats it as a text seed when S2 lookup fails)
 
@@ -91,7 +91,8 @@ Numeric validation:
 
 - Inherits citation flags for paper collection, including `--no-references`
 - Reuses embedding corpus/model knobs (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`)
-- `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph
+- `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
+  If omitted, hybrid computes a safe default of `min(10, max-papers - 1)`.
 
 ## Export Formats
 

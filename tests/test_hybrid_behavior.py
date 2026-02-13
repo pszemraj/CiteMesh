@@ -181,3 +181,18 @@ def test_hybrid_rejects_invalid_semantic_budget(
         ValueError, match="max_semantic must be between 0 and max_papers - 1"
     ):
         HybridGraphBuilder(max_papers=3, max_semantic=3, client=MagicMock())
+
+
+def test_hybrid_default_semantic_budget_is_capped_by_max_papers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default semantic budget should adapt to small max-papers values."""
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
+    )
+
+    small_builder = HybridGraphBuilder(max_papers=5, client=MagicMock())
+    assert small_builder.max_semantic == 4
+
+    default_builder = HybridGraphBuilder(client=MagicMock())
+    assert default_builder.max_semantic == 10

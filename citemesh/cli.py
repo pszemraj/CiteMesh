@@ -477,8 +477,8 @@ Examples:
     hybrid_group.add_argument(
         "--max-semantic",
         type=_non_negative_int,
-        default=10,
-        help="Maximum papers from semantic search (default: 10)",
+        default=None,
+        help=("Maximum papers from semantic search (default: min(10, max-papers - 1))"),
     )
 
     # Search subcommand

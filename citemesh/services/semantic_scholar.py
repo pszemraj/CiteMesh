@@ -66,6 +66,8 @@ def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
         candidate = candidate[:-4]
     candidate = candidate.strip()
 
+    # Some valid arXiv URLs include a legacy "arXiv:" prefix in the path.
+    candidate = re.sub(r"^(?:arxiv:)", "", candidate, flags=re.IGNORECASE)
     candidate = _strip_arxiv_version(candidate)
     return candidate or None
 
