@@ -223,3 +223,107 @@ def test_exporter_plotly_with_fake_module(
     out_path = tmp_path / "graph.plotly.html"
     exporter.to_plotly_html(out_path)
     assert out_path.exists()
+
+
+def test_exporter_plotly_with_missing_year_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plotly export should avoid None in marker colors when year data is missing."""
+
+    captured: dict[str, list[object]] = {}
+
+    class FakeFigure:
+        """Minimal plotly Figure stand-in."""
+
+        def __init__(self, data, layout) -> None:
+            """Store payload for assertions."""
+            self.data = data
+            self.layout = layout
+
+        def write_html(self, path: str) -> None:
+            """Write a simple marker HTML file."""
+            Path(path).write_text("<html>plotly</html>")
+
+    def fake_scatter(**kwargs) -> dict:
+        if kwargs.get("mode") == "markers+text":
+            captured["marker"] = list(kwargs["marker"]["color"])
+        return {"type": "scatter", **kwargs}
+
+    fake_go = types.SimpleNamespace(
+        Scatter=fake_scatter,
+        Layout=lambda **kwargs: {"type": "layout", **kwargs},
+        Figure=FakeFigure,
+    )
+    fake_plotly = types.ModuleType("plotly")
+    fake_plotly.graph_objects = fake_go
+    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        paper=Paper(
+            paper_id="seed",
+            title="Seed Paper",
+            year=None,
+            authors=[Author(name="Alice Smith")],
+            citation_count=3,
+            abstract="Seed abstract",
+            categories=["cs.AI"],
+            is_seed=True,
+        ),
+        title="Seed Paper",
+        citation_count=3,
+        authors=["Alice Smith"],
+        is_seed=True,
+    )
+    graph.add_node("missing-year", title="No Year", citation_count=0, authors=[])
+    graph.add_edge("seed", "missing-year")
+
+    exporter = GraphExporter(
+        graph,
+        "seed",
+        layout={"seed": (0.0, 0.0), "missing-year": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "graph.plotly.html"
+    exporter.to_plotly_html(out_path)
+
+    assert out_path.exists()
+    marker_colors = captured["marker"]
+    assert None not in marker_colors
+    assert 0 in marker_colors
+
+
+def test_exporter_graphml_with_missing_year(tmp_path: Path) -> None:
+    """GraphML export should serialize missing year values as a numeric default."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        paper=Paper(
+            paper_id="seed",
+            title="Seed Paper",
+            year=None,
+            authors=[Author(name="Alice Smith")],
+            citation_count=3,
+            abstract="Seed abstract",
+            categories=["cs.AI"],
+            is_seed=True,
+        ),
+        title="Seed Paper",
+        citation_count=3,
+        authors=["Alice Smith"],
+        is_seed=True,
+    )
+    graph.add_node(
+        "missing-year",
+        title="No Year",
+        citation_count=0,
+        authors=[],
+    )
+    graph.add_edge("seed", "missing-year")
+
+    exporter = GraphExporter(graph, "seed")
+    graphml_path = tmp_path / "graph.graphml"
+    exporter.to_graphml(graphml_path)
+
+    graphml = nx.read_graphml(graphml_path)
+    assert str(graphml.nodes["missing-year"]["year"]) == "0"

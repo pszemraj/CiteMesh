@@ -76,6 +76,7 @@ class GraphExporter:
 
         for node, attrs in self.graph.nodes(data=True):
             cleaned = self._serialize_node(node, attrs)
+            cleaned["year"] = self._coerce_year(cleaned.get("year"))
             if isinstance(cleaned.get("authors"), list):
                 cleaned["authors"] = ", ".join(cleaned["authors"])
             if isinstance(cleaned.get("categories"), list):
@@ -214,7 +215,10 @@ class GraphExporter:
         node_x = [pos[node][0] for node in node_ids]
         node_y = [pos[node][1] for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
-        node_years = [self.graph.nodes[node].get("year", 0) for node in node_ids]
+        node_years = [
+            self._coerce_year(self.graph.nodes[node].get("year"))
+            for node in node_ids
+        ]
         node_labels = [
             self.graph.nodes[node].get("paper").label
             if self.graph.nodes[node].get("paper")
@@ -325,6 +329,13 @@ class GraphExporter:
 
         color = self._color_map_cache[cache_key].get(node, theme.node_color_new)
         return _rgb_tuple_to_hex(color)
+
+    @staticmethod
+    def _coerce_year(raw_year: object) -> int:
+        """Normalize optional year values for formats that disallow null years."""
+        if isinstance(raw_year, int):
+            return raw_year
+        return 0
 
     @staticmethod
     def _serialize_node(node_id: str, attrs: Dict) -> Dict:
