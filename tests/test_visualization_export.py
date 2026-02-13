@@ -324,6 +324,41 @@ def test_exporter_plotly_with_fake_module(
     assert list(node_trace["text"]) == ["Related Paper", "Smith, 2020"]
 
 
+def test_exporter_plotly_requires_div_id_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plotly export should fail fast when deterministic div_id is unsupported."""
+
+    class FakeFigure:
+        """Minimal plotly Figure stand-in that rejects ``div_id``."""
+
+        def __init__(self, data, layout) -> None:
+            del data
+            del layout
+
+        def write_html(self, path: str, **kwargs) -> None:
+            del path
+            if "div_id" in kwargs:
+                raise TypeError("div_id unsupported")
+
+    fake_go = types.SimpleNamespace(
+        Scatter=lambda **kwargs: {"type": "scatter", **kwargs},
+        Layout=lambda **kwargs: {"type": "layout", **kwargs},
+        Figure=FakeFigure,
+    )
+    fake_plotly = types.ModuleType("plotly")
+    fake_plotly.graph_objects = fake_go
+    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+
+    with pytest.raises(RuntimeError, match="Deterministic Plotly export requires"):
+        exporter.to_plotly_html(tmp_path / "graph.plotly.html")
+
+
 def test_exporter_plotly_uses_deterministic_div_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

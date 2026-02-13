@@ -881,7 +881,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
         max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
-        heap: List[Tuple[Tuple[float, Tuple[int, ...], int], str, Dict, np.ndarray]] = []
+        heap: List[
+            Tuple[Tuple[float, Tuple[int, ...], int], str, Dict, np.ndarray]
+        ] = []
         seen_paper_ids: set[str] = set()
 
         progress_enabled = sys.stderr.isatty()

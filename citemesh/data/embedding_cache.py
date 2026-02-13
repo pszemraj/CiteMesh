@@ -324,7 +324,9 @@ class EmbeddingCache:
     @contextmanager
     def _cache_lock(self) -> Iterator[None]:
         """Serialize cache mutations across processes for this model namespace."""
-        lock = FileLock(str(self.lock_path), timeout=EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS)
+        lock = FileLock(
+            str(self.lock_path), timeout=EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
+        )
         try:
             with lock:
                 yield

@@ -59,6 +59,9 @@ def _configure_logging() -> None:
             )
         ],
     )
+    # Keep third-party HTTP logs concise without import-time side effects.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     _LOGGING_CONFIGURED = True
 
 
@@ -589,13 +592,11 @@ Examples:
             )
 
         except Exception as e:
-            message = f"Failed to build graph: {e}"
             logger.error(
                 "Failed to build graph: %s",
                 e,
                 exc_info=logging.getLogger().level == logging.DEBUG,
             )
-            print(message, file=sys.stderr)
             sys.exit(1)
     elif args.command == "search":
         try:

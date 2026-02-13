@@ -91,7 +91,7 @@ Numeric validation:
 
 - Inherits citation flags for paper collection, including `--no-references`
 - Reuses embedding corpus/model knobs (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`)
-- `--max-semantic`: number of semantic neighbors to add when enriching the citation graph
+- `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph
 
 ## Export Formats
 
@@ -109,7 +109,8 @@ Determinism notes:
   metadata in the GraphML:
   - `citemesh_graphml_determinism`
   - `citemesh_graphml_writer_version`
-- `png` and `plotly` are deterministic when using the same input graph and `--seed`.
+- `png` is deterministic when using the same input graph and `--seed`.
+- `plotly` is deterministic when using the same input graph and `--seed`, and your Plotly version supports `write_html(div_id=...)`. CiteMesh fails fast when that capability is unavailable.
 - Pyvis `html` export uses deterministic node/edge ordering in the generated file, but runtime force physics remain non-deterministic in-browser.
 
 Interactive exports require optional viz dependencies:

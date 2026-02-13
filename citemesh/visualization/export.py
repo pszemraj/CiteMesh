@@ -329,12 +329,11 @@ class GraphExporter:
         div_id = self._plotly_div_id()
         try:
             fig.write_html(str(path), div_id=div_id)
-        except TypeError:
-            logger.warning(
-                "Plotly version does not support deterministic div_id; "
-                "HTML bytes may vary between runs."
-            )
-            fig.write_html(str(path))
+        except TypeError as exc:
+            raise RuntimeError(
+                "Deterministic Plotly export requires write_html(div_id=...). "
+                "Upgrade plotly to a version that supports div_id."
+            ) from exc
 
     # ------------------------------------------------------------------
     # Internal helpers

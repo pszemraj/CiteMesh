@@ -24,8 +24,6 @@ from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data import get_cache_dir
 
 logger = logging.getLogger(__name__)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 REFERENCE_CACHE_DIR = get_cache_dir("references")
 REFERENCE_CACHE_VERSION = 1

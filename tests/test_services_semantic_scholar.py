@@ -1,5 +1,7 @@
 """Tests for the Semantic Scholar API client."""
 
+import importlib
+import logging
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 from unittest.mock import MagicMock, patch
@@ -314,6 +316,25 @@ def test_reset_client_recreates_singleton() -> None:
     second_client = get_client()
 
     assert first_client is not second_client
+
+
+def test_semantic_module_reload_does_not_mutate_http_logger_levels() -> None:
+    """Importing/reloading service module should not change global HTTP logger levels."""
+    httpx_logger = logging.getLogger("httpx")
+    httpcore_logger = logging.getLogger("httpcore")
+    original_levels = (httpx_logger.level, httpcore_logger.level)
+
+    try:
+        httpx_logger.setLevel(logging.ERROR)
+        httpcore_logger.setLevel(logging.CRITICAL)
+
+        importlib.reload(semantic_module)
+
+        assert httpx_logger.level == logging.ERROR
+        assert httpcore_logger.level == logging.CRITICAL
+    finally:
+        httpx_logger.setLevel(original_levels[0])
+        httpcore_logger.setLevel(original_levels[1])
 
 
 def test_close_and_reset_client_close_prior_session() -> None:

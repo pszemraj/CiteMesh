@@ -362,6 +362,8 @@ class TestCLIErrorHandling:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Invalid build errors should produce clean non-zero exits without traceback spam."""
+        error_mock = MagicMock()
+        monkeypatch.setattr(cli_module.logger, "error", error_mock)
         monkeypatch.setattr(
             cli_module,
             "_build_strategy_graph",
@@ -377,7 +379,9 @@ class TestCLIErrorHandling:
             ],
         )
         assert result.returncode != 0, "Should fail with non-zero exit code"
-        assert "not found" in result.stderr.lower()
+        assert error_mock.call_count == 1
+        assert "Seed paper not found" in str(error_mock.call_args)
+        assert result.stderr.count("Failed to build graph") <= 1
         assert "Traceback" not in result.stderr
 
     def test_missing_required_argument_fails(self) -> None:

@@ -1,9 +1,9 @@
 """Tests for embedding cache hit/miss behavior."""
 
 import multiprocessing as mp
-from queue import Empty
 import sqlite3
 import tempfile
+from queue import Empty
 from typing import Any
 
 import h5py
