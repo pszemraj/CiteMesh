@@ -69,7 +69,7 @@ class GraphExporter:
                 for u, v, data in sorted_edges
             ],
         }
-        Path(path).write_text(json.dumps(data, indent=2))
+        Path(path).write_text(json.dumps(data, sort_keys=True, indent=2))
 
     def to_graphml(self, path: Path) -> None:
         """Export to GraphML for external tools such as Gephi or Cytoscape."""
@@ -146,12 +146,12 @@ class GraphExporter:
                 """
             )
 
-        for node in self.graph.nodes():
-            paper: Optional[Paper] = self.graph.nodes[node].get("paper")
+        for node, attrs in self._sorted_nodes():
+            paper: Optional[Paper] = attrs.get("paper")
             size = self._node_size(node)
             color = self._node_color_hex(node, theme_obj)
 
-            label = paper.label if paper else self.graph.nodes[node].get("title", node)
+            label = paper.label if paper else attrs.get("title", node)
 
             tooltip_lines = []
             if paper:
@@ -164,9 +164,7 @@ class GraphExporter:
                     cats = ", ".join(html.escape(cat) for cat in paper.categories[:3])
                     tooltip_lines.append(f"Categories: {cats}")
             else:
-                tooltip_lines.append(
-                    html.escape(self.graph.nodes[node].get("title", ""))
-                )
+                tooltip_lines.append(html.escape(attrs.get("title", "")))
 
             net.add_node(
                 node,
@@ -174,10 +172,10 @@ class GraphExporter:
                 title="<br>".join(tooltip_lines),
                 size=max(6, size / 30),
                 color=color,
-                borderWidth=3 if self.graph.nodes[node].get("is_seed") else 1,
+                borderWidth=3 if attrs.get("is_seed") else 1,
             )
 
-        for u, v, data in self.graph.edges(data=True):
+        for u, v, data in self._sorted_edges():
             weight = float(data.get("weight", 0.1))
             net.add_edge(u, v, value=max(0.1, weight * 5))
 
@@ -200,7 +198,7 @@ class GraphExporter:
         pos = self._get_layout()
 
         edge_x, edge_y = [], []
-        for u, v in self.graph.edges():
+        for u, v, _ in self._sorted_edges():
             x0, y0 = pos[u]
             x1, y1 = pos[v]
             edge_x.extend([x0, x1, None])
@@ -214,7 +212,7 @@ class GraphExporter:
             mode="lines",
         )
 
-        node_ids = list(self.graph.nodes())
+        node_ids = [node_id for node_id, _ in self._sorted_nodes()]
         node_x = [pos[node][0] for node in node_ids]
         node_y = [pos[node][1] for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
@@ -333,8 +331,9 @@ class GraphExporter:
         """
         if self._size_map is None:
             sizes = compute_node_sizes(self.graph)
+            ordered_nodes = [node_id for node_id, _ in self._sorted_nodes()]
             self._size_map = {
-                graph_node: size for graph_node, size in zip(self.graph.nodes(), sizes)
+                graph_node: size for graph_node, size in zip(ordered_nodes, sizes)
             }
         return float(self._size_map.get(node, 300.0))
 
@@ -348,9 +347,9 @@ class GraphExporter:
         cache_key = theme.name
         if cache_key not in self._color_map_cache:
             colors, _, _ = compute_node_colors(self.graph, self.seed_id, theme)
+            ordered_nodes = [node_id for node_id, _ in self._sorted_nodes()]
             self._color_map_cache[cache_key] = {
-                graph_node: color
-                for graph_node, color in zip(self.graph.nodes(), colors)
+                graph_node: color for graph_node, color in zip(ordered_nodes, colors)
             }
 
         color = self._color_map_cache[cache_key].get(node, theme.node_color_new)

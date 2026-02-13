@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 from hashlib import sha1
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -21,6 +21,50 @@ from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
 MAX_TITLE_CHARS = 50
+
+
+def _ordered_nodes(graph: nx.Graph) -> List[str]:
+    """Return graph node IDs in canonical deterministic order."""
+    return sorted(graph.nodes(), key=str)
+
+
+def _ordered_edges_with_data(graph: nx.Graph) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """Return canonicalized edge tuples with deterministic ordering."""
+    canonicalized = []
+    for left, right, attrs in graph.edges(data=True):
+        edge_left, edge_right = (
+            (left, right) if str(left) <= str(right) else (right, left)
+        )
+        canonicalized.append((edge_left, edge_right, dict(attrs)))
+
+    return sorted(
+        canonicalized,
+        key=lambda item: (str(item[0]), str(item[1])),
+    )
+
+
+def _canonicalize_graph_for_layout(graph: nx.Graph) -> nx.Graph:
+    """Create a graph copy with deterministic node/edge insertion ordering."""
+    canonical_graph = nx.Graph()
+
+    for node in _ordered_nodes(graph):
+        canonical_graph.add_node(node, **dict(graph.nodes[node]))
+
+    for left, right, attrs in _ordered_edges_with_data(graph):
+        canonical_graph.add_edge(left, right, **attrs)
+
+    return canonical_graph
+
+
+def _citation_count(attrs: Mapping[str, Any]) -> int:
+    """Normalize citation count values for deterministic ranking."""
+    raw = attrs.get("citation_count", 0)
+    if isinstance(raw, bool) or raw is None:
+        return 0
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _filename_safe(text: str, max_chars: int = MAX_TITLE_CHARS) -> str:
@@ -157,17 +201,18 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
     :param nx.Graph graph: NetworkX graph with paper nodes
     :return List[float]: List of sizes (in square pixels) for each node
     """
-    nodes = list(graph.nodes())
+    nodes = _ordered_nodes(graph)
     sizes = []
     seed_nodes = {node for node in nodes if graph.nodes[node].get("is_seed")}
     sorted_nodes = sorted(
-        nodes, key=lambda n: graph.nodes[n].get("citation_count", 0), reverse=True
+        nodes,
+        key=lambda node: (-_citation_count(graph.nodes[node]), str(node)),
     )
     rank_of = {node: rank for rank, node in enumerate(sorted_nodes)}
 
     for node in nodes:
         rank = rank_of.get(node, len(nodes))
-        citation_count = graph.nodes[node].get("citation_count", 0)
+        citation_count = _citation_count(graph.nodes[node])
 
         if node in seed_nodes:
             # Seed paper gets special treatment
@@ -214,7 +259,7 @@ def compute_node_colors(
     :param Theme theme: Theme palette used for interpolation.
     :return Tuple[List[Tuple[float, float, float]], int, int]: Tuple of (color_list, min_year, max_year)
     """
-    nodes = list(graph.nodes())
+    nodes = _ordered_nodes(graph)
     years = [graph.nodes[n].get("year") for n in nodes if graph.nodes[n].get("year")]
     if years:
         min_year = min(years)
@@ -256,18 +301,22 @@ def compute_layout(
     :param Optional[int] layout_seed: Optional seed for deterministic layout perturbations/fallback.
     :return Dict[str, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
     """
+    canonical_graph = _canonicalize_graph_for_layout(graph)
+
     try:
         pos = nx.kamada_kawai_layout(
-            graph,
+            canonical_graph,
             weight="weight",
             scale=VIZ_CONFIG.layout_scale,
             center=VIZ_CONFIG.layout_center,
         )
     except Exception as e:
         logger.warning(f"Kamada-Kawai failed ({e}), using spring layout")
-        k_value = VIZ_CONFIG.spring_k_factor / np.sqrt(graph.number_of_nodes())
+        k_value = VIZ_CONFIG.spring_k_factor / np.sqrt(
+            canonical_graph.number_of_nodes()
+        )
         pos = nx.spring_layout(
-            graph,
+            canonical_graph,
             k=k_value,
             iterations=iterations,
             seed=42 if layout_seed is None else layout_seed,
@@ -294,7 +343,7 @@ def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict, theme: Theme) -> None:
     :param Theme theme: Theme palette for edge colors.
     :return None: Draws all edges onto the axes.
     """
-    for n1, n2, data in graph.edges(data=True):
+    for n1, n2, data in _ordered_edges_with_data(graph):
         weight = data.get("weight", 0.1)
         p1 = pos[n1]
         p2 = pos[n2]
@@ -333,7 +382,7 @@ def draw_nodes(
     :param Theme theme: Theme palette for edge outlines.
     :return None: Draws all nodes onto the axes.
     """
-    nodes = list(graph.nodes())
+    nodes = _ordered_nodes(graph)
 
     for i, node in enumerate(nodes):
         p = pos[node]
@@ -375,7 +424,7 @@ def draw_labels(
             return title
         return f"{title[: max_chars - 3].rstrip()}..."
 
-    for node in graph.nodes():
+    for node in _ordered_nodes(graph):
         p = pos[node]
 
         # Seed paper gets larger, bold label
@@ -429,9 +478,9 @@ def visualize_graph(
     :param nx.Graph graph: NetworkX graph with paper nodes
     :param str seed_id: ID of the seed paper
     :param Path output_path: Path for output PNG file
-    :param int iterations: Number of layout iterations (higher = better quality)
+    :param int iterations: Iterations used only if spring fallback layout is triggered.
     :param int dpi: Output resolution (defaults to config value).
-    :param Optional[Dict[str, Any]] metadata: Optional info to annotate on the figure (auto-positioned) Visual Encodings: - Node size: Citation count + importance ranking (80-2500 pixels) - Node color: Smooth gradient by year (light → dark) - Edge thickness: Proportional to similarity weight - Edge opacity: Based on connection strength - Layout: Kamada-Kawai with organic perturbations
+    :param Optional[Dict[str, Any]] metadata: Optional info to annotate on the figure (auto-positioned).
     :param str theme_name: Name of theme to render.
     :param Optional[Dict[str, np.ndarray]] layout: Optional precomputed layout to reuse.
     :param Optional[int] layout_seed: Optional seed used when computing layout internally.

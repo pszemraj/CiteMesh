@@ -170,6 +170,7 @@ def test_exporter_interactive_html_with_fake_pyvis(
     assert instance.options is not None
     assert len(instance.nodes) == 2
     assert len(instance.edges) == 1
+    assert [node_id for node_id, _ in instance.nodes] == ["related", "seed"]
 
 
 def test_exporter_plotly_raises_without_plotly(
@@ -189,6 +190,8 @@ def test_exporter_plotly_with_fake_module(
 ) -> None:
     """Plotly export should write output using a minimal graph_objects API."""
 
+    captured: dict[str, object] = {}
+
     class FakeFigure:
         """Minimal plotly Figure stand-in."""
 
@@ -200,6 +203,8 @@ def test_exporter_plotly_with_fake_module(
             """
             self.data = data
             self.layout = layout
+            captured["data"] = data
+            captured["layout"] = layout
 
         def write_html(self, path: str) -> None:
             """Write a simple marker HTML file.
@@ -224,6 +229,8 @@ def test_exporter_plotly_with_fake_module(
     out_path = tmp_path / "graph.plotly.html"
     exporter.to_plotly_html(out_path)
     assert out_path.exists()
+    node_trace = captured["data"][1]
+    assert list(node_trace["text"]) == ["Related Paper", "Smith, 2020"]
 
 
 def test_exporter_plotly_with_missing_year_data(
@@ -363,3 +370,51 @@ def test_exporter_json_and_graphml_ordering_is_stable(tmp_path: Path) -> None:
     ]
     assert node_ids == ["a", "seed", "z"]
     assert edge_pairs == [("a", "z"), ("seed", "z")]
+
+
+def test_exporter_plotly_edge_order_is_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plotly edge trace ordering should follow canonicalized edge order."""
+    captured: dict[str, object] = {}
+
+    class FakeFigure:
+        """Minimal plotly Figure stand-in."""
+
+        def __init__(self, data, layout) -> None:
+            """Store payload for assertions."""
+            self.data = data
+            self.layout = layout
+            captured["data"] = data
+
+        def write_html(self, path: str) -> None:
+            """Write a simple marker HTML file."""
+            Path(path).write_text("<html>plotly</html>")
+
+    fake_go = types.SimpleNamespace(
+        Scatter=lambda **kwargs: {"type": "scatter", **kwargs},
+        Layout=lambda **kwargs: {"type": "layout", **kwargs},
+        Figure=FakeFigure,
+    )
+    fake_plotly = types.ModuleType("plotly")
+    fake_plotly.graph_objects = fake_go
+    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+
+    graph = nx.Graph()
+    graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
+    graph.add_node("seed", title="Seed", year=2020, authors=[], is_seed=True)
+    graph.add_node("a", title="Node A", year=2021, authors=[], citation_count=0)
+    graph.add_edge("seed", "z", weight=0.7)
+    graph.add_edge("z", "a", weight=0.5)
+
+    exporter = GraphExporter(
+        graph,
+        "seed",
+        layout={"a": (0.0, 0.0), "seed": (1.0, 0.0), "z": (2.0, 0.0)},
+    )
+    out_path = tmp_path / "ordered.plotly.html"
+    exporter.to_plotly_html(out_path)
+
+    assert out_path.exists()
+    edge_trace = captured["data"][0]
+    assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
