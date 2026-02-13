@@ -24,7 +24,8 @@ citemesh cache root
 │   └── embeddings_<model-hash>.h5 # HDF5 vectors
 ├── joblib/
 │   └── ...                        # HuggingFace dataset shards cached via joblib
-└── logs/ (future use)
+└── references/
+    └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
 > Model hashes are the first eight characters of the SHA-256 digest of the model name, ensuring caches stay isolated when you switch between sentence-transformer checkpoints.
@@ -41,6 +42,10 @@ This makes iterative runs fast: after the first run, loading vectors becomes a d
 ## Joblib Dataset Cache
 
 `datasets.load_dataset` is wrapped with joblib caching. When you request a split like `train[:5%]`, the underlying HuggingFace dataset is stored in `joblib/` so subsequent runs reuse the on-disk Arrow shards instead of re-downloading.
+
+## Semantic Scholar Reference Cache
+
+When reference expansion is enabled, CiteMesh caches reference-id lookups under `references/` using hashed filenames. This reduces repeated API calls for the same paper IDs across runs.
 
 ## HuggingFace Default Cache
 

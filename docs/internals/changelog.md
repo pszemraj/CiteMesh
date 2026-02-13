@@ -2,6 +2,9 @@
 
 This living document summarizes noteworthy changes from the initial script-based prototypes to the current CiteMesh implementation.
 
+For current operational behavior, use the canonical guides:
+[CLI Usage](../guides/cli.md) and [Caching & Data](../guides/caching.md).
+
 ## Export & Visualization
 
 - Added the `GraphExporter` abstraction to generate PNG, Pyvis HTML, Plotly HTML, JSON, and GraphML from a single graph object.

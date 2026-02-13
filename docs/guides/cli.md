@@ -2,6 +2,8 @@
 
 The `citemesh` command builds paper graphs using one of four strategies (`recommendation`, `citation`, `embedding`, `hybrid`). This guide walks through common flags and workflows.
 
+This document is the canonical CLI reference for identifiers, flags, output naming, and export behavior.
+
 ## Basic Invocation
 
 ```bash
@@ -46,7 +48,9 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 
 - Recommended default.
 - Uses Semantic Scholar recommendations for fast, high-signal topical seeds.
-- No extra flags in this release.
+- Reuses:
+  - `--similarity-threshold`, `-t` for edge filtering.
+  - `--no-references` to skip fetching references for the seed paper.
 
 ### Citation Strategy
 
@@ -119,4 +123,8 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 export S2_API_KEY="your-key-here"
 ```
 
-For deeper architecture details or caching behavior, refer to the other documents in this directory.
+For cache behavior, use the canonical cache guide:
+[Caching & Data](caching.md).
+
+For architecture details and extension points:
+[Architecture](../internals/architecture.md).

@@ -17,7 +17,7 @@ GraphBuilderStrategy (base class)
             ↓
 Visualization + Export
     ├── visualization.visualize_graph → PNG
-    └── export.GraphExporter → HTML / JSON / GraphML
+    └── export.GraphExporter → HTML / Plotly / JSON / GraphML
 ```
 
 Every node added to the NetworkX graph carries the same attributes (`paper`, `title`, `year`, `authors`, `citation_count`, `is_seed`). This uniform payload allows the visualization and exporter layers to remain strategy-agnostic.
@@ -27,10 +27,12 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 ### `citemesh/cli.py`
 
 - Defines the `citemesh` console entry point.
-- Adds strategy-specific arguments (e.g., `--max-citations`, `--top-k`, `--max-semantic`).
-- Resolves output filenames for each requested export format.
+- Parses and validates all CLI arguments.
+- Resolves output filenames for requested export formats.
 - Computes one shared layout per build run (optionally seeded via `--seed`) and reuses it across PNG/HTML/Plotly outputs.
 - Builds a metadata dictionary (paper id, strategy, node/edge counts, timestamp) passed to both Matplotlib and HTML exporters.
+
+Authoritative flag/identifier behavior lives in [CLI Usage](../guides/cli.md).
 
 ### `citemesh/strategies/base.py`
 
@@ -41,7 +43,7 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 
 | Strategy    | Responsibilities                                               | Highlights                                                                         |
 | ----------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses temporal, citation-impact, and real bibliographic coupling scores             |
+| `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses abstract similarity, temporal signal, citation impact, and bibliographic coupling |
 | `embedding` | Loads/streams the HuggingFace arXiv metadata snapshot, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
 | `recommendation` | Uses Semantic Scholar recommendations as the primary neighborhood signal  | Fast topical discovery, deterministic thresholded edge filtering                  |
 | `hybrid`    | Starts with citation graph, enriches with semantic matches     | Adjusts weightings based on relationship type, caps edges per node                 |
@@ -94,9 +96,7 @@ Each strategy can surface helpful logging by calling `_set_collection_summary`, 
 
 ## Output Handling
 
-- Default target directory is `out/`; outputs are grouped under `out/<safe-seed-title>/` with strategy basenames.
-- When multiple export formats are requested, filenames receive distinct extensions without overwriting each other.
-- Integration tests point exports to temporary directories to avoid polluting working graphs.
+Output naming and extension-resolution rules are defined in [CLI Usage](../guides/cli.md). This architecture doc intentionally stays at component-level behavior.
 
 ## Extensibility
 
