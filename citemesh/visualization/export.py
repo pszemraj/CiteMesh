@@ -362,7 +362,10 @@ class GraphExporter:
         return _rgb_tuple_to_hex(color)
 
     def _plotly_div_id(self) -> str:
-        """Build deterministic Plotly HTML div identifier for this graph."""
+        """Build a deterministic Plotly HTML container id.
+
+        :return str: Stable ``div_id`` derived from seed id and sorted graph structure.
+        """
         nodes = [str(node_id) for node_id, _ in self._sorted_nodes()]
         edges = [
             (
