@@ -110,18 +110,16 @@ def _query_seed_id(query_text: str) -> str:
     return f"query:{digest}"
 
 
-def _heap_tiebreak_key(paper_id: str) -> Tuple[int, ...]:
-    """Build a legacy-compatible heap tie-break key for paper identifiers."""
-    return tuple([-ord(ch) for ch in str(paper_id)] + [1])
-
-
 def _stream_heap_key(
     similarity: float, paper_id: str, stable_index: int
 ) -> Tuple[float, Tuple[int, ...], int]:
     """Build total-order key where larger tuples represent better candidates."""
+    # Invert char ordinals so lexicographically smaller IDs compare as "better"
+    # when similarity ties, without relying on heterogeneous direct comparisons.
+    paper_key = tuple([-ord(ch) for ch in str(paper_id)] + [1])
     return (
         float(similarity),
-        _heap_tiebreak_key(str(paper_id)),
+        paper_key,
         -int(stable_index),
     )
 

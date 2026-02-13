@@ -185,34 +185,23 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             emb2 = self.embedding_builder.embeddings[paper2.paper_id]
             embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
 
-        # Adaptive weighting
+        # Adaptive weighting by relationship provenance.
         if source1 == "semantic" and source2 == "semantic":
-            # Both semantic: emphasize embeddings
+            # Both semantic: emphasize embeddings.
             weights = HYBRID_CONFIG.semantic_semantic_weights
-            similarity = (
-                weights[0] * embed_sim
-                + weights[1] * temporal_sim
-                + weights[2] * citation_sim
-                + weights[3] * biblio_coupling
-            )
         elif source1 == "citation" and source2 == "citation":
-            # Both citation: emphasize bibliographic coupling
+            # Both citation: emphasize bibliographic coupling.
             weights = HYBRID_CONFIG.citation_citation_weights
-            similarity = (
-                weights[0] * embed_sim
-                + weights[1] * temporal_sim
-                + weights[2] * citation_sim
-                + weights[3] * biblio_coupling
-            )
         else:
-            # Mixed: balanced approach
+            # Mixed: balanced approach.
             weights = HYBRID_CONFIG.mixed_weights
-            similarity = (
-                weights[0] * embed_sim
-                + weights[1] * temporal_sim
-                + weights[2] * citation_sim
-                + weights[3] * biblio_coupling
-            )
+
+        similarity = (
+            weights[0] * embed_sim
+            + weights[1] * temporal_sim
+            + weights[2] * citation_sim
+            + weights[3] * biblio_coupling
+        )
 
         # Add co-citation boost if papers are from same era
         if (

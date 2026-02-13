@@ -394,12 +394,6 @@ class EmbeddingCache:
             )
             conn.commit()
 
-    def _get_cache_metadata(self, conn: sqlite3.Connection, key: str) -> Optional[str]:
-        row = conn.execute(
-            "SELECT value FROM cache_metadata WHERE key = ?", (key,)
-        ).fetchone()
-        return row[0] if row else None
-
     @staticmethod
     def _set_cache_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
         conn.execute(

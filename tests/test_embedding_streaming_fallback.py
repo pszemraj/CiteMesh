@@ -13,7 +13,6 @@ import pytest
 
 from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
-    _heap_tiebreak_key,
     _query_seed_id,
     _stream_heap_key,
 )
@@ -202,9 +201,9 @@ def test_collect_papers_uses_hashed_query_seed_id(
     assert papers[expected_seed_id].is_seed is True
 
 
-def test_heap_tiebreak_handles_prefix_ids() -> None:
+def test_stream_heap_key_handles_prefix_ids() -> None:
     """Prefix paper IDs should preserve lexicographic ordering under tie-break keys."""
-    assert _heap_tiebreak_key("a") > _heap_tiebreak_key("aa")
+    assert _stream_heap_key(0.95, "a", 0) > _stream_heap_key(0.95, "aa", 0)
 
 
 def test_stream_batch_skips_duplicate_paper_ids(
