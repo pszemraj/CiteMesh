@@ -679,14 +679,20 @@ class SemanticScholarClient:
             return []
 
     def get_recommended_papers(
-        self, paper_id: str, limit: int = 50, fields: Optional[List[str]] = None
+        self,
+        paper_id: str,
+        limit: int = 50,
+        fields: Optional[List[str]] = None,
+        include_references: bool = False,
     ) -> List[Paper]:
         """
         Get semantically related papers using S2 recommendations.
 
         :param str paper_id: S2 paper ID
         :param int limit: Maximum recommendations
-        :param Optional[List[str]] fields: API fields to return
+        :param Optional[List[str]] fields: API fields to return.
+        :param bool include_references: Whether recommendation payload should include
+            reference lists when the endpoint supports it.
         :return List[Paper]: Ranked recommendation papers.
         """
         if fields is None:
@@ -699,6 +705,8 @@ class SemanticScholarClient:
                 "abstract",
                 "fieldsOfStudy",
             ]
+        if include_references and "references" not in fields:
+            fields = [*fields, "references"]
 
         normalized_paper_id = normalize_paper_id(paper_id)
         payload = self._request_json(

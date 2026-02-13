@@ -281,3 +281,15 @@ def test_reset_client_recreates_singleton() -> None:
     second_client = get_client()
 
     assert first_client is not second_client
+
+
+def test_get_recommended_papers_include_references_adds_field() -> None:
+    """Recommendation requests should include references field when requested."""
+    client = SemanticScholarClient(timeout=1)
+    client._request_json = MagicMock(return_value={"recommendedPapers": []})
+
+    client.get_recommended_papers("seed", limit=5, include_references=True)
+
+    params = client._request_json.call_args.args[1]
+    fields = params["fields"].split(",")
+    assert "references" in fields

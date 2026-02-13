@@ -146,6 +146,36 @@ class TestRecommendationGraphBuilder:
         assert "no_year" in graph
 
     @patch("citemesh.strategies.recommendation.get_client")
+    def test_collect_papers_uses_recommendation_references_when_available(
+        self, mock_get_client: MagicMock
+    ) -> None:
+        """Reference hydration fallback should be skipped when payload already has refs."""
+        mock_client = MagicMock()
+        mock_client.get_paper.return_value = Paper(
+            paper_id="seed", title="Seed", year=2020, abstract="seed abstract"
+        )
+        mock_client.get_recommended_papers.return_value = [
+            Paper(
+                paper_id="valid",
+                title="Valid",
+                year=2021,
+                abstract="valid abstract",
+                references=["r1", "r2"],
+            )
+        ]
+        mock_get_client.return_value = mock_client
+
+        builder = RecommendationGraphBuilder(max_papers=2, fetch_references=True)
+        papers = builder.collect_papers("seed")
+
+        assert papers["valid"].references == ["r1", "r2"]
+        mock_client.get_reference_ids.assert_not_called()
+        assert (
+            mock_client.get_recommended_papers.call_args.kwargs["include_references"]
+            is True
+        )
+
+    @patch("citemesh.strategies.recommendation.get_client")
     def test_collect_papers_keeps_seed_when_recommendations_include_seed(
         self, mock_get_client: MagicMock
     ) -> None:

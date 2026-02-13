@@ -77,7 +77,9 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
         logger.info("Fetching recommendations for %s", seed.paper_id)
         recommendations = self.client.get_recommended_papers(
-            seed.paper_id, limit=self.max_papers * 2
+            seed.paper_id,
+            limit=self.max_papers * 2,
+            include_references=self.fetch_references,
         )
 
         for paper in recommendations:
