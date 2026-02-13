@@ -340,23 +340,34 @@ def draw_labels(
         pos: Node positions dictionary
         seed_id: ID of seed paper (gets bold label)
     """
+
+    def _shorten_title(title: str, max_chars: int = 34) -> str:
+        if len(title) <= max_chars:
+            return title
+        return f"{title[: max_chars - 3].rstrip()}..."
+
     for node in graph.nodes():
         p = pos[node]
 
-        # Extract author surname
-        authors = graph.nodes[node].get("authors", [])
-        if authors and authors[0]:
-            last_name = authors[0].split()[-1]
-        else:
-            last_name = "Unknown"
-
-        year = graph.nodes[node].get("year")
-        year_label = "n.d." if year is None else str(year)
-        label = f"{last_name}, {year_label}"
-
         # Seed paper gets larger, bold label
         is_seed = node == seed_id
-        fontsize = 10 if is_seed else VIZ_CONFIG.font_size
+        if is_seed:
+            title = graph.nodes[node].get("title", "Seed paper")
+            label = _shorten_title(title)
+            fontsize = 9
+        else:
+            # Extract author surname
+            authors = graph.nodes[node].get("authors", [])
+            if authors and authors[0]:
+                last_name = authors[0].split()[-1]
+            else:
+                last_name = "Unknown"
+
+            year = graph.nodes[node].get("year")
+            year_label = "n.d." if year is None else str(year)
+            label = f"{last_name}, {year_label}"
+            fontsize = VIZ_CONFIG.font_size
+
         fontweight = "bold" if is_seed else VIZ_CONFIG.font_weight
 
         ax.annotate(

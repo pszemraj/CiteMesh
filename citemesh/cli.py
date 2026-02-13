@@ -11,12 +11,14 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Dict, List
 
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
 from citemesh.services import get_client
+from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
@@ -45,6 +47,66 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 EXPORT_FORMATS = ("png", "html", "plotly", "json", "graphml")
+EXPORT_EXTENSIONS: Dict[str, str] = {
+    "png": ".png",
+    "html": ".html",
+    "plotly": ".plotly.html",
+    "json": ".json",
+    "graphml": ".graphml",
+}
+KNOWN_EXPORT_SUFFIXES: List[str] = sorted(
+    EXPORT_EXTENSIONS.values(), key=len, reverse=True
+)
+
+
+def resolve_output_paths(
+    base_output_path: Path, selected_formats: List[str], explicit_output: bool
+) -> Dict[str, Path]:
+    """
+    Resolve final output paths for selected export formats.
+
+    Handles explicit user paths robustly, including names with dots that are not
+    recognized export extensions (e.g. ``paper-2508.14040-example``).
+    """
+    base_str = str(base_output_path)
+    matched_suffix = next(
+        (ext for ext in KNOWN_EXPORT_SUFFIXES if base_str.lower().endswith(ext)),
+        None,
+    )
+
+    output_paths: Dict[str, Path] = {}
+    if explicit_output and len(selected_formats) == 1:
+        fmt = selected_formats[0]
+        desired_ext = EXPORT_EXTENSIONS[fmt]
+
+        if matched_suffix == desired_ext:
+            output_paths[fmt] = base_output_path
+            return output_paths
+
+        if matched_suffix:
+            output_paths[fmt] = Path(base_str[: -len(matched_suffix)] + desired_ext)
+            return output_paths
+
+        output_paths[fmt] = Path(base_str + desired_ext)
+        return output_paths
+
+    if matched_suffix:
+        output_base = base_str[: -len(matched_suffix)]
+    else:
+        output_base = base_str
+
+    for fmt in selected_formats:
+        output_paths[fmt] = Path(output_base + EXPORT_EXTENSIONS[fmt])
+
+    return output_paths
+
+
+def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
+    """Best-effort canonical paper ID for output metadata display."""
+    try:
+        return normalize_paper_id(paper_id)
+    except ValueError:
+        return paper_id
 
 
 def build_citation_graph(args):
@@ -341,46 +403,16 @@ Examples:
             selected_formats = (
                 list(EXPORT_FORMATS) if args.export == "all" else [args.export]
             )
-
-            extension_map = {
-                "png": ".png",
-                "html": ".html",
-                "plotly": ".plotly.html",
-                "json": ".json",
-                "graphml": ".graphml",
-            }
-
-            explicit_suffix = base_output_path.suffix.lower()
-            base_name = (
-                base_output_path.stem
-                if base_output_path.suffix
-                else base_output_path.name
+            output_paths = resolve_output_paths(
+                base_output_path=base_output_path,
+                selected_formats=selected_formats,
+                explicit_output=bool(args.output),
             )
-
-            output_paths = {}
-            for fmt in selected_formats:
-                ext = extension_map[fmt]
-
-                if args.output and len(selected_formats) == 1:
-                    if base_output_path.suffix and (
-                        base_output_path.name.endswith(ext) or ext == explicit_suffix
-                    ):
-                        path = base_output_path
-                    elif base_output_path.suffix:
-                        path = output_dir / f"{base_name}{ext}"
-                    else:
-                        path = base_output_path.with_name(
-                            f"{base_output_path.name}{ext}"
-                        )
-                else:
-                    path = output_dir / f"{base_name}{ext}"
-
-                output_paths[fmt] = path
 
             # Visualize / export
             logger.info("Creating visualization...")
             metadata = {
-                "paper_id": args.paper_id,
+                "paper_id": canonicalize_paper_id_for_metadata(args.paper_id),
                 "seed_id": seed_id,
                 "strategy": args.strategy,
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
