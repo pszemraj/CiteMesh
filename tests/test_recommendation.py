@@ -49,8 +49,8 @@ class TestRecommendationGraphBuilder:
 
         assert related_similarity > unrelated_similarity
 
-    def test_should_create_edge_deterministic_thresholds(self) -> None:
-        """Edges are now deterministic and should not call random logic."""
+    def test_should_create_edge_uses_single_threshold(self) -> None:
+        """Recommendation edges should use only the configured threshold."""
         seed = Paper(paper_id="seed", title="Seed", year=2020, abstract="seed abstract")
         related = Paper(
             paper_id="related",
@@ -79,7 +79,7 @@ class TestRecommendationGraphBuilder:
         assert builder.should_create_edge(seed, related, 0.20)
         assert not builder.should_create_edge(seed, weak, 0.19)
         assert not builder.should_create_edge(weak, related, 0.12)
-        assert not builder.should_create_edge(weak, related, 0.25)
+        assert builder.should_create_edge(weak, related, 0.25)
 
     @patch("citemesh.strategies.recommendation.get_client")
     def test_collect_papers_filters_missing_abstract(

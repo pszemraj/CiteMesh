@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 from tqdm.auto import tqdm
 
-from citemesh.core import CITATION_CONFIG, Paper
+from citemesh.core import Paper
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
@@ -221,13 +221,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param float similarity: Computed similarity score
         :return bool: True if edge should be created
         """
-        # Check minimum threshold
-        if similarity < self.similarity_threshold:
-            return False
-
-        # Seed paper: lower threshold
-        if paper1.is_seed or paper2.is_seed:
-            return similarity > CITATION_CONFIG.seed_edge_threshold
-
-        # Non-seed papers: stricter deterministic threshold
-        return similarity > CITATION_CONFIG.normal_edge_threshold
+        del paper1
+        del paper2
+        return similarity >= self.similarity_threshold

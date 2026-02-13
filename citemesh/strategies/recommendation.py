@@ -158,8 +158,6 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param float similarity: Computed similarity score.
         :return bool: ``True`` when edge should be kept.
         """
-        if similarity < self.similarity_threshold:
-            return False
-        if paper1.is_seed or paper2.is_seed:
-            return similarity >= max(self.similarity_threshold, 0.2)
-        return similarity >= self.similarity_threshold * 1.5
+        del paper1
+        del paper2
+        return similarity >= self.similarity_threshold

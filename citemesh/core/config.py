@@ -29,15 +29,6 @@ class TemporalConfig:
 
 
 @dataclass
-class CitationSimilarityConfig:
-    """Configuration for citation-based similarity thresholds."""
-
-    # Edge creation thresholds
-    seed_edge_threshold: float = 0.45  # Lower threshold for seed connections
-    normal_edge_threshold: float = 0.65  # Standard threshold for other papers
-
-
-@dataclass
 class EmbeddingSimilarityConfig:
     """Configuration for embedding-based similarity."""
 
@@ -129,7 +120,6 @@ class APIConfig:
 
 # Global config instances (can be overridden)
 TEMPORAL_CONFIG = TemporalConfig()
-CITATION_CONFIG = CitationSimilarityConfig()
 EMBEDDING_CONFIG = EmbeddingSimilarityConfig()
 HYBRID_CONFIG = HybridSimilarityConfig()
 VIZ_CONFIG = VisualizationConfig()
