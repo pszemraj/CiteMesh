@@ -12,7 +12,61 @@ import networkx as nx
 import pytest
 
 from citemesh.core import Author, Paper
-from citemesh.visualization.export import GraphExporter
+from citemesh.visualization.export import (
+    GRAPHML_LAYOUT_METADATA_KEY,
+    GRAPHML_LAYOUT_VERSION_KEY,
+    GRAPHML_DETERMINISM_POLICY_STRICT,
+    GraphExporter,
+    _graphml_determinism_policy,
+)
+
+
+def _canonicalize_graphml(path: Path) -> str:
+    """Return a deterministic textual representation for GraphML comparison."""
+    document = ET.parse(path)
+    root = document.getroot()
+    namespace = "{http://graphml.graphdrawing.org/xmlns}"
+
+    def _sorted_children(node: ET.Element) -> None:
+        for child in node:
+            _sorted_children(child)
+
+        if not list(node):
+            return
+
+        if node.tag == f"{namespace}node":
+            node[:] = sorted(
+                node,
+                key=lambda item: item.attrib.get("id", ""),
+            )
+        elif node.tag == f"{namespace}edge":
+            node[:] = sorted(
+                node,
+                key=lambda item: (item.attrib.get("source", ""), item.attrib.get("target", "")),
+            )
+        elif node.tag == f"{namespace}graph":
+            node[:] = sorted(
+                node,
+                key=lambda item: (
+                    item.tag,
+                    item.attrib.get("id", ""),
+                    item.attrib.get("source", ""),
+                    item.attrib.get("target", ""),
+                    item.attrib.get("for", ""),
+                    item.attrib.get("attr.name", ""),
+                ),
+            )
+        else:
+            node[:] = sorted(node, key=lambda item: item.tag)
+
+        for child in node:
+            child.attrib = dict(sorted(child.attrib.items(), key=lambda item: item[0]))
+
+    _sorted_children(root)
+    for element in document.iter():
+        element.attrib = dict(sorted(element.attrib.items(), key=lambda item: item[0]))
+
+    return ET.tostring(root, encoding="unicode")
 
 
 def _build_graph() -> tuple[nx.Graph, str]:
@@ -171,6 +225,39 @@ def test_exporter_interactive_html_with_fake_pyvis(
     assert len(instance.nodes) == 2
     assert len(instance.edges) == 1
     assert [node_id for node_id, _ in instance.nodes] == ["related", "seed"]
+
+
+def test_graphml_export_is_deterministic_across_runs(tmp_path: Path) -> None:
+    """Repeated GraphML exports should be deterministically equivalent."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+
+    primary = tmp_path / "graph-a.graphml"
+    secondary = tmp_path / "graph-b.graphml"
+    exporter.to_graphml(primary)
+    exporter.to_graphml(secondary)
+
+    policy = _graphml_determinism_policy()
+    if policy == GRAPHML_DETERMINISM_POLICY_STRICT:
+        assert primary.read_text() == secondary.read_text()
+    else:
+        assert _canonicalize_graphml(primary) == _canonicalize_graphml(secondary)
+
+
+def test_graphml_export_records_determinism_metadata(
+    tmp_path: Path,
+) -> None:
+    """GraphML output should expose deterministic serialization policy metadata."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+
+    path = tmp_path / "graph.graphml"
+    exporter.to_graphml(path)
+    graphml = nx.read_graphml(path)
+
+    policy = _graphml_determinism_policy()
+    assert graphml.graph[GRAPHML_LAYOUT_METADATA_KEY] == policy
+    assert graphml.graph[GRAPHML_LAYOUT_VERSION_KEY] == nx.__version__
 
 
 def test_exporter_plotly_raises_without_plotly(

@@ -11,7 +11,7 @@ import re
 import sys
 from contextlib import nullcontext
 from hashlib import sha1
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
 import networkx as nx
 import numpy as np
@@ -23,6 +23,7 @@ from citemesh.data import EmbeddingCache, get_cache_dir, get_embedding_model_pro
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
+    deterministic_sort_key,
     select_capped_undirected_edges,
 )
 
@@ -107,17 +108,6 @@ def _query_seed_id(query_text: str) -> str:
     """Build deterministic query-mode seed node identifier."""
     digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
     return f"query:{digest}"
-
-
-def _heap_tiebreak_key(paper_id: str) -> Tuple[int, ...]:
-    """Build heap tiebreak key where lexicographically smaller IDs rank better.
-
-    The terminal sentinel fixes prefix ordering so ``"a"`` outranks ``"aa"``.
-
-    :param str paper_id: Candidate paper identifier.
-    :return Tuple[int, ...]: Orderable key used for deterministic tie-breaking.
-    """
-    return tuple([-ord(ch) for ch in str(paper_id)] + [1])
 
 
 class _AutocastEncodeProxy:
@@ -345,6 +335,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         top_k: int = 2,
         random_seed: Optional[int] = None,
         use_streaming: bool = False,
+        force_rebuild_cache: bool = False,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -359,6 +350,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int top_k: Number of most similar neighbors per node
         :param Optional[int] random_seed: Random seed for reproducibility
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
+        :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         _check_embedding_deps()
@@ -378,6 +370,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.embedding_cache = EmbeddingCache(
             model_name=self._embedding_cache_namespace()
         )
+        if force_rebuild_cache:
+            logger.info("Forcing embedding cache rebuild as requested.")
+            self.embedding_cache.clear()
         self.use_streaming = use_streaming
         if self.use_streaming and ":" in self.dataset_split:
             raise ValueError(
@@ -844,15 +839,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 paper_id,
                 metadata,
                 embeddings_array[idx],
+                idx,
             )
             for idx, (paper_id, metadata) in enumerate(valid_items)
         ]
-        scored_candidates.sort(key=lambda item: (-item[0], str(item[1])))
+        scored_candidates.sort(
+            key=lambda item: deterministic_sort_key(item[0], item[1], stable_index=item[4])
+        )
         top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(scored_candidates))
 
         return [
             (paper_id, metadata, embedding)
-            for _, paper_id, metadata, embedding in scored_candidates[:top_k]
+            for _, paper_id, metadata, embedding, _ in scored_candidates[:top_k]
         ]
 
     def _select_candidates_streaming(
@@ -865,7 +863,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
         max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
-        heap: List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]] = []
+        heap: List[Tuple[Tuple[Any, ...], str, Dict, np.ndarray]] = []
         seen_paper_ids: set[str] = set()
 
         progress_enabled = sys.stderr.isatty()
@@ -935,19 +933,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 raise last_exception
             return []
 
-        top_candidates = sorted(heap, key=lambda item: (-item[0], str(item[2])))
+        top_candidates = sorted(heap, key=lambda item: item[0])
         limited = top_candidates[: self.max_papers * CANDIDATE_MULTIPLIER]
 
         return [
             (paper_id, metadata, embedding)
-            for _, _, paper_id, metadata, embedding in limited
+            for _, paper_id, metadata, embedding in limited
         ]
 
     def _process_stream_batch(
         self,
         batch: List[Dict],
         seed_embedding: np.ndarray,
-        heap: List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]],
+        heap: List[Tuple[Tuple[Any, ...], str, Dict, np.ndarray]],
         max_candidates: int,
         seen_paper_ids: set[str],
     ) -> None:
@@ -969,7 +967,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             text_builder=self.model_profile.format_document,
         )
 
-        for metadata in batch:
+        for stable_index, metadata in enumerate(batch):
             paper_id = str(metadata["paper_id"])
             if paper_id in seen_paper_ids:
                 continue
@@ -983,8 +981,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             similarity = float(np.dot(seed_embedding, embedding))
             candidate = (
-                similarity,
-                _heap_tiebreak_key(paper_id),
+                deterministic_sort_key(similarity, paper_id, stable_index=stable_index),
                 paper_id,
                 metadata,
                 embedding,

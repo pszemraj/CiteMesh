@@ -40,7 +40,11 @@ A new vector is computed when:
 - The paper is not yet in the cache, or
 - The combined text (`title + abstract`) has changed (detected via SHA-256 hash).
 
-Older per-paper HDF5 cache layouts are treated as legacy and reset automatically on first use so new runs can use matrix storage.
+Older per-paper HDF5 cache layouts are renamed to a `.bak...` backup on first use, so existing data can be manually recovered before matrix storage is rebuilt.
+
+`clear()` and migration operations now preserve old cache bytes by moving them to timestamped backups (`.bak.<state>.<timestamp>`). Use this to recover from unexpected behavior before removing those backups manually.
+
+To force immediate rebuilds from scratch, pass `--force-rebuild-cache` with the `embedding` or `hybrid` strategy.
 
 This makes iterative runs fast: after the first run, loading vectors becomes a disk-read operation even for large corpora.
 

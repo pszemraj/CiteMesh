@@ -45,6 +45,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         corpus_size: Optional[int] = 50000,
         truncate_dim: Optional[int] = None,
         use_streaming: bool = False,
+        force_rebuild_cache: bool = False,
         random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
@@ -61,6 +62,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
         :param bool use_streaming: Whether to stream the embedding corpus.
+        :param bool force_rebuild_cache: Whether to clear embedding cache before semantic enrichment.
         :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
@@ -86,6 +88,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 truncate_dim=truncate_dim,
                 random_seed=random_seed,
                 use_streaming=use_streaming,
+                force_rebuild_cache=force_rebuild_cache,
                 client=self.client,
             )
         else:

@@ -168,6 +168,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             top_k=cli_args.top_k,
             random_seed=cli_args.seed,
             use_streaming=cli_args.streaming,
+            force_rebuild_cache=cli_args.force_rebuild_cache,
         ),
     ),
     "hybrid": _StrategyDispatchSpec(
@@ -182,6 +183,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             corpus_size=None if cli_args.all_corpus else cli_args.corpus_size,
             truncate_dim=cli_args.truncate_dim,
             use_streaming=cli_args.streaming,
+            force_rebuild_cache=cli_args.force_rebuild_cache,
             random_seed=cli_args.seed,
         ),
     ),
@@ -341,7 +343,9 @@ Examples:
         "-p",
         type=_positive_int,
         default=40,
-        help="Maximum papers to include (default: 40)",
+        help=(
+            "Maximum papers in final graph (seed included; default: 40)"
+        ),
     )
 
     build_parser.add_argument(
@@ -459,6 +463,12 @@ Examples:
         "--streaming",
         action="store_true",
         help="Stream HuggingFace dataset instead of loading it into memory (requires non-sliced --dataset-split)",
+    )
+
+    embedding_group.add_argument(
+        "--force-rebuild-cache",
+        action="store_true",
+        help="Forcefully clear and rebuild embedding cache for this model before running.",
     )
 
     # Hybrid strategy arguments
@@ -581,13 +591,11 @@ Examples:
             )
 
         except Exception as e:
-            message = f"Failed to build graph: {e}"
-            print(message, file=sys.stderr)
-            # Only show full traceback in debug mode
-            if logging.getLogger().level == logging.DEBUG:
-                import traceback
-
-                traceback.print_exc()
+            logger.error(
+                "Failed to build graph: %s",
+                e,
+                exc_info=logging.getLogger().level == logging.DEBUG,
+            )
             sys.exit(1)
     elif args.command == "search":
         try:

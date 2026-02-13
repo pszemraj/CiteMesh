@@ -14,6 +14,7 @@ from citemesh.services.semantic_scholar import (
     normalize_paper_id,
     reset_client,
 )
+from citemesh.services import semantic_scholar as semantic_module
 from tests.conftest import get_paper_id_normalization_cases
 
 
@@ -313,6 +314,92 @@ def test_reset_client_recreates_singleton() -> None:
     second_client = get_client()
 
     assert first_client is not second_client
+
+
+def test_close_and_reset_client_close_prior_session() -> None:
+    """`reset_client()` should close both request session and API wrapper."""
+    created: list["object"] = []
+
+    class _FakeRequestsSession:
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeApi:
+        def __init__(self, *_, **__) -> None:
+            self.session = _FakeRequestsSession()
+            self.closed = False
+            created.append(self)
+
+        def close(self) -> None:
+            self.closed = True
+
+    previous_session = semantic_module.requests.Session
+    previous_client = semantic_module.SemanticScholar
+    try:
+        semantic_module.requests.Session = _FakeRequestsSession
+        semantic_module.SemanticScholar = _FakeApi
+
+        reset_client()
+        first = get_client()
+        reset_client()
+
+        assert first._session.closed is True
+        assert first.client.closed is True
+        assert first._closed is True
+        assert len(created) == 1
+
+        second = get_client()
+        assert second is not first
+        assert len(created) == 2
+    finally:
+        semantic_module.requests.Session = previous_session
+        semantic_module.SemanticScholar = previous_client
+
+
+def test_client_context_manager_closes_sessions() -> None:
+    """Client context manager should close all owned sessions."""
+    class _FakeRequestsSession:
+        """Minimal request session with close tracking."""
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeApi:
+        """Minimal SemanticScholar wrapper stub."""
+
+        def __init__(self, *_, **__) -> None:
+            self.session = _FakeRequestsSession()
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    previous_session = semantic_module.requests.Session
+    previous_client = semantic_module.SemanticScholar
+    try:
+        semantic_module.requests.Session = _FakeRequestsSession
+        semantic_module.SemanticScholar = _FakeApi
+
+        with semantic_module.SemanticScholarClient(timeout=1) as client:
+            assert client._closed is False
+            api_session = client.client.session
+            request_session = client._session
+
+        assert client._closed is True
+        assert request_session.closed is True
+        assert api_session.closed is True
+        assert client.client.closed is True
+    finally:
+        semantic_module.requests.Session = previous_session
+        semantic_module.SemanticScholar = previous_client
 
 
 def test_get_recommended_papers_include_references_adds_field() -> None:

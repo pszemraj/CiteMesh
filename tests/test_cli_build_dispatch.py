@@ -25,6 +25,7 @@ def _dispatch_namespace() -> argparse.Namespace:
         streaming=True,
         max_semantic=5,
         seed=7,
+        force_rebuild_cache=False,
     )
 
 
@@ -67,6 +68,7 @@ def _dispatch_namespace() -> argparse.Namespace:
                 "corpus_size": None,
                 "truncate_dim": 64,
                 "top_k": 4,
+                "force_rebuild_cache": False,
                 "use_streaming": True,
                 "random_seed": 7,
             },
@@ -86,6 +88,7 @@ def _dispatch_namespace() -> argparse.Namespace:
                 "truncate_dim": 64,
                 "use_streaming": True,
                 "random_seed": 7,
+                "force_rebuild_cache": False,
             },
         ),
     ],
@@ -110,6 +113,27 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
     assert seed_id == "seed"
     assert graph.number_of_nodes() == 1
     assert captured == expected_kwargs
+
+
+@pytest.mark.parametrize("strategy,builder_name", [("embedding", "EmbeddingGraphBuilder"), ("hybrid", "HybridGraphBuilder")])
+def test_force_rebuild_cache_passes_through_embedding_strategies(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+    builder_name: str,
+) -> None:
+    """Forceful cache rebuild flag should pass through embedding builders."""
+    captured: dict[str, object] = {}
+    namespace = _dispatch_namespace()
+    namespace.force_rebuild_cache = True
+
+    monkeypatch.setattr(
+        cli_module,
+        builder_name,
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+
+    _ = cli_module._build_strategy_graph(namespace, strategy)
+    assert captured["force_rebuild_cache"] is True
 
 
 def test_build_strategy_graph_rejects_invalid_strategy() -> None:

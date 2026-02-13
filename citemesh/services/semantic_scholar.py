@@ -7,9 +7,11 @@ import json
 import logging
 import numbers
 import os
+import contextlib
 import re
 import threading
 import time
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import quote, unquote, urlparse
@@ -202,10 +204,74 @@ class SemanticScholarClient:
         self.timeout = timeout
         self.last_request_time = 0.0
         self._session = requests.Session()
+        self._closed = False
 
         if api_key:
             self._session.headers["x-api-key"] = api_key
             logger.info("Using Semantic Scholar API key from S2_API_KEY")
+
+    def __enter__(self) -> "SemanticScholarClient":
+        """Return this client for context-manager use."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[type],
+        exc: Optional[BaseException],
+        tb: Optional[Any],
+    ) -> None:
+        """Close the client session on context-manager exit."""
+        self.close()
+
+    def close(self) -> None:
+        """Close the HTTP session and underlying API client handles."""
+        if self._closed:
+            return
+        with contextlib.suppress(Exception):
+            self._session.close()
+        client_session = getattr(self.client, "session", None)
+        if hasattr(client_session, "close"):
+            with contextlib.suppress(Exception):
+                client_session.close()
+        with contextlib.suppress(Exception):
+            close_api_client = getattr(self.client, "close", None)
+            if callable(close_api_client):
+                close_api_client()
+        self._closed = True
+
+    def __del__(self) -> None:
+        """Attempt to close sessions on object finalization."""
+        with contextlib.suppress(Exception):
+            self.close()
+
+    def _atomic_write_json(self, cache_path: Path, payload: Dict[str, Any]) -> None:
+        """Write JSON payload with crash-safe atomic rename.
+
+        :param Path cache_path: Target cache file path.
+        :param Dict[str, Any] payload: JSON payload to persist.
+        """
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: Optional[Path] = None
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{cache_path.name}.",
+            suffix=".tmp",
+            dir=cache_path.parent,
+            text=True,
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                json.dump(payload, tmp, sort_keys=True)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+
+            os.replace(tmp_name, cache_path)
+            with cache_path.open("r+b") as final_file:
+                os.fsync(final_file.fileno())
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                with contextlib.suppress(Exception):
+                    tmp_path.unlink()
 
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests."""
@@ -697,14 +763,13 @@ class SemanticScholarClient:
                             ref_ids.append(ref.paper.paperId)
 
                     try:
-                        cache_path.write_text(
-                            json.dumps(
-                                {
-                                    "paper_id": normalized_paper_id,
-                                    "references": ref_ids,
-                                    "version": REFERENCE_CACHE_VERSION,
-                                }
-                            )
+                        self._atomic_write_json(
+                            cache_path,
+                            {
+                                "paper_id": normalized_paper_id,
+                                "references": ref_ids,
+                                "version": REFERENCE_CACHE_VERSION,
+                            },
                         )
                     except OSError as exc:
                         logger.debug(
@@ -868,4 +933,6 @@ def reset_client() -> None:
     """Reset cached client instance (for testing)."""
     global _client_instance
     with _client_lock:
+        if _client_instance is not None:
+            _client_instance.close()
         _client_instance = None

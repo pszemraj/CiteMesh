@@ -13,6 +13,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, Iterable, Optional
+import re
 
 import networkx as nx
 
@@ -23,6 +24,29 @@ from .render import compute_layout, compute_node_colors, compute_node_sizes
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
+
+GRAPHML_DETERMINISM_POLICY_STRICT = "strict_sorted_nodes_edges"
+GRAPHML_DETERMINISM_POLICY_BEST_EFFORT = "best_effort_sorted_nodes_edges"
+_GRAPHML_BEST_EFFORT_MIN_VERSION = (2, 8)
+GRAPHML_LAYOUT_METADATA_KEY = "citemesh_graphml_determinism"
+GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
+
+
+def _graphml_determinism_policy() -> str:
+    """Return determinism policy name for active NetworkX writer runtime."""
+    major_minor = tuple(int(part) for part in re.findall(r"\d+", nx.__version__)[:2])
+    if len(major_minor) < 2:
+        return GRAPHML_DETERMINISM_POLICY_BEST_EFFORT
+
+    major, minor = major_minor[0], major_minor[1]
+    if (major, minor) >= _GRAPHML_BEST_EFFORT_MIN_VERSION:
+        return GRAPHML_DETERMINISM_POLICY_STRICT
+    return GRAPHML_DETERMINISM_POLICY_BEST_EFFORT
+
+
+def _ordered_attrs(attrs: Dict[str, object]) -> Dict[str, object]:
+    """Return a copy of mapping with deterministic key ordering."""
+    return {key: attrs[key] for key in sorted(attrs, key=str)}
 
 
 class GraphExporter:
@@ -78,9 +102,19 @@ class GraphExporter:
 
     def to_graphml(self, path: Path) -> None:
         """Export to GraphML for external tools such as Gephi or Cytoscape."""
+        determinism_policy = _graphml_determinism_policy()
+        if determinism_policy == GRAPHML_DETERMINISM_POLICY_BEST_EFFORT:
+            logger.warning(
+                "GraphML serialization is deterministic only as best-effort "
+                "on this NetworkX version (%s).",
+                nx.__version__,
+            )
+
         export_graph = nx.Graph()
         sorted_nodes = self._sorted_nodes()
         sorted_edges = self._sorted_edges()
+        export_graph.graph[GRAPHML_LAYOUT_METADATA_KEY] = determinism_policy
+        export_graph.graph[GRAPHML_LAYOUT_VERSION_KEY] = nx.__version__
 
         for node, attrs in sorted_nodes:
             cleaned = self._serialize_node(node, attrs)
@@ -90,13 +124,18 @@ class GraphExporter:
             if isinstance(cleaned.get("categories"), list):
                 cleaned["categories"] = ", ".join(cleaned["categories"])
             cleaned["is_seed"] = int(bool(cleaned.get("is_seed")))
-            export_graph.add_node(node, **cleaned)
+            export_graph.add_node(node, **_ordered_attrs(cleaned))
 
         for u, v, data in sorted_edges:
             export_graph.add_edge(
                 u,
                 v,
-                **{k: float(val) if k == "weight" else val for k, val in data.items()},
+                **_ordered_attrs(
+                    {
+                        k: float(val) if k == "weight" else val
+                        for k, val in data.items()
+                    }
+                ),
             )
 
         nx.write_graphml(export_graph, path)

@@ -32,7 +32,7 @@ Accepted identifiers:
 | Flag                 | Description                                                      | Default                        |
 | -------------------- | ---------------------------------------------------------------- | ------------------------------ |
 | `--strategy`, `-s`   | `recommendation`, `citation`, `embedding`, or `hybrid`           | `recommendation`               |
-| `--max-papers`, `-p` | Maximum nodes in final graph                                     | `40`                           |
+| `--max-papers`, `-p` | Maximum nodes in final graph (seed included)                      | `40`                           |
 | `--spring-iterations`, `-i` | Iterations used only for spring-layout fallback                    | `100`                          |
 | `--dpi`, `-d`        | PNG output resolution                                            | `150`                          |
 | `--seed`             | Seed for layout computation used by layout-based exports (`png`, `plotly`) | deterministic built-in seed    |
@@ -82,6 +82,7 @@ Numeric validation:
 - `--top-k`, `-k`: strict per-node edge cap applied during embedding graph pruning
 - `--truncate-dim`: optional embedding output dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`); use `--corpus-size` to cap runtime in streaming mode.
+- `--force-rebuild-cache`: clear and rebuild embedding cache for this run (model-specific). Use when cache format migration is not desired automatically.
   
   _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts, defaults to `256d` Matryoshka embeddings (available: `768/512/256/128`), and logs the selected dimension at model load. It also prefers `bfloat16` model loading with CUDA autocast; if BF16 is unavailable, it falls back to float32.
   CiteMesh also attempts the `torch.compile` inner-transformer workaround (`model[0].auto_model`) for EmbeddingGemma when available; on compile failure it logs a warning and continues uncompiled.

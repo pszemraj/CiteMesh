@@ -19,6 +19,24 @@ from citemesh.core import TEMPORAL_CONFIG, Paper
 logger = logging.getLogger(__name__)
 
 
+def deterministic_sort_key(
+    primary: float,
+    primary_id: Any,
+    secondary_id: Optional[Any] = None,
+    stable_index: int = 0,
+) -> Tuple[Any, ...]:
+    """Build a strict deterministic ordering key for ranking and heap comparisons.
+
+    :param float primary: Primary numeric score used for ordering.
+    :param Any primary_id: Primary tie-breaker key.
+    :param Optional[Any] secondary_id: Optional second tie-breaker key.
+    :param int stable_index: Optional deterministic fallback index.
+    :return Tuple[Any, ...]: Tuple-safe comparison key with deterministic stringification.
+    """
+    secondary = "" if secondary_id is None else str(secondary_id)
+    return (-float(primary), str(primary_id), secondary, int(stable_index))
+
+
 def select_capped_undirected_edges(
     edges: Iterable[Tuple[Any, Any, Mapping[str, Any]]],
     max_edges_per_node: int,
@@ -46,11 +64,7 @@ def select_capped_undirected_edges(
 
     sorted_edges = sorted(
         canonical_edges.values(),
-        key=lambda item: (
-            -float(item[2]),
-            str(item[0]),
-            str(item[1]),
-        ),
+        key=lambda item: deterministic_sort_key(item[2], item[0], item[1]),
     )
 
     if max_edges_per_node <= 0:

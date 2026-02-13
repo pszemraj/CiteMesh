@@ -8,6 +8,7 @@ import hashlib
 import logging
 import sqlite3
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -22,6 +23,27 @@ logger = logging.getLogger(__name__)
 
 SQLITE_QUERY_BATCH_SIZE = 900
 EMBEDDINGS_DATASET_NAME = "embeddings"
+EMBEDDING_CACHE_SCHEMA_VERSION = 1
+H5_LAYOUT_KEY = "h5_layout_version"
+H5_LAYOUT_MATRIX_VERSION = "matrix-v1"
+SCHEMA_VERSION_KEY = "schema_version"
+MIGRATION_STATE_KEY = "migration_state"
+MIGRATION_STATE_ACTIVE = "active"
+MIGRATION_STATE_LEGACY_BACKUP = "legacy_h5_backed_up"
+MIGRATION_STATE_CLEAR = "explicit_clear"
+
+
+def _metadata_table_create_sql() -> str:
+    return """
+    CREATE TABLE IF NOT EXISTS cache_metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    )
+    """
+
+
+def _now_timestamp() -> str:
+    return datetime.utcnow().strftime("%Y%m%dT%H%M%S.%fZ")
 
 
 class EmbeddingCache:
@@ -246,12 +268,35 @@ class EmbeddingCache:
         }
 
     def clear(self) -> None:
-        """Remove cached metadata and embeddings."""
+        """Purge cache artifacts while preserving old files as backups."""
         if self.db_path.exists():
-            self.db_path.unlink()
+            self._backup_cache_file(self.db_path, MIGRATION_STATE_CLEAR)
+
         if self.h5_path.exists():
-            self.h5_path.unlink()
+            self._backup_cache_file(self.h5_path, MIGRATION_STATE_CLEAR)
+
         self._init_db()
+
+    def _make_backup_path(self, target_path: Path, suffix: str) -> Path:
+        """Build a timestamped backup path for cache artifacts."""
+        return target_path.with_suffix(f"{target_path.suffix}.{suffix}")
+
+    def _backup_cache_file(self, target_path: Path, suffix: str) -> Optional[Path]:
+        """Move an existing cache artifact to a timestamped backup path."""
+        if not target_path.exists():
+            return None
+
+        backup_suffix = f"bak.{suffix}.{_now_timestamp()}"
+        backup_path = self._make_backup_path(target_path, backup_suffix)
+        counter = 0
+        while backup_path.exists():
+            counter += 1
+            backup_path = self._make_backup_path(
+                target_path, f"bak.{suffix}.{_now_timestamp()}.{counter}"
+            )
+
+        target_path.rename(backup_path)
+        return backup_path
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -287,16 +332,79 @@ class EmbeddingCache:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_papers_row_idx ON papers(row_idx)"
             )
+            conn.execute(_metadata_table_create_sql())
+            conn.execute(
+                """
+                INSERT INTO cache_metadata (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (SCHEMA_VERSION_KEY, str(EMBEDDING_CACHE_SCHEMA_VERSION)),
+            )
+            conn.execute(
+                """
+                INSERT INTO cache_metadata (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (H5_LAYOUT_KEY, H5_LAYOUT_MATRIX_VERSION),
+            )
+            conn.execute(
+                """
+                INSERT INTO cache_metadata (key, value)
+                VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (MIGRATION_STATE_KEY, MIGRATION_STATE_ACTIVE),
+            )
             conn.commit()
+
+    def _get_cache_metadata(self, conn: sqlite3.Connection, key: str) -> Optional[str]:
+        row = conn.execute(
+            "SELECT value FROM cache_metadata WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _set_cache_metadata(
+        conn: sqlite3.Connection, key: str, value: str
+    ) -> None:
+        conn.execute(
+            """
+            INSERT INTO cache_metadata (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+
+    def _invalidate_cached_row_indices(self, conn: sqlite3.Connection) -> None:
+        conn.execute("UPDATE papers SET row_idx = NULL")
+
+    def _backup_incompatible_h5(self) -> Path:
+        return self._backup_cache_file(
+            self.h5_path, MIGRATION_STATE_LEGACY_BACKUP
+        ) or self._make_backup_path(
+            self.h5_path, f"bak.{MIGRATION_STATE_LEGACY_BACKUP}.{_now_timestamp()}"
+        )
+
+    def _reconcile_layout_metadata(self, conn: sqlite3.Connection) -> None:
+        self._set_cache_metadata(conn, H5_LAYOUT_KEY, H5_LAYOUT_MATRIX_VERSION)
+        self._set_cache_metadata(conn, MIGRATION_STATE_KEY, MIGRATION_STATE_ACTIVE)
 
     def _ensure_h5_layout(self) -> None:
         """Ensure cache file uses matrix-based HDF5 layout."""
         if not self.h5_path.exists():
-            return
+            with sqlite3.connect(self.db_path) as conn:
+                self._reconcile_layout_metadata(conn)
+                conn.commit()
+                return
 
         try:
-            with h5py.File(self.h5_path, "r") as h5:
+            with h5py.File(self.h5_path, "r") as h5, sqlite3.connect(self.db_path) as conn:
                 if EMBEDDINGS_DATASET_NAME in h5:
+                    self._reconcile_layout_metadata(conn)
+                    conn.commit()
                     return
 
                 first_key = next(iter(h5.keys()), None)
@@ -305,16 +413,48 @@ class EmbeddingCache:
                 "Embedding cache file at %s is unreadable. Resetting cache.",
                 self.h5_path,
             )
-            self.clear()
-            return
+            with sqlite3.connect(self.db_path) as conn:
+                self._invalidate_cached_row_indices(conn)
+                try:
+                    backup_path = self._backup_incompatible_h5()
+                    logger.warning(
+                        "Moved unreadable embedding cache %s to %s.",
+                        self.h5_path,
+                        backup_path,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "Could not back up unreadable embedding cache %s: %s",
+                        self.h5_path,
+                        exc,
+                    )
+                    self._reconcile_layout_metadata(conn)
+                    conn.commit()
+                return
 
         if first_key is not None:
             logger.warning(
                 "Detected legacy per-paper embedding cache layout at %s. "
-                "Resetting cache to use matrix-based storage.",
+                "Moving cache and rebuilding matrix storage on first use.",
                 self.h5_path,
             )
-            self.clear()
+            with sqlite3.connect(self.db_path) as conn:
+                self._invalidate_cached_row_indices(conn)
+                try:
+                    backup_path = self._backup_incompatible_h5()
+                    logger.warning(
+                        "Moved legacy per-paper embedding cache %s to %s.",
+                        self.h5_path,
+                        backup_path,
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "Could not back up legacy embedding cache %s: %s",
+                        self.h5_path,
+                        exc,
+                    )
+                self._reconcile_layout_metadata(conn)
+                conn.commit()
 
     @staticmethod
     def _metadata_tuple(
