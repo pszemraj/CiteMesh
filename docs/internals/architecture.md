@@ -42,7 +42,7 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 | Strategy    | Responsibilities                                               | Highlights                                                                         |
 | ----------- | -------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `citation`  | Pulls seed, references, and citations from Semantic Scholar    | Uses temporal, citation-impact, and real bibliographic coupling scores             |
-| `embedding` | Loads/streams HuggingFace ML-ArXiv corpus, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
+| `embedding` | Loads/streams the HuggingFace arXiv metadata snapshot, computes embeddings | Persistent embedding cache (SQLite + HDF5), multi-factor similarity, top-k pruning |
 | `recommendation` | Uses Semantic Scholar recommendations as the primary neighborhood signal  | Fast topical discovery, deterministic thresholded edge filtering                  |
 | `hybrid`    | Starts with citation graph, enriches with semantic matches     | Adjusts weightings based on relationship type, caps edges per node                 |
 
@@ -89,7 +89,7 @@ Each strategy can surface helpful logging by calling `_set_collection_summary`, 
 ## External Dependencies
 
 - **Semantic Scholar API**: citation and hybrid strategies fetch paper metadata, references, and citations.
-- **HuggingFace Datasets**: embedding strategy loads the ML ArXiv corpus (offline after first download).
+- **HuggingFace Datasets**: embedding strategy loads the arXiv metadata snapshot corpus (offline after first download).
 - **SentenceTransformers**: embedding/hybrid strategies load configurable models via `SentenceTransformer`.
 
 ## Output Handling
