@@ -7,8 +7,10 @@ including interactive visualizations.
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Iterable, Optional
 
@@ -19,6 +21,8 @@ from citemesh.core import Paper
 from .ordering import ordered_edges_with_data, ordered_nodes
 from .render import compute_layout, compute_node_colors, compute_node_sizes
 from .themes import Theme, get_theme
+
+logger = logging.getLogger(__name__)
 
 
 class GraphExporter:
@@ -286,7 +290,15 @@ class GraphExporter:
             ),
         )
 
-        fig.write_html(str(path))
+        div_id = self._plotly_div_id()
+        try:
+            fig.write_html(str(path), div_id=div_id)
+        except TypeError:
+            logger.warning(
+                "Plotly version does not support deterministic div_id; "
+                "HTML bytes may vary between runs."
+            )
+            fig.write_html(str(path))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -348,6 +360,25 @@ class GraphExporter:
 
         color = self._color_map_cache[cache_key].get(node, theme.node_color_new)
         return _rgb_tuple_to_hex(color)
+
+    def _plotly_div_id(self) -> str:
+        """Build deterministic Plotly HTML div identifier for this graph."""
+        nodes = [str(node_id) for node_id, _ in self._sorted_nodes()]
+        edges = [
+            (
+                str(left),
+                str(right),
+                round(float(attrs.get("weight", 0.0)), 8),
+            )
+            for left, right, attrs in self._sorted_edges()
+        ]
+        digest_payload = json.dumps(
+            {"seed_id": str(self.seed_id), "nodes": nodes, "edges": edges},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha1(digest_payload.encode("utf-8")).hexdigest()[:16]
+        return f"citemesh-plotly-{digest}"
 
     @staticmethod
     def _coerce_year(raw_year: object) -> int:

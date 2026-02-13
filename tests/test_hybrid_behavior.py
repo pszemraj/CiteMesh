@@ -144,3 +144,17 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     out_graph, out_seed = builder.build_graph("seed")
     assert out_graph is graph
     assert out_seed == "seed"
+
+
+def test_hybrid_rejects_invalid_semantic_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid should reject max_semantic values that consume the full paper budget."""
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
+    )
+
+    with pytest.raises(
+        ValueError, match="max_semantic must be between 0 and max_papers - 1"
+    ):
+        HybridGraphBuilder(max_papers=3, max_semantic=3, client=MagicMock())

@@ -53,8 +53,10 @@ def test_streaming_embedding_falls_back_to_secondary_dataset(
         seed_embedding: np.ndarray,
         heap: list[tuple],
         max_candidates: int,
+        seen_paper_ids: set[str],
     ) -> None:
         del seed_embedding
+        del seen_paper_ids
         for metadata in batch:
             paper_id = metadata["paper_id"]
             candidate = (
@@ -135,9 +137,11 @@ def test_streaming_candidate_ties_use_paper_id_tiebreak(
         seed_embedding: np.ndarray,
         heap: list[tuple],
         max_candidates: int,
+        seen_paper_ids: set[str],
     ) -> None:
         del self
         del seed_embedding
+        del seen_paper_ids
         for metadata in batch:
             paper_id = metadata["paper_id"]
             candidate = (
@@ -197,3 +201,45 @@ def test_collect_papers_uses_hashed_query_seed_id(
 
     assert list(papers.keys()) == [expected_seed_id]
     assert papers[expected_seed_id].is_seed is True
+
+
+def test_heap_tiebreak_handles_prefix_ids() -> None:
+    """Prefix paper IDs should preserve lexicographic ordering under tie-break keys."""
+    assert _heap_tiebreak_key("a") > _heap_tiebreak_key("aa")
+
+
+def test_stream_batch_skips_duplicate_paper_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Streaming batch processing should avoid duplicate IDs in the heap."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        use_streaming=True,
+        random_seed=0,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: MagicMock())
+    builder.embedding_cache.get_embeddings = MagicMock(
+        return_value={"dup": np.asarray([1.0, 0.0], dtype=np.float32)}
+    )
+
+    batch = [
+        {"paper_id": "dup", "title": "First", "abstract": "A"},
+        {"paper_id": "dup", "title": "Second", "abstract": "B"},
+    ]
+    heap: list[tuple] = []
+    seen: set[str] = set()
+    builder._process_stream_batch(
+        batch=batch,
+        seed_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        heap=heap,
+        max_candidates=4,
+        seen_paper_ids=seen,
+    )
+
+    assert len(heap) == 1
+    assert seen == {"dup"}

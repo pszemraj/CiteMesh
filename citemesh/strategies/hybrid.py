@@ -64,6 +64,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
+        if max_semantic < 0:
+            raise ValueError("max_semantic must be non-negative")
+        if max_semantic >= max_papers:
+            raise ValueError(
+                "max_semantic must be between 0 and max_papers - 1 "
+                f"(got max_semantic={max_semantic}, max_papers={max_papers})"
+            )
+
         super().__init__(max_papers, random_seed)
         self.client = client or get_client()
         self.max_semantic = max_semantic

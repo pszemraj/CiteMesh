@@ -110,8 +110,14 @@ def _query_seed_id(query_text: str) -> str:
 
 
 def _heap_tiebreak_key(paper_id: str) -> Tuple[int, ...]:
-    """Build heap tiebreak key where larger IDs rank as worse."""
-    return tuple(-ord(ch) for ch in str(paper_id))
+    """Build heap tiebreak key where lexicographically smaller IDs rank better.
+
+    The terminal sentinel fixes prefix ordering so ``"a"`` outranks ``"aa"``.
+
+    :param str paper_id: Candidate paper identifier.
+    :return Tuple[int, ...]: Orderable key used for deterministic tie-breaking.
+    """
+    return tuple([-ord(ch) for ch in str(paper_id)] + [1])
 
 
 class _AutocastEncodeProxy:
@@ -763,9 +769,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._load_corpus()
             candidates = self._select_candidates_from_loaded(seed_embedding)
 
-        # Convert candidates to Paper objects
-        added = 0
+        # Convert candidates to Paper objects while respecting max_papers total.
         for paper_id, metadata, embedding in candidates:
+            if len(papers) >= self.max_papers:
+                break
             if paper_id in papers:
                 continue
 
@@ -784,10 +791,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             papers[paper_id] = paper
             self.embeddings[paper_id] = embedding
-
-            added += 1
-            if added >= self.max_papers:
-                break
 
         self._update_citation_counts(papers)
         return papers
@@ -863,6 +866,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
         heap: List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]] = []
+        seen_paper_ids: set[str] = set()
 
         progress_enabled = sys.stderr.isatty()
 
@@ -903,13 +907,21 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
                     if len(batch) >= STREAMING_BATCH_SIZE:
                         self._process_stream_batch(
-                            batch, seed_embedding, heap, max_candidates
+                            batch,
+                            seed_embedding,
+                            heap,
+                            max_candidates,
+                            seen_paper_ids,
                         )
                         batch = []
 
                 if batch:
                     self._process_stream_batch(
-                        batch, seed_embedding, heap, max_candidates
+                        batch,
+                        seed_embedding,
+                        heap,
+                        max_candidates,
+                        seen_paper_ids,
                     )
 
                 if progress_total is None:
@@ -937,6 +949,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         seed_embedding: np.ndarray,
         heap: List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]],
         max_candidates: int,
+        seen_paper_ids: set[str],
     ) -> None:
         """
         Encode a batch of records and push to candidate heap.
@@ -945,6 +958,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param np.ndarray seed_embedding: Normalized seed embedding vector
         :param List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]] heap: Min-heap storing top candidates
         :param int max_candidates: Maximum heap size
+        :param set[str] seen_paper_ids: Paper IDs already emitted to the heap.
         """
         batch_map = {metadata["paper_id"]: metadata for metadata in batch}
         embeddings = self.embedding_cache.get_embeddings(
@@ -956,13 +970,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
 
         for metadata in batch:
-            raw_embedding = embeddings.get(metadata["paper_id"])
+            paper_id = str(metadata["paper_id"])
+            if paper_id in seen_paper_ids:
+                continue
+
+            raw_embedding = embeddings.get(paper_id)
             if raw_embedding is None:
                 continue
+            seen_paper_ids.add(paper_id)
+
             embedding = np.asarray(raw_embedding, dtype=np.float32)
 
             similarity = float(np.dot(seed_embedding, embedding))
-            paper_id = metadata["paper_id"]
             candidate = (
                 similarity,
                 _heap_tiebreak_key(paper_id),

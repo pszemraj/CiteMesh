@@ -206,11 +206,12 @@ def test_exporter_plotly_with_fake_module(
             captured["data"] = data
             captured["layout"] = layout
 
-        def write_html(self, path: str) -> None:
+        def write_html(self, path: str, **kwargs) -> None:
             """Write a simple marker HTML file.
 
             :param str path: Output path.
             """
+            del kwargs
             Path(path).write_text("<html>plotly</html>")
 
     fake_go = types.SimpleNamespace(
@@ -233,6 +234,47 @@ def test_exporter_plotly_with_fake_module(
     assert list(node_trace["text"]) == ["Related Paper", "Smith, 2020"]
 
 
+def test_exporter_plotly_uses_deterministic_div_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plotly HTML export should provide a stable div id when supported."""
+    captured: dict[str, object] = {}
+
+    class FakeFigure:
+        """Minimal plotly Figure stand-in."""
+
+        def __init__(self, data, layout) -> None:
+            """Store payload for assertions."""
+            self.data = data
+            self.layout = layout
+
+        def write_html(self, path: str, **kwargs) -> None:
+            """Capture div_id kwargs and write marker output."""
+            captured["kwargs"] = kwargs
+            Path(path).write_text("<html>plotly</html>")
+
+    fake_go = types.SimpleNamespace(
+        Scatter=lambda **kwargs: {"type": "scatter", **kwargs},
+        Layout=lambda **kwargs: {"type": "layout", **kwargs},
+        Figure=FakeFigure,
+    )
+    fake_plotly = types.ModuleType("plotly")
+    fake_plotly.graph_objects = fake_go
+    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    out_path = tmp_path / "graph.plotly.html"
+    exporter.to_plotly_html(out_path)
+
+    assert out_path.exists()
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["div_id"] == exporter._plotly_div_id()
+
+
 def test_exporter_plotly_with_missing_year_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -248,8 +290,9 @@ def test_exporter_plotly_with_missing_year_data(
             self.data = data
             self.layout = layout
 
-        def write_html(self, path: str) -> None:
+        def write_html(self, path: str, **kwargs) -> None:
             """Write a simple marker HTML file."""
+            del kwargs
             Path(path).write_text("<html>plotly</html>")
 
     def fake_scatter(**kwargs) -> dict:
@@ -387,8 +430,9 @@ def test_exporter_plotly_edge_order_is_stable(
             self.layout = layout
             captured["data"] = data
 
-        def write_html(self, path: str) -> None:
+        def write_html(self, path: str, **kwargs) -> None:
             """Write a simple marker HTML file."""
+            del kwargs
             Path(path).write_text("<html>plotly</html>")
 
     fake_go = types.SimpleNamespace(
@@ -418,3 +462,20 @@ def test_exporter_plotly_edge_order_is_stable(
     assert out_path.exists()
     edge_trace = captured["data"][0]
     assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
+
+
+def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) -> None:
+    """Real Plotly exports should be byte-stable for identical graph/layout inputs."""
+    pytest.importorskip("plotly")
+
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    out_a = tmp_path / "first.plotly.html"
+    out_b = tmp_path / "second.plotly.html"
+
+    exporter.to_plotly_html(out_a)
+    exporter.to_plotly_html(out_b)
+
+    assert out_a.read_text() == out_b.read_text()

@@ -582,7 +582,6 @@ Examples:
 
         except Exception as e:
             message = f"Failed to build graph: {e}"
-            logger.error(message)
             print(message, file=sys.stderr)
             # Only show full traceback in debug mode
             if logging.getLogger().level == logging.DEBUG:
