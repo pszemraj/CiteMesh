@@ -498,6 +498,14 @@ class TestCLIDefaults:
         assert result.returncode == 0
         assert "deterministic built-in seed" in result.stdout
 
+    def test_spring_iterations_help_text_mentions_fallback_scope(self) -> None:
+        """CLI help should expose spring-fallback-specific iteration flag wording."""
+        result = run_cli_command(["build", "--help"])
+        assert result.returncode == 0
+        assert "--spring-iterations" in result.stdout
+        assert "Spring fallback layout iterations" in result.stdout
+        assert "--iterations" not in result.stdout
+
     def test_threshold_help_text_mentions_scope(self) -> None:
         """Threshold help should clarify strategy scope."""
         result = run_cli_command(["build", "--help"])

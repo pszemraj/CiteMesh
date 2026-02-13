@@ -12,7 +12,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Protocol
+from typing import Callable, Dict, List, Protocol
 
 import networkx as nx
 from rich.console import Console
@@ -34,21 +34,32 @@ from citemesh.visualization import (
 
 log_console = Console(stderr=True)
 output_console = Console()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[
-        RichHandler(
-            console=log_console,
-            show_time=False,
-            show_path=False,
-            rich_tracebacks=False,
-            markup=True,
-        )
-    ],
-)
+_LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    """Configure CLI logging once at runtime."""
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        datefmt="[%X]",
+        handlers=[
+            RichHandler(
+                console=log_console,
+                show_time=False,
+                show_path=False,
+                rich_tracebacks=False,
+                markup=True,
+            )
+        ],
+    )
+    _LOGGING_CONFIGURED = True
+
 
 EXPORT_FORMATS = ("png", "html", "plotly", "json", "graphml")
 EXPORT_EXTENSIONS: Dict[str, str] = {
@@ -75,7 +86,6 @@ class _StrategyDispatchSpec:
     """Strategy dispatch metadata for CLI construction."""
 
     factory: StrategyFactory
-    defaults: Dict[str, Any]
 
 
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
@@ -88,13 +98,6 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             fetch_references=not cli_args.no_references,
             random_seed=cli_args.seed,
         ),
-        defaults={
-            "max_papers": 40,
-            "max_citations": 20,
-            "max_references": 20,
-            "similarity_threshold": 0.2,
-            "fetch_references": True,
-        },
     ),
     "recommendation": _StrategyDispatchSpec(
         factory=lambda cli_args: RecommendationGraphBuilder(
@@ -103,11 +106,6 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             similarity_threshold=cli_args.similarity_threshold,
             random_seed=cli_args.seed,
         ),
-        defaults={
-            "max_papers": 40,
-            "fetch_references": True,
-            "similarity_threshold": 0.2,
-        },
     ),
     "embedding": _StrategyDispatchSpec(
         factory=lambda cli_args: EmbeddingGraphBuilder(
@@ -120,13 +118,6 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             random_seed=cli_args.seed,
             use_streaming=cli_args.streaming,
         ),
-        defaults={
-            "max_papers": 40,
-            "model_name": "google/embeddinggemma-300m",
-            "dataset_split": "train",
-            "corpus_size": 50000,
-            "top_k": 2,
-        },
     ),
     "hybrid": _StrategyDispatchSpec(
         factory=lambda cli_args: HybridGraphBuilder(
@@ -142,13 +133,6 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             use_streaming=cli_args.streaming,
             random_seed=cli_args.seed,
         ),
-        defaults={
-            "max_papers": 40,
-            "max_citations": 15,
-            "max_references": 15,
-            "max_semantic": 10,
-            "fetch_references": True,
-        },
     ),
 }
 
@@ -269,6 +253,7 @@ def build_hybrid_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
 
 def main() -> None:
     """Main CLI entry point."""
+    _configure_logging()
     parser = argparse.ArgumentParser(
         description="CiteMesh: Create citation graph visualizations",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -349,11 +334,11 @@ Examples:
     )
 
     build_parser.add_argument(
-        "--iterations",
+        "--spring-iterations",
         "-i",
         type=int,
         default=100,
-        help="Layout iterations for quality (default: 100)",
+        help="Spring fallback layout iterations (default: 100)",
     )
 
     build_parser.add_argument(
@@ -399,7 +384,7 @@ Examples:
         "-t",
         type=float,
         default=0.2,
-        help="Minimum similarity for citation/recommendation edges (default: 0.2)",
+        help="Minimum edge similarity for citation/recommendation strategies (default: 0.2)",
     )
 
     citation_group.add_argument(
@@ -462,7 +447,7 @@ Examples:
     embedding_group.add_argument(
         "--streaming",
         action="store_true",
-        help="Stream HuggingFace dataset instead of loading it into memory",
+        help="Stream HuggingFace dataset instead of loading it into memory (requires non-sliced --dataset-split)",
     )
 
     # Hybrid strategy arguments
@@ -536,7 +521,7 @@ Examples:
             shared_layout = (
                 compute_layout(
                     graph,
-                    iterations=args.iterations,
+                    iterations=args.spring_iterations,
                     layout_seed=args.seed,
                 )
                 if layout_required
@@ -556,7 +541,7 @@ Examples:
                     graph,
                     seed_id,
                     output_paths["png"],
-                    iterations=args.iterations,
+                    iterations=args.spring_iterations,
                     dpi=args.dpi,
                     metadata=metadata,
                     theme_name=args.theme,
