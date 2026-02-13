@@ -58,6 +58,15 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         if self.max_semantic > 0:
             _check_embedding_deps()
+            self.embedding_builder = EmbeddingGraphBuilder(
+                max_papers=max_semantic,
+                model_name=model_name,
+                dataset_split=dataset_split,
+                random_seed=random_seed,
+                client=self.client,
+            )
+        else:
+            self.embedding_builder = None
 
         # Create citation and embedding builders (with same seed for consistency)
         citation_papers = max_papers - max_semantic
@@ -66,14 +75,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             max_citations=max_citations,
             max_references=max_references,
             fetch_references=True,  # Enable real bibliographic coupling
-            random_seed=random_seed,
-            client=self.client,
-        )
-
-        self.embedding_builder = EmbeddingGraphBuilder(
-            max_papers=max_semantic,
-            model_name=model_name,
-            dataset_split=dataset_split,
             random_seed=random_seed,
             client=self.client,
         )
@@ -151,7 +152,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         # Compute embedding similarity if available
         embed_sim = 0.0
         if (
-            paper1.paper_id in self.embedding_builder.embeddings
+            self.embedding_builder is not None
+            and paper1.paper_id in self.embedding_builder.embeddings
             and paper2.paper_id in self.embedding_builder.embeddings
         ):
             emb1 = self.embedding_builder.embeddings[paper1.paper_id]

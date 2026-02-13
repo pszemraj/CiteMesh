@@ -80,8 +80,30 @@ def load_arxiv_dataset_cached(
 
     from datasets import load_dataset
 
-    dataset = load_dataset("CShorten/ML-ArXiv-Papers", split=dataset_split)
-    logger.info(f"Loaded ML-ArXiv-Papers dataset (split: {dataset_split})")
+    dataset = None
+    last_error: Optional[Exception] = None
+    dataset_names = ["CShorten/ML-ArXiv-Papers", "gfissore/arxiv-abstracts-2021"]
+    for dataset_name in dataset_names:
+        try:
+            dataset = load_dataset(dataset_name, split=dataset_split)
+            logger.info(f"Loaded {dataset_name} dataset (split: {dataset_split})")
+            break
+        except Exception as exc:  # pragma: no cover - network/source dependent
+            last_error = exc
+            logger.warning(
+                "Could not load dataset %s: %s. Trying fallback.",
+                dataset_name,
+                exc,
+            )
+
+    if dataset is None:
+        logger.warning(
+            "Could not load any ArXiv dataset for split %s. Returning empty corpus.",
+            dataset_split,
+        )
+        if last_error is not None:
+            logger.debug("Last dataset error: %s", last_error)
+        return papers
 
     for i, paper in enumerate(
         tqdm(dataset, desc="Loading ArXiv papers", total=max_papers or len(dataset))
