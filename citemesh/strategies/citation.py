@@ -37,7 +37,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         max_references: int = 20,
         similarity_threshold: float = 0.2,
         fetch_references: bool = True,
-        random_seed: int = None,
+        random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -48,7 +48,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param int max_references: Maximum referenced papers to fetch
         :param float similarity_threshold: Minimum similarity for edges
         :param bool fetch_references: Whether to fetch reference lists (enables real bibliographic coupling)
-        :param int random_seed: Random seed for reproducibility
+        :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         super().__init__(max_papers, random_seed)

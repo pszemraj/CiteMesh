@@ -9,7 +9,12 @@ import requests
 
 from citemesh.core import API_CONFIG
 from citemesh.models import Paper
-from citemesh.services.semantic_scholar import SemanticScholarClient, normalize_paper_id
+from citemesh.services.semantic_scholar import (
+    SemanticScholarClient,
+    get_client,
+    normalize_paper_id,
+    reset_client,
+)
 
 
 class _MockResponse:
@@ -214,3 +219,36 @@ def test_get_paper_normalizes_arxiv_url_before_api_call() -> None:
     assert isinstance(result, Paper)
     assert result.paper_id == "seed"
     assert client.client.get_paper.call_args.args[0] == "arxiv:2508.14040"
+
+
+def test_convert_recommendation_with_missing_fields_is_robust() -> None:
+    """_convert_recommendation should tolerate sparse/missing payload keys."""
+    client = SemanticScholarClient(timeout=1)
+    payload = {
+        "paperId": "p1",
+        "title": "",
+        "year": None,
+        "abstract": "",
+        "citationCount": 0,
+        "authors": [{"name": ""}, {}],
+        "fieldsOfStudy": ["cs.AI", "cs.LG"],
+    }
+
+    paper = client._convert_recommendation(payload)
+
+    assert paper is not None
+    assert paper.paper_id == "p1"
+    assert paper.title == "Unknown"
+    assert paper.year is None
+    assert paper.abstract == ""
+    assert paper.authors == []
+    assert paper.categories == ["cs.AI", "cs.LG"]
+
+
+def test_reset_client_recreates_singleton() -> None:
+    """reset_client should clear and recreate the shared Semantic Scholar client."""
+    first_client = get_client()
+    reset_client()
+    second_client = get_client()
+
+    assert first_client is not second_client

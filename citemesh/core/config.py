@@ -33,25 +33,11 @@ class TemporalConfig:
 
 @dataclass
 class CitationSimilarityConfig:
-    """Configuration for citation-based similarity."""
-
-    # Similarity weights (must sum to 1.0)
-    temporal_weight: float = 0.3
-    citation_weight: float = 0.3
-    bibliographic_weight: float = 0.4
+    """Configuration for citation-based similarity thresholds."""
 
     # Edge creation thresholds
     seed_edge_threshold: float = 0.45  # Lower threshold for seed connections
     normal_edge_threshold: float = 0.65  # Standard threshold for other papers
-    random_edge_probability: float = 0.7  # Probability to create edge above threshold
-
-    def validate(self) -> None:
-        """Ensure weights sum to 1.0."""
-        total = self.temporal_weight + self.citation_weight + self.bibliographic_weight
-        if abs(total - 1.0) > 0.001:
-            raise ValueError(
-                f"Citation similarity weights must sum to 1.0, got {total:.3f}"
-            )
 
 
 @dataclass
@@ -215,5 +201,4 @@ VIZ_CONFIG = VisualizationConfig()
 API_CONFIG = APIConfig()
 
 # Validate all configs on import
-CITATION_CONFIG.validate()
 EMBEDDING_CONFIG.validate()

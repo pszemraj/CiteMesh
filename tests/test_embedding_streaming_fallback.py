@@ -6,7 +6,6 @@ import heapq
 import sys
 import types
 from typing import Any
-
 from unittest.mock import MagicMock
 
 import numpy as np

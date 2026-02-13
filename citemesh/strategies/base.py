@@ -6,7 +6,6 @@ enabling the Strategy pattern for different similarity computation approaches.
 """
 
 import math
-import random
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple
 
@@ -30,17 +29,12 @@ class GraphBuilderStrategy(ABC):
         Initialize the graph builder.
 
         :param int max_papers: Maximum number of papers to include in graph
-        :param Optional[int] random_seed: Random seed for reproducibility (None = non-deterministic)
+        :param Optional[int] random_seed: Reserved random seed parameter kept for compatibility.
         """
         self.max_papers = max_papers
         self.random_seed = random_seed
         self.papers: Dict[str, Paper] = {}  # paper_id -> Paper object
         self._collection_summary: Optional[str] = None
-        self.rng = np.random.default_rng(random_seed)
-
-        # Set deterministic seed for Python random
-        if random_seed is not None:
-            random.seed(random_seed)
 
     @abstractmethod
     def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:

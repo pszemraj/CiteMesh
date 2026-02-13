@@ -38,7 +38,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_semantic: int = 10,
         model_name: str = "google/embeddinggemma-300m",
         dataset_split: str = "train",  # Full training set by default (~117k papers)
-        random_seed: int = None,
+        random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -50,7 +50,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int max_semantic: Maximum papers from semantic search
         :param str model_name: Embedding model name
         :param str dataset_split: ArXiv dataset split
-        :param int random_seed: Random seed for reproducibility
+        :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         super().__init__(max_papers, random_seed)
@@ -214,6 +214,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         edges_to_remove = []
         for u, v, data in sorted_edges:
+            # Enforce a strict per-node edge cap; once either endpoint is full, we drop
+            # this edge to keep degree bounds predictable for downstream rendering.
             if edge_counts[u] >= max_edges or edge_counts[v] >= max_edges:
                 edges_to_remove.append((u, v))
                 continue

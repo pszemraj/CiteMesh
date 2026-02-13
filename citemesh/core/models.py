@@ -146,6 +146,10 @@ class Paper:
         Compute bibliographic coupling strength.
 
         :return float: Bibliographic coupling coefficient (0.0 to 1.0) Returns 0.0 if either paper has no references.
+
+        Note:
+            References from Semantic Scholar are API-limited, so this score is an
+            estimate when only partial reference lists are available.
         """
         if not self.references or not other.references:
             return 0.0

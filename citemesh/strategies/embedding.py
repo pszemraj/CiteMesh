@@ -171,7 +171,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         dataset_split: str = "train",  # Full training set by default (~117k papers)
         corpus_size: Optional[int] = None,
         top_k: int = 2,
-        random_seed: int = None,
+        random_seed: Optional[int] = None,
         use_streaming: bool = False,
         client: Optional[SemanticScholarClient] = None,
     ):
@@ -183,7 +183,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param str dataset_split: HuggingFace dataset split
         :param Optional[int] corpus_size: Maximum papers to load from corpus (None = all in split)
         :param int top_k: Number of most similar neighbors per node
-        :param int random_seed: Random seed for reproducibility
+        :param Optional[int] random_seed: Random seed for reproducibility
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
@@ -653,9 +653,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         # Use base class to collect papers and create nodes
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
-
         # Now filter edges to keep only top-k per node
-        import networkx as nx
 
         # Compute all pairwise similarities (already done by base class)
         # Now for each node, keep only top-k edges
