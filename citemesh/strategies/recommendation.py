@@ -63,13 +63,29 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         )
 
         for paper in recommendations:
-            if len(papers) >= self.max_papers:
-                break
+            # Recommendation payloads can include the seed paper itself.
+            # Preserve the original seed object so GraphBuilderStrategy can always
+            # identify a node with ``is_seed=True``.
+            if paper.paper_id == seed.paper_id:
+                continue
 
             if not paper.abstract or not paper.title:
                 continue
 
-            # Seed paper is always kept; all recommendations get merged by ID.
+            existing = papers.get(paper.paper_id)
+            if existing is not None:
+                if existing.is_seed:
+                    continue
+                # Keep richer metadata when duplicates are returned.
+                if (not existing.abstract and paper.abstract) or (
+                    existing.title == "Unknown" and paper.title != "Unknown"
+                ):
+                    papers[paper.paper_id] = paper
+                continue
+
+            if len(papers) >= self.max_papers:
+                break
+
             papers[paper.paper_id] = paper
 
         logger.info("Collected %s papers from recommendations", len(papers))

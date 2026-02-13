@@ -141,3 +141,39 @@ class TestRecommendationGraphBuilder:
 
         graph, _ = builder.build_graph("seed")
         assert "no_year" in graph
+
+    @patch("citemesh.strategies.recommendation.get_client")
+    def test_collect_papers_keeps_seed_when_recommendations_include_seed(
+        self, mock_get_client: MagicMock
+    ) -> None:
+        """Seed paper metadata should not be overwritten by duplicate recommendation rows."""
+        mock_client = MagicMock()
+        mock_client.get_paper.return_value = Paper(
+            paper_id="seed",
+            title="Seed",
+            year=2020,
+            abstract="seed abstract",
+        )
+        mock_client.get_recommended_papers.return_value = [
+            Paper(
+                paper_id="seed",
+                title="Duplicate Seed",
+                year=2020,
+                abstract="duplicate entry",
+            ),
+            Paper(
+                paper_id="rec1",
+                title="Recommendation",
+                year=2021,
+                abstract="related abstract",
+            ),
+        ]
+        mock_get_client.return_value = mock_client
+
+        builder = RecommendationGraphBuilder(max_papers=3, similarity_threshold=0.0)
+        papers = builder.collect_papers("seed")
+
+        assert papers["seed"].is_seed is True
+        assert papers["seed"].title == "Seed"
+        graph, _ = builder.build_graph("seed")
+        assert "seed" in graph

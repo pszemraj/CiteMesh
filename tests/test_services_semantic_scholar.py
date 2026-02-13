@@ -48,6 +48,14 @@ class _MockResponse:
         return self._payload
 
 
+class _BrokenJsonResponse(_MockResponse):
+    """Response object whose JSON body cannot be decoded."""
+
+    def json(self) -> dict:
+        """Raise decode error to emulate malformed upstream response body."""
+        raise ValueError("Malformed JSON payload")
+
+
 def _paper_payload(
     *,
     paper_id: str = "p1",
@@ -122,6 +130,28 @@ def test_retries_on_transient_api_failure() -> None:
     assert result.paper_id == "seed"
     assert sleep_mock.call_count == 1
     assert sleep_mock.call_args_list[0].args[0] == API_CONFIG.retry_delay
+
+
+def test_retries_when_direct_endpoint_returns_malformed_json() -> None:
+    """Direct endpoint helper should retry when response body is not valid JSON."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client._session.get = MagicMock()
+    client._session.get.side_effect = [
+        _BrokenJsonResponse(status_code=200),
+        _MockResponse(
+            status_code=200,
+            payload={"data": [_paper_payload(paper_id="x2", title="Retry success")]},
+        ),
+    ]
+
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        results = client.search_papers("transformer")
+
+    assert sleep_mock.call_count == 1
+    assert sleep_mock.call_args_list[0].args[0] == API_CONFIG.retry_delay
+    assert len(results) == 1
+    assert results[0].paper_id == "x2"
 
 
 def test_get_paper_returns_none_after_retries() -> None:

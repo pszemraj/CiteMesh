@@ -12,6 +12,7 @@ import networkx as nx
 import pytest
 
 from citemesh import cli as cli_module
+from citemesh.core import Author, Paper
 from citemesh.visualization import generate_output_path
 
 
@@ -244,6 +245,31 @@ class TestCLIExecution:
             assert output.exists()
 
         assert captured["top_k"] == 1
+
+    def test_search_command_prints_results_to_stdout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Search results table should be emitted on stdout for shell piping."""
+        mock_client = MagicMock()
+        mock_client.search_papers.return_value = [
+            Paper(
+                paper_id="seed",
+                title="Attention Is All You Need",
+                year=2017,
+                authors=[Author(name="Ashish Vaswani")],
+                citation_count=12345,
+                abstract="Transformer model paper",
+            )
+        ]
+        monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+
+        result = run_cli_command(["search", "attention", "--limit", "1"])
+
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        assert "Search results for 'attention'" in result.stdout
+        assert "Use the paper ID with:" in result.stdout
 
 
 class TestCLIErrorHandling:

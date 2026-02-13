@@ -335,7 +335,7 @@ class SemanticScholarClient:
                 response.raise_for_status()
                 return response.json()
 
-            except requests.RequestException as exc:
+            except (requests.RequestException, ValueError) as exc:
                 if attempt < API_CONFIG.max_retries - 1:
                     wait_time = self._retry_wait_time(exc, attempt)
                     logger.warning(

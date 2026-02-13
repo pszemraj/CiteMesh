@@ -31,14 +31,15 @@ from citemesh.visualization import (
     visualize_graph,
 )
 
-console = Console(stderr=True)
+log_console = Console(stderr=True)
+output_console = Console()
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
     datefmt="[%X]",
     handlers=[
         RichHandler(
-            console=console,
+            console=log_console,
             show_time=False,
             show_path=False,
             rich_tracebacks=False,
@@ -535,8 +536,8 @@ Examples:
                     authors_str,
                 )
 
-            console.print(table)
-            console.print(
+            output_console.print(table)
+            output_console.print(
                 "\n[dim]Use the paper ID with:[/dim] "
                 'citemesh build "<ID>" --strategy recommendation'
             )

@@ -216,8 +216,7 @@ class GraphExporter:
         node_y = [pos[node][1] for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
         node_years = [
-            self._coerce_year(self.graph.nodes[node].get("year"))
-            for node in node_ids
+            self._coerce_year(self.graph.nodes[node].get("year")) for node in node_ids
         ]
         node_labels = [
             self.graph.nodes[node].get("paper").label
