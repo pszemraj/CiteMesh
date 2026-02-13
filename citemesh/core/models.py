@@ -54,7 +54,7 @@ class Paper:
 
     paper_id: str
     title: str
-    year: int
+    year: Optional[int]
     authors: List[Author] = field(default_factory=list)
     citation_count: int = 0
     abstract: str = ""
@@ -66,8 +66,8 @@ class Paper:
         """Validate paper data after initialization."""
         current_year = datetime.now().year
 
-        # Validate year
-        if not 1900 <= self.year <= current_year + 1:
+        # Validate year if available
+        if self.year is not None and not 1900 <= self.year <= current_year + 1:
             raise ValueError(
                 f"Invalid year: {self.year}. Must be between 1900 and {current_year + 1}"
             )
@@ -90,8 +90,10 @@ class Paper:
         return "Unknown"
 
     @property
-    def age(self) -> int:
-        """Paper age in years from current date."""
+    def age(self) -> Optional[int]:
+        """Paper age in years from current date, or None when year is unknown."""
+        if self.year is None:
+            return None
         return datetime.now().year - self.year
 
     @property
@@ -102,7 +104,8 @@ class Paper:
     @property
     def label(self) -> str:
         """Generate display label: 'FirstAuthor, Year'."""
-        return f"{self.first_author_surname}, {self.year}"
+        year = self.year if self.year is not None else "n.d."
+        return f"{self.first_author_surname}, {year}"
 
     def shares_authors_with(self, other: "Paper") -> bool:
         """Check if this paper shares any authors with another paper."""
@@ -159,4 +162,7 @@ class Paper:
 
     def __repr__(self):
         """Concise string representation."""
-        return f"Paper(id={self.paper_id[:10]}..., title={self.title[:30]}..., year={self.year})"
+        return (
+            f"Paper(id={self.paper_id[:10]}..., title={self.title[:30]}..., "
+            f"year={self.year or 'n.d.'})"
+        )

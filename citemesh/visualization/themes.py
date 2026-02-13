@@ -7,10 +7,9 @@ consistent across static and interactive outputs.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Dict, Tuple
-
-from matplotlib import colors as mpl_colors
 
 
 @dataclass(frozen=True)
@@ -73,12 +72,6 @@ THEMES: Dict[str, Theme] = {
 }
 
 
-def _to_rgb_tuple(color: str) -> Tuple[float, float, float]:
-    """Convert matplotlib color specification to RGB tuple (0-1)."""
-    rgb = mpl_colors.to_rgb(color)
-    return float(rgb[0]), float(rgb[1]), float(rgb[2])
-
-
 def get_theme(name: str) -> Theme:
     """
     Retrieve a Theme by name, with support for 'auto'.
@@ -93,15 +86,30 @@ def get_theme(name: str) -> Theme:
         return THEMES["light"]
 
     if name == "auto":
-        # Heuristic: pick dark theme when default matplotlib facecolor is dark.
-        from matplotlib import rcParams
-
-        facecolor = rcParams.get("figure.facecolor", "#ffffff")
-        if not isinstance(facecolor, str):
-            facecolor = mpl_colors.to_hex(facecolor)
-
-        r, g, b = _to_rgb_tuple(facecolor)
-        brightness = (0.299 * r) + (0.587 * g) + (0.114 * b)
-        return THEMES["dark"] if brightness < 0.5 else THEMES["light"]
+        return _detect_terminal_theme()
 
     return THEMES.get(name, THEMES["light"])
+
+
+def _detect_terminal_theme() -> Theme:
+    """Detect terminal theme preference from common environment indicators."""
+    colorfgbg = os.environ.get("COLORFGBG")
+    if colorfgbg:
+        parts = colorfgbg.split(";")
+        if len(parts) >= 2:
+            for token in reversed(parts):
+                try:
+                    bg = int(token)
+                    if bg < 8:
+                        return THEMES["dark"]
+                    return THEMES["light"]
+                except ValueError:
+                    continue
+
+    if os.environ.get("DARKMODE") == "1":
+        return THEMES["dark"]
+
+    if os.environ.get("TERM_PROGRAM") == "iTerm.app":
+        return THEMES["light"]
+
+    return THEMES["light"]

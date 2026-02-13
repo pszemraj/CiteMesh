@@ -35,6 +35,13 @@ class TestSimilarityFunctions:
         # Should have strong penalty
         assert sim == 0.1
 
+    def test_temporal_similarity_with_unknown_year(self):
+        """Unknown year should return neutral temporal similarity."""
+        paper1 = Paper(paper_id="p1", title="Test 1", year=None)
+        paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
+        sim = GraphBuilderStrategy.temporal_similarity(paper1, paper2)
+        assert sim == 0.5
+
     def test_citation_similarity_similar_counts(self):
         """Test citation similarity for papers with similar citation counts."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2020, citation_count=100)
@@ -113,3 +120,10 @@ class TestSimilarityFunctions:
             paper1, paper3, decay_factor=8.0
         )
         assert abs(decay - 0.368) < 0.01
+
+    def test_exponential_temporal_decay_with_unknown_year(self):
+        """Unknown year should return neutral decay value."""
+        paper1 = Paper(paper_id="p1", title="Test 1", year=None)
+        paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
+        decay = GraphBuilderStrategy.exponential_temporal_decay(paper1, paper2)
+        assert decay == 0.5

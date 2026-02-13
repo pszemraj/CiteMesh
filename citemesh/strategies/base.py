@@ -12,7 +12,6 @@ from typing import Dict, Optional, Tuple
 
 import networkx as nx
 import numpy as np
-import torch
 
 from citemesh.core import TEMPORAL_CONFIG, Paper
 
@@ -38,14 +37,19 @@ class GraphBuilderStrategy(ABC):
         self.random_seed = random_seed
         self.papers: Dict[str, Paper] = {}  # paper_id -> Paper object
         self._collection_summary: Optional[str] = None
+        self.rng = np.random.default_rng(random_seed)
 
-        # Set random seeds for reproducibility
+        # Set deterministic seeds for Python random and optionally torch
         if random_seed is not None:
-            np.random.seed(random_seed)
             random.seed(random_seed)
-            torch.manual_seed(random_seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(random_seed)
+            try:
+                import torch
+
+                torch.manual_seed(random_seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(random_seed)
+            except ImportError:
+                pass
 
     @abstractmethod
     def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
@@ -194,6 +198,8 @@ class GraphBuilderStrategy(ABC):
         Returns:
             Temporal similarity score (0.0 to 1.0)
         """
+        if paper1.year is None or paper2.year is None:
+            return 0.5
         year_diff = abs(paper1.year - paper2.year)
         return TEMPORAL_CONFIG.year_similarity(year_diff)
 
@@ -254,5 +260,7 @@ class GraphBuilderStrategy(ABC):
         Returns:
             Similarity score (0.0 to 1.0)
         """
+        if paper1.year is None or paper2.year is None:
+            return 0.5
         year_diff = abs(paper1.year - paper2.year)
         return math.exp(-year_diff / decay_factor)

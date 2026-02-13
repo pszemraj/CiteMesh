@@ -6,6 +6,7 @@ visualization that all strategies can use, eliminating code duplication.
 """
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -137,17 +138,17 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
     """
     nodes = list(graph.nodes())
     sizes = []
-
-    # Sort nodes by citation count to identify top papers
+    seed_nodes = {node for node in nodes if graph.nodes[node].get("is_seed")}
     sorted_nodes = sorted(
         nodes, key=lambda n: graph.nodes[n].get("citation_count", 0), reverse=True
     )
+    rank_of = {node: rank for rank, node in enumerate(sorted_nodes)}
 
     for node in nodes:
-        rank = sorted_nodes.index(node)
+        rank = rank_of.get(node, len(nodes))
         citation_count = graph.nodes[node].get("citation_count", 0)
 
-        if graph.nodes[node].get("is_seed"):
+        if node in seed_nodes:
             # Seed paper gets special treatment
             if rank < 3:  # Also top-cited
                 size = VIZ_CONFIG.seed_size
@@ -170,7 +171,7 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
             size = base + (15 - rank) * increment
         else:
             # Remaining papers
-            size = VIZ_CONFIG.min_size + np.random.randint(0, 100)
+            size = VIZ_CONFIG.min_size
 
         # Add citation bonus (log scale)
         citation_bonus = np.log10(citation_count + 1) * 100
@@ -195,9 +196,13 @@ def compute_node_colors(
         Tuple of (color_list, min_year, max_year)
     """
     nodes = list(graph.nodes())
-    years = [graph.nodes[n].get("year", 2020) for n in nodes]
-    min_year = min(years)
-    max_year = max(years)
+    years = [graph.nodes[n].get("year") for n in nodes if graph.nodes[n].get("year")]
+    if years:
+        min_year = min(years)
+        max_year = max(years)
+    else:
+        min_year = 2000
+        max_year = datetime.now().year
 
     colors = []
     for node in nodes:
@@ -206,12 +211,13 @@ def compute_node_colors(
             colors.append(theme.seed_color)
             continue
 
-        year = graph.nodes[node].get("year", 2020)
-        if max_year == min_year:
+        year = graph.nodes[node].get("year")
+        if year is None:
+            norm = 0.5
+        elif max_year == min_year:
             norm = 0.5
         else:
             norm = (year - min_year) / (max_year - min_year)
-
         color = theme.interpolate(norm)
         colors.append(color)
 
@@ -251,9 +257,10 @@ def compute_layout(graph: nx.Graph, iterations: int = 100) -> Dict[str, np.ndarr
             center=VIZ_CONFIG.layout_center,
         )
 
-    # Add small random perturbations for organic look
+    # Add small deterministic perturbations for visual separation
+    rng = np.random.default_rng(0)
     for node in pos:
-        pos[node] += np.random.normal(0, VIZ_CONFIG.perturbation_std, 2)
+        pos[node] += rng.normal(0, VIZ_CONFIG.perturbation_std, 2)
 
     return pos
 
@@ -343,8 +350,9 @@ def draw_labels(
         else:
             last_name = "Unknown"
 
-        year = graph.nodes[node].get("year", "")
-        label = f"{last_name}, {year}"
+        year = graph.nodes[node].get("year")
+        year_label = "n.d." if year is None else str(year)
+        label = f"{last_name}, {year_label}"
 
         # Seed paper gets larger, bold label
         is_seed = node == seed_id
@@ -444,7 +452,7 @@ def visualize_graph(
 
 
 def generate_output_path(
-    graph: nx.Graph, seed_id: str, output_dir: Path = Path("out")
+    graph: nx.Graph, seed_id: str, output_dir: Path = Path("out"), strategy: str = ""
 ) -> Path:
     """
     Generate auto-named output path from paper title.
@@ -463,6 +471,9 @@ def generate_output_path(
     filename = title.lower()
     filename = "".join(c if c.isalnum() or c in " -" else "" for c in filename)
     filename = "-".join(filename.split())[:50]  # Limit length
+    if strategy:
+        filename = f"{filename}-{strategy}"
+
     filename = f"{filename}.png"
 
     output_dir.mkdir(exist_ok=True)

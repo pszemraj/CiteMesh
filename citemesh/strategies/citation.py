@@ -7,13 +7,13 @@ bibliographic coupling (shared references), and co-citation analysis.
 
 import logging
 import sys
-from typing import Dict
+from typing import Dict, Optional
 
-import numpy as np
 from tqdm.auto import tqdm
 
 from citemesh.core import CITATION_CONFIG, Paper
 from citemesh.services import SemanticScholarClient, get_client
+from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         similarity_threshold: float = 0.2,
         fetch_references: bool = True,
         random_seed: int = None,
+        client: Optional[SemanticScholarClient] = None,
     ):
         """
         Initialize citation graph builder.
@@ -55,8 +56,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.max_references = max_references
         self.similarity_threshold = similarity_threshold
         self.fetch_references = fetch_references
-        self.client: SemanticScholarClient = get_client()
+        self.client: SemanticScholarClient = client or get_client()
         self.reference_cache: Dict[str, list] = {}  # Cache reference lists
+        self._abstract_index = AbstractSimilarityIndex()
 
     def _get_references(self, paper_id: str) -> list:
         """
@@ -181,6 +183,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             f"Collected {len(papers)} papers ({reference_lists} with reference lists)"
         )
         logger.info(summary)
+        self._abstract_index.build(papers)
         self._set_collection_summary(summary)
 
         return papers
@@ -201,30 +204,18 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         Returns:
             Similarity score (0.0 to 1.0)
         """
-        # Component 1: Temporal similarity
+        abstract_sim = self._abstract_index.similarity(paper1.paper_id, paper2.paper_id)
         temp_sim = self.temporal_similarity(paper1, paper2)
-
-        # Component 2: Citation similarity
         cit_sim = self.citation_similarity(paper1, paper2)
 
-        # Component 3: Bibliographic coupling (real shared references!)
-        if self.fetch_references and paper1.references and paper2.references:
-            # Use real bibliographic coupling
-            bib_coupling = self.bibliographic_coupling(paper1, paper2)
-        else:
-            # Fallback: estimate based on temporal proximity
-            year_diff = abs(paper1.year - paper2.year)
-            if year_diff < 3:
-                bib_coupling = 0.4  # Likely to share references
-            else:
-                bib_coupling = 0.1  # Less likely
-
-        # Combined similarity with configured weights
-        similarity = (
-            CITATION_CONFIG.temporal_weight * temp_sim
-            + CITATION_CONFIG.citation_weight * cit_sim
-            + CITATION_CONFIG.bibliographic_weight * bib_coupling
+        has_refs = bool(
+            self.fetch_references and paper1.references and paper2.references
         )
+        if has_refs:
+            bib_coupling = self.bibliographic_coupling(paper1, paper2)
+            similarity = 0.40 * abstract_sim + 0.20 * temp_sim + 0.40 * bib_coupling
+        else:
+            similarity = 0.65 * abstract_sim + 0.20 * temp_sim + 0.15 * cit_sim
 
         return similarity
 
@@ -254,9 +245,5 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         if paper1.is_seed or paper2.is_seed:
             return similarity > CITATION_CONFIG.seed_edge_threshold
 
-        # Non-seed papers: stricter threshold with randomness for sparsity
-        if similarity > CITATION_CONFIG.normal_edge_threshold:
-            # Add randomness to create sparse mesh
-            return np.random.random() > (1.0 - CITATION_CONFIG.random_edge_probability)
-
-        return False
+        # Non-seed papers: stricter deterministic threshold
+        return similarity > CITATION_CONFIG.normal_edge_threshold

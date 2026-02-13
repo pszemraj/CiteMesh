@@ -77,7 +77,9 @@ class GraphExporter:
 
         for u, v, data in self.graph.edges(data=True):
             export_graph.add_edge(
-                u, v, **{k: float(v) if k == "weight" else v for k, v in data.items()}
+                u,
+                v,
+                **{k: float(val) if k == "weight" else val for k, val in data.items()},
             )
 
         nx.write_graphml(export_graph, path)

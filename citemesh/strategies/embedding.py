@@ -6,14 +6,13 @@ to find conceptually similar papers without relying on citations.
 """
 
 import heapq
+import importlib.util
 import logging
 import sys
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from datasets import load_dataset
 from joblib import Memory
-from sentence_transformers import SentenceTransformer
 from tqdm.auto import tqdm
 
 from citemesh.core import EMBEDDING_CONFIG, Author, Paper
@@ -24,13 +23,41 @@ from citemesh.strategies.base import GraphBuilderStrategy
 logger = logging.getLogger(__name__)
 
 # Set up joblib cache in the user cache directory
-memory = Memory(str(get_cache_dir("joblib")), verbose=0)
+_memory: Optional[Memory] = None
+
+
+def _get_memory() -> Memory:
+    """Get or create the joblib cache lazily."""
+    global _memory
+    if _memory is None:
+        _memory = Memory(str(get_cache_dir("joblib")), verbose=0)
+    return _memory
+
+
+def _check_embedding_deps() -> None:
+    """Verify optional embedding dependencies are available."""
+    missing = []
+    if importlib.util.find_spec("datasets") is None:
+        missing.append("datasets")
+
+    if importlib.util.find_spec("torch") is None:
+        missing.append("torch")
+
+    if importlib.util.find_spec("sentence_transformers") is None:
+        missing.append("sentence-transformers")
+
+    if missing:
+        raise ImportError(
+            "Embedding strategy requires optional dependencies: "
+            + ", ".join(missing)
+            + ". Install with: pip install citemesh[embeddings]"
+        )
+
 
 STREAMING_BATCH_SIZE = 32
 CANDIDATE_MULTIPLIER = 4
 
 
-@memory.cache
 def load_arxiv_dataset_cached(
     dataset_split: str, max_papers: Optional[int]
 ) -> Dict[str, Dict]:
@@ -47,10 +74,14 @@ def load_arxiv_dataset_cached(
     papers = {}
 
     try:
+        from datasets import load_dataset
+
         dataset = load_dataset("CShorten/ML-ArXiv-Papers", split=dataset_split)
         logger.info(f"Loaded ML-ArXiv-Papers dataset (split: {dataset_split})")
     except Exception:
         try:
+            from datasets import load_dataset
+
             dataset = load_dataset("gfissore/arxiv-abstracts-2021", split=dataset_split)
             logger.info(f"Loaded arxiv-abstracts-2021 dataset (split: {dataset_split})")
         except Exception as e:
@@ -66,12 +97,12 @@ def load_arxiv_dataset_cached(
         paper_id = paper.get("id", paper.get("paper_id", f"arxiv_{i}"))
 
         # Extract year
-        year = 2020
+        year = None
         if "year" in paper and paper["year"]:
             year = int(paper["year"])
         elif "update_date" in paper:
             try:
-                year = int(paper["update_date"][:4])
+                year = int(str(paper["update_date"])[:4])
             except (ValueError, IndexError):
                 pass
 
@@ -89,6 +120,14 @@ def load_arxiv_dataset_cached(
         }
 
     return papers
+
+
+def get_arxiv_dataset_cached(
+    dataset_split: str, max_papers: Optional[int]
+) -> Dict[str, Dict]:
+    """Apply joblib caching to dataset loading."""
+    cache = _get_memory()
+    return cache.cache(load_arxiv_dataset_cached)(dataset_split, max_papers)
 
 
 class EmbeddingGraphBuilder(GraphBuilderStrategy):
@@ -125,11 +164,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         """
         super().__init__(max_papers, random_seed)
+        _check_embedding_deps()
         self.model_name = model_name
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size
         self.top_k = top_k
-        self.model: Optional[SentenceTransformer] = None
+        self.model = None
         self.arxiv_corpus: Dict[str, Dict] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
         self.client = get_client()
@@ -141,6 +181,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
     def _load_model(self):
         """Lazy load sentence transformer model."""
         if self.model is None:
+            from sentence_transformers import SentenceTransformer
+
             logger.info(f"Loading embedding model: {self.model_name}")
             self.model = SentenceTransformer(self.model_name)
             if not self.model_profile.float16_supported:
@@ -155,7 +197,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """Load ArXiv corpus if not already loaded."""
         if not self.arxiv_corpus:
             logger.info(f"Loading ArXiv corpus (split: {self.dataset_split})...")
-            self.arxiv_corpus = load_arxiv_dataset_cached(
+            self.arxiv_corpus = get_arxiv_dataset_cached(
                 self.dataset_split, self.corpus_size
             )
             logger.info(f"Corpus loaded: {len(self.arxiv_corpus)} papers")
@@ -198,7 +240,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             logger.info(f"Using '{seed_id}' as text query")
             seed_text = seed_id
             # Create dummy seed paper
-            seed_paper = Paper(paper_id="query", title=seed_id, year=2020, is_seed=True)
+            seed_paper = Paper(paper_id="query", title=seed_id, year=None, is_seed=True)
             papers["query"] = seed_paper
             seed_metadata = {"title": seed_id, "abstract": ""}
 
@@ -240,7 +282,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             paper = Paper(
                 paper_id=paper_id,
                 title=metadata.get("title", "Unknown"),
-                year=metadata.get("year", 2020),
+                year=metadata.get("year"),
                 authors=authors,
                 abstract=metadata.get("abstract", ""),
                 categories=metadata.get("categories", []),
@@ -339,6 +381,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         for dataset_name in dataset_names:
             try:
+                from datasets import load_dataset
+
                 dataset = load_dataset(
                     dataset_name, split=self.dataset_split, streaming=True
                 )
@@ -451,7 +495,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             or f"arxiv_{fallback_index}"
         )
 
-        year = 2020
+        year = None
         if paper.get("year"):
             try:
                 year = int(paper["year"])
@@ -550,8 +594,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             semantic_sim = 0.0
 
         # Temporal factor
-        year_diff = abs(paper1.year - paper2.year)
-        temporal_factor = EMBEDDING_CONFIG.temporal_factor(year_diff)
+        temporal_factor = self.temporal_similarity(paper1, paper2)
 
         # Category overlap
         category_overlap = paper1.category_overlap(paper2)

@@ -8,7 +8,6 @@ comprehensive paper discovery.
 import logging
 from typing import Dict
 
-import networkx as nx
 import numpy as np
 
 from citemesh.core import HYBRID_CONFIG, Paper
@@ -181,7 +180,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             )
 
         # Add co-citation boost if papers are from same era
-        if abs(paper1.year - paper2.year) < 2:
+        if (
+            paper1.year is not None
+            and paper2.year is not None
+            and abs(paper1.year - paper2.year) < 2
+        ):
             similarity += HYBRID_CONFIG.co_citation_boost
 
         return min(similarity, 1.0)  # Cap at 1.0
@@ -202,9 +205,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if not max_edges or max_edges <= 0:
             return graph, actual_seed_id
 
-        limited_graph = nx.Graph()
-        limited_graph.add_nodes_from(graph.nodes(data=True))
-
         edge_counts = {node: 0 for node in graph.nodes()}
         # Sort edges by weight descending so strongest connections are kept
         sorted_edges = sorted(
@@ -213,15 +213,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             reverse=True,
         )
 
+        edges_to_remove = []
         for u, v, data in sorted_edges:
-            if edge_counts[u] >= max_edges and edge_counts[v] >= max_edges:
+            if edge_counts[u] >= max_edges or edge_counts[v] >= max_edges:
+                edges_to_remove.append((u, v))
                 continue
 
-            limited_graph.add_edge(u, v, **data)
             edge_counts[u] += 1
             edge_counts[v] += 1
 
-        return limited_graph, actual_seed_id
+        graph.remove_edges_from(edges_to_remove)
+        return graph, actual_seed_id
 
     def should_create_edge(
         self, paper1: Paper, paper2: Paper, similarity: float
