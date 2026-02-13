@@ -23,6 +23,7 @@ citemesh cache root
 ├── embeddings/
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, hashes, dims, row_idx)
 │   └── embeddings_<model-hash>.h5 # HDF5 matrix dataset: embeddings[row_idx] -> vector
+│   └── cache_<model-hash>.lock    # Inter-process file lock for cache mutation
 ├── joblib/
 │   └── ...                        # Normalized corpus payloads cached via joblib
 └── references/
@@ -43,6 +44,8 @@ A new vector is computed when:
 Older per-paper HDF5 cache layouts are renamed to a `.bak...` backup on first use, so existing data can be manually recovered before matrix storage is rebuilt.
 
 `clear()` and migration operations now preserve old cache bytes by moving them to timestamped backups (`.bak.<state>.<timestamp>`). Use this to recover from unexpected behavior before removing those backups manually.
+
+Embedding-cache writes are serialized with a per-model lock file (`cache_<model-hash>.lock`). This prevents concurrent processes from opening/writing the same HDF5 file at the same time, eliminating lock/open races under parallel workloads.
 
 To force immediate rebuilds from scratch, pass `--force-rebuild-cache` with the `embedding` or `hybrid` strategy.
 

@@ -8,12 +8,24 @@ import hashlib
 import logging
 import sqlite3
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import h5py
 import numpy as np
+from filelock import FileLock, Timeout
 from tqdm.auto import tqdm
 
 from .cache import get_cache_dir
@@ -24,6 +36,7 @@ logger = logging.getLogger(__name__)
 SQLITE_QUERY_BATCH_SIZE = 900
 EMBEDDINGS_DATASET_NAME = "embeddings"
 EMBEDDING_CACHE_SCHEMA_VERSION = 1
+EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS = 60.0
 H5_LAYOUT_KEY = "h5_layout_version"
 H5_LAYOUT_MATRIX_VERSION = "matrix-v1"
 SCHEMA_VERSION_KEY = "schema_version"
@@ -72,10 +85,12 @@ class EmbeddingCache:
         model_hash = hashlib.sha256(model_name.encode("utf-8")).hexdigest()[:12]
         self.db_path = self.cache_dir / f"metadata_{model_hash}.db"
         self.h5_path = self.cache_dir / f"embeddings_{model_hash}.h5"
+        self.lock_path = self.cache_dir / f"cache_{model_hash}.lock"
         self.model_name = model_name
 
-        self._init_db()
-        self._ensure_h5_layout()
+        with self._cache_lock():
+            self._init_db()
+            self._ensure_h5_layout()
 
     # ------------------------------------------------------------------
     # Public API
@@ -113,7 +128,11 @@ class EmbeddingCache:
             items, desc="Checking cache", unit="papers", disable=not progress_enabled
         )
 
-        with sqlite3.connect(self.db_path) as conn, h5py.File(self.h5_path, "a") as h5:
+        with (
+            self._cache_lock(),
+            sqlite3.connect(self.db_path) as conn,
+            h5py.File(self.h5_path, "a") as h5,
+        ):
             cursor = conn.cursor()
             existing_rows = self._load_existing_rows(
                 conn, [paper_id for paper_id, _ in items]
@@ -269,13 +288,14 @@ class EmbeddingCache:
 
     def clear(self) -> None:
         """Purge cache artifacts while preserving old files as backups."""
-        if self.db_path.exists():
-            self._backup_cache_file(self.db_path, MIGRATION_STATE_CLEAR)
+        with self._cache_lock():
+            if self.db_path.exists():
+                self._backup_cache_file(self.db_path, MIGRATION_STATE_CLEAR)
 
-        if self.h5_path.exists():
-            self._backup_cache_file(self.h5_path, MIGRATION_STATE_CLEAR)
+            if self.h5_path.exists():
+                self._backup_cache_file(self.h5_path, MIGRATION_STATE_CLEAR)
 
-        self._init_db()
+            self._init_db()
 
     def _make_backup_path(self, target_path: Path, suffix: str) -> Path:
         """Build a timestamped backup path for cache artifacts."""
@@ -300,6 +320,19 @@ class EmbeddingCache:
 
     # ------------------------------------------------------------------
     # Internal helpers
+
+    @contextmanager
+    def _cache_lock(self) -> Iterator[None]:
+        """Serialize cache mutations across processes for this model namespace."""
+        lock = FileLock(str(self.lock_path), timeout=EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS)
+        try:
+            with lock:
+                yield
+        except Timeout as exc:
+            raise TimeoutError(
+                "Timed out waiting for embedding cache lock "
+                f"at {self.lock_path}. Another process may be holding it."
+            ) from exc
 
     def _init_db(self) -> None:
         """Create and initialize the metadata cache schema when needed."""

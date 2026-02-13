@@ -1,5 +1,7 @@
 """Tests for embedding cache hit/miss behavior."""
 
+import multiprocessing as mp
+from queue import Empty
 import sqlite3
 import tempfile
 from typing import Any
@@ -27,6 +29,26 @@ class _MockModel:
         self.encode_calls += 1
         np.random.seed(len(texts))
         return np.random.rand(len(texts), 2)
+
+
+def _multiprocess_cache_worker(
+    cache_dir: str, worker_idx: int, queue: mp.Queue
+) -> None:
+    """Write embeddings in a subprocess and report success/failure."""
+    try:
+        cache = EmbeddingCache(cache_dir=cache_dir, model_name="process-lock-test")
+        model = _MockModel()
+        papers = {
+            f"p{worker_idx}_{offset}": {
+                "title": f"Title {offset}",
+                "abstract": f"Abstract {offset}",
+            }
+            for offset in range(100)
+        }
+        cache.get_embeddings(papers, model, show_progress=False)
+        queue.put(("ok", worker_idx))
+    except Exception as exc:  # pragma: no cover - subprocess path
+        queue.put(("err", worker_idx, repr(exc)))
 
 
 def test_embedding_cache_returns_cached_vectors() -> None:
@@ -108,3 +130,33 @@ def test_embedding_cache_reuses_row_for_text_updates() -> None:
 
     assert row_idx_before == row_idx_after
     assert model.encode_calls == 2
+
+
+def test_embedding_cache_serializes_multiprocess_writes(tmp_path) -> None:
+    """Concurrent processes should serialize writes without HDF5 lock failures."""
+    queue: mp.Queue = mp.Queue()
+    processes = [
+        mp.Process(
+            target=_multiprocess_cache_worker,
+            args=(str(tmp_path), idx, queue),
+        )
+        for idx in range(4)
+    ]
+
+    for process in processes:
+        process.start()
+
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+    results = []
+    for _ in processes:
+        try:
+            results.append(queue.get(timeout=5))
+        except Empty:
+            results.append(("err", "missing", "worker did not report result"))
+    errors = [result for result in results if result[0] == "err"]
+    assert not errors, f"Concurrent cache writes failed: {errors}"
