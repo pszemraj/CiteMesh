@@ -39,17 +39,9 @@ class GraphBuilderStrategy(ABC):
         self._collection_summary: Optional[str] = None
         self.rng = np.random.default_rng(random_seed)
 
-        # Set deterministic seeds for Python random and optionally torch
+        # Set deterministic seed for Python random
         if random_seed is not None:
             random.seed(random_seed)
-            try:
-                import torch
-
-                torch.manual_seed(random_seed)
-                if torch.cuda.is_available():
-                    torch.cuda.manual_seed_all(random_seed)
-            except ImportError:
-                pass
 
     @abstractmethod
     def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:

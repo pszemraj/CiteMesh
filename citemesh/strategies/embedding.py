@@ -6,7 +6,6 @@ to find conceptually similar papers without relying on citations.
 """
 
 import heapq
-import importlib.util
 import logging
 import sys
 from typing import Dict, List, Optional, Tuple
@@ -34,26 +33,6 @@ def _get_memory() -> Memory:
     return _memory
 
 
-def _check_embedding_deps() -> None:
-    """Verify optional embedding dependencies are available."""
-    missing = []
-    if importlib.util.find_spec("datasets") is None:
-        missing.append("datasets")
-
-    if importlib.util.find_spec("torch") is None:
-        missing.append("torch")
-
-    if importlib.util.find_spec("sentence_transformers") is None:
-        missing.append("sentence-transformers")
-
-    if missing:
-        raise ImportError(
-            "Embedding strategy requires optional dependencies: "
-            + ", ".join(missing)
-            + ". Install with: pip install citemesh[embeddings]"
-        )
-
-
 STREAMING_BATCH_SIZE = 32
 CANDIDATE_MULTIPLIER = 4
 
@@ -73,20 +52,10 @@ def load_arxiv_dataset_cached(
     """
     papers = {}
 
-    try:
-        from datasets import load_dataset
+    from datasets import load_dataset
 
-        dataset = load_dataset("CShorten/ML-ArXiv-Papers", split=dataset_split)
-        logger.info(f"Loaded ML-ArXiv-Papers dataset (split: {dataset_split})")
-    except Exception:
-        try:
-            from datasets import load_dataset
-
-            dataset = load_dataset("gfissore/arxiv-abstracts-2021", split=dataset_split)
-            logger.info(f"Loaded arxiv-abstracts-2021 dataset (split: {dataset_split})")
-        except Exception as e:
-            logger.warning(f"Could not load ArXiv dataset: {e}")
-            return papers
+    dataset = load_dataset("CShorten/ML-ArXiv-Papers", split=dataset_split)
+    logger.info(f"Loaded ML-ArXiv-Papers dataset (split: {dataset_split})")
 
     for i, paper in enumerate(
         tqdm(dataset, desc="Loading ArXiv papers", total=max_papers or len(dataset))
@@ -164,7 +133,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         """
         super().__init__(max_papers, random_seed)
-        _check_embedding_deps()
         self.model_name = model_name
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size
@@ -368,66 +336,47 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         Returns:
             List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
-        dataset_names = [
-            "CShorten/ML-ArXiv-Papers",
-            "gfissore/arxiv-abstracts-2021",
-        ]
-
         max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
         heap: List[Tuple[float, str, Dict, np.ndarray]] = []
-        last_exception: Optional[Exception] = None
 
         progress_enabled = sys.stderr.isatty()
 
-        for dataset_name in dataset_names:
-            try:
-                from datasets import load_dataset
+        from datasets import load_dataset
 
-                dataset = load_dataset(
-                    dataset_name, split=self.dataset_split, streaming=True
-                )
-            except Exception as exc:
-                logger.warning(f"Could not stream dataset {dataset_name}: {exc}")
-                last_exception = exc
-                continue
+        dataset = load_dataset(
+            "CShorten/ML-ArXiv-Papers", split=self.dataset_split, streaming=True
+        )
 
-            progress_total = self.corpus_size if self.corpus_size else None
-            with tqdm(
-                total=progress_total,
-                desc=f"Streaming {dataset_name}",
-                unit="papers",
-                dynamic_ncols=True,
-                disable=not progress_enabled,
-            ) as progress:
-                batch: List[Dict] = []
-                for idx, raw_record in enumerate(dataset):
-                    if self.corpus_size and idx >= self.corpus_size:
-                        break
+        progress_total = self.corpus_size if self.corpus_size else None
+        with tqdm(
+            total=progress_total,
+            desc="Streaming CShorten/ML-ArXiv-Papers",
+            unit="papers",
+            dynamic_ncols=True,
+            disable=not progress_enabled,
+        ) as progress:
+            batch: List[Dict] = []
+            for idx, raw_record in enumerate(dataset):
+                if self.corpus_size and idx >= self.corpus_size:
+                    break
 
-                    metadata = self._extract_paper_metadata(raw_record, idx)
-                    batch.append(metadata)
-                    progress.update(1)
+                metadata = self._extract_paper_metadata(raw_record, idx)
+                batch.append(metadata)
+                progress.update(1)
 
-                    if len(batch) >= STREAMING_BATCH_SIZE:
-                        self._process_stream_batch(
-                            batch, seed_embedding, heap, max_candidates
-                        )
-                        batch = []
-
-                if batch:
+                if len(batch) >= STREAMING_BATCH_SIZE:
                     self._process_stream_batch(
                         batch, seed_embedding, heap, max_candidates
                     )
+                    batch = []
 
-                if progress_total is None:
-                    progress.set_postfix_str(f"processed {progress.n}")
+            if batch:
+                self._process_stream_batch(batch, seed_embedding, heap, max_candidates)
 
-            if heap:
-                break  # Successfully collected candidates
+            if progress_total is None:
+                progress.set_postfix_str(f"processed {progress.n}")
 
         if not heap:
-            if last_exception:
-                raise last_exception
             return []
 
         top_candidates = sorted(heap, key=lambda item: item[0], reverse=True)
