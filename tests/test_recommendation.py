@@ -111,3 +111,29 @@ class TestRecommendationGraphBuilder:
 
         assert "valid" in papers
         assert "missing_abstract" not in papers
+
+    @patch("citemesh.strategies.recommendation.get_client")
+    def test_collect_and_build_with_unknown_year(self, mock_get_client):
+        """Papers with unknown year should not break recommendation graph construction."""
+        mock_client = MagicMock()
+        mock_client.get_paper.return_value = Paper(
+            paper_id="seed", title="Seed", year=2020, abstract="seed abstract"
+        )
+        mock_client.get_recommended_papers.return_value = [
+            Paper(
+                paper_id="no_year",
+                title="No Year",
+                year=None,
+                abstract="Related topic text about transformers.",
+            )
+        ]
+        mock_get_client.return_value = mock_client
+
+        builder = RecommendationGraphBuilder(max_papers=3, similarity_threshold=0.0)
+        papers = builder.collect_papers("seed")
+
+        assert "no_year" in papers
+        assert papers["no_year"].year is None
+
+        graph, _ = builder.build_graph("seed")
+        assert "no_year" in graph

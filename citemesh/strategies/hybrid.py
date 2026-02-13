@@ -6,14 +6,15 @@ comprehensive paper discovery.
 """
 
 import logging
-from typing import Dict
+from typing import Dict, Optional
 
 import numpy as np
 
 from citemesh.core import HYBRID_CONFIG, Paper
+from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.citation import CitationGraphBuilder
-from citemesh.strategies.embedding import EmbeddingGraphBuilder
+from citemesh.strategies.embedding import _check_embedding_deps, EmbeddingGraphBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         model_name: str = "google/embeddinggemma-300m",
         dataset_split: str = "train",  # Full training set by default (~117k papers)
         random_seed: int = None,
+        client: Optional[SemanticScholarClient] = None,
     ):
         """
         Initialize hybrid graph builder.
@@ -51,7 +53,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             random_seed: Random seed for reproducibility
         """
         super().__init__(max_papers, random_seed)
+        self.client = client or get_client()
         self.max_semantic = max_semantic
+
+        if self.max_semantic > 0:
+            _check_embedding_deps()
 
         # Create citation and embedding builders (with same seed for consistency)
         citation_papers = max_papers - max_semantic
@@ -61,6 +67,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             max_references=max_references,
             fetch_references=True,  # Enable real bibliographic coupling
             random_seed=random_seed,
+            client=self.client,
         )
 
         self.embedding_builder = EmbeddingGraphBuilder(
@@ -68,6 +75,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             model_name=model_name,
             dataset_split=dataset_split,
             random_seed=random_seed,
+            client=self.client,
         )
 
         # Track paper sources for adaptive similarity

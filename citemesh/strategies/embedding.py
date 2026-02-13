@@ -16,7 +16,7 @@ from tqdm.auto import tqdm
 
 from citemesh.core import EMBEDDING_CONFIG, Author, Paper
 from citemesh.data import EmbeddingCache, get_cache_dir, get_embedding_model_profile
-from citemesh.services import get_client
+from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import GraphBuilderStrategy
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,32 @@ def _get_memory() -> Memory:
     if _memory is None:
         _memory = Memory(str(get_cache_dir("joblib")), verbose=0)
     return _memory
+
+
+def _check_embedding_deps() -> None:
+    """Verify embedding dependencies are installed."""
+    missing: list[str] = []
+
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        missing.append("torch")
+
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError:
+        missing.append("sentence-transformers")
+
+    try:
+        import datasets  # noqa: F401
+    except ImportError:
+        missing.append("datasets")
+
+    if missing:
+        raise ImportError(
+            f"Embedding strategy requires: {', '.join(missing)}. "
+            f"Install with: pip install citemesh[embeddings]"
+        )
 
 
 STREAMING_BATCH_SIZE = 32
@@ -119,6 +145,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         top_k: int = 2,
         random_seed: int = None,
         use_streaming: bool = False,
+        client: Optional[SemanticScholarClient] = None,
     ):
         """
         Initialize embedding graph builder.
@@ -132,6 +159,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             random_seed: Random seed for reproducibility
             use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         """
+        _check_embedding_deps()
         super().__init__(max_papers, random_seed)
         self.model_name = model_name
         self.dataset_split = dataset_split
@@ -140,7 +168,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.model = None
         self.arxiv_corpus: Dict[str, Dict] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
-        self.client = get_client()
+        self.client = client or get_client()
         self.embedding_cache = EmbeddingCache(model_name=model_name)
         self.use_streaming = use_streaming
         self.model_profile = get_embedding_model_profile(model_name)

@@ -99,3 +99,45 @@ def test_get_paper_returns_none_after_retries():
 
     assert result is None
     assert sleep_mock.call_count == API_CONFIG.max_retries - 1
+
+
+def test_retries_on_rate_limit_for_citations():
+    """citation lookup should back off using Retry-After on 429 responses."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+
+    response = requests.Response()
+    response.status_code = 429
+    response.headers = {"Retry-After": "2"}
+
+    client.client.get_paper_citations = MagicMock(
+        side_effect=[requests.HTTPError(response=response), []]
+    )
+
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        result = client.get_paper_citations("seed", limit=5)
+
+    assert sleep_mock.call_count == 1
+    assert sleep_mock.call_args_list[0].args[0] == 2.0
+    assert result == []
+
+
+def test_retries_on_rate_limit_for_references():
+    """reference lookup should back off using Retry-After on 429 responses."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+
+    response = requests.Response()
+    response.status_code = 429
+    response.headers = {"Retry-After": "3"}
+
+    client.client.get_paper_references = MagicMock(
+        side_effect=[requests.HTTPError(response=response), []]
+    )
+
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        result = client.get_paper_references("seed", limit=5)
+
+    assert sleep_mock.call_count == 1
+    assert sleep_mock.call_args_list[0].args[0] == 3.0
+    assert result == []
