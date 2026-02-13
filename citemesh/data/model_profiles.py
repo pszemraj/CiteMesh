@@ -49,6 +49,7 @@ class EmbeddingModelProfile:
     float16_supported: bool = True
     preferred_torch_dtype: Optional[str] = None
     use_cuda_autocast: bool = False
+    compile_inner_transformer: bool = False
     available_truncate_dims: Optional[Tuple[int, ...]] = None
     recommended_truncate_dim: Optional[int] = None
     notes: Optional[str] = None
@@ -105,6 +106,7 @@ EMBEDDING_MODEL_PROFILES = (
         float16_supported=False,
         preferred_torch_dtype="bfloat16",
         use_cuda_autocast=True,
+        compile_inner_transformer=True,
         available_truncate_dims=(768, 512, 256, 128),
         recommended_truncate_dim=256,
         notes="Adds recommended query/document prompts for EmbeddingGemma.",

@@ -385,6 +385,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._autocast_device_type: Optional[str] = None
         self._autocast_enabled = False
         self._encode_model: Optional[Any] = None
+        self._inner_model_compiled = False
 
     def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
         """Resolve effective embedding dimension from request + model profile defaults.
@@ -599,6 +600,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             else:
                 self.model = SentenceTransformer(self.model_name)
 
+            self._maybe_compile_inner_transformer()
+
             if (
                 not self.model_profile.float16_supported
                 and not model_kwargs
@@ -612,6 +615,76 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if self.model_profile.notes and not self._profile_logged:
                 logger.info(self.model_profile.notes)
                 self._profile_logged = True
+
+    def _maybe_compile_inner_transformer(self) -> None:
+        """Best-effort compile of the wrapped HF model for selected profiles.
+
+        SentenceTransformer itself is not compiled due wrapper incompatibilities.
+        For supported profiles (currently EmbeddingGemma), we compile only
+        ``model[0].auto_model`` and keep the outer SentenceTransformer intact.
+
+        :return None: Mutates ``self.model`` in place when compilation succeeds.
+        """
+        if self.model is None or self._inner_model_compiled:
+            return
+
+        if not self.model_profile.compile_inner_transformer:
+            return
+
+        try:
+            import torch
+        except ImportError:
+            logger.info(
+                "%s profile supports inner-model torch.compile, but torch is unavailable.",
+                self.model_name,
+            )
+            return
+
+        compile_fn = getattr(torch, "compile", None)
+        if not callable(compile_fn):
+            logger.info(
+                "%s profile supports inner-model torch.compile, but torch.compile is unavailable.",
+                self.model_name,
+            )
+            return
+
+        try:
+            transformer_block = self.model[0]
+        except Exception as exc:  # pragma: no cover - defensive for upstream API drift
+            logger.warning(
+                "Skipping torch.compile for %s: could not access model[0] (%s).",
+                self.model_name,
+                exc,
+            )
+            return
+
+        auto_model = getattr(transformer_block, "auto_model", None)
+        if auto_model is None:
+            logger.warning(
+                "Skipping torch.compile for %s: model[0].auto_model is unavailable.",
+                self.model_name,
+            )
+            return
+
+        if auto_model.__class__.__name__ == "OptimizedModule":
+            self._inner_model_compiled = True
+            return
+
+        try:
+            transformer_block.auto_model = compile_fn(auto_model)
+        except Exception as exc:
+            logger.warning(
+                "torch.compile failed for %s inner transformer; continuing without compile: %s",
+                self.model_name,
+                exc,
+            )
+            return
+
+        self._inner_model_compiled = True
+        logger.info(
+            "Enabled torch.compile for %s inner transformer (model[0].auto_model).",
+            self.model_name,
+        )
 
     def _load_corpus(self) -> None:
         """Load ArXiv corpus if not already loaded.

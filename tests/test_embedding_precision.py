@@ -24,6 +24,13 @@ def _install_fake_sentence_transformers(
     init_log: dict[str, Any] = {}
     encode_log: list[dict[str, Any]] = []
 
+    class _FakeInnerBlock:
+        """Container exposing ``auto_model`` like SentenceTransformer internals."""
+
+        def __init__(self) -> None:
+            """Initialize with a placeholder auto model instance."""
+            self.auto_model = object()
+
     class _FakeSentenceTransformer:
         """Minimal fake SentenceTransformer."""
 
@@ -35,6 +42,8 @@ def _install_fake_sentence_transformers(
             """
             init_log["model_name"] = model_name_or_path
             init_log["kwargs"] = kwargs
+            self._blocks = [_FakeInnerBlock()]
+            init_log["auto_model_before_compile"] = self._blocks[0].auto_model
 
         def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
             """Return deterministic embeddings.
@@ -46,6 +55,10 @@ def _install_fake_sentence_transformers(
             encode_log.append(kwargs)
             return np.ones((len(texts), 2), dtype=np.float32)
 
+        def __getitem__(self, index: int) -> _FakeInnerBlock:
+            """Expose internal blocks through subscript access."""
+            return self._blocks[index]
+
     fake_module = types.ModuleType("sentence_transformers")
     fake_module.SentenceTransformer = _FakeSentenceTransformer
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
@@ -53,13 +66,18 @@ def _install_fake_sentence_transformers(
 
 
 def _install_fake_torch(
-    monkeypatch: pytest.MonkeyPatch, cuda_available: bool, bf16_supported: bool
+    monkeypatch: pytest.MonkeyPatch,
+    cuda_available: bool,
+    bf16_supported: bool,
+    *,
+    compile_behavior: str = "identity",
 ) -> tuple[object, list[tuple[Any, ...]]]:
     """Install a fake ``torch`` module for precision tests.
 
     :param pytest.MonkeyPatch monkeypatch: Pytest monkeypatch helper.
     :param bool cuda_available: Whether fake CUDA is available.
     :param bool bf16_supported: Whether fake CUDA reports BF16 support.
+    :param str compile_behavior: ``identity``, ``tagged``, or ``raise``.
     :return tuple[object, list[tuple[Any, ...]]]: BF16 token and autocast event log.
     """
     bf16_token = object()
@@ -104,9 +122,22 @@ def _install_fake_torch(
         """
         return _FakeAutocast(device_type=device_type, dtype=dtype)
 
+    def _compile(model: object) -> object:
+        """Mock ``torch.compile`` behavior for tests.
+
+        :param object model: Model object passed to ``torch.compile``.
+        :return object: Compiled replacement or original model.
+        """
+        if compile_behavior == "raise":
+            raise RuntimeError("compile failure")
+        if compile_behavior == "tagged":
+            return ("compiled", model)
+        return model
+
     fake_torch = types.ModuleType("torch")
     fake_torch.bfloat16 = bf16_token
     fake_torch.autocast = _autocast
+    fake_torch.compile = _compile
     fake_torch.cuda = types.SimpleNamespace(
         is_available=lambda: cuda_available,
         is_bf16_supported=lambda: bf16_supported,
@@ -178,3 +209,77 @@ def test_embeddinggemma_rejects_unsupported_truncate_dim(
         match="truncate_dim=300 is not supported for google/embeddinggemma-300m",
     ):
         EmbeddingGraphBuilder(max_papers=1, truncate_dim=300, client=MagicMock())
+
+
+def test_embeddinggemma_compiles_inner_transformer_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EmbeddingGemma should compile only the inner HF model when torch.compile exists."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        compile_behavior="tagged",
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    original = init_log["auto_model_before_compile"]
+    assert builder.model is not None
+    assert builder.model[0].auto_model == ("compiled", original)
+    assert builder._inner_model_compiled is True
+
+
+def test_embeddinggemma_compile_failure_falls_back_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compile failures should not prevent model loading."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        compile_behavior="raise",
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert builder.model is not None
+    assert builder.model[0].auto_model is init_log["auto_model_before_compile"]
+    assert builder._inner_model_compiled is False
+
+
+def test_non_gemma_profile_does_not_compile_inner_transformer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-EmbeddingGemma models should skip the inner-model compile path."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        compile_behavior="tagged",
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        client=MagicMock(),
+    )
+    builder._load_model()
+
+    assert builder.model is not None
+    assert builder.model[0].auto_model is init_log["auto_model_before_compile"]
+    assert builder._inner_model_compiled is False

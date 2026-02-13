@@ -32,6 +32,7 @@ Treat this page as historical context, not the normative behavior spec.
 
 - **Citation**: uses real bibliographic coupling (shared reference lists) and temporal penalties; optional reference fetching skip for faster runs.
 - **Embedding**: combines semantic similarity with temporal/category/author factors; fetches citation counts for top matches to balance node sizing. EmbeddingGemma now defaults to 256d Matryoshka embeddings (with clear runtime logs and dim-specific cache names).
+- **Embedding**: EmbeddingGemma now attempts a best-effort `torch.compile` on the inner HF model (`model[0].auto_model`) while leaving the SentenceTransformer wrapper uncompiled; failures fall back safely.
 - **Hybrid**: builds on the citation graph, injects semantic neighbors, and adjusts weights based on relationship provenance while capping per-node edges.
 - **Recommendation**: adds Semantic Scholar recommendation-based discovery with direct search endpoint and API-key-aware rate-limit handling. Reference-aware mode now requests reference payloads directly (with fallback hydration) so bibliographic coupling can contribute to scoring without unnecessary per-paper calls.
 - Citation and recommendation edge creation now use `--similarity-threshold` as the sole minimum edge gate.

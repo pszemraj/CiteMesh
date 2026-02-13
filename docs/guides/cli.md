@@ -84,6 +84,7 @@ Numeric validation:
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`); use `--corpus-size` to cap runtime in streaming mode.
   
   _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts, defaults to `256d` Matryoshka embeddings (available: `768/512/256/128`), and logs the selected dimension at model load. It also prefers `bfloat16` model loading with CUDA autocast; if BF16 is unavailable, it falls back to float32.
+  CiteMesh also attempts the `torch.compile` inner-transformer workaround (`model[0].auto_model`) for EmbeddingGemma when available; on compile failure it logs a warning and continues uncompiled.
 
 ### Hybrid Strategy
 
