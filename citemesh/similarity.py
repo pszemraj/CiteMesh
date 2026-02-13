@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict
 
 from citemesh.core import Paper
 
@@ -17,7 +17,6 @@ class AbstractSimilarityIndex:
         """
         self.max_features = max_features
         self._matrix = None
-        self._ids: List[str] = []
         self._id_to_idx: Dict[str, int] = {}
 
     def build(self, papers: Dict[str, Paper]) -> None:
@@ -34,7 +33,6 @@ class AbstractSimilarityIndex:
 
         if len(texts) < 2:
             self._matrix = None
-            self._ids = []
             self._id_to_idx = {}
             return
 
@@ -47,7 +45,6 @@ class AbstractSimilarityIndex:
         matrix = vectorizer.fit_transform(texts)
 
         self._matrix = matrix
-        self._ids = ids
         self._id_to_idx = {paper_id: idx for idx, paper_id in enumerate(ids)}
 
     def similarity(self, paper_id_a: str, paper_id_b: str) -> float:

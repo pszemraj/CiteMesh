@@ -60,6 +60,46 @@ class _BrokenJsonResponse(_MockResponse):
         raise ValueError("Malformed JSON payload")
 
 
+class _FakeRequestsSession:
+    """Minimal request session with close tracking."""
+
+    def __init__(self) -> None:
+        """Create an in-memory session stub."""
+        self.headers: dict[str, str] = {}
+        self.closed = False
+
+    def close(self) -> None:
+        """Mark the fake session as closed."""
+        self.closed = True
+
+
+def _build_fake_semantic_scholar_api(
+    created: Optional[list[object]] = None,
+) -> type:
+    """Create a SemanticScholar API stub class backed by fake sessions.
+
+    :param Optional[list[object]] created: Optional sink receiving each created API
+        instance.
+    :return type: Fake SemanticScholar-like class for monkeypatching.
+    """
+
+    class _FakeApi:
+        """Minimal SemanticScholar wrapper stub."""
+
+        def __init__(self, *_, **__) -> None:
+            """Create fake API instance and track it when requested."""
+            self.session = _FakeRequestsSession()
+            self.closed = False
+            if created is not None:
+                created.append(self)
+
+        def close(self) -> None:
+            """Mark fake API instance as closed."""
+            self.closed = True
+
+    return _FakeApi
+
+
 def _paper_payload(
     *,
     paper_id: str = "p1",
@@ -339,30 +379,13 @@ def test_semantic_module_reload_does_not_mutate_http_logger_levels() -> None:
 
 def test_close_and_reset_client_close_prior_session() -> None:
     """`reset_client()` should close both request session and API wrapper."""
-    created: list["object"] = []
-
-    class _FakeRequestsSession:
-        def __init__(self) -> None:
-            self.headers: dict[str, str] = {}
-            self.closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    class _FakeApi:
-        def __init__(self, *_, **__) -> None:
-            self.session = _FakeRequestsSession()
-            self.closed = False
-            created.append(self)
-
-        def close(self) -> None:
-            self.closed = True
+    created: list[object] = []
 
     previous_session = semantic_module.requests.Session
     previous_client = semantic_module.SemanticScholar
     try:
         semantic_module.requests.Session = _FakeRequestsSession
-        semantic_module.SemanticScholar = _FakeApi
+        semantic_module.SemanticScholar = _build_fake_semantic_scholar_api(created)
 
         reset_client()
         first = get_client()
@@ -384,31 +407,11 @@ def test_close_and_reset_client_close_prior_session() -> None:
 def test_client_context_manager_closes_sessions() -> None:
     """Client context manager should close all owned sessions."""
 
-    class _FakeRequestsSession:
-        """Minimal request session with close tracking."""
-
-        def __init__(self) -> None:
-            self.headers: dict[str, str] = {}
-            self.closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    class _FakeApi:
-        """Minimal SemanticScholar wrapper stub."""
-
-        def __init__(self, *_, **__) -> None:
-            self.session = _FakeRequestsSession()
-            self.closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
     previous_session = semantic_module.requests.Session
     previous_client = semantic_module.SemanticScholar
     try:
         semantic_module.requests.Session = _FakeRequestsSession
-        semantic_module.SemanticScholar = _FakeApi
+        semantic_module.SemanticScholar = _build_fake_semantic_scholar_api()
 
         with semantic_module.SemanticScholarClient(timeout=1) as client:
             assert client._closed is False

@@ -62,11 +62,7 @@ For complete CLI behavior (identifier normalization, defaults, strategy-specific
 ## Documentation
 
 Use [docs/README.md](docs/README.md) as the documentation index and source-of-truth map.
-
-- CLI behavior (identifiers, flags, output naming, export behavior): [docs/guides/cli.md](docs/guides/cli.md)
-- Cache/storage behavior and invalidation: [docs/guides/caching.md](docs/guides/caching.md)
-- Component boundaries and extension points: [docs/internals/architecture.md](docs/internals/architecture.md)
-- Historical context: [docs/internals/changelog.md](docs/internals/changelog.md)
+It links each topic to one canonical document to avoid duplicated behavior specs.
 
 ## API Key
 
@@ -75,9 +71,6 @@ Set `S2_API_KEY` for higher Semantic Scholar rate limits:
 ```bash
 export S2_API_KEY="your-semantic-scholar-key"
 ```
-
-For API-related CLI behavior (retries, limits, identifier normalization), see:
-[docs/guides/cli.md](docs/guides/cli.md).
 
 ## Development
 

@@ -21,6 +21,43 @@ from citemesh.visualization.export import (
 )
 
 
+def _install_fake_plotly(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    figure_cls: type,
+    scatter_factory=None,
+) -> None:
+    """Install a minimal ``plotly`` module with configurable graph_objects types.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch ``sys.modules``.
+    :param type figure_cls: Figure class replacement used by exporter tests.
+    :param callable scatter_factory: Optional ``Scatter`` constructor.
+    :return None: Installs fake plotly modules for the current test.
+    """
+    fake_go = types.SimpleNamespace(
+        Scatter=scatter_factory or (lambda **kwargs: {"type": "scatter", **kwargs}),
+        Layout=lambda **kwargs: {"type": "layout", **kwargs},
+        Figure=figure_cls,
+    )
+    fake_plotly = types.ModuleType("plotly")
+    fake_plotly.graph_objects = fake_go
+    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+
+
+class _BaseFakeFigure:
+    """Reusable minimal Plotly ``Figure`` stand-in for exporter tests."""
+
+    def __init__(self, data, layout) -> None:
+        """Store figure payload for assertion helpers."""
+        self.data = data
+        self.layout = layout
+
+    def write_html(self, path: str, **kwargs) -> None:
+        """Write deterministic marker output and ignore optional kwargs."""
+        del kwargs
+        Path(path).write_text("<html>plotly</html>")
+
+
 def _canonicalize_graphml(path: Path) -> str:
     """Return a deterministic textual representation for GraphML comparison."""
     document = ET.parse(path)
@@ -282,7 +319,7 @@ def test_exporter_plotly_with_fake_module(
 
     captured: dict[str, object] = {}
 
-    class FakeFigure:
+    class FakeFigure(_BaseFakeFigure):
         """Minimal plotly Figure stand-in."""
 
         def __init__(self, data, layout) -> None:
@@ -291,27 +328,11 @@ def test_exporter_plotly_with_fake_module(
             :param data: Figure data traces.
             :param layout: Figure layout spec.
             """
-            self.data = data
-            self.layout = layout
+            super().__init__(data, layout)
             captured["data"] = data
             captured["layout"] = layout
 
-        def write_html(self, path: str, **kwargs) -> None:
-            """Write a simple marker HTML file.
-
-            :param str path: Output path.
-            """
-            del kwargs
-            Path(path).write_text("<html>plotly</html>")
-
-    fake_go = types.SimpleNamespace(
-        Scatter=lambda **kwargs: {"type": "scatter", **kwargs},
-        Layout=lambda **kwargs: {"type": "layout", **kwargs},
-        Figure=FakeFigure,
-    )
-    fake_plotly = types.ModuleType("plotly")
-    fake_plotly.graph_objects = fake_go
-    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
 
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
@@ -341,14 +362,7 @@ def test_exporter_plotly_requires_div_id_support(
             if "div_id" in kwargs:
                 raise TypeError("div_id unsupported")
 
-    fake_go = types.SimpleNamespace(
-        Scatter=lambda **kwargs: {"type": "scatter", **kwargs},
-        Layout=lambda **kwargs: {"type": "layout", **kwargs},
-        Figure=FakeFigure,
-    )
-    fake_plotly = types.ModuleType("plotly")
-    fake_plotly.graph_objects = fake_go
-    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
 
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
@@ -365,27 +379,15 @@ def test_exporter_plotly_uses_deterministic_div_id(
     """Plotly HTML export should provide a stable div id when supported."""
     captured: dict[str, object] = {}
 
-    class FakeFigure:
+    class FakeFigure(_BaseFakeFigure):
         """Minimal plotly Figure stand-in."""
-
-        def __init__(self, data, layout) -> None:
-            """Store payload for assertions."""
-            self.data = data
-            self.layout = layout
 
         def write_html(self, path: str, **kwargs) -> None:
             """Capture div_id kwargs and write marker output."""
             captured["kwargs"] = kwargs
             Path(path).write_text("<html>plotly</html>")
 
-    fake_go = types.SimpleNamespace(
-        Scatter=lambda **kwargs: {"type": "scatter", **kwargs},
-        Layout=lambda **kwargs: {"type": "layout", **kwargs},
-        Figure=FakeFigure,
-    )
-    fake_plotly = types.ModuleType("plotly")
-    fake_plotly.graph_objects = fake_go
-    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
 
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
@@ -407,32 +409,16 @@ def test_exporter_plotly_with_missing_year_data(
 
     captured: dict[str, list[object]] = {}
 
-    class FakeFigure:
-        """Minimal plotly Figure stand-in."""
-
-        def __init__(self, data, layout) -> None:
-            """Store payload for assertions."""
-            self.data = data
-            self.layout = layout
-
-        def write_html(self, path: str, **kwargs) -> None:
-            """Write a simple marker HTML file."""
-            del kwargs
-            Path(path).write_text("<html>plotly</html>")
-
     def fake_scatter(**kwargs) -> dict:
         if kwargs.get("mode") == "markers+text":
             captured["marker"] = list(kwargs["marker"]["color"])
         return {"type": "scatter", **kwargs}
 
-    fake_go = types.SimpleNamespace(
-        Scatter=fake_scatter,
-        Layout=lambda **kwargs: {"type": "layout", **kwargs},
-        Figure=FakeFigure,
+    _install_fake_plotly(
+        monkeypatch,
+        figure_cls=_BaseFakeFigure,
+        scatter_factory=fake_scatter,
     )
-    fake_plotly = types.ModuleType("plotly")
-    fake_plotly.graph_objects = fake_go
-    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
 
     graph = nx.Graph()
     graph.add_node(
@@ -546,28 +532,15 @@ def test_exporter_plotly_edge_order_is_stable(
     """Plotly edge trace ordering should follow canonicalized edge order."""
     captured: dict[str, object] = {}
 
-    class FakeFigure:
+    class FakeFigure(_BaseFakeFigure):
         """Minimal plotly Figure stand-in."""
 
         def __init__(self, data, layout) -> None:
             """Store payload for assertions."""
-            self.data = data
-            self.layout = layout
+            super().__init__(data, layout)
             captured["data"] = data
 
-        def write_html(self, path: str, **kwargs) -> None:
-            """Write a simple marker HTML file."""
-            del kwargs
-            Path(path).write_text("<html>plotly</html>")
-
-    fake_go = types.SimpleNamespace(
-        Scatter=lambda **kwargs: {"type": "scatter", **kwargs},
-        Layout=lambda **kwargs: {"type": "layout", **kwargs},
-        Figure=FakeFigure,
-    )
-    fake_plotly = types.ModuleType("plotly")
-    fake_plotly.graph_objects = fake_go
-    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
 
     graph = nx.Graph()
     graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)

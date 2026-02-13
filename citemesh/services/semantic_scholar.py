@@ -31,6 +31,23 @@ RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
 )
 SEARCH_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+DEFAULT_PAPER_FIELDS = (
+    "paperId",
+    "title",
+    "year",
+    "authors",
+    "citationCount",
+    "abstract",
+    "fieldsOfStudy",
+)
+
+
+def _default_paper_fields() -> List[str]:
+    """Return a mutable default field list for paper-like API endpoints.
+
+    :return List[str]: Default paper fields for search/recommendation/get operations.
+    """
+    return list(DEFAULT_PAPER_FIELDS)
 
 
 def _strip_arxiv_version(identifier: str) -> str:
@@ -563,15 +580,7 @@ class SemanticScholarClient:
         for attempt in range(API_CONFIG.max_retries):
             try:
                 self._rate_limit()
-                fields = [
-                    "paperId",
-                    "title",
-                    "year",
-                    "authors",
-                    "citationCount",
-                    "abstract",
-                    "fieldsOfStudy",
-                ]
+                fields = _default_paper_fields()
                 if fetch_references:
                     fields.append("references")
 
@@ -836,15 +845,7 @@ class SemanticScholarClient:
         :return List[Paper]: Ranked recommendation papers.
         """
         if fields is None:
-            fields = [
-                "paperId",
-                "title",
-                "year",
-                "authors",
-                "citationCount",
-                "abstract",
-                "fieldsOfStudy",
-            ]
+            fields = _default_paper_fields()
         if include_references and "references" not in fields:
             fields = [*fields, "references"]
         parsed_limit = _validate_integer_limit(limit, "limit")
@@ -883,15 +884,7 @@ class SemanticScholarClient:
             raise ValueError("query must not be empty")
 
         if fields is None:
-            fields = [
-                "paperId",
-                "title",
-                "year",
-                "authors",
-                "citationCount",
-                "abstract",
-                "fieldsOfStudy",
-            ]
+            fields = _default_paper_fields()
 
         payload = self._request_json(
             SEARCH_BASE_URL,
