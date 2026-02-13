@@ -153,7 +153,9 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
 }
 
 
-def _build_strategy_graph(args: argparse.Namespace, strategy: str) -> tuple[nx.Graph, str]:
+def _build_strategy_graph(
+    args: argparse.Namespace, strategy: str
+) -> tuple[nx.Graph, str]:
     """Build a graph for a strategy selected from CLI arguments.
 
     :param argparse.Namespace args: Parsed arguments.

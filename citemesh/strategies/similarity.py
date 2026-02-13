@@ -64,9 +64,7 @@ def compute_similarity_features(
         and bool(paper2.references)
     )
     bibliographic_coupling = (
-        bibliographic_coupling_fn(paper1, paper2)
-        if has_bibliographic_coupling
-        else 0.0
+        bibliographic_coupling_fn(paper1, paper2) if has_bibliographic_coupling else 0.0
     )
 
     if has_bibliographic_coupling:

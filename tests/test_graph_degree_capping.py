@@ -36,9 +36,7 @@ def _make_constant_similarity_builder(
         del seed_id, kwargs
         return papers
 
-    def always_true(
-        self, paper1: Paper, paper2: Paper, similarity: float
-    ) -> bool:
+    def always_true(self, paper1: Paper, paper2: Paper, similarity: float) -> bool:
         del paper1
         del paper2
         del similarity
@@ -88,9 +86,7 @@ def test_degree_capping_preserves_per_node_limit(
     assert graph.number_of_nodes() == 4
     assert graph.number_of_edges() == len(expected_edges)
     assert all(degree <= max_edges_per_node for _, degree in graph.degree())
-    assert {
-        (min(u, v), max(u, v)) for u, v in graph.edges()
-    } == expected_edges
+    assert {(min(u, v), max(u, v)) for u, v in graph.edges()} == expected_edges
 
 
 def test_select_capped_undirected_edges_tie_break_and_dedupe() -> None:

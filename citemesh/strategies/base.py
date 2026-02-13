@@ -57,9 +57,7 @@ def select_capped_undirected_edges(
         return sorted_edges
 
     edge_counts: Dict[str, int] = {
-        node_id: 0
-        for edge in sorted_edges
-        for node_id in (str(edge[0]), str(edge[1]))
+        node_id: 0 for edge in sorted_edges for node_id in (str(edge[0]), str(edge[1]))
     }
 
     selected_edges: List[Tuple[Any, Any, float]] = []

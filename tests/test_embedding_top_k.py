@@ -1,7 +1,8 @@
 """Tests for embedding top-k configuration validation."""
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 

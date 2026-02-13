@@ -117,4 +117,3 @@ def test_build_strategy_graph_rejects_invalid_strategy() -> None:
     namespace = _dispatch_namespace()
     with pytest.raises(ValueError, match="Unsupported strategy: unknown"):
         cli_module._build_strategy_graph(namespace, "unknown")
-

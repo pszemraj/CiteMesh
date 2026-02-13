@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List
 
 import networkx as nx
 
@@ -37,7 +37,10 @@ def build_top_k_papers() -> Dict[str, Paper]:
 
 
 def build_fake_strategy_builder_factory(
-    captured_kwargs: Dict[str, Any], *, graph: nx.Graph | None = None, seed_id: str = "seed"
+    captured_kwargs: Dict[str, Any],
+    *,
+    graph: nx.Graph | None = None,
+    seed_id: str = "seed",
 ) -> type:
     """Build a fake strategy class that captures ctor kwargs."""
 
