@@ -115,6 +115,17 @@ def _heap_tiebreak_key(paper_id: str) -> Tuple[int, ...]:
     return tuple([-ord(ch) for ch in str(paper_id)] + [1])
 
 
+def _stream_heap_key(
+    similarity: float, paper_id: str, stable_index: int
+) -> Tuple[float, Tuple[int, ...], int]:
+    """Build total-order key where larger tuples represent better candidates."""
+    return (
+        float(similarity),
+        _heap_tiebreak_key(str(paper_id)),
+        -int(stable_index),
+    )
+
+
 class _AutocastEncodeProxy:
     """Wrap model encode calls in a precision context manager."""
 
@@ -870,7 +881,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
         max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
-        heap: List[Tuple[Tuple[Any, ...], str, Dict, np.ndarray]] = []
+        heap: List[Tuple[Tuple[float, Tuple[int, ...], int], str, Dict, np.ndarray]] = []
         seen_paper_ids: set[str] = set()
 
         progress_enabled = sys.stderr.isatty()
@@ -940,31 +951,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 raise last_exception
             return []
 
-        top_candidates = sorted(
-            heap,
-            key=lambda item: (
-                item[0]
-                if isinstance(item[0], tuple)
-                else deterministic_sort_key(item[0], item[2], stable_index=0)
-            ),
-        )
+        top_candidates = sorted(heap, key=lambda item: item[0], reverse=True)
         limited = top_candidates[: self.max_papers * CANDIDATE_MULTIPLIER]
-
-        normalized_candidates: list[tuple[str, Dict, np.ndarray]] = []
-        for candidate in limited:
-            if len(candidate) == 4:
-                _, paper_id, metadata, embedding = candidate
-            else:
-                _, _, paper_id, metadata, embedding = candidate
-            normalized_candidates.append((str(paper_id), metadata, embedding))
-
-        return normalized_candidates
+        return [
+            (str(paper_id), metadata, embedding)
+            for _, paper_id, metadata, embedding in limited
+        ]
 
     def _process_stream_batch(
         self,
         batch: List[Dict],
         seed_embedding: np.ndarray,
-        heap: List[Tuple[Tuple[Any, ...], str, Dict, np.ndarray]],
+        heap: List[Tuple[Tuple[float, Tuple[int, ...], int], str, Dict, np.ndarray]],
         max_candidates: int,
         seen_paper_ids: set[str],
     ) -> None:
@@ -1000,7 +998,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             similarity = float(np.dot(seed_embedding, embedding))
             candidate = (
-                deterministic_sort_key(similarity, paper_id, stable_index=stable_index),
+                _stream_heap_key(similarity, paper_id, stable_index),
                 paper_id,
                 metadata,
                 embedding,

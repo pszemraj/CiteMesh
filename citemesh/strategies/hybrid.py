@@ -81,7 +81,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if self.max_semantic > 0:
             _check_embedding_deps()
             self.embedding_builder = EmbeddingGraphBuilder(
-                max_papers=max_semantic,
+                # Embedding strategy budgets include the seed node; hybrid's
+                # max_semantic contract counts only added non-seed neighbors.
+                max_papers=max_semantic + 1,
                 model_name=model_name,
                 dataset_split=dataset_split,
                 corpus_size=corpus_size,
@@ -137,10 +139,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 # Add new papers not already in collection
                 added = 0
                 for paper_id, paper in semantic_papers.items():
-                    if paper_id not in papers and added < self.max_semantic:
-                        papers[paper_id] = paper
-                        self.paper_sources[paper_id] = "semantic"
-                        added += 1
+                    if added >= self.max_semantic:
+                        break
+                    if len(papers) >= self.max_papers:
+                        break
+                    if paper.is_seed:
+                        continue
+                    if paper_id in papers:
+                        continue
+                    papers[paper_id] = paper
+                    self.paper_sources[paper_id] = "semantic"
+                    added += 1
 
                 logger.info(f"Added {added} semantic papers")
 

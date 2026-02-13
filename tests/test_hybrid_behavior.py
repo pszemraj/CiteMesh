@@ -76,6 +76,29 @@ def test_collect_papers_semantic_failure_falls_back_to_citation(
     assert set(papers) == {"seed", "c1"}
 
 
+def test_collect_papers_max_semantic_counts_non_seed_neighbors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid semantic budget should count only added non-seed neighbors."""
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
+    )
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
+
+    seed = _paper("seed")
+    seed.is_seed = True
+    citation_papers = {"seed": seed, "c1": _paper("c1"), "c2": _paper("c2")}
+    semantic_papers = {"seed": seed, "s1": _paper("s1"), "s2": _paper("s2")}
+
+    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
+
+    papers = builder.collect_papers("seed")
+    assert set(papers) == {"seed", "c1", "c2", "s1"}
+    assert builder.paper_sources["s1"] == "semantic"
+
+
 def test_compute_similarity_uses_source_specific_weights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

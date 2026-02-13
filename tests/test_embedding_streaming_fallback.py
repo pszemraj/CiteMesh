@@ -15,6 +15,7 @@ from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
     _heap_tiebreak_key,
     _query_seed_id,
+    _stream_heap_key,
 )
 
 
@@ -60,8 +61,7 @@ def test_streaming_embedding_falls_back_to_secondary_dataset(
         for metadata in batch:
             paper_id = metadata["paper_id"]
             candidate = (
-                0.95,
-                _heap_tiebreak_key(paper_id),
+                _stream_heap_key(0.95, paper_id, stable_index=0),
                 paper_id,
                 metadata,
                 np.array([0.1], dtype=np.float32),
@@ -145,8 +145,7 @@ def test_streaming_candidate_ties_use_paper_id_tiebreak(
         for metadata in batch:
             paper_id = metadata["paper_id"]
             candidate = (
-                0.95,
-                _heap_tiebreak_key(paper_id),
+                _stream_heap_key(0.95, paper_id, stable_index=0),
                 paper_id,
                 metadata,
                 np.array([0.1], dtype=np.float32),
@@ -243,3 +242,44 @@ def test_stream_batch_skips_duplicate_paper_ids(
 
     assert len(heap) == 1
     assert seen == {"dup"}
+
+
+def test_stream_batch_keeps_strongest_candidates_under_heap_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded streaming heaps should retain the highest-similarity candidates."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        use_streaming=True,
+        random_seed=0,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: MagicMock())
+    builder.embedding_cache.get_embeddings = MagicMock(
+        return_value={
+            "top": np.asarray([1.0, 0.0], dtype=np.float32),
+            "mid": np.asarray([0.5, 0.0], dtype=np.float32),
+            "low": np.asarray([0.2, 0.0], dtype=np.float32),
+        }
+    )
+
+    batch = [
+        {"paper_id": "top", "title": "Top", "abstract": "A"},
+        {"paper_id": "mid", "title": "Mid", "abstract": "B"},
+        {"paper_id": "low", "title": "Low", "abstract": "C"},
+    ]
+    heap: list[tuple] = []
+    seen: set[str] = set()
+    builder._process_stream_batch(
+        batch=batch,
+        seed_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        heap=heap,
+        max_candidates=2,
+        seen_paper_ids=seen,
+    )
+
+    assert {paper_id for _, paper_id, _, _ in heap} == {"top", "mid"}
