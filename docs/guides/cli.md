@@ -67,7 +67,7 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 - `--top-k`, `-k`: strict per-node edge cap applied during embedding graph pruning
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards (disabled by default)
   
-  _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts and keeps activations in float32.
+  _Note_: When using EmbeddingGemma, CiteMesh automatically applies the model card’s recommended query/document prompts and prefers `bfloat16` model loading with CUDA autocast. If BF16 is unavailable, it falls back to float32.
 
 ### Hybrid Strategy
 

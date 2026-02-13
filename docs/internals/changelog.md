@@ -24,7 +24,7 @@ For current operational behavior, use the canonical guides:
 - Joblib caches now live under the same user cache root, avoiding `./cache` clutter within the repo.
 - Added `CITEMESH_CACHE_DIR` environment override for cluster or container deployments.
 - Embedding strategy hits cached HuggingFace datasets by default; streaming is opt-in via `--streaming`.
-- Introduced model profiles (starting with EmbeddingGemma) to add recommended prompts and dtype notes without hard-coding logic in strategies.
+- Introduced model profiles (starting with EmbeddingGemma) to add recommended prompts and explicit precision policies without hard-coding logic in strategies.
 
 ## Strategy Enhancements
 

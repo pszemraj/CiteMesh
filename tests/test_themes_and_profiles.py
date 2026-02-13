@@ -38,6 +38,8 @@ def test_model_profiles_match_expected_formatters() -> None:
     gemma = get_embedding_model_profile("google/embeddinggemma-300m")
     assert gemma.name == "google/embeddinggemma"
     assert gemma.float16_supported is False
+    assert gemma.preferred_torch_dtype == "bfloat16"
+    assert gemma.use_cuda_autocast is True
     assert gemma.format_query("  attention  ").startswith(
         "task: search result | query:"
     )
@@ -48,5 +50,7 @@ def test_model_profiles_match_expected_formatters() -> None:
 
     default = get_embedding_model_profile("all-MiniLM-L6-v2")
     assert default.name == "default"
+    assert default.preferred_torch_dtype is None
+    assert default.use_cuda_autocast is False
     assert default.format_query("plain") == "plain"
     assert default.format_document({"title": "T", "abstract": ""}) == "T"

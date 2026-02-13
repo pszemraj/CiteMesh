@@ -47,6 +47,8 @@ class EmbeddingModelProfile:
     query_formatter: QueryFormatter = _identity_query_formatter
     document_formatter: DocumentFormatter = _identity_document_formatter
     float16_supported: bool = True
+    preferred_torch_dtype: Optional[str] = None
+    use_cuda_autocast: bool = False
     notes: Optional[str] = None
 
     def format_query(self, text: str, metadata: Optional[Dict[str, str]] = None) -> str:
@@ -99,6 +101,8 @@ EMBEDDING_MODEL_PROFILES = (
         query_formatter=_gemma_query_formatter,
         document_formatter=_gemma_document_formatter,
         float16_supported=False,
+        preferred_torch_dtype="bfloat16",
+        use_cuda_autocast=True,
         notes="Adds recommended query/document prompts for EmbeddingGemma.",
     ),
 )

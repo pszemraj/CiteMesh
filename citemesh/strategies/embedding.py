@@ -8,7 +8,8 @@ to find conceptually similar papers without relying on citations.
 import heapq
 import logging
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+from contextlib import nullcontext
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import networkx as nx
 import numpy as np
@@ -70,6 +71,37 @@ ARXIV_DATASET_CANDIDATES = (
     "CShorten/ML-ArXiv-Papers",
     "gfissore/arxiv-abstracts-2021",
 )
+
+
+class _AutocastEncodeProxy:
+    """Wrap model encode calls in a precision context manager."""
+
+    def __init__(self, model: Any, context_factory: Callable[[], Any]):
+        """Create a model proxy for encode-time autocast.
+
+        :param Any model: Wrapped model object exposing ``encode``.
+        :param Callable[[], Any] context_factory: Callable returning a context manager.
+        """
+        self._model = model
+        self._context_factory = context_factory
+
+    def encode(self, *args: Any, **kwargs: Any) -> Any:
+        """Run ``encode`` within the configured context manager.
+
+        :param Any args: Positional arguments forwarded to ``encode``.
+        :param Any kwargs: Keyword arguments forwarded to ``encode``.
+        :return Any: Model ``encode`` return value.
+        """
+        with self._context_factory():
+            return self._model.encode(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate unknown attributes to the wrapped model.
+
+        :param str name: Attribute name.
+        :return Any: Delegated attribute value.
+        """
+        return getattr(self._model, name)
 
 
 def _parse_year(paper: Dict[str, Any]) -> Optional[int]:
@@ -294,6 +326,131 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.use_streaming = use_streaming
         self.model_profile = get_embedding_model_profile(model_name)
         self._profile_logged = False
+        self._autocast_dtype: Optional[Any] = None
+        self._autocast_device_type: Optional[str] = None
+        self._autocast_enabled = False
+        self._encode_model: Optional[Any] = None
+
+    def _reset_precision_runtime(self) -> None:
+        """Clear runtime precision/autocast state."""
+        self._autocast_dtype = None
+        self._autocast_device_type = None
+        self._autocast_enabled = False
+        self._encode_model = None
+
+    def _resolve_model_kwargs(self) -> Dict[str, Any]:
+        """Compute SentenceTransformer kwargs for model precision policy.
+
+        :return Dict[str, Any]: ``SentenceTransformer`` constructor kwargs.
+        """
+        self._reset_precision_runtime()
+        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
+        if preferred_dtype != "bfloat16":
+            return {}
+
+        try:
+            import torch
+        except ImportError:
+            logger.warning(
+                "%s prefers bfloat16, but torch is unavailable; using float32.",
+                self.model_name,
+            )
+            return {}
+
+        if not torch.cuda.is_available():
+            logger.info(
+                "%s prefers bfloat16, but CUDA is unavailable; using float32.",
+                self.model_name,
+            )
+            return {}
+
+        bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+        if not bf16_supported:
+            logger.info(
+                "%s prefers bfloat16, but CUDA bfloat16 is unsupported; using float32.",
+                self.model_name,
+            )
+            return {}
+
+        self._autocast_dtype = torch.bfloat16
+        self._autocast_device_type = "cuda"
+        self._autocast_enabled = bool(self.model_profile.use_cuda_autocast)
+
+        if self._autocast_enabled:
+            logger.info(
+                "%s will run with torch_dtype=bfloat16 and CUDA autocast.",
+                self.model_name,
+            )
+        else:
+            logger.info("%s will run with torch_dtype=bfloat16.", self.model_name)
+
+        return {"torch_dtype": torch.bfloat16}
+
+    def _autocast_context(self) -> Any:
+        """Return autocast context for model encoding.
+
+        :return Any: Active autocast context manager or no-op context.
+        """
+        if (
+            not self._autocast_enabled
+            or self._autocast_dtype is None
+            or self._autocast_device_type is None
+        ):
+            return nullcontext()
+
+        try:
+            import torch
+        except ImportError:
+            return nullcontext()
+
+        return torch.autocast(
+            device_type=self._autocast_device_type,
+            dtype=self._autocast_dtype,
+        )
+
+    def _get_model_for_encoding(self) -> Any:
+        """Return model object used for embedding encode calls.
+
+        :return Any: Base model or autocast-enabled proxy.
+        """
+        if self.model is None:
+            raise RuntimeError("Embedding model is not loaded.")
+
+        if not self._autocast_enabled:
+            return self.model
+
+        if self._encode_model is None:
+            self._encode_model = _AutocastEncodeProxy(
+                self.model, self._autocast_context
+            )
+
+        return self._encode_model
+
+    def _encode_texts(
+        self,
+        texts: List[str],
+        batch_size: Optional[int] = None,
+        show_progress_bar: bool = False,
+    ) -> np.ndarray:
+        """Encode text inputs and return normalized float32 embeddings.
+
+        :param List[str] texts: Text payload(s) to encode.
+        :param Optional[int] batch_size: Optional batch size override.
+        :param bool show_progress_bar: Whether to display encoding progress.
+        :return np.ndarray: Embeddings with shape ``(len(texts), dim)``.
+        """
+        encode_model = self._get_model_for_encoding()
+
+        encode_kwargs: Dict[str, Any] = {
+            "convert_to_tensor": False,
+            "normalize_embeddings": True,
+            "show_progress_bar": show_progress_bar,
+        }
+        if batch_size is not None:
+            encode_kwargs["batch_size"] = batch_size
+
+        embeddings = encode_model.encode(texts, **encode_kwargs)
+        return np.asarray(embeddings, dtype=np.float32)
 
     def _load_model(self) -> None:
         """Lazy load sentence transformer model.
@@ -304,10 +461,23 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             from sentence_transformers import SentenceTransformer
 
             logger.info(f"Loading embedding model: {self.model_name}")
-            self.model = SentenceTransformer(self.model_name)
-            if not self.model_profile.float16_supported:
+            model_kwargs = self._resolve_model_kwargs()
+            if model_kwargs:
+                self.model = SentenceTransformer(
+                    self.model_name,
+                    model_kwargs=model_kwargs,
+                )
+            else:
+                self.model = SentenceTransformer(self.model_name)
+
+            if (
+                not self.model_profile.float16_supported
+                and not model_kwargs
+                and not self.model_profile.preferred_torch_dtype
+            ):
                 logger.info(
-                    f"{self.model_name} does not support float16 activations; defaulting to float32."
+                    "%s does not support float16 activations; using float32.",
+                    self.model_name,
                 )
             if self.model_profile.notes and not self._profile_logged:
                 logger.info(self.model_profile.notes)
@@ -368,11 +538,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         # Compute normalized seed embedding
         logger.info("Computing seed embedding...")
         formatted_seed_text = self.model_profile.format_query(seed_text, seed_metadata)
-        seed_embedding = self.model.encode(
-            [formatted_seed_text],
-            convert_to_tensor=False,
-            normalize_embeddings=True,
-            show_progress_bar=False,
+        seed_embedding = self._encode_texts(
+            [formatted_seed_text], show_progress_bar=False
         )[0]
         self.embeddings[seed_paper.paper_id] = seed_embedding
 
@@ -440,7 +607,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         embeddings_dict = self.embedding_cache.get_embeddings(
             metadata_map,
-            self.model,
+            self._get_model_for_encoding(),
             batch_size=STREAMING_BATCH_SIZE,
             show_progress=sys.stderr.isatty(),
             text_builder=self.model_profile.format_document,
@@ -571,7 +738,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         batch_map = {metadata["paper_id"]: metadata for metadata in batch}
         embeddings = self.embedding_cache.get_embeddings(
             batch_map,
-            self.model,
+            self._get_model_for_encoding(),
             batch_size=len(batch_map) or STREAMING_BATCH_SIZE,
             show_progress=False,
             text_builder=self.model_profile.format_document,
