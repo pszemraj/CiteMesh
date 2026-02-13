@@ -1,70 +1,83 @@
 [build-system]
-requires = ["setuptools>=68.0.0", "wheel", "setuptools-scm[toml]>=8.0"]
+requires = ["setuptools>=77.0.0", "setuptools-scm[toml]>=8.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "citemesh"
 dynamic = ["version"]
-description = "Intuitive citation graph visualization with multiple similarity strategies"
-readme = "README.md"
+description = "Build and export exploration-friendly scholarly paper graphs from Semantic Scholar and embedding-based discovery"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Peter Szemraj", email = "peterszemraj+dev@gmail.com" }]
 maintainers = [{ name = "Peter Szemraj", email = "peterszemraj+dev@gmail.com" }]
 keywords = [
+    "citation-graph",
     "citation-analysis",
     "graph-visualization",
-    "semantic-similarity",
     "bibliometrics",
+    "semantic-similarity",
+    "semantic-scholar",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Environment :: Console",
     "Intended Audience :: Science/Research",
-    "Topic :: Scientific/Engineering :: Information Analysis",
-    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
 ]
 
 dependencies = [
+    "h5py>=3.10.0",
+    "joblib>=1.3.0",
     "matplotlib>=3.5.0",
     "networkx>=2.6",
     "numpy>=1.21.0",
-    "h5py>=3.9.0",
-    "requests>=2.28.0",
-    "scikit-learn>=1.3.0",
-    "semanticscholar>=0.8.0",
-    "joblib>=1.3.0",
-    "tqdm>=4.66.0",
-    "pyyaml>=6.0",
     "plotly>=5.18.0",
     "pyvis>=0.3.2",
+    "pyyaml>=6.0",
+    "requests>=2.28.0",
     "rich>=13.7.0",
+    "scikit-learn>=1.3.0",
+    "semanticscholar>=0.8.0",
+    "tqdm>=4.66.0",
 ]
 
 [project.optional-dependencies]
 embeddings = [
-    "sentence-transformers>=2.2.0",
-    "torch>=2.0.0",
     "datasets>=2.14.0",
+    "sentence-transformers>=3.0.0",
+    "torch>=2.0.0",
 ]
 dev = [
-    "pytest>=7.0.0",
-    "ruff>=0.1.0",
-    "sentence-transformers>=2.2.0",
-    "torch>=2.0.0",
     "datasets>=2.14.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.9.0",
+    "sentence-transformers>=3.0.0",
+    "torch>=2.0.0",
 ]
 
 [project.scripts]
 citemesh = "citemesh.cli:main"
 
 [project.urls]
-Repository = "https://github.com/yourusername/paper-graph-vis"
-Issues = "https://github.com/yourusername/paper-graph-vis/issues"
+Homepage = "https://github.com/pszemraj/CiteMesh"
+Repository = "https://github.com/pszemraj/CiteMesh.git"
+Issues = "https://github.com/pszemraj/CiteMesh/issues"
+Documentation = "https://github.com/pszemraj/CiteMesh/tree/main/docs"
+Changelog = "https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/changelog.md"
+
+[tool.setuptools]
+include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -80,15 +93,12 @@ local_scheme = "dirty-tag"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-ra --strict-markers --tb=short"
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py39"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
