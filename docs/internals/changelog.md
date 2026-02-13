@@ -40,6 +40,7 @@ This living document summarizes noteworthy changes from the initial script-based
 - Explicit output basenames with dots are now preserved across multi-export runs (for example `-o out/arxiv-2508.14040-example --export all`).
 - Embedding `--top-k` now enforces strict per-node edge caps during pruning.
 - CLI computes a single shared layout per run and reuses it across static/interactive exports; `--seed` now consistently controls that shared layout path.
+- Default auto-generated outputs are grouped under per-paper folders (`out/<safe-seed-title>/`) instead of a flat `out/` namespace.
 
 ## Maintenance Consolidation
 

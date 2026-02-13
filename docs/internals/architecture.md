@@ -94,7 +94,7 @@ Each strategy can surface helpful logging by calling `_set_collection_summary`, 
 
 ## Output Handling
 
-- Default target directory is `out/`; the CLI auto-sanitises seed titles for filenames.
+- Default target directory is `out/`; outputs are grouped under `out/<safe-seed-title>/` with strategy basenames.
 - When multiple export formats are requested, filenames receive distinct extensions without overwriting each other.
 - Integration tests point exports to temporary directories to avoid polluting working graphs.
 

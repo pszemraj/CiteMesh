@@ -34,8 +34,9 @@ Accepted identifiers:
 | `--seed`             | Layout seed reused across exporters for reproducible positioning | none (uses default behavior)   |
 | `--export`, `-e`     | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all`     | `png`                          |
 | `--theme`            | `light`, `dark`, `solarized`, `auto`                             | `light`                        |
-| `--output`, `-o`     | Base filename for exports                                        | auto-generated from seed title |
+| `--output`, `-o`     | Base filename for exports                                        | auto-generated in paper folder |
 
+When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:50]>/<strategy>.<ext>`.
 When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path, the CLI appends the correct extension for each exported format.
 Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`) are preserved; format extensions are appended without truncating the basename.
 

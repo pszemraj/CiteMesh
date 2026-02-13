@@ -19,6 +19,20 @@ from citemesh.core import VIZ_CONFIG
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
+MAX_TITLE_CHARS = 50
+
+
+def _filename_safe(text: str, max_chars: int = MAX_TITLE_CHARS) -> str:
+    """Create a filesystem-safe slug from input text.
+
+    :param str text: Raw text value.
+    :param int max_chars: Maximum slug length.
+    :return str: Safe slug using lowercase alnum/hyphen tokens.
+    """
+    normalized = text.lower()
+    normalized = "".join(c if c.isalnum() or c in " -" else "" for c in normalized)
+    slug = "-".join(normalized.split())[:max_chars].strip("-")
+    return slug or "graph"
 
 
 def _choose_metadata_anchor(
@@ -479,15 +493,8 @@ def generate_output_path(
     :return Path: Path object for output file
     """
     title = graph.nodes[seed_id].get("title", "graph")
+    paper_dir = output_dir / _filename_safe(title)
+    paper_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clean title for filename
-    filename = title.lower()
-    filename = "".join(c if c.isalnum() or c in " -" else "" for c in filename)
-    filename = "-".join(filename.split())[:50]  # Limit length
-    if strategy:
-        filename = f"{filename}-{strategy}"
-
-    filename = f"{filename}.png"
-
-    output_dir.mkdir(exist_ok=True)
-    return output_dir / filename
+    basename = _filename_safe(strategy, max_chars=32) if strategy else "graph"
+    return paper_dir / f"{basename}.png"

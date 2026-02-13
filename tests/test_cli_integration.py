@@ -285,8 +285,8 @@ def test_default_strategy_is_recommendation() -> None:
     assert "default: recommendation" in result.stdout
 
 
-def test_generated_output_path_uses_strategy_suffix() -> None:
-    """Strategy name should be included in generated filenames."""
+def test_generated_output_path_uses_paper_directory_and_strategy_basename() -> None:
+    """Generated path should use per-paper directory and strategy basename."""
     graph = nx.Graph()
     graph.add_node("seed", title="Attention Is All You Need")
 
@@ -297,7 +297,8 @@ def test_generated_output_path_uses_strategy_suffix() -> None:
             output_dir=Path(tmpdir),
             strategy="recommendation",
         )
-        assert path.name.endswith("-recommendation.png")
+        assert path.parent.name == "attention-is-all-you-need"
+        assert path.name == "recommendation.png"
 
 
 class TestCLIDefaults:
