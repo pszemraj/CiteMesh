@@ -15,6 +15,7 @@ from citemesh.core import CITATION_CONFIG, Paper
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.similarity import compute_similarity_features
 
 logger = logging.getLogger(__name__)
 
@@ -191,20 +192,23 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param Paper paper2: Second paper
         :return float: Similarity score (0.0 to 1.0)
         """
-        abstract_sim = self._abstract_index.similarity(paper1.paper_id, paper2.paper_id)
-        temp_sim = self.temporal_similarity(paper1, paper2)
-        cit_sim = self.citation_similarity(paper1, paper2)
-
-        has_refs = bool(
-            self.fetch_references and paper1.references and paper2.references
+        features = compute_similarity_features(
+            paper1,
+            paper2,
+            abstract_similarity_fn=lambda a, b: self._abstract_index.similarity(
+                a.paper_id, b.paper_id
+            ),
+            temporal_similarity_fn=self.temporal_similarity,
+            citation_similarity_fn=self.citation_similarity,
+            bibliographic_coupling_fn=self.bibliographic_coupling,
+            use_bibliographic_coupling=bool(
+                self.fetch_references and paper1.references and paper2.references
+            ),
+            with_references_weights=(0.40, 0.20, 0.00, 0.40),
+            without_references_weights=(0.65, 0.20, 0.15, 0.00),
         )
-        if has_refs:
-            bib_coupling = self.bibliographic_coupling(paper1, paper2)
-            similarity = 0.40 * abstract_sim + 0.20 * temp_sim + 0.40 * bib_coupling
-        else:
-            similarity = 0.65 * abstract_sim + 0.20 * temp_sim + 0.15 * cit_sim
 
-        return similarity
+        return features.combined_score
 
     def should_create_edge(
         self, paper1: Paper, paper2: Paper, similarity: float

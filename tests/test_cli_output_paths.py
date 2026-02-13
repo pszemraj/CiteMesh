@@ -6,6 +6,7 @@ import networkx as nx
 
 from citemesh.cli import canonicalize_paper_id_for_metadata, resolve_output_paths
 from citemesh.visualization import generate_output_path
+from tests.conftest import get_paper_id_normalization_cases
 
 
 def test_resolve_output_paths_preserves_dotted_basename_for_multi_export() -> None:
@@ -43,12 +44,11 @@ def test_resolve_output_paths_keeps_matching_suffix_for_single_export() -> None:
     assert paths["plotly"] == Path("reports/example.plotly.html")
 
 
-def test_canonicalize_paper_id_for_metadata_normalizes_arxiv_url() -> None:
+def test_canonicalize_paper_id_for_metadata_normalizes_arxiv_urls() -> None:
     """Metadata should display concise canonical IDs for arXiv URLs."""
-    assert (
-        canonicalize_paper_id_for_metadata("https://arxiv.org/abs/2508.14040")
-        == "arxiv:2508.14040"
-    )
+    for raw_id, expected in get_paper_id_normalization_cases():
+        if raw_id.startswith("http://") or raw_id.startswith("https://"):
+            assert canonicalize_paper_id_for_metadata(raw_id) == expected
 
 
 def test_generate_output_path_includes_seed_suffix_for_collision_safety() -> None:

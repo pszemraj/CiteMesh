@@ -9,9 +9,10 @@ providing a single interface to all graph building strategies.
 import argparse
 import logging
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Callable, Dict, List, Protocol
 
 import networkx as nx
 from rich.console import Console
@@ -60,6 +61,111 @@ EXPORT_EXTENSIONS: Dict[str, str] = {
 KNOWN_EXPORT_SUFFIXES: List[str] = sorted(
     EXPORT_EXTENSIONS.values(), key=len, reverse=True
 )
+
+
+class _StrategyBuilderProtocol(Protocol):
+    def build_graph(self, paper_id: str) -> tuple[nx.Graph, str]: ...
+
+
+StrategyFactory = Callable[[argparse.Namespace], _StrategyBuilderProtocol]
+
+
+@dataclass(frozen=True)
+class _StrategyDispatchSpec:
+    """Strategy dispatch metadata for CLI construction."""
+
+    factory: StrategyFactory
+    defaults: Dict[str, Any]
+
+
+_STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
+    "citation": _StrategyDispatchSpec(
+        factory=lambda cli_args: CitationGraphBuilder(
+            max_papers=cli_args.max_papers,
+            max_citations=cli_args.max_citations,
+            max_references=cli_args.max_references,
+            similarity_threshold=cli_args.similarity_threshold,
+            fetch_references=not cli_args.no_references,
+            random_seed=cli_args.seed,
+        ),
+        defaults={
+            "max_papers": 40,
+            "max_citations": 20,
+            "max_references": 20,
+            "similarity_threshold": 0.2,
+            "fetch_references": True,
+        },
+    ),
+    "recommendation": _StrategyDispatchSpec(
+        factory=lambda cli_args: RecommendationGraphBuilder(
+            max_papers=cli_args.max_papers,
+            fetch_references=not cli_args.no_references,
+            similarity_threshold=cli_args.similarity_threshold,
+            random_seed=cli_args.seed,
+        ),
+        defaults={
+            "max_papers": 40,
+            "fetch_references": True,
+            "similarity_threshold": 0.2,
+        },
+    ),
+    "embedding": _StrategyDispatchSpec(
+        factory=lambda cli_args: EmbeddingGraphBuilder(
+            max_papers=cli_args.max_papers,
+            model_name=cli_args.model,
+            dataset_split=cli_args.dataset_split,
+            corpus_size=None if cli_args.all_corpus else cli_args.corpus_size,
+            truncate_dim=cli_args.truncate_dim,
+            top_k=cli_args.top_k,
+            random_seed=cli_args.seed,
+            use_streaming=cli_args.streaming,
+        ),
+        defaults={
+            "max_papers": 40,
+            "model_name": "google/embeddinggemma-300m",
+            "dataset_split": "train",
+            "corpus_size": 50000,
+            "top_k": 2,
+        },
+    ),
+    "hybrid": _StrategyDispatchSpec(
+        factory=lambda cli_args: HybridGraphBuilder(
+            max_papers=cli_args.max_papers,
+            max_citations=cli_args.max_citations,
+            max_references=cli_args.max_references,
+            fetch_references=not cli_args.no_references,
+            max_semantic=cli_args.max_semantic,
+            model_name=cli_args.model,
+            dataset_split=cli_args.dataset_split,
+            corpus_size=None if cli_args.all_corpus else cli_args.corpus_size,
+            truncate_dim=cli_args.truncate_dim,
+            use_streaming=cli_args.streaming,
+            random_seed=cli_args.seed,
+        ),
+        defaults={
+            "max_papers": 40,
+            "max_citations": 15,
+            "max_references": 15,
+            "max_semantic": 10,
+            "fetch_references": True,
+        },
+    ),
+}
+
+
+def _build_strategy_graph(args: argparse.Namespace, strategy: str) -> tuple[nx.Graph, str]:
+    """Build a graph for a strategy selected from CLI arguments.
+
+    :param argparse.Namespace args: Parsed arguments.
+    :param str strategy: Strategy name.
+    :return tuple[nx.Graph, str]: Graph and normalized seed paper ID.
+    :raises ValueError: If strategy is unsupported.
+    """
+    if strategy not in _STRATEGY_DISPATCH:
+        raise ValueError(f"Unsupported strategy: {strategy}")
+
+    builder = _STRATEGY_DISPATCH[strategy].factory(args)
+    return builder.build_graph(args.paper_id)
 
 
 def resolve_output_paths(
@@ -126,17 +232,7 @@ def build_citation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
     :param argparse.Namespace args: Parsed CLI arguments.
     :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
     """
-    builder = CitationGraphBuilder(
-        max_papers=args.max_papers,
-        max_citations=args.max_citations,
-        max_references=args.max_references,
-        similarity_threshold=args.similarity_threshold,
-        fetch_references=not args.no_references,
-        random_seed=args.seed,
-    )
-
-    graph, seed_id = builder.build_graph(args.paper_id)
-    return graph, seed_id
+    return _build_strategy_graph(args, strategy="citation")
 
 
 def build_recommendation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
@@ -146,15 +242,7 @@ def build_recommendation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]
     :param argparse.Namespace args: Parsed CLI arguments.
     :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
     """
-    builder = RecommendationGraphBuilder(
-        max_papers=args.max_papers,
-        fetch_references=not args.no_references,
-        similarity_threshold=args.similarity_threshold,
-        random_seed=args.seed,
-    )
-
-    graph, seed_id = builder.build_graph(args.paper_id)
-    return graph, seed_id
+    return _build_strategy_graph(args, strategy="recommendation")
 
 
 def build_embedding_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
@@ -164,19 +252,7 @@ def build_embedding_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
     :param argparse.Namespace args: Parsed CLI arguments.
     :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
     """
-    builder = EmbeddingGraphBuilder(
-        max_papers=args.max_papers,
-        model_name=args.model,
-        dataset_split=args.dataset_split,
-        corpus_size=None if args.all_corpus else args.corpus_size,
-        truncate_dim=args.truncate_dim,
-        top_k=args.top_k,
-        random_seed=args.seed,
-        use_streaming=args.streaming,
-    )
-
-    graph, seed_id = builder.build_graph(args.paper_id)
-    return graph, seed_id
+    return _build_strategy_graph(args, strategy="embedding")
 
 
 def build_hybrid_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
@@ -186,22 +262,7 @@ def build_hybrid_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
     :param argparse.Namespace args: Parsed CLI arguments.
     :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
     """
-    builder = HybridGraphBuilder(
-        max_papers=args.max_papers,
-        max_citations=args.max_citations,
-        max_references=args.max_references,
-        fetch_references=not args.no_references,
-        max_semantic=args.max_semantic,
-        model_name=args.model,
-        dataset_split=args.dataset_split,
-        corpus_size=None if args.all_corpus else args.corpus_size,
-        truncate_dim=args.truncate_dim,
-        use_streaming=args.streaming,
-        random_seed=args.seed,
-    )
-
-    graph, seed_id = builder.build_graph(args.paper_id)
-    return graph, seed_id
+    return _build_strategy_graph(args, strategy="hybrid")
 
 
 def main() -> None:
@@ -434,13 +495,7 @@ Examples:
         try:
             # Build graph based on strategy
             logger.info(f"Building graph using {args.strategy} strategy...")
-            strategy_builders = {
-                "citation": build_citation_graph,
-                "recommendation": build_recommendation_graph,
-                "embedding": build_embedding_graph,
-                "hybrid": build_hybrid_graph,
-            }
-            graph, seed_id = strategy_builders[args.strategy](args)
+            graph, seed_id = _build_strategy_graph(args, args.strategy)
 
             # Determine output paths
             if args.output:

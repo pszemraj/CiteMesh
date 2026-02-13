@@ -13,7 +13,10 @@ import numpy as np
 
 from citemesh.core import HYBRID_CONFIG, Paper
 from citemesh.services import SemanticScholarClient, get_client
-from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.base import (
+    GraphBuilderStrategy,
+    select_capped_undirected_edges,
+)
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder, _check_embedding_deps
 
@@ -215,30 +218,15 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if not max_edges or max_edges <= 0:
             return graph, actual_seed_id
 
-        edge_counts = {node: 0 for node in graph.nodes()}
-        # Sort edges by weight descending so strongest connections are kept
-        sorted_edges = sorted(
-            graph.edges(data=True),
-            key=lambda item: (
-                -float(item[2].get("weight", 0.0)),
-                min(str(item[0]), str(item[1])),
-                max(str(item[0]), str(item[1])),
-            ),
-        )
+        filtered_graph = nx.Graph()
+        filtered_graph.add_nodes_from(graph.nodes(data=True))
 
-        edges_to_remove = []
-        for u, v, data in sorted_edges:
-            # Enforce a strict per-node edge cap; once either endpoint is full, we drop
-            # this edge to keep degree bounds predictable for downstream rendering.
-            if edge_counts[u] >= max_edges or edge_counts[v] >= max_edges:
-                edges_to_remove.append((u, v))
-                continue
+        for u, v, weight in select_capped_undirected_edges(
+            graph.edges(data=True), max_edges
+        ):
+            filtered_graph.add_edge(u, v, weight=weight)
 
-            edge_counts[u] += 1
-            edge_counts[v] += 1
-
-        graph.remove_edges_from(edges_to_remove)
-        return graph, actual_seed_id
+        return filtered_graph, actual_seed_id
 
     def should_create_edge(
         self, paper1: Paper, paper2: Paper, similarity: float

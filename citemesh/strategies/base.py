@@ -7,8 +7,9 @@ enabling the Strategy pattern for different similarity computation approaches.
 
 import logging
 import math
+import warnings
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import networkx as nx
 import numpy as np
@@ -16,6 +17,81 @@ import numpy as np
 from citemesh.core import TEMPORAL_CONFIG, Paper
 
 logger = logging.getLogger(__name__)
+
+
+def select_capped_undirected_edges(
+    edges: Iterable[Tuple[Any, Any, Mapping[str, Any]]],
+    max_edges_per_node: int,
+) -> List[Tuple[Any, Any, float]]:
+    """Select edges for an undirected graph while capping per-node degree.
+
+    :param Iterable[Tuple[Any, Any, Mapping[str, Any]]] edges: Edge tuples with optional
+        ``weight`` metadata.
+    :param int max_edges_per_node: Maximum degree per node.
+    :return List[Tuple[Any, Any, float]]: Selected canonicalized edges with weights.
+    """
+    canonical_edges: Dict[Tuple[str, str], Tuple[Any, Any, float]] = {}
+    for u, v, *_rest in edges:
+        data = _rest[0] if _rest else {}
+        if not isinstance(data, Mapping):
+            data = {}
+
+        left, right = (u, v) if str(u) <= str(v) else (v, u)
+        key = (str(left), str(right))
+
+        weight = float(data.get("weight", 0.0))
+        best = canonical_edges.get(key)
+        if best is None or weight > best[2]:
+            canonical_edges[key] = (left, right, weight)
+
+    sorted_edges = sorted(
+        canonical_edges.values(),
+        key=lambda item: (
+            -float(item[2]),
+            str(item[0]),
+            str(item[1]),
+        ),
+    )
+
+    if max_edges_per_node <= 0:
+        return sorted_edges
+
+    edge_counts: Dict[str, int] = {
+        node_id: 0
+        for edge in sorted_edges
+        for node_id in (str(edge[0]), str(edge[1]))
+    }
+
+    selected_edges: List[Tuple[Any, Any, float]] = []
+    for u, v, weight in sorted_edges:
+        u_key = str(u)
+        v_key = str(v)
+        if edge_counts[u_key] >= max_edges_per_node:
+            continue
+        if edge_counts[v_key] >= max_edges_per_node:
+            continue
+
+        selected_edges.append((u, v, weight))
+        edge_counts[u_key] += 1
+        edge_counts[v_key] += 1
+
+    return selected_edges
+
+
+def _exponential_temporal_decay(
+    paper1: Paper, paper2: Paper, decay_factor: float = 8.0
+) -> float:
+    """Compute exponential temporal similarity decay.
+
+    :param Paper paper1: First paper.
+    :param Paper paper2: Second paper.
+    :param float decay_factor: Controls decay rate (higher = slower decay).
+    :return float: Similarity in [0.0, 1.0].
+    """
+    if paper1.year is None or paper2.year is None:
+        return 0.5
+    year_diff = abs(paper1.year - paper2.year)
+    return math.exp(-year_diff / decay_factor)
 
 
 class GraphBuilderStrategy(ABC):
@@ -216,7 +292,9 @@ class GraphBuilderStrategy(ABC):
         :param float decay_factor: Controls decay rate (higher = slower decay)
         :return float: Similarity score (0.0 to 1.0)
         """
-        if paper1.year is None or paper2.year is None:
-            return 0.5
-        year_diff = abs(paper1.year - paper2.year)
-        return math.exp(-year_diff / decay_factor)
+        warnings.warn(
+            "exponential_temporal_decay is retained for compatibility only.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _exponential_temporal_decay(paper1, paper2, decay_factor=decay_factor)

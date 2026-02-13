@@ -19,7 +19,10 @@ from tqdm.auto import tqdm
 from citemesh.core import EMBEDDING_CONFIG, Author, Paper
 from citemesh.data import EmbeddingCache, get_cache_dir, get_embedding_model_profile
 from citemesh.services import SemanticScholarClient, get_client
-from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.base import (
+    GraphBuilderStrategy,
+    select_capped_undirected_edges,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -957,22 +960,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         filtered_graph = nx.Graph()
         filtered_graph.add_nodes_from(graph.nodes(data=True))
 
-        edge_counts = {node: 0 for node in graph.nodes()}
-        sorted_edges = sorted(
-            graph.edges(data=True),
-            key=lambda item: (
-                -float(item[2].get("weight", 0.0)),
-                min(str(item[0]), str(item[1])),
-                max(str(item[0]), str(item[1])),
-            ),
-        )
-
-        for u, v, data in sorted_edges:
-            if edge_counts[u] >= self.top_k or edge_counts[v] >= self.top_k:
-                continue
-            filtered_graph.add_edge(u, v, weight=data.get("weight", 0.0))
-            edge_counts[u] += 1
-            edge_counts[v] += 1
+        for u, v, weight in select_capped_undirected_edges(
+            graph.edges(data=True), self.top_k
+        ):
+            filtered_graph.add_edge(u, v, weight=weight)
 
         logger.info(
             f"Filtered graph: {filtered_graph.number_of_nodes()} nodes, "

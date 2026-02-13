@@ -14,6 +14,7 @@ from citemesh.services.semantic_scholar import (
     normalize_paper_id,
     reset_client,
 )
+from tests.conftest import get_paper_id_normalization_cases
 
 
 class _MockResponse:
@@ -209,18 +210,7 @@ def test_retries_on_rate_limit_for_references() -> None:
     assert result == []
 
 
-@pytest.mark.parametrize(
-    ("raw_id", "expected"),
-    [
-        ("https://arxiv.org/abs/2508.14040", "arxiv:2508.14040"),
-        ("https://arxiv.org/pdf/2508.14040.pdf", "arxiv:2508.14040"),
-        ("arXiv:2508.14040", "arxiv:2508.14040"),
-        ("arXiv:1706.03762v5", "arxiv:1706.03762"),
-        ("https://arxiv.org/abs/1706.03762v5", "arxiv:1706.03762"),
-        ("https://arxiv.org/pdf/1706.03762v5.pdf", "arxiv:1706.03762"),
-        ("https://doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
-    ],
-)
+@pytest.mark.parametrize("raw_id, expected", get_paper_id_normalization_cases())
 def test_normalize_paper_id_urls(raw_id: str, expected: str) -> None:
     """URL and prefixed identifiers should normalize to API-friendly IDs.
 

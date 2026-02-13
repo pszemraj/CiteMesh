@@ -14,6 +14,11 @@ import pytest
 from citemesh import cli as cli_module
 from citemesh.core import Author, Paper
 from citemesh.visualization import generate_output_path
+from tests.conftest import (
+    build_fake_exporter_factory,
+    build_fake_strategy_builder_factory,
+    build_seed_graph,
+)
 
 
 def run_cli_command(args: list[str]) -> SimpleNamespace:
@@ -136,34 +141,18 @@ class TestCLIExecution:
     ) -> None:
         """CLI should pass ``--no-references`` through to citation builder config."""
         captured: dict[str, object] = {}
-
-        class _FakeCitationBuilder:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            def build_graph(self, paper_id: str):
-                del paper_id
-                graph = nx.Graph()
-                graph.add_node(
-                    "seed",
-                    title="Seed",
-                    year=2020,
-                    authors=[],
-                    citation_count=0,
-                    is_seed=True,
-                )
-                return graph, "seed"
-
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                del kwargs
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "CitationGraphBuilder", _FakeCitationBuilder)
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "CitationGraphBuilder",
+            build_fake_strategy_builder_factory(
+                captured, graph=build_seed_graph("seed")
+            ),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory({}, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_no_refs.json"
@@ -194,34 +183,18 @@ class TestCLIExecution:
     ) -> None:
         """CLI should pass embedding-specific knobs through to embedding builder."""
         captured: dict[str, object] = {}
-
-        class _FakeEmbeddingBuilder:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            def build_graph(self, paper_id: str):
-                del paper_id
-                graph = nx.Graph()
-                graph.add_node(
-                    "seed",
-                    title="Seed",
-                    year=2020,
-                    authors=[],
-                    citation_count=0,
-                    is_seed=True,
-                )
-                return graph, "seed"
-
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                del kwargs
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", _FakeEmbeddingBuilder)
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "EmbeddingGraphBuilder",
+            build_fake_strategy_builder_factory(
+                captured, graph=build_seed_graph("seed")
+            ),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory({}, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_embedding.json"
@@ -254,34 +227,18 @@ class TestCLIExecution:
     ) -> None:
         """CLI should pass ``--no-references`` through to hybrid builder config."""
         captured: dict[str, object] = {}
-
-        class _FakeHybridBuilder:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            def build_graph(self, paper_id: str):
-                del paper_id
-                graph = nx.Graph()
-                graph.add_node(
-                    "seed",
-                    title="Seed",
-                    year=2020,
-                    authors=[],
-                    citation_count=0,
-                    is_seed=True,
-                )
-                return graph, "seed"
-
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                del kwargs
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "HybridGraphBuilder", _FakeHybridBuilder)
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "HybridGraphBuilder",
+            build_fake_strategy_builder_factory(
+                captured, graph=build_seed_graph("seed")
+            ),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory({}, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_hybrid_no_refs.json"
@@ -312,34 +269,18 @@ class TestCLIExecution:
     ) -> None:
         """Hybrid builder should receive embedding/runtime-related CLI settings."""
         captured: dict[str, object] = {}
-
-        class _FakeHybridBuilder:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            def build_graph(self, paper_id: str):
-                del paper_id
-                graph = nx.Graph()
-                graph.add_node(
-                    "seed",
-                    title="Seed",
-                    year=2020,
-                    authors=[],
-                    citation_count=0,
-                    is_seed=True,
-                )
-                return graph, "seed"
-
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                del kwargs
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "HybridGraphBuilder", _FakeHybridBuilder)
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "HybridGraphBuilder",
+            build_fake_strategy_builder_factory(
+                captured, graph=build_seed_graph("seed")
+            ),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory({}, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_hybrid_knobs.json"
@@ -376,34 +317,18 @@ class TestCLIExecution:
     ) -> None:
         """Embedding CLI defaults should pass a bounded corpus size."""
         captured: dict[str, object] = {}
-
-        class _FakeEmbeddingBuilder:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            def build_graph(self, paper_id: str):
-                del paper_id
-                graph = nx.Graph()
-                graph.add_node(
-                    "seed",
-                    title="Seed",
-                    year=2020,
-                    authors=[],
-                    citation_count=0,
-                    is_seed=True,
-                )
-                return graph, "seed"
-
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                del kwargs
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", _FakeEmbeddingBuilder)
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "EmbeddingGraphBuilder",
+            build_fake_strategy_builder_factory(
+                captured, graph=build_seed_graph("seed")
+            ),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory({}, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_embedding_defaults.json"
@@ -431,34 +356,18 @@ class TestCLIExecution:
     ) -> None:
         """Embedding ``--all-corpus`` should pass an uncapped corpus size."""
         captured: dict[str, object] = {}
-
-        class _FakeEmbeddingBuilder:
-            def __init__(self, **kwargs):
-                captured.update(kwargs)
-
-            def build_graph(self, paper_id: str):
-                del paper_id
-                graph = nx.Graph()
-                graph.add_node(
-                    "seed",
-                    title="Seed",
-                    year=2020,
-                    authors=[],
-                    citation_count=0,
-                    is_seed=True,
-                )
-                return graph, "seed"
-
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                del kwargs
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", _FakeEmbeddingBuilder)
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "EmbeddingGraphBuilder",
+            build_fake_strategy_builder_factory(
+                captured, graph=build_seed_graph("seed")
+            ),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory({}, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_embedding_all_corpus.json"
@@ -634,15 +543,11 @@ class TestCLIReproducibility:
             _fake_compute_layout,
         )
 
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                captured["exporter_layout"] = kwargs["layout"]
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory(captured, methods=("to_json",)),
+        )
 
         def _fake_visualize(*args, **kwargs) -> None:
             captured["visualize_layout"] = kwargs.get("layout")
@@ -670,7 +575,7 @@ class TestCLIReproducibility:
             f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
         assert captured["layout_seed"] == 123
-        assert captured["exporter_layout"] is shared_layout
+        assert captured["layout"] is shared_layout
         assert captured["visualize_layout"] is shared_layout
 
     def test_json_export_skips_layout_computation(
@@ -702,15 +607,11 @@ class TestCLIReproducibility:
 
         monkeypatch.setattr(cli_module, "compute_layout", _fail_compute_layout)
 
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                captured["exporter_layout"] = kwargs["layout"]
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory(captured, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "graph.json"
@@ -731,7 +632,7 @@ class TestCLIReproducibility:
         assert result.returncode == 0, (
             f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
-        assert captured["exporter_layout"] is None
+        assert captured["layout"] is None
 
     def test_metadata_omits_timestamp_by_default(
         self, monkeypatch: pytest.MonkeyPatch
@@ -755,15 +656,11 @@ class TestCLIReproducibility:
             lambda args: (graph, "seed"),
         )
 
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                captured["metadata"] = kwargs["metadata"]
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory(captured, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "graph.json"
@@ -810,15 +707,11 @@ class TestCLIReproducibility:
             lambda args: (graph, "seed"),
         )
 
-        class _FakeExporter:
-            def __init__(self, *args, **kwargs):
-                del args
-                captured["metadata"] = kwargs["metadata"]
-
-            def to_json(self, path: Path) -> None:
-                path.write_text("{}")
-
-        monkeypatch.setattr(cli_module, "GraphExporter", _FakeExporter)
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory(captured, methods=("to_json",)),
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "graph.json"
