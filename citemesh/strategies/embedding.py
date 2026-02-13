@@ -7,8 +7,10 @@ to find conceptually similar papers without relying on citations.
 
 import heapq
 import logging
+import re
 import sys
 from contextlib import nullcontext
+from hashlib import sha1
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import networkx as nx
@@ -74,6 +76,42 @@ ARXIV_DATASET_CANDIDATES = (
     "CShorten/ML-ArXiv-Papers",
     "gfissore/arxiv-abstracts-2021",
 )
+ARXIV_IDENTIFIER_PATTERN = re.compile(
+    r"^(?:arxiv:)?((?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z\-]+)?/\d{7})(?:v\d+)?)$",
+    re.IGNORECASE,
+)
+
+
+def _canonicalize_embedding_paper_id(raw_id: Any) -> str:
+    """Canonicalize arXiv-like identifiers for downstream lookups.
+
+    :param Any raw_id: Raw dataset record identifier.
+    :return str: Canonicalized identifier.
+    """
+    text = str(raw_id).strip() if raw_id is not None else ""
+    if not text:
+        return ""
+
+    if text.startswith("arxiv_"):
+        return text
+
+    match = ARXIV_IDENTIFIER_PATTERN.match(text)
+    if not match:
+        return text
+
+    normalized = re.sub(r"v\d+$", "", match.group(1), flags=re.IGNORECASE)
+    return f"arxiv:{normalized}"
+
+
+def _query_seed_id(query_text: str) -> str:
+    """Build deterministic query-mode seed node identifier."""
+    digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
+    return f"query:{digest}"
+
+
+def _heap_tiebreak_key(paper_id: str) -> Tuple[int, ...]:
+    """Build heap tiebreak key where larger IDs rank as worse."""
+    return tuple(-ord(ch) for ch in str(paper_id))
 
 
 class _AutocastEncodeProxy:
@@ -192,12 +230,13 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
     :param int fallback_index: Index used for synthetic IDs when missing.
     :return Dict: Normalized metadata used by embedding selection.
     """
-    paper_id = (
+    raw_paper_id = (
         paper.get("id")
         or paper.get("paper_id")
         or paper.get("paperId")
         or f"arxiv_{fallback_index}"
     )
+    paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
     title = paper.get("title", "Unknown")
     if not isinstance(title, str) or not title.strip():
         title = "Unknown"
@@ -334,6 +373,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             model_name=self._embedding_cache_namespace()
         )
         self.use_streaming = use_streaming
+        if self.use_streaming and ":" in self.dataset_split:
+            raise ValueError(
+                "Streaming mode does not support sliced dataset splits such as "
+                f"'{self.dataset_split}'. Use --dataset-split train with "
+                "--corpus-size to cap runtime, or disable --streaming."
+            )
         self._profile_logged = False
         self._dim_logged = False
         self._autocast_dtype: Optional[Any] = None
@@ -616,8 +661,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             logger.info(f"Using '{seed_id}' as text query")
             seed_text = seed_id
             # Create dummy seed paper
-            seed_paper = Paper(paper_id="query", title=seed_id, year=None, is_seed=True)
-            papers["query"] = seed_paper
+            query_seed = _query_seed_id(seed_id)
+            seed_paper = Paper(
+                paper_id=query_seed,
+                title=seed_id,
+                year=None,
+                is_seed=True,
+            )
+            papers[query_seed] = seed_paper
             seed_metadata = {"title": seed_id, "abstract": ""}
 
         # Compute normalized seed embedding
@@ -628,8 +679,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )[0]
         self.embeddings[seed_paper.paper_id] = seed_embedding
 
-        # Decide whether to use streaming based on split and corpus_size
-        use_streaming = self.use_streaming and ":" not in self.dataset_split
+        use_streaming = self.use_streaming
 
         if use_streaming:
             logger.info(
@@ -681,7 +731,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not self.arxiv_corpus:
             return []
 
-        print("Computing corpus embeddings (cache-enabled)...")
+        logger.info("Computing corpus embeddings (cache-enabled)...")
 
         corpus_items = list(self.arxiv_corpus.items())
         metadata_map = {paper_id: metadata for paper_id, metadata in corpus_items}
@@ -712,15 +762,22 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         embeddings_array = np.vstack(ordered_embeddings)
         similarities = embeddings_array @ seed_embedding
-        top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(valid_items))
-        top_indices = np.argsort(similarities)[::-1][:top_k]
+        scored_candidates = [
+            (
+                float(similarities[idx]),
+                paper_id,
+                metadata,
+                embeddings_array[idx],
+            )
+            for idx, (paper_id, metadata) in enumerate(valid_items)
+        ]
+        scored_candidates.sort(key=lambda item: (-item[0], str(item[1])))
+        top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(scored_candidates))
 
-        candidates: List[Tuple[str, Dict, np.ndarray]] = []
-        for idx in top_indices:
-            paper_id, metadata = valid_items[int(idx)]
-            candidates.append((paper_id, metadata, embeddings_array[int(idx)]))
-
-        return candidates
+        return [
+            (paper_id, metadata, embedding)
+            for _, paper_id, metadata, embedding in scored_candidates[:top_k]
+        ]
 
     def _select_candidates_streaming(
         self, seed_embedding: np.ndarray
@@ -732,7 +789,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
         max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
-        heap: List[Tuple[float, str, Dict, np.ndarray]] = []
+        heap: List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]] = []
 
         progress_enabled = sys.stderr.isatty()
 
@@ -793,19 +850,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 raise last_exception
             return []
 
-        top_candidates = sorted(heap, key=lambda item: item[0], reverse=True)
+        top_candidates = sorted(heap, key=lambda item: (-item[0], str(item[2])))
         limited = top_candidates[: self.max_papers * CANDIDATE_MULTIPLIER]
 
         return [
             (paper_id, metadata, embedding)
-            for _, paper_id, metadata, embedding in limited
+            for _, _, paper_id, metadata, embedding in limited
         ]
 
     def _process_stream_batch(
         self,
         batch: List[Dict],
         seed_embedding: np.ndarray,
-        heap: List[Tuple[float, str, Dict, np.ndarray]],
+        heap: List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]],
         max_candidates: int,
     ) -> None:
         """
@@ -813,7 +870,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         :param List[Dict] batch: List of metadata dictionaries
         :param np.ndarray seed_embedding: Normalized seed embedding vector
-        :param List[Tuple[float, str, Dict, np.ndarray]] heap: Min-heap storing top candidates
+        :param List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]] heap: Min-heap storing top candidates
         :param int max_candidates: Maximum heap size
         """
         batch_map = {metadata["paper_id"]: metadata for metadata in batch}
@@ -832,11 +889,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             embedding = np.asarray(raw_embedding, dtype=np.float32)
 
             similarity = float(np.dot(seed_embedding, embedding))
-            candidate = (similarity, metadata["paper_id"], metadata, embedding)
+            paper_id = metadata["paper_id"]
+            candidate = (
+                similarity,
+                _heap_tiebreak_key(paper_id),
+                paper_id,
+                metadata,
+                embedding,
+            )
 
             if len(heap) < max_candidates:
                 heapq.heappush(heap, candidate)
-            elif similarity > heap[0][0]:
+            elif candidate > heap[0]:
                 heapq.heapreplace(heap, candidate)
 
     def _extract_paper_metadata(self, paper: Dict, fallback_index: int) -> Dict:
@@ -861,7 +925,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             (pid, paper)
             for pid, paper in list(papers.items())[:10]
             if not paper.is_seed
-            and pid != "query"
+            and not (isinstance(pid, str) and pid.startswith("query:"))
             and not (isinstance(pid, str) and pid.startswith("arxiv_"))
         ]
 
