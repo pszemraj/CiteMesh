@@ -250,10 +250,11 @@ class TestCLIExecution:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Search results table should be emitted on stdout for shell piping."""
+        long_paper_id = "0123456789abcdef0123456789abcdef01234567"
         mock_client = MagicMock()
         mock_client.search_papers.return_value = [
             Paper(
-                paper_id="seed",
+                paper_id=long_paper_id,
                 title="Attention Is All You Need",
                 year=2017,
                 authors=[Author(name="Ashish Vaswani")],
@@ -269,7 +270,9 @@ class TestCLIExecution:
             f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
         assert "Search results for 'attention'" in result.stdout
+        assert "Full paper IDs:" in result.stdout
         assert "Use the paper ID with:" in result.stdout
+        assert long_paper_id in result.stdout
 
 
 class TestCLIErrorHandling:

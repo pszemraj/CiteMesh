@@ -514,7 +514,8 @@ Examples:
 
             table = Table(title=f"Search results for '{args.query}'")
             table.add_column("#", style="dim", width=3)
-            table.add_column("ID", style="cyan", max_width=20)
+            # Keep full IDs copyable for direct use in `citemesh build`.
+            table.add_column("ID", style="cyan", overflow="fold")
             table.add_column("Title", max_width=50)
             table.add_column("Year", justify="right", width=6)
             table.add_column("Citations", justify="right", width=10)
@@ -527,9 +528,7 @@ Examples:
 
                 table.add_row(
                     str(i),
-                    paper.paper_id[:18] + "..."
-                    if len(paper.paper_id) > 18
-                    else paper.paper_id,
+                    paper.paper_id,
                     paper.title[:48] + "..." if len(paper.title) > 48 else paper.title,
                     str(paper.year) if paper.year is not None else "",
                     f"{paper.citation_count:,}",
@@ -537,6 +536,9 @@ Examples:
                 )
 
             output_console.print(table)
+            output_console.print("\n[dim]Full paper IDs:[/dim]")
+            for i, paper in enumerate(results, 1):
+                output_console.print(f"[dim]{i}.[/dim] {paper.paper_id}")
             output_console.print(
                 "\n[dim]Use the paper ID with:[/dim] "
                 'citemesh build "<ID>" --strategy recommendation'
