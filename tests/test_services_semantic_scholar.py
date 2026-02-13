@@ -3,11 +3,12 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import requests
 
 from citemesh.core import API_CONFIG
 from citemesh.models import Paper
-from citemesh.services.semantic_scholar import SemanticScholarClient
+from citemesh.services.semantic_scholar import SemanticScholarClient, normalize_paper_id
 
 
 class _MockResponse:
@@ -141,3 +142,40 @@ def test_retries_on_rate_limit_for_references():
     assert sleep_mock.call_count == 1
     assert sleep_mock.call_args_list[0].args[0] == 3.0
     assert result == []
+
+
+@pytest.mark.parametrize(
+    ("raw_id", "expected"),
+    [
+        ("https://arxiv.org/abs/2508.14040", "arxiv:2508.14040"),
+        ("https://arxiv.org/pdf/2508.14040.pdf", "arxiv:2508.14040"),
+        ("arXiv:2508.14040", "arxiv:2508.14040"),
+        ("https://doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
+    ],
+)
+def test_normalize_paper_id_urls(raw_id: str, expected: str):
+    """URL and prefixed identifiers should normalize to API-friendly IDs."""
+    assert normalize_paper_id(raw_id) == expected
+
+
+def test_get_paper_normalizes_arxiv_url_before_api_call():
+    """get_paper should transform arXiv URLs before querying Semantic Scholar."""
+    api_paper = SimpleNamespace(
+        paperId="seed",
+        title="Seed",
+        year=2025,
+        authors=[],
+        citationCount=1,
+        abstract="abstract",
+        fieldsOfStudy=[],
+    )
+
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper = MagicMock(return_value=api_paper)
+
+    result = client.get_paper("https://arxiv.org/abs/2508.14040")
+
+    assert isinstance(result, Paper)
+    assert result.paper_id == "seed"
+    assert client.client.get_paper.call_args.args[0] == "arxiv:2508.14040"

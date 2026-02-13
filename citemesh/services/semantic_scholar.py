@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import unquote, urlparse
 
 import requests
 from semanticscholar import SemanticScholar
@@ -28,6 +29,73 @@ RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
 )
 SEARCH_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+
+
+def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
+    """
+    Extract an arXiv identifier from an arXiv URL path.
+
+    Supports:
+    - /abs/2508.14040
+    - /pdf/2508.14040.pdf
+    - legacy IDs like /abs/hep-th/9901001
+    """
+    segments = [segment for segment in raw_path.strip("/").split("/") if segment]
+    if not segments:
+        return None
+
+    if segments[0] in {"abs", "pdf"}:
+        candidate = "/".join(segments[1:])
+    else:
+        candidate = "/".join(segments)
+
+    candidate = candidate.strip()
+    if not candidate:
+        return None
+
+    if candidate.endswith(".pdf"):
+        candidate = candidate[:-4]
+    candidate = candidate.strip()
+
+    return candidate or None
+
+
+def normalize_paper_id(paper_id: str) -> str:
+    """Normalize paper identifiers (including arXiv/DOI URLs) for S2 API calls."""
+    normalized = paper_id.strip()
+    if not normalized:
+        raise ValueError(f"Invalid paper ID: {paper_id}")
+
+    lowered = normalized.lower()
+
+    if lowered.startswith("arxiv:"):
+        suffix = normalized.split(":", 1)[1].strip()
+        if not suffix:
+            raise ValueError(f"Invalid paper ID: {paper_id}")
+        return f"arxiv:{suffix}"
+
+    if lowered.startswith("http://") or lowered.startswith("https://"):
+        parsed = urlparse(normalized)
+        host = parsed.netloc.lower()
+        path = unquote(parsed.path)
+
+        if host.endswith("arxiv.org"):
+            arxiv_id = _extract_arxiv_identifier(path)
+            if arxiv_id:
+                return f"arxiv:{arxiv_id}"
+
+        if host.endswith("doi.org"):
+            doi_id = path.strip("/")
+            if doi_id:
+                return doi_id
+
+    if lowered.startswith("arxiv.org/"):
+        parsed = urlparse(f"https://{normalized}")
+        arxiv_id = _extract_arxiv_identifier(unquote(parsed.path))
+        if arxiv_id:
+            return f"arxiv:{arxiv_id}"
+
+    return normalized
 
 
 def _reference_cache_path(paper_id: str) -> Path:
@@ -270,7 +338,7 @@ class SemanticScholarClient:
         if not paper_id or not isinstance(paper_id, str):
             raise ValueError(f"Invalid paper ID: {paper_id}")
 
-        paper_id = paper_id.strip()
+        paper_id = normalize_paper_id(paper_id)
         for attempt in range(API_CONFIG.max_retries):
             try:
                 self._rate_limit()
@@ -335,11 +403,14 @@ class SemanticScholarClient:
             limit: Maximum number of citations to fetch
         """
         papers: List[Paper] = []
+        normalized_paper_id = normalize_paper_id(paper_id)
 
         for attempt in range(API_CONFIG.max_retries):
             try:
                 self._rate_limit()
-                citations = self.client.get_paper_citations(paper_id, limit=limit)
+                citations = self.client.get_paper_citations(
+                    normalized_paper_id, limit=limit
+                )
                 if not citations:
                     return papers
 
@@ -359,14 +430,14 @@ class SemanticScholarClient:
                 return papers
 
             except ObjectNotFoundException:
-                logger.warning("Paper not found for citations: %s", paper_id)
+                logger.warning("Paper not found for citations: %s", normalized_paper_id)
                 return papers
             except Exception as exc:
                 if attempt < API_CONFIG.max_retries - 1:
                     wait_time = self._retry_wait_time(exc, attempt)
                     logger.warning(
                         "Failed to fetch citations for %s (attempt %s). Retrying in %ss",
-                        paper_id,
+                        normalized_paper_id,
                         attempt + 1,
                         wait_time,
                     )
@@ -374,7 +445,7 @@ class SemanticScholarClient:
                 else:
                     logger.warning(
                         "Failed to fetch citations for %s after %s attempts: %s",
-                        paper_id,
+                        normalized_paper_id,
                         API_CONFIG.max_retries,
                         exc,
                     )
@@ -393,11 +464,14 @@ class SemanticScholarClient:
             List of Paper objects (may be shorter than limit)
         """
         papers: List[Paper] = []
+        normalized_paper_id = normalize_paper_id(paper_id)
 
         for attempt in range(API_CONFIG.max_retries):
             try:
                 self._rate_limit()
-                references = self.client.get_paper_references(paper_id, limit=limit)
+                references = self.client.get_paper_references(
+                    normalized_paper_id, limit=limit
+                )
 
                 if not references:
                     return papers
@@ -418,14 +492,16 @@ class SemanticScholarClient:
                 return papers
 
             except ObjectNotFoundException:
-                logger.warning("Paper not found for references: %s", paper_id)
+                logger.warning(
+                    "Paper not found for references: %s", normalized_paper_id
+                )
                 return papers
             except Exception as exc:
                 if attempt < API_CONFIG.max_retries - 1:
                     wait_time = self._retry_wait_time(exc, attempt)
                     logger.warning(
                         "Failed to fetch references for %s (attempt %s). Retrying in %ss",
-                        paper_id,
+                        normalized_paper_id,
                         attempt + 1,
                         wait_time,
                     )
@@ -433,7 +509,7 @@ class SemanticScholarClient:
                 else:
                     logger.warning(
                         "Failed to fetch references for %s after %s attempts: %s",
-                        paper_id,
+                        normalized_paper_id,
                         API_CONFIG.max_retries,
                         exc,
                     )
@@ -450,14 +526,17 @@ class SemanticScholarClient:
         Returns:
             List of referenced paper IDs
         """
-        cache_path = _reference_cache_path(paper_id)
+        normalized_paper_id = normalize_paper_id(paper_id)
+        cache_path = _reference_cache_path(normalized_paper_id)
         if cache_path.exists():
             try:
                 data = json.loads(cache_path.read_text())
                 if data.get("version") == REFERENCE_CACHE_VERSION:
                     refs = data.get("references", [])
                     logger.debug(
-                        "Loaded %d cached references for %s", len(refs), paper_id
+                        "Loaded %d cached references for %s",
+                        len(refs),
+                        normalized_paper_id,
                     )
                     return refs
             except json.JSONDecodeError:
@@ -468,7 +547,7 @@ class SemanticScholarClient:
                 try:
                     self._rate_limit()
                     references = self.client.get_paper_references(
-                        paper_id, fields=["paperId"]
+                        normalized_paper_id, fields=["paperId"]
                     )
                     if not references:
                         return []
@@ -486,7 +565,7 @@ class SemanticScholarClient:
                         cache_path.write_text(
                             json.dumps(
                                 {
-                                    "paper_id": paper_id,
+                                    "paper_id": normalized_paper_id,
                                     "references": ref_ids,
                                     "version": REFERENCE_CACHE_VERSION,
                                 }
@@ -495,7 +574,7 @@ class SemanticScholarClient:
                     except OSError as exc:
                         logger.debug(
                             "Failed to persist reference cache for %s: %s",
-                            paper_id,
+                            normalized_paper_id,
                             exc,
                         )
 
@@ -503,18 +582,21 @@ class SemanticScholarClient:
 
                 except TypeError:
                     logger.debug(
-                        "Reference payload missing for %s (treating as empty)", paper_id
+                        "Reference payload missing for %s (treating as empty)",
+                        normalized_paper_id,
                     )
                     return []
                 except ObjectNotFoundException:
-                    logger.warning("Paper not found for reference IDs: %s", paper_id)
+                    logger.warning(
+                        "Paper not found for reference IDs: %s", normalized_paper_id
+                    )
                     return []
                 except Exception as exc:
                     if attempt < API_CONFIG.max_retries - 1:
                         wait_time = self._retry_wait_time(exc, attempt)
                         logger.warning(
                             "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
-                            paper_id,
+                            normalized_paper_id,
                             attempt + 1,
                             wait_time,
                         )
@@ -522,7 +604,7 @@ class SemanticScholarClient:
                     else:
                         logger.warning(
                             "Failed to fetch reference IDs for %s after %s attempts: %s",
-                            paper_id,
+                            normalized_paper_id,
                             API_CONFIG.max_retries,
                             exc,
                         )
@@ -530,7 +612,9 @@ class SemanticScholarClient:
 
         except Exception as exc:
             logger.warning(
-                "Unexpected error fetching reference IDs for %s: %s", paper_id, exc
+                "Unexpected error fetching reference IDs for %s: %s",
+                normalized_paper_id,
+                exc,
             )
             return []
 
@@ -556,8 +640,9 @@ class SemanticScholarClient:
                 "fieldsOfStudy",
             ]
 
+        normalized_paper_id = normalize_paper_id(paper_id)
         payload = self._request_json(
-            f"{RECOMMENDATION_BASE_URL}/{paper_id}",
+            f"{RECOMMENDATION_BASE_URL}/{normalized_paper_id}",
             {"fields": ",".join(fields), "limit": limit},
         )
         if not payload:
