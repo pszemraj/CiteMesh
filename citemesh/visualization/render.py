@@ -418,8 +418,10 @@ def visualize_graph(
     theme = get_theme(theme_name)
 
     # Compute layout
-    pos = layout if layout is not None else compute_layout(
-        graph, iterations, layout_seed=layout_seed
+    pos = (
+        layout
+        if layout is not None
+        else compute_layout(graph, iterations, layout_seed=layout_seed)
     )
 
     # Compute visual properties

@@ -51,11 +51,7 @@ class EmbeddingSimilarityConfig:
 
     def validate(self) -> None:
         """Ensure component weights are valid."""
-        total = (
-            self.semantic_weight
-            + self.temporal_weight
-            + self.category_weight
-        )
+        total = self.semantic_weight + self.temporal_weight + self.category_weight
         if total <= 0 or total > 1.0:
             raise ValueError(
                 f"Embedding similarity weights must total within (0.0, 1.0], got {total:.3f}"
@@ -113,6 +109,7 @@ class VisualizationConfig:
     # Font settings
     font_size: int = 8
     font_weight: str = "normal"
+
 
 @dataclass
 class APIConfig:
