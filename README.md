@@ -2,6 +2,8 @@
 
 Build exploration-friendly paper graphs from a single paper or query using recommendation, citation, embedding, or hybrid strategies. CiteMesh ships as a single CLI with consistent visuals and export formats so you can switch approaches without changing tools.
 
+Documentation is organized with canonical sources per topic. Start from [docs/README.md](docs/README.md).
+
 ## Quick Start
 
 ### Install
@@ -49,14 +51,11 @@ citemesh search "attention mechanism"
 - Persistent user-level caching for embeddings and corpora; re-runs are fast.
 - Typed models and strategy abstraction make extensions straightforward.
 
-## Essentials
+## Canonical References
 
-- Core command:
-  `citemesh build "<paper-id>" --strategy <recommendation|citation|embedding|hybrid> [options]`
-- Canonical CLI reference (identifiers, flags, output naming, export behavior):
-  [docs/guides/cli.md](docs/guides/cli.md)
-- Cache/storage behavior:
-  [docs/guides/caching.md](docs/guides/caching.md)
+- CLI behavior (identifiers, flags, output naming, export behavior): [docs/guides/cli.md](docs/guides/cli.md)
+- Cache and storage behavior: [docs/guides/caching.md](docs/guides/caching.md)
+- Architecture and extension points: [docs/internals/architecture.md](docs/internals/architecture.md)
 
 ## API Key
 
@@ -66,7 +65,7 @@ Set `S2_API_KEY` for higher Semantic Scholar rate limits:
 export S2_API_KEY="your-semantic-scholar-key"
 ```
 
-For full API-behavior notes, see the canonical CLI guide:
+For API-related CLI behavior (retries, limits, identifier normalization), see:
 [docs/guides/cli.md](docs/guides/cli.md).
 
 ## Documentation

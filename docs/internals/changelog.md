@@ -4,6 +4,7 @@ This living document summarizes noteworthy changes from the initial script-based
 
 For current operational behavior, use the canonical guides:
 [CLI Usage](../guides/cli.md) and [Caching & Data](../guides/caching.md).
+Treat this page as historical context, not the normative behavior spec.
 
 ## Export & Visualization
 
@@ -14,7 +15,7 @@ For current operational behavior, use the canonical guides:
 
 ## Graph Rendering
 
-- All strategies feed a unified visualization pipeline: shared layout (Kamada-Kawai with spring fallback), node sizing tiers, and author-year labels.
+- Layout-based renders now share a unified pipeline: shared layout (Kamada-Kawai with spring fallback), node sizing tiers, and author-year labels.
 - Edge opacity and width scale with normalized weights, maintaining clarity even with hybrid similarity signals.
 - Integration tests route outputs to temporary paths so development runs don't get confused with fixtures.
 
@@ -43,7 +44,7 @@ For current operational behavior, use the canonical guides:
 - Paper ID normalization now accepts arXiv/DOI URLs directly (for example `https://arxiv.org/abs/...`) and converts them to canonical IDs before API calls.
 - Explicit output basenames with dots are now preserved across multi-export runs (for example `-o out/arxiv-2508.14040-example --export all`).
 - Embedding `--top-k` now enforces strict per-node edge caps during pruning.
-- CLI computes a single shared layout per run and reuses it across static/interactive exports; `--seed` now consistently controls that shared layout path.
+- CLI computes a single shared layout per run for layout-consuming exports and reuses it across PNG/Plotly outputs; `--seed` now consistently controls that shared layout path.
 - Default auto-generated outputs are grouped under per-paper folders (`out/<safe-seed-title>/`) instead of a flat `out/` namespace.
 
 ## Maintenance Consolidation

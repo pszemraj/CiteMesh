@@ -1,12 +1,13 @@
 # Caching & Data Storage
 
-CiteMesh uses persistent caches to avoid recomputing expensive datasets and embeddings. This guide explains what gets cached, where it lives by default, and how to override the locations.
+CiteMesh uses persistent caches to avoid recomputing expensive datasets and embeddings. This is the canonical cache/storage reference for the repository.
 
 ## Cache Root
 
 By default, all project-specific caches live under:
 
-- **Linux / macOS**: `~/.cache/citemesh`
+- **Linux**: `~/.cache/citemesh`
+- **macOS**: `~/Library/Caches/citemesh`
 - **Windows**: `%LOCALAPPDATA%\CiteMesh` (or `%APPDATA%` if `LOCALAPPDATA` is unset)
 
 Override the root path by setting an environment variable before running the CLI:
@@ -23,12 +24,12 @@ citemesh cache root
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, hashes, dims)
 │   └── embeddings_<model-hash>.h5 # HDF5 vectors
 ├── joblib/
-│   └── ...                        # HuggingFace dataset shards cached via joblib
+│   └── ...                        # Normalized corpus payloads cached via joblib
 └── references/
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
-> Model hashes are the first eight characters of the SHA-256 digest of the model name, ensuring caches stay isolated when you switch between sentence-transformer checkpoints.
+> Model hashes are the first **12** characters of the SHA-256 digest of the model name, ensuring caches stay isolated when you switch between sentence-transformer checkpoints.
 
 ## Embedding Cache
 
@@ -41,7 +42,7 @@ This makes iterative runs fast: after the first run, loading vectors becomes a d
 
 ## Joblib Dataset Cache
 
-`datasets.load_dataset` is wrapped with joblib caching. When you request a split like `train[:5%]`, the underlying HuggingFace dataset is stored in `joblib/` so subsequent runs reuse the on-disk Arrow shards instead of re-downloading.
+ArXiv corpus loading is wrapped with joblib caching. The normalized corpus mapping (for a given split and paper cap) is cached under `joblib/`, so repeated runs can skip rebuilding that in-process structure.
 
 ## Semantic Scholar Reference Cache
 
@@ -53,7 +54,7 @@ The HuggingFace library also maintains its own cache (usually `~/.cache/huggingf
 
 ## Cleaning the Cache
 
-To remove embeddings for a given model, delete the corresponding `.db` and `.h5` files inside `embeddings/`. You can safely regenerate them on the next run. For a full reset:
+To remove embeddings for a given model, delete the corresponding `.db` and `.h5` files inside `embeddings/`. You can safely regenerate them on the next run. For a full reset on Linux/macOS:
 
 ```bash
 rm -rf ~/.cache/citemesh
@@ -64,6 +65,8 @@ Or with a custom root:
 ```bash
 rm -rf "$CITEMESH_CACHE_DIR"
 ```
+
+On Windows, remove the cache directory in Explorer or PowerShell instead of `rm -rf`.
 
 ## Best Practices
 

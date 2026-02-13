@@ -2,7 +2,7 @@
 
 The `citemesh` command builds paper graphs using one of four strategies (`recommendation`, `citation`, `embedding`, `hybrid`). This guide walks through common flags and workflows.
 
-This document is the canonical CLI reference for identifiers, flags, output naming, and export behavior.
+This document is the canonical CLI reference for identifiers, flags, output naming, and export behavior. Other docs should link here for CLI specifics instead of restating them.
 
 ## Basic Invocation
 
@@ -20,7 +20,7 @@ Accepted identifiers:
 
 - DOI (`10.1038/nature14539`)
 - DOI URL (`https://doi.org/10.1038/nature14539`)
-- arXiv ID (`arxiv:1706.03762`, `1706.03762`)
+- arXiv ID (`arxiv:1706.03762`; bare IDs like `1706.03762` may work when Semantic Scholar resolves them)
 - arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`)
 - Semantic Scholar Paper ID
 - Free-form text query (embedding strategy treats it as a search query)
@@ -33,7 +33,7 @@ Accepted identifiers:
 | `--max-papers`, `-p` | Maximum nodes in final graph                                     | `40`                           |
 | `--iterations`, `-i` | Layout iterations (higher = smoother)                            | `100`                          |
 | `--dpi`, `-d`        | PNG output resolution                                            | `150`                          |
-| `--seed`             | Layout seed reused across exporters for reproducible positioning | none (uses default behavior)   |
+| `--seed`             | Seed for layout computation used by layout-based exports (`png`, `plotly`) | none (uses default behavior)   |
 | `--export`, `-e`     | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all`     | `png`                          |
 | `--theme`            | `light`, `dark`, `solarized`, `auto`                             | `light`                        |
 | `--output`, `-o`     | Base filename for exports                                        | auto-generated in paper folder |
@@ -41,6 +41,8 @@ Accepted identifiers:
 When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:50]>/<strategy>.<ext>`.
 When `--export all` is used, CiteMesh writes every supported format using consistent styling. If you specify a custom output path, the CLI appends the correct extension for each exported format.
 Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`) are preserved; format extensions are appended without truncating the basename.
+
+`--seed` controls the shared layout path for `png` and `plotly` exports. Pyvis `html` exports use vis.js physics and do not consume this layout.
 
 ## Strategy-Specific Flags
 
@@ -78,7 +80,7 @@ Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`)
 ## Export Formats
 
 - `png`: Matplotlib static render with theme-aware background/labels.
-- `html` (Pyvis): vis.js network with hover tooltips and optional physics.
+- `html` (Pyvis): vis.js network with hover tooltips and force-physics enabled by default.
 - `plotly`: interactive Plotly graph (HTML) suitable for notebook/dashboard embedding.
 - `json`: structured graph data with nodes, edges, metadata.
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools.

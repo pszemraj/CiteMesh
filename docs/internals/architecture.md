@@ -2,6 +2,8 @@
 
 The CLI orchestrates a consistent pipeline regardless of the strategy you choose (`recommendation`, `citation`, `embedding`, or `hybrid`). This document describes the major components, how data flows between them, and where to hook in new functionality.
 
+Behavior-level CLI details (flags, identifier parsing, output naming) remain canonical in [CLI Usage](../guides/cli.md). Cache path/layout details remain canonical in [Caching & Data](../guides/caching.md).
+
 ## Execution Flow
 
 ```
@@ -29,8 +31,8 @@ Every node added to the NetworkX graph carries the same attributes (`paper`, `ti
 - Defines the `citemesh` console entry point.
 - Parses and validates all CLI arguments.
 - Resolves output filenames for requested export formats.
-- Computes one shared layout per build run (optionally seeded via `--seed`) and reuses it across PNG/HTML/Plotly outputs.
-- Builds a metadata dictionary (paper id, strategy, node/edge counts, timestamp) passed to both Matplotlib and HTML exporters.
+- Computes one shared layout per build run (optionally seeded via `--seed`) when layout-consuming exports are requested, then reuses it across PNG/Plotly outputs.
+- Builds a metadata dictionary (paper id, strategy, node/edge counts, timestamp) passed to Matplotlib and structured exports.
 
 Authoritative flag/identifier behavior lives in [CLI Usage](../guides/cli.md).
 
