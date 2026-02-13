@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from citemesh.core import Paper
 from citemesh.services import SemanticScholarClient, get_client
@@ -26,13 +26,27 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
+        """Initialize recommendation graph builder.
+
+        :param int max_papers: Maximum papers to include in graph.
+        :param bool fetch_references: Whether to fetch references for seed.
+        :param float similarity_threshold: Threshold for edge creation.
+        :param Optional[int] random_seed: Seed for reproducibility.
+        :param Optional[SemanticScholarClient] client: Optional injected S2 client.
+        """
         super().__init__(max_papers=max_papers, random_seed=random_seed)
         self.fetch_references = fetch_references
         self.similarity_threshold = similarity_threshold
         self.client = client or get_client()
         self._abstract_index = AbstractSimilarityIndex()
 
-    def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
+        """Collect recommendations for a seed paper.
+
+        :param str seed_id: Seed paper identifier.
+        :param Any kwargs: Strategy-specific arguments (currently unused).
+        :return Dict[str, Paper]: Papers included in graph.
+        """
         papers: Dict[str, Paper] = {}
 
         logger.info("Fetching seed paper: %s", seed_id)
@@ -70,6 +84,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         Compute similarity combining topical and temporal signals.
 
         60% abstract similarity, 15% temporal (when available), 25% bibliographic.
+
+        :param Paper paper1: First paper.
+        :param Paper paper2: Second paper.
+        :return float: Similarity score in [0.0, 1.0].
         """
         abstract_sim = self._abstract_index.similarity(paper1.paper_id, paper2.paper_id)
         temporal_sim = self.temporal_similarity(paper1, paper2)
@@ -87,6 +105,13 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
     def should_create_edge(
         self, paper1: Paper, paper2: Paper, similarity: float
     ) -> bool:
+        """Apply threshold logic for recommendation-derived edges.
+
+        :param Paper paper1: First paper.
+        :param Paper paper2: Second paper.
+        :param float similarity: Computed similarity score.
+        :return bool: ``True`` when edge should be kept.
+        """
         if similarity < self.similarity_threshold:
             return False
         if paper1.is_seed or paper2.is_seed:

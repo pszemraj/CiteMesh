@@ -15,7 +15,11 @@ from citemesh.visualization import generate_output_path
 
 
 def run_cli_command(args: list[str]) -> SimpleNamespace:
-    """Run the CLI in-process and capture stdout/stderr."""
+    """Run the CLI in-process and capture stdout/stderr.
+
+    :param list[str] args: CLI arguments to parse.
+    :return SimpleNamespace: Namespace with ``returncode``, ``stdout`` and ``stderr``.
+    """
     previous_argv = sys.argv[:]
     sys.argv = ["citemesh"] + list(args)
 
@@ -48,14 +52,14 @@ def run_cli_command(args: list[str]) -> SimpleNamespace:
 class TestCLIBasics:
     """Test basic CLI functionality and argument parsing."""
 
-    def test_cli_help_works(self):
+    def test_cli_help_works(self) -> None:
         """Test CLI help command runs without error."""
         result = run_cli_command(["--help"])
         assert result.returncode == 0
         assert "CiteMesh" in result.stdout
         assert "build" in result.stdout
 
-    def test_build_help_works(self):
+    def test_build_help_works(self) -> None:
         """Test build subcommand help."""
         result = run_cli_command(["build", "--help"])
         assert result.returncode == 0
@@ -65,21 +69,21 @@ class TestCLIBasics:
         assert "embedding" in result.stdout
         assert "hybrid" in result.stdout
 
-    def test_search_help_works(self):
+    def test_search_help_works(self) -> None:
         """Test search subcommand help."""
         result = run_cli_command(["search", "--help"])
         assert result.returncode == 0
         assert "search" in result.stdout.lower()
         assert "--limit" in result.stdout
 
-    def test_seed_argument_exists(self):
+    def test_seed_argument_exists(self) -> None:
         """Test --seed argument is exposed (caught bug: was implemented but not exposed)."""
         result = run_cli_command(["build", "--help"])
         assert result.returncode == 0
         assert "--seed" in result.stdout
         assert "reproducibility" in result.stdout.lower()
 
-    def test_invalid_strategy_rejected(self):
+    def test_invalid_strategy_rejected(self) -> None:
         """Test invalid strategy name is rejected by argparse."""
         result = run_cli_command(
             [
@@ -97,7 +101,7 @@ class TestCLIExecution:
     """Test actual CLI execution with real (but small) workloads."""
 
     @pytest.mark.slow
-    def test_citation_strategy_runs(self):
+    def test_citation_strategy_runs(self) -> None:
         """Test citation strategy completes successfully with small graph."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_output.png"
@@ -126,7 +130,7 @@ class TestCLIExecution:
             assert output.stat().st_size > 1000, "Output file suspiciously small"
 
     @pytest.mark.slow
-    def test_citation_no_references_faster(self):
+    def test_citation_no_references_faster(self) -> None:
         """Test --no-references flag works and is faster."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_no_refs.png"
@@ -150,7 +154,7 @@ class TestCLIExecution:
             assert "0 with reference lists" in result.stdout
 
     @pytest.mark.slow
-    def test_embedding_strategy_runs(self):
+    def test_embedding_strategy_runs(self) -> None:
         """Test embedding strategy with tiny dataset."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "test_cli_embedding.png"
@@ -184,7 +188,7 @@ class TestCLIErrorHandling:
     """Test error handling and exit codes."""
 
     @pytest.mark.slow
-    def test_invalid_paper_id_fails_cleanly(self):
+    def test_invalid_paper_id_fails_cleanly(self) -> None:
         """Test invalid paper ID returns non-zero exit code with clean error."""
         result = run_cli_command(
             [
@@ -201,21 +205,21 @@ class TestCLIErrorHandling:
         # Should NOT have traceback spam (caught bug: verbose tracebacks)
         assert "Traceback" not in result.stderr
 
-    def test_missing_required_argument_fails(self):
+    def test_missing_required_argument_fails(self) -> None:
         """Test missing paper_id argument fails."""
         result = run_cli_command(["build", "--strategy", "citation"])
         assert result.returncode != 0
         assert "required" in result.stderr.lower() or "error" in result.stderr.lower()
 
 
-def test_default_strategy_is_recommendation():
+def test_default_strategy_is_recommendation() -> None:
     """Default strategy should be recommendation."""
     result = run_cli_command(["build", "--help"])
     assert result.returncode == 0
     assert "default: recommendation" in result.stdout
 
 
-def test_generated_output_path_uses_strategy_suffix():
+def test_generated_output_path_uses_strategy_suffix() -> None:
     """Strategy name should be included in generated filenames."""
     graph = nx.Graph()
     graph.add_node("seed", title="Attention Is All You Need")
@@ -233,7 +237,7 @@ def test_generated_output_path_uses_strategy_suffix():
 class TestCLIDefaults:
     """Test default values match between CLI and strategy classes."""
 
-    def test_dataset_split_default_matches(self):
+    def test_dataset_split_default_matches(self) -> None:
         """Test dataset-split default in CLI help matches strategy (caught bug: train[:2%] vs train)."""
         result = run_cli_command(["build", "--help"])
         assert result.returncode == 0
@@ -250,7 +254,7 @@ class TestCLIReproducibility:
     """Test seed functionality for reproducible builds."""
 
     @pytest.mark.slow
-    def test_seed_produces_deterministic_output(self):
+    def test_seed_produces_deterministic_output(self) -> None:
         """Test same seed produces consistent results (node/edge counts)."""
         args = [
             "citemesh",

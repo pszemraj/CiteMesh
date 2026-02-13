@@ -6,15 +6,16 @@ comprehensive paper discovery.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
+import networkx as nx
 import numpy as np
 
 from citemesh.core import HYBRID_CONFIG, Paper
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.citation import CitationGraphBuilder
-from citemesh.strategies.embedding import _check_embedding_deps, EmbeddingGraphBuilder
+from citemesh.strategies.embedding import EmbeddingGraphBuilder, _check_embedding_deps
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +44,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         Initialize hybrid graph builder.
 
-        Args:
-            max_papers: Maximum total papers
-            max_citations: Maximum citing papers from S2
-            max_references: Maximum referenced papers from S2
-            max_semantic: Maximum papers from semantic search
-            model_name: Embedding model name
-            dataset_split: ArXiv dataset split
-            random_seed: Random seed for reproducibility
+        :param int max_papers: Maximum total papers
+        :param int max_citations: Maximum citing papers from S2
+        :param int max_references: Maximum referenced papers from S2
+        :param int max_semantic: Maximum papers from semantic search
+        :param str model_name: Embedding model name
+        :param str dataset_split: ArXiv dataset split
+        :param int random_seed: Random seed for reproducibility
+        :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         super().__init__(max_papers, random_seed)
         self.client = client or get_client()
@@ -82,15 +83,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         # Track paper sources for adaptive similarity
         self.paper_sources: Dict[str, str] = {}  # paper_id -> "citation" or "semantic"
 
-    def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
         Collect papers from both citation and semantic sources.
 
-        Args:
-            seed_id: Seed paper identifier
-
-        Returns:
-            Combined dictionary of papers
+        :param str seed_id: Seed paper identifier
+        :param Any kwargs: Strategy-specific options (currently unused).
+        :return Dict[str, Paper]: Combined dictionary of papers
         """
         papers = {}
         self.paper_sources = {}
@@ -129,17 +128,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         Compute similarity using adaptive weights.
 
-        Uses different weights based on paper sources:
-        - Both from citations: emphasize bibliographic coupling
-        - Both from semantics: emphasize embedding similarity
-        - Mixed: balanced approach
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Similarity score (0.0 to 1.0)
         """
         source1 = self.paper_sources.get(paper1.paper_id, "citation")
         source2 = self.paper_sources.get(paper2.paper_id, "citation")
@@ -199,15 +190,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         return min(similarity, 1.0)  # Cap at 1.0
 
-    def build_graph(self, seed_id: str, **kwargs):
+    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
         """
         Build graph and enforce per-node edge limits for readability.
 
-        Args:
-            seed_id: Seed paper identifier
-
-        Returns:
-            Tuple of (graph, seed_id)
+        :param str seed_id: Seed paper identifier
+        :param Any kwargs: Strategy-specific options (currently unused).
+        :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed_id).
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
 
@@ -241,15 +230,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         Create edges with per-node limits.
 
-        Implements edge limiting to prevent overcrowding.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-            similarity: Computed similarity
-
-        Returns:
-            True if edge should be created
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :param float similarity: Computed similarity
+        :return bool: True if edge should be created
         """
         # Basic threshold
         if similarity < 0.2:

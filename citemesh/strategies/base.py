@@ -8,7 +8,7 @@ enabling the Strategy pattern for different similarity computation approaches.
 import math
 import random
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import networkx as nx
 import numpy as np
@@ -29,9 +29,8 @@ class GraphBuilderStrategy(ABC):
         """
         Initialize the graph builder.
 
-        Args:
-            max_papers: Maximum number of papers to include in graph
-            random_seed: Random seed for reproducibility (None = non-deterministic)
+        :param int max_papers: Maximum number of papers to include in graph
+        :param Optional[int] random_seed: Random seed for reproducibility (None = non-deterministic)
         """
         self.max_papers = max_papers
         self.random_seed = random_seed
@@ -44,19 +43,14 @@ class GraphBuilderStrategy(ABC):
             random.seed(random_seed)
 
     @abstractmethod
-    def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
         Collect papers for the graph using strategy-specific method.
 
-        Args:
-            seed_id: The seed paper identifier (DOI, arXiv ID, or S2 ID)
-            **kwargs: Strategy-specific parameters
-
-        Returns:
-            Dictionary mapping paper IDs to Paper objects
-
-        Raises:
-            ValueError: If seed paper cannot be found
+        :param str seed_id: The seed paper identifier (DOI, arXiv ID, or S2 ID)
+        :param kwargs: Strategy-specific parameters
+        :return Dict[str, Paper]: Dictionary mapping paper IDs to Paper objects
+        :raises ValueError: If seed paper cannot be found
         """
         pass
 
@@ -65,12 +59,9 @@ class GraphBuilderStrategy(ABC):
         """
         Compute similarity between two papers using strategy-specific method.
 
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Similarity score from 0.0 (not similar) to 1.0 (identical)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Similarity score from 0.0 (not similar) to 1.0 (identical)
         """
         pass
 
@@ -80,16 +71,10 @@ class GraphBuilderStrategy(ABC):
         """
         Decide whether to create an edge based on similarity and paper properties.
 
-        Default implementation: always create edge if similarity > 0.
-        Subclasses can override for more sophisticated logic.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-            similarity: Computed similarity score
-
-        Returns:
-            True if edge should be created
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :param float similarity: Computed similarity score
+        :return bool: True if edge should be created
         """
         return similarity > 0.0
 
@@ -99,6 +84,8 @@ class GraphBuilderStrategy(ABC):
 
         Subclasses can set this to surface additional detail (e.g., reference counts)
         that should be shown to users on stdout.
+
+        :return Optional[str]: Optional summary string to display after collection.
         """
         return self._collection_summary
 
@@ -106,18 +93,13 @@ class GraphBuilderStrategy(ABC):
         """Allow subclasses to provide a collection summary."""
         self._collection_summary = summary
 
-    def build_graph(self, seed_id: str, **kwargs) -> Tuple[nx.Graph, str]:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
         """
         Build the complete similarity graph.
 
-        This is the template method that orchestrates the graph building process.
-
-        Args:
-            seed_id: The seed paper identifier
-            **kwargs: Strategy-specific parameters passed to collect_papers
-
-        Returns:
-            Tuple of (NetworkX graph, seed paper ID)
+        :param str seed_id: The seed paper identifier
+        :param kwargs: Strategy-specific parameters passed to collect_papers.
+        :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
         """
         # Step 1: Collect papers
         print(f"Collecting papers using {self.__class__.__name__}...")
@@ -181,14 +163,9 @@ class GraphBuilderStrategy(ABC):
         """
         Compute temporal similarity based on publication year difference.
 
-        Uses configuration from TemporalConfig.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Temporal similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Temporal similarity score (0.0 to 1.0)
         """
         if paper1.year is None or paper2.year is None:
             return 0.5
@@ -200,14 +177,9 @@ class GraphBuilderStrategy(ABC):
         """
         Compute similarity based on citation counts (log scale).
 
-        Papers with similar impact (citation counts) are considered more similar.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Citation similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Citation similarity score (0.0 to 1.0)
         """
         cit1 = paper1.citation_count
         cit2 = paper2.citation_count
@@ -225,15 +197,9 @@ class GraphBuilderStrategy(ABC):
         """
         Compute bibliographic coupling strength.
 
-        Uses the Kessler (1963) formula:
-            coupling = |shared_refs| / sqrt(|refs1| * |refs2|)
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Bibliographic coupling coefficient (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Bibliographic coupling coefficient (0.0 to 1.0)
         """
         return paper1.reference_overlap(paper2)
 
@@ -244,13 +210,10 @@ class GraphBuilderStrategy(ABC):
         """
         Compute exponential temporal similarity decay.
 
-        Args:
-            paper1: First paper
-            paper2: Second paper
-            decay_factor: Controls decay rate (higher = slower decay)
-
-        Returns:
-            Similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :param float decay_factor: Controls decay rate (higher = slower decay)
+        :return float: Similarity score (0.0 to 1.0)
         """
         if paper1.year is None or paper2.year is None:
             return 0.5

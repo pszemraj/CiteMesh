@@ -7,7 +7,7 @@ bibliographic coupling (shared references), and co-citation analysis.
 
 import logging
 import sys
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from tqdm.auto import tqdm
 
@@ -43,13 +43,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         """
         Initialize citation graph builder.
 
-        Args:
-            max_papers: Maximum total papers in graph
-            max_citations: Maximum citing papers to fetch
-            max_references: Maximum referenced papers to fetch
-            similarity_threshold: Minimum similarity for edges
-            fetch_references: Whether to fetch reference lists (enables real bibliographic coupling)
-            random_seed: Random seed for reproducibility
+        :param int max_papers: Maximum total papers in graph
+        :param int max_citations: Maximum citing papers to fetch
+        :param int max_references: Maximum referenced papers to fetch
+        :param float similarity_threshold: Minimum similarity for edges
+        :param bool fetch_references: Whether to fetch reference lists (enables real bibliographic coupling)
+        :param int random_seed: Random seed for reproducibility
+        :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         super().__init__(max_papers, random_seed)
         self.max_citations = max_citations
@@ -64,11 +64,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         """
         Get reference IDs for a paper with caching.
 
-        Args:
-            paper_id: Paper identifier
-
-        Returns:
-            List of referenced paper IDs
+        :param str paper_id: Paper identifier
+        :return list: List of referenced paper IDs
         """
         if paper_id in self.reference_cache:
             return self.reference_cache[paper_id]
@@ -77,15 +74,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache[paper_id] = ref_ids
         return ref_ids
 
-    def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
         Collect papers via citations and references.
 
-        Args:
-            seed_id: Seed paper identifier
-
-        Returns:
-            Dictionary of paper_id -> Paper objects
+        :param str seed_id: Seed paper identifier
+        :param Any kwargs: Strategy-specific options (currently unused).
+        :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         papers = {}
 
@@ -192,17 +187,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         """
         Compute similarity using temporal, citation, and bibliographic factors.
 
-        This implements the bibliography overlap scoring used in citation meshes:
-        - Temporal proximity (with strong penalties for distant papers)
-        - Citation impact similarity (log scale)
-        - Bibliographic coupling (shared references)
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Similarity score (0.0 to 1.0)
         """
         abstract_sim = self._abstract_index.similarity(paper1.paper_id, paper2.paper_id)
         temp_sim = self.temporal_similarity(paper1, paper2)
@@ -225,17 +212,10 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         """
         Decide whether to create edge based on similarity and sparsity goals.
 
-        Implements selective edge creation to match CiteMesh sparsity:
-        - Seed connects to highly similar papers
-        - Other papers connect only if very similar and probabilistically
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-            similarity: Computed similarity score
-
-        Returns:
-            True if edge should be created
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :param float similarity: Computed similarity score
+        :return bool: True if edge should be created
         """
         # Check minimum threshold
         if similarity < self.similarity_threshold:

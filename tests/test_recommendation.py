@@ -9,7 +9,7 @@ from citemesh.strategies.recommendation import RecommendationGraphBuilder
 class TestRecommendationGraphBuilder:
     """Tests for S2 recommendation graph behavior."""
 
-    def test_tfidf_recommendation_prefers_related_papers(self):
+    def test_tfidf_recommendation_prefers_related_papers(self) -> None:
         """Related papers should score higher than unrelated ones."""
         papers = {
             "seed": Paper(
@@ -49,7 +49,7 @@ class TestRecommendationGraphBuilder:
 
         assert related_similarity > unrelated_similarity
 
-    def test_should_create_edge_deterministic_thresholds(self):
+    def test_should_create_edge_deterministic_thresholds(self) -> None:
         """Edges are now deterministic and should not call random logic."""
         seed = Paper(paper_id="seed", title="Seed", year=2020, abstract="seed abstract")
         related = Paper(
@@ -82,7 +82,9 @@ class TestRecommendationGraphBuilder:
         assert not builder.should_create_edge(weak, related, 0.25)
 
     @patch("citemesh.strategies.recommendation.get_client")
-    def test_collect_papers_filters_missing_abstract(self, mock_get_client):
+    def test_collect_papers_filters_missing_abstract(
+        self, mock_get_client: MagicMock
+    ) -> None:
         """Recommendations without abstract text should be filtered out."""
         mock_client = MagicMock()
         mock_client.get_paper.return_value = Paper(
@@ -113,7 +115,9 @@ class TestRecommendationGraphBuilder:
         assert "missing_abstract" not in papers
 
     @patch("citemesh.strategies.recommendation.get_client")
-    def test_collect_and_build_with_unknown_year(self, mock_get_client):
+    def test_collect_and_build_with_unknown_year(
+        self, mock_get_client: MagicMock
+    ) -> None:
         """Papers with unknown year should not break recommendation graph construction."""
         mock_client = MagicMock()
         mock_client.get_paper.return_value = Paper(

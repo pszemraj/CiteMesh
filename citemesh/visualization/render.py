@@ -27,11 +27,8 @@ def _choose_metadata_anchor(
     """
     Choose which corner to place the metadata box in based on node density.
 
-    Args:
-        pos: Mapping of node -> position array
-
-    Returns:
-        Tuple of (x, y, horizontal_alignment, vertical_alignment) in axes coords.
+    :param Dict[str, np.ndarray] pos: Mapping of node -> position array
+    :return Tuple[float, float, str, str]: Tuple of (x, y, horizontal_alignment, vertical_alignment) in axes coords.
     """
     if not pos:
         return 0.02, 0.02, "left", "bottom"
@@ -77,9 +74,11 @@ def add_metadata_box(
     """
     Render a small metadata block in the plot corner.
 
-    Args:
-        ax: Matplotlib axes
-        metadata: Dictionary of metadata key/value pairs
+    :param plt.Axes ax: Matplotlib axes
+    :param Dict[str, Any] metadata: Dictionary of metadata key/value pairs
+    :param Dict[str, np.ndarray] pos: Node position map.
+    :param Theme theme: Active theme (used for text colors).
+    :return None: Draws metadata box directly to axes.
     """
     lines = []
     label_map = {
@@ -130,11 +129,8 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
     """
     Compute node sizes with extreme variation matching CiteMesh style.
 
-    Args:
-        graph: NetworkX graph with paper nodes
-
-    Returns:
-        List of sizes (in square pixels) for each node
+    :param nx.Graph graph: NetworkX graph with paper nodes
+    :return List[float]: List of sizes (in square pixels) for each node
     """
     nodes = list(graph.nodes())
     sizes = []
@@ -188,12 +184,10 @@ def compute_node_colors(
     """
     Compute smooth color gradient by publication year.
 
-    Args:
-        graph: NetworkX graph with paper nodes
-        seed_id: ID of the seed paper (gets special color)
-
-    Returns:
-        Tuple of (color_list, min_year, max_year)
+    :param nx.Graph graph: NetworkX graph with paper nodes
+    :param str seed_id: ID of the seed paper (gets special color)
+    :param Theme theme: Theme palette used for interpolation.
+    :return Tuple[List[Tuple[float, float, float]], int, int]: Tuple of (color_list, min_year, max_year)
     """
     nodes = list(graph.nodes())
     years = [graph.nodes[n].get("year") for n in nodes if graph.nodes[n].get("year")]
@@ -228,14 +222,9 @@ def compute_layout(graph: nx.Graph, iterations: int = 100) -> Dict[str, np.ndarr
     """
     Compute force-directed layout with organic clustering.
 
-    Tries Kamada-Kawai first (better clustering), falls back to spring layout.
-
-    Args:
-        graph: NetworkX graph
-        iterations: Number of iterations for spring layout
-
-    Returns:
-        Dictionary mapping node IDs to (x, y) positions
+    :param nx.Graph graph: NetworkX graph
+    :param int iterations: Number of iterations for spring layout
+    :return Dict[str, np.ndarray]: Dictionary mapping node IDs to (x, y) positions
     """
     try:
         pos = nx.kamada_kawai_layout(
@@ -269,10 +258,11 @@ def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict, theme: Theme) -> None:
     """
     Draw edges with varying thickness and opacity based on weight.
 
-    Args:
-        ax: Matplotlib axes
-        graph: NetworkX graph
-        pos: Node positions dictionary
+    :param plt.Axes ax: Matplotlib axes
+    :param nx.Graph graph: NetworkX graph
+    :param Dict pos: Node positions dictionary
+    :param Theme theme: Theme palette for edge colors.
+    :return None: Draws all edges onto the axes.
     """
     for n1, n2, data in graph.edges(data=True):
         weight = data.get("weight", 0.1)
@@ -305,12 +295,13 @@ def draw_nodes(
     """
     Draw nodes with computed sizes and colors.
 
-    Args:
-        ax: Matplotlib axes
-        graph: NetworkX graph
-        pos: Node positions dictionary
-        sizes: List of node sizes
-        colors: List of node colors (RGB tuples)
+    :param plt.Axes ax: Matplotlib axes
+    :param nx.Graph graph: NetworkX graph
+    :param Dict pos: Node positions dictionary
+    :param List[float] sizes: List of node sizes
+    :param List[Tuple[float, float, float]] colors: List of node colors (RGB tuples)
+    :param Theme theme: Theme palette for edge outlines.
+    :return None: Draws all nodes onto the axes.
     """
     nodes = list(graph.nodes())
 
@@ -334,23 +325,21 @@ def draw_labels(
     """
     Draw paper labels in "Author, Year" format.
 
-    Args:
-        ax: Matplotlib axes
-        graph: NetworkX graph
-        pos: Node positions dictionary
-        seed_id: ID of seed paper (gets bold label)
+    :param plt.Axes ax: Matplotlib axes
+    :param nx.Graph graph: NetworkX graph
+    :param Dict pos: Node positions dictionary
+    :param str seed_id: ID of seed paper (gets bold label)
+    :param Theme theme: Theme palette for text color.
+    :return None: Draws all node labels.
     """
 
     def _shorten_title(title: str, max_chars: int = 34) -> str:
         """
         Shorten long seed labels to keep static plots readable.
 
-        Args:
-            title: Full seed paper title.
-            max_chars: Maximum label width before truncation.
-
-        Returns:
-            Label-safe title.
+        :param str title: Full seed paper title.
+        :param int max_chars: Maximum label width before truncation.
+        :return str: Label-safe title.
         """
         if len(title) <= max_chars:
             return title
@@ -405,22 +394,14 @@ def visualize_graph(
     """
     Create CiteMesh visualization.
 
-    This is the unified visualization function used by all strategies.
-
-    Args:
-        graph: NetworkX graph with paper nodes
-        seed_id: ID of the seed paper
-        output_path: Path for output PNG file
-        iterations: Number of layout iterations (higher = better quality)
-        dpi: Output resolution (defaults to config value)
-        metadata: Optional info to annotate on the figure (auto-positioned)
-
-    Visual Encodings:
-        - Node size: Citation count + importance ranking (80-2500 pixels)
-        - Node color: Smooth gradient by year (light → dark)
-        - Edge thickness: Proportional to similarity weight
-        - Edge opacity: Based on connection strength
-        - Layout: Kamada-Kawai with organic perturbations
+    :param nx.Graph graph: NetworkX graph with paper nodes
+    :param str seed_id: ID of the seed paper
+    :param Path output_path: Path for output PNG file
+    :param int iterations: Number of layout iterations (higher = better quality)
+    :param int dpi: Output resolution (defaults to config value)
+    :param Optional[Dict[str, Any]] metadata: Optional info to annotate on the figure (auto-positioned) Visual Encodings: - Node size: Citation count + importance ranking (80-2500 pixels) - Node color: Smooth gradient by year (light → dark) - Edge thickness: Proportional to similarity weight - Edge opacity: Based on connection strength - Layout: Kamada-Kawai with organic perturbations
+    :param str theme_name: Name of theme to render.
+    :return None: Writes output image to the given path.
     """
     if dpi is None:
         dpi = VIZ_CONFIG.dpi
@@ -478,13 +459,11 @@ def generate_output_path(
     """
     Generate auto-named output path from paper title.
 
-    Args:
-        graph: NetworkX graph
-        seed_id: ID of seed paper
-        output_dir: Output directory
-
-    Returns:
-        Path object for output file
+    :param nx.Graph graph: NetworkX graph
+    :param str seed_id: ID of seed paper
+    :param Path output_dir: Output directory
+    :param str strategy: Optional strategy suffix used in filename.
+    :return Path: Path object for output file
     """
     title = graph.nodes[seed_id].get("title", "graph")
 

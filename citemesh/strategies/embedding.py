@@ -8,8 +8,9 @@ to find conceptually similar papers without relying on citations.
 import heapq
 import logging
 import sys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import networkx as nx
 import numpy as np
 from joblib import Memory
 from tqdm.auto import tqdm
@@ -26,7 +27,10 @@ _memory: Optional[Memory] = None
 
 
 def _get_memory() -> Memory:
-    """Get or create the joblib cache lazily."""
+    """Get or create the joblib cache lazily.
+
+    :return Memory: Shared joblib cache object for expensive dataset operations.
+    """
     global _memory
     if _memory is None:
         _memory = Memory(str(get_cache_dir("joblib")), verbose=0)
@@ -69,12 +73,9 @@ def load_arxiv_dataset_cached(
     """
     Load and cache ArXiv dataset.
 
-    Args:
-        dataset_split: Dataset split (e.g., "train[:2%]")
-        max_papers: Maximum papers to load
-
-    Returns:
-        Dictionary mapping paper IDs to paper data
+    :param str dataset_split: Dataset split (e.g., "train[:2%]")
+    :param Optional[int] max_papers: Maximum papers to load
+    :return Dict[str, Dict]: Dictionary mapping paper IDs to paper data
     """
     papers = {}
 
@@ -142,7 +143,12 @@ def load_arxiv_dataset_cached(
 def get_arxiv_dataset_cached(
     dataset_split: str, max_papers: Optional[int]
 ) -> Dict[str, Dict]:
-    """Apply joblib caching to dataset loading."""
+    """Apply joblib caching to dataset loading.
+
+    :param str dataset_split: HuggingFace split expression (e.g. ``train[:2%]``).
+    :param Optional[int] max_papers: Optional paper cap for corpus sampling.
+    :return Dict[str, Dict]: Cached dataset mapping paper ID to metadata.
+    """
     cache = _get_memory()
     return cache.cache(load_arxiv_dataset_cached)(dataset_split, max_papers)
 
@@ -172,14 +178,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Initialize embedding graph builder.
 
-        Args:
-            max_papers: Maximum papers in final graph
-            model_name: Sentence transformer model name
-            dataset_split: HuggingFace dataset split
-            corpus_size: Maximum papers to load from corpus (None = all in split)
-            top_k: Number of most similar neighbors per node
-            random_seed: Random seed for reproducibility
-            use_streaming: Whether to stream the HuggingFace dataset instead of loading it
+        :param int max_papers: Maximum papers in final graph
+        :param str model_name: Sentence transformer model name
+        :param str dataset_split: HuggingFace dataset split
+        :param Optional[int] corpus_size: Maximum papers to load from corpus (None = all in split)
+        :param int top_k: Number of most similar neighbors per node
+        :param int random_seed: Random seed for reproducibility
+        :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
+        :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         _check_embedding_deps()
         super().__init__(max_papers, random_seed)
@@ -196,8 +202,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.model_profile = get_embedding_model_profile(model_name)
         self._profile_logged = False
 
-    def _load_model(self):
-        """Lazy load sentence transformer model."""
+    def _load_model(self) -> None:
+        """Lazy load sentence transformer model.
+
+        :return None: Model is initialized in-place on first access.
+        """
         if self.model is None:
             from sentence_transformers import SentenceTransformer
 
@@ -211,8 +220,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 logger.info(self.model_profile.notes)
                 self._profile_logged = True
 
-    def _load_corpus(self):
-        """Load ArXiv corpus if not already loaded."""
+    def _load_corpus(self) -> None:
+        """Load ArXiv corpus if not already loaded.
+
+        :return None: Corpus is populated in-place on first access.
+        """
         if not self.arxiv_corpus:
             logger.info(f"Loading ArXiv corpus (split: {self.dataset_split})...")
             self.arxiv_corpus = get_arxiv_dataset_cached(
@@ -220,15 +232,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             logger.info(f"Corpus loaded: {len(self.arxiv_corpus)} papers")
 
-    def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
 
-        Args:
-            seed_id: Seed paper identifier (ArXiv ID or text query)
-
-        Returns:
-            Dictionary of paper_id -> Paper objects
+        :param str seed_id: Seed paper identifier (ArXiv ID or text query)
+        :param Any kwargs: Strategy-specific options (currently unused).
+        :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         papers: Dict[str, Paper] = {}
         self.embeddings = {}
@@ -324,11 +334,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Select top candidates from an in-memory corpus.
 
-        Args:
-            seed_embedding: Normalized seed embedding vector
-
-        Returns:
-            List of (paper_id, metadata, embedding) tuples sorted by similarity
+        :param np.ndarray seed_embedding: Normalized seed embedding vector
+        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
         if not self.arxiv_corpus:
             return []
@@ -380,11 +387,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Stream dataset and keep top candidates in a bounded heap.
 
-        Args:
-            seed_embedding: Normalized seed embedding vector
-
-        Returns:
-            List of (paper_id, metadata, embedding) tuples sorted by similarity
+        :param np.ndarray seed_embedding: Normalized seed embedding vector
+        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
         max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
         heap: List[Tuple[float, str, Dict, np.ndarray]] = []
@@ -447,11 +451,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Encode a batch of records and push to candidate heap.
 
-        Args:
-            batch: List of metadata dictionaries
-            seed_embedding: Normalized seed embedding vector
-            heap: Min-heap storing top candidates
-            max_candidates: Maximum heap size
+        :param List[Dict] batch: List of metadata dictionaries
+        :param np.ndarray seed_embedding: Normalized seed embedding vector
+        :param List[Tuple[float, str, Dict, np.ndarray]] heap: Min-heap storing top candidates
+        :param int max_candidates: Maximum heap size
         """
         batch_map = {metadata["paper_id"]: metadata for metadata in batch}
         embeddings = self.embedding_cache.get_embeddings(
@@ -480,12 +483,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Normalize dataset record into metadata dictionary.
 
-        Args:
-            paper: Raw dataset record
-            fallback_index: Index used to generate ID if missing
-
-        Returns:
-            Dictionary with normalized fields
+        :param Dict paper: Raw dataset record
+        :param int fallback_index: Index used to generate ID if missing
+        :return Dict: Dictionary with normalized fields
         """
         paper_id = (
             paper.get("id")
@@ -527,8 +527,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Optionally enrich top papers with citation counts from Semantic Scholar.
 
-        Args:
-            papers: Dictionary of collected papers (including seed)
+        :param Dict[str, Paper] papers: Dictionary of collected papers (including seed)
         """
         logger.info("Fetching citation counts from Semantic Scholar (optional)...")
 
@@ -571,18 +570,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Compute multi-factor similarity.
 
-        Combines:
-        - Semantic embedding similarity (50%)
-        - Temporal proximity (20%)
-        - Category overlap (20%)
-        - Author collaboration (10%)
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Combined similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Combined similarity score (0.0 to 1.0)
         """
         # Semantic similarity from embeddings
         if paper1.paper_id in self.embeddings and paper2.paper_id in self.embeddings:
@@ -620,33 +610,23 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Create edges using top-k strategy.
 
-        Each paper connects to its k most similar neighbors.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-            similarity: Computed similarity
-
-        Returns:
-            True if edge should be created
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :param float similarity: Computed similarity
+        :return bool: True if edge should be created
         """
         # For embedding strategy, we'll compute top-k after all similarities
         # For now, return True for all non-zero similarities
         # The build_graph method will filter to top-k
         return similarity > 0.1
 
-    def build_graph(self, seed_id: str, **kwargs) -> Tuple:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
         """
         Build graph with top-k edge selection.
 
-        Overrides base class to implement top-k neighbor selection
-        instead of threshold-based edge creation.
-
-        Args:
-            seed_id: Seed paper identifier
-
-        Returns:
-            Tuple of (NetworkX graph, seed paper ID)
+        :param str seed_id: Seed paper identifier
+        :param Any kwargs: Strategy-specific options (currently unused).
+        :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
         """
         # Use base class to collect papers and create nodes
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)

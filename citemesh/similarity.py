@@ -11,6 +11,10 @@ class AbstractSimilarityIndex:
     """Simple TF-IDF cosine similarity index over paper abstracts."""
 
     def __init__(self, max_features: int = 5000):
+        """Create a simple TF-IDF cosine similarity index.
+
+        :param int max_features: Maximum number of TF-IDF features.
+        """
         self.max_features = max_features
         self._matrix = None
         self._ids: List[str] = []
@@ -47,7 +51,12 @@ class AbstractSimilarityIndex:
         self._id_to_idx = {paper_id: idx for idx, paper_id in enumerate(ids)}
 
     def similarity(self, paper_id_a: str, paper_id_b: str) -> float:
-        """Return cosine similarity between two indexed papers."""
+        """Return cosine similarity between two indexed papers.
+
+        :param str paper_id_a: First paper identifier.
+        :param str paper_id_b: Second paper identifier.
+        :return float: Cosine similarity in [0.0, 1.0].
+        """
         if self._matrix is None:
             return 0.0
 
@@ -60,5 +69,8 @@ class AbstractSimilarityIndex:
 
     @property
     def is_ready(self) -> bool:
-        """Whether the index has enough papers to compute similarities."""
+        """Whether the index has enough papers to compute similarities.
+
+        :return bool: ``True`` when a fitted matrix exists.
+        """
         return self._matrix is not None

@@ -9,7 +9,7 @@ from citemesh.strategies.base import GraphBuilderStrategy
 class TestSimilarityFunctions:
     """Test similarity computation functions."""
 
-    def test_temporal_similarity_same_year(self):
+    def test_temporal_similarity_same_year(self) -> None:
         """Test temporal similarity for papers from same year."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2020)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
@@ -17,7 +17,7 @@ class TestSimilarityFunctions:
         sim = GraphBuilderStrategy.temporal_similarity(paper1, paper2)
         assert sim == 1.0
 
-    def test_temporal_similarity_close_years(self):
+    def test_temporal_similarity_close_years(self) -> None:
         """Test temporal similarity for papers 2 years apart."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2020)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2022)
@@ -26,7 +26,7 @@ class TestSimilarityFunctions:
         # Should be high but not 1.0
         assert 0.5 < sim < 1.0
 
-    def test_temporal_similarity_distant_years(self):
+    def test_temporal_similarity_distant_years(self) -> None:
         """Test temporal similarity for papers >5 years apart."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2010)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
@@ -35,14 +35,14 @@ class TestSimilarityFunctions:
         # Should have strong penalty
         assert sim == 0.1
 
-    def test_temporal_similarity_with_unknown_year(self):
+    def test_temporal_similarity_with_unknown_year(self) -> None:
         """Unknown year should return neutral temporal similarity."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=None)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
         sim = GraphBuilderStrategy.temporal_similarity(paper1, paper2)
         assert sim == 0.5
 
-    def test_citation_similarity_similar_counts(self):
+    def test_citation_similarity_similar_counts(self) -> None:
         """Test citation similarity for papers with similar citation counts."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2020, citation_count=100)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2020, citation_count=105)
@@ -51,7 +51,7 @@ class TestSimilarityFunctions:
         # Should be very high (log scale makes them nearly identical)
         assert sim > 0.9
 
-    def test_citation_similarity_different_magnitudes(self):
+    def test_citation_similarity_different_magnitudes(self) -> None:
         """Test citation similarity for papers with very different citation counts."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2020, citation_count=10)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2020, citation_count=1000)
@@ -60,7 +60,7 @@ class TestSimilarityFunctions:
         # Should be lower due to magnitude difference
         assert 0.1 < sim < 0.7
 
-    def test_citation_similarity_zero_citations(self):
+    def test_citation_similarity_zero_citations(self) -> None:
         """Test citation similarity when one paper has no citations."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2020, citation_count=0)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2020, citation_count=100)
@@ -69,7 +69,7 @@ class TestSimilarityFunctions:
         # Should return default value
         assert sim == 0.3
 
-    def test_bibliographic_coupling_identical_refs(self):
+    def test_bibliographic_coupling_identical_refs(self) -> None:
         """Test bibliographic coupling for papers with identical references."""
         paper1 = Paper(
             paper_id="p1",
@@ -87,7 +87,7 @@ class TestSimilarityFunctions:
         coupling = GraphBuilderStrategy.bibliographic_coupling(paper1, paper2)
         assert coupling == 1.0
 
-    def test_bibliographic_coupling_no_overlap(self):
+    def test_bibliographic_coupling_no_overlap(self) -> None:
         """Test bibliographic coupling for papers with no shared references."""
         paper1 = Paper(
             paper_id="p1",
@@ -105,7 +105,7 @@ class TestSimilarityFunctions:
         coupling = GraphBuilderStrategy.bibliographic_coupling(paper1, paper2)
         assert coupling == 0.0
 
-    def test_exponential_temporal_decay(self):
+    def test_exponential_temporal_decay(self) -> None:
         """Test exponential temporal decay function."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2020)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
@@ -121,7 +121,7 @@ class TestSimilarityFunctions:
         )
         assert abs(decay - 0.368) < 0.01
 
-    def test_exponential_temporal_decay_with_unknown_year(self):
+    def test_exponential_temporal_decay_with_unknown_year(self) -> None:
         """Unknown year should return neutral decay value."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=None)
         paper2 = Paper(paper_id="p2", title="Test 2", year=2020)

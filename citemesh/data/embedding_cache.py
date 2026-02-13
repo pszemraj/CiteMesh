@@ -8,7 +8,7 @@ import hashlib
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -30,6 +30,11 @@ class EmbeddingCache:
         cache_dir: Optional[Path] = None,
         model_name: str = "google/embeddinggemma-300m",
     ):
+        """Create a persistent embedding cache for a model variant.
+
+        :param Optional[Path] cache_dir: Cache directory override. Uses global cache when ``None``.
+        :param str model_name: Model name used to namespace cached embeddings.
+        """
         if cache_dir is None:
             cache_dir = get_cache_dir("embeddings")
         self.cache_dir = Path(cache_dir)
@@ -48,7 +53,7 @@ class EmbeddingCache:
     def get_embeddings(
         self,
         papers: Dict[str, Dict],
-        model,
+        model: Any,
         batch_size: int = 32,
         show_progress: bool = True,
         text_builder: Optional[Callable[[Dict[str, object]], str]] = None,
@@ -56,11 +61,13 @@ class EmbeddingCache:
         """
         Return embeddings for provided papers, computing only the missing ones.
 
-        Args:
-            papers: Mapping of paper_id -> metadata dict containing title/abstract/year.
-            model: SentenceTransformer-compatible model providing encode().
-            batch_size: Batch size for model encoding.
-            show_progress: Whether to display tqdm progress bars.
+        :param Dict[str, Dict] papers: Mapping of paper_id -> metadata dict containing title/abstract/year.
+        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param int batch_size: Batch size for model encoding.
+        :param bool show_progress: Whether to display tqdm progress bars.
+        :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional text builder
+            for each paper metadata record. Defaults to internal helper.
+        :return Dict[str, np.ndarray]: Paper embeddings for requested records.
         """
         if not papers:
             return {}
@@ -137,7 +144,10 @@ class EmbeddingCache:
         return {**cached_embeddings, **new_embeddings}
 
     def get_stats(self) -> Dict[str, Optional[float]]:
-        """Return basic cache statistics."""
+        """Return basic cache statistics.
+
+        :return Dict[str, Optional[float]]: Cache size, embedding dimensions, and year range.
+        """
         total_h5_size = self.h5_path.stat().st_size if self.h5_path.exists() else 0
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -168,6 +178,7 @@ class EmbeddingCache:
     # Internal helpers
 
     def _init_db(self) -> None:
+        """Create and initialize the metadata cache schema when needed."""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 """
@@ -189,11 +200,20 @@ class EmbeddingCache:
 
     @staticmethod
     def _text_hash(text: str) -> str:
+        """Compute deterministic SHA-256 hash for text content.
+
+        :param str text: Normalized paper text.
+        :return str: Hexadecimal SHA-256 digest.
+        """
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _build_text(metadata: Dict) -> str:
-    """Compose text used for embedding computation."""
+    """Compose paper text for embedding computation.
+
+    :param Dict metadata: Paper metadata containing title and abstract.
+    :return str: Concatenated title and abstract string.
+    """
     title = metadata.get("title", "")
     abstract = metadata.get("abstract", "")
     return f"{title}. {abstract}".strip()

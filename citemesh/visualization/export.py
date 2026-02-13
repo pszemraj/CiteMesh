@@ -31,6 +31,14 @@ class GraphExporter:
         theme_name: str = "light",
         layout: Optional[Dict[str, Iterable[float]]] = None,
     ):
+        """Create exporter bound to a graph and seed paper metadata.
+
+        :param nx.Graph graph: Graph to export.
+        :param str seed_id: Seed paper identifier.
+        :param Optional[Dict] metadata: Optional metadata to include in outputs.
+        :param str theme_name: Theme for visual color defaults.
+        :param Optional[Dict[str, Iterable[float]]] layout: Optional precomputed layout.
+        """
         self.graph = graph
         self.seed_id = seed_id
         self.metadata = metadata or {}
@@ -93,10 +101,9 @@ class GraphExporter:
         """
         Create interactive HTML visualization with pyvis (vis.js).
 
-        Args:
-            path: Output HTML path.
-            theme: Optional override for theme.
-            physics: Whether to enable force-directed physics.
+        :param Path path: Output HTML path.
+        :param Optional[str] theme: Optional override for theme.
+        :param bool physics: Whether to enable force-directed physics.
         """
         try:
             from pyvis.network import Network
@@ -173,7 +180,11 @@ class GraphExporter:
         net.save_graph(str(path))
 
     def to_plotly_html(self, path: Path, theme: Optional[str] = None) -> None:
-        """Create Plotly interactive visualization."""
+        """Create Plotly interactive visualization.
+
+        :param Path path: Output HTML path.
+        :param Optional[str] theme: Optional theme override.
+        """
         try:
             from plotly import graph_objects as go
         except ImportError as exc:
@@ -276,11 +287,20 @@ class GraphExporter:
     # Internal helpers
 
     def _get_layout(self) -> Dict[str, Iterable[float]]:
+        """Compute or reuse cached graph layout.
+
+        :return Dict[str, Iterable[float]]: Mapping of node ID to coordinates.
+        """
         if self._layout is None:
             self._layout = compute_layout(self.graph)
         return self._layout
 
     def _node_size(self, node: str) -> float:
+        """Compute cached node size for a node ID.
+
+        :param str node: Graph node identifier.
+        :return float: Cached node size.
+        """
         if self._size_map is None:
             sizes = compute_node_sizes(self.graph)
             self._size_map = {
@@ -289,6 +309,12 @@ class GraphExporter:
         return float(self._size_map.get(node, 300.0))
 
     def _node_color_hex(self, node: str, theme: Theme) -> str:
+        """Convert computed node color to hex for export serializers.
+
+        :param str node: Graph node identifier.
+        :param Theme theme: Theme to use.
+        :return str: Hex color string.
+        """
         cache_key = theme.name
         if cache_key not in self._color_map_cache:
             colors, _, _ = compute_node_colors(self.graph, self.seed_id, theme)
@@ -302,7 +328,12 @@ class GraphExporter:
 
     @staticmethod
     def _serialize_node(node_id: str, attrs: Dict) -> Dict:
-        """Serialize node attributes into JSON/GraphML friendly dict."""
+        """Serialize node attributes into JSON/GraphML friendly dict.
+
+        :param str node_id: Graph node identifier.
+        :param Dict attrs: Raw node attributes.
+        :return Dict: JSON/GraphML-safe node payload.
+        """
         paper: Optional[Paper] = attrs.get("paper")
 
         node_data = {
@@ -330,7 +361,11 @@ class GraphExporter:
 
 
 def _rgb_tuple_to_hex(color: tuple) -> str:
-    """Convert RGB tuple (0-1) to hex string."""
+    """Convert RGB tuple (0-1) to hex string.
+
+    :param tuple color: RGB triple in [0, 1] space.
+    :return str: HTML hex color code.
+    """
     r, g, b = color
     return "#{:02x}{:02x}{:02x}".format(
         int(max(0, min(1, r)) * 255),

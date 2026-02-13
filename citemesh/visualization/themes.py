@@ -25,7 +25,11 @@ class Theme:
     text_color: str
 
     def interpolate(self, norm: float) -> Tuple[float, float, float]:
-        """Linear interpolation between old and new node colors."""
+        """Linear interpolation between old and new node colors.
+
+        :param float norm: Normalized position in [0, 1].
+        :return Tuple[float, float, float]: Interpolated RGB color tuple.
+        """
         r = (
             self.node_color_old[0]
             + (self.node_color_new[0] - self.node_color_old[0]) * norm
@@ -76,11 +80,8 @@ def get_theme(name: str) -> Theme:
     """
     Retrieve a Theme by name, with support for 'auto'.
 
-    Args:
-        name: Theme identifier.
-
-    Returns:
-        Theme instance. Defaults to 'light' when name is unknown.
+    :param str name: Theme identifier.
+    :return Theme: Theme instance. Defaults to 'light' when name is unknown.
     """
     if not name:
         return THEMES["light"]
@@ -92,7 +93,10 @@ def get_theme(name: str) -> Theme:
 
 
 def _detect_terminal_theme() -> Theme:
-    """Detect terminal theme preference from common environment indicators."""
+    """Detect terminal theme preference from common environment indicators.
+
+    :return Theme: Best-effort inferred terminal theme.
+    """
     colorfgbg = os.environ.get("COLORFGBG")
     if colorfgbg:
         parts = colorfgbg.split(";")

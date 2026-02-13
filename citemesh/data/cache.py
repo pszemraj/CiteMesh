@@ -10,7 +10,10 @@ from pathlib import Path
 
 
 def _default_cache_root() -> Path:
-    """Return user-level cache root honoring platform conventions."""
+    """Return user-level cache root honoring platform conventions.
+
+    :return Path: Base cache directory for CiteMesh artifacts.
+    """
     override = os.getenv("CITEMESH_CACHE_DIR")
     if override:
         return Path(override)
@@ -33,12 +36,9 @@ def get_cache_dir(*parts: str, create: bool = True) -> Path:
     """
     Get (and optionally create) a cache directory scoped to CiteMesh.
 
-    Args:
-        *parts: Additional subdirectories to append.
-        create: Whether to create the directory if it does not exist.
-
-    Returns:
-        Path to the requested cache directory.
+    :param str parts: Additional subdirectories to append.
+    :param bool create: Whether to create the directory if it does not exist.
+    :return Path: Path to the requested cache directory.
     """
     path = _default_cache_root()
     if parts:

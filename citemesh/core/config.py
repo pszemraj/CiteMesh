@@ -23,11 +23,8 @@ class TemporalConfig:
         """
         Compute temporal similarity based on year difference.
 
-        Args:
-            year_diff: Absolute difference in publication years
-
-        Returns:
-            Similarity score from 0.0 (very distant) to 1.0 (same year)
+        :param int year_diff: Absolute difference in publication years
+        :return float: Similarity score from 0.0 (very distant) to 1.0 (same year)
         """
         if year_diff > self.max_year_diff_threshold:
             return 0.1  # Strong penalty for distant papers
@@ -90,7 +87,11 @@ class EmbeddingSimilarityConfig:
             )
 
     def temporal_factor(self, year_diff: int) -> float:
-        """Compute temporal proximity factor for embeddings."""
+        """Compute temporal proximity factor for embeddings.
+
+        :param int year_diff: Absolute publication year difference.
+        :return float: Temporal similarity in [0.0, 1.0].
+        """
         return 1.0 / (1.0 + year_diff / self.temporal_scale)
 
 
@@ -111,7 +112,12 @@ class HybridSimilarityConfig:
 
     # Relevance scoring for citations
     def relevance_score(self, citation_count: int, year_diff: int) -> float:
-        """Compute relevance score for filtering citations."""
+        """Compute relevance score for citation-based filtering.
+
+        :param int citation_count: Raw citation count used as primary signal.
+        :param int year_diff: Publication year gap between compared papers.
+        :return float: Relevance score in citation-time tradeoff scale.
+        """
         return citation_count / (1 + year_diff)
 
 
@@ -167,13 +173,10 @@ class VisualizationConfig:
         """
         Compute smooth RGB gradient color based on year.
 
-        Args:
-            year: Paper's publication year
-            min_year: Earliest year in graph
-            max_year: Latest year in graph
-
-        Returns:
-            RGB tuple (normalized 0-1)
+        :param int year: Paper's publication year
+        :param int min_year: Earliest year in graph
+        :param int max_year: Latest year in graph
+        :return Tuple[float, float, float]: RGB tuple (normalized 0-1)
         """
         if max_year == min_year:
             year_norm = 0.5

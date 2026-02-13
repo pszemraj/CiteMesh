@@ -1,6 +1,7 @@
 """Tests for embedding cache hit/miss behavior."""
 
 import tempfile
+from typing import Any
 
 import numpy as np
 
@@ -10,16 +11,23 @@ from citemesh.data.embedding_cache import EmbeddingCache
 class _MockModel:
     """Deterministic embedding model mock."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize deterministic mock model."""
         self.encode_calls = 0
 
-    def encode(self, texts, **kwargs):
+    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
+        """Generate deterministic pseudo-embeddings.
+
+        :param list[str] texts: Input texts for encoding.
+        :param kwargs: Extra arguments ignored by the mock.
+        :return np.ndarray: Deterministic embeddings shaped ``(len(texts), 2)``.
+        """
         self.encode_calls += 1
         np.random.seed(len(texts))
         return np.random.rand(len(texts), 2)
 
 
-def test_embedding_cache_returns_cached_vectors():
+def test_embedding_cache_returns_cached_vectors() -> None:
     """Repeated lookup should avoid re-encoding unchanged records."""
     model = _MockModel()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -36,7 +44,7 @@ def test_embedding_cache_returns_cached_vectors():
     assert first["p1"].shape == second["p1"].shape
 
 
-def test_embedding_cache_recomputes_on_text_change():
+def test_embedding_cache_recomputes_on_text_change() -> None:
     """Cache key changes when text changes."""
     model = _MockModel()
     with tempfile.TemporaryDirectory() as tmpdir:

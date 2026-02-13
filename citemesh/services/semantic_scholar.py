@@ -35,17 +35,8 @@ def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
     """
     Extract an arXiv identifier from an arXiv URL path.
 
-    Supports:
-    - /abs/2508.14040
-    - /pdf/2508.14040.pdf
-    - legacy IDs like /abs/hep-th/9901001
-
-    Args:
-        raw_path: URL path component (for example ``/abs/2508.14040``).
-
-    Returns:
-        Canonical arXiv identifier suffix without prefix (for example
-        ``2508.14040``), or ``None`` when extraction fails.
+    :param str raw_path: URL path component (for example ``/abs/2508.14040``).
+    :return Optional[str]: Canonical arXiv identifier suffix without prefix (for example ``2508.14040``), or ``None`` when extraction fails.
     """
     segments = [segment for segment in raw_path.strip("/").split("/") if segment]
     if not segments:
@@ -71,14 +62,9 @@ def normalize_paper_id(paper_id: str) -> str:
     """
     Normalize paper identifiers (including arXiv/DOI URLs) for S2 API calls.
 
-    Args:
-        paper_id: Raw user-provided identifier (ID or URL).
-
-    Returns:
-        Canonical Semantic Scholar paper identifier string.
-
-    Raises:
-        ValueError: If the identifier is empty after trimming.
+    :param str paper_id: Raw user-provided identifier (ID or URL).
+    :return str: Canonical Semantic Scholar paper identifier string.
+    :raises ValueError: If the identifier is empty after trimming.
     """
     normalized = paper_id.strip()
     if not normalized:
@@ -117,6 +103,11 @@ def normalize_paper_id(paper_id: str) -> str:
 
 
 def _reference_cache_path(paper_id: str) -> Path:
+    """Build cache file path for a normalized paper identifier.
+
+    :param str paper_id: Normalized paper identifier.
+    :return Path: JSON cache path for the paper's reference IDs.
+    """
     digest = hashlib.sha1(paper_id.encode("utf-8")).hexdigest()
     return REFERENCE_CACHE_DIR / f"{digest}.json"
 
@@ -136,8 +127,7 @@ class SemanticScholarClient:
         """
         Initialize the API client.
 
-        Args:
-            timeout: Request timeout in seconds
+        :param float timeout: Request timeout in seconds
         """
         api_key = os.getenv("S2_API_KEY")
 
@@ -160,9 +150,20 @@ class SemanticScholarClient:
 
     @staticmethod
     def _is_rate_limit_error(error: Exception) -> bool:
+        """Detect rate-limit exceptions.
+
+        :param Exception error: Exception from request/client layer.
+        :return bool: ``True`` when the error indicates HTTP 429.
+        """
         return "429" in str(error)
 
     def _retry_wait_time(self, error: Optional[Exception], attempt: int) -> float:
+        """Compute adaptive retry delay for transient failures.
+
+        :param Optional[Exception] error: Captured exception, if any.
+        :param int attempt: Zero-based retry attempt index.
+        :return float: Delay in seconds before retry.
+        """
         if error:
             retry_after = self._get_retry_after(error)
             if retry_after is not None:
@@ -173,7 +174,11 @@ class SemanticScholarClient:
 
     @staticmethod
     def _get_retry_after(error: Exception) -> Optional[float]:
-        """Extract Retry-After from library or HTTP errors."""
+        """Extract Retry-After from library or HTTP errors.
+
+        :param Exception error: Exception instance captured from request.
+        :return Optional[float]: Parsed Retry-After value in seconds, if available.
+        """
         if isinstance(error, requests.RequestException) and error.response is not None:
             header = error.response.headers.get("Retry-After")
             if header:
@@ -196,7 +201,11 @@ class SemanticScholarClient:
 
     @staticmethod
     def _safe_retry_after(response: requests.Response) -> float:
-        """Extract Retry-After from direct HTTP responses safely."""
+        """Extract Retry-After from direct HTTP responses safely.
+
+        :param requests.Response response: HTTP response to inspect.
+        :return float: Retry delay in seconds (header value or default delay).
+        """
         header = response.headers.get("Retry-After")
         if header:
             try:
@@ -212,11 +221,8 @@ class SemanticScholarClient:
         """
         Convert Semantic Scholar API response to Paper model.
 
-        Args:
-            api_paper: Raw paper object from S2 API
-
-        Returns:
-            Paper object or None if conversion fails
+        :param Any api_paper: Raw paper object from S2 API
+        :return Optional[Paper]: Paper object or None if conversion fails
         """
         try:
             if not api_paper or not hasattr(api_paper, "paperId"):
@@ -257,7 +263,11 @@ class SemanticScholarClient:
             return None
 
     def _convert_recommendation(self, rec: Dict[str, Any]) -> Optional[Paper]:
-        """Convert recommendation/search record dict to Paper."""
+        """Convert recommendation/search record dict to a Paper model.
+
+        :param Dict[str, Any] rec: Record returned by recommendation/search APIs.
+        :return Optional[Paper]: Parsed Paper model or ``None`` on malformed payload.
+        """
         try:
             paper_id = rec.get("paperId")
             if not paper_id:
@@ -297,7 +307,12 @@ class SemanticScholarClient:
     def _request_json(
         self, url: str, params: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        """Request JSON payload from direct Semantic Scholar REST endpoints."""
+        """Request JSON payload from direct Semantic Scholar REST endpoints.
+
+        :param str url: Endpoint URL.
+        :param Dict[str, Any] params: Query parameters.
+        :return Optional[Dict[str, Any]]: Parsed JSON payload or ``None`` on failure.
+        """
         for attempt in range(API_CONFIG.max_retries):
             try:
                 self._rate_limit()
@@ -346,12 +361,9 @@ class SemanticScholarClient:
         """
         Fetch a paper by ID with retry logic.
 
-        Args:
-            paper_id: Paper identifier (DOI, arXiv ID, or S2 ID)
-            fetch_references: Whether to fetch reference list (slower)
-
-        Returns:
-            Paper object or None if not found
+        :param str paper_id: Paper identifier (DOI, arXiv ID, or S2 ID)
+        :param bool fetch_references: Whether to fetch reference list (slower)
+        :return Optional[Paper]: Paper object or None if not found
         """
         if not paper_id or not isinstance(paper_id, str):
             raise ValueError(f"Invalid paper ID: {paper_id}")
@@ -416,9 +428,9 @@ class SemanticScholarClient:
         """
         Fetch papers that cite the given paper.
 
-        Args:
-            paper_id: Paper identifier
-            limit: Maximum number of citations to fetch
+        :param str paper_id: Paper identifier
+        :param int limit: Maximum number of citations to fetch
+        :return List[Paper]: Citation Papers (may be empty).
         """
         papers: List[Paper] = []
         normalized_paper_id = normalize_paper_id(paper_id)
@@ -474,12 +486,9 @@ class SemanticScholarClient:
         """
         Fetch papers referenced by the given paper.
 
-        Args:
-            paper_id: Paper identifier
-            limit: Maximum number of references to fetch
-
-        Returns:
-            List of Paper objects (may be shorter than limit)
+        :param str paper_id: Paper identifier
+        :param int limit: Maximum number of references to fetch
+        :return List[Paper]: List of Paper objects (may be shorter than limit)
         """
         papers: List[Paper] = []
         normalized_paper_id = normalize_paper_id(paper_id)
@@ -538,11 +547,8 @@ class SemanticScholarClient:
         """
         Fetch only the reference IDs for a paper (faster than full references).
 
-        Args:
-            paper_id: Paper identifier
-
-        Returns:
-            List of referenced paper IDs
+        :param str paper_id: Paper identifier
+        :return List[str]: List of referenced paper IDs
         """
         normalized_paper_id = normalize_paper_id(paper_id)
         cache_path = _reference_cache_path(normalized_paper_id)
@@ -642,10 +648,10 @@ class SemanticScholarClient:
         """
         Get semantically related papers using S2 recommendations.
 
-        Args:
-            paper_id: S2 paper ID
-            limit: Maximum recommendations
-            fields: API fields to return
+        :param str paper_id: S2 paper ID
+        :param int limit: Maximum recommendations
+        :param Optional[List[str]] fields: API fields to return
+        :return List[Paper]: Ranked recommendation papers.
         """
         if fields is None:
             fields = [
@@ -676,7 +682,13 @@ class SemanticScholarClient:
     def search_papers(
         self, query: str, limit: int = 10, fields: Optional[List[str]] = None
     ) -> List[Paper]:
-        """Search papers by title or keyword."""
+        """Search papers by title or keyword.
+
+        :param str query: Search query string.
+        :param int limit: Maximum number of results.
+        :param Optional[List[str]] fields: Optional fields list for API payload.
+        :return List[Paper]: Search results.
+        """
         if fields is None:
             fields = [
                 "paperId",
@@ -708,7 +720,10 @@ _client_lock = threading.Lock()
 
 
 def get_client() -> SemanticScholarClient:
-    """Get or create the global API client instance."""
+    """Get or create the shared Semantic Scholar API client instance.
+
+    :return SemanticScholarClient: Process-wide singleton client.
+    """
     global _client_instance
     if _client_instance is None:
         with _client_lock:

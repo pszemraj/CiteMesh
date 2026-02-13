@@ -15,9 +15,8 @@ class Author:
     """
     Represents a paper author.
 
-    Attributes:
-        name: Full name of the author
-        author_id: Optional Semantic Scholar author ID
+    :ivar name: Full name of the author
+    :ivar author_id: Optional Semantic Scholar author ID
     """
 
     name: str
@@ -25,7 +24,10 @@ class Author:
 
     @property
     def surname(self) -> str:
-        """Extract surname from full name."""
+        """Extract surname from full name.
+
+        :return str: Surname extracted from ``name`` (or ``Unknown`` if missing).
+        """
         if not self.name:
             return "Unknown"
         parts = self.name.strip().split()
@@ -37,19 +39,15 @@ class Paper:
     """
     Validated paper model with business logic.
 
-    This replaces raw dictionary manipulation with a typed structure
-    that validates data and provides convenient access methods.
-
-    Attributes:
-        paper_id: Unique identifier (S2 paperId, DOI, or arXiv ID)
-        title: Paper title
-        year: Publication year (validated to be reasonable)
-        authors: List of authors
-        citation_count: Number of times cited
-        abstract: Paper abstract text
-        categories: List of subject categories (e.g., ArXiv categories)
-        references: List of paper IDs this paper references
-        is_seed: Whether this is the query paper
+    :ivar paper_id: Unique identifier (S2 paperId, DOI, or arXiv ID)
+    :ivar title: Paper title
+    :ivar year: Publication year (validated to be reasonable)
+    :ivar authors: List of authors
+    :ivar citation_count: Number of times cited
+    :ivar abstract: Paper abstract text
+    :ivar categories: List of subject categories (e.g., ArXiv categories)
+    :ivar references: List of paper IDs this paper references
+    :ivar is_seed: Whether this is the query paper
     """
 
     paper_id: str
@@ -84,40 +82,54 @@ class Paper:
 
     @property
     def first_author_surname(self) -> str:
-        """Get first author's surname safely."""
+        """Get first author's surname safely.
+
+        :return str: First listed author surname or ``Unknown`` when absent.
+        """
         if self.authors:
             return self.authors[0].surname
         return "Unknown"
 
     @property
     def age(self) -> Optional[int]:
-        """Paper age in years from current date, or None when year is unknown."""
+        """Return paper age in years relative to current year.
+
+        :return Optional[int]: Paper age in years or ``None`` when publication year is missing.
+        """
         if self.year is None:
             return None
         return datetime.now().year - self.year
 
     @property
     def author_names(self) -> Set[str]:
-        """Get set of all author names for comparison."""
+        """Get set of all author names for comparison.
+
+        :return Set[str]: Unique author names for the paper.
+        """
         return {author.name for author in self.authors}
 
     @property
     def label(self) -> str:
-        """Generate display label: 'FirstAuthor, Year'."""
+        """Generate display label used in graph annotations.
+
+        :return str: Compact label formatted as ``"<author>, <year>"``.
+        """
         year = self.year if self.year is not None else "n.d."
         return f"{self.first_author_surname}, {year}"
 
     def shares_authors_with(self, other: "Paper") -> bool:
-        """Check if this paper shares any authors with another paper."""
+        """Check if this paper shares any authors with another paper.
+
+        :param Paper other: Paper to compare authors against.
+        :return bool: ``True`` when the author sets intersect.
+        """
         return bool(self.author_names & other.author_names)
 
     def category_overlap(self, other: "Paper") -> float:
         """
         Compute category overlap coefficient.
 
-        Returns:
-            Jaccard similarity: |intersection| / |union|
-            Returns 0.0 if either paper has no categories.
+        :return float: Jaccard similarity: |intersection| / |union| Returns 0.0 if either paper has no categories.
         """
         if not self.categories or not other.categories:
             return 0.0
@@ -133,12 +145,7 @@ class Paper:
         """
         Compute bibliographic coupling strength.
 
-        Follows Kessler (1963) formula:
-            coupling = |shared_refs| / sqrt(|refs1| * |refs2|)
-
-        Returns:
-            Bibliographic coupling coefficient (0.0 to 1.0)
-            Returns 0.0 if either paper has no references.
+        :return float: Bibliographic coupling coefficient (0.0 to 1.0) Returns 0.0 if either paper has no references.
         """
         if not self.references or not other.references:
             return 0.0

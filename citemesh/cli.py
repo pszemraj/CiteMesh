@@ -66,16 +66,10 @@ def resolve_output_paths(
     """
     Resolve final output paths for selected export formats.
 
-    Handles explicit user paths robustly, including names with dots that are not
-    recognized export extensions (e.g. ``paper-2508.14040-example``).
-
-    Args:
-        base_output_path: Path provided by the user or auto-generated filename.
-        selected_formats: Export formats selected for this run.
-        explicit_output: True when the user provided ``--output``.
-
-    Returns:
-        Mapping of export format -> resolved output path.
+    :param Path base_output_path: Path provided by the user or auto-generated filename.
+    :param List[str] selected_formats: Export formats selected for this run.
+    :param bool explicit_output: True when the user provided ``--output``.
+    :return Dict[str, Path]: Mapping of export format -> resolved output path.
     """
     base_str = str(base_output_path)
     matched_suffix = next(
@@ -114,11 +108,8 @@ def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
     """
     Best-effort canonical paper ID for output metadata display.
 
-    Args:
-        paper_id: Raw CLI paper identifier.
-
-    Returns:
-        Canonicalized identifier when possible; otherwise original input.
+    :param str paper_id: Raw CLI paper identifier.
+    :return str: Canonicalized identifier when possible; otherwise original input.
     """
     try:
         return normalize_paper_id(paper_id)
@@ -130,11 +121,8 @@ def build_citation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
     """
     Build graph using citation strategy.
 
-    Args:
-        args: Parsed CLI arguments.
-
-    Returns:
-        Tuple of graph and normalized seed paper ID.
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
     """
     builder = CitationGraphBuilder(
         max_papers=args.max_papers,
@@ -153,11 +141,8 @@ def build_recommendation_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]
     """
     Build graph using recommendation strategy.
 
-    Args:
-        args: Parsed CLI arguments.
-
-    Returns:
-        Tuple of graph and normalized seed paper ID.
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
     """
     builder = RecommendationGraphBuilder(
         max_papers=args.max_papers,
@@ -174,11 +159,8 @@ def build_embedding_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
     """
     Build graph using embedding strategy.
 
-    Args:
-        args: Parsed CLI arguments.
-
-    Returns:
-        Tuple of graph and normalized seed paper ID.
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
     """
     builder = EmbeddingGraphBuilder(
         max_papers=args.max_papers,
@@ -198,11 +180,8 @@ def build_hybrid_graph(args: argparse.Namespace) -> tuple[nx.Graph, str]:
     """
     Build graph using hybrid strategy.
 
-    Args:
-        args: Parsed CLI arguments.
-
-    Returns:
-        Tuple of graph and normalized seed paper ID.
+    :param argparse.Namespace args: Parsed CLI arguments.
+    :return tuple[nx.Graph, str]: Tuple of graph and normalized seed paper ID.
     """
     builder = HybridGraphBuilder(
         max_papers=args.max_papers,

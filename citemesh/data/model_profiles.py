@@ -15,10 +15,21 @@ DocumentFormatter = Callable[[Dict[str, str]], str]
 
 
 def _identity_query_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
+    """Return input text unchanged for query formatting.
+
+    :param str text: Original query text.
+    :param Optional[Dict[str, str]] _: Unused metadata context.
+    :return str: Unmodified query text.
+    """
     return text
 
 
 def _identity_document_formatter(metadata: Dict[str, str]) -> str:
+    """Compose a minimal document string from title and abstract.
+
+    :param Dict[str, str] metadata: Paper metadata payload.
+    :return str: Best-effort ``\"title. abstract\"`` representation.
+    """
     title = metadata.get("title", "").strip()
     abstract = metadata.get("abstract", "").strip()
     if title and abstract:
@@ -39,18 +50,40 @@ class EmbeddingModelProfile:
     notes: Optional[str] = None
 
     def format_query(self, text: str, metadata: Optional[Dict[str, str]] = None) -> str:
+        """Format a query using the profile-specific rule.
+
+        :param str text: Raw query string.
+        :param Optional[Dict[str, str]] metadata: Optional metadata context.
+        :return str: Profile-formatted query string.
+        """
         return self.query_formatter(text, metadata)
 
     def format_document(self, metadata: Dict[str, str]) -> str:
+        """Format paper metadata into embedding model input text.
+
+        :param Dict[str, str] metadata: Paper metadata payload.
+        :return str: Profile-formatted document text.
+        """
         return self.document_formatter(metadata)
 
 
 def _gemma_query_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
+    """Format a query with Gemma-style task prompt.
+
+    :param str text: Raw query text.
+    :param Optional[Dict[str, str]] _: Unused metadata context.
+    :return str: Prompt-prefixed query string.
+    """
     text = text.strip()
     return f"task: search result | query: {text}"
 
 
 def _gemma_document_formatter(metadata: Dict[str, str]) -> str:
+    """Format paper metadata with explicit fields for Gemma models.
+
+    :param Dict[str, str] metadata: Paper metadata payload.
+    :return str: Gemma-friendly text representation.
+    """
     title = metadata.get("title") or "none"
     abstract = metadata.get("abstract") or ""
     title = title.strip() or "none"
@@ -72,7 +105,11 @@ EMBEDDING_MODEL_PROFILES = (
 
 
 def get_embedding_model_profile(model_name: str) -> EmbeddingModelProfile:
-    """Return the best matching profile for a model name."""
+    """Return the best matching profile for a model name.
+
+    :param str model_name: Model identifier.
+    :return EmbeddingModelProfile: Selected profile, falling back to default.
+    """
     normalized = model_name.lower()
     for profile in EMBEDDING_MODEL_PROFILES:
         if normalized.startswith(profile.name):
