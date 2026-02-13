@@ -16,6 +16,12 @@ You can also discover papers by keyword/title with:
 citemesh search "<query>" [--limit N]
 ```
 
+To clear the entire CiteMesh cache root from the CLI:
+
+```bash
+citemesh cache clear --yes
+```
+
 Accepted identifiers:
 
 - DOI (`10.1038/nature14539`)
@@ -159,6 +165,7 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 - **Slow embedding runs on first attempt**: the initial execution downloads HuggingFace data and computes embeddings. Subsequent runs reuse cached corpora and vectors.
 - **Missing exports**: double-check `--export` values; unknown strings are rejected by argparse.
 - **API limits**: set `S2_API_KEY` for higher Semantic Scholar rate limits, especially for recommendation and search heavy workflows.
+- **Reset local caches**: use `citemesh cache clear --yes` to remove the full CiteMesh cache root in one command.
 
 ```bash
 export S2_API_KEY="your-key-here"

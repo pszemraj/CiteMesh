@@ -67,6 +67,14 @@ The HuggingFace library also maintains its own cache (usually `~/.cache/huggingf
 
 ## Cleaning the Cache
 
+For a full cache reset via CLI:
+
+```bash
+citemesh cache clear --yes
+```
+
+Omit `--yes` to get an interactive confirmation prompt.
+
 To remove embeddings for a given model, delete the corresponding `.db` and `.h5` files inside `embeddings/`. You can safely regenerate them on the next run. For a full reset on Linux/macOS:
 
 ```bash

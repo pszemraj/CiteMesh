@@ -9,6 +9,7 @@ providing a single interface to all graph building strategies.
 import argparse
 import logging
 import math
+import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -20,6 +21,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+from citemesh.data import get_cache_dir
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
@@ -129,7 +131,15 @@ KNOWN_EXPORT_SUFFIXES: List[str] = sorted(
 
 
 class _StrategyBuilderProtocol(Protocol):
-    def build_graph(self, paper_id: str) -> tuple[nx.Graph, str]: ...
+    """Protocol describing strategy builder objects used by CLI dispatch."""
+
+    def build_graph(self, paper_id: str) -> tuple[nx.Graph, str]:
+        """Build a graph for a paper identifier.
+
+        :param str paper_id: Raw or normalized seed paper identifier.
+        :return tuple[nx.Graph, str]: Built graph and normalized seed paper ID.
+        """
+        ...
 
 
 StrategyFactory = Callable[[argparse.Namespace], _StrategyBuilderProtocol]
@@ -265,6 +275,66 @@ def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
         return normalize_paper_id(paper_id)
     except ValueError:
         return paper_id
+
+
+def _confirmed_cache_clear(cache_root: Path, assume_yes: bool) -> bool:
+    """Return whether cache directory deletion is confirmed.
+
+    :param Path cache_root: Cache root directory targeted for deletion.
+    :param bool assume_yes: Skip interactive prompt when ``True``.
+    :return bool: ``True`` if cache deletion should proceed.
+    """
+    if assume_yes:
+        return True
+
+    if not sys.stdin.isatty():
+        logger.error(
+            "Refusing to clear cache in non-interactive mode without --yes. "
+            "Re-run with: citemesh cache clear --yes"
+        )
+        return False
+
+    prompt = f"Delete CiteMesh cache directory '{cache_root}'? [y/N]: "
+    try:
+        response = input(prompt).strip().lower()
+    except EOFError:
+        logger.error("No confirmation input received; cache clear aborted.")
+        return False
+    return response in {"y", "yes"}
+
+
+def _clear_cache_directory(*, assume_yes: bool) -> int:
+    """Clear the entire CiteMesh cache root.
+
+    :param bool assume_yes: Whether to bypass interactive confirmation.
+    :return int: Process exit code (``0`` success, ``1`` failure/cancelled).
+    """
+    raw_cache_root = get_cache_dir(create=False)
+    cache_root = raw_cache_root.expanduser().resolve()
+
+    if len(cache_root.parts) <= 1:
+        logger.error("Refusing to clear unsafe cache path: %s", cache_root)
+        return 1
+    if cache_root == Path.home().expanduser().resolve():
+        logger.error("Refusing to clear home directory path: %s", cache_root)
+        return 1
+
+    if not cache_root.exists():
+        logger.info("Cache directory does not exist: %s", cache_root)
+        return 0
+
+    if not _confirmed_cache_clear(cache_root, assume_yes):
+        logger.info("Cache clear aborted.")
+        return 1
+
+    try:
+        shutil.rmtree(cache_root)
+    except OSError as exc:
+        logger.error("Failed to clear cache directory %s: %s", cache_root, exc)
+        return 1
+
+    logger.info("✓ Cleared cache directory: %s", cache_root)
+    return 0
 
 
 def main() -> None:
@@ -497,6 +567,19 @@ Examples:
         default=10,
         help="Maximum results (default: 10)",
     )
+    cache_parser = subparsers.add_parser("cache", help="Manage local CiteMesh caches")
+    cache_subparsers = cache_parser.add_subparsers(
+        dest="cache_command", help="Cache operations"
+    )
+    cache_clear_parser = cache_subparsers.add_parser(
+        "clear", help="Delete the entire CiteMesh cache directory"
+    )
+    cache_clear_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Skip confirmation prompt and clear cache immediately",
+    )
 
     args = parser.parse_args()
 
@@ -647,6 +730,14 @@ Examples:
         except Exception as e:
             logger.error(f"Search failed: {e}")
             sys.exit(1)
+    elif args.command == "cache":
+        if args.cache_command != "clear":
+            cache_parser.print_help()
+            sys.exit(1)
+
+        exit_code = _clear_cache_directory(assume_yes=bool(args.yes))
+        if exit_code != 0:
+            sys.exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -121,6 +121,32 @@ class TestCLIBasics:
         assert "search" in result.stdout.lower()
         assert "--limit" in result.stdout
 
+    def test_cache_help_works(self) -> None:
+        """Test cache subcommand help."""
+        result = run_cli_command(["cache", "--help"])
+        assert result.returncode == 0
+        assert "clear" in result.stdout
+
+    def test_cache_clear_removes_configured_cache_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Cache clear should delete configured cache root when --yes is provided.
+
+        :param Path tmp_path: Temporary directory fixture.
+        :param pytest.MonkeyPatch monkeypatch: Fixture used to set env vars.
+        :return None: Asserts that cache root is removed.
+        """
+        cache_root = tmp_path / "citemesh-cache-root"
+        (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
+        (cache_root / "embeddings" / "payload.txt").write_text("cache bytes")
+        monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
+
+        result = run_cli_command(["cache", "clear", "--yes"])
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        assert not cache_root.exists()
+
     def test_seed_argument_exists(self) -> None:
         """Test --seed argument is exposed (caught bug: was implemented but not exposed)."""
         result = run_cli_command(["build", "--help"])
@@ -165,7 +191,12 @@ class TestCLIBasics:
     def test_cli_rejects_invalid_numeric_inputs(
         self, args: list[str], expected_error: str
     ) -> None:
-        """Argparse validators should reject out-of-range numeric values."""
+        """Argparse validators should reject out-of-range numeric values.
+
+        :param list[str] args: CLI argument list to validate.
+        :param str expected_error: Expected argparse error snippet.
+        :return None: Asserts non-zero status and expected message.
+        """
         result = run_cli_command(args)
         assert result.returncode != 0
         assert expected_error in result.stderr
