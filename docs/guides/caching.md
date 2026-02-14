@@ -65,7 +65,7 @@ Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`)
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
 
-When hydration metadata matches the requested split/corpus cap and a queryable embedding matrix exists, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
+When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 
 ## Semantic Scholar Reference Cache
 

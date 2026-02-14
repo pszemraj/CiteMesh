@@ -277,6 +277,82 @@ def test_embedding_cache_hydration_requires_h5_payload() -> None:
         )
 
 
+def test_embedding_cache_hydration_requires_metadata_row_integrity() -> None:
+    """Hydration should be false when embedding rows have no matching metadata rows."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-metadata-rows")
+        cache.get_embeddings(
+            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            _MockModel(),
+            show_progress=False,
+        )
+        cache.mark_hydrated(
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+            dataset_split="train",
+            corpus_size=256,
+            complete=True,
+        )
+        assert cache.is_hydrated(
+            dataset_split="train",
+            corpus_size=256,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+
+        with sqlite3.connect(cache.db_path) as conn:
+            conn.execute("DELETE FROM papers")
+            conn.commit()
+
+        assert not cache.is_hydrated(
+            dataset_split="train",
+            corpus_size=256,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+
+
+def test_embedding_cache_hydration_requires_dataset_source_metadata() -> None:
+    """Hydration should be false when completion exists but dataset source is missing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-source-required")
+        cache.get_embeddings(
+            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            _MockModel(),
+            show_progress=False,
+        )
+        cache.mark_hydrated(
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+            dataset_split="train",
+            corpus_size=128,
+            complete=True,
+        )
+        assert cache.is_hydrated(
+            dataset_split="train",
+            corpus_size=128,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+
+        with sqlite3.connect(cache.db_path) as conn:
+            conn.execute(
+                "UPDATE cache_metadata SET value = '' WHERE key = ?",
+                (HYDRATION_DATASET_SOURCE_KEY,),
+            )
+            conn.commit()
+
+        assert not cache.is_hydrated(dataset_split="train", corpus_size=128)
+
+
+def test_embedding_cache_mark_hydrated_rejects_empty_source_when_complete() -> None:
+    """Complete hydration markers should reject empty dataset source tokens."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-empty-source")
+        with pytest.raises(ValueError, match="dataset_source must be non-empty"):
+            cache.mark_hydrated(
+                dataset_source="  ",
+                dataset_split="train",
+                corpus_size=16,
+                complete=True,
+            )
+
+
 def test_embedding_cache_recovery_clears_hydration_metadata() -> None:
     """Invalid HDF5 layout should reset all hydration markers."""
     with tempfile.TemporaryDirectory() as tmpdir:

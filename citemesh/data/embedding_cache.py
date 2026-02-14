@@ -601,11 +601,6 @@ class EmbeddingCache:
         with sqlite3.connect(self.db_path) as conn:
             metadata = self._load_cache_metadata(conn)
 
-        if expected_source is not None:
-            cached_source = metadata.get(HYDRATION_DATASET_SOURCE_KEY)
-            if cached_source != expected_source:
-                return False
-
         metadata_matches = (
             metadata.get(HYDRATION_COMPLETE_KEY, "0") == "1"
             and metadata.get(HYDRATION_SPLIT_KEY) == expected_split
@@ -614,22 +609,34 @@ class EmbeddingCache:
         if not metadata_matches:
             return False
 
+        cached_source = (metadata.get(HYDRATION_DATASET_SOURCE_KEY) or "").strip()
+        if not cached_source:
+            return False
+
+        if expected_source is not None and cached_source != expected_source:
+            return False
+
         return self._has_queryable_hydrated_payload()
 
     def _has_queryable_hydrated_payload(self) -> bool:
         """Return whether hydrated HDF5 payload exists and can be queried safely.
 
-        :return bool: ``True`` when cache has a readable, non-empty embedding matrix.
+        :return bool: ``True`` when cache has readable embedding + metadata rows.
         """
-        if not self.h5_path.exists():
+        if not self.h5_path.exists() or not self.db_path.exists():
             return False
 
         try:
-            with self._cache_lock(), h5py.File(self.h5_path, "r") as h5:
+            with (
+                self._cache_lock(),
+                sqlite3.connect(self.db_path) as conn,
+                h5py.File(self.h5_path, "r") as h5,
+            ):
                 embeddings_dataset = self._get_embeddings_dataset(h5)
                 if embeddings_dataset is None:
                     return False
-                if int(embeddings_dataset.shape[0]) < 1:
+                row_count = int(embeddings_dataset.shape[0])
+                if row_count < 1:
                     return False
 
                 if (
@@ -637,7 +644,27 @@ class EmbeddingCache:
                     and CALIBRATION_RANGES_DATASET_NAME not in h5
                 ):
                     return False
-        except (OSError, ValueError):
+
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM papers")
+                total_rows = int(cursor.fetchone()[0])
+                if total_rows != row_count:
+                    return False
+
+                cursor.execute(
+                    """
+                    SELECT COUNT(*), COUNT(DISTINCT row_idx)
+                    FROM papers
+                    WHERE row_idx IS NOT NULL
+                      AND row_idx >= 0
+                      AND row_idx < ?
+                    """,
+                    (row_count,),
+                )
+                valid_rows, distinct_rows = cursor.fetchone()
+                if int(valid_rows) != row_count or int(distinct_rows) != row_count:
+                    return False
+        except (OSError, ValueError, sqlite3.DatabaseError):
             return False
 
         return True
@@ -665,8 +692,15 @@ class EmbeddingCache:
         :param bool complete: Whether hydration completed successfully.
         :return None: Mutates SQLite metadata in-place.
         """
+        normalized_source = str(dataset_source).strip()
+        if complete and not normalized_source:
+            raise ValueError(
+                "dataset_source must be non-empty when complete=True for hydration."
+            )
         with sqlite3.connect(self.db_path) as conn:
-            self._set_cache_metadata(conn, HYDRATION_DATASET_SOURCE_KEY, dataset_source)
+            self._set_cache_metadata(
+                conn, HYDRATION_DATASET_SOURCE_KEY, normalized_source
+            )
             self._set_cache_metadata(conn, HYDRATION_SPLIT_KEY, str(dataset_split))
             self._set_cache_metadata(
                 conn,
