@@ -73,10 +73,13 @@ Lock acquisition timeout defaults to `60` seconds and can be overridden with
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
 
 For Hugging Face repo IDs, hydration resolves and stores a commit-SHA fingerprint.
-If the active fingerprint cannot be resolved while a cached fingerprint exists, CiteMesh
-reuses the cached namespace with a warning to avoid unnecessary failures in offline
-or rate-limited environments. If a stored fingerprint differs from a successfully
-resolved active fingerprint, CiteMesh clears and rebuilds that namespace before reuse.
+CiteMesh first attempts online resolution, then attempts local snapshot-SHA resolution
+from existing Hugging Face cache artifacts for offline/rate-limited runs.
+If strong SHA resolution still fails, CiteMesh uses deterministic fallback identity
+tokens (`...::offline`) for initialization and only reuses existing payload when the
+cached fingerprint is compatible with the requested model identity.
+If compatibility checks fail (for example unresolved revision mismatch), CiteMesh clears
+and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 

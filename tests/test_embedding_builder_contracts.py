@@ -513,7 +513,9 @@ def test_embedding_cache_reuses_cached_fingerprint_when_lookup_fails(
         max_papers=1, model_name="org/offline-test", client=MagicMock()
     )
     builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value="cached-fp")
+    builder.embedding_cache.get_model_fingerprint = MagicMock(
+        return_value="hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
+    )
     builder.embedding_cache.clear = MagicMock()
     builder.embedding_cache.set_model_fingerprint = MagicMock()
     builder._resolve_model_fingerprint = MagicMock(
@@ -523,12 +525,53 @@ def test_embedding_cache_reuses_cached_fingerprint_when_lookup_fails(
     with caplog.at_level(logging.WARNING):
         builder._ensure_cache_model_fingerprint()
 
-    assert builder._resolved_model_fingerprint == "cached-fp"
+    assert (
+        builder._resolved_model_fingerprint
+        == "hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
+    )
     assert builder.embedding_cache.clear.call_count == 0
     builder.embedding_cache.set_model_fingerprint.assert_not_called()
     assert any(
-        "Reusing cached fingerprint cached-fp without identity verification."
-        in record.getMessage()
+        "Reusing compatible cached fingerprint" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_embedding_cache_clears_stale_cached_fingerprint_when_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Offline fallback should clear payload when cached fingerprint is incompatible."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/offline-test",
+        model_revision="refs/pr/12",
+        client=MagicMock(),
+    )
+    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
+    builder.embedding_cache.get_model_fingerprint = MagicMock(
+        return_value="hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
+    )
+    builder.embedding_cache.clear = MagicMock()
+    builder.embedding_cache.set_model_fingerprint = MagicMock()
+    builder._resolve_model_fingerprint = MagicMock(
+        side_effect=RuntimeError("network unavailable")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_model_fingerprint()
+
+    assert (
+        builder._resolved_model_fingerprint
+        == "hf::org/offline-test::refs/pr/12::offline"
+    )
+    builder.embedding_cache.clear.assert_called_once()
+    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
+        "hf::org/offline-test::refs/pr/12::offline"
+    )
+    assert any(
+        "is incompatible with requested identity" in record.getMessage()
         for record in caplog.records
     )
 
@@ -565,6 +608,40 @@ def test_embedding_cache_reuses_cached_payload_with_fallback_fingerprint_when_lo
     assert any(
         "Reusing cached payload with fallback identity" in record.getMessage()
         for record in caplog.records
+    )
+
+
+def test_embedding_cache_initializes_offline_without_payload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No-payload namespaces should initialize fingerprint metadata in offline mode."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/offline-init",
+        model_revision="refs/pr/34",
+        client=MagicMock(),
+    )
+    builder.embedding_cache.has_cached_payload = MagicMock(return_value=False)
+    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value=None)
+    builder.embedding_cache.set_model_fingerprint = MagicMock()
+    builder._resolve_model_fingerprint = MagicMock(
+        side_effect=RuntimeError("network unavailable")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_model_fingerprint()
+
+    assert (
+        builder._resolved_model_fingerprint
+        == "hf::org/offline-init::refs/pr/34::offline"
+    )
+    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
+        "hf::org/offline-init::refs/pr/34::offline"
+    )
+    assert any(
+        "offline initialization" in record.getMessage() for record in caplog.records
     )
 
 
@@ -615,6 +692,40 @@ def test_embedding_fingerprint_resolution_fails_closed_for_hf_repo(
 
     with pytest.raises(RuntimeError, match="Could not resolve Hugging Face commit SHA"):
         builder._resolve_model_fingerprint()
+
+
+def test_embedding_fingerprint_resolution_uses_local_snapshot_sha_when_offline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF fingerprint resolution should fall back to local snapshot SHA without API."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    class _FailingHfApi:
+        def model_info(self, repo_id: str, revision: str) -> object:
+            del repo_id, revision
+            raise RuntimeError("network unavailable")
+
+    def _snapshot_download(repo_id: str, revision: str, local_files_only: bool) -> str:
+        del repo_id, revision
+        assert local_files_only is True
+        return "/tmp/models--org--test-model/snapshots/0123456789abcdef0123456789abcdef01234567"
+
+    fake_hf_module = types.ModuleType("huggingface_hub")
+    fake_hf_module.HfApi = _FailingHfApi
+    fake_hf_module.snapshot_download = _snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/test-model",
+        model_revision="refs/pr/12",
+        client=MagicMock(),
+    )
+
+    assert (
+        builder._resolve_model_fingerprint()
+        == "hf::org/test-model::0123456789abcdef0123456789abcdef01234567"
+    )
 
 
 def test_metadata_and_streaming_loader_contracts(
