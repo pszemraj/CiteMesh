@@ -51,11 +51,25 @@ For cache path/layout/hydration details, see [Caching & Data](caching.md).
 | `--include-timestamp` | Include generation time in output metadata | disabled |
 | `--export`, `-e` | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all` | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
-| `--output`, `-o` | Base output path used for all selected export formats | auto-generated per-paper folder |
+| `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 
-When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:50]>-<seed_hash8>/<strategy>.<ext>`.
+When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:40]>/<strategy>.<ext>`.
 
-When `--export all` is used, CiteMesh writes every supported format using consistent styling. If a custom output path is provided, the CLI appends the correct extension for each selected format. Custom basenames containing dots (for example `-o out/arxiv-2508.14040-example`) are preserved.
+When `--export all` is used, CiteMesh writes every supported format using consistent styling into a directory. With default naming this is `out/<safe_seed_title[:40]>/`; with explicit output it is the directory passed via `-o`.
+
+For multi-export runs, files are named `<strategy>.<ext>` inside the selected directory. Example:
+
+`citemesh build "<paper-id>" --strategy hybrid --export all -o out/arxiv-2508.14040-hybrid-full`
+
+writes:
+
+- `out/arxiv-2508.14040-hybrid-full/hybrid.png`
+- `out/arxiv-2508.14040-hybrid-full/hybrid.html`
+- `out/arxiv-2508.14040-hybrid-full/hybrid.plotly.html`
+- `out/arxiv-2508.14040-hybrid-full/hybrid.json`
+- `out/arxiv-2508.14040-hybrid-full/hybrid.graphml`
+
+For single-export runs, explicit `-o` remains file-style and preserves extension replacement/appending behavior.
 
 `--seed` controls shared layout generation for `png` and `plotly` exports. Pyvis `html` exports use vis.js browser physics and do not consume this precomputed layout.
 
