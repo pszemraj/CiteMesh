@@ -25,6 +25,9 @@ The following items were intentionally deferred during the easy-win + breaking A
 - `#12` Cross-strategy score taxonomy harmonization
   - Scope: define optional calibrated score bands/labels that can be consumed uniformly across citation/recommendation/embedding/hybrid outputs.
   - Deferred because current workflows intentionally use strategy-specific scoring math and need a calibration design pass before claiming comparability.
+- `#13` Hydration dataset identity hardening beyond source-name checks
+  - Scope: persist and verify immutable dataset revision/fingerprint metadata so warm-cache fast paths can prove equivalence to a fresh hydration when upstream dataset aliases change.
+  - Deferred because current behavior relies on source-name/split/corpus boundaries plus formatter/model provenance; robust revision checks need stable identity contracts across streaming and non-streaming loaders.
 
 ## Follow-up Conditions
 

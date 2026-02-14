@@ -96,6 +96,11 @@ and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 
+Current limitation: hydration compatibility is keyed to dataset source/split/corpus
+metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias
+mutates upstream without changing source name, treat cache reuse as a performance
+optimization rather than a strict reproducibility guarantee.
+
 During cache-native search, scored embedding rows must map to metadata rows. Missing
 metadata row mappings now fail closed with an integrity error instead of returning
 partial top-k results.
