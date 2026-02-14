@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from citemesh.core import Paper
 from citemesh.data.embedding_cache import CacheSearchResult
 from citemesh.strategies.embedding import EmbeddingGraphBuilder, _query_seed_id
 from tests._helpers import ConstantEncodeModel
@@ -1187,3 +1188,44 @@ def test_embedding_top_k_validation_and_tie_order(
         np.asarray([1.0, 0.0], dtype=np.float32)
     )
     assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
+
+
+def test_embedding_runtime_metadata_tracks_prefilter_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding runtime metadata should reflect effective query-time prefilter use."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(max_papers=2, top_k=2, client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.last_search_used_binary_prefilter = False
+    builder.embedding_cache.search = MagicMock(return_value=[])
+
+    candidates = builder._select_candidates_from_loaded(
+        np.asarray([1.0, 0.0], dtype=np.float32)
+    )
+    assert candidates == []
+    assert builder._embedding_runtime_metadata() == {"binary_prefilter_used": False}
+
+
+def test_embedding_build_graph_persists_runtime_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding build_graph should propagate runtime metadata to graph attrs."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._last_search_used_binary_prefilter = True
+    monkeypatch.setattr(
+        builder,
+        "collect_papers",
+        lambda seed_id, **kwargs: {
+            "seed": Paper(paper_id="seed", title="Seed", year=2024, is_seed=True)
+        },
+    )
+    monkeypatch.setattr(builder, "compute_similarity", lambda p1, p2: 0.0)
+
+    graph, seed_id = builder.build_graph("seed")
+    assert seed_id == "seed"
+    assert graph.graph["embedding_runtime"] == {"binary_prefilter_used": True}

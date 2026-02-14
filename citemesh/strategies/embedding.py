@@ -404,6 +404,16 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._tf32_mode = "off"
         self._resolved_model_fingerprint: Optional[str] = None
         self._resolved_offline_fingerprint: Optional[str] = None
+        self._last_search_used_binary_prefilter: Optional[bool] = None
+
+    def _embedding_runtime_metadata(self) -> Dict[str, object]:
+        """Return runtime metadata describing effective embedding retrieval behavior.
+
+        :return Dict[str, object]: Runtime metadata payload for downstream export.
+        """
+        return {
+            "binary_prefilter_used": self._last_search_used_binary_prefilter,
+        }
 
     def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
         """Resolve effective embedding dimension from request + model profile defaults.
@@ -1412,6 +1422,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             binary_prefilter=self.binary_prefilter,
             binary_rescore_multiplier=self.binary_rescore_multiplier,
         )
+        self._last_search_used_binary_prefilter = (
+            self.embedding_cache.last_search_used_binary_prefilter
+        )
 
         scored_candidates = [
             (
@@ -1818,8 +1831,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         # Use base class to collect papers and create nodes
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph.graph["embedding_runtime"] = self._embedding_runtime_metadata()
         # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
         filtered_graph = nx.Graph()
+        filtered_graph.graph.update(graph.graph)
         filtered_graph.add_nodes_from(graph.nodes(data=True))
 
         for u, v, weight in select_capped_undirected_edges(

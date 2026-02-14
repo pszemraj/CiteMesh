@@ -15,7 +15,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Protocol, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
 
 import networkx as nx
 from rich.console import Console
@@ -265,17 +265,31 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
     }
 
 
-def _embedding_export_metadata(cli_args: argparse.Namespace) -> Dict[str, object]:
+def _embedding_export_metadata(
+    cli_args: argparse.Namespace, runtime_metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, object]:
     """Build embedding provenance payload persisted in export metadata.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
-    :return Dict[str, object]: Effective embedding cache/vector provenance fields.
+    :param Optional[Dict[str, Any]] runtime_metadata: Optional runtime retrieval metadata.
+    :return Dict[str, object]: Embedding cache/vector provenance + runtime fields.
     """
     int8_mode = str(cli_args.storage_precision) == "int8"
+    binary_prefilter_enabled = bool(cli_args.binary_prefilter and int8_mode)
+    binary_prefilter_used_for_query: Optional[bool]
+    binary_prefilter_used_for_query = None
+    if int8_mode and isinstance(runtime_metadata, dict):
+        raw_used = runtime_metadata.get("binary_prefilter_used")
+        if isinstance(raw_used, bool):
+            binary_prefilter_used_for_query = raw_used
+    elif not int8_mode:
+        binary_prefilter_used_for_query = False
+
     return {
         "effective_vector_dtype": "float32",
         "storage_precision": str(cli_args.storage_precision),
-        "binary_prefilter_enabled": bool(cli_args.binary_prefilter and int8_mode),
+        "binary_prefilter_enabled": binary_prefilter_enabled,
+        "binary_prefilter_used_for_query": binary_prefilter_used_for_query,
         "binary_rescore_multiplier": (
             int(cli_args.binary_rescore_multiplier) if int8_mode else 1
         ),
@@ -1227,7 +1241,13 @@ def main() -> None:
                 "score_contract": _strategy_score_contract(args.strategy),
             }
             if args.strategy in {"embedding", "hybrid"}:
-                metadata["embedding"] = _embedding_export_metadata(args)
+                runtime_embedding_metadata: Optional[Dict[str, Any]] = None
+                raw_runtime_metadata = graph.graph.get("embedding_runtime")
+                if isinstance(raw_runtime_metadata, dict):
+                    runtime_embedding_metadata = raw_runtime_metadata
+                metadata["embedding"] = _embedding_export_metadata(
+                    args, runtime_embedding_metadata
+                )
             if args.include_timestamp:
                 metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             layout_required = any(fmt in output_paths for fmt in ("png", "plotly"))

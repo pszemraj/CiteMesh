@@ -166,7 +166,7 @@ Execution transparency:
 - `json`: structured graph data with nodes, edges, metadata
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
 
-For `embedding` and `hybrid` strategies, export metadata includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, and effective binary-prefilter settings).
+For `embedding` and `hybrid` strategies, export metadata includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, configured binary-prefilter state, and `binary_prefilter_used_for_query` when runtime retrieval metadata is available).
 All strategies include a `score_contract` object in export metadata describing score semantics (`score_type`) and explicitly marking scores as non-comparable across strategies.
 Hybrid exports also include `score_contract.adjudication_policy` describing citation/semantic merge behavior.
 

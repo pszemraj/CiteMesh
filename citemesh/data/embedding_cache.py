@@ -275,6 +275,7 @@ class EmbeddingCache:
         self.compression_level = int(compression_level)
         self.source_torch_dtype = str(source_torch_dtype or "float32")
         self.embedding_vector_dtype = "float32"
+        self.last_search_used_binary_prefilter: Optional[bool] = None
 
         with self._cache_lock():
             self._init_db()
@@ -514,6 +515,7 @@ class EmbeddingCache:
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
 
+        self.last_search_used_binary_prefilter = None
         query = np.asarray(query_embedding, dtype=np.float32)
         if query.ndim != 1:
             raise ValueError("query_embedding must be 1-dimensional")
@@ -564,6 +566,7 @@ class EmbeddingCache:
                             self.h5_path,
                         )
                         use_binary_prefilter = False
+                self.last_search_used_binary_prefilter = bool(use_binary_prefilter)
                 if use_binary_prefilter:
                     candidate_rows = self._binary_prefilter_rows(
                         binary_dataset=binary_dataset,
@@ -593,6 +596,7 @@ class EmbeddingCache:
                     query_embedding=query,
                     top_k=top_k,
                 )
+                self.last_search_used_binary_prefilter = False
 
             if rows.size == 0:
                 return []

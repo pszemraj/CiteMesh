@@ -634,8 +634,57 @@ def test_embedding_export_metadata_uses_effective_precision_values(
         "effective_vector_dtype": "float32",
         "storage_precision": "float32",
         "binary_prefilter_enabled": False,
+        "binary_prefilter_used_for_query": False,
         "binary_rescore_multiplier": 1,
     }
+
+
+def test_embedding_export_metadata_includes_runtime_prefilter_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding export metadata should include runtime prefilter usage when available."""
+    graph = nx.Graph()
+    graph.graph["embedding_runtime"] = {"binary_prefilter_used": False}
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "int8",
+                "--binary-prefilter",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["embedding"]["binary_prefilter_enabled"] is True
+    assert metadata["embedding"]["binary_prefilter_used_for_query"] is False
 
 
 def test_embedding_build_logs_side_effect_contract(

@@ -260,12 +260,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed_id).
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        if self.embedding_builder is not None:
+            graph.graph["embedding_runtime"] = (
+                self.embedding_builder._embedding_runtime_metadata()
+            )
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:
             return graph, actual_seed_id
 
         filtered_graph = nx.Graph()
+        filtered_graph.graph.update(graph.graph)
         filtered_graph.add_nodes_from(graph.nodes(data=True))
 
         for u, v, weight in select_capped_undirected_edges(
