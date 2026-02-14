@@ -84,6 +84,15 @@ def _multiprocess_cache_worker(
         queue.put(("err", worker_idx, repr(exc)))
 
 
+def _multiprocess_cache_init_worker(cache_dir: str, queue: mp.Queue) -> None:
+    """Initialize cache namespace in subprocess and report success/failure."""
+    try:
+        EmbeddingCache(cache_dir=cache_dir, model_name="process-init-recovery")
+        queue.put(("ok",))
+    except Exception as exc:  # pragma: no cover - subprocess path
+        queue.put(("err", repr(exc)))
+
+
 def test_embedding_cache_lifecycle_contract() -> None:
     """Cache lifecycle should handle hit/miss, rewrites, and quantized layout."""
     model = _MockModel()
@@ -554,6 +563,51 @@ def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
 
     errors = [result for result in results if result[0] == "err"]
     assert not errors, f"Concurrent cache writes failed: {errors}"
+
+
+def test_embedding_cache_serializes_multiprocess_initialization_recovery(
+    tmp_path: Path,
+) -> None:
+    """Concurrent init/recovery should not race when repairing stale namespace state."""
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="process-init-recovery")
+    with sqlite3.connect(cache.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO papers (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx)
+            VALUES ('seed', 'seed', '', NULL, 'hash', 2, 0)
+            """
+        )
+        conn.commit()
+    cache.h5_path.unlink(missing_ok=True)
+
+    queue: mp.Queue = mp.Queue()
+    processes = [
+        mp.Process(target=_multiprocess_cache_init_worker, args=(str(tmp_path), queue))
+        for _ in range(4)
+    ]
+
+    for process in processes:
+        process.start()
+
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+    results = []
+    for _ in processes:
+        try:
+            results.append(queue.get(timeout=5))
+        except Empty:
+            results.append(("err", "worker did not report result"))
+
+    errors = [result for result in results if result[0] == "err"]
+    assert not errors, f"Concurrent cache init recovery failed: {errors}"
+
+    reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="process-init-recovery")
+    with sqlite3.connect(reloaded.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
 
 def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
