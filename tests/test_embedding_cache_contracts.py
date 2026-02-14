@@ -76,8 +76,8 @@ def _multiprocess_cache_worker(
         queue.put(("err", worker_idx, repr(exc)))
 
 
-def test_embedding_cache_hit_miss_and_text_change() -> None:
-    """Cache should reuse unchanged rows and recompute when text changes."""
+def test_embedding_cache_lifecycle_contract() -> None:
+    """Cache lifecycle should handle hit/miss, rewrites, and quantized layout."""
     model = _MockModel()
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
@@ -92,22 +92,15 @@ def test_embedding_cache_hit_miss_and_text_change() -> None:
 
         first = cache.get_embeddings(papers_v1, model, show_progress=False)
         second = cache.get_embeddings(papers_v1, model, show_progress=False)
-        _ = cache.get_embeddings(papers_v2, model, show_progress=False)
+        cache.get_embeddings(papers_v2, model, show_progress=False)
 
-    assert model.encode_calls == 2
-    assert first["p1"].shape == second["p1"].shape
-
-
-def test_embedding_cache_uses_quantized_matrix_layout() -> None:
-    """Embeddings should be stored as int8 + binary + calibration ranges."""
-    model = _MockModel()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
-        papers = {
-            "p1": {"title": "Paper One", "abstract": "Abstract one"},
-            "p2": {"title": "Paper Two", "abstract": "Abstract two"},
-        }
-        cache.get_embeddings(papers, model, show_progress=False)
+        with sqlite3.connect(cache.db_path) as conn:
+            rows = conn.execute(
+                "SELECT paper_id, row_idx FROM papers ORDER BY row_idx"
+            ).fetchall()
+            row_idx_after_update = conn.execute(
+                "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
+            ).fetchone()[0]
 
         with h5py.File(cache.h5_path, "r") as h5:
             assert set(h5.keys()) == {
@@ -122,42 +115,14 @@ def test_embedding_cache_uses_quantized_matrix_layout() -> None:
             assert h5["calibration_ranges"].shape == (2, 2)
             assert h5["calibration_ranges"].dtype == np.float32
 
-        with sqlite3.connect(cache.db_path) as conn:
-            rows = conn.execute(
-                "SELECT paper_id, row_idx FROM papers ORDER BY row_idx"
-            ).fetchall()
-
+    assert model.encode_calls == 2
+    assert first["p1"].shape == second["p1"].shape
     assert rows == [("p1", 0), ("p2", 1)]
+    assert row_idx_after_update == 0
 
 
-def test_embedding_cache_reuses_row_for_text_updates() -> None:
-    """Text updates should overwrite existing rows instead of appending duplicates."""
-    model = _MockModel()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
-        papers_v1 = {"p1": {"title": "Original", "abstract": "Abstract"}}
-        papers_v2 = {"p1": {"title": "Updated", "abstract": "Abstract"}}
-
-        cache.get_embeddings(papers_v1, model, show_progress=False)
-        with sqlite3.connect(cache.db_path) as conn:
-            row_idx_before = conn.execute(
-                "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
-            ).fetchone()[0]
-
-        cache.get_embeddings(papers_v2, model, show_progress=False)
-        with sqlite3.connect(cache.db_path) as conn:
-            row_idx_after = conn.execute(
-                "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
-            ).fetchone()[0]
-
-        with h5py.File(cache.h5_path, "r") as h5:
-            assert h5["embeddings"].shape[0] == 1
-
-    assert row_idx_before == row_idx_after
-
-
-def test_embedding_cache_search_returns_metadata_and_float_embeddings() -> None:
-    """Cache search should return metadata payload and float32 embeddings."""
+def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
+    """Search should return metadata and reuse calibration ranges in one namespace."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="search-metadata")
         papers = {
@@ -176,14 +141,17 @@ def test_embedding_cache_search_returns_metadata_and_float_embeddings() -> None:
                 "categories": ["cs.LG"],
             },
         }
-        model = _LookupModel(
+        first_model = _LookupModel(
             {
                 "Alpha. First": np.array([1.0, 0.0], dtype=np.float32),
                 "Beta. Second": np.array([0.0, 1.0], dtype=np.float32),
             }
         )
 
-        _ = cache.get_embeddings(papers, model, show_progress=False)
+        cache.get_embeddings(papers, first_model, show_progress=False)
+        with h5py.File(cache.h5_path, "r") as h5:
+            ranges_before = np.asarray(h5["calibration_ranges"], dtype=np.float32)
+
         results = cache.search(
             query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
             top_k=2,
@@ -191,40 +159,11 @@ def test_embedding_cache_search_returns_metadata_and_float_embeddings() -> None:
             binary_rescore_multiplier=4,
         )
 
-    assert [result.paper_id for result in results] == ["p1", "p2"]
-    assert results[0].metadata["authors"] == ["Alice", "Bob"]
-    assert results[0].metadata["categories"] == ["cs.AI"]
-    assert results[0].metadata["year"] == 2020
-    assert results[0].embedding.dtype == np.float32
-
-
-def test_embedding_cache_reuses_calibration_ranges_for_same_namespace() -> None:
-    """Calibration ranges should persist and be reused within one namespace."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="calibration-reuse")
-        first_model = _LookupModel(
-            {
-                "One. A": np.array([0.1, 0.9], dtype=np.float32),
-                "Two. B": np.array([0.9, 0.1], dtype=np.float32),
-            }
-        )
         second_model = _LookupModel(
-            {"Three. C": np.array([0.3, 0.7], dtype=np.float32)}
+            {"Gamma. Third": np.array([0.3, 0.7], dtype=np.float32)}
         )
-
-        _ = cache.get_embeddings(
-            {
-                "p1": {"title": "One", "abstract": "A"},
-                "p2": {"title": "Two", "abstract": "B"},
-            },
-            first_model,
-            show_progress=False,
-        )
-        with h5py.File(cache.h5_path, "r") as h5:
-            ranges_before = np.asarray(h5["calibration_ranges"], dtype=np.float32)
-
-        _ = cache.get_embeddings(
-            {"p3": {"title": "Three", "abstract": "C"}},
+        cache.get_embeddings(
+            {"p3": {"title": "Gamma", "abstract": "Third"}},
             second_model,
             show_progress=False,
         )
@@ -232,6 +171,11 @@ def test_embedding_cache_reuses_calibration_ranges_for_same_namespace() -> None:
             ranges_after = np.asarray(h5["calibration_ranges"], dtype=np.float32)
 
     np.testing.assert_allclose(ranges_before, ranges_after)
+    assert [result.paper_id for result in results[:2]] == ["p1", "p2"]
+    assert results[0].metadata["authors"] == ["Alice", "Bob"]
+    assert results[0].metadata["categories"] == ["cs.AI"]
+    assert results[0].metadata["year"] == 2020
+    assert results[0].embedding.dtype == np.float32
 
 
 def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
@@ -262,8 +206,8 @@ def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
     assert not errors, f"Concurrent cache writes failed: {errors}"
 
 
-def test_legacy_h5_layout_is_dropped_and_rebuilt(tmp_path: Path) -> None:
-    """Legacy cache files should be dropped and rebuilt under current schema."""
+def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
+    """Legacy schema recovery and clear() should restore a healthy namespace."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
     model = _MockModel()
 
@@ -281,7 +225,6 @@ def test_legacy_h5_layout_is_dropped_and_rebuilt(tmp_path: Path) -> None:
         conn.commit()
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
-
     with sqlite3.connect(reloaded.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
@@ -292,16 +235,6 @@ def test_legacy_h5_layout_is_dropped_and_rebuilt(tmp_path: Path) -> None:
         assert "embeddings" in h5
         assert h5["embeddings"].shape[0] == 1
 
-
-def test_clear_removes_cache_files_and_recreates_schema(tmp_path: Path) -> None:
-    """``clear()`` should remove namespace cache files and recreate DB schema."""
-    cache = EmbeddingCache(cache_dir=tmp_path, model_name="clear-recovery")
-    model = _MockModel()
-    cache.get_embeddings(
-        {"seed": {"title": "Seed", "abstract": "x", "year": 2020}}, model
-    )
-
-    cache.clear()
-
-    assert cache.db_path.exists()
-    assert not cache.h5_path.exists()
+    reloaded.clear()
+    assert reloaded.db_path.exists()
+    assert not reloaded.h5_path.exists()

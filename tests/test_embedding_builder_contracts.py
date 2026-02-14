@@ -148,138 +148,96 @@ def test_embedding_builder_requires_optional_deps(
         )
 
 
-@pytest.mark.parametrize(
-    ("cuda_available", "bf16_supported", "expects_bf16"),
-    [(True, True, True), (True, False, False)],
-)
-def test_embeddinggemma_precision_path(
-    monkeypatch: pytest.MonkeyPatch,
-    cuda_available: bool,
-    bf16_supported: bool,
-    expects_bf16: bool,
+def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """EmbeddingGemma should request BF16/autocast only on supported devices."""
+    """Runtime should enforce precision, compile, TF32, and logging policies."""
     _disable_embedding_dep_check(monkeypatch)
-    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    bf16_token, autocast_log, _fake_torch = _install_fake_torch(
-        monkeypatch,
-        cuda_available=cuda_available,
-        bf16_supported=bf16_supported,
-    )
 
-    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    builder._load_model()
-    embeddings = builder._encode_texts(["seed"], show_progress_bar=False)
-
-    assert init_log["model_name"] == "google/embeddinggemma-300m"
-    assert init_log["kwargs"]["truncate_dim"] == 256
-    assert embeddings.shape == (1, 2)
-    if expects_bf16:
-        assert init_log["kwargs"]["model_kwargs"]["torch_dtype"] is bf16_token
-        assert ("call", "cuda", bf16_token) in autocast_log
-        assert ("enter",) in autocast_log and ("exit",) in autocast_log
-    else:
-        assert "model_kwargs" not in init_log["kwargs"]
-        assert autocast_log == []
-
-
-def test_embeddinggemma_rejects_unsupported_truncate_dim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """EmbeddingGemma should reject unsupported truncate dimensions."""
-    _disable_embedding_dep_check(monkeypatch)
     with pytest.raises(
         ValueError,
         match="truncate_dim=300 is not supported for google/embeddinggemma-300m",
     ):
         EmbeddingGraphBuilder(max_papers=1, truncate_dim=300, client=MagicMock())
 
+    precision_cases = [
+        (True, True, True),
+        (True, False, False),
+    ]
+    for cuda_available, bf16_supported, expects_bf16 in precision_cases:
+        init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+        bf16_token, autocast_log, _fake_torch = _install_fake_torch(
+            monkeypatch,
+            cuda_available=cuda_available,
+            bf16_supported=bf16_supported,
+        )
 
-@pytest.mark.parametrize(
-    ("model_name", "compile_behavior", "expect_compiled"),
-    [
+        builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+        builder._load_model()
+        embeddings = builder._encode_texts(["seed"], show_progress_bar=False)
+
+        assert init_log["model_name"] == "google/embeddinggemma-300m"
+        assert init_log["kwargs"]["truncate_dim"] == 256
+        assert embeddings.shape == (1, 2)
+        if expects_bf16:
+            assert init_log["kwargs"]["model_kwargs"]["torch_dtype"] is bf16_token
+            assert ("call", "cuda", bf16_token) in autocast_log
+            assert ("enter",) in autocast_log and ("exit",) in autocast_log
+        else:
+            assert "model_kwargs" not in init_log["kwargs"]
+            assert autocast_log == []
+
+    compile_cases = [
         ("google/embeddinggemma-300m", "tagged", True),
         ("google/embeddinggemma-300m", "raise", False),
         ("sentence-transformers/all-MiniLM-L6-v2", "tagged", False),
-    ],
-)
-def test_inner_transformer_compile_behavior(
-    monkeypatch: pytest.MonkeyPatch,
-    model_name: str,
-    compile_behavior: str,
-    expect_compiled: bool,
-) -> None:
-    """Only EmbeddingGemma should compile the inner HF model when available."""
-    _disable_embedding_dep_check(monkeypatch)
-    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
-        monkeypatch,
-        cuda_available=True,
-        bf16_supported=True,
-        compile_behavior=compile_behavior,
-    )
+    ]
+    for model_name, compile_behavior, expect_compiled in compile_cases:
+        init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+        _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
+            monkeypatch,
+            cuda_available=True,
+            bf16_supported=True,
+            compile_behavior=compile_behavior,
+        )
 
-    builder = EmbeddingGraphBuilder(
-        max_papers=1, model_name=model_name, client=MagicMock()
-    )
-    builder._load_model()
+        builder = EmbeddingGraphBuilder(
+            max_papers=1, model_name=model_name, client=MagicMock()
+        )
+        builder._load_model()
 
-    original = init_log["auto_model_before_compile"]
-    assert builder.model is not None
-    if expect_compiled:
-        assert builder.model[0].auto_model == ("compiled", original)
-    else:
-        assert builder.model[0].auto_model is original
-    assert builder._inner_model_compiled is expect_compiled
+        original = init_log["auto_model_before_compile"]
+        assert builder.model is not None
+        if expect_compiled:
+            assert builder.model[0].auto_model == ("compiled", original)
+        else:
+            assert builder.model[0].auto_model is original
+        assert builder._inner_model_compiled is expect_compiled
 
+    tf32_cases = [
+        ((8, 0), "tf32"),
+        ((7, 5), "off"),
+    ]
+    for capability, expected_mode in tf32_cases:
+        _install_fake_sentence_transformers(monkeypatch)
+        _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+            monkeypatch,
+            cuda_available=True,
+            bf16_supported=True,
+            capability=capability,
+        )
 
-def test_tf32_runtime_config_enables_precision_api_on_ampere(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """TF32 runtime policy should enable precision APIs on Ampere+ GPUs."""
-    _disable_embedding_dep_check(monkeypatch)
-    _install_fake_sentence_transformers(monkeypatch)
-    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
-        monkeypatch,
-        cuda_available=True,
-        bf16_supported=True,
-        capability=(8, 0),
-    )
+        builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+        builder._load_model()
 
-    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    builder._load_model()
+        if expected_mode == "tf32":
+            assert fake_torch.backends.cuda.matmul.fp32_precision == "tf32"
+            assert fake_torch.backends.cudnn.conv.fp32_precision == "tf32"
+        else:
+            assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
+            assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
+        assert builder._tf32_mode == expected_mode
 
-    assert fake_torch.backends.cuda.matmul.fp32_precision == "tf32"
-    assert fake_torch.backends.cudnn.conv.fp32_precision == "tf32"
-    assert builder._tf32_mode == "tf32"
-
-
-def test_tf32_runtime_config_skips_pre_ampere(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """TF32 runtime policy should skip GPUs older than Ampere."""
-    _disable_embedding_dep_check(monkeypatch)
-    _install_fake_sentence_transformers(monkeypatch)
-    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
-        monkeypatch,
-        cuda_available=True,
-        bf16_supported=True,
-        capability=(7, 5),
-    )
-
-    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    builder._load_model()
-
-    assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
-    assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
-    assert builder._tf32_mode == "off"
-
-
-def test_embedding_runtime_logging_is_concise_at_info(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Info logs should be concise while detailed profile logs stay at debug."""
-    _disable_embedding_dep_check(monkeypatch)
     _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
@@ -290,6 +248,7 @@ def test_embedding_runtime_logging_is_concise_at_info(
     )
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    caplog.clear()
     with caplog.at_level(logging.DEBUG):
         builder._load_model()
 
@@ -341,10 +300,10 @@ def test_embedding_cache_namespace_varies_by_storage_precision(
     )
 
 
-def test_extract_paper_metadata_parsing_and_normalization(
+def test_metadata_and_streaming_loader_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Metadata extraction should parse strings and normalize arXiv IDs."""
+    """Metadata parsing and streaming hydration fallback should stay deterministic."""
     _disable_embedding_dep_check(monkeypatch)
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
@@ -373,13 +332,6 @@ def test_extract_paper_metadata_parsing_and_normalization(
     assert snapshot["categories"] == ["cs.LG", "cs.AI"]
     assert snapshot["year"] == 2023
     assert versioned["paper_id"] == "arxiv:1706.03762"
-
-
-def test_streaming_embedding_hydration_loader_falls_back_to_secondary_dataset(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Failing primary stream should fallback to secondary dataset source."""
-    _disable_embedding_dep_check(monkeypatch)
 
     load_calls: list[tuple[str, str, bool]] = []
 
@@ -414,13 +366,6 @@ def test_streaming_embedding_hydration_loader_falls_back_to_secondary_dataset(
     ]
     assert len(list(dataset)) == 1
 
-
-def test_streaming_with_sliced_split_fails_fast(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Streaming mode should reject sliced split syntax."""
-    _disable_embedding_dep_check(monkeypatch)
-
     with pytest.raises(ValueError, match="does not support sliced dataset splits"):
         EmbeddingGraphBuilder(
             max_papers=1,
@@ -430,10 +375,10 @@ def test_streaming_with_sliced_split_fails_fast(
         )
 
 
-def test_collect_papers_uses_hashed_query_seed_id(
+def test_collect_papers_query_seed_and_warm_cache_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Query-mode seeds should use deterministic hashed identifiers."""
+    """Query-mode IDs and warm-cache candidate retrieval should be deterministic."""
     _disable_embedding_dep_check(monkeypatch)
 
     builder = EmbeddingGraphBuilder(
@@ -453,17 +398,9 @@ def test_collect_papers_uses_hashed_query_seed_id(
 
     query = "attention mechanism test query"
     papers = builder.collect_papers(query)
-
     expected_seed_id = _query_seed_id(query)
     assert list(papers.keys()) == [expected_seed_id]
     assert papers[expected_seed_id].is_seed is True
-
-
-def test_warm_cache_candidate_selection_skips_dataset_loading(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hydrated cache candidate retrieval should bypass dataset loading."""
-    _disable_embedding_dep_check(monkeypatch)
 
     fake_datasets = types.ModuleType("datasets")
 
