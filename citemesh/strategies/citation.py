@@ -38,6 +38,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         max_references: int = 20,
         similarity_threshold: float = 0.2,
         fetch_references: bool = True,
+        refresh_reference_cache: bool = False,
         random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
@@ -49,6 +50,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param int max_references: Maximum referenced papers to fetch
         :param float similarity_threshold: Minimum similarity for edges
         :param bool fetch_references: Whether to fetch reference lists (enables real bibliographic coupling)
+        :param bool refresh_reference_cache: Whether to bypass persisted reference-cache reads.
         :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
@@ -57,6 +59,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.max_references = max_references
         self.similarity_threshold = similarity_threshold
         self.fetch_references = fetch_references
+        self.refresh_reference_cache = bool(refresh_reference_cache)
         self.client: SemanticScholarClient = client or get_client()
         self.reference_cache: Dict[str, list] = {}  # Cache reference lists
         self._abstract_index = AbstractSimilarityIndex()
@@ -71,7 +74,10 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         if paper_id in self.reference_cache:
             return self.reference_cache[paper_id]
 
-        ref_ids = self.client.get_reference_ids(paper_id)
+        ref_ids = self.client.get_reference_ids(
+            paper_id,
+            force_refresh=self.refresh_reference_cache,
+        )
         self.reference_cache[paper_id] = ref_ids
         return ref_ids
 

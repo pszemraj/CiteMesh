@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from types import MethodType
 from typing import Callable
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import networkx as nx
 import numpy as np
@@ -174,7 +174,9 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
     client.get_paper.return_value = seed
     client.get_paper_references.return_value = [ref]
     client.get_paper_citations.return_value = [cit]
-    client.get_reference_ids.side_effect = lambda pid: [f"{pid}-ref"]
+    client.get_reference_ids.side_effect = lambda pid, force_refresh=False: [
+        f"{pid}-ref"
+    ]
 
     builder = CitationGraphBuilder(
         max_papers=3,
@@ -192,6 +194,48 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
         builder.get_collection_summary()
         == "Collected 3 papers (3 with reference lists)"
     )
+    assert client.get_reference_ids.call_args_list == [
+        call("ref1", force_refresh=False),
+        call("cit1", force_refresh=False),
+    ]
+
+
+def test_citation_refresh_reference_cache_forces_service_refresh() -> None:
+    """Citation strategy should pass force-refresh flag to reference lookups."""
+    client = MagicMock()
+    client.get_reference_ids.return_value = ["r1"]
+    builder = CitationGraphBuilder(
+        fetch_references=True,
+        refresh_reference_cache=True,
+        client=client,
+    )
+
+    refs = builder._get_references("paper-1")
+
+    assert refs == ["r1"]
+    client.get_reference_ids.assert_called_once_with("paper-1", force_refresh=True)
+
+
+def test_recommendation_refresh_reference_cache_forces_service_refresh() -> None:
+    """Recommendation strategy should pass force-refresh flag to reference lookups."""
+    client = MagicMock()
+    client.get_reference_ids.return_value = ["r2"]
+    builder = RecommendationGraphBuilder(
+        fetch_references=True,
+        refresh_reference_cache=True,
+        client=client,
+    )
+    paper = Paper(
+        paper_id="paper-2",
+        title="Paper 2",
+        year=2020,
+        abstract="paper two",
+    )
+
+    builder._hydrate_references(paper)
+
+    assert paper.references == ["r2"]
+    client.get_reference_ids.assert_called_once_with("paper-2", force_refresh=True)
 
 
 def test_citation_similarity_uses_reference_and_fallback_branches(
@@ -272,6 +316,21 @@ def test_hybrid_thresholds_and_default_budget(
 
     small_builder = HybridGraphBuilder(max_papers=5, client=MagicMock())
     assert small_builder.max_semantic == 4
+
+
+def test_hybrid_propagates_refresh_reference_cache_to_citation_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid should forward refresh-reference policy to citation builder."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(
+        max_papers=4,
+        max_semantic=0,
+        refresh_reference_cache=True,
+        client=MagicMock(),
+    )
+
+    assert builder.citation_builder.refresh_reference_cache is True
 
 
 def test_hybrid_build_graph_skips_pruning_when_disabled(

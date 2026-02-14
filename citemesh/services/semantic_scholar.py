@@ -25,7 +25,9 @@ from citemesh.data import get_cache_dir
 
 logger = logging.getLogger(__name__)
 
-REFERENCE_CACHE_DIR = get_cache_dir("references")
+# Optional runtime override for tests and one-off callers.
+# When unset, reference cache paths are resolved from ``get_cache_dir`` per call.
+REFERENCE_CACHE_DIR: Optional[Path] = None
 REFERENCE_CACHE_VERSION = 1
 RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
@@ -40,6 +42,19 @@ DEFAULT_PAPER_FIELDS = (
     "abstract",
     "fieldsOfStudy",
 )
+
+
+def _reference_cache_dir() -> Path:
+    """Resolve reference-cache directory at call time.
+
+    :return Path: Directory where reference cache JSON files are stored.
+    """
+    if REFERENCE_CACHE_DIR is None:
+        return get_cache_dir("references")
+
+    resolved = Path(REFERENCE_CACHE_DIR)
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def _default_paper_fields() -> List[str]:
@@ -174,7 +189,7 @@ def _reference_cache_path(paper_id: str) -> Path:
     :return Path: JSON cache path for the paper's reference IDs.
     """
     digest = hashlib.sha1(paper_id.encode("utf-8")).hexdigest()
-    return REFERENCE_CACHE_DIR / f"{digest}.json"
+    return _reference_cache_dir() / f"{digest}.json"
 
 
 def _validate_integer_limit(
@@ -729,16 +744,24 @@ class SemanticScholarClient:
 
         return papers
 
-    def get_reference_ids(self, paper_id: str) -> List[str]:
+    def get_reference_ids(
+        self, paper_id: str, *, force_refresh: bool = False
+    ) -> List[str]:
         """
         Fetch only the reference IDs for a paper (faster than full references).
 
         :param str paper_id: Paper identifier
+        :param bool force_refresh: Whether to bypass cache reads and fetch fresh IDs.
         :return List[str]: List of referenced paper IDs
         """
         normalized_paper_id = normalize_paper_id(paper_id)
         cache_path = _reference_cache_path(normalized_paper_id)
-        if cache_path.exists():
+        if force_refresh:
+            logger.debug(
+                "Bypassing reference cache for %s due to force_refresh.",
+                normalized_paper_id,
+            )
+        if not force_refresh and cache_path.exists():
             try:
                 data = json.loads(cache_path.read_text())
                 if data.get("version") == REFERENCE_CACHE_VERSION:

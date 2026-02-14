@@ -161,6 +161,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             max_references=cli_args.max_references,
             similarity_threshold=cli_args.similarity_threshold,
             fetch_references=not cli_args.no_references,
+            refresh_reference_cache=cli_args.refresh_reference_cache,
             random_seed=cli_args.seed,
         ),
     ),
@@ -168,6 +169,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
         factory=lambda cli_args: RecommendationGraphBuilder(
             max_papers=cli_args.max_papers,
             fetch_references=not cli_args.no_references,
+            refresh_reference_cache=cli_args.refresh_reference_cache,
             similarity_threshold=cli_args.similarity_threshold,
             random_seed=cli_args.seed,
         ),
@@ -197,6 +199,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             max_citations=cli_args.max_citations,
             max_references=cli_args.max_references,
             fetch_references=not cli_args.no_references,
+            refresh_reference_cache=cli_args.refresh_reference_cache,
             max_semantic=cli_args.max_semantic,
             model_name=cli_args.model,
             dataset_split=cli_args.dataset_split,
@@ -596,6 +599,14 @@ Examples:
         "--no-references",
         action="store_true",
         help="Disable fetching reference lists (faster but no real bibliographic coupling)",
+    )
+    citation_group.add_argument(
+        "--refresh-reference-cache",
+        action="store_true",
+        help=(
+            "Bypass persisted reference-cache reads and force fresh API fetches "
+            "for recommendation/citation lookups."
+        ),
     )
 
     # Embedding strategy arguments

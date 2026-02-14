@@ -23,6 +23,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self,
         max_papers: int = 40,
         fetch_references: bool = False,
+        refresh_reference_cache: bool = False,
         similarity_threshold: float = 0.15,
         random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
@@ -31,12 +32,14 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
         :param int max_papers: Maximum papers to include in graph.
         :param bool fetch_references: Whether to fetch references for seed and recommended papers.
+        :param bool refresh_reference_cache: Whether to bypass persisted reference-cache reads.
         :param float similarity_threshold: Threshold for edge creation.
         :param Optional[int] random_seed: Seed for reproducibility.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         super().__init__(max_papers=max_papers, random_seed=random_seed)
         self.fetch_references = fetch_references
+        self.refresh_reference_cache = bool(refresh_reference_cache)
         self.similarity_threshold = similarity_threshold
         self.client = client or get_client()
         self._abstract_index = AbstractSimilarityIndex()
@@ -51,7 +54,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             return
 
         try:
-            paper.references = self.client.get_reference_ids(paper.paper_id)
+            paper.references = self.client.get_reference_ids(
+                paper.paper_id,
+                force_refresh=self.refresh_reference_cache,
+            )
         except Exception as exc:
             logger.debug(
                 "Could not fetch reference IDs for recommendation %s: %s",

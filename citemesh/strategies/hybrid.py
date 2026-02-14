@@ -40,6 +40,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_citations: int = 15,
         max_references: int = 15,
         fetch_references: bool = True,
+        refresh_reference_cache: bool = False,
         max_semantic: Optional[int] = None,
         model_name: str = "google/embeddinggemma-300m",
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
@@ -63,6 +64,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int max_citations: Maximum citing papers from S2
         :param int max_references: Maximum referenced papers from S2
         :param bool fetch_references: Whether citation branch fetches reference lists.
+        :param bool refresh_reference_cache: Whether citation/reference lookups bypass persisted cache reads.
         :param Optional[int] max_semantic: Maximum non-seed semantic papers added during
             enrichment. This reserves capacity from the citation branch
             (``citation_budget = max_papers - max_semantic``), so values must satisfy
@@ -132,6 +134,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             max_citations=max_citations,
             max_references=max_references,
             fetch_references=fetch_references,
+            refresh_reference_cache=refresh_reference_cache,
             random_seed=random_seed,
             client=self.client,
         )

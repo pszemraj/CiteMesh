@@ -365,7 +365,7 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reference cache should support hit, corrupt-rebuild, and type-error fallback."""
+    """Reference cache should support hit, refresh, corrupt-rebuild, and type-error fallback."""
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
@@ -386,6 +386,18 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     )
     assert client.get_reference_ids("arxiv:1234.5678") == ["r1", "r2"]
 
+    client.client.get_paper_references = MagicMock(
+        return_value=[
+            _make_reference_record("fresh-1"),
+            _make_reference_record("fresh-2"),
+        ]
+    )
+    assert client.get_reference_ids("arxiv:1234.5678", force_refresh=True) == [
+        "fresh-1",
+        "fresh-2",
+    ]
+    assert json.loads(cache_path.read_text())["references"] == ["fresh-1", "fresh-2"]
+
     normalized_seed = s2.normalize_paper_id("seed")
     seed_cache_path = s2._reference_cache_path(normalized_seed)
     seed_cache_path.write_text("{bad-json")
@@ -398,6 +410,22 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
 
     client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
     assert client.get_reference_ids("seed-type-error") == []
+
+
+def test_reference_cache_path_uses_runtime_cache_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reference cache paths should resolve cache root at call time."""
+    cache_root = tmp_path / "runtime-root"
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", None)
+
+    normalized = s2.normalize_paper_id("arxiv:1234.5678")
+    path = s2._reference_cache_path(normalized)
+
+    assert path.parent == cache_root / "references"
+    assert path.parent.exists()
 
 
 def test_atomic_reference_cache_write_preserves_existing_file_on_replace_error(
