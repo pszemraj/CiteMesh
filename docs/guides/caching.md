@@ -6,7 +6,7 @@ CiteMesh uses persistent caches to avoid recomputing expensive datasets and embe
 
 This is the canonical cache behavior specification.
 
-- Normative here: cache root resolution, directory layout, cache migration/backup behavior, and cleanup guidance.
+- Normative here: cache root resolution, directory layout, quantized embedding cache behavior, and cleanup guidance.
 - Non-normative here: broader CLI command semantics. See [CLI Usage](cli.md) for command contracts.
 
 ## Cache Root
@@ -28,8 +28,8 @@ export CITEMESH_CACHE_DIR=/path/to/custom/cache
 ```text
 citemesh cache root
 ├── embeddings/
-│   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, hashes, dims, row_idx)
-│   ├── embeddings_<model-hash>.h5 # HDF5 matrix dataset: embeddings[row_idx] -> vector
+│   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, text hashes, row_idx, authors/categories JSON, hydration state)
+│   ├── embeddings_<model-hash>.h5 # Quantized HDF5 matrix datasets (int8/f16/f32 + optional binary index + calibration ranges)
 │   └── cache_<model-hash>.lock    # Inter-process lock for cache mutation
 ├── joblib/
 │   └── ...                        # Normalized corpus payloads cached via joblib
@@ -37,22 +37,36 @@ citemesh cache root
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
-Model hashes are the first 12 characters of `sha256(model_name)` so cache artifacts remain isolated per model.
+Model hashes are the first 12 characters of `sha256(model_name)`. For embedding strategy caches, the namespace string includes model + truncate dim + storage precision + binary prefilter mode + source dtype hint, so incompatible precision modes are isolated by design.
 
 ## Embedding Cache Behavior
 
-`EmbeddingCache` stores each paper embedding once per model. Vectors are kept in a single resizable HDF5 matrix, while SQLite tracks metadata and `row_idx` mappings.
+`EmbeddingCache` stores each paper embedding once per namespace. Vectors are kept in a resizable HDF5 matrix, while SQLite tracks metadata and `row_idx` mappings.
+
+Default storage mode is quantized:
+
+- `embeddings`: `int8` matrix (`N x dim`)
+- `calibration_ranges`: float32 per-dimension min/max (`2 x dim`)
+- `binary_index`: packed `uint8` matrix (`N x ceil(dim/8)`) used for Hamming prefiltering
+
+Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
+
+SQLite stores metadata authority fields used for warm-cache retrieval:
+
+- `title`, `abstract`, `year`
+- `authors_json`, `categories_json`
+- hydration metadata keys (`dataset source`, `split`, `corpus cap`, completion flag)
 
 A vector is recomputed when:
 
 - The paper is missing from cache, or
 - The composed text (`title + abstract`) hash changed.
 
-Legacy per-paper HDF5 layouts are moved to timestamped `.bak...` files during migration. `clear()` also preserves prior cache bytes by backing up existing files (`.bak.<state>.<timestamp>`).
-
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
 
-Embedding/hybrid workflows can trigger a model-specific rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
+Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
+
+When hydration metadata matches the requested split/corpus cap, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 
 ## Joblib Dataset Cache
 
@@ -82,7 +96,7 @@ citemesh cache clear --yes
 
 Omit `--yes` for interactive confirmation.
 
-To remove artifacts for one model, delete matching `.db` and `.h5` files in `embeddings/`.
+To remove artifacts for one namespace, delete matching `.db` and `.h5` files in `embeddings/`.
 
 Manual full reset examples:
 

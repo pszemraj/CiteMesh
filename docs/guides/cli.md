@@ -61,8 +61,9 @@ When `--export all` is used, CiteMesh writes every supported format using consis
 
 Numeric validation:
 
-- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, and `search --limit` must be at least `1`.
+- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, and `search --limit` must be at least `1`.
 - `--max-citations` and `--max-references` must be at least `0`.
+- `--cache-compression-level` must be at least `0`.
 - `--max-semantic` must satisfy `0 <= max-semantic <= max-papers - 1` (hybrid strategy).
 - `--similarity-threshold` must be a finite float between `0.0` and `1.0`.
 
@@ -72,7 +73,7 @@ Numeric validation:
 
 - `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (default `0.2`).
 - `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
-- `embedding` and the embedding branch of `hybrid` use embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`).
+- `embedding` and the embedding branch of `hybrid` use embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`, storage/cache flags below).
 
 ### Recommendation Strategy
 
@@ -96,11 +97,17 @@ Numeric validation:
 - `--truncate-dim`: optional embedding output-dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running
+- `--storage-precision {int8,float16,float32}`: persistent embedding-cache precision (default `int8`)
+- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled)
+- `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`)
+- `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
+- `--cache-compression`: HDF5 compression filter for cache datasets (default `gzip`)
+- `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
 
 ### Hybrid Strategy
 
 - Inherits citation flags for collection, including `--no-references`.
-- Reuses embedding corpus/model controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`).
+- Reuses embedding corpus/model/cache controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
 - `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
   Hybrid reserves this capacity from citation collection (`citation_budget = max_papers - max_semantic`), so valid values are `0` through `max-papers - 1`.
   If omitted, hybrid defaults to `min(10, max-papers - 1)`.
@@ -154,7 +161,7 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 ## Troubleshooting
 
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
-- **Slow first embedding run**: initial run downloads data and computes embeddings; later runs reuse caches.
+- **Slow first embedding run**: first run hydrates/cache-builds the selected corpus spec; warm runs query directly from cache metadata + quantized vectors.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
 - **API limits**: set `S2_API_KEY` for higher Semantic Scholar limits.
 

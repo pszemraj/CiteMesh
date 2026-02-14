@@ -26,6 +26,11 @@ This changelog summarizes notable changes from early script-based prototypes to 
 ## Persistent Caching
 
 - Introduced `EmbeddingCache` with SQLite metadata + HDF5 matrix storage.
+- Switched embedding cache defaults to quantized storage (`int8` + calibration ranges) with optional binary prefilter index for large-corpus retrieval.
+- Added cache-native search API with binary Hamming prefilter + float query rescoring.
+- Persisted authors/categories metadata in cache so warm-cache retrieval can skip corpus reloads.
+- Added hydration metadata gating so matching split/corpus-cap runs query directly from cache.
+- Added precision-aware cache namespaces (`storage precision`, `binary mode`, `source dtype`) to isolate incompatible cache layouts.
 - Moved joblib caches under a user-scoped cache root.
 - Added `CITEMESH_CACHE_DIR` override for custom deployments.
 - Added streaming mode for embedding corpus ingestion as an explicit opt-in.
@@ -45,6 +50,7 @@ This changelog summarizes notable changes from early script-based prototypes to 
 
 - Added `--export all` for multi-format runs.
 - Improved parser validation and test coverage around CLI ergonomics.
+- Added embedding/hybrid cache controls: `--storage-precision`, binary prefilter toggles, binary rescore multiplier, calibration sample size, and cache compression knobs.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
 - Preserved dotted custom output basenames across multi-export workflows.
