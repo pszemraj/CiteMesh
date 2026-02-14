@@ -948,6 +948,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return None: Mutates cache state in-place when hydration is required.
         """
         cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
+        if self.embedding_cache.is_hydrated(
+            self.dataset_split,
+            self.corpus_size,
+            dataset_source=cached_dataset_source,
+        ):
+            logger.debug(
+                "Embedding cache already hydrated for split=%s corpus_size=%s source=%s; "
+                "skipping dataset load.",
+                self.dataset_split,
+                "all" if self.corpus_size is None else self.corpus_size,
+                cached_dataset_source or "unknown",
+            )
+            return
 
         dataset_source: Optional[str]
         dataset: Iterable[Dict[str, Any]]

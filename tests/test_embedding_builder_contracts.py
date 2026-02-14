@@ -406,6 +406,9 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
         max_papers=2, use_streaming=False, random_seed=0, client=MagicMock()
     )
     builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(
+        return_value="librarian-bots/arxiv-metadata-snapshot"
+    )
     builder.embedding_cache.search = MagicMock(
         return_value=[
             CacheSearchResult(
@@ -448,11 +451,7 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
         np.asarray([1.0, 0.0], dtype=np.float32)
     )
     assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
-    fake_load_dataset_for_hydration.assert_called_once()
-    assert fake_load_dataset_for_hydration.call_args is not None
-    _, kwargs = fake_load_dataset_for_hydration.call_args
-    assert kwargs["use_streaming"] is False
-    assert "preferred_dataset_source" in kwargs
+    fake_load_dataset_for_hydration.assert_not_called()
 
 
 def test_collect_papers_revalidates_cache_when_dataset_source_changes(
