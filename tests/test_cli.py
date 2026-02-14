@@ -226,6 +226,122 @@ def test_cli_argument_validation_contracts() -> None:
         assert expected_error in result.stderr
 
 
+def test_cli_rejects_strategy_incompatible_options() -> None:
+    """Build should reject options that are unsupported for the selected strategy."""
+    cases = [
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "--model",
+                "all-MiniLM-L6-v2",
+            ],
+            "--model",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--max-citations",
+                "10",
+            ],
+            "--max-citations",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--top-k",
+                "4",
+            ],
+            "--top-k",
+        ),
+    ]
+    for args, token in cases:
+        result = run_cli_command(args)
+        assert result.returncode != 0
+        assert "Unsupported option(s)" in result.stderr
+        assert token in result.stderr
+
+
+def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
+    """Build should fail fast for invalid embedding/hybrid option combinations."""
+    cases = [
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--streaming",
+                "--dataset-split",
+                "train[:5%]",
+            ],
+            "Streaming mode does not support sliced --dataset-split",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--max-papers",
+                "5",
+                "--max-semantic",
+                "5",
+            ],
+            "--max-semantic must be between 0 and --max-papers - 1",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "float32",
+                "--binary-prefilter",
+            ],
+            "--binary-prefilter requires --storage-precision int8",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "float32",
+                "--binary-rescore-multiplier",
+                "5",
+            ],
+            "--binary-rescore-multiplier requires --storage-precision int8",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--all-corpus",
+                "--corpus-size",
+                "200",
+            ],
+            "--all-corpus cannot be combined with explicit --corpus-size",
+        ),
+    ]
+    for args, token in cases:
+        result = run_cli_command(args)
+        assert result.returncode != 0
+        assert token in result.stderr
+
+
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build path should share seeded layout and skip it for JSON-only export."""
     graph = nx.Graph()
@@ -318,6 +434,51 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["layout"] is None
 
 
+def test_build_metadata_includes_score_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Export metadata should declare score comparability and hybrid adjudication policy."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module, "_build_strategy_graph", lambda args, strategy: (graph, "seed")
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    score_contract = metadata["score_contract"]
+    assert isinstance(score_contract, dict)
+    assert score_contract["strategy"] == "hybrid"
+    assert score_contract["comparable_across_strategies"] is False
+    assert "adjudication_policy" in score_contract
+
+
 def test_metadata_timestamp_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
     """Metadata timestamp should be opt-in only."""
     for include_timestamp, expected_key in [(False, False), (True, True)]:
@@ -366,7 +527,7 @@ def test_metadata_timestamp_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_embedding_export_metadata_uses_effective_precision_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Embedding export metadata should expose effective runtime precision knobs."""
+    """Embedding metadata should normalize non-int8 defaults to effective values."""
     graph = nx.Graph()
     graph.add_node(
         "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
@@ -394,9 +555,6 @@ def test_embedding_export_metadata_uses_effective_precision_values(
                 "embedding",
                 "--storage-precision",
                 "float32",
-                "--binary-prefilter",
-                "--binary-rescore-multiplier",
-                "9",
                 "--export",
                 "json",
                 "-o",
@@ -414,6 +572,48 @@ def test_embedding_export_metadata_uses_effective_precision_values(
         "binary_prefilter_enabled": False,
         "binary_rescore_multiplier": 1,
     }
+
+
+def test_embedding_build_logs_side_effect_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding build should emit explicit side-effect contract logs."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    info_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    monkeypatch.setattr(
+        cli_module, "_build_strategy_graph", lambda args, strategy: (graph, "seed")
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory({}, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    messages = [str(call.args[0]) for call in info_mock.call_args_list if call.args]
+    assert any("Embedding workflow contract" in msg for msg in messages)
+    assert any("Embedding run config" in msg for msg in messages)
 
 
 def test_strategy_dispatches_to_matching_builder_kwargs(

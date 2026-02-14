@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Protocol
+from typing import Callable, Dict, List, Protocol, Set
 
 import networkx as nx
 from rich.console import Console
@@ -145,6 +145,62 @@ class _StrategyBuilderProtocol(Protocol):
 
 StrategyFactory = Callable[[argparse.Namespace], _StrategyBuilderProtocol]
 
+# Strategy-scoped build options and CLI-token aliases for strict post-parse validation.
+_BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
+    "max_citations": {"citation", "hybrid"},
+    "max_references": {"citation", "hybrid"},
+    "similarity_threshold": {"citation", "recommendation"},
+    "no_references": {"citation", "recommendation", "hybrid"},
+    "refresh_reference_cache": {"citation", "recommendation", "hybrid"},
+    "model": {"embedding", "hybrid"},
+    "model_revision": {"embedding", "hybrid"},
+    "dataset_split": {"embedding", "hybrid"},
+    "corpus_size": {"embedding", "hybrid"},
+    "all_corpus": {"embedding", "hybrid"},
+    "top_k": {"embedding"},
+    "truncate_dim": {"embedding", "hybrid"},
+    "streaming": {"embedding", "hybrid"},
+    "force_rebuild_cache": {"embedding", "hybrid"},
+    "storage_precision": {"embedding", "hybrid"},
+    "binary_prefilter": {"embedding", "hybrid"},
+    "binary_rescore_multiplier": {"embedding", "hybrid"},
+    "calibration_sample_size": {"embedding", "hybrid"},
+    "cache_compression": {"embedding", "hybrid"},
+    "cache_compression_level": {"embedding", "hybrid"},
+    "torch_compile": {"embedding", "hybrid"},
+    "max_semantic": {"hybrid"},
+}
+_BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
+    "max_citations": ["--max-citations", "-c"],
+    "max_references": ["--max-references", "-r"],
+    "similarity_threshold": ["--similarity-threshold", "-t"],
+    "no_references": ["--no-references"],
+    "refresh_reference_cache": ["--refresh-reference-cache"],
+    "model": ["--model", "-m"],
+    "model_revision": ["--model-revision"],
+    "dataset_split": ["--dataset-split"],
+    "corpus_size": ["--corpus-size"],
+    "all_corpus": ["--all-corpus"],
+    "top_k": ["--top-k", "-k"],
+    "truncate_dim": ["--truncate-dim"],
+    "streaming": ["--streaming"],
+    "force_rebuild_cache": ["--force-rebuild-cache"],
+    "storage_precision": ["--storage-precision"],
+    "binary_prefilter": ["--binary-prefilter", "--no-binary-prefilter"],
+    "binary_rescore_multiplier": ["--binary-rescore-multiplier"],
+    "calibration_sample_size": ["--calibration-sample-size"],
+    "cache_compression": ["--cache-compression"],
+    "cache_compression_level": ["--cache-compression-level"],
+    "torch_compile": ["--torch-compile", "--no-torch-compile"],
+    "max_semantic": ["--max-semantic"],
+}
+_BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
+    dest: flags[0] for dest, flags in _BUILD_OPTION_FLAGS.items()
+}
+_BUILD_OPTION_DEST_BY_FLAG: Dict[str, str] = {
+    flag: dest for dest, flags in _BUILD_OPTION_FLAGS.items() for flag in flags
+}
+
 
 @dataclass(frozen=True)
 class _StrategyDispatchSpec:
@@ -192,6 +248,158 @@ def _embedding_export_metadata(cli_args: argparse.Namespace) -> Dict[str, object
             int(cli_args.binary_rescore_multiplier) if int8_mode else 1
         ),
     }
+
+
+def _strategy_score_contract(strategy: str) -> Dict[str, object]:
+    """Return strategy-specific score semantics metadata for export payloads.
+
+    :param str strategy: Active build strategy.
+    :return Dict[str, object]: Score semantics metadata.
+    """
+    base_contract = {
+        "strategy": strategy,
+        "comparable_across_strategies": False,
+        "range_hint": "[0,1] strategy-specific composite score",
+    }
+    if strategy == "citation":
+        return {
+            **base_contract,
+            "score_type": "citation_similarity_composite",
+        }
+    if strategy == "recommendation":
+        return {
+            **base_contract,
+            "score_type": "recommendation_similarity_composite",
+        }
+    if strategy == "embedding":
+        return {
+            **base_contract,
+            "score_type": "embedding_similarity_composite",
+        }
+    if strategy == "hybrid":
+        return {
+            **base_contract,
+            "score_type": "hybrid_similarity_composite",
+            "adjudication_policy": (
+                "citation-first union; semantic additions include only new papers "
+                "up to max_semantic."
+            ),
+        }
+    return {
+        **base_contract,
+        "score_type": "unknown",
+    }
+
+
+def _collect_provided_build_option_dests(argv: List[str]) -> Set[str]:
+    """Return build-option destinations explicitly present in CLI argv.
+
+    :param List[str] argv: Raw argv list without executable name.
+    :return Set[str]: Explicitly provided build option destinations.
+    """
+    if not argv or argv[0] != "build":
+        return set()
+
+    provided: Set[str] = set()
+    for token in argv[1:]:
+        if not token.startswith("-"):
+            continue
+        option_token = token.split("=", 1)[0]
+        dest = _BUILD_OPTION_DEST_BY_FLAG.get(option_token)
+        if dest is not None:
+            provided.add(dest)
+    return provided
+
+
+def _validate_build_cli_contract(
+    args: argparse.Namespace, build_parser: argparse.ArgumentParser, provided: Set[str]
+) -> None:
+    """Validate strategy-scoped and dependent build options before execution.
+
+    :param argparse.Namespace args: Parsed build arguments.
+    :param argparse.ArgumentParser build_parser: Build subcommand parser.
+    :param Set[str] provided: Explicit option destinations found in argv.
+    :return None: Mutates normalized args for effective no-op elimination.
+    """
+    strategy = str(args.strategy)
+    unsupported: List[str] = []
+    for dest in sorted(provided):
+        allowed = _BUILD_STRATEGY_OPTION_SUPPORT.get(dest)
+        if allowed is None:
+            continue
+        if strategy not in allowed:
+            unsupported.append(_BUILD_OPTION_PRIMARY_FLAG[dest])
+    if unsupported:
+        unsupported_text = ", ".join(unsupported)
+        build_parser.error(
+            f"Unsupported option(s) for --strategy {strategy}: {unsupported_text}. "
+            "Use --help to view strategy-scoped option applicability."
+        )
+
+    if strategy in {"embedding", "hybrid"}:
+        if args.streaming and ":" in str(args.dataset_split):
+            build_parser.error(
+                "Streaming mode does not support sliced --dataset-split values "
+                "(for example train[:5%]). Use unsliced split (e.g. train) or "
+                "disable --streaming."
+            )
+        if args.all_corpus and "corpus_size" in provided:
+            build_parser.error(
+                "--all-corpus cannot be combined with explicit --corpus-size."
+            )
+        if str(args.storage_precision) != "int8":
+            if "binary_prefilter" in provided and bool(args.binary_prefilter):
+                build_parser.error(
+                    "--binary-prefilter requires --storage-precision int8."
+                )
+            if "binary_rescore_multiplier" in provided:
+                build_parser.error(
+                    "--binary-rescore-multiplier requires --storage-precision int8."
+                )
+            # Normalize implicit non-int8 defaults to effective values to avoid
+            # strategy-level runtime warnings about ignored options.
+            args.binary_prefilter = False
+            args.binary_rescore_multiplier = 1
+
+    if strategy == "hybrid":
+        if args.max_semantic is not None and int(args.max_semantic) >= int(
+            args.max_papers
+        ):
+            build_parser.error(
+                "--max-semantic must be between 0 and --max-papers - 1 for hybrid."
+            )
+
+
+def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
+    """Log build side-effect contract summary for transparency before execution.
+
+    :param argparse.Namespace args: Parsed build arguments.
+    :return None: Emits info-level contract summary logs.
+    """
+    if args.strategy not in {"embedding", "hybrid"}:
+        return
+
+    corpus_label = "all" if args.all_corpus else str(args.corpus_size)
+    cache_root = get_cache_dir("embeddings")
+    logger.info(
+        "Embedding workflow contract: may download model/dataset artifacts and mutate "
+        "cache namespace at %s.",
+        cache_root,
+    )
+    logger.info(
+        "Embedding run config: model=%s revision=%s split=%s corpus=%s streaming=%s "
+        "precision=%s.",
+        args.model,
+        args.model_revision or "default",
+        args.dataset_split,
+        corpus_label,
+        bool(args.streaming),
+        args.storage_precision,
+    )
+    if args.force_rebuild_cache:
+        logger.warning(
+            "--force-rebuild-cache enabled; existing embedding namespace payload will be cleared."
+        )
 
 
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
@@ -822,13 +1030,16 @@ Examples:
     )
 
     args = parser.parse_args()
+    provided_build_options = _collect_provided_build_option_dests(sys.argv[1:])
 
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
     if args.command == "build":
+        _validate_build_cli_contract(args, build_parser, provided_build_options)
         try:
+            _log_build_side_effect_contract(args)
             # Build graph based on strategy
             logger.info(f"Building graph using {args.strategy} strategy...")
             graph, seed_id = _build_strategy_graph(args, args.strategy)
@@ -863,6 +1074,7 @@ Examples:
                 "nodes": graph.number_of_nodes(),
                 "edges": graph.number_of_edges(),
                 "theme": args.theme,
+                "score_contract": _strategy_score_contract(args.strategy),
             }
             if args.strategy in {"embedding", "hybrid"}:
                 metadata["embedding"] = _embedding_export_metadata(args)

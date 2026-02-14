@@ -94,6 +94,10 @@ Numeric validation:
 
 Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.md). Flag contracts live here.
 
+Build command options are strategy-scoped. If you pass a flag that is not supported
+for the selected `--strategy`, CiteMesh exits with a CLI error instead of silently
+ignoring it.
+
 ### Cross-Strategy Scope
 
 - `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (default `0.2`).
@@ -126,8 +130,8 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running
 - `--storage-precision {int8,float16,float32}`: persistent embedding-cache precision (default `int8`)
-- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). This is only effective for `--storage-precision int8`; non-int8 runs emit a warning and disable it.
-- `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). This is only effective for `--storage-precision int8`; non-int8 runs emit a warning and normalize to effective value `1`.
+- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). Explicit `--binary-prefilter` requires `--storage-precision int8`.
+- `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
@@ -136,6 +140,11 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 Runtime precision policy:
 
 - TF32 kernels are auto-enabled on supported Ampere+ CUDA runtimes for embedding inference. This behavior is intentional and currently does not expose a CLI toggle.
+
+Execution transparency:
+
+- Before embedding/hybrid execution, CLI logs a preflight contract describing expected side effects (model/dataset artifact download risk and embedding-cache mutation scope).
+- With non-int8 precision, implicit binary-prefilter defaults are normalized to effective runtime values (`binary_prefilter=false`, `binary_rescore_multiplier=1`) to avoid no-op ambiguity.
 
 ### Hybrid Strategy
 
@@ -153,7 +162,9 @@ Runtime precision policy:
 - `json`: structured graph data with nodes, edges, metadata
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
 
-For `embedding` and `hybrid` strategies, export metadata now includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, and effective binary-prefilter settings).
+For `embedding` and `hybrid` strategies, export metadata includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, and effective binary-prefilter settings).
+All strategies include a `score_contract` object in export metadata describing score semantics (`score_type`) and explicitly marking scores as non-comparable across strategies.
+Hybrid exports also include `score_contract.adjudication_policy` describing citation/semantic merge behavior.
 
 Determinism notes:
 
