@@ -7,6 +7,7 @@ providing a single interface to all graph building strategies.
 """
 
 import argparse
+import copy
 import logging
 import math
 import shutil
@@ -291,9 +292,12 @@ def _strategy_score_contract(strategy: str) -> Dict[str, object]:
     }
 
 
-def _collect_provided_build_option_dests(argv: List[str]) -> Set[str]:
+def _collect_provided_build_option_dests(
+    build_parser: argparse.ArgumentParser, argv: List[str]
+) -> Set[str]:
     """Return build-option destinations explicitly present in CLI argv.
 
+    :param argparse.ArgumentParser build_parser: Build-subcommand parser.
     :param List[str] argv: Raw argv list without executable name.
     :return Set[str]: Explicitly provided build option destinations.
     """
@@ -301,13 +305,30 @@ def _collect_provided_build_option_dests(argv: List[str]) -> Set[str]:
         return set()
 
     provided: Set[str] = set()
-    for token in argv[1:]:
-        if not token.startswith("-"):
+    if not build_parser:
+        return provided
+
+    probe_parser = copy.deepcopy(build_parser)
+    probe_default = object()
+    for action in probe_parser._actions:
+        if action.option_strings:
+            action.default = probe_default
+    probe_parser.set_defaults(**{key: probe_default for key in probe_parser._defaults})
+
+    try:
+        parsed, _ = probe_parser.parse_known_args(argv[1:])
+    except SystemExit:
+        return provided
+
+    for action in probe_parser._actions:
+        if (
+            not action.option_strings
+            or not hasattr(parsed, action.dest)
+            or getattr(parsed, action.dest) is probe_default
+        ):
             continue
-        option_token = token.split("=", 1)[0]
-        dest = _BUILD_OPTION_DEST_BY_FLAG.get(option_token)
-        if dest is not None:
-            provided.add(dest)
+        provided.add(action.dest)
+
     return provided
 
 
@@ -1030,7 +1051,9 @@ Examples:
     )
 
     args = parser.parse_args()
-    provided_build_options = _collect_provided_build_option_dests(sys.argv[1:])
+    provided_build_options = _collect_provided_build_option_dests(
+        build_parser, sys.argv[1:]
+    )
 
     if not args.command:
         parser.print_help()

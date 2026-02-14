@@ -245,11 +245,42 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
                 "build",
                 "arxiv:1706.03762",
                 "--strategy",
+                "citation",
+                "-mall-MiniLM-L6-v2",
+            ],
+            "--model",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
                 "recommendation",
                 "--max-citations",
                 "10",
             ],
             "--max-citations",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "-k4",
+            ],
+            "--top-k",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--max-s",
+                "4",
+            ],
+            "--max-semantic",
         ),
         (
             [
