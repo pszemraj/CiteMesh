@@ -1,4 +1,6 @@
-"""Tests for embedding cache hit/miss behavior."""
+"""Contract tests for embedding cache layout, reset, and retrieval behavior."""
+
+from __future__ import annotations
 
 import multiprocessing as mp
 import sqlite3
@@ -27,6 +29,7 @@ class _MockModel:
         :param kwargs: Extra arguments ignored by the mock.
         :return np.ndarray: Deterministic embeddings shaped ``(len(texts), 2)``.
         """
+        del kwargs
         self.encode_calls += 1
         np.random.seed(len(texts))
         return np.random.rand(len(texts), 2)
@@ -56,13 +59,7 @@ class _LookupModel:
 def _multiprocess_cache_worker(
     cache_dir: str, worker_idx: int, queue: mp.Queue
 ) -> None:
-    """Write embeddings in subprocess and report success/failure via queue.
-
-    :param str cache_dir: Cache directory shared by workers.
-    :param int worker_idx: Worker index used to create unique paper IDs.
-    :param mp.Queue queue: Multiprocessing queue receiving status tuples.
-    :return None: Worker reports status via queue.
-    """
+    """Write embeddings in subprocess and report success/failure via queue."""
     try:
         cache = EmbeddingCache(cache_dir=cache_dir, model_name="process-lock-test")
         model = _MockModel()
@@ -79,39 +76,30 @@ def _multiprocess_cache_worker(
         queue.put(("err", worker_idx, repr(exc)))
 
 
-def test_embedding_cache_returns_cached_vectors() -> None:
-    """Repeated lookup should avoid re-encoding unchanged records."""
+def test_embedding_cache_hit_miss_and_text_change() -> None:
+    """Cache should reuse unchanged rows and recompute when text changes."""
     model = _MockModel()
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
-        papers = {
+        papers_v1 = {
             "p1": {"title": "Paper One", "abstract": "Abstract one"},
             "p2": {"title": "Paper Two", "abstract": "Abstract two"},
         }
+        papers_v2 = {
+            "p1": {"title": "Updated", "abstract": "Abstract one"},
+            "p2": {"title": "Paper Two", "abstract": "Abstract two"},
+        }
 
-        first = cache.get_embeddings(papers, model)
-        second = cache.get_embeddings(papers, model)
+        first = cache.get_embeddings(papers_v1, model, show_progress=False)
+        second = cache.get_embeddings(papers_v1, model, show_progress=False)
+        _ = cache.get_embeddings(papers_v2, model, show_progress=False)
 
-    assert model.encode_calls == 1
+    assert model.encode_calls == 2
     assert first["p1"].shape == second["p1"].shape
 
 
-def test_embedding_cache_recomputes_on_text_change() -> None:
-    """Cache key changes when text changes."""
-    model = _MockModel()
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
-        papers_v1 = {"p1": {"title": "Original", "abstract": "Abstract"}}
-        papers_v2 = {"p1": {"title": "Updated", "abstract": "Abstract"}}
-
-        cache.get_embeddings(papers_v1, model)
-        cache.get_embeddings(papers_v2, model)
-
-    assert model.encode_calls == 2
-
-
-def test_embedding_cache_uses_matrix_dataset_layout() -> None:
-    """Embeddings are stored as int8 matrix + binary index + calibration ranges."""
+def test_embedding_cache_uses_quantized_matrix_layout() -> None:
+    """Embeddings should be stored as int8 + binary + calibration ranges."""
     model = _MockModel()
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
@@ -119,7 +107,7 @@ def test_embedding_cache_uses_matrix_dataset_layout() -> None:
             "p1": {"title": "Paper One", "abstract": "Abstract one"},
             "p2": {"title": "Paper Two", "abstract": "Abstract two"},
         }
-        cache.get_embeddings(papers, model)
+        cache.get_embeddings(papers, model, show_progress=False)
 
         with h5py.File(cache.h5_path, "r") as h5:
             assert set(h5.keys()) == {
@@ -143,20 +131,20 @@ def test_embedding_cache_uses_matrix_dataset_layout() -> None:
 
 
 def test_embedding_cache_reuses_row_for_text_updates() -> None:
-    """Text updates overwrite existing rows instead of appending duplicates."""
+    """Text updates should overwrite existing rows instead of appending duplicates."""
     model = _MockModel()
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
         papers_v1 = {"p1": {"title": "Original", "abstract": "Abstract"}}
         papers_v2 = {"p1": {"title": "Updated", "abstract": "Abstract"}}
 
-        cache.get_embeddings(papers_v1, model)
+        cache.get_embeddings(papers_v1, model, show_progress=False)
         with sqlite3.connect(cache.db_path) as conn:
             row_idx_before = conn.execute(
                 "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
             ).fetchone()[0]
 
-        cache.get_embeddings(papers_v2, model)
+        cache.get_embeddings(papers_v2, model, show_progress=False)
         with sqlite3.connect(cache.db_path) as conn:
             row_idx_after = conn.execute(
                 "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
@@ -166,37 +154,6 @@ def test_embedding_cache_reuses_row_for_text_updates() -> None:
             assert h5["embeddings"].shape[0] == 1
 
     assert row_idx_before == row_idx_after
-    assert model.encode_calls == 2
-
-
-def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
-    """Concurrent processes should serialize writes without HDF5 lock failures."""
-    queue: mp.Queue = mp.Queue()
-    processes = [
-        mp.Process(
-            target=_multiprocess_cache_worker,
-            args=(str(tmp_path), idx, queue),
-        )
-        for idx in range(4)
-    ]
-
-    for process in processes:
-        process.start()
-
-    for process in processes:
-        process.join(timeout=30)
-        if process.is_alive():
-            process.terminate()
-            process.join()
-
-    results = []
-    for _ in processes:
-        try:
-            results.append(queue.get(timeout=5))
-        except Empty:
-            results.append(("err", "missing", "worker did not report result"))
-    errors = [result for result in results if result[0] == "err"]
-    assert not errors, f"Concurrent cache writes failed: {errors}"
 
 
 def test_embedding_cache_search_returns_metadata_and_float_embeddings() -> None:
@@ -252,9 +209,7 @@ def test_embedding_cache_reuses_calibration_ranges_for_same_namespace() -> None:
             }
         )
         second_model = _LookupModel(
-            {
-                "Three. C": np.array([0.3, 0.7], dtype=np.float32),
-            }
+            {"Three. C": np.array([0.3, 0.7], dtype=np.float32)}
         )
 
         _ = cache.get_embeddings(
@@ -277,3 +232,76 @@ def test_embedding_cache_reuses_calibration_ranges_for_same_namespace() -> None:
             ranges_after = np.asarray(h5["calibration_ranges"], dtype=np.float32)
 
     np.testing.assert_allclose(ranges_before, ranges_after)
+
+
+def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
+    """Concurrent processes should serialize writes without HDF5 lock failures."""
+    queue: mp.Queue = mp.Queue()
+    processes = [
+        mp.Process(target=_multiprocess_cache_worker, args=(str(tmp_path), idx, queue))
+        for idx in range(4)
+    ]
+
+    for process in processes:
+        process.start()
+
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+    results = []
+    for _ in processes:
+        try:
+            results.append(queue.get(timeout=5))
+        except Empty:
+            results.append(("err", "missing", "worker did not report result"))
+
+    errors = [result for result in results if result[0] == "err"]
+    assert not errors, f"Concurrent cache writes failed: {errors}"
+
+
+def test_legacy_h5_layout_is_dropped_and_rebuilt(tmp_path: Path) -> None:
+    """Legacy cache files should be dropped and rebuilt under current schema."""
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
+    model = _MockModel()
+
+    cache.h5_path.unlink(missing_ok=True)
+    with h5py.File(cache.h5_path, "w") as h5:
+        h5.create_dataset("legacy_payload", data=np.array([1, 2, 3], dtype=np.float32))
+
+    with sqlite3.connect(cache.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO papers (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx)
+            VALUES ('seed', 'seed', '', NULL, 'hash', 3, 2)
+            """
+        )
+        conn.commit()
+
+    reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
+
+    with sqlite3.connect(reloaded.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
+
+    reloaded.get_embeddings(
+        {"seed": {"title": "Seed", "abstract": "x", "year": None}}, model
+    )
+    with h5py.File(reloaded.h5_path, "r") as h5:
+        assert "embeddings" in h5
+        assert h5["embeddings"].shape[0] == 1
+
+
+def test_clear_removes_cache_files_and_recreates_schema(tmp_path: Path) -> None:
+    """``clear()`` should remove namespace cache files and recreate DB schema."""
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="clear-recovery")
+    model = _MockModel()
+    cache.get_embeddings(
+        {"seed": {"title": "Seed", "abstract": "x", "year": 2020}}, model
+    )
+
+    cache.clear()
+
+    assert cache.db_path.exists()
+    assert not cache.h5_path.exists()

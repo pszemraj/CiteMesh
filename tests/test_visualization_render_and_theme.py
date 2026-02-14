@@ -1,4 +1,4 @@
-"""Determinism tests for layout perturbation behavior."""
+"""Determinism tests for rendering/layout and theme/model profile selection."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
+from citemesh.data.model_profiles import get_embedding_model_profile
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
     compute_layout,
@@ -21,22 +22,11 @@ from citemesh.visualization.themes import get_theme
 def test_compute_layout_perturbation_is_stable_across_node_order(
     monkeypatch: pytest.MonkeyPatch, layout_seed: int | None
 ) -> None:
-    """Node perturbations should map deterministically regardless of insertion order.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch layout internals.
-    :param int | None layout_seed: Seed propagated to perturbation RNG.
-    :return None: Asserts stable node-wise perturbations.
-    """
+    """Node perturbations should map deterministically regardless of insertion order."""
 
     def fake_kamada_kawai_layout(
         graph: nx.Graph, **kwargs: Any
     ) -> dict[Hashable, np.ndarray]:
-        """Return identical base positions while preserving input iteration order.
-
-        :param nx.Graph graph: Input graph passed by layout wrapper.
-        :param Any kwargs: Unused keyword args from NetworkX call site.
-        :return dict[Hashable, np.ndarray]: Zero-valued positions keyed by node.
-        """
         del kwargs
         return {node: np.array([0.0, 0.0], dtype=np.float64) for node in graph.nodes()}
 
@@ -86,22 +76,12 @@ def test_compute_layout_is_stable_for_real_kamada_kawai() -> None:
 def test_compute_layout_uses_distance_weights_for_kamada_kawai(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kamada-Kawai should receive inverted similarity distances.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch layout internals.
-    :return None: Asserts monotonic distance mapping and weight attribute usage.
-    """
+    """Kamada-Kawai should receive inverted similarity distances."""
     captured: dict[str, object] = {}
 
     def fake_kamada_kawai_layout(
         graph: nx.Graph, **kwargs: Any
     ) -> dict[Hashable, np.ndarray]:
-        """Capture KK distance payload and return fixed coordinates.
-
-        :param nx.Graph graph: Canonicalized graph passed to KK layout.
-        :param Any kwargs: Layout keyword arguments.
-        :return dict[Hashable, np.ndarray]: Deterministic node coordinates.
-        """
         captured["weight_attr"] = kwargs.get("weight")
         distances = {}
         for left, right, attrs in graph.edges(data=True):
@@ -127,32 +107,80 @@ def test_compute_layout_uses_distance_weights_for_kamada_kawai(
     assert distances[("high", "seed")] < distances[("low", "seed")]
 
 
-def test_compute_node_colors_uses_fixed_fallback_range_without_valid_years() -> None:
-    """All-missing-year graphs should use deterministic fallback bounds."""
-    graph = nx.Graph()
-    graph.add_node("seed", title="Seed", year=None, is_seed=True)
-    graph.add_node("neighbor", title="Neighbor", year=None, is_seed=False)
-
-    _, min_year, max_year = compute_node_colors(graph, "seed", get_theme("light"))
-    assert min_year == 2000
-    assert max_year == 2001
-
-
-def test_compute_node_sizes_are_stable_for_tied_citation_counts() -> None:
-    """Node-size tiers should not depend on graph insertion order under ties."""
+def test_compute_node_colors_and_sizes_are_stable_for_missing_years_and_ties() -> None:
+    """Color fallback bounds and size ties should be deterministic."""
     graph_1 = nx.Graph()
-    graph_1.add_node("b", title="B", citation_count=0, is_seed=False)
-    graph_1.add_node("a", title="A", citation_count=0, is_seed=False)
-    graph_1.add_node("seed", title="Seed", citation_count=0, is_seed=True)
+    graph_1.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
+    graph_1.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
+    graph_1.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
 
     graph_2 = nx.Graph()
-    graph_2.add_node("seed", title="Seed", citation_count=0, is_seed=True)
-    graph_2.add_node("a", title="A", citation_count=0, is_seed=False)
-    graph_2.add_node("b", title="B", citation_count=0, is_seed=False)
+    graph_2.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
+    graph_2.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
+    graph_2.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
+
+    _, min_year, max_year = compute_node_colors(graph_1, "seed", get_theme("light"))
+    assert min_year == 2000
+    assert max_year == 2001
 
     ordered_nodes = sorted(graph_1.nodes(), key=str)
     size_map_1 = dict(zip(ordered_nodes, compute_node_sizes(graph_1)))
     size_map_2 = dict(zip(ordered_nodes, compute_node_sizes(graph_2)))
-
     assert size_map_1 == size_map_2
     assert size_map_1["a"] >= size_map_1["b"]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_theme"),
+    [
+        ({"COLORFGBG": "15;0", "DARKMODE": None, "TERM_PROGRAM": None}, "dark"),
+        ({"COLORFGBG": "0;15", "DARKMODE": None, "TERM_PROGRAM": None}, "light"),
+        ({"COLORFGBG": None, "DARKMODE": "1", "TERM_PROGRAM": None}, "dark"),
+    ],
+)
+def test_get_theme_auto_detection(
+    monkeypatch: pytest.MonkeyPatch,
+    env: dict[str, str | None],
+    expected_theme: str,
+) -> None:
+    """Auto theme detection should prioritize COLORFGBG then DARKMODE."""
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    assert get_theme("auto").name == expected_theme
+
+
+def test_get_theme_unknown_defaults_to_light() -> None:
+    """Unknown theme keys should default to light palette."""
+    assert get_theme("not-a-theme").name == "light"
+
+
+def test_model_profiles_match_expected_formatters() -> None:
+    """Gemma and default profiles should expose expected formatting behavior."""
+    gemma = get_embedding_model_profile("google/embeddinggemma-300m")
+    assert gemma.name == "google/embeddinggemma"
+    assert gemma.float16_supported is False
+    assert gemma.preferred_torch_dtype == "bfloat16"
+    assert gemma.use_cuda_autocast is True
+    assert gemma.compile_inner_transformer is True
+    assert gemma.available_truncate_dims == (768, 512, 256, 128)
+    assert gemma.recommended_truncate_dim == 256
+    assert gemma.format_query("  attention  ").startswith(
+        "task: search result | query:"
+    )
+    assert (
+        gemma.format_document({"title": " Title ", "abstract": " Abstract "})
+        == "title: Title | text: Abstract"
+    )
+
+    default = get_embedding_model_profile("all-MiniLM-L6-v2")
+    assert default.name == "default"
+    assert default.preferred_torch_dtype is None
+    assert default.use_cuda_autocast is False
+    assert default.compile_inner_transformer is False
+    assert default.available_truncate_dims is None
+    assert default.recommended_truncate_dim is None
+    assert default.format_query("plain") == "plain"
+    assert default.format_document({"title": "T", "abstract": ""}) == "T"

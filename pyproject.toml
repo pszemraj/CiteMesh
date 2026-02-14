@@ -93,7 +93,10 @@ local_scheme = "dirty-tag"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --tb=short -m \"not slow\""
-markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests that exercise integrated command/service flows",
+]
 
 [tool.ruff]
 line-length = 88
