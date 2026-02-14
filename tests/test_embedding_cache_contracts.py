@@ -85,6 +85,9 @@ def test_embedding_cache_lifecycle_contract() -> None:
             row_idx_after_update = conn.execute(
                 "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
             ).fetchone()[0]
+            p2_metadata_after_refresh = conn.execute(
+                "SELECT year FROM papers WHERE paper_id = 'p2'"
+            ).fetchone()[0]
 
         with h5py.File(cache.h5_path, "r") as h5:
             assert set(h5.keys()) == {
@@ -99,10 +102,11 @@ def test_embedding_cache_lifecycle_contract() -> None:
             assert h5["calibration_ranges"].shape == (2, 2)
             assert h5["calibration_ranges"].dtype == np.float32
 
-    assert model.encode_calls == 3
+    assert model.encode_calls == 2
     assert first["p1"].shape == second["p1"].shape
     assert rows == [("p1", 0), ("p2", 1)]
     assert row_idx_after_update == 0
+    assert p2_metadata_after_refresh == 2024
 
 
 def test_embedding_cache_search_and_calibration_reuse_contract() -> None:

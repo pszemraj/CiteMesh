@@ -279,20 +279,26 @@ class EmbeddingCache:
                 else 0
             )
 
+            metadata_updates_on_hit: List[Tuple[Any, ...]] = []
+
             for paper_id, metadata in iterator:
                 text = builder(metadata)
                 text_hash = self._metadata_hash(metadata, text)
                 existing_row = existing_rows.get(paper_id)
-                row_idx = existing_row[1] if existing_row is not None else None
+                row_idx = existing_row["row_idx"] if existing_row is not None else None
 
                 if (
                     existing_row is not None
-                    and existing_row[0] == text_hash
+                    and existing_row["text_hash"] == text_hash
                     and row_idx is not None
                     and embeddings_dataset is not None
                     and 0 <= row_idx < cached_limit
                 ):
                     cached_rows.append((paper_id, row_idx))
+                    if self._metadata_fields_changed(existing_row, metadata):
+                        metadata_updates_on_hit.append(
+                            self._metadata_refresh_tuple(paper_id, metadata)
+                        )
                 else:
                     papers_to_embed.append(
                         (paper_id, metadata, text_hash, text, row_idx)
@@ -307,8 +313,19 @@ class EmbeddingCache:
                     embeddings_dataset,
                     cached_rows,
                 )
+            if metadata_updates_on_hit:
+                cursor.executemany(
+                    """
+                    UPDATE papers
+                    SET title = ?, abstract = ?, year = ?, authors_json = ?, categories_json = ?
+                    WHERE paper_id = ?
+                    """,
+                    metadata_updates_on_hit,
+                )
 
             if not papers_to_embed:
+                if metadata_updates_on_hit:
+                    conn.commit()
                 return cached_embeddings
 
             texts = [text for _, _, _, text, _ in papers_to_embed]
@@ -1212,6 +1229,32 @@ class EmbeddingCache:
         :param int row_idx: Row index inside matrix dataset.
         :return Tuple[Any, ...]: SQLite upsert tuple matching ``papers`` columns.
         """
+        title, abstract, year, authors_json, categories_json = (
+            EmbeddingCache._normalized_metadata_fields(metadata)
+        )
+
+        return (
+            paper_id,
+            title,
+            abstract,
+            year,
+            text_hash,
+            embedding_dim,
+            row_idx,
+            authors_json,
+            categories_json,
+        )
+
+    @staticmethod
+    def _normalized_metadata_fields(
+        metadata: Dict[str, object],
+    ) -> Tuple[str, str, Optional[int], str, str]:
+        """Normalize metadata fields to stable cache representations.
+
+        :param Dict[str, object] metadata: Paper metadata payload.
+        :return Tuple[str, str, Optional[int], str, str]: Normalized title, abstract, year,
+            authors JSON, and categories JSON fields.
+        """
         title = str(metadata.get("title", "") or "")
         abstract = str(metadata.get("abstract", "") or "")
         year_raw = metadata.get("year")
@@ -1222,17 +1265,48 @@ class EmbeddingCache:
             except (TypeError, ValueError):
                 year = None
 
-        return (
-            paper_id,
-            title,
-            abstract,
-            year,
-            text_hash,
-            embedding_dim,
-            row_idx,
-            _safe_json_list(metadata.get("authors", [])),
-            _safe_json_list(metadata.get("categories", [])),
+        authors_json = _safe_json_list(metadata.get("authors", []))
+        categories_json = _safe_json_list(metadata.get("categories", []))
+        return title, abstract, year, authors_json, categories_json
+
+    @staticmethod
+    def _metadata_fields_changed(
+        existing_row: Dict[str, Any], metadata: Dict[str, object]
+    ) -> bool:
+        """Return whether cached non-vector metadata differs from incoming payload.
+
+        :param Dict[str, Any] existing_row: Existing cached metadata row.
+        :param Dict[str, object] metadata: Incoming metadata payload.
+        :return bool: ``True`` when a metadata-only refresh is required.
+        """
+        current = (
+            str(existing_row.get("title", "") or ""),
+            str(existing_row.get("abstract", "") or ""),
+            (
+                int(existing_row["year"])
+                if existing_row.get("year") is not None
+                else None
+            ),
+            _safe_json_list(_parse_json_list(existing_row.get("authors_json"))),
+            _safe_json_list(_parse_json_list(existing_row.get("categories_json"))),
         )
+        expected = EmbeddingCache._normalized_metadata_fields(metadata)
+        return current != expected
+
+    @staticmethod
+    def _metadata_refresh_tuple(
+        paper_id: str, metadata: Dict[str, object]
+    ) -> Tuple[Any, ...]:
+        """Build SQL update tuple for metadata-only refresh paths.
+
+        :param str paper_id: Paper identifier.
+        :param Dict[str, object] metadata: Incoming metadata payload.
+        :return Tuple[Any, ...]: Tuple for metadata UPDATE query.
+        """
+        title, abstract, year, authors_json, categories_json = (
+            EmbeddingCache._normalized_metadata_fields(metadata)
+        )
+        return (title, abstract, year, authors_json, categories_json, paper_id)
 
     def _set_h5_attrs(self, h5_file: h5py.File) -> None:
         """Write schema/layout metadata attrs to an open HDF5 file.
@@ -1252,27 +1326,44 @@ class EmbeddingCache:
         self,
         conn: sqlite3.Connection,
         paper_ids: Sequence[str],
-    ) -> Dict[str, Tuple[str, Optional[int]]]:
+    ) -> Dict[str, Dict[str, Any]]:
         """Fetch existing metadata rows for target paper IDs.
 
         :param sqlite3.Connection conn: Open SQLite connection.
         :param Sequence[str] paper_ids: Paper IDs to look up.
-        :return Dict[str, Tuple[str, Optional[int]]]: Mapping of paper ID to (text_hash, row_idx).
+        :return Dict[str, Dict[str, Any]]: Mapping of paper ID to cached metadata payload.
         """
         if not paper_ids:
             return {}
 
-        existing_rows: Dict[str, Tuple[str, Optional[int]]] = {}
+        existing_rows: Dict[str, Dict[str, Any]] = {}
         for id_chunk in _chunked(paper_ids, SQLITE_QUERY_BATCH_SIZE):
             placeholders = ",".join("?" for _ in id_chunk)
             query = (
-                "SELECT paper_id, text_hash, row_idx "
+                "SELECT paper_id, text_hash, row_idx, title, abstract, year, authors_json, categories_json "
                 f"FROM papers WHERE paper_id IN ({placeholders})"
             )
 
-            for paper_id, text_hash, row_idx in conn.execute(query, id_chunk):
-                normalized_row_idx = int(row_idx) if row_idx is not None else None
-                existing_rows[str(paper_id)] = (str(text_hash), normalized_row_idx)
+            for row in conn.execute(query, id_chunk):
+                (
+                    paper_id,
+                    text_hash,
+                    row_idx,
+                    title,
+                    abstract,
+                    year,
+                    authors_json,
+                    categories_json,
+                ) = row
+                existing_rows[str(paper_id)] = {
+                    "text_hash": str(text_hash),
+                    "row_idx": int(row_idx) if row_idx is not None else None,
+                    "title": str(title or ""),
+                    "abstract": str(abstract or ""),
+                    "year": int(year) if year is not None else None,
+                    "authors_json": str(authors_json or ""),
+                    "categories_json": str(categories_json or ""),
+                }
 
         return existing_rows
 
@@ -1847,34 +1938,14 @@ class EmbeddingCache:
 
     @staticmethod
     def _metadata_hash(metadata: Dict[str, object], text: str) -> str:
-        """Compute deterministic invalidation hash for embedding inputs + metadata.
+        """Compute deterministic invalidation hash for embedding model input text.
 
         :param Dict[str, object] metadata: Paper metadata payload.
         :param str text: Normalized paper text used for embedding.
         :return str: Hexadecimal SHA-256 digest.
         """
-        raw_authors = metadata.get("authors", [])
-        authors = raw_authors if isinstance(raw_authors, list) else []
-        raw_categories = metadata.get("categories", [])
-        categories = raw_categories if isinstance(raw_categories, list) else []
-
-        normalized_payload = {
-            "text": str(text),
-            "title": str(metadata.get("title", "")),
-            "abstract": str(metadata.get("abstract", "")),
-            "year": metadata.get("year"),
-            "authors": [str(author) for author in authors if str(author).strip()],
-            "categories": [
-                str(category) for category in categories if str(category).strip()
-            ],
-        }
-        serialized = json.dumps(
-            normalized_payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        del metadata
+        return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
 
 
 def _chunked(values: Sequence[str], chunk_size: int) -> Iterable[List[str]]:

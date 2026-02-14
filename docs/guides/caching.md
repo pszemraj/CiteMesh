@@ -61,8 +61,10 @@ SQLite stores metadata authority fields used for warm-cache retrieval:
 A vector is recomputed when:
 
 - The paper is missing from cache, or
-- The embedding invalidation hash changed (derived from `title`, `abstract`, `year`,
-  `authors`, `categories`, and composed embedding text).
+- The embedding invalidation hash changed (derived from the composed embedding input text).
+
+Metadata-only changes (`year`, `authors`, `categories`, or other stored fields that do
+not alter embedding input text) refresh SQLite metadata rows without re-encoding vectors.
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
 
