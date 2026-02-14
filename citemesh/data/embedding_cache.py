@@ -421,7 +421,7 @@ class EmbeddingCache:
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
 
-        query = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
+        query = np.asarray(query_embedding, dtype=np.float32)
         if query.ndim != 1:
             raise ValueError("query_embedding must be 1-dimensional")
         if not self.h5_path.exists():

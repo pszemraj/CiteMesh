@@ -11,6 +11,7 @@ from typing import Any
 
 import h5py
 import numpy as np
+import pytest
 
 from citemesh.data.embedding_cache import (
     HYDRATION_COMPLETE_KEY,
@@ -196,6 +197,25 @@ def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
         )
 
     assert results == []
+
+
+def test_embedding_cache_search_rejects_non_vector_queries() -> None:
+    """Search should reject non-1D query embeddings instead of flattening them."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="invalid-query-shape")
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            _LookupModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            show_progress=False,
+        )
+
+        with pytest.raises(ValueError, match="query_embedding must be 1-dimensional"):
+            cache.search(
+                query_embedding=np.asarray([[1.0, 0.0]], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
 
 
 def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
