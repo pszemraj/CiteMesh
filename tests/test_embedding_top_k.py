@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from citemesh.core import Paper
+from citemesh.data.embedding_cache import CacheSearchResult
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 
 
@@ -22,23 +23,28 @@ def test_embedding_top_k_validation(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_loaded_candidate_ties_are_sorted_by_paper_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Loaded candidate ranking should use paper ID as deterministic tie-break."""
+    """Cache search ties should use paper ID as deterministic tie-break."""
     monkeypatch.setattr(
         "citemesh.strategies.embedding._check_embedding_deps", lambda: None
     )
 
     builder = EmbeddingGraphBuilder(max_papers=2, top_k=2, client=MagicMock())
-    builder.arxiv_corpus = {
-        "b": {"title": "Paper B", "abstract": "Abstract B"},
-        "a": {"title": "Paper A", "abstract": "Abstract A"},
-    }
-
-    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: MagicMock())
-    builder.embedding_cache.get_embeddings = MagicMock(
-        return_value={
-            "a": np.asarray([1.0, 0.0], dtype=np.float32),
-            "b": np.asarray([1.0, 0.0], dtype=np.float32),
-        }
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.search = MagicMock(
+        return_value=[
+            CacheSearchResult(
+                paper_id="b",
+                score=0.95,
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                metadata={"title": "B", "abstract": "B", "authors": []},
+            ),
+            CacheSearchResult(
+                paper_id="a",
+                score=0.95,
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                metadata={"title": "A", "abstract": "A", "authors": []},
+            ),
+        ]
     )
 
     candidates = builder._select_candidates_from_loaded(

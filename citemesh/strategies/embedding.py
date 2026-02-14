@@ -5,20 +5,19 @@ This strategy uses semantic similarity from sentence transformers
 to find conceptually similar papers without relying on citations.
 """
 
-import heapq
 import logging
 import re
 import sys
 from contextlib import nullcontext
 from hashlib import sha1
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import networkx as nx
 import numpy as np
 from joblib import Memory
 from tqdm.auto import tqdm
 
-from citemesh.core import EMBEDDING_CONFIG, Author, Paper
+from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.data import EmbeddingCache, get_cache_dir, get_embedding_model_profile
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
@@ -360,6 +359,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         random_seed: Optional[int] = None,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
+        storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
+        binary_prefilter: bool = EMBEDDING_STORAGE_CONFIG.binary_prefilter,
+        binary_rescore_multiplier: int = EMBEDDING_STORAGE_CONFIG.binary_rescore_multiplier,
+        calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
+        cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
+        cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -375,24 +380,47 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] random_seed: Random seed for reproducibility
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
+        :param str storage_precision: Persistent cache precision (``int8``, ``float16``, ``float32``).
+        :param bool binary_prefilter: Whether cache search uses binary Hamming prefiltering.
+        :param int binary_rescore_multiplier: Candidate oversampling factor for binary prefilter search.
+        :param int calibration_sample_size: Calibration sample size used for int8 quantization ranges.
+        :param str cache_compression: HDF5 compression filter for embedding datasets.
+        :param int cache_compression_level: HDF5 compression level.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         _check_embedding_deps()
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
+        if binary_rescore_multiplier < 1:
+            raise ValueError("binary_rescore_multiplier must be at least 1")
+        if calibration_sample_size < 1:
+            raise ValueError("calibration_sample_size must be at least 1")
         super().__init__(max_papers, random_seed)
         self.model_name = model_name
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size
+        self.storage_precision = storage_precision
+        self.binary_prefilter = bool(binary_prefilter)
+        self.binary_rescore_multiplier = int(binary_rescore_multiplier)
+        self.calibration_sample_size = int(calibration_sample_size)
+        self.cache_compression = cache_compression
+        self.cache_compression_level = int(cache_compression_level)
         self.model_profile = get_embedding_model_profile(model_name)
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
+        self._source_dtype_hint = self._resolve_source_dtype_hint()
         self.top_k = top_k
         self.model = None
         self.arxiv_corpus: Dict[str, Dict] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
         self.client = client or get_client()
         self.embedding_cache = EmbeddingCache(
-            model_name=self._embedding_cache_namespace()
+            model_name=self._embedding_cache_namespace(),
+            storage_precision=self.storage_precision,
+            binary_prefilter=self.binary_prefilter,
+            calibration_sample_size=self.calibration_sample_size,
+            compression=self.cache_compression,
+            compression_level=self.cache_compression_level,
+            source_torch_dtype=self._source_dtype_hint,
         )
         if force_rebuild_cache:
             logger.info("Forcing embedding cache rebuild as requested.")
@@ -439,9 +467,33 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         :return str: Namespace key used for embedding cache partitioning.
         """
-        if self.truncate_dim is None:
-            return self.model_name
-        return f"{self.model_name}::truncate_dim={self.truncate_dim}"
+        parts = [self.model_name]
+        if self.truncate_dim is not None:
+            parts.append(f"truncate_dim={self.truncate_dim}")
+        parts.append(f"storage_precision={self.storage_precision}")
+        parts.append(f"binary_prefilter={int(self.binary_prefilter)}")
+        parts.append(f"source_dtype={self._source_dtype_hint}")
+        return "::".join(parts)
+
+    def _resolve_source_dtype_hint(self) -> str:
+        """Resolve source dtype token used in cache namespace metadata.
+
+        :return str: Source dtype token.
+        """
+        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
+        if preferred_dtype != "bfloat16":
+            return "float32"
+
+        try:
+            import torch
+        except ImportError:
+            return "float32"
+
+        if not torch.cuda.is_available():
+            return "float32"
+        if not bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)()):
+            return "float32"
+        return "bfloat16"
 
     def _log_dimension_policy(self) -> None:
         """Emit one-time info log for active embedding dimensionality."""
@@ -498,6 +550,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._reset_precision_runtime()
         preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
         if preferred_dtype != "bfloat16":
+            self._source_dtype_hint = "float32"
             return {}
 
         try:
@@ -507,6 +560,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 "%s prefers bfloat16, but torch is unavailable; using float32.",
                 self.model_name,
             )
+            self._source_dtype_hint = "float32"
             return {}
 
         if not torch.cuda.is_available():
@@ -514,6 +568,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 "%s prefers bfloat16, but CUDA is unavailable; using float32.",
                 self.model_name,
             )
+            self._source_dtype_hint = "float32"
             return {}
 
         bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
@@ -522,11 +577,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 "%s prefers bfloat16, but CUDA bfloat16 is unsupported; using float32.",
                 self.model_name,
             )
+            self._source_dtype_hint = "float32"
             return {}
 
         self._autocast_dtype = torch.bfloat16
         self._autocast_device_type = "cuda"
         self._autocast_enabled = bool(self.model_profile.use_cuda_autocast)
+        self._source_dtype_hint = "bfloat16"
 
         if self._autocast_enabled:
             logger.info(
@@ -781,11 +838,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         if use_streaming:
             logger.info(
-                "Streaming ArXiv corpus for semantic matches (disables joblib cache)..."
+                "Using streaming hydration path for cache-native semantic search..."
             )
             candidates = self._select_candidates_streaming(seed_embedding)
         else:
-            self._load_corpus()
+            logger.info("Using cache-native semantic search...")
             candidates = self._select_candidates_from_loaded(seed_embedding)
 
         # Convert candidates to Paper objects while respecting max_papers total.
@@ -818,206 +875,258 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self, seed_embedding: np.ndarray
     ) -> List[Tuple[str, Dict, np.ndarray]]:
         """
-        Select top candidates from an in-memory corpus.
+        Select top candidates from cache using non-streaming hydration policy.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector
         :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
-        if not self.arxiv_corpus:
-            return []
+        self._ensure_cache_hydrated(use_streaming=False)
+        return self._search_cache_candidates(seed_embedding)
 
-        logger.info("Computing corpus embeddings (cache-enabled)...")
+    def _select_candidates_streaming(
+        self, seed_embedding: np.ndarray
+    ) -> List[Tuple[str, Dict, np.ndarray]]:
+        """
+        Select top candidates from cache using streaming hydration policy.
 
-        corpus_items = list(self.arxiv_corpus.items())
-        metadata_map = {paper_id: metadata for paper_id, metadata in corpus_items}
+        :param np.ndarray seed_embedding: Normalized seed embedding vector
+        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
+        """
+        self._ensure_cache_hydrated(use_streaming=True)
+        return self._search_cache_candidates(seed_embedding)
 
-        embeddings_dict = self.embedding_cache.get_embeddings(
-            metadata_map,
-            self._get_model_for_encoding(),
-            batch_size=STREAMING_BATCH_SIZE,
-            show_progress=sys.stderr.isatty(),
-            text_builder=self.model_profile.format_document,
+    def _search_cache_candidates(
+        self, seed_embedding: np.ndarray
+    ) -> List[Tuple[str, Dict, np.ndarray]]:
+        """Run cache-native retrieval and map results to candidate tuples.
+
+        :param np.ndarray seed_embedding: Normalized seed embedding vector.
+        :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples ordered by score.
+        """
+        top_k = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
+        search_results = self.embedding_cache.search(
+            query_embedding=np.asarray(seed_embedding, dtype=np.float32),
+            top_k=top_k,
+            binary_prefilter=self.binary_prefilter,
+            binary_rescore_multiplier=self.binary_rescore_multiplier,
         )
 
-        if not embeddings_dict:
-            return []
-
-        valid_items: List[Tuple[str, Dict]] = []
-        ordered_embeddings: List[np.ndarray] = []
-
-        for paper_id, metadata in corpus_items:
-            embedding = embeddings_dict.get(paper_id)
-            if embedding is None:
-                continue
-            valid_items.append((paper_id, metadata))
-            ordered_embeddings.append(np.asarray(embedding, dtype=np.float32))
-
-        if not ordered_embeddings:
-            return []
-
-        embeddings_array = np.vstack(ordered_embeddings)
-        similarities = embeddings_array @ seed_embedding
         scored_candidates = [
             (
-                float(similarities[idx]),
-                paper_id,
-                metadata,
-                embeddings_array[idx],
+                float(result.score),
+                str(result.paper_id),
+                dict(result.metadata),
+                np.asarray(result.embedding, dtype=np.float32),
                 idx,
             )
-            for idx, (paper_id, metadata) in enumerate(valid_items)
+            for idx, result in enumerate(search_results)
         ]
         scored_candidates.sort(
             key=lambda item: deterministic_sort_key(
                 item[0], item[1], stable_index=item[4]
             )
         )
-        top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(scored_candidates))
+        limited = min(top_k, len(scored_candidates))
 
         return [
             (paper_id, metadata, embedding)
-            for _, paper_id, metadata, embedding, _ in scored_candidates[:top_k]
+            for _, paper_id, metadata, embedding, _ in scored_candidates[:limited]
         ]
 
-    def _select_candidates_streaming(
-        self, seed_embedding: np.ndarray
-    ) -> List[Tuple[str, Dict, np.ndarray]]:
+    def _ensure_cache_hydrated(self, use_streaming: bool) -> None:
+        """Ensure cache contains hydrated corpus embeddings for current split/cap.
+
+        :param bool use_streaming: Whether to use streaming dataset hydration.
+        :return None: Mutates cache state in-place when hydration is required.
         """
-        Stream dataset and keep top candidates in a bounded heap.
+        if self.embedding_cache.is_hydrated(self.dataset_split, self.corpus_size):
+            return
 
-        :param np.ndarray seed_embedding: Normalized seed embedding vector
-        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
+        logger.info(
+            "Hydrating embedding cache for split=%s corpus_size=%s (streaming=%s).",
+            self.dataset_split,
+            "all" if self.corpus_size is None else self.corpus_size,
+            use_streaming,
+        )
+        self.embedding_cache.clear()
+
+        dataset_source, dataset = self._load_dataset_for_hydration(
+            use_streaming=use_streaming
+        )
+        self.embedding_cache.mark_hydrated(
+            dataset_source=dataset_source,
+            dataset_split=self.dataset_split,
+            corpus_size=self.corpus_size,
+            complete=False,
+        )
+
+        calibration_records: List[Dict] = []
+        calibration_ready = (
+            self.storage_precision != "int8"
+            or self.embedding_cache.has_calibration_ranges()
+        )
+        progress_total = self.corpus_size if self.corpus_size else None
+        if not use_streaming and self.corpus_size is None:
+            try:
+                progress_total = len(dataset)
+            except TypeError:  # pragma: no cover - defensive for dataset APIs
+                progress_total = None
+
+        with tqdm(
+            total=progress_total,
+            desc=f"Hydrating {dataset_source}",
+            unit="papers",
+            dynamic_ncols=True,
+            disable=not sys.stderr.isatty(),
+        ) as progress:
+            batch: List[Dict] = []
+            for idx, raw_record in enumerate(dataset):
+                if self.corpus_size is not None and idx >= self.corpus_size:
+                    break
+
+                metadata = self._extract_paper_metadata(raw_record, idx)
+                if (
+                    not calibration_ready
+                    and len(calibration_records) < self.calibration_sample_size
+                ):
+                    calibration_records.append(metadata)
+                    if len(calibration_records) == self.calibration_sample_size:
+                        self._initialize_calibration_ranges(calibration_records)
+                        calibration_ready = True
+                        batch.extend(calibration_records)
+                        calibration_records = []
+                    progress.update(1)
+                    continue
+
+                batch.append(metadata)
+                if len(batch) >= STREAMING_BATCH_SIZE:
+                    self._cache_metadata_batch(batch)
+                    batch = []
+                progress.update(1)
+
+            if calibration_records and not calibration_ready:
+                self._initialize_calibration_ranges(calibration_records)
+                calibration_ready = True
+                batch.extend(calibration_records)
+                calibration_records = []
+
+            if batch:
+                self._cache_metadata_batch(batch)
+
+            if progress_total is None:
+                progress.set_postfix_str(f"processed {progress.n}")
+
+        self.embedding_cache.mark_hydrated(
+            dataset_source=dataset_source,
+            dataset_split=self.dataset_split,
+            corpus_size=self.corpus_size,
+            complete=True,
+        )
+
+    def _load_dataset_for_hydration(
+        self, use_streaming: bool
+    ) -> Tuple[str, Iterable[Dict[str, Any]]]:
+        """Load first available ArXiv dataset for hydration.
+
+        :param bool use_streaming: Whether to load streaming dataset iterator.
+        :return Tuple[str, Iterable[Dict[str, Any]]]: Dataset source name and iterable.
         """
-        max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
-        heap: List[
-            Tuple[Tuple[float, Tuple[int, ...], int], str, Dict, np.ndarray]
-        ] = []
-        seen_paper_ids: set[str] = set()
-
-        progress_enabled = sys.stderr.isatty()
-
         from datasets import load_dataset
 
-        last_exception: Optional[Exception] = None
-
+        last_error: Optional[Exception] = None
         for dataset_name in ARXIV_DATASET_CANDIDATES:
             try:
                 dataset = load_dataset(
-                    dataset_name, split=self.dataset_split, streaming=True
+                    dataset_name,
+                    split=self.dataset_split,
+                    streaming=use_streaming,
                 )
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover - source/network dependent
+                last_error = exc
                 logger.warning(
-                    "Could not stream dataset %s: %s. Trying fallback.",
+                    "Could not load dataset %s for hydration: %s. Trying fallback.",
                     dataset_name,
                     exc,
                 )
-                last_exception = exc
                 continue
+            logger.info(
+                "Hydration dataset selected: %s (split=%s, streaming=%s).",
+                dataset_name,
+                self.dataset_split,
+                use_streaming,
+            )
+            return dataset_name, dataset
 
-            progress_total = self.corpus_size if self.corpus_size else None
-            with tqdm(
-                total=progress_total,
-                desc=f"Streaming {dataset_name}",
-                unit="papers",
-                dynamic_ncols=True,
-                disable=not progress_enabled,
-            ) as progress:
-                batch: List[Dict] = []
-                for idx, raw_record in enumerate(dataset):
-                    if self.corpus_size and idx >= self.corpus_size:
-                        break
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Could not load any ArXiv dataset for hydration.")
 
-                    metadata = self._extract_paper_metadata(raw_record, idx)
-                    batch.append(metadata)
-                    progress.update(1)
+    def _initialize_calibration_ranges(self, records: List[Dict]) -> None:
+        """Compute and persist int8 calibration ranges from metadata records.
 
-                    if len(batch) >= STREAMING_BATCH_SIZE:
-                        self._process_stream_batch(
-                            batch,
-                            seed_embedding,
-                            heap,
-                            max_candidates,
-                            seen_paper_ids,
-                        )
-                        batch = []
+        :param List[Dict] records: Records used for calibration embedding sample.
+        :return None: Persists calibration ranges in cache.
+        """
+        if self.storage_precision != "int8":
+            return
+        if self.embedding_cache.has_calibration_ranges():
+            return
+        if not records:
+            return
 
-                if batch:
-                    self._process_stream_batch(
-                        batch,
-                        seed_embedding,
-                        heap,
-                        max_candidates,
-                        seen_paper_ids,
-                    )
-
-                if progress_total is None:
-                    progress.set_postfix_str(f"processed {progress.n}")
-
-            if heap:
-                break
-
-        if not heap:
-            if last_exception:
-                raise last_exception
-            return []
-
-        top_candidates = sorted(heap, key=lambda item: item[0], reverse=True)
-        limited = top_candidates[: self.max_papers * CANDIDATE_MULTIPLIER]
-        return [
-            (str(paper_id), metadata, embedding)
-            for _, paper_id, metadata, embedding in limited
+        sample_texts = [
+            self.model_profile.format_document(
+                {
+                    "title": metadata.get("title", ""),
+                    "abstract": metadata.get("abstract", ""),
+                }
+            )
+            for metadata in records
         ]
+        sample_embeddings = self._encode_texts(
+            sample_texts,
+            batch_size=STREAMING_BATCH_SIZE,
+            show_progress_bar=False,
+        )
+        ranges = np.vstack(
+            (
+                np.min(sample_embeddings, axis=0),
+                np.max(sample_embeddings, axis=0),
+            )
+        )
+        self.embedding_cache.set_calibration_ranges(
+            ranges=ranges,
+            embedding_dim=int(sample_embeddings.shape[1]),
+        )
 
-    def _process_stream_batch(
-        self,
-        batch: List[Dict],
-        seed_embedding: np.ndarray,
-        heap: List[Tuple[Tuple[float, Tuple[int, ...], int], str, Dict, np.ndarray]],
-        max_candidates: int,
-        seen_paper_ids: set[str],
-    ) -> None:
-        """
-        Encode a batch of records and push to candidate heap.
+    def _cache_metadata_batch(self, batch: List[Dict]) -> None:
+        """Encode/cache a batch of metadata records.
 
-        :param List[Dict] batch: List of metadata dictionaries
-        :param np.ndarray seed_embedding: Normalized seed embedding vector
-        :param List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]] heap: Min-heap storing top candidates
-        :param int max_candidates: Maximum heap size
-        :param set[str] seen_paper_ids: Paper IDs already emitted to the heap.
+        :param List[Dict] batch: Metadata records including ``paper_id``.
+        :return None: Mutates persistent cache.
         """
-        batch_map = {metadata["paper_id"]: metadata for metadata in batch}
-        embeddings = self.embedding_cache.get_embeddings(
-            batch_map,
+        if not batch:
+            return
+
+        metadata_map: Dict[str, Dict] = {}
+        for metadata in batch:
+            paper_id = str(metadata.get("paper_id", "")).strip()
+            if not paper_id:
+                continue
+            payload = dict(metadata)
+            payload.pop("paper_id", None)
+            metadata_map[paper_id] = payload
+
+        if not metadata_map:
+            return
+
+        self.embedding_cache.get_embeddings(
+            metadata_map,
             self._get_model_for_encoding(),
-            batch_size=len(batch_map) or STREAMING_BATCH_SIZE,
+            batch_size=min(STREAMING_BATCH_SIZE, len(metadata_map)),
             show_progress=False,
             text_builder=self.model_profile.format_document,
         )
-
-        for stable_index, metadata in enumerate(batch):
-            paper_id = str(metadata["paper_id"])
-            if paper_id in seen_paper_ids:
-                continue
-
-            raw_embedding = embeddings.get(paper_id)
-            if raw_embedding is None:
-                continue
-            seen_paper_ids.add(paper_id)
-
-            embedding = np.asarray(raw_embedding, dtype=np.float32)
-
-            similarity = float(np.dot(seed_embedding, embedding))
-            candidate = (
-                _stream_heap_key(similarity, paper_id, stable_index),
-                paper_id,
-                metadata,
-                embedding,
-            )
-
-            if len(heap) < max_candidates:
-                heapq.heappush(heap, candidate)
-            elif candidate > heap[0]:
-                heapq.heapreplace(heap, candidate)
 
     def _extract_paper_metadata(self, paper: Dict, fallback_index: int) -> Dict:
         """

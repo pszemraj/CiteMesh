@@ -30,6 +30,12 @@ def _dispatch_namespace() -> argparse.Namespace:
         max_semantic=5,
         seed=7,
         force_rebuild_cache=False,
+        storage_precision="int8",
+        binary_prefilter=True,
+        binary_rescore_multiplier=9,
+        calibration_sample_size=123,
+        cache_compression="gzip",
+        cache_compression_level=1,
     )
 
 
@@ -75,6 +81,12 @@ def _dispatch_namespace() -> argparse.Namespace:
                 "force_rebuild_cache": False,
                 "use_streaming": True,
                 "random_seed": 7,
+                "storage_precision": "int8",
+                "binary_prefilter": True,
+                "binary_rescore_multiplier": 9,
+                "calibration_sample_size": 123,
+                "cache_compression": "gzip",
+                "cache_compression_level": 1,
             },
         ),
         (
@@ -93,6 +105,12 @@ def _dispatch_namespace() -> argparse.Namespace:
                 "use_streaming": True,
                 "random_seed": 7,
                 "force_rebuild_cache": False,
+                "storage_precision": "int8",
+                "binary_prefilter": True,
+                "binary_rescore_multiplier": 9,
+                "calibration_sample_size": 123,
+                "cache_compression": "gzip",
+                "cache_compression_level": 1,
             },
         ),
     ],

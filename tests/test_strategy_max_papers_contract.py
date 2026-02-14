@@ -99,21 +99,24 @@ def test_embedding_max_papers_is_total_node_cap_including_seed(
     )
     builder.client.get_paper.return_value = _seed_paper()
     builder._load_model = lambda: None
-    builder._get_model_for_encoding = lambda: None
-    builder._load_corpus = lambda: None
     builder._update_citation_counts = lambda _: None
-    builder.arxiv_corpus = {
-        "c1": {"title": "Paper c1", "abstract": "A"},
-        "c2": {"title": "Paper c2", "abstract": "B"},
-        "c3": {"title": "Paper c3", "abstract": "C"},
-    }
-    builder.embedding_cache.get_embeddings = MagicMock(
-        return_value={
-            "c1": np.array([1.0, 0.0], dtype=np.float32),
-            "c2": np.array([0.0, 1.0], dtype=np.float32),
-            "c3": np.array([0.5, 0.5], dtype=np.float32),
-        }
-    )
+    builder._select_candidates_from_loaded = lambda _: [
+        (
+            "c1",
+            {"title": "Paper c1", "abstract": "A", "authors": [], "categories": []},
+            np.array([1.0, 0.0], dtype=np.float32),
+        ),
+        (
+            "c2",
+            {"title": "Paper c2", "abstract": "B", "authors": [], "categories": []},
+            np.array([0.0, 1.0], dtype=np.float32),
+        ),
+        (
+            "c3",
+            {"title": "Paper c3", "abstract": "C", "authors": [], "categories": []},
+            np.array([0.5, 0.5], dtype=np.float32),
+        ),
+    ]
     builder._encode_texts = lambda texts, **kwargs: np.array(
         [[1.0, 0.0] for _ in texts], dtype=np.float32
     )

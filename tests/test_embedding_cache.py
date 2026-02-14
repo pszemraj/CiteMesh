@@ -32,6 +32,27 @@ class _MockModel:
         return np.random.rand(len(texts), 2)
 
 
+class _LookupModel:
+    """Deterministic model backed by a text->embedding lookup table."""
+
+    def __init__(self, lookup: dict[str, np.ndarray]) -> None:
+        """Store lookup table used for ``encode`` calls.
+
+        :param dict[str, np.ndarray] lookup: Text->embedding table.
+        """
+        self.lookup = lookup
+
+    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
+        """Return lookup embeddings in request order.
+
+        :param list[str] texts: Input texts.
+        :param Any kwargs: Ignored keyword arguments.
+        :return np.ndarray: Embedding matrix.
+        """
+        del kwargs
+        return np.asarray([self.lookup[text] for text in texts], dtype=np.float32)
+
+
 def _multiprocess_cache_worker(
     cache_dir: str, worker_idx: int, queue: mp.Queue
 ) -> None:
@@ -90,7 +111,7 @@ def test_embedding_cache_recomputes_on_text_change() -> None:
 
 
 def test_embedding_cache_uses_matrix_dataset_layout() -> None:
-    """Embeddings are stored in a single matrix dataset with row indices."""
+    """Embeddings are stored as int8 matrix + binary index + calibration ranges."""
     model = _MockModel()
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
@@ -101,8 +122,17 @@ def test_embedding_cache_uses_matrix_dataset_layout() -> None:
         cache.get_embeddings(papers, model)
 
         with h5py.File(cache.h5_path, "r") as h5:
-            assert list(h5.keys()) == ["embeddings"]
+            assert set(h5.keys()) == {
+                "embeddings",
+                "binary_index",
+                "calibration_ranges",
+            }
             assert h5["embeddings"].shape == (2, 2)
+            assert h5["embeddings"].dtype == np.int8
+            assert h5["binary_index"].shape == (2, 1)
+            assert h5["binary_index"].dtype == np.uint8
+            assert h5["calibration_ranges"].shape == (2, 2)
+            assert h5["calibration_ranges"].dtype == np.float32
 
         with sqlite3.connect(cache.db_path) as conn:
             rows = conn.execute(
@@ -167,3 +197,83 @@ def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
             results.append(("err", "missing", "worker did not report result"))
     errors = [result for result in results if result[0] == "err"]
     assert not errors, f"Concurrent cache writes failed: {errors}"
+
+
+def test_embedding_cache_search_returns_metadata_and_float_embeddings() -> None:
+    """Cache search should return metadata payload and float32 embeddings."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="search-metadata")
+        papers = {
+            "p1": {
+                "title": "Alpha",
+                "abstract": "First",
+                "year": 2020,
+                "authors": ["Alice", "Bob"],
+                "categories": ["cs.AI"],
+            },
+            "p2": {
+                "title": "Beta",
+                "abstract": "Second",
+                "year": 2021,
+                "authors": ["Carol"],
+                "categories": ["cs.LG"],
+            },
+        }
+        model = _LookupModel(
+            {
+                "Alpha. First": np.array([1.0, 0.0], dtype=np.float32),
+                "Beta. Second": np.array([0.0, 1.0], dtype=np.float32),
+            }
+        )
+
+        _ = cache.get_embeddings(papers, model, show_progress=False)
+        results = cache.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=2,
+            binary_prefilter=True,
+            binary_rescore_multiplier=4,
+        )
+
+    assert [result.paper_id for result in results] == ["p1", "p2"]
+    assert results[0].metadata["authors"] == ["Alice", "Bob"]
+    assert results[0].metadata["categories"] == ["cs.AI"]
+    assert results[0].metadata["year"] == 2020
+    assert results[0].embedding.dtype == np.float32
+
+
+def test_embedding_cache_reuses_calibration_ranges_for_same_namespace() -> None:
+    """Calibration ranges should persist and be reused within one namespace."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="calibration-reuse")
+        first_model = _LookupModel(
+            {
+                "One. A": np.array([0.1, 0.9], dtype=np.float32),
+                "Two. B": np.array([0.9, 0.1], dtype=np.float32),
+            }
+        )
+        second_model = _LookupModel(
+            {
+                "Three. C": np.array([0.3, 0.7], dtype=np.float32),
+            }
+        )
+
+        _ = cache.get_embeddings(
+            {
+                "p1": {"title": "One", "abstract": "A"},
+                "p2": {"title": "Two", "abstract": "B"},
+            },
+            first_model,
+            show_progress=False,
+        )
+        with h5py.File(cache.h5_path, "r") as h5:
+            ranges_before = np.asarray(h5["calibration_ranges"], dtype=np.float32)
+
+        _ = cache.get_embeddings(
+            {"p3": {"title": "Three", "abstract": "C"}},
+            second_model,
+            show_progress=False,
+        )
+        with h5py.File(cache.h5_path, "r") as h5:
+            ranges_after = np.asarray(h5["calibration_ranges"], dtype=np.float32)
+
+    np.testing.assert_allclose(ranges_before, ranges_after)

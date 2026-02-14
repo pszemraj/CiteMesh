@@ -1,8 +1,7 @@
-"""Regression coverage for streaming dataset fallback behavior."""
+"""Regression coverage for hydration fallback and warm-cache behavior."""
 
 from __future__ import annotations
 
-import heapq
 import sys
 import types
 from typing import Any
@@ -11,6 +10,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from citemesh.data.embedding_cache import CacheSearchResult
 from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
     _query_seed_id,
@@ -18,10 +18,24 @@ from citemesh.strategies.embedding import (
 )
 
 
-def test_streaming_embedding_falls_back_to_secondary_dataset(
+class _FakeEncodeModel:
+    """Minimal encode model used by hydration tests."""
+
+    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
+        """Return deterministic embeddings for input texts.
+
+        :param list[str] texts: Input texts.
+        :param Any kwargs: Ignored kwargs.
+        :return np.ndarray: Float32 embedding matrix.
+        """
+        del kwargs
+        return np.asarray([[1.0, 0.0] for _ in texts], dtype=np.float32)
+
+
+def test_streaming_embedding_hydration_loader_falls_back_to_secondary_dataset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Failing primary HF stream should transparently fallback to secondary source."""
+    """Failing primary stream should fallback to a secondary dataset source."""
     monkeypatch.setattr(
         "citemesh.strategies.embedding._check_embedding_deps", lambda: None
     )
@@ -31,17 +45,16 @@ def test_streaming_embedding_falls_back_to_secondary_dataset(
     def fake_load_dataset(
         dataset_name: str, split: str, streaming: bool = False
     ) -> list[dict[str, Any]]:
-        """Simulate dataset loader with primary-source failure then fallback success.
+        """Simulate primary source failure and secondary source success.
 
         :param str dataset_name: Requested dataset identifier.
-        :param str split: Dataset split string.
-        :param bool streaming: Whether streaming mode is requested.
-        :return list[dict[str, Any]]: Mocked dataset records.
-        :raises RuntimeError: When primary dataset is requested.
+        :param str split: Dataset split.
+        :param bool streaming: Streaming flag.
+        :return list[dict[str, Any]]: Fake dataset rows.
         """
         load_calls.append((dataset_name, split, streaming))
         if dataset_name == "librarian-bots/arxiv-metadata-snapshot":
-            raise RuntimeError("Primary source unavailable")
+            raise RuntimeError("primary unavailable")
         return [
             {
                 "id": "fallback-paper",
@@ -55,57 +68,21 @@ def test_streaming_embedding_falls_back_to_secondary_dataset(
     fake_datasets.load_dataset = fake_load_dataset
     monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
 
-    def fake_process_stream_batch(
-        self,
-        batch: list[dict[str, Any]],
-        seed_embedding: np.ndarray,
-        heap: list[tuple],
-        max_candidates: int,
-        seen_paper_ids: set[str],
-    ) -> None:
-        """Push deterministic candidate records into the streaming heap.
-
-        :param EmbeddingGraphBuilder self: Builder instance.
-        :param list[dict[str, Any]] batch: Batch metadata payload.
-        :param np.ndarray seed_embedding: Seed embedding vector.
-        :param list[tuple] heap: Candidate min-heap.
-        :param int max_candidates: Heap capacity.
-        :param set[str] seen_paper_ids: Set of already-seen paper IDs.
-        :return None: Heap is mutated in-place.
-        """
-        del seed_embedding
-        del seen_paper_ids
-        for metadata in batch:
-            paper_id = metadata["paper_id"]
-            candidate = (
-                _stream_heap_key(0.95, paper_id, stable_index=0),
-                paper_id,
-                metadata,
-                np.array([0.1], dtype=np.float32),
-            )
-            if len(heap) < max_candidates:
-                heapq.heappush(heap, candidate)
-            elif candidate > heap[0]:
-                heapq.heapreplace(heap, candidate)
-
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder, "_process_stream_batch", fake_process_stream_batch
-    )
-
     builder = EmbeddingGraphBuilder(
         max_papers=1,
         use_streaming=True,
         random_seed=0,
         client=MagicMock(),
     )
-    candidates = builder._select_candidates_streaming(np.array([1.0], dtype=np.float32))
 
+    selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=True)
+
+    assert selected_name == "CShorten/ML-ArXiv-Papers"
     assert [name for name, _, _ in load_calls] == [
         "librarian-bots/arxiv-metadata-snapshot",
         "CShorten/ML-ArXiv-Papers",
     ]
-    assert len(candidates) == 1
-    assert candidates[0][0] == "fallback-paper"
+    assert len(list(dataset)) == 1
 
 
 def test_streaming_with_sliced_split_fails_fast(
@@ -123,85 +100,6 @@ def test_streaming_with_sliced_split_fails_fast(
             use_streaming=True,
             client=MagicMock(),
         )
-
-
-def test_streaming_candidate_ties_use_paper_id_tiebreak(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Streaming candidates with equal similarity should sort by paper ID."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
-
-    def fake_load_dataset(
-        dataset_name: str, split: str, streaming: bool = False
-    ) -> list[dict[str, Any]]:
-        """Return deterministic tiny dataset used for tie-break verification.
-
-        :param str dataset_name: Requested dataset identifier.
-        :param str split: Dataset split string.
-        :param bool streaming: Whether streaming mode is requested.
-        :return list[dict[str, Any]]: Mocked dataset records.
-        """
-        del dataset_name
-        del split
-        del streaming
-        return [
-            {"id": "b", "title": "B", "abstract": "Abstract B"},
-            {"id": "a", "title": "A", "abstract": "Abstract A"},
-        ]
-
-    fake_datasets = types.ModuleType("datasets")
-    fake_datasets.load_dataset = fake_load_dataset
-    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
-
-    def fake_process_stream_batch(
-        self,
-        batch: list[dict[str, Any]],
-        seed_embedding: np.ndarray,
-        heap: list[tuple],
-        max_candidates: int,
-        seen_paper_ids: set[str],
-    ) -> None:
-        """Push deterministic tie candidates into heap for ordering assertions.
-
-        :param EmbeddingGraphBuilder self: Builder instance.
-        :param list[dict[str, Any]] batch: Batch metadata payload.
-        :param np.ndarray seed_embedding: Seed embedding vector.
-        :param list[tuple] heap: Candidate min-heap.
-        :param int max_candidates: Heap capacity.
-        :param set[str] seen_paper_ids: Set of already-seen paper IDs.
-        :return None: Heap is mutated in-place.
-        """
-        del self
-        del seed_embedding
-        del seen_paper_ids
-        for metadata in batch:
-            paper_id = metadata["paper_id"]
-            candidate = (
-                _stream_heap_key(0.95, paper_id, stable_index=0),
-                paper_id,
-                metadata,
-                np.array([0.1], dtype=np.float32),
-            )
-            if len(heap) < max_candidates:
-                heapq.heappush(heap, candidate)
-            elif candidate > heap[0]:
-                heapq.heapreplace(heap, candidate)
-
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder, "_process_stream_batch", fake_process_stream_batch
-    )
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=2,
-        use_streaming=True,
-        random_seed=0,
-        client=MagicMock(),
-    )
-    candidates = builder._select_candidates_streaming(np.array([1.0], dtype=np.float32))
-
-    assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
 
 
 def test_collect_papers_uses_hashed_query_seed_id(
@@ -224,7 +122,6 @@ def test_collect_papers_uses_hashed_query_seed_id(
             [[1.0, 0.0] for _ in texts], dtype=np.float32
         ),
     )
-    monkeypatch.setattr(builder, "_load_corpus", lambda: None)
     monkeypatch.setattr(builder, "_select_candidates_from_loaded", lambda _: [])
     monkeypatch.setattr(builder, "_update_citation_counts", lambda _: None)
 
@@ -241,79 +138,67 @@ def test_stream_heap_key_handles_prefix_ids() -> None:
     assert _stream_heap_key(0.95, "a", 0) > _stream_heap_key(0.95, "aa", 0)
 
 
-def test_stream_batch_skips_duplicate_paper_ids(
+def test_warm_cache_candidate_selection_skips_dataset_loading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Streaming batch processing should avoid duplicate IDs in the heap."""
+    """When cache is hydrated, candidate retrieval should bypass dataset loading."""
     monkeypatch.setattr(
         "citemesh.strategies.embedding._check_embedding_deps", lambda: None
     )
 
-    builder = EmbeddingGraphBuilder(
-        max_papers=2,
-        use_streaming=True,
-        random_seed=0,
-        client=MagicMock(),
-    )
-    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: MagicMock())
-    builder.embedding_cache.get_embeddings = MagicMock(
-        return_value={"dup": np.asarray([1.0, 0.0], dtype=np.float32)}
-    )
+    fake_datasets = types.ModuleType("datasets")
 
-    batch = [
-        {"paper_id": "dup", "title": "First", "abstract": "A"},
-        {"paper_id": "dup", "title": "Second", "abstract": "B"},
-    ]
-    heap: list[tuple] = []
-    seen: set[str] = set()
-    builder._process_stream_batch(
-        batch=batch,
-        seed_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-        heap=heap,
-        max_candidates=4,
-        seen_paper_ids=seen,
-    )
+    def fail_load_dataset(*args: Any, **kwargs: Any) -> None:
+        """Fail if hydration path unexpectedly touches HF datasets.
 
-    assert len(heap) == 1
-    assert seen == {"dup"}
+        :param Any args: Positional args.
+        :param Any kwargs: Keyword args.
+        :raises AssertionError: Always.
+        """
+        raise AssertionError("load_dataset should not be called on warm cache")
 
-
-def test_stream_batch_keeps_strongest_candidates_under_heap_cap(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Bounded streaming heaps should retain the highest-similarity candidates."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    fake_datasets.load_dataset = fail_load_dataset
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
 
     builder = EmbeddingGraphBuilder(
         max_papers=2,
-        use_streaming=True,
+        use_streaming=False,
         random_seed=0,
         client=MagicMock(),
     )
-    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: MagicMock())
-    builder.embedding_cache.get_embeddings = MagicMock(
-        return_value={
-            "top": np.asarray([1.0, 0.0], dtype=np.float32),
-            "mid": np.asarray([0.5, 0.0], dtype=np.float32),
-            "low": np.asarray([0.2, 0.0], dtype=np.float32),
-        }
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.search = MagicMock(
+        return_value=[
+            CacheSearchResult(
+                paper_id="a",
+                score=0.9,
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                metadata={
+                    "title": "A",
+                    "abstract": "A",
+                    "year": 2020,
+                    "authors": ["Alice"],
+                    "categories": ["cs.AI"],
+                },
+            ),
+            CacheSearchResult(
+                paper_id="b",
+                score=0.8,
+                embedding=np.asarray([0.5, 0.5], dtype=np.float32),
+                metadata={
+                    "title": "B",
+                    "abstract": "B",
+                    "year": 2021,
+                    "authors": ["Bob"],
+                    "categories": ["cs.LG"],
+                },
+            ),
+        ]
+    )
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: _FakeEncodeModel())
+
+    candidates = builder._select_candidates_from_loaded(
+        np.asarray([1.0, 0.0], dtype=np.float32)
     )
 
-    batch = [
-        {"paper_id": "top", "title": "Top", "abstract": "A"},
-        {"paper_id": "mid", "title": "Mid", "abstract": "B"},
-        {"paper_id": "low", "title": "Low", "abstract": "C"},
-    ]
-    heap: list[tuple] = []
-    seen: set[str] = set()
-    builder._process_stream_batch(
-        batch=batch,
-        seed_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-        heap=heap,
-        max_candidates=2,
-        seen_paper_ids=seen,
-    )
-
-    assert {paper_id for _, paper_id, _, _ in heap} == {"top", "mid"}
+    assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]

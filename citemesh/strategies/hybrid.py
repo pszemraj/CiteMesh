@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional, Tuple
 import networkx as nx
 import numpy as np
 
-from citemesh.core import HYBRID_CONFIG, Paper
+from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -47,6 +47,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         truncate_dim: Optional[int] = None,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
+        storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
+        binary_prefilter: bool = EMBEDDING_STORAGE_CONFIG.binary_prefilter,
+        binary_rescore_multiplier: int = EMBEDDING_STORAGE_CONFIG.binary_rescore_multiplier,
+        calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
+        cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
+        cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
@@ -69,6 +75,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
         :param bool use_streaming: Whether to stream the embedding corpus.
         :param bool force_rebuild_cache: Whether to clear embedding cache before semantic enrichment.
+        :param str storage_precision: Persistent cache precision for semantic branch embeddings.
+        :param bool binary_prefilter: Whether semantic branch uses binary prefiltering.
+        :param int binary_rescore_multiplier: Candidate oversampling factor for semantic branch search.
+        :param int calibration_sample_size: Calibration sample size for int8 storage ranges.
+        :param str cache_compression: HDF5 compression filter for semantic branch cache.
+        :param int cache_compression_level: HDF5 compression level for semantic branch cache.
         :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
@@ -102,6 +114,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 random_seed=random_seed,
                 use_streaming=use_streaming,
                 force_rebuild_cache=force_rebuild_cache,
+                storage_precision=storage_precision,
+                binary_prefilter=binary_prefilter,
+                binary_rescore_multiplier=binary_rescore_multiplier,
+                calibration_sample_size=calibration_sample_size,
+                cache_compression=cache_compression,
+                cache_compression_level=cache_compression_level,
                 client=self.client,
             )
         else:

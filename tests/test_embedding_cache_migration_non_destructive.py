@@ -1,4 +1,4 @@
-"""Regression tests for non-destructive embedding cache migration."""
+"""Regression tests for embedding cache reset behavior."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ class _MockModel:
         return np.array([[float(len(texts)), 1.0] for _ in texts], dtype=np.float32)
 
 
-def test_legacy_h5_layout_is_backed_up_and_preserved(tmp_path: Path) -> None:
-    """Legacy cache files should be renamed for recovery instead of deleted."""
+def test_legacy_h5_layout_is_dropped_and_rebuilt(tmp_path: Path) -> None:
+    """Legacy cache files should be dropped and rebuilt under current schema."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
     model = _MockModel()
 
@@ -43,16 +43,9 @@ def test_legacy_h5_layout_is_backed_up_and_preserved(tmp_path: Path) -> None:
         conn.commit()
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
-    backups = sorted(cache.h5_path.parent.glob(f"{cache.h5_path.name}.bak.*"))
-    assert backups, "Expected a backup path for legacy HDF5 layout"
 
     with sqlite3.connect(reloaded.db_path) as conn:
-        assert (
-            conn.execute(
-                "SELECT row_idx FROM papers WHERE paper_id = 'seed'"
-            ).fetchone()[0]
-            is None
-        )
+        assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
     reloaded.get_embeddings(
         {"seed": {"title": "Seed", "abstract": "x", "year": None}}, model
@@ -62,11 +55,9 @@ def test_legacy_h5_layout_is_backed_up_and_preserved(tmp_path: Path) -> None:
         assert "embeddings" in h5
         assert h5["embeddings"].shape[0] == 1
 
-    assert any(backup.exists() for backup in backups)
 
-
-def test_clear_moves_cache_files_to_backups(tmp_path: Path) -> None:
-    """`clear()` should move cache files and rebuild a fresh empty schema."""
+def test_clear_removes_cache_files_and_recreates_schema(tmp_path: Path) -> None:
+    """`clear()` should remove namespace cache files and recreate DB schema."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="clear-recovery")
     model = _MockModel()
     cache.get_embeddings(
@@ -75,9 +66,5 @@ def test_clear_moves_cache_files_to_backups(tmp_path: Path) -> None:
 
     cache.clear()
 
-    db_backups = sorted(cache.db_path.parent.glob(f"{cache.db_path.name}.bak.*"))
-    h5_backups = sorted(cache.h5_path.parent.glob(f"{cache.h5_path.name}.bak.*"))
-    assert db_backups
-    assert h5_backups
     assert cache.db_path.exists()
     assert not cache.h5_path.exists()

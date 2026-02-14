@@ -50,6 +50,32 @@ class EmbeddingSimilarityConfig:
 
 
 @dataclass
+class EmbeddingStorageConfig:
+    """Configuration for embedding cache storage/retrieval behavior."""
+
+    storage_precision: str = "int8"
+    binary_prefilter: bool = True
+    binary_rescore_multiplier: int = 8
+    calibration_sample_size: int = 2000
+    compression: str = "gzip"
+    compression_level: int = 1
+
+    def validate(self) -> None:
+        """Ensure storage settings are valid."""
+        if self.storage_precision not in {"float32", "float16", "int8"}:
+            raise ValueError(
+                "Embedding storage_precision must be one of "
+                "{'float32', 'float16', 'int8'}"
+            )
+        if self.binary_rescore_multiplier < 1:
+            raise ValueError("binary_rescore_multiplier must be at least 1")
+        if self.calibration_sample_size < 1:
+            raise ValueError("calibration_sample_size must be at least 1")
+        if self.compression_level < 0:
+            raise ValueError("compression_level must be non-negative")
+
+
+@dataclass
 class HybridSimilarityConfig:
     """Configuration for hybrid similarity approach."""
 
@@ -121,9 +147,11 @@ class APIConfig:
 # Global config instances (can be overridden)
 TEMPORAL_CONFIG = TemporalConfig()
 EMBEDDING_CONFIG = EmbeddingSimilarityConfig()
+EMBEDDING_STORAGE_CONFIG = EmbeddingStorageConfig()
 HYBRID_CONFIG = HybridSimilarityConfig()
 VIZ_CONFIG = VisualizationConfig()
 API_CONFIG = APIConfig()
 
 # Validate all configs on import
 EMBEDDING_CONFIG.validate()
+EMBEDDING_STORAGE_CONFIG.validate()

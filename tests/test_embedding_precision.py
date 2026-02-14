@@ -167,7 +167,8 @@ def test_embeddinggemma_uses_bf16_model_kwargs_and_autocast(
     assert init_log["kwargs"]["model_kwargs"]["torch_dtype"] is bf16_token
     assert init_log["kwargs"]["truncate_dim"] == 256
     assert builder.truncate_dim == 256
-    assert builder.embedding_cache.model_name.endswith("::truncate_dim=256")
+    assert "::truncate_dim=256" in builder.embedding_cache.model_name
+    assert "::storage_precision=int8" in builder.embedding_cache.model_name
     assert embeddings.shape == (1, 2)
     assert ("call", "cuda", bf16_token) in autocast_log
     assert ("enter",) in autocast_log
@@ -283,3 +284,28 @@ def test_non_gemma_profile_does_not_compile_inner_transformer(
     assert builder.model is not None
     assert builder.model[0].auto_model is init_log["auto_model_before_compile"]
     assert builder._inner_model_compiled is False
+
+
+def test_embedding_cache_namespace_varies_by_storage_precision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache namespace should isolate incompatible storage precision settings."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+
+    int8_builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        client=MagicMock(),
+    )
+    f32_builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        client=MagicMock(),
+    )
+
+    assert (
+        int8_builder.embedding_cache.model_name
+        != f32_builder.embedding_cache.model_name
+    )

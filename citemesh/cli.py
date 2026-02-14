@@ -21,6 +21,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.data import get_cache_dir
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar import normalize_paper_id
@@ -182,6 +183,12 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             random_seed=cli_args.seed,
             use_streaming=cli_args.streaming,
             force_rebuild_cache=cli_args.force_rebuild_cache,
+            storage_precision=cli_args.storage_precision,
+            binary_prefilter=cli_args.binary_prefilter,
+            binary_rescore_multiplier=cli_args.binary_rescore_multiplier,
+            calibration_sample_size=cli_args.calibration_sample_size,
+            cache_compression=cli_args.cache_compression,
+            cache_compression_level=cli_args.cache_compression_level,
         ),
     ),
     "hybrid": _StrategyDispatchSpec(
@@ -197,6 +204,12 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             truncate_dim=cli_args.truncate_dim,
             use_streaming=cli_args.streaming,
             force_rebuild_cache=cli_args.force_rebuild_cache,
+            storage_precision=cli_args.storage_precision,
+            binary_prefilter=cli_args.binary_prefilter,
+            binary_rescore_multiplier=cli_args.binary_rescore_multiplier,
+            calibration_sample_size=cli_args.calibration_sample_size,
+            cache_compression=cli_args.cache_compression,
+            cache_compression_level=cli_args.cache_compression_level,
             random_seed=cli_args.seed,
         ),
     ),
@@ -628,6 +641,68 @@ Examples:
         "--force-rebuild-cache",
         action="store_true",
         help="Forcefully clear and rebuild embedding cache for this model before running.",
+    )
+
+    embedding_group.add_argument(
+        "--storage-precision",
+        choices=["int8", "float16", "float32"],
+        default=EMBEDDING_STORAGE_CONFIG.storage_precision,
+        help=("Persistent embedding cache precision (default: %(default)s)"),
+    )
+
+    binary_prefilter_group = embedding_group.add_mutually_exclusive_group()
+    binary_prefilter_group.add_argument(
+        "--binary-prefilter",
+        dest="binary_prefilter",
+        action="store_true",
+        help="Enable binary Hamming prefilter + rescoring (recommended for large corpora).",
+    )
+    binary_prefilter_group.add_argument(
+        "--no-binary-prefilter",
+        dest="binary_prefilter",
+        action="store_false",
+        help="Disable binary prefilter and use direct cache scoring.",
+    )
+    build_parser.set_defaults(
+        binary_prefilter=EMBEDDING_STORAGE_CONFIG.binary_prefilter
+    )
+
+    embedding_group.add_argument(
+        "--binary-rescore-multiplier",
+        type=_positive_int,
+        default=EMBEDDING_STORAGE_CONFIG.binary_rescore_multiplier,
+        help=(
+            "Oversampling factor for binary prefilter rescoring (default: %(default)s)"
+        ),
+    )
+
+    embedding_group.add_argument(
+        "--calibration-sample-size",
+        type=_positive_int,
+        default=EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
+        help=(
+            "Calibration sample size for int8 quantization ranges "
+            "(default: %(default)s)"
+        ),
+    )
+
+    embedding_group.add_argument(
+        "--cache-compression",
+        type=str,
+        default=EMBEDDING_STORAGE_CONFIG.compression,
+        help=(
+            "HDF5 compression filter for embedding cache datasets "
+            "(default: %(default)s)"
+        ),
+    )
+
+    embedding_group.add_argument(
+        "--cache-compression-level",
+        type=_non_negative_int,
+        default=EMBEDDING_STORAGE_CONFIG.compression_level,
+        help=(
+            "HDF5 compression level for embedding cache datasets (default: %(default)s)"
+        ),
     )
 
     # Hybrid strategy arguments
