@@ -266,6 +266,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
+        enable_torch_compile: bool = True,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -289,6 +290,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int calibration_sample_size: Calibration sample size used for int8 quantization ranges.
         :param str cache_compression: HDF5 compression filter for embedding datasets.
         :param int cache_compression_level: HDF5 compression level.
+        :param bool enable_torch_compile: Whether to enable best-effort inner-model
+            ``torch.compile`` optimization for supported profiles.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         _check_embedding_deps()
@@ -329,6 +332,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.calibration_sample_size = int(calibration_sample_size)
         self.cache_compression = cache_compression
         self.cache_compression_level = int(cache_compression_level)
+        self.enable_torch_compile = bool(enable_torch_compile)
         self.model_profile = get_embedding_model_profile(model_name)
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
         self._source_dtype_hint = self._resolve_source_dtype_hint()
@@ -533,7 +537,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 )
                 return
 
-            if cached_fingerprint is not None and cached_fingerprint != model_fingerprint:
+            if (
+                cached_fingerprint is not None
+                and cached_fingerprint != model_fingerprint
+            ):
                 logger.warning(
                     "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
                     "Clearing namespace cache.",
@@ -551,10 +558,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         model_fingerprint = self._resolve_model_fingerprint()
-        if (
-            cached_fingerprint is not None
-            and cached_fingerprint != model_fingerprint
-        ):
+        if cached_fingerprint is not None and cached_fingerprint != model_fingerprint:
             logger.warning(
                 "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
                 "Clearing namespace cache.",
@@ -900,6 +904,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return None: Mutates ``self.model`` in place when compilation succeeds.
         """
         if self.model is None or self._inner_model_compiled:
+            return
+
+        if not self.enable_torch_compile:
+            logger.debug(
+                "Skipping torch.compile for %s: disabled by configuration.",
+                self.model_name,
+            )
             return
 
         if not self.model_profile.compile_inner_transformer:

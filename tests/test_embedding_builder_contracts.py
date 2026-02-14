@@ -213,6 +213,25 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
             assert builder.model[0].auto_model is original
         assert builder._inner_model_compiled is expect_compiled
 
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        compile_behavior="tagged",
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        enable_torch_compile=False,
+        client=MagicMock(),
+    )
+    builder._load_model()
+    original = init_log["auto_model_before_compile"]
+    assert builder.model is not None
+    assert builder.model[0].auto_model is original
+    assert builder._inner_model_compiled is False
+
     tf32_cases = [
         ((8, 0), "tf32"),
         ((7, 5), "off"),
@@ -537,12 +556,14 @@ def test_embedding_cache_reuses_cached_payload_with_fallback_fingerprint_when_lo
     with caplog.at_level(logging.WARNING):
         builder._ensure_cache_model_fingerprint()
 
-    assert builder._resolved_model_fingerprint == "hf::org/offline-no-fingerprint::refs/pr/12::offline"
+    assert (
+        builder._resolved_model_fingerprint
+        == "hf::org/offline-no-fingerprint::refs/pr/12::offline"
+    )
     assert builder.embedding_cache.clear.call_count == 0
     builder.embedding_cache.set_model_fingerprint.assert_not_called()
     assert any(
-        "Reusing cached payload with fallback identity"
-        in record.getMessage()
+        "Reusing cached payload with fallback identity" in record.getMessage()
         for record in caplog.records
     )
 

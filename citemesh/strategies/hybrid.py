@@ -55,6 +55,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
+        enable_torch_compile: bool = True,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -84,6 +85,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int calibration_sample_size: Calibration sample size for int8 storage ranges.
         :param str cache_compression: HDF5 compression filter for semantic branch cache.
         :param int cache_compression_level: HDF5 compression level for semantic branch cache.
+        :param bool enable_torch_compile: Whether semantic branch may use
+            best-effort inner-model ``torch.compile`` optimization.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         if max_semantic is None:
@@ -122,6 +125,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 calibration_sample_size=calibration_sample_size,
                 cache_compression=cache_compression,
                 cache_compression_level=cache_compression_level,
+                enable_torch_compile=enable_torch_compile,
                 client=self.client,
             )
         else:

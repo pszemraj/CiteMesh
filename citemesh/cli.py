@@ -173,6 +173,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "calibration_sample_size": cli_args.calibration_sample_size,
         "cache_compression": cli_args.cache_compression,
         "cache_compression_level": cli_args.cache_compression_level,
+        "enable_torch_compile": cli_args.torch_compile,
     }
 
 
@@ -759,6 +760,24 @@ Examples:
             "HDF5 compression level for embedding cache datasets (default: %(default)s)"
         ),
     )
+
+    torch_compile_group = embedding_group.add_mutually_exclusive_group()
+    torch_compile_group.add_argument(
+        "--torch-compile",
+        dest="torch_compile",
+        action="store_true",
+        help=(
+            "Enable best-effort torch.compile for supported embedding profiles "
+            "(default: enabled)."
+        ),
+    )
+    torch_compile_group.add_argument(
+        "--no-torch-compile",
+        dest="torch_compile",
+        action="store_false",
+        help="Disable torch.compile and keep eager runtime for embedding models.",
+    )
+    build_parser.set_defaults(torch_compile=True)
 
     # Hybrid strategy arguments
     hybrid_group = build_parser.add_argument_group("hybrid strategy options")

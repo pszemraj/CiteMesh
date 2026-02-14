@@ -91,6 +91,7 @@ def _dispatch_namespace() -> argparse.Namespace:
         calibration_sample_size=123,
         cache_compression="gzip",
         cache_compression_level=1,
+        torch_compile=True,
     )
 
 
@@ -461,6 +462,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "calibration_sample_size": 123,
                 "cache_compression": "gzip",
                 "cache_compression_level": 1,
+                "enable_torch_compile": True,
             },
         ),
         (
@@ -486,6 +488,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "calibration_sample_size": 123,
                 "cache_compression": "gzip",
                 "cache_compression_level": 1,
+                "enable_torch_compile": True,
             },
         ),
     ]
@@ -533,6 +536,7 @@ def test_cli_help_contracts() -> None:
                 "--binary-prefilter",
                 "--binary-rescore-multiplier",
                 "--calibration-sample-size",
+                "--no-torch-compile",
                 "--spring-iterations",
                 "citation/recommendation",
             ],

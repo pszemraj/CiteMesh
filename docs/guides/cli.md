@@ -128,6 +128,11 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
+- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled)
+
+Runtime precision policy:
+
+- TF32 kernels are auto-enabled on supported Ampere+ CUDA runtimes for embedding inference. This behavior is intentional and currently does not expose a CLI toggle.
 
 ### Hybrid Strategy
 
