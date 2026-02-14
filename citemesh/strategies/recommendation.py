@@ -113,7 +113,6 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             self._hydrate_references(paper)
             papers[paper.paper_id] = paper
 
-        logger.info("Collected %s papers from recommendations", len(papers))
         self._abstract_index.build(papers)
         self._set_collection_summary(
             f"Collected {len(papers)} papers from recommendations"
@@ -147,17 +146,3 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         )
 
         return min(features.combined_score, 1.0)
-
-    def should_create_edge(
-        self, paper1: Paper, paper2: Paper, similarity: float
-    ) -> bool:
-        """Apply threshold logic for recommendation-derived edges.
-
-        :param Paper paper1: First paper.
-        :param Paper paper2: Second paper.
-        :param float similarity: Computed similarity score.
-        :return bool: ``True`` when edge should be kept.
-        """
-        del paper1
-        del paper2
-        return similarity >= self.similarity_threshold

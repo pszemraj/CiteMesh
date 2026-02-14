@@ -178,7 +178,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         summary = (
             f"Collected {len(papers)} papers ({reference_lists} with reference lists)"
         )
-        logger.info(summary)
         self._abstract_index.build(papers)
         self._set_collection_summary(summary)
 
@@ -209,18 +208,3 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         )
 
         return features.combined_score
-
-    def should_create_edge(
-        self, paper1: Paper, paper2: Paper, similarity: float
-    ) -> bool:
-        """
-        Decide whether to create edge based on similarity and sparsity goals.
-
-        :param Paper paper1: First paper
-        :param Paper paper2: Second paper
-        :param float similarity: Computed similarity score
-        :return bool: True if edge should be created
-        """
-        del paper1
-        del paper2
-        return similarity >= self.similarity_threshold

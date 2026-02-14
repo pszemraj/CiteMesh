@@ -46,6 +46,13 @@ def _install_fake_sentence_transformers(
     return init_log, encode_log
 
 
+def _disable_embedding_dep_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable optional embedding dependency guard for focused unit tests."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+
+
 def _install_fake_torch(
     monkeypatch: pytest.MonkeyPatch,
     cuda_available: bool,
@@ -152,9 +159,7 @@ def test_embeddinggemma_precision_path(
     expects_bf16: bool,
 ) -> None:
     """EmbeddingGemma should request BF16/autocast only on supported devices."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     bf16_token, autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
@@ -182,9 +187,7 @@ def test_embeddinggemma_rejects_unsupported_truncate_dim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """EmbeddingGemma should reject unsupported truncate dimensions."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
     with pytest.raises(
         ValueError,
         match="truncate_dim=300 is not supported for google/embeddinggemma-300m",
@@ -207,9 +210,7 @@ def test_inner_transformer_compile_behavior(
     expect_compiled: bool,
 ) -> None:
     """Only EmbeddingGemma should compile the inner HF model when available."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
@@ -236,9 +237,7 @@ def test_tf32_runtime_config_enables_precision_api_on_ampere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """TF32 runtime policy should enable precision APIs on Ampere+ GPUs."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
     _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
         monkeypatch,
@@ -259,9 +258,7 @@ def test_tf32_runtime_config_skips_pre_ampere(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """TF32 runtime policy should skip GPUs older than Ampere."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
     _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
         monkeypatch,
@@ -282,9 +279,7 @@ def test_embedding_runtime_logging_is_concise_at_info(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Info logs should be concise while detailed profile logs stay at debug."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
     _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
@@ -331,9 +326,7 @@ def test_embedding_cache_namespace_varies_by_storage_precision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cache namespace should isolate incompatible storage precision settings."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
 
     int8_builder = EmbeddingGraphBuilder(
         max_papers=1, storage_precision="int8", client=MagicMock()
@@ -352,9 +345,7 @@ def test_extract_paper_metadata_parsing_and_normalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Metadata extraction should parse strings and normalize arXiv IDs."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
     snapshot = builder._extract_paper_metadata(
@@ -388,9 +379,7 @@ def test_streaming_embedding_hydration_loader_falls_back_to_secondary_dataset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Failing primary stream should fallback to secondary dataset source."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
 
     load_calls: list[tuple[str, str, bool]] = []
 
@@ -430,9 +419,7 @@ def test_streaming_with_sliced_split_fails_fast(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Streaming mode should reject sliced split syntax."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
 
     with pytest.raises(ValueError, match="does not support sliced dataset splits"):
         EmbeddingGraphBuilder(
@@ -447,9 +434,7 @@ def test_collect_papers_uses_hashed_query_seed_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Query-mode seeds should use deterministic hashed identifiers."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
 
     builder = EmbeddingGraphBuilder(
         max_papers=1, use_streaming=False, client=MagicMock()
@@ -478,9 +463,7 @@ def test_warm_cache_candidate_selection_skips_dataset_loading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hydrated cache candidate retrieval should bypass dataset loading."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
 
     fake_datasets = types.ModuleType("datasets")
 
@@ -535,9 +518,7 @@ def test_embedding_top_k_validation_and_tie_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Embedding top-k should validate bounds and sort cache ties by paper ID."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
+    _disable_embedding_dep_check(monkeypatch)
 
     with pytest.raises(ValueError, match="top_k must be at least 1"):
         EmbeddingGraphBuilder(top_k=0, client=MagicMock())

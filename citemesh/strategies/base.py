@@ -159,9 +159,17 @@ class GraphBuilderStrategy(ABC):
         :param Paper paper1: First paper
         :param Paper paper2: Second paper
         :param float similarity: Computed similarity score
-        :return bool: True if edge should be created
+        :return bool: True if edge should be created. Uses ``self.similarity_threshold``
+            when present, otherwise defaults to ``0.0``.
         """
-        return similarity > 0.0
+        del paper1
+        del paper2
+        raw_threshold = getattr(self, "similarity_threshold", 0.0)
+        try:
+            threshold = float(raw_threshold)
+        except (TypeError, ValueError):
+            threshold = 0.0
+        return similarity >= threshold
 
     def get_collection_summary(self) -> Optional[str]:
         """
