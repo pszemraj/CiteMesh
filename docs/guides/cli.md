@@ -62,6 +62,9 @@ When `--export all` is used, CiteMesh writes every supported format using consis
 
 If explicit `-o` ends with a known export suffix (for example `-o out/my-run.json`), the suffix is stripped and the remaining path is treated as the directory base for multi-export runs.
 If explicit `-o` has no known suffix, it is treated as the directory base for multi-export runs.
+Example: `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
+normalizes to directory `out/` and writes files like `out/hybrid.png`, `out/hybrid.html`,
+`out/hybrid.plotly.html`, `out/hybrid.json`, and `out/hybrid.graphml`.
 
 For multi-export runs, files are named `<strategy>.<ext>` inside the selected directory. Example:
 
@@ -146,7 +149,7 @@ Runtime precision policy:
 
 - `png`: Matplotlib static render with theme-aware background and labels
 - `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
-- `plotly`: interactive Plotly graph (HTML)
+- `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
 - `json`: structured graph data with nodes, edges, metadata
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
 
