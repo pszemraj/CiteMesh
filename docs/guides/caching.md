@@ -68,10 +68,11 @@ Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`)
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
 
-For Hugging Face repo IDs, hydration resolves and stores a commit-SHA fingerprint. If
-fingerprint resolution fails, hydration fails closed rather than reusing cache state
-without model identity verification. If a stored fingerprint differs from the active
-model fingerprint, CiteMesh clears and rebuilds that namespace before reuse.
+For Hugging Face repo IDs, hydration resolves and stores a commit-SHA fingerprint.
+If the active fingerprint cannot be resolved while a cached fingerprint exists, CiteMesh
+reuses the cached namespace with a warning to avoid unnecessary failures in offline
+or rate-limited environments. If a stored fingerprint differs from a successfully
+resolved active fingerprint, CiteMesh clears and rebuilds that namespace before reuse.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 

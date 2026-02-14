@@ -484,6 +484,92 @@ def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
     builder.embedding_cache.set_model_fingerprint.assert_called_once_with("fp-new")
 
 
+def test_embedding_cache_reuses_cached_fingerprint_when_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Offline fingerprint lookup failures should not block reuse of a hydrated cache."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, model_name="org/offline-test", client=MagicMock()
+    )
+    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
+    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value="cached-fp")
+    builder.embedding_cache.clear = MagicMock()
+    builder.embedding_cache.set_model_fingerprint = MagicMock()
+    builder._resolve_model_fingerprint = MagicMock(
+        side_effect=RuntimeError("network unavailable")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_model_fingerprint()
+
+    assert builder._resolved_model_fingerprint == "cached-fp"
+    assert builder.embedding_cache.clear.call_count == 0
+    builder.embedding_cache.set_model_fingerprint.assert_not_called()
+    assert any(
+        "Reusing cached fingerprint cached-fp without identity verification."
+        in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_embedding_cache_reuses_cached_payload_with_fallback_fingerprint_when_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Old caches without stored fingerprint should still be reusable offline."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/offline-no-fingerprint",
+        model_revision="refs/pr/12",
+        client=MagicMock(),
+    )
+    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
+    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value=None)
+    builder.embedding_cache.clear = MagicMock()
+    builder.embedding_cache.set_model_fingerprint = MagicMock()
+    builder._resolve_model_fingerprint = MagicMock(
+        side_effect=RuntimeError("network unavailable")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_model_fingerprint()
+
+    assert builder._resolved_model_fingerprint == "hf::org/offline-no-fingerprint::refs/pr/12::offline"
+    assert builder.embedding_cache.clear.call_count == 0
+    builder.embedding_cache.set_model_fingerprint.assert_not_called()
+    assert any(
+        "Reusing cached payload with fallback identity"
+        in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_embedding_cache_sets_missing_cached_fingerprint_after_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cached payload without fingerprint should be migrated to a resolved fingerprint."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, model_name="org/needs-fingerprint", client=MagicMock()
+    )
+    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
+    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value=None)
+    builder.embedding_cache.set_model_fingerprint = MagicMock()
+
+    builder._resolve_model_fingerprint = MagicMock(return_value="resolved-fp")
+    builder.embedding_cache.clear = MagicMock()
+
+    builder._ensure_cache_model_fingerprint()
+
+    builder.embedding_cache.set_model_fingerprint.assert_called_once_with("resolved-fp")
+    assert builder._resolved_model_fingerprint == "resolved-fp"
+    assert builder.embedding_cache.clear.call_count == 0
+
+
 def test_embedding_fingerprint_resolution_fails_closed_for_hf_repo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

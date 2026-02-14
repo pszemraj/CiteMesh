@@ -483,14 +483,75 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._resolved_model_fingerprint = fingerprint
         return fingerprint
 
+    def _offline_model_fingerprint_fallback(self) -> str:
+        """Build a deterministic fallback fingerprint token for offline verification gaps.
+
+        :return str: Deterministic fingerprint proxy derived from model identity hints.
+        """
+        model_id = str(self.model_name).strip()
+        if "/" not in model_id:
+            revision_token = self.model_revision or "default"
+            return f"model-alias::{model_id}::revision={revision_token}"
+
+        requested_revision = (self.model_revision or "main").strip() or "main"
+        return f"hf::{model_id}::{requested_revision}::offline"
+
     def _ensure_cache_model_fingerprint(self) -> None:
         """Verify cache payload is bound to the active model fingerprint."""
-        model_fingerprint = self._resolve_model_fingerprint()
+        has_cached_payload = self.embedding_cache.has_cached_payload()
         cached_fingerprint = self.embedding_cache.get_model_fingerprint()
-        if (
-            self.embedding_cache.has_cached_payload()
-            and cached_fingerprint != model_fingerprint
-        ):
+
+        if has_cached_payload:
+            try:
+                model_fingerprint = self._resolve_model_fingerprint()
+            except Exception as exc:
+                if cached_fingerprint:
+                    self._resolved_model_fingerprint = cached_fingerprint
+                    logger.warning(
+                        "Could not resolve Hugging Face model fingerprint for %s while "
+                        "reuse checks are active. Reusing cached fingerprint %s without "
+                        "identity verification.",
+                        self.model_name,
+                        cached_fingerprint,
+                    )
+                    logger.debug(
+                        "Skipping model-fingerprint enforcement due resolution failure: %s",
+                        exc,
+                    )
+                    return
+                fallback_fingerprint = self._offline_model_fingerprint_fallback()
+                self._resolved_model_fingerprint = fallback_fingerprint
+                logger.warning(
+                    "Could not resolve Hugging Face model fingerprint for %s with no "
+                    "stored fingerprint. Reusing cached payload with fallback identity %s.",
+                    self.model_name,
+                    fallback_fingerprint,
+                )
+                logger.debug(
+                    "Skipping model-fingerprint enforcement due resolution failure: %s",
+                    exc,
+                )
+                return
+
+            if cached_fingerprint is not None and cached_fingerprint != model_fingerprint:
+                logger.warning(
+                    "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
+                    "Clearing namespace cache.",
+                    cached_fingerprint or "missing",
+                    model_fingerprint,
+                )
+                self.embedding_cache.clear()
+                self._resolved_model_fingerprint = model_fingerprint
+                self.embedding_cache.set_model_fingerprint(model_fingerprint)
+                return
+            if cached_fingerprint is None:
+                self.embedding_cache.set_model_fingerprint(model_fingerprint)
+
+            self._resolved_model_fingerprint = model_fingerprint
+            return
+
+        model_fingerprint = self._resolve_model_fingerprint()
+        if cached_fingerprint != model_fingerprint:
             logger.warning(
                 "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
                 "Clearing namespace cache.",
@@ -498,6 +559,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 model_fingerprint,
             )
             self.embedding_cache.clear()
+        self._resolved_model_fingerprint = model_fingerprint
         self.embedding_cache.set_model_fingerprint(model_fingerprint)
 
     def _log_dimension_policy(self) -> None:
