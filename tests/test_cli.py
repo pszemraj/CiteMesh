@@ -91,24 +91,10 @@ def _dispatch_namespace() -> argparse.Namespace:
     )
 
 
-def test_cache_clear_removes_configured_cache_root(
+def test_cache_commands_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cache clear should delete configured cache root when --yes is provided."""
-    cache_root = tmp_path / "citemesh-cache-root"
-    (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
-    (cache_root / "embeddings" / "payload.txt").write_text("cache bytes")
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
-
-    result = run_cli_command(["cache", "clear", "--yes"])
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    assert not cache_root.exists()
-
-
-def test_cache_scan_reports_usage_summary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Cache scan should print per-section and total usage stats."""
+    """Cache clear/scan should honor configured cache root and print usage summary."""
     cache_root = tmp_path / "citemesh-cache-root"
     (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
     (cache_root / "misc").mkdir(parents=True, exist_ok=True)
@@ -117,8 +103,10 @@ def test_cache_scan_reports_usage_summary(
     (cache_root / "references" / "payload.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
 
-    result = run_cli_command(["cache", "scan"])
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    scan_result = run_cli_command(["cache", "scan"])
+    assert scan_result.returncode == 0, (
+        f"STDOUT: {scan_result.stdout}\nSTDERR: {scan_result.stderr}"
+    )
     for token in [
         "CiteMesh Cache Scan",
         "embeddings",
@@ -126,7 +114,13 @@ def test_cache_scan_reports_usage_summary(
         "TOTAL",
         "Cache root:",
     ]:
-        assert token in result.stdout
+        assert token in scan_result.stdout
+
+    clear_result = run_cli_command(["cache", "clear", "--yes"])
+    assert clear_result.returncode == 0, (
+        f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"
+    )
+    assert not cache_root.exists()
 
 
 @pytest.mark.slow
@@ -204,15 +198,32 @@ def test_invalid_paper_id_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None
     assert "Traceback" not in result.stderr
 
 
-def test_missing_required_argument_fails() -> None:
-    """Missing required build args should return an error."""
+def test_cli_argument_validation_contracts() -> None:
+    """Missing args and numeric validators should fail with clear messages."""
     result = run_cli_command(["build", "--strategy", "citation"])
     assert result.returncode != 0
     assert "required" in result.stderr.lower() or "error" in result.stderr.lower()
 
+    numeric_cases = [
+        (["build", "arxiv:1706.03762", "--max-papers", "0"], "must be at least 1"),
+        (
+            ["build", "arxiv:1706.03762", "--similarity-threshold", "1.2"],
+            "must be between 0.0 and 1.0",
+        ),
+        (
+            ["build", "arxiv:1706.03762", "--similarity-threshold", "nan"],
+            "must be a finite float",
+        ),
+        (["search", "attention", "--limit", "0"], "must be at least 1"),
+    ]
+    for args, expected_error in numeric_cases:
+        result = run_cli_command(args)
+        assert result.returncode != 0
+        assert expected_error in result.stderr
 
-def test_seed_is_threaded_to_shared_layout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Build path should compute one seeded layout and share with exporters."""
+
+def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build path should share seeded layout and skip it for JSON-only export."""
     graph = nx.Graph()
     graph.add_node(
         "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
@@ -268,19 +279,6 @@ def test_seed_is_threaded_to_shared_layout(monkeypatch: pytest.MonkeyPatch) -> N
     assert captured["layout"] is shared_layout
     assert captured["visualize_layout"] is shared_layout
 
-
-def test_json_export_skips_layout_computation(monkeypatch: pytest.MonkeyPatch) -> None:
-    """JSON-only export should not trigger layout computation."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
-
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        cli_module, "_build_strategy_graph", lambda args, strategy: (graph, "seed")
-    )
-
     def _fail_compute_layout(
         *args: Any, **kwargs: Any
     ) -> dict[str, tuple[float, float]]:
@@ -289,6 +287,7 @@ def test_json_export_skips_layout_computation(monkeypatch: pytest.MonkeyPatch) -
         raise AssertionError("compute_layout should not run for JSON-only export")
 
     monkeypatch.setattr(cli_module, "compute_layout", _fail_compute_layout)
+    captured.clear()
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
@@ -447,11 +446,18 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         assert captured == expected_kwargs
 
 
-def test_build_strategy_graph_rejects_invalid_strategy() -> None:
-    """Unsupported strategies should raise clear errors."""
+def test_build_strategy_graph_invalid_and_lazy_exports_contract() -> None:
+    """Unsupported strategies should error and top-level lazy exports should resolve."""
     namespace = _dispatch_namespace()
     with pytest.raises(ValueError, match="Unsupported strategy: unknown"):
         cli_module._build_strategy_graph(namespace, "unknown")
+
+    import citemesh
+
+    assert citemesh.CitationGraphBuilder.__name__ == "CitationGraphBuilder"
+    assert citemesh.RecommendationGraphBuilder.__name__ == "RecommendationGraphBuilder"
+    assert citemesh.EmbeddingGraphBuilder.__name__ == "EmbeddingGraphBuilder"
+    assert citemesh.HybridGraphBuilder.__name__ == "HybridGraphBuilder"
 
 
 def test_cli_help_contracts() -> None:
@@ -483,29 +489,9 @@ def test_cli_help_contracts() -> None:
             assert token.lower() in lowered
 
 
-def test_cli_rejects_invalid_numeric_inputs() -> None:
-    """Argparse validators should reject out-of-range numeric values."""
-    cases = [
-        (["build", "arxiv:1706.03762", "--max-papers", "0"], "must be at least 1"),
-        (
-            ["build", "arxiv:1706.03762", "--similarity-threshold", "1.2"],
-            "must be between 0.0 and 1.0",
-        ),
-        (
-            ["build", "arxiv:1706.03762", "--similarity-threshold", "nan"],
-            "must be a finite float",
-        ),
-        (["search", "attention", "--limit", "0"], "must be at least 1"),
-    ]
-    for args, expected_error in cases:
-        result = run_cli_command(args)
-        assert result.returncode != 0
-        assert expected_error in result.stderr
-
-
-def test_resolve_output_paths_contract() -> None:
-    """Output path resolver should preserve/replace suffixes correctly."""
-    cases = [
+def test_output_path_and_slug_contracts() -> None:
+    """Output path resolver and auto-output slug generation should stay stable."""
+    path_cases = [
         (
             Path("out/arxiv-2508.14040-example"),
             ["png", "html", "json"],
@@ -529,7 +515,7 @@ def test_resolve_output_paths_contract() -> None:
             {"plotly": Path("reports/example.plotly.html")},
         ),
     ]
-    for base_output_path, formats, explicit_output, expected in cases:
+    for base_output_path, formats, explicit_output, expected in path_cases:
         paths = resolve_output_paths(
             base_output_path=base_output_path,
             selected_formats=formats,
@@ -538,35 +524,23 @@ def test_resolve_output_paths_contract() -> None:
         )
         assert paths == expected
 
-
-def test_canonicalize_paper_id_for_metadata_normalizes_urls() -> None:
-    """Metadata IDs should canonicalize URL-like arXiv/DOI forms."""
     for raw_id, expected in get_paper_id_normalization_cases():
         if raw_id.startswith("http://") or raw_id.startswith("https://"):
             assert canonicalize_paper_id_for_metadata(raw_id) == expected
 
-
-def test_generate_output_path_reuses_title_directory_without_hash_suffix() -> None:
-    """Same title should map to a stable title-only output directory."""
     graph = nx.Graph()
     graph.add_node("seed-a", title="A Survey of Transformers")
     graph.add_node("seed-b", title="A Survey of Transformers")
-
     path_a = generate_output_path(graph, seed_id="seed-a", output_dir=Path("out"))
     path_b = generate_output_path(graph, seed_id="seed-b", output_dir=Path("out"))
-
     assert path_a.parent == path_b.parent
     assert path_a.parent.name == "a-survey-of-transformers"
 
-
-def test_generate_output_path_slug_length_is_capped_at_40_chars() -> None:
-    """Auto output directory slug should be capped to 40 characters."""
     graph = nx.Graph()
     graph.add_node(
         "seed",
         title="This title should definitely exceed forty characters for the slug",
     )
-
     output_path = generate_output_path(graph, seed_id="seed", output_dir=Path("out"))
     assert len(output_path.parent.name) <= 40
 
@@ -581,13 +555,3 @@ def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("citemesh.cli.main", fake_main)
     runpy.run_module("citemesh.__main__", run_name="__main__")
     assert called["main"] is True
-
-
-def test_lazy_strategy_exports_resolve() -> None:
-    """Top-level strategy exports should resolve via lazy loading."""
-    import citemesh
-
-    assert citemesh.CitationGraphBuilder.__name__ == "CitationGraphBuilder"
-    assert citemesh.RecommendationGraphBuilder.__name__ == "RecommendationGraphBuilder"
-    assert citemesh.EmbeddingGraphBuilder.__name__ == "EmbeddingGraphBuilder"
-    assert citemesh.HybridGraphBuilder.__name__ == "HybridGraphBuilder"

@@ -114,13 +114,13 @@ def _make_reference_record(paper_id: str) -> SimpleNamespace:
     return SimpleNamespace(paper=SimpleNamespace(paperId=paper_id))
 
 
-def test_relation_calls_retry_on_rate_limit() -> None:
-    """Citation/reference lookups should back off using Retry-After on 429."""
-    cases = [
+def test_retry_and_backoff_contracts() -> None:
+    """Retry policy should handle rate limits, transient failures, and exhaustion."""
+    relation_cases = [
         ("get_paper_citations", "2", 2.0),
         ("get_paper_references", "3", 3.0),
     ]
-    for api_method, retry_after, delay in cases:
+    for api_method, retry_after, delay in relation_cases:
         client = SemanticScholarClient(timeout=1)
         client._rate_limit = lambda: None
 
@@ -131,12 +131,7 @@ def test_relation_calls_retry_on_rate_limit() -> None:
         setattr(
             client.client,
             api_method,
-            MagicMock(
-                side_effect=[
-                    requests.HTTPError(response=response),
-                    [],
-                ]
-            ),
+            MagicMock(side_effect=[requests.HTTPError(response=response), []]),
         )
 
         with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
@@ -149,9 +144,6 @@ def test_relation_calls_retry_on_rate_limit() -> None:
         assert sleep_mock.call_args_list[0].args[0] == delay
         assert result == []
 
-
-def test_retries_on_rate_limit_from_direct_endpoint() -> None:
-    """Search should retry after Retry-After for 429 responses."""
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
     client._session.get = MagicMock()
@@ -162,7 +154,6 @@ def test_retries_on_rate_limit_from_direct_endpoint() -> None:
             payload={"data": [_paper_payload(paper_id="x1", title="A", year=2020)]},
         ),
     ]
-
     with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
         results = client.search_papers("attention")
 
@@ -171,34 +162,6 @@ def test_retries_on_rate_limit_from_direct_endpoint() -> None:
     assert len(results) == 1
     assert results[0] == Paper(paper_id="x1", title="A", year=2020, abstract="Abstract")
 
-
-def test_retries_on_transient_api_failure() -> None:
-    """``get_paper`` should retry and eventually return a paper."""
-    api_paper = SimpleNamespace(
-        paperId="seed",
-        title="Seed",
-        year=2020,
-        authors=[],
-        citationCount=1,
-        abstract="abstract",
-        fieldsOfStudy=[],
-    )
-
-    client = SemanticScholarClient(timeout=1)
-    client._rate_limit = lambda: None
-    client.client.get_paper = MagicMock(side_effect=[Exception("temporary"), api_paper])
-
-    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
-        result = client.get_paper("seed")
-
-    assert isinstance(result, Paper)
-    assert result.paper_id == "seed"
-    assert sleep_mock.call_count == 1
-    assert sleep_mock.call_args_list[0].args[0] == API_CONFIG.retry_delay
-
-
-def test_retries_when_direct_endpoint_returns_malformed_json() -> None:
-    """Direct endpoint helper should retry when response JSON is malformed."""
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
     client._session.get = MagicMock()
@@ -209,7 +172,6 @@ def test_retries_when_direct_endpoint_returns_malformed_json() -> None:
             payload={"data": [_paper_payload(paper_id="x2", title="Retry success")]},
         ),
     ]
-
     with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
         results = client.search_papers("transformer")
 
@@ -218,13 +180,29 @@ def test_retries_when_direct_endpoint_returns_malformed_json() -> None:
     assert len(results) == 1
     assert results[0].paper_id == "x2"
 
+    api_paper = SimpleNamespace(
+        paperId="seed",
+        title="Seed",
+        year=2020,
+        authors=[],
+        citationCount=1,
+        abstract="abstract",
+        fieldsOfStudy=[],
+    )
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper = MagicMock(side_effect=[Exception("temporary"), api_paper])
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        result = client.get_paper("seed")
 
-def test_get_paper_returns_none_after_retries() -> None:
-    """``get_paper`` should return None after all retries are exhausted."""
+    assert isinstance(result, Paper)
+    assert result.paper_id == "seed"
+    assert sleep_mock.call_count == 1
+    assert sleep_mock.call_args_list[0].args[0] == API_CONFIG.retry_delay
+
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
     client.client.get_paper = MagicMock(side_effect=Exception("down"))
-
     with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
         result = client.get_paper("seed")
 
@@ -232,45 +210,36 @@ def test_get_paper_returns_none_after_retries() -> None:
     assert sleep_mock.call_count == API_CONFIG.max_retries - 1
 
 
-def test_normalize_paper_id_urls() -> None:
-    """URL and prefixed IDs should normalize to API-friendly canonical IDs."""
+def test_normalization_and_get_paper_id_contracts() -> None:
+    """ID normalization should cover URL/DOI edge cases and request canonical IDs."""
     for raw_id, expected in get_paper_id_normalization_cases():
         assert normalize_paper_id(raw_id) == expected
 
-
-def test_normalize_paper_id_handles_doi_prefixes_and_ports() -> None:
-    """DOI forms with prefixes/ports should normalize to bare DOI IDs."""
-    cases = [
+    doi_cases = [
         ("doi:10.1145/3133956.3134029", "10.1145/3133956.3134029"),
         ("https://doi.org:443/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
         ("doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
         ("dx.doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
     ]
-    for raw_id, expected in cases:
+    for raw_id, expected in doi_cases:
         assert normalize_paper_id(raw_id) == expected
 
-
-def test_normalize_paper_id_does_not_match_non_domains() -> None:
-    """Host matching should only accept exact domains/proper subdomains."""
-    cases = [
+    non_domain_cases = [
         (
             "https://notdoi.org/10.1145/3133956.3134029",
             "https://notdoi.org/10.1145/3133956.3134029",
         ),
-        ("https://fooarxiv.org/abs/1706.03762", "https://fooarxiv.org/abs/1706.03762"),
+        (
+            "https://fooarxiv.org/abs/1706.03762",
+            "https://fooarxiv.org/abs/1706.03762",
+        ),
     ]
-    for raw_id, expected in cases:
+    for raw_id, expected in non_domain_cases:
         assert normalize_paper_id(raw_id) == expected
 
-
-def test_normalize_paper_id_rejects_non_string_input() -> None:
-    """normalize_paper_id should fail clearly for non-string input."""
     with pytest.raises(ValueError, match="Invalid paper ID"):
         normalize_paper_id(None)  # type: ignore[arg-type]
 
-
-def test_get_paper_normalizes_arxiv_url_before_api_call() -> None:
-    """get_paper should normalize arXiv URLs before API requests."""
     api_paper = SimpleNamespace(
         paperId="seed",
         title="Seed",
@@ -280,20 +249,18 @@ def test_get_paper_normalizes_arxiv_url_before_api_call() -> None:
         abstract="abstract",
         fieldsOfStudy=[],
     )
-
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
     client.client.get_paper = MagicMock(return_value=api_paper)
 
     result = client.get_paper("https://arxiv.org/abs/2508.14040")
-
     assert isinstance(result, Paper)
     assert result.paper_id == "seed"
     assert client.client.get_paper.call_args.args[0] == "arxiv:2508.14040"
 
 
-def test_convert_recommendation_with_missing_fields_is_robust() -> None:
-    """``_convert_recommendation`` should tolerate sparse payload keys."""
+def test_direct_endpoint_conversion_and_validation_contracts() -> None:
+    """Direct endpoint payload conversion and validation should match API contracts."""
     client = SemanticScholarClient(timeout=1)
     payload = {
         "paperId": "p1",
@@ -304,7 +271,6 @@ def test_convert_recommendation_with_missing_fields_is_robust() -> None:
         "authors": [{"name": ""}, {}],
         "fieldsOfStudy": ["cs.AI", "cs.LG"],
     }
-
     paper = client._convert_recommendation(payload)
 
     assert paper is not None
@@ -315,9 +281,6 @@ def test_convert_recommendation_with_missing_fields_is_robust() -> None:
     assert paper.authors == []
     assert paper.categories == ["cs.AI", "cs.LG"]
 
-
-def test_get_recommended_and_search_payload_conversion() -> None:
-    """Recommendation/search wrappers should convert direct endpoint payloads."""
     client = SemanticScholarClient(timeout=1)
     client._request_json = MagicMock(
         side_effect=[
@@ -358,61 +321,39 @@ def test_get_recommended_and_search_payload_conversion() -> None:
 
     recommendations = client.get_recommended_papers("seed", limit=1)
     search_results = client.search_papers("transformer", limit=1)
-
     assert [paper.paper_id for paper in recommendations] == ["rec1"]
     assert recommendations[0].references == ["r1", "r2", "r3"]
     assert [paper.paper_id for paper in search_results] == ["search1"]
 
-
-def test_direct_endpoint_limit_validation_rejects_non_positive() -> None:
-    """Direct endpoint helpers should reject non-positive limits."""
     client = SemanticScholarClient(timeout=1)
-    cases = [
+    validation_cases = [
         ("get_recommended_papers", ("seed",), "limit must be at least 1"),
         ("search_papers", ("attention",), "limit must be at least 1"),
     ]
-    for method, args, error in cases:
+    for method, args, error in validation_cases:
         with pytest.raises(ValueError, match=error):
             getattr(client, method)(*args, limit=0)
 
-
-def test_search_query_validation() -> None:
-    """Search should reject blank and non-string queries."""
-    client = SemanticScholarClient(timeout=1)
-
     with pytest.raises(ValueError, match="query must not be empty"):
         client.search_papers("   ", limit=1)
-
     with pytest.raises(ValueError, match="query must be a string"):
         client.search_papers(123, limit=1)  # type: ignore[arg-type]
 
-
-def test_relation_limit_validation_for_citations_and_references() -> None:
-    """Citation/reference helpers should allow zero to disable fetches."""
-    client = SemanticScholarClient(timeout=1)
     client.client.get_paper_citations = MagicMock(return_value=[])
     client.client.get_paper_references = MagicMock(return_value=[])
-
     assert client.get_paper_citations("seed", limit=0) == []
     assert client.get_paper_references("seed", limit=0) == []
     client.client.get_paper_citations.assert_not_called()
     client.client.get_paper_references.assert_not_called()
 
-
-def test_direct_endpoint_limit_validation_rejects_non_integer() -> None:
-    """Direct endpoint helpers should reject non-integer limit values."""
-    client = SemanticScholarClient(timeout=1)
     with pytest.raises(ValueError, match="limit must be an integer"):
         client.get_recommended_papers("seed", limit=True)  # type: ignore[arg-type]
 
-
-def test_get_recommended_papers_url_encodes_paper_id_path_segment() -> None:
-    """Recommendation URL should treat paper_id as one encoded path token."""
-    cases = [
+    encoding_cases = [
         ("10.1145/3133956.3134029", "10.1145%2F3133956.3134029"),
         ("arxiv:math/0301234v1", "arxiv%3Amath%2F0301234"),
     ]
-    for raw_id, expected_suffix in cases:
+    for raw_id, expected_suffix in encoding_cases:
         client = SemanticScholarClient(timeout=1)
         client._request_json = MagicMock(return_value={"recommendedPapers": []})
         client.get_recommended_papers(raw_id, limit=1)

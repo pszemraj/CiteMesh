@@ -156,15 +156,18 @@ def _build_graph() -> tuple[nx.Graph, str]:
     return graph, seed.paper_id
 
 
-def test_exporter_json_and_graphml_serialization(tmp_path: Path) -> None:
-    """JSON and GraphML exports should serialize expected node/edge fields."""
+def test_exporter_json_graphml_contracts_and_determinism(tmp_path: Path) -> None:
+    """JSON and GraphML exports should preserve fields, metadata, and determinism."""
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
 
     json_path = tmp_path / "graph.json"
     graphml_path = tmp_path / "graph.graphml"
+    graphml_again_path = tmp_path / "graph-again.graphml"
+
     exporter.to_json(json_path)
     exporter.to_graphml(graphml_path)
+    exporter.to_graphml(graphml_again_path)
 
     payload = json.loads(json_path.read_text())
     assert payload["seed_id"] == seed_id
@@ -177,25 +180,28 @@ def test_exporter_json_and_graphml_serialization(tmp_path: Path) -> None:
     assert seed_node["is_seed"] in {"1", 1}
     assert "Alice Smith" in seed_node["authors"]
 
+    policy = _graphml_determinism_policy()
+    assert graphml.graph[GRAPHML_LAYOUT_METADATA_KEY] == policy
+    assert graphml.graph[GRAPHML_LAYOUT_VERSION_KEY] == nx.__version__
+    if policy == GRAPHML_DETERMINISM_POLICY_STRICT:
+        assert graphml_path.read_text() == graphml_again_path.read_text()
+    else:
+        assert _canonicalize_graphml(graphml_path) == _canonicalize_graphml(
+            graphml_again_path
+        )
 
-def test_exporter_interactive_html_raises_without_pyvis(
+
+def test_exporter_interactive_html_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Interactive HTML export should error cleanly when pyvis is unavailable."""
+    """Interactive HTML should fail clearly without pyvis and succeed with a stub."""
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
     monkeypatch.setitem(sys.modules, "pyvis", None)
     monkeypatch.setitem(sys.modules, "pyvis.network", None)
-
     with pytest.raises(RuntimeError, match="pyvis is required"):
-        exporter.to_interactive_html(tmp_path / "graph.html")
-
-
-def test_exporter_interactive_html_with_fake_pyvis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Interactive HTML export should write output through a pyvis-compatible API."""
+        exporter.to_interactive_html(tmp_path / "missing.html")
 
     class FakeNetwork:
         instances = []
@@ -205,7 +211,6 @@ def test_exporter_interactive_html_with_fake_pyvis(
             self.options = None
             self.nodes = []
             self.edges = []
-            self.saved_path = None
             FakeNetwork.instances.append(self)
 
         def set_options(self, options: str) -> None:
@@ -218,20 +223,17 @@ def test_exporter_interactive_html_with_fake_pyvis(
             self.edges.append((source, target, kwargs))
 
         def save_graph(self, path: str) -> None:
-            self.saved_path = path
             Path(path).write_text("<html>fake</html>")
 
     fake_pyvis = types.ModuleType("pyvis")
     fake_pyvis_network = types.ModuleType("pyvis.network")
     fake_pyvis_network.Network = FakeNetwork
     fake_pyvis.network = fake_pyvis_network
-
     monkeypatch.setitem(sys.modules, "pyvis", fake_pyvis)
     monkeypatch.setitem(sys.modules, "pyvis.network", fake_pyvis_network)
 
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, theme_name="dark")
     out_path = tmp_path / "graph.html"
+    exporter = GraphExporter(graph, seed_id, theme_name="dark")
     exporter.to_interactive_html(out_path, physics=True)
 
     instance = FakeNetwork.instances[-1]
@@ -242,55 +244,16 @@ def test_exporter_interactive_html_with_fake_pyvis(
     assert [node_id for node_id, _ in instance.nodes] == ["related", "seed"]
 
 
-def test_graphml_export_is_deterministic_across_runs(tmp_path: Path) -> None:
-    """Repeated GraphML exports should be deterministically equivalent."""
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
-
-    primary = tmp_path / "graph-a.graphml"
-    secondary = tmp_path / "graph-b.graphml"
-    exporter.to_graphml(primary)
-    exporter.to_graphml(secondary)
-
-    policy = _graphml_determinism_policy()
-    if policy == GRAPHML_DETERMINISM_POLICY_STRICT:
-        assert primary.read_text() == secondary.read_text()
-    else:
-        assert _canonicalize_graphml(primary) == _canonicalize_graphml(secondary)
-
-
-def test_graphml_export_records_determinism_metadata(
-    tmp_path: Path,
-) -> None:
-    """GraphML output should expose deterministic serialization policy metadata."""
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
-
-    path = tmp_path / "graph.graphml"
-    exporter.to_graphml(path)
-    graphml = nx.read_graphml(path)
-
-    policy = _graphml_determinism_policy()
-    assert graphml.graph[GRAPHML_LAYOUT_METADATA_KEY] == policy
-    assert graphml.graph[GRAPHML_LAYOUT_VERSION_KEY] == nx.__version__
-
-
-def test_exporter_plotly_raises_without_plotly(
+def test_exporter_plotly_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should error cleanly when plotly is unavailable."""
+    """Plotly export should cover missing dependency, div-id handling, and labels."""
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
     monkeypatch.setitem(sys.modules, "plotly", None)
     with pytest.raises(RuntimeError, match="plotly is required"):
-        exporter.to_plotly_html(tmp_path / "graph.plotly.html")
-
-
-def test_exporter_plotly_with_fake_module(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Plotly export should write output using a minimal graph_objects API."""
+        exporter.to_plotly_html(tmp_path / "missing.plotly.html")
 
     captured: dict[str, object] = {}
 
@@ -300,19 +263,42 @@ def test_exporter_plotly_with_fake_module(
             captured["data"] = data
             captured["layout"] = layout
 
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+        def write_html(self, path: str, **kwargs: Any) -> None:
+            captured["kwargs"] = kwargs
+            Path(path).write_text("<html>plotly</html>")
 
-    graph, seed_id = _build_graph()
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
     exporter = GraphExporter(
         graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
     )
     out_path = tmp_path / "graph.plotly.html"
     exporter.to_plotly_html(out_path)
+
     assert out_path.exists()
     node_trace = captured["data"][1]
     assert list(node_trace["text"]) == ["Related Paper", "Smith, 2020"]
     layout = captured["layout"]
     assert layout["title"] == "CiteMesh: Seed Paper"
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["div_id"] == exporter._plotly_div_id()
+
+    class NoDivIdFigure:
+        def __init__(self, data: Any, layout: Any) -> None:
+            del data
+            del layout
+
+        def write_html(self, path: str, **kwargs: Any) -> None:
+            del path
+            if "div_id" in kwargs:
+                raise TypeError("div_id unsupported")
+
+    _install_fake_plotly(monkeypatch, figure_cls=NoDivIdFigure)
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    with pytest.raises(RuntimeError, match="Deterministic Plotly export requires"):
+        exporter.to_plotly_html(tmp_path / "nodivid.plotly.html")
 
 
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(
@@ -358,69 +344,13 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     )
 
     assert "..." not in captured["title"]
-    assert (
-        "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents"
-        in captured["title"].replace("\n", " ")
-    )
+    assert seed_title in captured["title"].replace("\n", " ")
 
 
-def test_exporter_plotly_requires_div_id_support(
+def test_exporter_plotly_and_graphml_handle_missing_year_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should fail fast when deterministic div_id is unsupported."""
-
-    class FakeFigure:
-        def __init__(self, data: Any, layout: Any) -> None:
-            del data
-            del layout
-
-        def write_html(self, path: str, **kwargs: Any) -> None:
-            del path
-            if "div_id" in kwargs:
-                raise TypeError("div_id unsupported")
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
-
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
-    )
-
-    with pytest.raises(RuntimeError, match="Deterministic Plotly export requires"):
-        exporter.to_plotly_html(tmp_path / "graph.plotly.html")
-
-
-def test_exporter_plotly_uses_deterministic_div_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Plotly HTML export should provide a stable div id when supported."""
-    captured: dict[str, object] = {}
-
-    class FakeFigure(_BaseFakeFigure):
-        def write_html(self, path: str, **kwargs: Any) -> None:
-            captured["kwargs"] = kwargs
-            Path(path).write_text("<html>plotly</html>")
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
-
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
-    )
-    out_path = tmp_path / "graph.plotly.html"
-    exporter.to_plotly_html(out_path)
-
-    assert out_path.exists()
-    kwargs = captured["kwargs"]
-    assert isinstance(kwargs, dict)
-    assert kwargs["div_id"] == exporter._plotly_div_id()
-
-
-def test_exporter_plotly_with_missing_year_data(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Plotly export should avoid None in marker colors when year data is missing."""
-
+    """Plotly colors and GraphML year serialization should be stable with null years."""
     captured: dict[str, object] = {}
 
     def fake_scatter(**kwargs: Any) -> dict[str, object]:
@@ -462,10 +392,12 @@ def test_exporter_plotly_with_missing_year_data(
         "seed",
         layout={"seed": (0.0, 0.0), "missing-year": (1.0, 1.0)},
     )
-    out_path = tmp_path / "graph.plotly.html"
-    exporter.to_plotly_html(out_path)
+    plotly_path = tmp_path / "graph.plotly.html"
+    graphml_path = tmp_path / "graph.graphml"
+    exporter.to_plotly_html(plotly_path)
+    exporter.to_graphml(graphml_path)
 
-    assert out_path.exists()
+    assert plotly_path.exists()
     marker = captured["marker"]
     assert isinstance(marker, dict)
     marker_colors = marker["color"]
@@ -474,82 +406,14 @@ def test_exporter_plotly_with_missing_year_data(
     assert marker["cmin"] == 2000.0
     assert marker["cmax"] == 2001.0
 
-
-def test_exporter_graphml_with_missing_year(tmp_path: Path) -> None:
-    """GraphML export should serialize missing year values as a numeric default."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed",
-        paper=Paper(
-            paper_id="seed",
-            title="Seed Paper",
-            year=None,
-            authors=[Author(name="Alice Smith")],
-            citation_count=3,
-            abstract="Seed abstract",
-            categories=["cs.AI"],
-            is_seed=True,
-        ),
-        title="Seed Paper",
-        citation_count=3,
-        authors=["Alice Smith"],
-        is_seed=True,
-    )
-    graph.add_node(
-        "missing-year",
-        title="No Year",
-        citation_count=0,
-        authors=[],
-    )
-    graph.add_edge("seed", "missing-year")
-
-    exporter = GraphExporter(graph, "seed")
-    graphml_path = tmp_path / "graph.graphml"
-    exporter.to_graphml(graphml_path)
-
     graphml = nx.read_graphml(graphml_path)
     assert str(graphml.nodes["missing-year"]["year"]) == "0"
 
 
-def test_exporter_json_and_graphml_ordering_is_stable(tmp_path: Path) -> None:
-    """Serialization should sort nodes/edges regardless of insertion order."""
-    graph = nx.Graph()
-    graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
-    graph.add_node("seed", title="Seed Paper", year=2020, authors=[], is_seed=True)
-    graph.add_node("a", title="Node A", year=2021, authors=[], citation_count=0)
-    graph.add_edge("z", "a", weight=0.5)
-    graph.add_edge("seed", "z", weight=0.7)
-
-    exporter = GraphExporter(graph, "seed")
-    json_path = tmp_path / "ordered.json"
-    graphml_path = tmp_path / "ordered.graphml"
-    exporter.to_json(json_path)
-    exporter.to_graphml(graphml_path)
-
-    payload = json.loads(json_path.read_text())
-    assert [node["id"] for node in payload["nodes"]] == ["a", "seed", "z"]
-    assert payload["edges"] == [
-        {"source": "a", "target": "z", "weight": pytest.approx(0.5)},
-        {"source": "seed", "target": "z", "weight": pytest.approx(0.7)},
-    ]
-
-    graphml_xml = ET.fromstring(graphml_path.read_text())
-    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
-    graph_element = graphml_xml.find("g:graph", ns)
-    assert graph_element is not None
-    node_ids = [node.attrib["id"] for node in graph_element.findall("g:node", ns)]
-    edge_pairs = [
-        (edge.attrib["source"], edge.attrib["target"])
-        for edge in graph_element.findall("g:edge", ns)
-    ]
-    assert node_ids == ["a", "seed", "z"]
-    assert edge_pairs == [("a", "z"), ("seed", "z")]
-
-
-def test_exporter_plotly_edge_order_is_stable(
+def test_export_ordering_is_stable_across_json_graphml_and_plotly_edge_trace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly edge trace ordering should follow canonicalized edge order."""
+    """Node and edge ordering should remain deterministic across exporters."""
     captured: dict[str, object] = {}
 
     class FakeFigure(_BaseFakeFigure):
@@ -571,10 +435,32 @@ def test_exporter_plotly_edge_order_is_stable(
         "seed",
         layout={"a": (0.0, 0.0), "seed": (1.0, 0.0), "z": (2.0, 0.0)},
     )
-    out_path = tmp_path / "ordered.plotly.html"
-    exporter.to_plotly_html(out_path)
+    json_path = tmp_path / "ordered.json"
+    graphml_path = tmp_path / "ordered.graphml"
+    plotly_path = tmp_path / "ordered.plotly.html"
+    exporter.to_json(json_path)
+    exporter.to_graphml(graphml_path)
+    exporter.to_plotly_html(plotly_path)
 
-    assert out_path.exists()
+    payload = json.loads(json_path.read_text())
+    assert [node["id"] for node in payload["nodes"]] == ["a", "seed", "z"]
+    assert payload["edges"] == [
+        {"source": "a", "target": "z", "weight": pytest.approx(0.5)},
+        {"source": "seed", "target": "z", "weight": pytest.approx(0.7)},
+    ]
+
+    graphml_xml = ET.fromstring(graphml_path.read_text())
+    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
+    graph_element = graphml_xml.find("g:graph", ns)
+    assert graph_element is not None
+    node_ids = [node.attrib["id"] for node in graph_element.findall("g:node", ns)]
+    edge_pairs = [
+        (edge.attrib["source"], edge.attrib["target"])
+        for edge in graph_element.findall("g:edge", ns)
+    ]
+    assert node_ids == ["a", "seed", "z"]
+    assert edge_pairs == [("a", "z"), ("seed", "z")]
+
     edge_trace = captured["data"][0]
     assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
 
@@ -596,65 +482,11 @@ def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) ->
     assert out_a.read_text() == out_b.read_text()
 
 
-def test_compute_layout_perturbation_is_stable_across_node_order(
+def test_compute_layout_stability_and_distance_weight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Node perturbations should map deterministically regardless of insertion order."""
+    """Layout perturbations and distance-weight wiring should both be deterministic."""
 
-    def fake_kamada_kawai_layout(
-        graph: nx.Graph, **kwargs: Any
-    ) -> dict[Hashable, np.ndarray]:
-        del kwargs
-        return {node: np.array([0.0, 0.0], dtype=np.float64) for node in graph.nodes()}
-
-    monkeypatch.setattr(
-        "citemesh.visualization.render.nx.kamada_kawai_layout",
-        fake_kamada_kawai_layout,
-    )
-
-    graph_1 = nx.Graph()
-    graph_1.add_nodes_from(["seed", "a", "b"])
-    graph_1.add_edges_from([("seed", "a"), ("a", "b")])
-
-    graph_2 = nx.Graph()
-    graph_2.add_nodes_from(["b", "seed", "a"])
-    graph_2.add_edges_from([("seed", "a"), ("a", "b")])
-
-    for layout_seed in [None, 123]:
-        pos_1 = compute_layout(graph_1, iterations=10, layout_seed=layout_seed)
-        pos_2 = compute_layout(graph_2, iterations=10, layout_seed=layout_seed)
-
-        for node_id in sorted(graph_1.nodes()):
-            assert np.allclose(pos_1[node_id], pos_2[node_id])
-
-
-def test_compute_layout_is_stable_for_real_kamada_kawai() -> None:
-    """Real layout output should be invariant to node insertion order."""
-    graph_1 = nx.Graph()
-    graph_1.add_nodes_from(["seed", "a", "b", "c"])
-    graph_1.add_edge("seed", "a", weight=0.8)
-    graph_1.add_edge("a", "b", weight=0.7)
-    graph_1.add_edge("b", "c", weight=0.6)
-    graph_1.add_edge("c", "seed", weight=0.5)
-
-    graph_2 = nx.Graph()
-    graph_2.add_nodes_from(["c", "b", "a", "seed"])
-    graph_2.add_edge("b", "c", weight=0.6)
-    graph_2.add_edge("a", "b", weight=0.7)
-    graph_2.add_edge("seed", "a", weight=0.8)
-    graph_2.add_edge("c", "seed", weight=0.5)
-
-    pos_1 = compute_layout(graph_1, iterations=25, layout_seed=77)
-    pos_2 = compute_layout(graph_2, iterations=25, layout_seed=77)
-
-    for node_id in sorted(graph_1.nodes()):
-        assert np.allclose(pos_1[node_id], pos_2[node_id])
-
-
-def test_compute_layout_uses_distance_weights_for_kamada_kawai(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Kamada-Kawai should receive inverted similarity distances."""
     captured: dict[str, object] = {}
 
     def fake_kamada_kawai_layout(
@@ -673,11 +505,24 @@ def test_compute_layout_uses_distance_weights_for_kamada_kawai(
         fake_kamada_kawai_layout,
     )
 
-    graph = nx.Graph()
-    graph.add_edge("seed", "high", weight=0.9)
-    graph.add_edge("seed", "low", weight=0.1)
+    graph_1 = nx.Graph()
+    graph_1.add_nodes_from(["seed", "a", "b"])
+    graph_1.add_edges_from([("seed", "a"), ("a", "b")])
 
-    compute_layout(graph, iterations=10, layout_seed=123)
+    graph_2 = nx.Graph()
+    graph_2.add_nodes_from(["b", "seed", "a"])
+    graph_2.add_edges_from([("seed", "a"), ("a", "b")])
+
+    for layout_seed in [None, 123]:
+        pos_1 = compute_layout(graph_1, iterations=10, layout_seed=layout_seed)
+        pos_2 = compute_layout(graph_2, iterations=10, layout_seed=layout_seed)
+        for node_id in sorted(graph_1.nodes()):
+            assert np.allclose(pos_1[node_id], pos_2[node_id])
+
+    graph_3 = nx.Graph()
+    graph_3.add_edge("seed", "high", weight=0.9)
+    graph_3.add_edge("seed", "low", weight=0.1)
+    compute_layout(graph_3, iterations=10, layout_seed=77)
 
     assert captured["weight_attr"] == KK_LAYOUT_DISTANCE_ATTR
     distances = captured["distances"]
@@ -708,28 +553,23 @@ def test_compute_node_colors_and_sizes_are_stable_for_missing_years_and_ties() -
     assert size_map_1["a"] >= size_map_1["b"]
 
 
-@pytest.mark.parametrize(
-    ("env", "expected_theme"),
-    [
+def test_get_theme_auto_detection_and_unknown_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto theme detection should honor env priority and unknown names default light."""
+    cases = [
         ({"COLORFGBG": "15;0", "DARKMODE": None, "TERM_PROGRAM": None}, "dark"),
         ({"COLORFGBG": "0;15", "DARKMODE": None, "TERM_PROGRAM": None}, "light"),
         ({"COLORFGBG": None, "DARKMODE": "1", "TERM_PROGRAM": None}, "dark"),
-    ],
-)
-def test_get_theme_auto_detection(
-    monkeypatch: pytest.MonkeyPatch, env: dict[str, str | None], expected_theme: str
-) -> None:
-    """Auto theme detection should prioritize COLORFGBG then DARKMODE."""
-    for key, value in env.items():
-        if value is None:
-            monkeypatch.delenv(key, raising=False)
-        else:
-            monkeypatch.setenv(key, value)
-    assert get_theme("auto").name == expected_theme
+    ]
+    for env, expected_theme in cases:
+        for key, value in env.items():
+            if value is None:
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, value)
+        assert get_theme("auto").name == expected_theme
 
-
-def test_get_theme_unknown_defaults_to_light() -> None:
-    """Unknown theme keys should default to light palette."""
     assert get_theme("not-a-theme").name == "light"
 
 
