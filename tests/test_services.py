@@ -404,6 +404,30 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     assert refs == ["a", "b"]
     assert json.loads(seed_cache_path.read_text())["references"] == ["a", "b"]
 
+    malformed_seed = s2.normalize_paper_id("seed-malformed")
+    malformed_cache_path = s2._reference_cache_path(malformed_seed)
+    malformed_cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": malformed_seed,
+                "references": {"unexpected": "mapping"},
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        return_value=[
+            _make_reference_record("fixed-1"),
+            _make_reference_record("fixed-2"),
+        ]
+    )
+    rebuilt_refs = client.get_reference_ids("seed-malformed")
+    assert rebuilt_refs == ["fixed-1", "fixed-2"]
+    assert json.loads(malformed_cache_path.read_text())["references"] == [
+        "fixed-1",
+        "fixed-2",
+    ]
+
     client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
     assert client.get_reference_ids("seed-type-error") == []
 

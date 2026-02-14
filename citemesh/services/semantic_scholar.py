@@ -192,6 +192,28 @@ def _reference_cache_path(paper_id: str) -> Path:
     return _reference_cache_dir() / f"{digest}.json"
 
 
+def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
+    """Validate and normalize cached reference ID payloads.
+
+    :param Any payload: Cached ``references`` field from JSON payload.
+    :return Optional[List[str]]: Normalized ID list, or ``None`` when invalid.
+    """
+    if not isinstance(payload, list):
+        return None
+
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw_value in payload:
+        if not isinstance(raw_value, str):
+            return None
+        paper_id = raw_value.strip()
+        if not paper_id or paper_id in seen:
+            continue
+        seen.add(paper_id)
+        normalized.append(paper_id)
+    return normalized
+
+
 def _validate_integer_limit(
     limit: int, field_name: str, allow_zero: bool = False
 ) -> int:
@@ -765,13 +787,20 @@ class SemanticScholarClient:
             try:
                 data = json.loads(cache_path.read_text())
                 if data.get("version") == REFERENCE_CACHE_VERSION:
-                    refs = data.get("references", [])
-                    logger.debug(
-                        "Loaded %d cached references for %s",
-                        len(refs),
-                        normalized_paper_id,
-                    )
-                    return refs
+                    refs = _coerce_cached_reference_ids(data.get("references", []))
+                    if refs is None:
+                        logger.warning(
+                            "Invalid reference cache payload for %s; rebuilding entry.",
+                            normalized_paper_id,
+                        )
+                        cache_path.unlink(missing_ok=True)
+                    else:
+                        logger.debug(
+                            "Loaded %d cached references for %s",
+                            len(refs),
+                            normalized_paper_id,
+                        )
+                        return refs
             except json.JSONDecodeError:
                 cache_path.unlink(missing_ok=True)
 
