@@ -44,6 +44,7 @@ SCHEMA_VERSION_KEY = "schema_version"
 STORAGE_PRECISION_KEY = "storage_precision"
 SOURCE_TORCH_DTYPE_KEY = "source_torch_dtype"
 EMBEDDING_VECTOR_DTYPE_KEY = "embedding_vector_dtype"
+CALIBRATION_SAMPLE_SIZE_KEY = "calibration_sample_size"
 BINARY_PREFILTER_ENABLED_KEY = "binary_prefilter_enabled"
 HYDRATION_DATASET_SOURCE_KEY = "hydration_dataset_source"
 HYDRATION_SPLIT_KEY = "hydration_split"
@@ -891,6 +892,9 @@ class EmbeddingCache:
                 conn, EMBEDDING_VECTOR_DTYPE_KEY, self.embedding_vector_dtype
             )
             self._set_cache_metadata(
+                conn, CALIBRATION_SAMPLE_SIZE_KEY, str(self.calibration_sample_size)
+            )
+            self._set_cache_metadata(
                 conn,
                 BINARY_PREFILTER_ENABLED_KEY,
                 "1" if self.binary_prefilter else "0",
@@ -970,13 +974,17 @@ class EmbeddingCache:
 
         :return Dict[str, str]: Expected metadata mapping for this namespace instance.
         """
-        return {
+        expected = {
             SCHEMA_VERSION_KEY: str(EMBEDDING_CACHE_SCHEMA_VERSION),
             H5_LAYOUT_KEY: H5_LAYOUT_MATRIX_VERSION,
             STORAGE_PRECISION_KEY: self.storage_precision,
+            SOURCE_TORCH_DTYPE_KEY: self.source_torch_dtype,
             EMBEDDING_VECTOR_DTYPE_KEY: self.embedding_vector_dtype,
             BINARY_PREFILTER_ENABLED_KEY: "1" if self.binary_prefilter else "0",
         }
+        if self.storage_precision == "int8":
+            expected[CALIBRATION_SAMPLE_SIZE_KEY] = str(self.calibration_sample_size)
+        return expected
 
     def _assert_runtime_cache_consistency(
         self,
@@ -1044,6 +1052,15 @@ class EmbeddingCache:
                 f"({h5_precision!r} != {expected[STORAGE_PRECISION_KEY]!r})"
             )
 
+        h5_source_dtype = self._metadata_value_from_h5_attr(
+            h5_file.attrs.get(SOURCE_TORCH_DTYPE_KEY)
+        )
+        if h5_source_dtype != expected[SOURCE_TORCH_DTYPE_KEY]:
+            _fail(
+                f"HDF5 attr {SOURCE_TORCH_DTYPE_KEY!r} mismatch "
+                f"({h5_source_dtype!r} != {expected[SOURCE_TORCH_DTYPE_KEY]!r})"
+            )
+
         h5_embedding_dtype = self._metadata_value_from_h5_attr(
             h5_file.attrs.get(EMBEDDING_VECTOR_DTYPE_KEY)
         )
@@ -1061,6 +1078,17 @@ class EmbeddingCache:
                 f"HDF5 attr {BINARY_PREFILTER_ENABLED_KEY!r} mismatch "
                 f"({h5_binary_prefilter!r} != {expected[BINARY_PREFILTER_ENABLED_KEY]!r})"
             )
+
+        if CALIBRATION_SAMPLE_SIZE_KEY in expected:
+            h5_calibration_sample_size = self._metadata_value_from_h5_attr(
+                h5_file.attrs.get(CALIBRATION_SAMPLE_SIZE_KEY)
+            )
+            if h5_calibration_sample_size != expected[CALIBRATION_SAMPLE_SIZE_KEY]:
+                _fail(
+                    f"HDF5 attr {CALIBRATION_SAMPLE_SIZE_KEY!r} mismatch "
+                    f"({h5_calibration_sample_size!r} != "
+                    f"{expected[CALIBRATION_SAMPLE_SIZE_KEY]!r})"
+                )
 
         target_dtype = _storage_dtype_for_precision(self.storage_precision)
         if np.dtype(embeddings_dataset.dtype) != np.dtype(target_dtype):
@@ -1239,6 +1267,7 @@ class EmbeddingCache:
         h5_file.attrs[STORAGE_PRECISION_KEY] = self.storage_precision
         h5_file.attrs[SOURCE_TORCH_DTYPE_KEY] = self.source_torch_dtype
         h5_file.attrs[EMBEDDING_VECTOR_DTYPE_KEY] = self.embedding_vector_dtype
+        h5_file.attrs[CALIBRATION_SAMPLE_SIZE_KEY] = int(self.calibration_sample_size)
         h5_file.attrs[BINARY_PREFILTER_ENABLED_KEY] = int(self.binary_prefilter)
 
     def _load_existing_rows(

@@ -344,10 +344,10 @@ def test_embedding_cache_namespace_ignores_binary_prefilter_outside_int8(
     )
 
 
-def test_embedding_cache_namespace_ignores_source_dtype_hint(
+def test_embedding_cache_namespace_varies_by_source_dtype_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Source dtype hints should not fragment namespaces with identical behavior."""
+    """Source dtype hints should participate in namespace identity."""
     _disable_embedding_dep_check(monkeypatch)
 
     monkeypatch.setattr(
@@ -366,8 +366,77 @@ def test_embedding_cache_namespace_ignores_source_dtype_hint(
 
     assert (
         f32_hint_builder.embedding_cache.model_name
-        == bf16_hint_builder.embedding_cache.model_name
+        != bf16_hint_builder.embedding_cache.model_name
     )
+
+
+def test_embedding_cache_namespace_includes_int8_calibration_sample_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Int8 caches should include calibration sample size in namespace identity."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+
+    int8_small = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        calibration_sample_size=32,
+        client=MagicMock(),
+    )
+    int8_large = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        calibration_sample_size=128,
+        client=MagicMock(),
+    )
+    f32_small = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        calibration_sample_size=32,
+        client=MagicMock(),
+    )
+    f32_large = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        calibration_sample_size=128,
+        client=MagicMock(),
+    )
+
+    assert (
+        int8_small.embedding_cache.model_name != int8_large.embedding_cache.model_name
+    )
+    assert f32_small.embedding_cache.model_name == f32_large.embedding_cache.model_name
+
+
+def test_embedding_cache_namespace_matches_default_and_explicit_truncate_dim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default resolved truncate dim should match explicit equivalent namespace."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+
+    implicit = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="google/embeddinggemma-300m",
+        truncate_dim=None,
+        client=MagicMock(),
+    )
+    explicit = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="google/embeddinggemma-300m",
+        truncate_dim=256,
+        client=MagicMock(),
+    )
+
+    assert implicit.embedding_cache.model_name == explicit.embedding_cache.model_name
 
 
 def test_embedding_model_revision_forwards_to_model_loader(

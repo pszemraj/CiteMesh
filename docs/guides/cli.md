@@ -123,8 +123,8 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running
 - `--storage-precision {int8,float16,float32}`: persistent embedding-cache precision (default `int8`)
-- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). This is only effective for `--storage-precision int8`.
-- `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). This is only effective for `--storage-precision int8`; non-int8 runs normalize to effective value `1`.
+- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). This is only effective for `--storage-precision int8`; non-int8 runs emit a warning and disable it.
+- `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). This is only effective for `--storage-precision int8`; non-int8 runs emit a warning and normalize to effective value `1`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)

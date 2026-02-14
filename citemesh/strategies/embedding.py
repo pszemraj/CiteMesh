@@ -309,14 +309,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.storage_precision = storage_precision
         self.binary_prefilter = bool(binary_prefilter and storage_precision == "int8")
         if storage_precision != "int8" and binary_prefilter:
-            logger.debug(
-                "binary_prefilter is ignored when storage_precision=%s.",
+            logger.warning(
+                "binary_prefilter is ignored when storage_precision=%s; "
+                "switch to storage_precision='int8' to enable it.",
                 storage_precision,
             )
 
         requested_multiplier = int(binary_rescore_multiplier)
         if storage_precision != "int8" and requested_multiplier != 1:
-            logger.debug(
+            logger.warning(
                 "binary_rescore_multiplier=%s is ignored when storage_precision=%s; "
                 "using effective value 1.",
                 requested_multiplier,
@@ -398,8 +399,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             parts.append(f"truncate_dim={self.truncate_dim}")
         parts.append(f"storage_precision={self.storage_precision}")
         parts.append(f"binary_prefilter={int(self._cache_binary_prefilter_enabled())}")
-        # Namespace includes only behavior-affecting knobs. Source torch dtype is
-        # tracked as metadata, but vectors are normalized to float32 before storage.
+        if self.storage_precision == "int8":
+            parts.append(f"calibration_sample_size={self.calibration_sample_size}")
+        parts.append(f"source_dtype={self._source_dtype_hint}")
         return "::".join(parts)
 
     def _cache_binary_prefilter_enabled(self) -> bool:

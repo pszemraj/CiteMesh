@@ -13,11 +13,13 @@ import numpy as np
 import pytest
 
 from citemesh.data.embedding_cache import (
+    CALIBRATION_SAMPLE_SIZE_KEY,
     HYDRATION_COMPLETE_KEY,
     HYDRATION_CORPUS_SIZE_KEY,
     HYDRATION_DATASET_SOURCE_KEY,
     HYDRATION_SPLIT_KEY,
     MODEL_FINGERPRINT_KEY,
+    SOURCE_TORCH_DTYPE_KEY,
     EmbeddingCache,
 )
 from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
@@ -239,6 +241,75 @@ def test_embedding_cache_search_fails_closed_on_metadata_dtype_mismatch() -> Non
         with pytest.raises(
             RuntimeError,
             match="metadata key 'storage_precision' mismatch",
+        ):
+            cache.search(
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
+
+
+def test_embedding_cache_search_fails_closed_on_source_dtype_mismatch() -> None:
+    """Search should fail closed when source dtype metadata drifts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="search-source-dtype-mismatch",
+            source_torch_dtype="float32",
+        )
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            show_progress=False,
+        )
+
+        with sqlite3.connect(cache.db_path) as conn:
+            conn.execute(
+                "UPDATE cache_metadata SET value = ? WHERE key = ?",
+                ("bfloat16", SOURCE_TORCH_DTYPE_KEY),
+            )
+            conn.commit()
+
+        with pytest.raises(
+            RuntimeError,
+            match="metadata key 'source_torch_dtype' mismatch",
+        ):
+            cache.search(
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
+
+
+def test_embedding_cache_search_fails_closed_on_int8_calibration_sample_mismatch() -> (
+    None
+):
+    """Int8 search should fail closed when calibration sample metadata drifts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="search-calibration-sample-mismatch",
+            storage_precision="int8",
+            calibration_sample_size=8,
+        )
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            show_progress=False,
+        )
+
+        with sqlite3.connect(cache.db_path) as conn:
+            conn.execute(
+                "UPDATE cache_metadata SET value = ? WHERE key = ?",
+                ("32", CALIBRATION_SAMPLE_SIZE_KEY),
+            )
+            conn.commit()
+
+        with pytest.raises(
+            RuntimeError,
+            match="metadata key 'calibration_sample_size' mismatch",
         ):
             cache.search(
                 query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
