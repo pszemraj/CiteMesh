@@ -153,6 +153,29 @@ class _StrategyDispatchSpec:
     factory: StrategyFactory
 
 
+def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, object]:
+    """Build shared embedding kwargs for embedding-aware strategy builders.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :return Dict[str, object]: Shared kwargs consumed by embedding/hybrid builders.
+    """
+    return {
+        "model_name": cli_args.model,
+        "model_revision": cli_args.model_revision,
+        "dataset_split": cli_args.dataset_split,
+        "corpus_size": None if cli_args.all_corpus else cli_args.corpus_size,
+        "truncate_dim": cli_args.truncate_dim,
+        "use_streaming": cli_args.streaming,
+        "force_rebuild_cache": cli_args.force_rebuild_cache,
+        "storage_precision": cli_args.storage_precision,
+        "binary_prefilter": cli_args.binary_prefilter,
+        "binary_rescore_multiplier": cli_args.binary_rescore_multiplier,
+        "calibration_sample_size": cli_args.calibration_sample_size,
+        "cache_compression": cli_args.cache_compression,
+        "cache_compression_level": cli_args.cache_compression_level,
+    }
+
+
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
     "citation": _StrategyDispatchSpec(
         factory=lambda cli_args: CitationGraphBuilder(
@@ -162,7 +185,6 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             similarity_threshold=cli_args.similarity_threshold,
             fetch_references=not cli_args.no_references,
             refresh_reference_cache=cli_args.refresh_reference_cache,
-            random_seed=cli_args.seed,
         ),
     ),
     "recommendation": _StrategyDispatchSpec(
@@ -171,27 +193,13 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             fetch_references=not cli_args.no_references,
             refresh_reference_cache=cli_args.refresh_reference_cache,
             similarity_threshold=cli_args.similarity_threshold,
-            random_seed=cli_args.seed,
         ),
     ),
     "embedding": _StrategyDispatchSpec(
         factory=lambda cli_args: EmbeddingGraphBuilder(
             max_papers=cli_args.max_papers,
-            model_name=cli_args.model,
-            model_revision=cli_args.model_revision,
-            dataset_split=cli_args.dataset_split,
-            corpus_size=None if cli_args.all_corpus else cli_args.corpus_size,
-            truncate_dim=cli_args.truncate_dim,
             top_k=cli_args.top_k,
-            random_seed=cli_args.seed,
-            use_streaming=cli_args.streaming,
-            force_rebuild_cache=cli_args.force_rebuild_cache,
-            storage_precision=cli_args.storage_precision,
-            binary_prefilter=cli_args.binary_prefilter,
-            binary_rescore_multiplier=cli_args.binary_rescore_multiplier,
-            calibration_sample_size=cli_args.calibration_sample_size,
-            cache_compression=cli_args.cache_compression,
-            cache_compression_level=cli_args.cache_compression_level,
+            **_shared_embedding_builder_kwargs(cli_args),
         ),
     ),
     "hybrid": _StrategyDispatchSpec(
@@ -202,20 +210,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             fetch_references=not cli_args.no_references,
             refresh_reference_cache=cli_args.refresh_reference_cache,
             max_semantic=cli_args.max_semantic,
-            model_name=cli_args.model,
-            model_revision=cli_args.model_revision,
-            dataset_split=cli_args.dataset_split,
-            corpus_size=None if cli_args.all_corpus else cli_args.corpus_size,
-            truncate_dim=cli_args.truncate_dim,
-            use_streaming=cli_args.streaming,
-            force_rebuild_cache=cli_args.force_rebuild_cache,
-            storage_precision=cli_args.storage_precision,
-            binary_prefilter=cli_args.binary_prefilter,
-            binary_rescore_multiplier=cli_args.binary_rescore_multiplier,
-            calibration_sample_size=cli_args.calibration_sample_size,
-            cache_compression=cli_args.cache_compression,
-            cache_compression_level=cli_args.cache_compression_level,
-            random_seed=cli_args.seed,
+            **_shared_embedding_builder_kwargs(cli_args),
         ),
     ),
 }
@@ -563,7 +558,10 @@ Examples:
         "--seed",
         type=int,
         default=None,
-        help="Random seed for reproducibility (default: deterministic built-in seed)",
+        help=(
+            "Seed for deterministic layout generation in layout-based exports "
+            "(default: deterministic built-in seed)"
+        ),
     )
     build_parser.add_argument(
         "--include-timestamp",

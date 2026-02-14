@@ -327,7 +327,9 @@ def test_metadata_timestamp_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
 
         captured: dict[str, object] = {}
         monkeypatch.setattr(
-            cli_module, "_build_strategy_graph", lambda args, strategy: (graph, "seed")
+            cli_module,
+            "_build_strategy_graph",
+            lambda args, strategy, graph=graph: (graph, "seed"),
         )
         monkeypatch.setattr(
             cli_module,
@@ -375,7 +377,6 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "similarity_threshold": 0.21,
                 "fetch_references": False,
                 "refresh_reference_cache": False,
-                "random_seed": 7,
             },
         ),
         (
@@ -386,7 +387,6 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "fetch_references": False,
                 "refresh_reference_cache": False,
                 "similarity_threshold": 0.21,
-                "random_seed": 7,
             },
         ),
         (
@@ -402,7 +402,6 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "top_k": 4,
                 "force_rebuild_cache": False,
                 "use_streaming": True,
-                "random_seed": 7,
                 "storage_precision": "int8",
                 "binary_prefilter": True,
                 "binary_rescore_multiplier": 9,
@@ -427,7 +426,6 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "corpus_size": None,
                 "truncate_dim": 64,
                 "use_streaming": True,
-                "random_seed": 7,
                 "force_rebuild_cache": False,
                 "storage_precision": "int8",
                 "binary_prefilter": True,
