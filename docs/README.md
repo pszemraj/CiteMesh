@@ -1,15 +1,28 @@
 # CiteMesh Documentation
 
-Use this index to navigate the project documentation by topic.
+Use this index to navigate docs by topic and keep behavior definitions centralized.
 
-## Guides
+## Scope
 
-- [CLI Usage](guides/cli.md) - command-line options, export formats, and theming.
-- [Caching & Data](guides/caching.md) - where datasets, embeddings, and joblib results live, plus environment overrides.
+This page is the canonical map of documentation ownership.
 
-## Internals
+- Each topic has one canonical document.
+- Non-canonical documents should summarize in 1-2 lines and link to the canonical source.
+- If documents disagree, the canonical document listed below wins.
 
-- [Architecture](internals/architecture.md) - execution flow, module responsibilities, and extension points.
-- [Changelog & Key Improvements](internals/changelog.md) - notable changes and outstanding opportunities.
+## Source-of-Truth Map
 
-Additional configuration examples live alongside these docs (e.g., `config.yaml.example` for Semantic Scholar clients).
+| Topic | Canonical doc |
+| --- | --- |
+| Project overview, install, and quick start | [Repository README](../README.md) |
+| CLI commands, flags, identifiers, output naming, export behavior | [Guides: CLI Usage](guides/cli.md) |
+| Cache paths/layout, migration, invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
+| Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |
+| Historical changes and release notes | [Internals: Changelog](internals/changelog.md) |
+
+## Internal Docs Rule
+
+`docs/internals/architecture.md` and `docs/internals/changelog.md` are not normative for CLI flag contracts or cache behavior details. Those remain canonical in:
+
+- [Guides: CLI Usage](guides/cli.md)
+- [Guides: Caching & Data](guides/caching.md)

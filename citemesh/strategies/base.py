@@ -5,16 +5,105 @@ This module defines the interface that all graph building strategies must implem
 enabling the Strategy pattern for different similarity computation approaches.
 """
 
+import logging
 import math
-import random
+import warnings
 from abc import ABC, abstractmethod
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import networkx as nx
 import numpy as np
-import torch
 
 from citemesh.core import TEMPORAL_CONFIG, Paper
+
+logger = logging.getLogger(__name__)
+
+
+def deterministic_sort_key(
+    primary: float,
+    primary_id: Any,
+    secondary_id: Optional[Any] = None,
+    stable_index: int = 0,
+) -> Tuple[Any, ...]:
+    """Build a strict deterministic ordering key for ranking and heap comparisons.
+
+    :param float primary: Primary numeric score used for ordering.
+    :param Any primary_id: Primary tie-breaker key.
+    :param Optional[Any] secondary_id: Optional second tie-breaker key.
+    :param int stable_index: Optional deterministic fallback index.
+    :return Tuple[Any, ...]: Tuple-safe comparison key with deterministic stringification.
+    """
+    secondary = "" if secondary_id is None else str(secondary_id)
+    return (-float(primary), str(primary_id), secondary, int(stable_index))
+
+
+def select_capped_undirected_edges(
+    edges: Iterable[Tuple[Any, Any, Mapping[str, Any]]],
+    max_edges_per_node: int,
+) -> List[Tuple[Any, Any, float]]:
+    """Select edges for an undirected graph while capping per-node degree.
+
+    :param Iterable[Tuple[Any, Any, Mapping[str, Any]]] edges: Edge tuples with optional
+        ``weight`` metadata.
+    :param int max_edges_per_node: Maximum degree per node.
+    :return List[Tuple[Any, Any, float]]: Selected canonicalized edges with weights.
+    """
+    canonical_edges: Dict[Tuple[str, str], Tuple[Any, Any, float]] = {}
+    for u, v, *_rest in edges:
+        data = _rest[0] if _rest else {}
+        if not isinstance(data, Mapping):
+            data = {}
+
+        left, right = (u, v) if str(u) <= str(v) else (v, u)
+        key = (str(left), str(right))
+
+        weight = float(data.get("weight", 0.0))
+        best = canonical_edges.get(key)
+        if best is None or weight > best[2]:
+            canonical_edges[key] = (left, right, weight)
+
+    sorted_edges = sorted(
+        canonical_edges.values(),
+        key=lambda item: deterministic_sort_key(item[2], item[0], item[1]),
+    )
+
+    if max_edges_per_node <= 0:
+        return sorted_edges
+
+    edge_counts: Dict[str, int] = {
+        node_id: 0 for edge in sorted_edges for node_id in (str(edge[0]), str(edge[1]))
+    }
+
+    selected_edges: List[Tuple[Any, Any, float]] = []
+    for u, v, weight in sorted_edges:
+        u_key = str(u)
+        v_key = str(v)
+        if edge_counts[u_key] >= max_edges_per_node:
+            continue
+        if edge_counts[v_key] >= max_edges_per_node:
+            continue
+
+        selected_edges.append((u, v, weight))
+        edge_counts[u_key] += 1
+        edge_counts[v_key] += 1
+
+    return selected_edges
+
+
+def _exponential_temporal_decay(
+    paper1: Paper, paper2: Paper, decay_factor: float = 8.0
+) -> float:
+    """Compute exponential temporal similarity decay.
+
+    :param Paper paper1: First paper.
+    :param Paper paper2: Second paper.
+    :param float decay_factor: Controls decay rate (higher = slower decay).
+    :return float: Similarity in [0.0, 1.0].
+    """
+    if paper1.year is None or paper2.year is None:
+        return 0.5
+    year_diff = abs(paper1.year - paper2.year)
+    return math.exp(-year_diff / decay_factor)
 
 
 class GraphBuilderStrategy(ABC):
@@ -30,37 +119,23 @@ class GraphBuilderStrategy(ABC):
         """
         Initialize the graph builder.
 
-        Args:
-            max_papers: Maximum number of papers to include in graph
-            random_seed: Random seed for reproducibility (None = non-deterministic)
+        :param int max_papers: Maximum number of papers to include in graph
+        :param Optional[int] random_seed: Reserved random seed parameter kept for compatibility.
         """
         self.max_papers = max_papers
         self.random_seed = random_seed
         self.papers: Dict[str, Paper] = {}  # paper_id -> Paper object
         self._collection_summary: Optional[str] = None
 
-        # Set random seeds for reproducibility
-        if random_seed is not None:
-            np.random.seed(random_seed)
-            random.seed(random_seed)
-            torch.manual_seed(random_seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(random_seed)
-
     @abstractmethod
-    def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
         Collect papers for the graph using strategy-specific method.
 
-        Args:
-            seed_id: The seed paper identifier (DOI, arXiv ID, or S2 ID)
-            **kwargs: Strategy-specific parameters
-
-        Returns:
-            Dictionary mapping paper IDs to Paper objects
-
-        Raises:
-            ValueError: If seed paper cannot be found
+        :param str seed_id: The seed paper identifier (DOI, arXiv ID, or S2 ID)
+        :param kwargs: Strategy-specific parameters
+        :return Dict[str, Paper]: Dictionary mapping paper IDs to Paper objects
+        :raises ValueError: If seed paper cannot be found
         """
         pass
 
@@ -69,12 +144,9 @@ class GraphBuilderStrategy(ABC):
         """
         Compute similarity between two papers using strategy-specific method.
 
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Similarity score from 0.0 (not similar) to 1.0 (identical)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Similarity score from 0.0 (not similar) to 1.0 (identical)
         """
         pass
 
@@ -84,16 +156,10 @@ class GraphBuilderStrategy(ABC):
         """
         Decide whether to create an edge based on similarity and paper properties.
 
-        Default implementation: always create edge if similarity > 0.
-        Subclasses can override for more sophisticated logic.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-            similarity: Computed similarity score
-
-        Returns:
-            True if edge should be created
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :param float similarity: Computed similarity score
+        :return bool: True if edge should be created
         """
         return similarity > 0.0
 
@@ -103,6 +169,8 @@ class GraphBuilderStrategy(ABC):
 
         Subclasses can set this to surface additional detail (e.g., reference counts)
         that should be shown to users on stdout.
+
+        :return Optional[str]: Optional summary string to display after collection.
         """
         return self._collection_summary
 
@@ -110,21 +178,16 @@ class GraphBuilderStrategy(ABC):
         """Allow subclasses to provide a collection summary."""
         self._collection_summary = summary
 
-    def build_graph(self, seed_id: str, **kwargs) -> Tuple[nx.Graph, str]:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
         """
         Build the complete similarity graph.
 
-        This is the template method that orchestrates the graph building process.
-
-        Args:
-            seed_id: The seed paper identifier
-            **kwargs: Strategy-specific parameters passed to collect_papers
-
-        Returns:
-            Tuple of (NetworkX graph, seed paper ID)
+        :param str seed_id: The seed paper identifier
+        :param kwargs: Strategy-specific parameters passed to collect_papers.
+        :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
         """
         # Step 1: Collect papers
-        print(f"Collecting papers using {self.__class__.__name__}...")
+        logger.info("Collecting papers using %s...", self.__class__.__name__)
         self.papers = self.collect_papers(seed_id, **kwargs)
 
         if not self.papers:
@@ -139,10 +202,10 @@ class GraphBuilderStrategy(ABC):
 
         summary = self.get_collection_summary()
         if summary:
-            print(summary)
+            logger.info(summary)
         else:
-            print(f"Collected {len(self.papers)} papers")
-        print(f"Seed paper: {seed_paper.title[:50]}...")
+            logger.info("Collected %s papers", len(self.papers))
+        logger.info("Seed paper: %s...", seed_paper.title[:50])
 
         # Step 2: Create graph with nodes
         graph = nx.Graph()
@@ -159,7 +222,7 @@ class GraphBuilderStrategy(ABC):
             )
 
         # Step 3: Compute similarities and create edges
-        print("Computing similarities and creating edges...")
+        logger.info("Computing similarities and creating edges...")
         paper_list = list(self.papers.values())
         edges_created = 0
 
@@ -175,7 +238,11 @@ class GraphBuilderStrategy(ABC):
                     graph.add_edge(p1.paper_id, p2.paper_id, weight=similarity)
                     edges_created += 1
 
-        print(f"Graph complete: {graph.number_of_nodes()} nodes, {edges_created} edges")
+        logger.info(
+            "Graph complete: %s nodes, %s edges",
+            graph.number_of_nodes(),
+            edges_created,
+        )
         return graph, actual_seed_id
 
     # Utility methods for common similarity computations
@@ -185,15 +252,12 @@ class GraphBuilderStrategy(ABC):
         """
         Compute temporal similarity based on publication year difference.
 
-        Uses configuration from TemporalConfig.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Temporal similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Temporal similarity score (0.0 to 1.0)
         """
+        if paper1.year is None or paper2.year is None:
+            return 0.5
         year_diff = abs(paper1.year - paper2.year)
         return TEMPORAL_CONFIG.year_similarity(year_diff)
 
@@ -202,14 +266,9 @@ class GraphBuilderStrategy(ABC):
         """
         Compute similarity based on citation counts (log scale).
 
-        Papers with similar impact (citation counts) are considered more similar.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Citation similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Citation similarity score (0.0 to 1.0)
         """
         cit1 = paper1.citation_count
         cit2 = paper2.citation_count
@@ -227,15 +286,9 @@ class GraphBuilderStrategy(ABC):
         """
         Compute bibliographic coupling strength.
 
-        Uses the Kessler (1963) formula:
-            coupling = |shared_refs| / sqrt(|refs1| * |refs2|)
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Bibliographic coupling coefficient (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Bibliographic coupling coefficient (0.0 to 1.0)
         """
         return paper1.reference_overlap(paper2)
 
@@ -246,13 +299,14 @@ class GraphBuilderStrategy(ABC):
         """
         Compute exponential temporal similarity decay.
 
-        Args:
-            paper1: First paper
-            paper2: Second paper
-            decay_factor: Controls decay rate (higher = slower decay)
-
-        Returns:
-            Similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :param float decay_factor: Controls decay rate (higher = slower decay)
+        :return float: Similarity score (0.0 to 1.0)
         """
-        year_diff = abs(paper1.year - paper2.year)
-        return math.exp(-year_diff / decay_factor)
+        warnings.warn(
+            "exponential_temporal_decay is retained for compatibility only.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _exponential_temporal_decay(paper1, paper2, decay_factor=decay_factor)

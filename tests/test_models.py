@@ -4,13 +4,13 @@ Tests for data models.
 
 import pytest
 
-from citemesh.models import Author, Paper
+from citemesh.core import Author, Paper
 
 
 class TestAuthor:
     """Test Author model."""
 
-    def test_surname_extraction(self):
+    def test_surname_extraction(self) -> None:
         """Test surname extraction from full name."""
         author = Author(name="John Smith")
         assert author.surname == "Smith"
@@ -18,7 +18,7 @@ class TestAuthor:
         author = Author(name="Jean-Claude Van Damme")
         assert author.surname == "Damme"
 
-    def test_empty_name(self):
+    def test_empty_name(self) -> None:
         """Test handling of empty name."""
         author = Author(name="")
         assert author.surname == "Unknown"
@@ -27,7 +27,7 @@ class TestAuthor:
 class TestPaper:
     """Test Paper model."""
 
-    def test_valid_paper_creation(self):
+    def test_valid_paper_creation(self) -> None:
         """Test creating a valid paper."""
         paper = Paper(
             paper_id="test123",
@@ -43,7 +43,7 @@ class TestPaper:
         assert paper.citation_count == 10
         assert paper.first_author_surname == "Smith"
 
-    def test_invalid_year_raises_error(self):
+    def test_invalid_year_raises_error(self) -> None:
         """Test that invalid year raises ValueError."""
         with pytest.raises(ValueError, match="Invalid year"):
             Paper(
@@ -59,7 +59,7 @@ class TestPaper:
                 year=2100,  # Too future
             )
 
-    def test_negative_citation_count_raises_error(self):
+    def test_negative_citation_count_raises_error(self) -> None:
         """Test that negative citations raise ValueError."""
         with pytest.raises(ValueError, match="Citation count cannot be negative"):
             Paper(
@@ -69,7 +69,7 @@ class TestPaper:
                 citation_count=-5,
             )
 
-    def test_paper_age(self):
+    def test_paper_age(self) -> None:
         """Test paper age calculation."""
         from datetime import datetime
 
@@ -78,7 +78,7 @@ class TestPaper:
 
         assert paper.age == 5
 
-    def test_label_generation(self):
+    def test_label_generation(self) -> None:
         """Test label generation."""
         paper = Paper(
             paper_id="test",
@@ -89,7 +89,7 @@ class TestPaper:
 
         assert paper.label == "Johnson, 2020"
 
-    def test_shared_authors(self):
+    def test_shared_authors(self) -> None:
         """Test author sharing detection."""
         paper1 = Paper(
             paper_id="p1",
@@ -115,7 +115,7 @@ class TestPaper:
         assert paper1.shares_authors_with(paper2)
         assert not paper1.shares_authors_with(paper3)
 
-    def test_category_overlap(self):
+    def test_category_overlap(self) -> None:
         """Test category overlap calculation."""
         paper1 = Paper(
             paper_id="p1",
@@ -137,7 +137,7 @@ class TestPaper:
         # Overlap: 2/3 ≈ 0.667
         assert abs(overlap - 0.667) < 0.01
 
-    def test_reference_overlap(self):
+    def test_reference_overlap(self) -> None:
         """Test bibliographic coupling calculation."""
         paper1 = Paper(
             paper_id="p1",
@@ -159,7 +159,7 @@ class TestPaper:
         # Coupling: 2/4 = 0.5
         assert coupling == 0.5
 
-    def test_reference_overlap_no_refs(self):
+    def test_reference_overlap_no_refs(self) -> None:
         """Test bibliographic coupling with no references."""
         paper1 = Paper(paper_id="p1", title="Test 1", year=2020, references=[])
 

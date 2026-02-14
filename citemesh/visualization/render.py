@@ -6,8 +6,9 @@ visualization that all strategies can use, eliminating code duplication.
 """
 
 import logging
+from hashlib import sha1
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -15,22 +16,85 @@ import numpy as np
 
 from citemesh.core import VIZ_CONFIG
 
+from .ordering import (
+    canonicalize_graph_for_layout,
+    ordered_edges_with_data,
+    ordered_nodes,
+)
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
+MAX_TITLE_CHARS = 50
+MISSING_YEAR_FALLBACK_MIN = 2000
+MISSING_YEAR_FALLBACK_MAX = 2001
+KK_LAYOUT_DISTANCE_ATTR = "layout_distance"
+KK_LAYOUT_DISTANCE_EPSILON = 1e-6
+
+
+def _citation_count(attrs: Mapping[str, Any]) -> int:
+    """Normalize citation count values for deterministic ranking.
+
+    :param Mapping[str, Any] attrs: Raw node attributes mapping.
+    :return int: Non-negative citation count value.
+    """
+    raw = attrs.get("citation_count", 0)
+    if isinstance(raw, bool) or raw is None:
+        return 0
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _filename_safe(text: str, max_chars: int = MAX_TITLE_CHARS) -> str:
+    """Create a filesystem-safe slug from input text.
+
+    :param str text: Raw text value.
+    :param int max_chars: Maximum slug length.
+    :return str: Safe slug using lowercase alnum/hyphen tokens.
+    """
+    normalized = text.lower()
+    normalized = "".join(c if c.isalnum() or c in " -" else "" for c in normalized)
+    slug = "-".join(normalized.split())[:max_chars].strip("-")
+    return slug or "graph"
+
+
+def _seed_suffix(seed_id: str, length: int = 8) -> str:
+    """Build a short, stable suffix from the seed identifier.
+
+    :param str seed_id: Seed paper identifier.
+    :param int length: Number of digest characters to keep.
+    :return str: Stable hex suffix used in auto-generated output directories.
+    """
+    return sha1(seed_id.encode("utf-8")).hexdigest()[:length]
+
+
+def _similarity_to_layout_distance(raw_similarity: object) -> float:
+    """Map similarity-style edge weights to positive layout distances for KK.
+
+    :param object raw_similarity: Raw edge similarity value.
+    :return float: Strictly positive distance used by Kamada-Kawai.
+    """
+    try:
+        similarity = float(raw_similarity)
+    except (TypeError, ValueError):
+        similarity = 0.0
+
+    if not np.isfinite(similarity):
+        similarity = 0.0
+
+    similarity = max(similarity, 0.0)
+    return 1.0 / (KK_LAYOUT_DISTANCE_EPSILON + similarity)
 
 
 def _choose_metadata_anchor(
-    pos: Dict[str, np.ndarray],
+    pos: Dict[Hashable, np.ndarray],
 ) -> Tuple[float, float, str, str]:
     """
     Choose which corner to place the metadata box in based on node density.
 
-    Args:
-        pos: Mapping of node -> position array
-
-    Returns:
-        Tuple of (x, y, horizontal_alignment, vertical_alignment) in axes coords.
+    :param Dict[Hashable, np.ndarray] pos: Mapping of node -> position array
+    :return Tuple[float, float, str, str]: Tuple of (x, y, horizontal_alignment, vertical_alignment) in axes coords.
     """
     if not pos:
         return 0.02, 0.02, "left", "bottom"
@@ -71,14 +135,19 @@ def _choose_metadata_anchor(
 
 
 def add_metadata_box(
-    ax: plt.Axes, metadata: Dict[str, Any], pos: Dict[str, np.ndarray], theme: Theme
+    ax: plt.Axes,
+    metadata: Dict[str, Any],
+    pos: Dict[Hashable, np.ndarray],
+    theme: Theme,
 ) -> None:
     """
     Render a small metadata block in the plot corner.
 
-    Args:
-        ax: Matplotlib axes
-        metadata: Dictionary of metadata key/value pairs
+    :param plt.Axes ax: Matplotlib axes
+    :param Dict[str, Any] metadata: Dictionary of metadata key/value pairs
+    :param Dict[Hashable, np.ndarray] pos: Node position map.
+    :param Theme theme: Active theme (used for text colors).
+    :return None: Draws metadata box directly to axes.
     """
     lines = []
     label_map = {
@@ -129,25 +198,23 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
     """
     Compute node sizes with extreme variation matching CiteMesh style.
 
-    Args:
-        graph: NetworkX graph with paper nodes
-
-    Returns:
-        List of sizes (in square pixels) for each node
+    :param nx.Graph graph: NetworkX graph with paper nodes
+    :return List[float]: List of sizes (in square pixels) for each node
     """
-    nodes = list(graph.nodes())
+    nodes = ordered_nodes(graph)
     sizes = []
-
-    # Sort nodes by citation count to identify top papers
+    seed_nodes = {node for node in nodes if graph.nodes[node].get("is_seed")}
     sorted_nodes = sorted(
-        nodes, key=lambda n: graph.nodes[n].get("citation_count", 0), reverse=True
+        nodes,
+        key=lambda node: (-_citation_count(graph.nodes[node]), str(node)),
     )
+    rank_of = {node: rank for rank, node in enumerate(sorted_nodes)}
 
     for node in nodes:
-        rank = sorted_nodes.index(node)
-        citation_count = graph.nodes[node].get("citation_count", 0)
+        rank = rank_of.get(node, len(nodes))
+        citation_count = _citation_count(graph.nodes[node])
 
-        if graph.nodes[node].get("is_seed"):
+        if node in seed_nodes:
             # Seed paper gets special treatment
             if rank < 3:  # Also top-cited
                 size = VIZ_CONFIG.seed_size
@@ -170,7 +237,7 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
             size = base + (15 - rank) * increment
         else:
             # Remaining papers
-            size = VIZ_CONFIG.min_size + np.random.randint(0, 100)
+            size = VIZ_CONFIG.min_size
 
         # Add citation bonus (log scale)
         citation_bonus = np.log10(citation_count + 1) * 100
@@ -187,17 +254,19 @@ def compute_node_colors(
     """
     Compute smooth color gradient by publication year.
 
-    Args:
-        graph: NetworkX graph with paper nodes
-        seed_id: ID of the seed paper (gets special color)
-
-    Returns:
-        Tuple of (color_list, min_year, max_year)
+    :param nx.Graph graph: NetworkX graph with paper nodes
+    :param str seed_id: ID of the seed paper (gets special color)
+    :param Theme theme: Theme palette used for interpolation.
+    :return Tuple[List[Tuple[float, float, float]], int, int]: Tuple of (color_list, min_year, max_year)
     """
-    nodes = list(graph.nodes())
-    years = [graph.nodes[n].get("year", 2020) for n in nodes]
-    min_year = min(years)
-    max_year = max(years)
+    nodes = ordered_nodes(graph)
+    years = [graph.nodes[n].get("year") for n in nodes if graph.nodes[n].get("year")]
+    if years:
+        min_year = min(years)
+        max_year = max(years)
+    else:
+        min_year = MISSING_YEAR_FALLBACK_MIN
+        max_year = MISSING_YEAR_FALLBACK_MAX
 
     colors = []
     for node in nodes:
@@ -206,68 +275,83 @@ def compute_node_colors(
             colors.append(theme.seed_color)
             continue
 
-        year = graph.nodes[node].get("year", 2020)
-        if max_year == min_year:
+        year = graph.nodes[node].get("year")
+        if year is None:
+            norm = 0.5
+        elif max_year == min_year:
             norm = 0.5
         else:
             norm = (year - min_year) / (max_year - min_year)
-
         color = theme.interpolate(norm)
         colors.append(color)
 
     return colors, min_year, max_year
 
 
-def compute_layout(graph: nx.Graph, iterations: int = 100) -> Dict[str, np.ndarray]:
+def compute_layout(
+    graph: nx.Graph,
+    iterations: int = 100,
+    layout_seed: Optional[int] = None,
+) -> Dict[Hashable, np.ndarray]:
     """
     Compute force-directed layout with organic clustering.
 
-    Tries Kamada-Kawai first (better clustering), falls back to spring layout.
-
-    Args:
-        graph: NetworkX graph
-        iterations: Number of iterations for spring layout
-
-    Returns:
-        Dictionary mapping node IDs to (x, y) positions
+    :param nx.Graph graph: NetworkX graph
+    :param int iterations: Number of iterations for spring layout
+    :param Optional[int] layout_seed: Optional seed for deterministic layout perturbations/fallback.
+    :return Dict[Hashable, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
     """
+    canonical_graph = canonicalize_graph_for_layout(graph)
+    for _, _, attrs in canonical_graph.edges(data=True):
+        # Kamada-Kawai interprets weights as path lengths (distances), not
+        # affinities; convert similarity weights so stronger links are shorter.
+        attrs[KK_LAYOUT_DISTANCE_ATTR] = _similarity_to_layout_distance(
+            attrs.get("weight", 0.0)
+        )
+
     try:
         pos = nx.kamada_kawai_layout(
-            graph,
-            weight="weight",
+            canonical_graph,
+            weight=KK_LAYOUT_DISTANCE_ATTR,
             scale=VIZ_CONFIG.layout_scale,
             center=VIZ_CONFIG.layout_center,
         )
     except Exception as e:
         logger.warning(f"Kamada-Kawai failed ({e}), using spring layout")
-        k_value = VIZ_CONFIG.spring_k_factor / np.sqrt(graph.number_of_nodes())
+        k_value = VIZ_CONFIG.spring_k_factor / np.sqrt(
+            canonical_graph.number_of_nodes()
+        )
         pos = nx.spring_layout(
-            graph,
+            canonical_graph,
             k=k_value,
             iterations=iterations,
-            seed=42,
+            seed=42 if layout_seed is None else layout_seed,
             weight="weight",
             scale=VIZ_CONFIG.layout_scale,
             center=VIZ_CONFIG.layout_center,
         )
 
-    # Add small random perturbations for organic look
-    for node in pos:
-        pos[node] += np.random.normal(0, VIZ_CONFIG.perturbation_std, 2)
+    # Add small deterministic perturbations for visual separation
+    rng = np.random.default_rng(0 if layout_seed is None else layout_seed)
+    for node in sorted(pos, key=str):
+        pos[node] += rng.normal(0, VIZ_CONFIG.perturbation_std, 2)
 
     return pos
 
 
-def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict, theme: Theme) -> None:
+def draw_edges(
+    ax: plt.Axes, graph: nx.Graph, pos: Dict[Hashable, np.ndarray], theme: Theme
+) -> None:
     """
     Draw edges with varying thickness and opacity based on weight.
 
-    Args:
-        ax: Matplotlib axes
-        graph: NetworkX graph
-        pos: Node positions dictionary
+    :param plt.Axes ax: Matplotlib axes
+    :param nx.Graph graph: NetworkX graph
+    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param Theme theme: Theme palette for edge colors.
+    :return None: Draws all edges onto the axes.
     """
-    for n1, n2, data in graph.edges(data=True):
+    for n1, n2, data in ordered_edges_with_data(graph):
         weight = data.get("weight", 0.1)
         p1 = pos[n1]
         p2 = pos[n2]
@@ -290,7 +374,7 @@ def draw_edges(ax: plt.Axes, graph: nx.Graph, pos: Dict, theme: Theme) -> None:
 def draw_nodes(
     ax: plt.Axes,
     graph: nx.Graph,
-    pos: Dict,
+    pos: Dict[Hashable, np.ndarray],
     sizes: List[float],
     colors: List[Tuple[float, float, float]],
     theme: Theme,
@@ -298,14 +382,15 @@ def draw_nodes(
     """
     Draw nodes with computed sizes and colors.
 
-    Args:
-        ax: Matplotlib axes
-        graph: NetworkX graph
-        pos: Node positions dictionary
-        sizes: List of node sizes
-        colors: List of node colors (RGB tuples)
+    :param plt.Axes ax: Matplotlib axes
+    :param nx.Graph graph: NetworkX graph
+    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param List[float] sizes: List of node sizes
+    :param List[Tuple[float, float, float]] colors: List of node colors (RGB tuples)
+    :param Theme theme: Theme palette for edge outlines.
+    :return None: Draws all nodes onto the axes.
     """
-    nodes = list(graph.nodes())
+    nodes = ordered_nodes(graph)
 
     for i, node in enumerate(nodes):
         p = pos[node]
@@ -322,33 +407,57 @@ def draw_nodes(
 
 
 def draw_labels(
-    ax: plt.Axes, graph: nx.Graph, pos: Dict, seed_id: str, theme: Theme
+    ax: plt.Axes,
+    graph: nx.Graph,
+    pos: Dict[Hashable, np.ndarray],
+    seed_id: str,
+    theme: Theme,
 ) -> None:
     """
     Draw paper labels in "Author, Year" format.
 
-    Args:
-        ax: Matplotlib axes
-        graph: NetworkX graph
-        pos: Node positions dictionary
-        seed_id: ID of seed paper (gets bold label)
+    :param plt.Axes ax: Matplotlib axes
+    :param nx.Graph graph: NetworkX graph
+    :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
+    :param str seed_id: ID of seed paper (gets bold label)
+    :param Theme theme: Theme palette for text color.
+    :return None: Draws all node labels.
     """
-    for node in graph.nodes():
+
+    def _shorten_title(title: str, max_chars: int = 34) -> str:
+        """
+        Shorten long seed labels to keep static plots readable.
+
+        :param str title: Full seed paper title.
+        :param int max_chars: Maximum label width before truncation.
+        :return str: Label-safe title.
+        """
+        if len(title) <= max_chars:
+            return title
+        return f"{title[: max_chars - 3].rstrip()}..."
+
+    for node in ordered_nodes(graph):
         p = pos[node]
-
-        # Extract author surname
-        authors = graph.nodes[node].get("authors", [])
-        if authors and authors[0]:
-            last_name = authors[0].split()[-1]
-        else:
-            last_name = "Unknown"
-
-        year = graph.nodes[node].get("year", "")
-        label = f"{last_name}, {year}"
 
         # Seed paper gets larger, bold label
         is_seed = node == seed_id
-        fontsize = 10 if is_seed else VIZ_CONFIG.font_size
+        if is_seed:
+            title = graph.nodes[node].get("title", "Seed paper")
+            label = _shorten_title(title)
+            fontsize = 9
+        else:
+            # Extract author surname
+            authors = graph.nodes[node].get("authors", [])
+            if authors and authors[0]:
+                last_name = authors[0].split()[-1]
+            else:
+                last_name = "Unknown"
+
+            year = graph.nodes[node].get("year")
+            year_label = "n.d." if year is None else str(year)
+            label = f"{last_name}, {year_label}"
+            fontsize = VIZ_CONFIG.font_size
+
         fontweight = "bold" if is_seed else VIZ_CONFIG.font_weight
 
         ax.annotate(
@@ -372,26 +481,23 @@ def visualize_graph(
     dpi: int = None,
     metadata: Optional[Dict[str, Any]] = None,
     theme_name: str = "light",
+    layout: Optional[Dict[Hashable, np.ndarray]] = None,
+    layout_seed: Optional[int] = None,
 ) -> None:
     """
     Create CiteMesh visualization.
 
-    This is the unified visualization function used by all strategies.
-
-    Args:
-        graph: NetworkX graph with paper nodes
-        seed_id: ID of the seed paper
-        output_path: Path for output PNG file
-        iterations: Number of layout iterations (higher = better quality)
-        dpi: Output resolution (defaults to config value)
-        metadata: Optional info to annotate on the figure (auto-positioned)
-
-    Visual Encodings:
-        - Node size: Citation count + importance ranking (80-2500 pixels)
-        - Node color: Smooth gradient by year (light → dark)
-        - Edge thickness: Proportional to similarity weight
-        - Edge opacity: Based on connection strength
-        - Layout: Kamada-Kawai with organic perturbations
+    :param nx.Graph graph: NetworkX graph with paper nodes
+    :param str seed_id: ID of the seed paper
+    :param Path output_path: Path for output PNG file
+    :param int iterations: Iterations used only if spring fallback layout is triggered.
+    :param int dpi: Output resolution (defaults to config value).
+    :param Optional[Dict[str, Any]] metadata: Optional info to annotate on the figure (auto-positioned).
+    :param str theme_name: Name of theme to render.
+    :param Optional[Dict[Hashable, np.ndarray]] layout: Optional precomputed layout to
+        reuse.
+    :param Optional[int] layout_seed: Optional seed used when computing layout internally.
+    :return None: Writes output image to the given path.
     """
     if dpi is None:
         dpi = VIZ_CONFIG.dpi
@@ -399,7 +505,11 @@ def visualize_graph(
     theme = get_theme(theme_name)
 
     # Compute layout
-    pos = compute_layout(graph, iterations)
+    pos = (
+        layout
+        if layout is not None
+        else compute_layout(graph, iterations, layout_seed=layout_seed)
+    )
 
     # Compute visual properties
     sizes = compute_node_sizes(graph)
@@ -444,26 +554,20 @@ def visualize_graph(
 
 
 def generate_output_path(
-    graph: nx.Graph, seed_id: str, output_dir: Path = Path("out")
+    graph: nx.Graph, seed_id: str, output_dir: Path = Path("out"), strategy: str = ""
 ) -> Path:
     """
     Generate auto-named output path from paper title.
 
-    Args:
-        graph: NetworkX graph
-        seed_id: ID of seed paper
-        output_dir: Output directory
-
-    Returns:
-        Path object for output file
+    :param nx.Graph graph: NetworkX graph
+    :param str seed_id: ID of seed paper
+    :param Path output_dir: Output directory
+    :param str strategy: Optional strategy suffix used in filename.
+    :return Path: Path object for output file
     """
     title = graph.nodes[seed_id].get("title", "graph")
+    paper_dir = output_dir / f"{_filename_safe(title)}-{_seed_suffix(seed_id)}"
+    paper_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clean title for filename
-    filename = title.lower()
-    filename = "".join(c if c.isalnum() or c in " -" else "" for c in filename)
-    filename = "-".join(filename.split())[:50]  # Limit length
-    filename = f"{filename}.png"
-
-    output_dir.mkdir(exist_ok=True)
-    return output_dir / filename
+    basename = _filename_safe(strategy, max_chars=32) if strategy else "graph"
+    return paper_dir / f"{basename}.png"
