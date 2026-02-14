@@ -9,7 +9,7 @@ import logging
 import re
 import sys
 from contextlib import nullcontext
-from hashlib import sha1
+from hashlib import sha1, sha256
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -370,6 +370,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._tf32_runtime_configured = False
         self._tf32_mode = "off"
         self._resolved_model_fingerprint: Optional[str] = None
+        self._resolved_offline_fingerprint: Optional[str] = None
 
     def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
         """Resolve effective embedding dimension from request + model profile defaults.
@@ -442,7 +443,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """Resolve deterministic model fingerprint for cache validity checks.
 
         :return str: Model fingerprint token.
-        :raises RuntimeError: If Hugging Face SHA cannot be resolved for hub repo IDs.
+        :raises RuntimeError: If no strong/weak local fingerprint can be resolved.
         """
         if self._resolved_model_fingerprint is not None:
             return self._resolved_model_fingerprint
@@ -482,6 +483,22 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             if local_snapshot_sha is not None:
                 resolved_sha = local_snapshot_sha
+
+        if not resolved_sha:
+            local_artifact_fingerprint = self._resolve_local_hf_artifact_fingerprint(
+                model_id=model_id,
+                requested_revision=requested_revision,
+            )
+            if local_artifact_fingerprint is not None:
+                logger.warning(
+                    "Could not resolve Hugging Face commit SHA for %s (revision=%s). "
+                    "Using local artifact fingerprint from config.json + model.safetensors; "
+                    "assuming local artifacts are unchanged.",
+                    model_id,
+                    requested_revision,
+                )
+                self._resolved_model_fingerprint = local_artifact_fingerprint
+                return local_artifact_fingerprint
 
         if not resolved_sha:
             raise RuntimeError(
@@ -542,18 +559,92 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 return candidate.lower()
         return None
 
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        """Return hex SHA-256 digest for a file path.
+
+        :param Path path: File path to hash.
+        :return str: Lowercase SHA-256 hex digest.
+        """
+        digest = sha256()
+        with path.open("rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _resolve_local_hf_artifact_fingerprint(
+        self, model_id: str, requested_revision: str
+    ) -> Optional[str]:
+        """Best-effort local artifact fingerprint using config + weights files.
+
+        :param str model_id: Hugging Face repository ID.
+        :param str requested_revision: Requested model revision token.
+        :return Optional[str]: Deterministic local artifact fingerprint if available.
+        """
+        try:
+            from huggingface_hub import snapshot_download
+        except Exception:
+            return None
+
+        try:
+            snapshot_path = Path(
+                snapshot_download(
+                    repo_id=model_id,
+                    revision=requested_revision,
+                    local_files_only=True,
+                )
+            ).resolve()
+        except Exception:
+            return None
+
+        config_path = snapshot_path / "config.json"
+        weights_path = snapshot_path / "model.safetensors"
+        if not config_path.is_file() or not weights_path.is_file():
+            return None
+
+        try:
+            config_hash = self._sha256_file(config_path)
+            weights_hash = self._sha256_file(weights_path)
+        except OSError:
+            return None
+
+        return (
+            f"hf::{model_id}::revision={requested_revision}"
+            f"::config={config_hash}::weights={weights_hash}"
+        )
+
     def _offline_model_fingerprint_fallback(self) -> str:
         """Build a deterministic fallback fingerprint token for offline verification gaps.
 
         :return str: Deterministic fingerprint proxy derived from model identity hints.
         """
+        if self._resolved_offline_fingerprint is not None:
+            return self._resolved_offline_fingerprint
+
         model_id = str(self.model_name).strip()
         if "/" not in model_id:
             revision_token = self.model_revision or "default"
-            return f"model-alias::{model_id}::revision={revision_token}"
+            fingerprint = f"model-alias::{model_id}::revision={revision_token}"
+            self._resolved_offline_fingerprint = fingerprint
+            return fingerprint
 
         requested_revision = (self.model_revision or "main").strip() or "main"
-        return f"hf::{model_id}::{requested_revision}::offline"
+        local_artifact_fingerprint = self._resolve_local_hf_artifact_fingerprint(
+            model_id=model_id,
+            requested_revision=requested_revision,
+        )
+        if local_artifact_fingerprint is not None:
+            self._resolved_offline_fingerprint = local_artifact_fingerprint
+            return local_artifact_fingerprint
+
+        fingerprint = (
+            f"hf::{model_id}::revision={requested_revision}::offline-unverified"
+        )
+        self._resolved_offline_fingerprint = fingerprint
+        return fingerprint
 
     def _cached_fingerprint_compatible_with_requested_identity(
         self, cached_fingerprint: Optional[str]
@@ -583,6 +674,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         requested_revision = self._requested_hf_revision_token()
         if fingerprint.endswith("::offline"):
             return fingerprint == self._offline_model_fingerprint_fallback()
+        if fingerprint.endswith("::offline-unverified"):
+            return fingerprint == self._offline_model_fingerprint_fallback()
+        if fingerprint == self._offline_model_fingerprint_fallback():
+            return True
 
         suffix = fingerprint[len(expected_prefix) :]
         if not re.fullmatch(r"[0-9a-f]{40}", suffix, flags=re.IGNORECASE):
@@ -593,6 +688,28 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         # Legacy sha-only fingerprints do not encode non-default revision tokens.
         return requested_revision == "main"
+
+    def _is_legacy_main_sha_assumption(self, cached_fingerprint: Optional[str]) -> bool:
+        """Return whether compatibility relies on legacy ``main`` SHA assumption.
+
+        :param Optional[str] cached_fingerprint: Existing cached fingerprint token.
+        :return bool: ``True`` when reuse assumes ``main`` still maps to cached SHA.
+        """
+        if cached_fingerprint is None:
+            return False
+        fingerprint = str(cached_fingerprint).strip()
+        if not fingerprint:
+            return False
+        model_id = str(self.model_name).strip()
+        if "/" not in model_id:
+            return False
+        if self._requested_hf_revision_token() != "main":
+            return False
+        expected_prefix = f"hf::{model_id}::"
+        if not fingerprint.startswith(expected_prefix):
+            return False
+        suffix = fingerprint[len(expected_prefix) :]
+        return bool(re.fullmatch(r"[0-9a-f]{40}", suffix, flags=re.IGNORECASE))
 
     def _ensure_cache_model_fingerprint(self) -> None:
         """Verify cache payload is bound to the active model fingerprint."""
@@ -608,6 +725,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     cached_fingerprint
                 ):
                     self._resolved_model_fingerprint = str(cached_fingerprint)
+                    if self._is_legacy_main_sha_assumption(cached_fingerprint):
+                        logger.warning(
+                            "Could not verify whether requested revision 'main' still "
+                            "matches cached SHA fingerprint %s for %s. Reusing cache "
+                            "under assumption of unchanged local model artifacts.",
+                            cached_fingerprint,
+                            self.model_name,
+                        )
                     logger.warning(
                         "Could not resolve Hugging Face model fingerprint for %s while "
                         "reuse checks are active. Reusing compatible cached fingerprint %s.",
@@ -639,7 +764,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 self._resolved_model_fingerprint = fallback_fingerprint
                 logger.warning(
                     "Could not resolve Hugging Face model fingerprint for %s with no "
-                    "stored fingerprint. Reusing cached payload with fallback identity %s.",
+                    "stored fingerprint. Reusing cached payload with fallback identity %s "
+                    "and recording this assumption for future offline checks.",
                     self.model_name,
                     fallback_fingerprint,
                 )
@@ -647,6 +773,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     "Skipping model-fingerprint enforcement due resolution failure: %s",
                     exc,
                 )
+                self.embedding_cache.set_model_fingerprint(fallback_fingerprint)
                 return
 
             if (

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 import types
+from hashlib import sha256
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -564,11 +565,11 @@ def test_embedding_cache_clears_stale_cached_fingerprint_when_lookup_fails(
 
     assert (
         builder._resolved_model_fingerprint
-        == "hf::org/offline-test::refs/pr/12::offline"
+        == "hf::org/offline-test::revision=refs/pr/12::offline-unverified"
     )
     builder.embedding_cache.clear.assert_called_once()
     builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-test::refs/pr/12::offline"
+        "hf::org/offline-test::revision=refs/pr/12::offline-unverified"
     )
     assert any(
         "is incompatible with requested identity" in record.getMessage()
@@ -601,10 +602,12 @@ def test_embedding_cache_reuses_cached_payload_with_fallback_fingerprint_when_lo
 
     assert (
         builder._resolved_model_fingerprint
-        == "hf::org/offline-no-fingerprint::refs/pr/12::offline"
+        == "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
     )
     assert builder.embedding_cache.clear.call_count == 0
-    builder.embedding_cache.set_model_fingerprint.assert_not_called()
+    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
+        "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
+    )
     assert any(
         "Reusing cached payload with fallback identity" in record.getMessage()
         for record in caplog.records
@@ -635,10 +638,10 @@ def test_embedding_cache_initializes_offline_without_payload(
 
     assert (
         builder._resolved_model_fingerprint
-        == "hf::org/offline-init::refs/pr/34::offline"
+        == "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
     )
     builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-init::refs/pr/34::offline"
+        "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
     )
     assert any(
         "offline initialization" in record.getMessage() for record in caplog.records
@@ -725,6 +728,50 @@ def test_embedding_fingerprint_resolution_uses_local_snapshot_sha_when_offline(
     assert (
         builder._resolve_model_fingerprint()
         == "hf::org/test-model::0123456789abcdef0123456789abcdef01234567"
+    )
+
+
+def test_embedding_fingerprint_resolution_uses_local_artifact_hashes_when_sha_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """HF fingerprint resolution should hash config + weights when SHA is unavailable."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    class _FailingHfApi:
+        def model_info(self, repo_id: str, revision: str) -> object:
+            del repo_id, revision
+            raise RuntimeError("network unavailable")
+
+    snapshot_root = tmp_path / "models--org--artifact-model"
+    snapshot_root.mkdir(parents=True, exist_ok=True)
+    config_bytes = b'{"architectures":["FakeModel"]}\n'
+    weights_bytes = b"weights-v1"
+    (snapshot_root / "config.json").write_bytes(config_bytes)
+    (snapshot_root / "model.safetensors").write_bytes(weights_bytes)
+
+    def _snapshot_download(repo_id: str, revision: str, local_files_only: bool) -> str:
+        assert repo_id == "org/artifact-model"
+        assert revision == "refs/pr/7"
+        assert local_files_only is True
+        return str(snapshot_root)
+
+    fake_hf_module = types.ModuleType("huggingface_hub")
+    fake_hf_module.HfApi = _FailingHfApi
+    fake_hf_module.snapshot_download = _snapshot_download
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/artifact-model",
+        model_revision="refs/pr/7",
+        client=MagicMock(),
+    )
+
+    expected_config = sha256(config_bytes).hexdigest()
+    expected_weights = sha256(weights_bytes).hexdigest()
+    assert builder._resolve_model_fingerprint() == (
+        "hf::org/artifact-model::revision=refs/pr/7"
+        f"::config={expected_config}::weights={expected_weights}"
     )
 
 
