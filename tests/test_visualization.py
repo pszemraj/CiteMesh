@@ -1,4 +1,4 @@
-"""Tests for graph exporter output branches."""
+"""Consolidated tests for visualization rendering and export contracts."""
 
 from __future__ import annotations
 
@@ -7,12 +7,14 @@ import sys
 import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Hashable
 
 import networkx as nx
+import numpy as np
 import pytest
 
 from citemesh.core import Author, Paper
+from citemesh.data.model_profiles import get_embedding_model_profile
 from citemesh.visualization.export import (
     GRAPHML_DETERMINISM_POLICY_STRICT,
     GRAPHML_LAYOUT_METADATA_KEY,
@@ -20,6 +22,13 @@ from citemesh.visualization.export import (
     GraphExporter,
     _graphml_determinism_policy,
 )
+from citemesh.visualization.render import (
+    KK_LAYOUT_DISTANCE_ATTR,
+    compute_layout,
+    compute_node_colors,
+    compute_node_sizes,
+)
+from citemesh.visualization.themes import get_theme
 
 
 def _install_fake_plotly(
@@ -28,13 +37,7 @@ def _install_fake_plotly(
     figure_cls: type,
     scatter_factory: Callable[..., dict[str, object]] | None = None,
 ) -> None:
-    """Install a minimal ``plotly`` module with configurable graph_objects types.
-
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch ``sys.modules``.
-    :param type figure_cls: Figure class replacement used by exporter tests.
-    :param callable scatter_factory: Optional ``Scatter`` constructor.
-    :return None: Installs fake plotly modules for the current test.
-    """
+    """Install a minimal ``plotly`` module with configurable graph_objects types."""
     fake_go = types.SimpleNamespace(
         Scatter=scatter_factory or (lambda **kwargs: {"type": "scatter", **kwargs}),
         Layout=lambda **kwargs: {"type": "layout", **kwargs},
@@ -49,42 +52,21 @@ class _BaseFakeFigure:
     """Reusable minimal Plotly ``Figure`` stand-in for exporter tests."""
 
     def __init__(self, data: Any, layout: Any) -> None:
-        """Store figure payload for assertion helpers.
-
-        :param Any data: Figure trace payload.
-        :param Any layout: Figure layout payload.
-        :return None: Stores payload for later assertions.
-        """
         self.data = data
         self.layout = layout
 
     def write_html(self, path: str, **kwargs: Any) -> None:
-        """Write deterministic marker output and ignore optional kwargs.
-
-        :param str path: Output HTML path.
-        :param Any kwargs: Ignored Plotly write options.
-        :return None: Writes marker HTML output.
-        """
         del kwargs
         Path(path).write_text("<html>plotly</html>")
 
 
 def _canonicalize_graphml(path: Path) -> str:
-    """Return a deterministic textual representation for GraphML comparison.
-
-    :param Path path: GraphML file path to normalize.
-    :return str: Canonicalized XML string for deterministic comparisons.
-    """
+    """Return a deterministic textual representation for GraphML comparison."""
     document = ET.parse(path)
     root = document.getroot()
     namespace = "{http://graphml.graphdrawing.org/xmlns}"
 
     def _sorted_children(node: ET.Element) -> None:
-        """Recursively sort GraphML child elements for canonical comparison.
-
-        :param ET.Element node: XML element whose descendants are normalized.
-        :return None: Mutates element tree ordering in place.
-        """
         for child in node:
             _sorted_children(child)
 
@@ -130,10 +112,7 @@ def _canonicalize_graphml(path: Path) -> str:
 
 
 def _build_graph() -> tuple[nx.Graph, str]:
-    """Create a small graph with one rich paper node and one fallback node.
-
-    :return tuple[nx.Graph, str]: Graph and seed ID.
-    """
+    """Create a small graph with one rich paper node and one fallback node."""
     seed = Paper(
         paper_id="seed",
         title="Seed Paper",
@@ -201,12 +180,7 @@ def test_exporter_json_and_graphml_serialization(tmp_path: Path) -> None:
 def test_exporter_interactive_html_raises_without_pyvis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Interactive HTML export should error cleanly when pyvis is unavailable.
-
-    :param Path tmp_path: Temporary output directory fixture.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
-    :return None: Asserts missing dependency error handling.
-    """
+    """Interactive HTML export should error cleanly when pyvis is unavailable."""
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
@@ -220,23 +194,12 @@ def test_exporter_interactive_html_raises_without_pyvis(
 def test_exporter_interactive_html_with_fake_pyvis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Interactive HTML export should write output through a pyvis-compatible API.
-
-    :param Path tmp_path: Temporary output directory fixture.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
-    :return None: Asserts pyvis-compatible export behavior.
-    """
+    """Interactive HTML export should write output through a pyvis-compatible API."""
 
     class FakeNetwork:
-        """Minimal pyvis Network stand-in."""
-
         instances = []
 
         def __init__(self, **kwargs: Any) -> None:
-            """Store creation kwargs for assertions.
-
-            :param kwargs: Constructor arguments.
-            """
             self.kwargs = kwargs
             self.options = None
             self.nodes = []
@@ -245,34 +208,15 @@ def test_exporter_interactive_html_with_fake_pyvis(
             FakeNetwork.instances.append(self)
 
         def set_options(self, options: str) -> None:
-            """Store physics options string.
-
-            :param str options: JSON options payload.
-            """
             self.options = options
 
         def add_node(self, node_id: str, **kwargs: Any) -> None:
-            """Store node payload.
-
-            :param str node_id: Node identifier.
-            :param kwargs: Node options.
-            """
             self.nodes.append((node_id, kwargs))
 
         def add_edge(self, source: str, target: str, **kwargs: Any) -> None:
-            """Store edge payload.
-
-            :param str source: Source node.
-            :param str target: Target node.
-            :param kwargs: Edge options.
-            """
             self.edges.append((source, target, kwargs))
 
         def save_graph(self, path: str) -> None:
-            """Write a simple marker file.
-
-            :param str path: Output path.
-            """
             self.saved_path = path
             Path(path).write_text("<html>fake</html>")
 
@@ -333,12 +277,7 @@ def test_graphml_export_records_determinism_metadata(
 def test_exporter_plotly_raises_without_plotly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should error cleanly when plotly is unavailable.
-
-    :param Path tmp_path: Temporary output directory fixture.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
-    :return None: Asserts missing dependency error handling.
-    """
+    """Plotly export should error cleanly when plotly is unavailable."""
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
@@ -350,24 +289,12 @@ def test_exporter_plotly_raises_without_plotly(
 def test_exporter_plotly_with_fake_module(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should write output using a minimal graph_objects API.
-
-    :param Path tmp_path: Temporary output directory fixture.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
-    :return None: Asserts minimal graph_objects compatibility.
-    """
+    """Plotly export should write output using a minimal graph_objects API."""
 
     captured: dict[str, object] = {}
 
     class FakeFigure(_BaseFakeFigure):
-        """Minimal plotly Figure stand-in."""
-
         def __init__(self, data: Any, layout: Any) -> None:
-            """Store payload for assertions.
-
-            :param data: Figure data traces.
-            :param layout: Figure layout spec.
-            """
             super().__init__(data, layout)
             captured["data"] = data
             captured["layout"] = layout
@@ -388,33 +315,14 @@ def test_exporter_plotly_with_fake_module(
 def test_exporter_plotly_requires_div_id_support(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should fail fast when deterministic div_id is unsupported.
-
-    :param Path tmp_path: Temporary output directory fixture.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
-    :return None: Asserts deterministic div_id capability enforcement.
-    """
+    """Plotly export should fail fast when deterministic div_id is unsupported."""
 
     class FakeFigure:
-        """Minimal plotly Figure stand-in that rejects ``div_id``."""
-
         def __init__(self, data: Any, layout: Any) -> None:
-            """Ignore constructor payload for this failure-path stub.
-
-            :param Any data: Unused figure data payload.
-            :param Any layout: Unused layout payload.
-            :return None: Discards constructor input.
-            """
             del data
             del layout
 
         def write_html(self, path: str, **kwargs: Any) -> None:
-            """Raise when deterministic div id is passed.
-
-            :param str path: Unused output path.
-            :param Any kwargs: Plotly write options.
-            :return None: Raises ``TypeError`` for unsupported ``div_id``.
-            """
             del path
             if "div_id" in kwargs:
                 raise TypeError("div_id unsupported")
@@ -433,24 +341,11 @@ def test_exporter_plotly_requires_div_id_support(
 def test_exporter_plotly_uses_deterministic_div_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly HTML export should provide a stable div id when supported.
-
-    :param Path tmp_path: Temporary output directory fixture.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
-    :return None: Asserts deterministic div_id propagation.
-    """
+    """Plotly HTML export should provide a stable div id when supported."""
     captured: dict[str, object] = {}
 
     class FakeFigure(_BaseFakeFigure):
-        """Minimal plotly Figure stand-in."""
-
         def write_html(self, path: str, **kwargs: Any) -> None:
-            """Capture div_id kwargs and write marker output.
-
-            :param str path: Output HTML path.
-            :param Any kwargs: Plotly write options.
-            :return None: Writes marker HTML output and stores kwargs.
-            """
             captured["kwargs"] = kwargs
             Path(path).write_text("<html>plotly</html>")
 
@@ -472,21 +367,11 @@ def test_exporter_plotly_uses_deterministic_div_id(
 def test_exporter_plotly_with_missing_year_data(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly export should avoid None in marker colors when year data is missing.
-
-    :param Path tmp_path: Temporary output directory fixture.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
-    :return None: Asserts missing-year marker normalization and fixed bounds.
-    """
+    """Plotly export should avoid None in marker colors when year data is missing."""
 
     captured: dict[str, object] = {}
 
     def fake_scatter(**kwargs: Any) -> dict[str, object]:
-        """Capture marker configuration from fake Plotly scatter traces.
-
-        :param Any kwargs: Scatter keyword arguments.
-        :return dict[str, object]: Serialized scatter payload.
-        """
         if kwargs.get("mode") == "markers+text":
             marker = dict(kwargs["marker"])
             marker["color"] = list(marker["color"])
@@ -612,24 +497,11 @@ def test_exporter_json_and_graphml_ordering_is_stable(tmp_path: Path) -> None:
 def test_exporter_plotly_edge_order_is_stable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly edge trace ordering should follow canonicalized edge order.
-
-    :param Path tmp_path: Temporary output directory fixture.
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to patch import modules.
-    :return None: Asserts stable edge coordinate sequencing.
-    """
+    """Plotly edge trace ordering should follow canonicalized edge order."""
     captured: dict[str, object] = {}
 
     class FakeFigure(_BaseFakeFigure):
-        """Minimal plotly Figure stand-in."""
-
         def __init__(self, data: Any, layout: Any) -> None:
-            """Store payload for assertions.
-
-            :param Any data: Figure trace payload.
-            :param Any layout: Figure layout payload.
-            :return None: Stores payload for later assertions.
-            """
             super().__init__(data, layout)
             captured["data"] = data
 
@@ -670,3 +542,169 @@ def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) ->
     exporter.to_plotly_html(out_b)
 
     assert out_a.read_text() == out_b.read_text()
+
+
+def test_compute_layout_perturbation_is_stable_across_node_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Node perturbations should map deterministically regardless of insertion order."""
+
+    def fake_kamada_kawai_layout(
+        graph: nx.Graph, **kwargs: Any
+    ) -> dict[Hashable, np.ndarray]:
+        del kwargs
+        return {node: np.array([0.0, 0.0], dtype=np.float64) for node in graph.nodes()}
+
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.kamada_kawai_layout",
+        fake_kamada_kawai_layout,
+    )
+
+    graph_1 = nx.Graph()
+    graph_1.add_nodes_from(["seed", "a", "b"])
+    graph_1.add_edges_from([("seed", "a"), ("a", "b")])
+
+    graph_2 = nx.Graph()
+    graph_2.add_nodes_from(["b", "seed", "a"])
+    graph_2.add_edges_from([("seed", "a"), ("a", "b")])
+
+    for layout_seed in [None, 123]:
+        pos_1 = compute_layout(graph_1, iterations=10, layout_seed=layout_seed)
+        pos_2 = compute_layout(graph_2, iterations=10, layout_seed=layout_seed)
+
+        for node_id in sorted(graph_1.nodes()):
+            assert np.allclose(pos_1[node_id], pos_2[node_id])
+
+
+def test_compute_layout_is_stable_for_real_kamada_kawai() -> None:
+    """Real layout output should be invariant to node insertion order."""
+    graph_1 = nx.Graph()
+    graph_1.add_nodes_from(["seed", "a", "b", "c"])
+    graph_1.add_edge("seed", "a", weight=0.8)
+    graph_1.add_edge("a", "b", weight=0.7)
+    graph_1.add_edge("b", "c", weight=0.6)
+    graph_1.add_edge("c", "seed", weight=0.5)
+
+    graph_2 = nx.Graph()
+    graph_2.add_nodes_from(["c", "b", "a", "seed"])
+    graph_2.add_edge("b", "c", weight=0.6)
+    graph_2.add_edge("a", "b", weight=0.7)
+    graph_2.add_edge("seed", "a", weight=0.8)
+    graph_2.add_edge("c", "seed", weight=0.5)
+
+    pos_1 = compute_layout(graph_1, iterations=25, layout_seed=77)
+    pos_2 = compute_layout(graph_2, iterations=25, layout_seed=77)
+
+    for node_id in sorted(graph_1.nodes()):
+        assert np.allclose(pos_1[node_id], pos_2[node_id])
+
+
+def test_compute_layout_uses_distance_weights_for_kamada_kawai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kamada-Kawai should receive inverted similarity distances."""
+    captured: dict[str, object] = {}
+
+    def fake_kamada_kawai_layout(
+        graph: nx.Graph, **kwargs: Any
+    ) -> dict[Hashable, np.ndarray]:
+        captured["weight_attr"] = kwargs.get("weight")
+        distances = {}
+        for left, right, attrs in graph.edges(data=True):
+            edge_key = tuple(sorted((str(left), str(right))))
+            distances[edge_key] = attrs[KK_LAYOUT_DISTANCE_ATTR]
+        captured["distances"] = distances
+        return {node: np.array([0.0, 0.0], dtype=np.float64) for node in graph.nodes()}
+
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.kamada_kawai_layout",
+        fake_kamada_kawai_layout,
+    )
+
+    graph = nx.Graph()
+    graph.add_edge("seed", "high", weight=0.9)
+    graph.add_edge("seed", "low", weight=0.1)
+
+    compute_layout(graph, iterations=10, layout_seed=123)
+
+    assert captured["weight_attr"] == KK_LAYOUT_DISTANCE_ATTR
+    distances = captured["distances"]
+    assert isinstance(distances, dict)
+    assert distances[("high", "seed")] < distances[("low", "seed")]
+
+
+def test_compute_node_colors_and_sizes_are_stable_for_missing_years_and_ties() -> None:
+    """Color fallback bounds and size ties should be deterministic."""
+    graph_1 = nx.Graph()
+    graph_1.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
+    graph_1.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
+    graph_1.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
+
+    graph_2 = nx.Graph()
+    graph_2.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
+    graph_2.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
+    graph_2.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
+
+    _, min_year, max_year = compute_node_colors(graph_1, "seed", get_theme("light"))
+    assert min_year == 2000
+    assert max_year == 2001
+
+    ordered_nodes = sorted(graph_1.nodes(), key=str)
+    size_map_1 = dict(zip(ordered_nodes, compute_node_sizes(graph_1)))
+    size_map_2 = dict(zip(ordered_nodes, compute_node_sizes(graph_2)))
+    assert size_map_1 == size_map_2
+    assert size_map_1["a"] >= size_map_1["b"]
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_theme"),
+    [
+        ({"COLORFGBG": "15;0", "DARKMODE": None, "TERM_PROGRAM": None}, "dark"),
+        ({"COLORFGBG": "0;15", "DARKMODE": None, "TERM_PROGRAM": None}, "light"),
+        ({"COLORFGBG": None, "DARKMODE": "1", "TERM_PROGRAM": None}, "dark"),
+    ],
+)
+def test_get_theme_auto_detection(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str | None], expected_theme: str
+) -> None:
+    """Auto theme detection should prioritize COLORFGBG then DARKMODE."""
+    for key, value in env.items():
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    assert get_theme("auto").name == expected_theme
+
+
+def test_get_theme_unknown_defaults_to_light() -> None:
+    """Unknown theme keys should default to light palette."""
+    assert get_theme("not-a-theme").name == "light"
+
+
+def test_model_profiles_match_expected_formatters() -> None:
+    """Gemma and default profiles should expose expected formatting behavior."""
+    gemma = get_embedding_model_profile("google/embeddinggemma-300m")
+    assert gemma.name == "google/embeddinggemma"
+    assert gemma.float16_supported is False
+    assert gemma.preferred_torch_dtype == "bfloat16"
+    assert gemma.use_cuda_autocast is True
+    assert gemma.compile_inner_transformer is True
+    assert gemma.available_truncate_dims == (768, 512, 256, 128)
+    assert gemma.recommended_truncate_dim == 256
+    assert gemma.format_query("  attention  ").startswith(
+        "task: search result | query:"
+    )
+    assert (
+        gemma.format_document({"title": " Title ", "abstract": " Abstract "})
+        == "title: Title | text: Abstract"
+    )
+
+    default = get_embedding_model_profile("all-MiniLM-L6-v2")
+    assert default.name == "default"
+    assert default.preferred_torch_dtype is None
+    assert default.use_cuda_autocast is False
+    assert default.compile_inner_transformer is False
+    assert default.available_truncate_dims is None
+    assert default.recommended_truncate_dim is None
+    assert default.format_query("plain") == "plain"
+    assert default.format_document({"title": "T", "abstract": ""}) == "T"

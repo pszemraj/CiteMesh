@@ -583,18 +583,26 @@ class EmbeddingCache:
         self,
         dataset_split: str,
         corpus_size: Optional[int],
+        dataset_source: Optional[str] = None,
     ) -> bool:
         """Return whether cache hydration metadata matches target corpus spec.
 
         :param str dataset_split: Dataset split token.
         :param Optional[int] corpus_size: Corpus cap or ``None`` for full split.
+        :param Optional[str] dataset_source: Expected dataset source token.
         :return bool: ``True`` when hydration metadata indicates a completed matching cache.
         """
         expected_split = str(dataset_split)
         expected_corpus_size = _corpus_size_token(corpus_size)
+        expected_source = None if dataset_source is None else str(dataset_source)
 
         with sqlite3.connect(self.db_path) as conn:
             metadata = self._load_cache_metadata(conn)
+
+        if expected_source is not None:
+            cached_source = metadata.get(HYDRATION_DATASET_SOURCE_KEY)
+            if cached_source != expected_source:
+                return False
 
         return (
             metadata.get(HYDRATION_COMPLETE_KEY, "0") == "1"

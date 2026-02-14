@@ -826,7 +826,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether to use streaming dataset hydration.
         :return None: Mutates cache state in-place when hydration is required.
         """
-        if self.embedding_cache.is_hydrated(self.dataset_split, self.corpus_size):
+        dataset_source: Optional[str]
+        dataset: Iterable[Dict[str, Any]]
+
+        try:
+            dataset_source, dataset = self._load_dataset_for_hydration(
+                use_streaming=use_streaming
+            )
+        except Exception:
+            if self.embedding_cache.is_hydrated(self.dataset_split, self.corpus_size):
+                logger.info(
+                    "Using existing hydrated cache; dataset hydration source could not be "
+                    "resolved in current environment."
+                )
+                return
+            raise
+
+        if self.embedding_cache.is_hydrated(
+            self.dataset_split,
+            self.corpus_size,
+            dataset_source=dataset_source,
+        ):
             return
 
         logger.info(
@@ -836,10 +856,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             use_streaming,
         )
         self.embedding_cache.clear()
-
-        dataset_source, dataset = self._load_dataset_for_hydration(
-            use_streaming=use_streaming
-        )
         self.embedding_cache.mark_hydrated(
             dataset_source=dataset_source,
             dataset_split=self.dataset_split,
