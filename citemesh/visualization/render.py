@@ -6,6 +6,7 @@ visualization that all strategies can use, eliminating code duplication.
 """
 
 import logging
+import hashlib
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
@@ -57,6 +58,24 @@ def _filename_safe(text: str, max_chars: int = MAX_TITLE_CHARS) -> str:
     normalized = "".join(c if c.isalnum() or c in " -" else "" for c in normalized)
     slug = "-".join(normalized.split())[:max_chars].strip("-")
     return slug or "graph"
+
+
+def _seed_suffix(seed_id: str, length: int = 8) -> str:
+    """Build a short, stable suffix from the seed identifier.
+
+    :param str seed_id: Seed paper identifier.
+    :param int length: Number of digest characters to keep.
+    :return str: Stable hex suffix used in output directory naming.
+    """
+    return hashlib.sha256(seed_id.encode("utf-8")).hexdigest()[:length]
+
+
+def _output_dir_name(title: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS) -> str:
+    """Build an output directory name that keeps a stable suffix under truncation."""
+    suffix = f"-{_seed_suffix(seed_id)}"
+    title_budget = max_chars - len(suffix)
+    title_budget = max(1, title_budget)
+    return f"{_filename_safe(title, max_chars=title_budget)}{suffix}"
 
 
 def _similarity_to_layout_distance(raw_similarity: object) -> float:
@@ -561,7 +580,7 @@ def generate_output_path(
     :return Path: Path object for output file
     """
     title = graph.nodes[seed_id].get("title", "graph")
-    paper_dir = output_dir / _filename_safe(title)
+    paper_dir = output_dir / _output_dir_name(title=title, seed_id=seed_id)
     paper_dir.mkdir(parents=True, exist_ok=True)
 
     basename = _filename_safe(strategy, max_chars=32) if strategy else "graph"

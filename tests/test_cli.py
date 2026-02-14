@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import re
 import runpy
 import sys
 import tempfile
@@ -533,8 +534,10 @@ def test_output_path_and_slug_contracts() -> None:
     graph.add_node("seed-b", title="A Survey of Transformers")
     path_a = generate_output_path(graph, seed_id="seed-a", output_dir=Path("out"))
     path_b = generate_output_path(graph, seed_id="seed-b", output_dir=Path("out"))
-    assert path_a.parent == path_b.parent
-    assert path_a.parent.name == "a-survey-of-transformers"
+    assert path_a != path_b
+    assert path_a.parent.name != path_b.parent.name
+    assert re.search(r"-[0-9a-f]{8}$", path_a.parent.name)
+    assert re.search(r"-[0-9a-f]{8}$", path_b.parent.name)
 
     graph = nx.Graph()
     graph.add_node(
@@ -542,6 +545,7 @@ def test_output_path_and_slug_contracts() -> None:
         title="This title should definitely exceed forty characters for the slug",
     )
     output_path = generate_output_path(graph, seed_id="seed", output_dir=Path("out"))
+    assert re.search(r"-[0-9a-f]{8}$", output_path.parent.name)
     assert len(output_path.parent.name) <= 40
 
 
