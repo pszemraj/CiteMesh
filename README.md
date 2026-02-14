@@ -7,6 +7,7 @@ Build exploration-friendly paper graphs from a single paper or query using recom
 This README is intentionally high-level.
 
 - Canonical CLI behavior (flags, defaults, identifier normalization, outputs): [CLI Usage](./docs/guides/cli.md)
+- Strategy behavior and tradeoffs: [Strategies Guide](./docs/guides/strategies.md)
 - Canonical cache behavior (paths, layout, hydration/invalidation, cleanup): [Caching & Data](./docs/guides/caching.md)
 - Full docs ownership map: [Documentation Index](./docs/README.md)
 - This file intentionally avoids duplicating CLI/cache contracts; those remain centralized in the canonical docs above.

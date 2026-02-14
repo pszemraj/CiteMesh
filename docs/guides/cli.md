@@ -54,11 +54,14 @@ For cache path/layout/hydration details, see [Caching & Data](caching.md).
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 
-When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:40]>/<strategy>.<ext>`.
+When `--output` is omitted, CiteMesh writes to `out/<slug>-<hash>/<strategy>.<ext>`.
 
-When `--export all` is used, CiteMesh writes every supported format using consistent styling into a directory. With default naming this is `out/<safe_seed_title[:40]>/`; with explicit output it is the directory passed via `-o`.
+`<slug>` is a filesystem-safe version of the seed title, `<hash>` is the first 8 hex characters of `sha256(seed_id)`, and the combined directory name is capped at 40 characters.
+
+When `--export all` is used, CiteMesh writes every supported format using consistent styling into a directory. With default naming this is `out/<slug>-<hash>/`; with explicit output it uses the directory base derived from `-o`.
 
 If explicit `-o` ends with a known export suffix (for example `-o out/my-run.json`), the suffix is stripped and the remaining path is treated as the directory base for multi-export runs.
+If explicit `-o` has no known suffix, it is treated as the directory base for multi-export runs.
 
 For multi-export runs, files are named `<strategy>.<ext>` inside the selected directory. Example:
 
@@ -85,6 +88,8 @@ Numeric validation:
 - `--similarity-threshold` must be a finite float between `0.0` and `1.0`.
 
 ## Strategy-Specific Flags
+
+Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.md). Flag contracts live here.
 
 ### Cross-Strategy Scope
 
@@ -178,7 +183,7 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 ## Troubleshooting
 
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
-- **Slow first embedding run**: first run hydrates/cache-builds the selected corpus spec; warm runs query directly from cache metadata + quantized vectors.
+- **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
 - **API limits**: set `S2_API_KEY` for higher Semantic Scholar limits.
 

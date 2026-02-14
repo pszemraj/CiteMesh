@@ -59,6 +59,7 @@ Operational CLI behavior remains canonical in [CLI Usage](../guides/cli.md).
 | `hybrid` | Start with citation graph and enrich with semantic neighbors | Relationship-aware weighting and per-node cap behavior |
 
 Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
+User-facing strategy behavior and selection guidance are canonical in [Guides: Strategies](../guides/strategies.md).
 
 ### `citemesh/core/models.py`
 
