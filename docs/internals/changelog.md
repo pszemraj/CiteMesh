@@ -67,6 +67,7 @@ Historical bullets below may describe superseded behavior; canonical current beh
 - Made metadata timestamps opt-in (`--include-timestamp`) for deterministic outputs by default.
 - Grouped auto outputs into stable per-paper title folders.
 - Removed title truncation in runtime seed logs and static/Plotly chart titles.
+- Fixed hybrid CLI validation to resolve effective default `--max-semantic` before rejecting embedding-only flags.
 - Moved interactive exporters to optional `.[viz]` extras.
 
 ## Maintenance Consolidation

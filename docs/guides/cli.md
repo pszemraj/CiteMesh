@@ -159,6 +159,7 @@ Execution transparency:
   Hybrid reserves this capacity from citation collection (`citation_budget = max_papers - max_semantic`), so valid values are `0` through `max-papers - 1`.
   If omitted, hybrid defaults to `min(10, max-papers - 1)`.
 - Setting `--max-semantic 0` disables semantic enrichment; embedding-only flags are rejected to avoid no-op configuration.
+- If `--max-semantic` is omitted and `--max-papers` is `1`, the effective default is also `0`; embedding-only hybrid flags are rejected in that configuration for the same reason.
 - Hybrid runs fail closed if semantic enrichment fails; CiteMesh does not silently downgrade to citation-only output.
 
 ## Export Formats
