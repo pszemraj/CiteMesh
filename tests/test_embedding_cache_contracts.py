@@ -22,6 +22,7 @@ from citemesh.data.embedding_cache import (
     SOURCE_TORCH_DTYPE_KEY,
     EmbeddingCache,
 )
+from citemesh.data.model_profiles import get_embedding_model_profile
 from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
 
 
@@ -175,6 +176,42 @@ def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
         )
 
     assert results == []
+
+
+def test_embedding_cache_default_text_builder_matches_profile_formatter() -> None:
+    """Default cache text builder should match the default profile formatter."""
+
+    class _CaptureEncodeModel:
+        """Capture encoded texts while returning deterministic float32 embeddings."""
+
+        def __init__(self) -> None:
+            self.texts: list[str] = []
+
+        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            del kwargs
+            self.texts.extend(texts)
+            return np.repeat(
+                np.asarray([[1.0, 0.0]], dtype=np.float32),
+                len(texts),
+                axis=0,
+            )
+
+    papers = {
+        "p1": {"title": "Alpha", "abstract": "First"},
+        "p2": {"title": "Beta", "abstract": "  "},
+        "p3": {"title": "   ", "abstract": "Gamma"},
+    }
+    profile = get_embedding_model_profile("sentence-transformers/all-MiniLM-L6-v2")
+    expected_texts = [profile.format_document(metadata) for metadata in papers.values()]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="text-builder-parity")
+        model = _CaptureEncodeModel()
+        embeddings = cache.get_embeddings(papers, model, show_progress=False)
+
+    assert list(embeddings) == list(papers)
+    assert model.texts == expected_texts
+    assert expected_texts == ["Alpha. First", "Beta", "Gamma"]
 
 
 def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:

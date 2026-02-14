@@ -28,6 +28,7 @@ from filelock import FileLock, Timeout
 from tqdm.auto import tqdm
 
 from .cache import get_cache_dir
+from .model_profiles import compose_title_abstract_text
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class EmbeddingCache:
         cached_embeddings: Dict[str, np.ndarray] = {}
         papers_to_embed: List[Tuple[str, Dict, str, str, Optional[int]]] = []
         cached_rows: List[Tuple[str, int]] = []
-        builder = text_builder or _build_text
+        builder = text_builder or compose_title_abstract_text
 
         items = list(papers.items())
         progress_enabled = show_progress and sys.stderr.isatty() and len(items) > 50
@@ -552,29 +553,6 @@ class EmbeddingCache:
 
             results.sort(key=lambda item: (-item.score, str(item.paper_id)))
             return results[:top_k]
-
-    def get_stats(self) -> Dict[str, Optional[float]]:
-        """Return basic cache statistics.
-
-        :return Dict[str, Optional[float]]: Cache size, dimensions, and year range.
-        """
-        total_h5_size = self.h5_path.stat().st_size if self.h5_path.exists() else 0
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM papers")
-            total_papers = cursor.fetchone()[0]
-
-            cursor.execute(
-                "SELECT AVG(embedding_dim), MIN(year), MAX(year) FROM papers WHERE embedding_dim IS NOT NULL"
-            )
-            avg_dim, min_year, max_year = cursor.fetchone()
-
-        return {
-            "total_papers": total_papers,
-            "avg_embedding_dim": avg_dim,
-            "year_range": (min_year, max_year),
-            "cache_size_mb": total_h5_size / (1024 * 1024),
-        }
 
     def has_cached_payload(self) -> bool:
         """Return whether namespace contains any cached embedding payload rows.
@@ -1880,17 +1858,6 @@ class EmbeddingCache:
             ensure_ascii=True,
         )
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-
-
-def _build_text(metadata: Dict) -> str:
-    """Compose paper text for embedding computation.
-
-    :param Dict metadata: Paper metadata containing title and abstract.
-    :return str: Concatenated title and abstract string.
-    """
-    title = metadata.get("title", "")
-    abstract = metadata.get("abstract", "")
-    return f"{title}. {abstract}".strip()
 
 
 def _chunked(values: Sequence[str], chunk_size: int) -> Iterable[List[str]]:
