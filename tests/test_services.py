@@ -70,9 +70,7 @@ class _FakeRequestsSession:
         self.closed = True
 
 
-def _build_fake_semantic_scholar_api(
-    created: Optional[list[object]] = None,
-) -> type:
+def _build_fake_semantic_scholar_api() -> type:
     """Create a SemanticScholar API stub class backed by fake sessions."""
 
     class _FakeApi:
@@ -81,8 +79,6 @@ def _build_fake_semantic_scholar_api(
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             self.session = _FakeRequestsSession()
             self.closed = False
-            if created is not None:
-                created.append(self)
 
         def close(self) -> None:
             self.closed = True
@@ -469,12 +465,11 @@ def test_singleton_and_context_lifecycle_behaviors() -> None:
     second_client = get_client()
     assert first_client is not second_client
 
-    created: list[object] = []
     previous_session = semantic_module.requests.Session
     previous_client = semantic_module.SemanticScholar
     try:
         semantic_module.requests.Session = _FakeRequestsSession
-        semantic_module.SemanticScholar = _build_fake_semantic_scholar_api(created)
+        semantic_module.SemanticScholar = _build_fake_semantic_scholar_api()
 
         reset_client()
         first = get_client()

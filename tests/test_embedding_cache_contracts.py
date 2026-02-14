@@ -7,7 +7,6 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from queue import Empty
-from typing import Any
 
 import h5py
 import numpy as np
@@ -21,47 +20,7 @@ from citemesh.data.embedding_cache import (
     MODEL_FINGERPRINT_KEY,
     EmbeddingCache,
 )
-
-
-class _MockModel:
-    """Deterministic embedding model mock."""
-
-    def __init__(self) -> None:
-        """Initialize deterministic mock model."""
-        self.encode_calls = 0
-
-    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
-        """Generate deterministic pseudo-embeddings.
-
-        :param list[str] texts: Input texts for encoding.
-        :param kwargs: Extra arguments ignored by the mock.
-        :return np.ndarray: Deterministic embeddings shaped ``(len(texts), 2)``.
-        """
-        del kwargs
-        self.encode_calls += 1
-        np.random.seed(len(texts))
-        return np.random.rand(len(texts), 2)
-
-
-class _LookupModel:
-    """Deterministic model backed by a text->embedding lookup table."""
-
-    def __init__(self, lookup: dict[str, np.ndarray]) -> None:
-        """Store lookup table used for ``encode`` calls.
-
-        :param dict[str, np.ndarray] lookup: Text->embedding table.
-        """
-        self.lookup = lookup
-
-    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
-        """Return lookup embeddings in request order.
-
-        :param list[str] texts: Input texts.
-        :param Any kwargs: Ignored keyword arguments.
-        :return np.ndarray: Embedding matrix.
-        """
-        del kwargs
-        return np.asarray([self.lookup[text] for text in texts], dtype=np.float32)
+from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
 
 
 def _multiprocess_cache_worker(
@@ -70,7 +29,7 @@ def _multiprocess_cache_worker(
     """Write embeddings in subprocess and report success/failure via queue."""
     try:
         cache = EmbeddingCache(cache_dir=cache_dir, model_name="process-lock-test")
-        model = _MockModel()
+        model = SeededRandomEncodeModel()
         papers = {
             f"p{worker_idx}_{offset}": {
                 "title": f"Title {offset}",
@@ -95,7 +54,7 @@ def _multiprocess_cache_init_worker(cache_dir: str, queue: mp.Queue) -> None:
 
 def test_embedding_cache_lifecycle_contract() -> None:
     """Cache lifecycle should handle hit/miss, rewrites, and quantized layout."""
-    model = _MockModel()
+    model = SeededRandomEncodeModel()
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
         papers_v1 = {
@@ -163,7 +122,7 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
                 "categories": ["cs.LG"],
             },
         }
-        first_model = _LookupModel(
+        first_model = LookupEncodeModel(
             {
                 "Alpha. First": np.array([1.0, 0.0], dtype=np.float32),
                 "Beta. Second": np.array([0.0, 1.0], dtype=np.float32),
@@ -181,7 +140,7 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
             binary_rescore_multiplier=4,
         )
 
-        second_model = _LookupModel(
+        second_model = LookupEncodeModel(
             {"Gamma. Third": np.array([0.3, 0.7], dtype=np.float32)}
         )
         cache.get_embeddings(
@@ -220,7 +179,7 @@ def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-search-metadata")
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
-            _LookupModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
             show_progress=False,
         )
 
@@ -246,7 +205,7 @@ def test_embedding_cache_search_rejects_non_vector_queries() -> None:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="invalid-query-shape")
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
-            _LookupModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
             show_progress=False,
         )
 
@@ -265,7 +224,7 @@ def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-persistence")
         cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            _MockModel(),
+            SeededRandomEncodeModel(),
             show_progress=False,
         )
         cache.mark_hydrated(
@@ -316,7 +275,7 @@ def test_embedding_cache_has_cached_payload_contract() -> None:
         assert not cache.has_cached_payload()
         cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            _MockModel(),
+            SeededRandomEncodeModel(),
             show_progress=False,
         )
         assert cache.has_cached_payload()
@@ -328,7 +287,7 @@ def test_embedding_cache_hydration_requires_h5_payload() -> None:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-payload")
         cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            _MockModel(),
+            SeededRandomEncodeModel(),
             show_progress=False,
         )
         cache.mark_hydrated(
@@ -358,7 +317,7 @@ def test_embedding_cache_hydration_requires_metadata_row_integrity() -> None:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-metadata-rows")
         cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            _MockModel(),
+            SeededRandomEncodeModel(),
             show_progress=False,
         )
         cache.mark_hydrated(
@@ -390,7 +349,7 @@ def test_embedding_cache_hydration_requires_dataset_source_metadata() -> None:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-source-required")
         cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            _MockModel(),
+            SeededRandomEncodeModel(),
             show_progress=False,
         )
         cache.mark_hydrated(
@@ -471,7 +430,7 @@ def test_embedding_cache_recovery_when_h5_missing_clears_stale_sqlite_rows() -> 
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-h5-stale-db")
         cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            _MockModel(),
+            SeededRandomEncodeModel(),
             show_progress=False,
         )
         cache.mark_hydrated(
@@ -506,7 +465,7 @@ def test_embedding_cache_search_falls_back_when_binary_index_rows_mismatch(
         cache = EmbeddingCache(
             cache_dir=tmpdir, model_name=f"binary-row-mismatch-{binary_rows}"
         )
-        lookup = _LookupModel(
+        lookup = LookupEncodeModel(
             {
                 "Alpha. First": np.array([1.0, 0.0], dtype=np.float32),
                 "Beta. Second": np.array([0.0, 1.0], dtype=np.float32),
@@ -613,7 +572,7 @@ def test_embedding_cache_serializes_multiprocess_initialization_recovery(
 def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
     """Legacy schema recovery and clear() should restore a healthy namespace."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
-    model = _MockModel()
+    model = SeededRandomEncodeModel()
 
     cache.h5_path.unlink(missing_ok=True)
     with h5py.File(cache.h5_path, "w") as h5:

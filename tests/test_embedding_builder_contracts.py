@@ -13,6 +13,7 @@ import pytest
 
 from citemesh.data.embedding_cache import CacheSearchResult
 from citemesh.strategies.embedding import EmbeddingGraphBuilder, _query_seed_id
+from tests._helpers import ConstantEncodeModel
 
 
 def _install_fake_sentence_transformers(
@@ -130,15 +131,6 @@ def _install_fake_torch(
     return bf16_token, autocast_log, fake_torch
 
 
-class _FakeEncodeModel:
-    """Minimal encode model used by hydration tests."""
-
-    def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
-        """Return deterministic embeddings for input texts."""
-        del kwargs
-        return np.asarray([[1.0, 0.0] for _ in texts], dtype=np.float32)
-
-
 def test_embedding_builder_requires_optional_deps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -152,9 +144,7 @@ def test_embedding_builder_requires_optional_deps(
         match=r"Embedding strategy requires: torch, sentence-transformers, datasets\. "
         r"Install with: pip install citemesh\[embeddings\]",
     ):
-        EmbeddingGraphBuilder(
-            max_papers=5, model_name="test-model", random_seed=42, client=MagicMock()
-        )
+        EmbeddingGraphBuilder(max_papers=5, model_name="test-model", client=MagicMock())
 
 
 def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
@@ -435,7 +425,7 @@ def test_metadata_and_streaming_loader_contracts(
     monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
 
     builder = EmbeddingGraphBuilder(
-        max_papers=1, use_streaming=True, random_seed=0, client=MagicMock()
+        max_papers=1, use_streaming=True, client=MagicMock()
     )
     selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=True)
 
@@ -483,7 +473,7 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     assert papers[expected_seed_id].is_seed is True
 
     builder = EmbeddingGraphBuilder(
-        max_papers=2, use_streaming=False, random_seed=0, client=MagicMock()
+        max_papers=2, use_streaming=False, client=MagicMock()
     )
     _pin_model_fingerprint(monkeypatch, builder)
     builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
@@ -518,7 +508,9 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
             ),
         ]
     )
-    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: _FakeEncodeModel())
+    monkeypatch.setattr(
+        builder, "_get_model_for_encoding", lambda: ConstantEncodeModel()
+    )
     fake_load_dataset_for_hydration = MagicMock(
         return_value=("librarian-bots/arxiv-metadata-snapshot", [])
     )
@@ -570,7 +562,9 @@ def test_collect_papers_revalidates_cache_when_dataset_source_changes(
         "_load_dataset_for_hydration",
         fake_load_dataset_for_hydration,
     )
-    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: _FakeEncodeModel())
+    monkeypatch.setattr(
+        builder, "_get_model_for_encoding", lambda: ConstantEncodeModel()
+    )
 
     candidates = builder._select_candidates_from_loaded(
         np.asarray([1.0, 0.0], dtype=np.float32)
