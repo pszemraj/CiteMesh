@@ -31,8 +31,6 @@ citemesh cache root
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, text hashes, row_idx, authors/categories JSON, hydration state)
 │   ├── embeddings_<model-hash>.h5 # Quantized HDF5 matrix datasets (int8/f16/f32 + optional binary index + calibration ranges)
 │   └── cache_<model-hash>.lock    # Inter-process lock for cache mutation
-├── joblib/
-│   └── ...                        # Normalized corpus payloads cached via joblib
 └── references/
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
@@ -67,10 +65,6 @@ Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`)
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
 
 When hydration metadata matches the requested split/corpus cap, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
-
-## Joblib Dataset Cache
-
-ArXiv corpus normalization is cached under `joblib/` so repeated runs can skip rebuilding the same in-process corpus mapping.
 
 ## Semantic Scholar Reference Cache
 

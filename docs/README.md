@@ -16,7 +16,7 @@ This page is the canonical map of documentation ownership.
 | --- | --- |
 | Project overview, install, and quick start | [Repository README](../README.md) |
 | CLI commands, flags, identifiers, output naming, export behavior | [Guides: CLI Usage](guides/cli.md) |
-| Cache paths/layout, migration, invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
+| Cache paths/layout, hydration/invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
 | Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |
 | Historical changes and release notes | [Internals: Changelog](internals/changelog.md) |
 

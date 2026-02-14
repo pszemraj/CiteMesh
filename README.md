@@ -7,7 +7,7 @@ Build exploration-friendly paper graphs from a single paper or query using recom
 This README is intentionally high-level.
 
 - Canonical CLI behavior (flags, defaults, identifier normalization, outputs): [docs/guides/cli.md](docs/guides/cli.md)
-- Canonical cache behavior (paths, layout, migration, cleanup): [docs/guides/caching.md](docs/guides/caching.md)
+- Canonical cache behavior (paths, layout, hydration/invalidation, cleanup): [docs/guides/caching.md](docs/guides/caching.md)
 - Full docs map: [docs/README.md](docs/README.md)
 
 ## Quick Start

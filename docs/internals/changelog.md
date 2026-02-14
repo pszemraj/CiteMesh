@@ -31,7 +31,6 @@ This changelog summarizes notable changes from early script-based prototypes to 
 - Persisted authors/categories metadata in cache so warm-cache retrieval can skip corpus reloads.
 - Added hydration metadata gating so matching split/corpus-cap runs query directly from cache.
 - Added precision-aware cache namespaces (`storage precision`, `binary mode`, `source dtype`) to isolate incompatible cache layouts.
-- Moved joblib caches under a user-scoped cache root.
 - Added `CITEMESH_CACHE_DIR` override for custom deployments.
 - Added streaming mode for embedding corpus ingestion as an explicit opt-in.
 - Added model profiles (starting with EmbeddingGemma) for prompts/precision policy.

@@ -26,7 +26,7 @@ citemesh cache scan
 citemesh cache clear [--yes]
 ```
 
-For cache path/layout/migration details, see [Caching & Data](caching.md).
+For cache path/layout/hydration details, see [Caching & Data](caching.md).
 
 ## Accepted Identifiers
 
