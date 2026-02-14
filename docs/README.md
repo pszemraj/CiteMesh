@@ -2,23 +2,27 @@
 
 Use this index to navigate docs by topic and keep behavior definitions centralized.
 
-## Documentation Contract
+## Scope
+
+This page is the canonical map of documentation ownership.
 
 - Each topic has one canonical document.
-- Non-canonical docs should summarize and link to the canonical page instead of repeating detailed behavior.
-- If two docs disagree, the canonical doc in the map below is the source of truth and the other doc should be updated.
+- Non-canonical documents should summarize in 1-2 lines and link to the canonical source.
+- If documents disagree, the canonical document listed below wins.
 
 ## Source-of-Truth Map
 
 | Topic | Canonical doc |
 | --- | --- |
-| Project overview, install, and quickstart | [Repository README](../README.md) |
+| Project overview, install, and quick start | [Repository README](../README.md) |
 | CLI commands, flags, identifiers, output naming, export behavior | [Guides: CLI Usage](guides/cli.md) |
-| Cache layout, platform paths, overrides, invalidation | [Guides: Caching & Data](guides/caching.md) |
+| Cache paths/layout, migration, invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
 | Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |
 | Historical changes and release notes | [Internals: Changelog](internals/changelog.md) |
 
-## Scope Notes
+## Internal Docs Rule
 
-Configuration is handled via CLI flags and environment variables.
-The top-level `README.md` is intentionally high-level; operational behavior should be maintained in the canonical docs listed above.
+`docs/internals/architecture.md` and `docs/internals/changelog.md` are not normative for CLI flag contracts or cache behavior details. Those remain canonical in:
+
+- [Guides: CLI Usage](guides/cli.md)
+- [Guides: Caching & Data](guides/caching.md)
