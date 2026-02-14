@@ -551,14 +551,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         model_fingerprint = self._resolve_model_fingerprint()
-        if cached_fingerprint != model_fingerprint:
+        if (
+            cached_fingerprint is not None
+            and cached_fingerprint != model_fingerprint
+        ):
             logger.warning(
                 "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
                 "Clearing namespace cache.",
                 cached_fingerprint or "missing",
                 model_fingerprint,
             )
-            self.embedding_cache.clear()
+            # Metadata-only mismatches do not indicate payload corruption here.
+            # Keep existing hydration metadata only when payload is absent and proceed
+            # with refreshed model identity.
         self._resolved_model_fingerprint = model_fingerprint
         self.embedding_cache.set_model_fingerprint(model_fingerprint)
 
