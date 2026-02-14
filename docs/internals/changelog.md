@@ -11,6 +11,12 @@ This page is historical context, not a normative behavior specification.
 This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
 Historical bullets below may describe superseded behavior; canonical current behavior remains in the guides above.
 
+## Breaking Changes
+
+- Removed deprecated `GraphBuilderStrategy.exponential_temporal_decay`.
+- Removed `random_seed` constructor arguments from strategy builders.
+- Clarified `--seed` CLI semantics as layout/export determinism only.
+
 ## Export & Visualization
 
 - Added `GraphExporter` to emit PNG, Pyvis HTML, Plotly HTML, JSON, and GraphML from one graph object.
