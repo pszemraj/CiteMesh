@@ -178,6 +178,20 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
     assert results[0].embedding.dtype == np.float32
 
 
+def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
+    """Search should safely return no candidates when cache file is absent."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-h5")
+        results = cache.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=3,
+            binary_prefilter=True,
+            binary_rescore_multiplier=2,
+        )
+
+    assert results == []
+
+
 def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
     """Hydration completion should survive cache re-open in same namespace."""
     with tempfile.TemporaryDirectory() as tmpdir:

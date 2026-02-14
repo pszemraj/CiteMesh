@@ -424,6 +424,8 @@ class EmbeddingCache:
         query = np.asarray(query_embedding, dtype=np.float32).reshape(-1)
         if query.ndim != 1:
             raise ValueError("query_embedding must be 1-dimensional")
+        if not self.h5_path.exists():
+            return []
 
         with (
             self._cache_lock(),

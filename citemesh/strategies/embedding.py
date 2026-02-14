@@ -988,6 +988,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             complete=False,
         )
 
+        hydrated_records = 0
         calibration_records: List[Dict] = []
         calibration_ready = (
             self.storage_precision != "int8"
@@ -1028,7 +1029,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
                 batch.append(metadata)
                 if len(batch) >= STREAMING_BATCH_SIZE:
-                    self._cache_metadata_batch(batch)
+                    hydrated_records += self._cache_metadata_batch(batch)
                     batch = []
                 progress.update(1)
 
@@ -1039,10 +1040,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 calibration_records = []
 
             if batch:
-                self._cache_metadata_batch(batch)
+                hydrated_records += self._cache_metadata_batch(batch)
 
             if progress_total is None:
                 progress.set_postfix_str(f"processed {progress.n}")
+
+        if hydrated_records == 0:
+            logger.warning(
+                "Hydration produced zero records for split=%s corpus_size=%s; "
+                "cache remains incomplete.",
+                self.dataset_split,
+                "all" if self.corpus_size is None else self.corpus_size,
+            )
+            return
 
         self.embedding_cache.mark_hydrated(
             dataset_source=dataset_source,
@@ -1127,14 +1137,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             embedding_dim=int(sample_embeddings.shape[1]),
         )
 
-    def _cache_metadata_batch(self, batch: List[Dict]) -> None:
+    def _cache_metadata_batch(self, batch: List[Dict]) -> int:
         """Encode/cache a batch of metadata records.
 
         :param List[Dict] batch: Metadata records including ``paper_id``.
-        :return None: Mutates persistent cache.
+        :return int: Number of paper IDs routed into cache encoding.
         """
         if not batch:
-            return
+            return 0
 
         metadata_map: Dict[str, Dict] = {}
         for metadata in batch:
@@ -1146,7 +1156,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             metadata_map[paper_id] = payload
 
         if not metadata_map:
-            return
+            return 0
 
         self.embedding_cache.get_embeddings(
             metadata_map,
@@ -1155,6 +1165,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             show_progress=False,
             text_builder=self.model_profile.format_document,
         )
+        return len(metadata_map)
 
     def _extract_paper_metadata(self, paper: Dict, fallback_index: int) -> Dict:
         """

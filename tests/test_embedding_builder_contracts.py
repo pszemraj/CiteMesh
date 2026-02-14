@@ -450,6 +450,50 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     fake_load_dataset.assert_not_called()
 
 
+def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Empty hydration should not mark cache complete and should return no candidates."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    mark_hydrated_spy = MagicMock(wraps=builder.embedding_cache.mark_hydrated)
+    monkeypatch.setattr(builder.embedding_cache, "mark_hydrated", mark_hydrated_spy)
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        lambda use_streaming: ("empty-snapshot", []),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_get_model_for_encoding",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("encoding should not run for empty hydration")
+        ),
+    )
+
+    candidates = builder._select_candidates_from_loaded(
+        np.asarray([1.0, 0.0], dtype=np.float32)
+    )
+
+    assert candidates == []
+    complete_flags = [
+        call.kwargs["complete"] for call in mark_hydrated_spy.call_args_list
+    ]
+    assert complete_flags == [False]
+    assert not builder.embedding_cache.is_hydrated(
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        dataset_source="empty-snapshot",
+    )
+
+
 def test_embedding_top_k_validation_and_tie_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
