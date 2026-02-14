@@ -739,6 +739,51 @@ def test_embedding_export_metadata_includes_runtime_prefilter_truth(
     assert metadata["embedding"]["binary_prefilter_used_for_query"] is False
 
 
+def test_hybrid_export_omits_embedding_metadata_when_semantic_branch_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid export should omit embedding metadata when --max-semantic resolves to 0."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--max-semantic",
+                "0",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    assert "embedding" not in metadata
+
+
 def test_embedding_build_logs_side_effect_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

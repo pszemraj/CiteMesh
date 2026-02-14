@@ -296,6 +296,22 @@ def _embedding_export_metadata(
     }
 
 
+def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
+    """Return whether hybrid semantic branch is effectively enabled.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :return bool: ``True`` when hybrid semantic branch can run.
+    """
+    if cli_args.max_semantic is None:
+        resolved_max_semantic = max(
+            0,
+            min(int(DEFAULT_MAX_SEMANTIC), int(cli_args.max_papers) - 1),
+        )
+    else:
+        resolved_max_semantic = int(cli_args.max_semantic)
+    return resolved_max_semantic > 0
+
+
 def _strategy_score_contract(strategy: str) -> Dict[str, object]:
     """Return strategy-specific score semantics metadata for export payloads.
 
@@ -1255,7 +1271,10 @@ def main() -> None:
                 "theme": args.theme,
                 "score_contract": _strategy_score_contract(args.strategy),
             }
-            if args.strategy in {"embedding", "hybrid"}:
+            include_embedding_metadata = args.strategy == "embedding" or (
+                args.strategy == "hybrid" and _hybrid_semantic_branch_enabled(args)
+            )
+            if include_embedding_metadata:
                 runtime_embedding_metadata: Optional[Dict[str, Any]] = None
                 raw_runtime_metadata = graph.graph.get("embedding_runtime")
                 if isinstance(raw_runtime_metadata, dict):
