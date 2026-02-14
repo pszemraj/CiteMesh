@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import types
 from typing import Any
@@ -51,7 +52,10 @@ def _install_fake_torch(
     bf16_supported: bool,
     *,
     compile_behavior: str = "identity",
-) -> tuple[object, list[tuple[Any, ...]]]:
+    capability: tuple[int, int] | None = (8, 0),
+    include_tf32_precision_api: bool = True,
+    include_tf32_legacy_api: bool = True,
+) -> tuple[object, list[tuple[Any, ...]], object]:
     """Install fake ``torch`` module for precision tests."""
     bf16_token = object()
     autocast_log: list[tuple[Any, ...]] = []
@@ -78,17 +82,36 @@ def _install_fake_torch(
             return ("compiled", model)
         return model
 
+    matmul_backend = types.SimpleNamespace()
+    cudnn_backend = types.SimpleNamespace()
+    cudnn_conv = types.SimpleNamespace()
+    cudnn_backend.conv = cudnn_conv
+    if include_tf32_precision_api:
+        matmul_backend.fp32_precision = "none"
+        cudnn_conv.fp32_precision = "none"
+    if include_tf32_legacy_api:
+        matmul_backend.allow_tf32 = False
+        cudnn_backend.allow_tf32 = False
+
+    cuda_module = types.SimpleNamespace(
+        is_available=lambda: cuda_available,
+        is_bf16_supported=lambda: bf16_supported,
+    )
+    if capability is not None:
+        cuda_module.get_device_capability = lambda _index=0: capability
+
     fake_torch = types.ModuleType("torch")
     fake_torch.bfloat16 = bf16_token
     fake_torch.autocast = _autocast
     fake_torch.compile = _compile
-    fake_torch.cuda = types.SimpleNamespace(
-        is_available=lambda: cuda_available,
-        is_bf16_supported=lambda: bf16_supported,
+    fake_torch.cuda = cuda_module
+    fake_torch.backends = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(matmul=matmul_backend),
+        cudnn=cudnn_backend,
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
-    return bf16_token, autocast_log
+    return bf16_token, autocast_log, fake_torch
 
 
 class _FakeEncodeModel:
@@ -133,7 +156,7 @@ def test_embeddinggemma_precision_path(
         "citemesh.strategies.embedding._check_embedding_deps", lambda: None
     )
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    bf16_token, autocast_log = _install_fake_torch(
+    bf16_token, autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=cuda_available,
         bf16_supported=bf16_supported,
@@ -188,7 +211,7 @@ def test_inner_transformer_compile_behavior(
         "citemesh.strategies.embedding._check_embedding_deps", lambda: None
     )
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    _bf16_token, _autocast_log = _install_fake_torch(
+    _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=True,
         bf16_supported=True,
@@ -207,6 +230,101 @@ def test_inner_transformer_compile_behavior(
     else:
         assert builder.model[0].auto_model is original
     assert builder._inner_model_compiled is expect_compiled
+
+
+def test_tf32_runtime_config_enables_precision_api_on_ampere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TF32 runtime policy should enable precision APIs on Ampere+ GPUs."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        capability=(8, 0),
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert fake_torch.backends.cuda.matmul.fp32_precision == "tf32"
+    assert fake_torch.backends.cudnn.conv.fp32_precision == "tf32"
+    assert builder._tf32_mode == "tf32"
+
+
+def test_tf32_runtime_config_skips_pre_ampere(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TF32 runtime policy should skip GPUs older than Ampere."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        capability=(7, 5),
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
+    assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
+    assert builder._tf32_mode == "off"
+
+
+def test_embedding_runtime_logging_is_concise_at_info(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Info logs should be concise while detailed profile logs stay at debug."""
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        capability=(8, 0),
+        compile_behavior="tagged",
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    with caplog.at_level(logging.DEBUG):
+        builder._load_model()
+
+    info_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.INFO
+    ]
+    debug_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+    ]
+
+    assert any("runtime: dim=" in message for message in info_messages)
+    assert not any(
+        "Adds recommended query/document prompts for EmbeddingGemma." in message
+        for message in info_messages
+    )
+    assert any(
+        "Adds recommended query/document prompts for EmbeddingGemma." in message
+        for message in debug_messages
+    )
+    assert not any("embedding dimension: using" in message for message in info_messages)
+    assert any("embedding dimension: using" in message for message in debug_messages)
+    assert any(
+        "Enabled torch.compile for google/embeddinggemma-300m inner transformer"
+        in message
+        for message in debug_messages
+    )
 
 
 def test_embedding_cache_namespace_varies_by_storage_precision(

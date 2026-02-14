@@ -338,6 +338,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._autocast_enabled = False
         self._encode_model: Optional[Any] = None
         self._inner_model_compiled = False
+        self._runtime_summary_logged = False
+        self._tf32_runtime_configured = False
+        self._tf32_mode = "off"
 
     def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
         """Resolve effective embedding dimension from request + model profile defaults.
@@ -395,7 +398,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         return "bfloat16"
 
     def _log_dimension_policy(self) -> None:
-        """Emit one-time info log for active embedding dimensionality."""
+        """Emit one-time debug log for active embedding dimensionality."""
         if self._dim_logged:
             return
 
@@ -409,7 +412,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             available_text = ", ".join(f"{dim}d" for dim in available_dims)
             recommended_dim = self.model_profile.recommended_truncate_dim
             if recommended_dim is not None:
-                logger.info(
+                logger.debug(
                     "%s embedding dimension: using %sd (recommended: %sd; available: %s).",
                     self.model_name,
                     selected_dim,
@@ -417,7 +420,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     available_text,
                 )
             else:
-                logger.info(
+                logger.debug(
                     "%s embedding dimension: using %sd (available: %s).",
                     self.model_name,
                     selected_dim,
@@ -427,12 +430,24 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         if self.truncate_dim is not None:
-            logger.info(
+            logger.debug(
                 "%s embedding dimension: using truncate_dim=%sd.",
                 self.model_name,
                 self.truncate_dim,
             )
             self._dim_logged = True
+
+    def _effective_embedding_dim(self) -> Optional[int]:
+        """Return effective embedding dimension used by this builder.
+
+        :return Optional[int]: Active embedding dimension, or ``None`` for full model output.
+        """
+        if self.truncate_dim is not None:
+            return self.truncate_dim
+        available_dims = self.model_profile.available_truncate_dims
+        if available_dims:
+            return available_dims[0]
+        return None
 
     def _reset_precision_runtime(self) -> None:
         """Clear runtime precision/autocast state."""
@@ -581,6 +596,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             else:
                 self.model = SentenceTransformer(self.model_name)
 
+            self._configure_tf32_runtime()
             self._maybe_compile_inner_transformer()
 
             if (
@@ -594,8 +610,113 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 )
             self._log_dimension_policy()
             if self.model_profile.notes and not self._profile_logged:
-                logger.info(self.model_profile.notes)
+                logger.debug(self.model_profile.notes)
                 self._profile_logged = True
+            self._log_runtime_summary()
+
+    def _configure_tf32_runtime(self) -> None:
+        """Best-effort TF32 enablement for Ampere+ CUDA devices.
+
+        :return None: Updates runtime backend configuration in-place when available.
+        """
+        if self._tf32_runtime_configured:
+            return
+        self._tf32_runtime_configured = True
+        self._tf32_mode = "off"
+
+        try:
+            import torch
+        except ImportError:
+            logger.debug(
+                "Skipping TF32 config for %s: torch unavailable.", self.model_name
+            )
+            return
+
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        if not callable(cuda_available) or not bool(cuda_available()):
+            logger.debug(
+                "Skipping TF32 config for %s: CUDA unavailable.", self.model_name
+            )
+            return
+
+        get_capability = getattr(cuda_module, "get_device_capability", None)
+        capability = get_capability(0) if callable(get_capability) else None
+        if not isinstance(capability, tuple) or len(capability) < 2:
+            self._tf32_mode = "unknown"
+            logger.debug(
+                "Skipping TF32 config for %s: CUDA capability unavailable.",
+                self.model_name,
+            )
+            return
+        major, minor = int(capability[0]), int(capability[1])
+        if major < 8:
+            logger.debug(
+                "Skipping TF32 config for %s: GPU capability %s.%s is pre-Ampere.",
+                self.model_name,
+                major,
+                minor,
+            )
+            return
+
+        backends = getattr(torch, "backends", None)
+        cuda_backends = getattr(backends, "cuda", None)
+        matmul_backend = getattr(cuda_backends, "matmul", None)
+        cudnn_backend = getattr(backends, "cudnn", None)
+        cudnn_conv = getattr(cudnn_backend, "conv", None)
+
+        try:
+            if hasattr(matmul_backend, "fp32_precision") and hasattr(
+                cudnn_conv, "fp32_precision"
+            ):
+                matmul_backend.fp32_precision = "tf32"
+                cudnn_conv.fp32_precision = "tf32"
+                self._tf32_mode = "tf32"
+                logger.info("Enabled TF32 kernels for CUDA matmul/conv (Ampere+ GPU).")
+                return
+        except Exception as exc:
+            logger.debug(
+                "Failed setting TF32 precision APIs for %s: %s",
+                self.model_name,
+                exc,
+            )
+
+        try:
+            if hasattr(matmul_backend, "allow_tf32") and hasattr(
+                cudnn_backend, "allow_tf32"
+            ):
+                matmul_backend.allow_tf32 = True
+                cudnn_backend.allow_tf32 = True
+                self._tf32_mode = "legacy-tf32"
+                logger.info(
+                    "Enabled TF32 kernels via legacy backend flags (Ampere+ GPU)."
+                )
+                return
+        except Exception as exc:
+            logger.debug(
+                "Failed setting legacy TF32 flags for %s: %s",
+                self.model_name,
+                exc,
+            )
+
+        self._tf32_mode = "unsupported"
+        logger.debug("TF32 configuration API unavailable for %s.", self.model_name)
+
+    def _log_runtime_summary(self) -> None:
+        """Emit concise one-time runtime summary at info level."""
+        if self._runtime_summary_logged:
+            return
+
+        selected_dim = self._effective_embedding_dim()
+        dim_label = "full" if selected_dim is None else f"{selected_dim}d"
+        logger.info(
+            "%s runtime: dim=%s, compile=%s, tf32=%s.",
+            self.model_name,
+            dim_label,
+            "on" if self._inner_model_compiled else "off",
+            self._tf32_mode,
+        )
+        self._runtime_summary_logged = True
 
     def _maybe_compile_inner_transformer(self) -> None:
         """Best-effort compile of the wrapped HF model for selected profiles.
@@ -662,7 +783,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         self._inner_model_compiled = True
-        logger.info(
+        logger.debug(
             "Enabled torch.compile for %s inner transformer (model[0].auto_model).",
             self.model_name,
         )
