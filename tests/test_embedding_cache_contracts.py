@@ -97,10 +97,15 @@ def test_embedding_cache_lifecycle_contract() -> None:
             "p1": {"title": "Updated", "abstract": "Abstract one"},
             "p2": {"title": "Paper Two", "abstract": "Abstract two"},
         }
+        papers_v3 = {
+            "p1": {"title": "Updated", "abstract": "Abstract one"},
+            "p2": {"title": "Paper Two", "abstract": "Abstract two", "year": 2024},
+        }
 
         first = cache.get_embeddings(papers_v1, model, show_progress=False)
         second = cache.get_embeddings(papers_v1, model, show_progress=False)
         cache.get_embeddings(papers_v2, model, show_progress=False)
+        cache.get_embeddings(papers_v3, model, show_progress=False)
 
         with sqlite3.connect(cache.db_path) as conn:
             rows = conn.execute(
@@ -123,7 +128,7 @@ def test_embedding_cache_lifecycle_contract() -> None:
             assert h5["calibration_ranges"].shape == (2, 2)
             assert h5["calibration_ranges"].dtype == np.float32
 
-    assert model.encode_calls == 2
+    assert model.encode_calls == 3
     assert first["p1"].shape == second["p1"].shape
     assert rows == [("p1", 0), ("p2", 1)]
     assert row_idx_after_update == 0
@@ -198,6 +203,32 @@ def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
         )
 
     assert results == []
+
+
+def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:
+    """Search should fail closed when scored rows have no metadata payload."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-search-metadata")
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            _LookupModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            show_progress=False,
+        )
+
+        with sqlite3.connect(cache.db_path) as conn:
+            conn.execute("DELETE FROM papers")
+            conn.commit()
+
+        with pytest.raises(
+            RuntimeError,
+            match="Embedding cache integrity error: missing metadata rows",
+        ):
+            cache.search(
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
 
 
 def test_embedding_cache_search_rejects_non_vector_queries() -> None:

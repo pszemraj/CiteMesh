@@ -268,7 +268,7 @@ class EmbeddingCache:
 
             for paper_id, metadata in iterator:
                 text = builder(metadata)
-                text_hash = self._text_hash(text)
+                text_hash = self._metadata_hash(metadata, text)
                 existing_row = existing_rows.get(paper_id)
                 row_idx = existing_row[1] if existing_row is not None else None
 
@@ -499,12 +499,21 @@ class EmbeddingCache:
             if rows.size == 0:
                 return []
 
-            metadata_by_row = self._load_metadata_by_rows(conn, rows.tolist())
+            row_values = [int(row_idx) for row_idx in rows.tolist()]
+            metadata_by_row = self._load_metadata_by_rows(conn, row_values)
+            missing_rows = [
+                row_idx for row_idx in row_values if row_idx not in metadata_by_row
+            ]
+            if missing_rows:
+                sampled_rows = ", ".join(str(value) for value in missing_rows[:10])
+                raise RuntimeError(
+                    "Embedding cache integrity error: missing metadata rows for "
+                    f"{len(missing_rows)} scored embeddings (row_idx={sampled_rows}). "
+                    "Rebuild this cache namespace to restore row mapping consistency."
+                )
             results: List[CacheSearchResult] = []
-            for idx, row_idx in enumerate(rows.tolist()):
-                payload = metadata_by_row.get(row_idx)
-                if payload is None:
-                    continue
+            for idx, row_idx in enumerate(row_values):
+                payload = metadata_by_row[row_idx]
                 result_metadata = {
                     "title": payload.get("title", "Unknown"),
                     "abstract": payload.get("abstract", ""),
@@ -1649,13 +1658,35 @@ class EmbeddingCache:
         return output
 
     @staticmethod
-    def _text_hash(text: str) -> str:
-        """Compute deterministic SHA-256 hash for text content.
+    def _metadata_hash(metadata: Dict[str, object], text: str) -> str:
+        """Compute deterministic invalidation hash for embedding inputs + metadata.
 
-        :param str text: Normalized paper text.
+        :param Dict[str, object] metadata: Paper metadata payload.
+        :param str text: Normalized paper text used for embedding.
         :return str: Hexadecimal SHA-256 digest.
         """
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        raw_authors = metadata.get("authors", [])
+        authors = raw_authors if isinstance(raw_authors, list) else []
+        raw_categories = metadata.get("categories", [])
+        categories = raw_categories if isinstance(raw_categories, list) else []
+
+        normalized_payload = {
+            "text": str(text),
+            "title": str(metadata.get("title", "")),
+            "abstract": str(metadata.get("abstract", "")),
+            "year": metadata.get("year"),
+            "authors": [str(author) for author in authors if str(author).strip()],
+            "categories": [
+                str(category) for category in categories if str(category).strip()
+            ],
+        }
+        serialized = json.dumps(
+            normalized_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _build_text(metadata: Dict) -> str:
