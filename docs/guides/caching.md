@@ -67,6 +67,8 @@ Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuil
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 
+If cache payload files become inconsistent (for example missing matrix file, incompatible layout, or invalid calibration metadata), CiteMesh resets that namespace state and rebuilds on the next hydration run.
+
 ## Semantic Scholar Reference Cache
 
 When reference expansion is enabled, reference-ID lookups are cached under `references/` using hashed filenames.

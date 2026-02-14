@@ -454,6 +454,18 @@ class EmbeddingCache:
             if self.storage_precision == "int8":
                 if use_binary_prefilter:
                     binary_dataset = h5[BINARY_INDEX_DATASET_NAME]
+                    if not self._is_binary_dataset_compatible(
+                        binary_dataset=binary_dataset,
+                        embedding_dim=int(embeddings_dataset.shape[1]),
+                        embedding_rows=int(embeddings_dataset.shape[0]),
+                    ):
+                        logger.warning(
+                            "Binary index dataset is incompatible with embedding matrix "
+                            "for cache %s; falling back to direct int8 scoring.",
+                            self.h5_path,
+                        )
+                        use_binary_prefilter = False
+                if use_binary_prefilter:
                     candidate_rows = self._binary_prefilter_rows(
                         binary_dataset=binary_dataset,
                         query_embedding=query,
@@ -856,15 +868,74 @@ class EmbeddingCache:
         """Ensure cache file uses matrix-based HDF5 layout."""
         if not self.h5_path.exists():
             with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM papers")
+                paper_rows = int(cursor.fetchone()[0])
+                metadata = self._load_cache_metadata(conn)
+                has_hydration_markers = bool(
+                    str(metadata.get(HYDRATION_COMPLETE_KEY, "0")) == "1"
+                    or str(metadata.get(HYDRATION_DATASET_SOURCE_KEY, "")).strip()
+                    or str(metadata.get(HYDRATION_SPLIT_KEY, "")).strip()
+                    or str(metadata.get(HYDRATION_CORPUS_SIZE_KEY, "")).strip()
+                )
+                if paper_rows > 0 or has_hydration_markers:
+                    logger.warning(
+                        "Embedding matrix %s is missing; clearing stale SQLite metadata "
+                        "and hydration markers.",
+                        self.h5_path,
+                    )
+                    conn.execute("DELETE FROM papers")
+                    self._reset_hydration_metadata(conn)
                 self._reconcile_layout_metadata(conn)
                 conn.commit()
                 return
 
         try:
-            with h5py.File(self.h5_path, "r") as h5:
+            with h5py.File(self.h5_path, "a") as h5:
                 dataset = h5.get(EMBEDDINGS_DATASET_NAME)
                 if dataset is None or dataset.ndim != 2:
                     raise ValueError("incompatible embedding cache layout")
+                target_dtype = _storage_dtype_for_precision(self.storage_precision)
+                if np.dtype(dataset.dtype) != np.dtype(target_dtype):
+                    raise ValueError(
+                        "incompatible embedding cache dtype: "
+                        f"{dataset.dtype} != {target_dtype}"
+                    )
+
+                embedding_dim = int(dataset.shape[1])
+                embedding_rows = int(dataset.shape[0])
+                if self.storage_precision == "int8":
+                    ranges = h5.get(CALIBRATION_RANGES_DATASET_NAME)
+                    if ranges is None:
+                        raise ValueError(
+                            "incompatible int8 embedding cache: missing calibration ranges"
+                        )
+                    if (
+                        ranges.ndim != 2
+                        or int(ranges.shape[0]) != 2
+                        or int(ranges.shape[1]) != embedding_dim
+                    ):
+                        raise ValueError(
+                            "incompatible int8 embedding cache: calibration range shape "
+                            f"{ranges.shape} for embedding dim {embedding_dim}"
+                        )
+
+                binary_dataset = h5.get(BINARY_INDEX_DATASET_NAME)
+                if (
+                    binary_dataset is not None
+                    and not self._is_binary_dataset_compatible(
+                        binary_dataset=binary_dataset,
+                        embedding_dim=embedding_dim,
+                        embedding_rows=embedding_rows,
+                    )
+                ):
+                    logger.warning(
+                        "Binary index dataset in %s is incompatible with embedding "
+                        "matrix shape; dropping stale binary index.",
+                        self.h5_path,
+                    )
+                    del h5[BINARY_INDEX_DATASET_NAME]
+                self._set_h5_attrs(h5)
         except (OSError, ValueError):
             logger.warning(
                 "Embedding cache %s is incompatible with current schema. "
@@ -874,10 +945,7 @@ class EmbeddingCache:
             self.h5_path.unlink(missing_ok=True)
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM papers")
-                self._set_cache_metadata(conn, HYDRATION_DATASET_SOURCE_KEY, "")
-                self._set_cache_metadata(conn, HYDRATION_SPLIT_KEY, "")
-                self._set_cache_metadata(conn, HYDRATION_CORPUS_SIZE_KEY, "")
-                self._set_cache_metadata(conn, HYDRATION_COMPLETE_KEY, "0")
+                self._reset_hydration_metadata(conn)
                 self._reconcile_layout_metadata(conn)
                 conn.commit()
             return
@@ -885,6 +953,18 @@ class EmbeddingCache:
         with sqlite3.connect(self.db_path) as conn:
             self._reconcile_layout_metadata(conn)
             conn.commit()
+
+    @staticmethod
+    def _reset_hydration_metadata(conn: sqlite3.Connection) -> None:
+        """Reset hydration metadata keys to an incomplete state.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :return None: Mutates metadata table in-place.
+        """
+        EmbeddingCache._set_cache_metadata(conn, HYDRATION_DATASET_SOURCE_KEY, "")
+        EmbeddingCache._set_cache_metadata(conn, HYDRATION_SPLIT_KEY, "")
+        EmbeddingCache._set_cache_metadata(conn, HYDRATION_CORPUS_SIZE_KEY, "")
+        EmbeddingCache._set_cache_metadata(conn, HYDRATION_COMPLETE_KEY, "0")
 
     @staticmethod
     def _metadata_tuple(
@@ -1057,6 +1137,28 @@ class EmbeddingCache:
             )
 
         return dataset
+
+    @staticmethod
+    def _is_binary_dataset_compatible(
+        binary_dataset: h5py.Dataset,
+        embedding_dim: int,
+        embedding_rows: int,
+    ) -> bool:
+        """Return whether binary dataset shape aligns with embedding matrix.
+
+        :param h5py.Dataset binary_dataset: Binary index dataset.
+        :param int embedding_dim: Embedding vector dimension.
+        :param int embedding_rows: Number of embedding rows in matrix dataset.
+        :return bool: ``True`` when binary index shape is compatible.
+        """
+        if binary_dataset.ndim != 2:
+            return False
+        expected_cols = (int(embedding_dim) + 7) // 8
+        if int(binary_dataset.shape[1]) != expected_cols:
+            return False
+        if int(binary_dataset.shape[0]) != int(embedding_rows):
+            return False
+        return True
 
     def _ensure_calibration_ranges(
         self,

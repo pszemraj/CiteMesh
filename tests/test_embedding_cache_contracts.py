@@ -390,6 +390,78 @@ def test_embedding_cache_recovery_clears_hydration_metadata() -> None:
         assert metadata[HYDRATION_CORPUS_SIZE_KEY] == ""
 
 
+def test_embedding_cache_recovery_when_h5_missing_clears_stale_sqlite_rows() -> None:
+    """Missing HDF5 payload should clear stale SQLite rows and hydration metadata."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-h5-stale-db")
+        cache.get_embeddings(
+            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            _MockModel(),
+            show_progress=False,
+        )
+        cache.mark_hydrated(
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+            dataset_split="train",
+            corpus_size=64,
+            complete=True,
+        )
+        cache.h5_path.unlink(missing_ok=True)
+
+        reloaded = EmbeddingCache(cache_dir=tmpdir, model_name="missing-h5-stale-db")
+        with sqlite3.connect(reloaded.db_path) as conn:
+            paper_count = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+            metadata = {
+                key: value
+                for key, value in conn.execute("SELECT key, value FROM cache_metadata")
+            }
+
+    assert paper_count == 0
+    assert metadata[HYDRATION_COMPLETE_KEY] == "0"
+    assert metadata[HYDRATION_DATASET_SOURCE_KEY] == ""
+    assert metadata[HYDRATION_SPLIT_KEY] == ""
+    assert metadata[HYDRATION_CORPUS_SIZE_KEY] == ""
+
+
+@pytest.mark.parametrize("binary_rows", [1, 3])
+def test_embedding_cache_search_falls_back_when_binary_index_rows_mismatch(
+    binary_rows: int,
+) -> None:
+    """Search should fall back to direct int8 scoring when binary rows mismatch."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir, model_name=f"binary-row-mismatch-{binary_rows}"
+        )
+        lookup = _LookupModel(
+            {
+                "Alpha. First": np.array([1.0, 0.0], dtype=np.float32),
+                "Beta. Second": np.array([0.0, 1.0], dtype=np.float32),
+            }
+        )
+        cache.get_embeddings(
+            {
+                "p1": {"title": "Alpha", "abstract": "First"},
+                "p2": {"title": "Beta", "abstract": "Second"},
+            },
+            lookup,
+            show_progress=False,
+        )
+        with h5py.File(cache.h5_path, "a") as h5:
+            binary = h5["binary_index"]
+            binary.resize((binary_rows, binary.shape[1]))
+            if binary_rows > 2:
+                binary[2:binary_rows] = 0
+
+        results = cache.search(
+            query_embedding=np.asarray([0.0, 1.0], dtype=np.float32),
+            top_k=2,
+            binary_prefilter=True,
+            binary_rescore_multiplier=4,
+        )
+
+    assert len(results) == 2
+    assert {result.paper_id for result in results} == {"p1", "p2"}
+
+
 def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
     """Concurrent processes should serialize writes without HDF5 lock failures."""
     queue: mp.Queue = mp.Queue()
