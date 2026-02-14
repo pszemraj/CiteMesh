@@ -10,6 +10,8 @@ This document is canonical for component responsibilities and data flow.
 - Non-normative here: CLI flag/default contracts and cache-path rules.
   - CLI contracts: [CLI Usage](../guides/cli.md)
   - Cache contracts: [Caching & Data](../guides/caching.md)
+  - Runtime variables: [Environment Variables](../reference/environment.md)
+- Documentation ownership map: [Documentation Index](../README.md)
 
 ## Execution Flow
 
@@ -53,11 +55,12 @@ Operational CLI behavior remains canonical in [CLI Usage](../guides/cli.md).
 | Strategy | Responsibilities | Highlights |
 | --- | --- | --- |
 | `citation` | Pull seed, references, and citations from Semantic Scholar | Similarity from bibliographic and metadata features |
-| `embedding` | Load/stream corpus and compute semantic neighbors | Embedding cache integration and capped edge pruning |
+| `embedding` | Hydrate/query quantized cache and compute semantic neighbors | Int8/binary cache-native retrieval, metadata-authoritative warm runs, capped edge pruning |
 | `recommendation` | Use Semantic Scholar recommendations as primary neighborhood signal | Fast topical discovery path |
 | `hybrid` | Start with citation graph and enrich with semantic neighbors | Relationship-aware weighting and per-node cap behavior |
 
 Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
+User-facing strategy behavior and selection guidance are canonical in [Guides: Strategies](../guides/strategies.md).
 
 ### `citemesh/core/models.py`
 
@@ -85,7 +88,7 @@ Strategies may emit collection summaries through `_set_collection_summary` for c
 ### Caching Support
 
 - `citemesh/data/cache.py` resolves user-scoped cache roots.
-- `citemesh/data/embedding_cache.py` manages SQLite/HDF5 embedding cache state.
+- `citemesh/data/embedding_cache.py` manages quantized SQLite/HDF5 embedding cache state (`int8` matrix, calibration ranges, optional binary index, hydration metadata).
 - `citemesh/data/model_profiles.py` stores model-specific runtime profile metadata.
 
 On-disk layout and invalidation behavior are canonical in [Caching & Data](../guides/caching.md).

@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional, Tuple
 import networkx as nx
 import numpy as np
 
-from citemesh.core import HYBRID_CONFIG, Paper
+from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -40,14 +40,22 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_citations: int = 15,
         max_references: int = 15,
         fetch_references: bool = True,
+        refresh_reference_cache: bool = False,
         max_semantic: Optional[int] = None,
         model_name: str = "google/embeddinggemma-300m",
+        model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
         corpus_size: Optional[int] = 50000,
         truncate_dim: Optional[int] = None,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
-        random_seed: Optional[int] = None,
+        storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
+        binary_prefilter: Optional[bool] = None,
+        binary_rescore_multiplier: Optional[int] = None,
+        calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
+        cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
+        cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
+        enable_torch_compile: bool = True,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -57,6 +65,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int max_citations: Maximum citing papers from S2
         :param int max_references: Maximum referenced papers from S2
         :param bool fetch_references: Whether citation branch fetches reference lists.
+        :param bool refresh_reference_cache: Whether citation/reference lookups bypass persisted cache reads.
         :param Optional[int] max_semantic: Maximum non-seed semantic papers added during
             enrichment. This reserves capacity from the citation branch
             (``citation_budget = max_papers - max_semantic``), so values must satisfy
@@ -64,12 +73,23 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             ``min(10, max_papers - 1)`` so small ``max_papers`` values still work
             without extra flags.
         :param str model_name: Embedding model name
+        :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
         :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
         :param bool use_streaming: Whether to stream the embedding corpus.
         :param bool force_rebuild_cache: Whether to clear embedding cache before semantic enrichment.
-        :param Optional[int] random_seed: Random seed for reproducibility
+        :param str storage_precision: Persistent cache precision for semantic branch embeddings.
+        :param Optional[bool] binary_prefilter: Whether semantic branch uses binary
+            prefiltering. When ``None``, defaults are selected by embedding precision.
+        :param Optional[int] binary_rescore_multiplier: Candidate oversampling factor
+            for semantic branch search. When ``None``, defaults are selected by
+            embedding precision.
+        :param int calibration_sample_size: Calibration sample size for int8 storage ranges.
+        :param str cache_compression: HDF5 compression filter for semantic branch cache.
+        :param int cache_compression_level: HDF5 compression level for semantic branch cache.
+        :param bool enable_torch_compile: Whether semantic branch may use
+            best-effort inner-model ``torch.compile`` optimization.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         if max_semantic is None:
@@ -85,7 +105,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 f"(got max_semantic={resolved_max_semantic}, max_papers={max_papers})"
             )
 
-        super().__init__(max_papers, random_seed)
+        super().__init__(max_papers)
         self.client = client or get_client()
         self.max_semantic = resolved_max_semantic
 
@@ -96,12 +116,19 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 # max_semantic contract counts only added non-seed neighbors.
                 max_papers=self.max_semantic + 1,
                 model_name=model_name,
+                model_revision=model_revision,
                 dataset_split=dataset_split,
                 corpus_size=corpus_size,
                 truncate_dim=truncate_dim,
-                random_seed=random_seed,
                 use_streaming=use_streaming,
                 force_rebuild_cache=force_rebuild_cache,
+                storage_precision=storage_precision,
+                binary_prefilter=binary_prefilter,
+                binary_rescore_multiplier=binary_rescore_multiplier,
+                calibration_sample_size=calibration_sample_size,
+                cache_compression=cache_compression,
+                cache_compression_level=cache_compression_level,
+                enable_torch_compile=enable_torch_compile,
                 client=self.client,
             )
         else:
@@ -114,7 +141,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             max_citations=max_citations,
             max_references=max_references,
             fetch_references=fetch_references,
-            random_seed=random_seed,
+            refresh_reference_cache=refresh_reference_cache,
             client=self.client,
         )
 
@@ -164,8 +191,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
                 logger.info(f"Added {added} semantic papers")
 
-            except Exception as e:
-                logger.warning(f"Semantic enrichment failed: {e}")
+            except Exception as exc:
+                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
         return papers
 
@@ -233,12 +260,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed_id).
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        if self.embedding_builder is not None:
+            graph.graph["embedding_runtime"] = (
+                self.embedding_builder._embedding_runtime_metadata()
+            )
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:
             return graph, actual_seed_id
 
         filtered_graph = nx.Graph()
+        filtered_graph.graph.update(graph.graph)
         filtered_graph.add_nodes_from(graph.nodes(data=True))
 
         for u, v, weight in select_capped_undirected_edges(
@@ -246,6 +278,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         ):
             filtered_graph.add_edge(u, v, weight=weight)
 
+        logger.info(
+            "Hybrid edge cap applied: %s -> %s edges",
+            graph.number_of_edges(),
+            filtered_graph.number_of_edges(),
+        )
         return filtered_graph, actual_seed_id
 
     def should_create_edge(

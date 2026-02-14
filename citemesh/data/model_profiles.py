@@ -8,10 +8,27 @@ embedding checkpoints without hard-coding logic in the strategies.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Mapping, Optional, Tuple
 
 QueryFormatter = Callable[[str, Optional[Dict[str, str]]], str]
 DocumentFormatter = Callable[[Dict[str, str]], str]
+
+
+def compose_title_abstract_text(metadata: Mapping[str, object]) -> str:
+    """Compose a stable document string from title/abstract metadata.
+
+    :param Mapping[str, object] metadata: Paper metadata payload.
+    :return str: Best-effort ``"title. abstract"`` representation.
+    """
+    raw_title = metadata.get("title", "")
+    raw_abstract = metadata.get("abstract", "")
+    title = str(raw_title).strip() if raw_title is not None else ""
+    abstract = str(raw_abstract).strip() if raw_abstract is not None else ""
+    if title and abstract:
+        return f"{title}. {abstract}"
+    if title:
+        return title
+    return abstract
 
 
 def _identity_query_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
@@ -30,13 +47,7 @@ def _identity_document_formatter(metadata: Dict[str, str]) -> str:
     :param Dict[str, str] metadata: Paper metadata payload.
     :return str: Best-effort ``\"title. abstract\"`` representation.
     """
-    title = metadata.get("title", "").strip()
-    abstract = metadata.get("abstract", "").strip()
-    if title and abstract:
-        return f"{title}. {abstract}"
-    if title:
-        return title
-    return abstract
+    return compose_title_abstract_text(metadata)
 
 
 @dataclass(frozen=True)

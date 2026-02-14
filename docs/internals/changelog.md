@@ -6,8 +6,17 @@ This page is historical context, not a normative behavior specification.
 
 - Use [CLI Usage](../guides/cli.md) for current command/flag behavior.
 - Use [Caching & Data](../guides/caching.md) for current cache behavior.
+- Use [Environment Variables](../reference/environment.md) for current runtime variable contracts.
+- Documentation ownership map: [Documentation Index](../README.md).
 
 This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
+Historical bullets below may describe superseded behavior; canonical current behavior remains in the guides above.
+
+## Breaking Changes
+
+- Removed deprecated `GraphBuilderStrategy.exponential_temporal_decay`.
+- Removed `random_seed` constructor arguments from strategy builders.
+- Clarified `--seed` CLI semantics as layout/export determinism only.
 
 ## Export & Visualization
 
@@ -26,7 +35,11 @@ This changelog summarizes notable changes from early script-based prototypes to 
 ## Persistent Caching
 
 - Introduced `EmbeddingCache` with SQLite metadata + HDF5 matrix storage.
-- Moved joblib caches under a user-scoped cache root.
+- Switched embedding cache defaults to quantized storage (`int8` + calibration ranges) with optional binary prefilter index for large-corpus retrieval.
+- Added cache-native search API with binary Hamming prefilter + float query rescoring.
+- Persisted authors/categories metadata in cache so warm-cache retrieval can skip corpus reloads.
+- Added hydration metadata gating so matching split/corpus-cap runs query directly from cache.
+- Added precision-aware cache namespaces (`storage precision`, effective `binary mode`, source dtype) to isolate incompatible cache layouts.
 - Added `CITEMESH_CACHE_DIR` override for custom deployments.
 - Added streaming mode for embedding corpus ingestion as an explicit opt-in.
 - Added model profiles (starting with EmbeddingGemma) for prompts/precision policy.
@@ -45,13 +58,17 @@ This changelog summarizes notable changes from early script-based prototypes to 
 
 - Added `--export all` for multi-format runs.
 - Improved parser validation and test coverage around CLI ergonomics.
+- Added embedding/hybrid cache controls: `--storage-precision`, binary prefilter toggles, binary rescore multiplier, calibration sample size, and cache compression knobs.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
-- Preserved dotted custom output basenames across multi-export workflows.
+- Switched multi-export explicit `--output` handling to directory-based exports with strategy-named files.
 - Enforced strict embedding `--top-k` per-node edge caps.
 - Reused a single layout per run across layout-consuming exporters.
 - Made metadata timestamps opt-in (`--include-timestamp`) for deterministic outputs by default.
-- Grouped auto outputs into stable per-paper folder naming.
+- Grouped auto outputs into stable per-paper title folders.
+- Removed title truncation in runtime seed logs and static/Plotly chart titles.
+- Fixed hybrid CLI validation to resolve effective default `--max-semantic` before rejecting embedding-only flags.
+- Removed unsupported `szip` embedding-cache compression mode from CLI/validation.
 - Moved interactive exporters to optional `.[viz]` extras.
 
 ## Maintenance Consolidation

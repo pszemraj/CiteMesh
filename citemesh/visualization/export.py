@@ -12,6 +12,7 @@ import html
 import json
 import logging
 import re
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
 
@@ -90,6 +91,29 @@ class GraphExporter:
         self._size_map: Optional[Dict[Hashable, float]] = None
         self._color_map_cache: Dict[str, Dict[Hashable, tuple]] = {}
 
+    @staticmethod
+    def _graphml_metadata_key(raw_key: object) -> str:
+        """Normalize metadata key for GraphML graph-level attributes.
+
+        :param object raw_key: Source metadata key.
+        :return str: Sanitized GraphML-safe key.
+        """
+        normalized = re.sub(r"[^0-9a-zA-Z_]+", "_", str(raw_key)).strip("_")
+        if not normalized:
+            normalized = "metadata"
+        return f"citemesh_meta_{normalized}"
+
+    @staticmethod
+    def _graphml_metadata_value(raw_value: object) -> str:
+        """Normalize metadata value for GraphML graph-level attributes.
+
+        :param object raw_value: Source metadata value.
+        :return str: Scalar/serialized value for GraphML export.
+        """
+        if isinstance(raw_value, (str, int, float, bool)) or raw_value is None:
+            return str(raw_value)
+        return json.dumps(raw_value, sort_keys=True)
+
     # ------------------------------------------------------------------
     # Public export methods
 
@@ -129,6 +153,11 @@ class GraphExporter:
         sorted_edges = self._sorted_edges()
         export_graph.graph[GRAPHML_LAYOUT_METADATA_KEY] = determinism_policy
         export_graph.graph[GRAPHML_LAYOUT_VERSION_KEY] = nx.__version__
+        for metadata_key in sorted(self.metadata, key=str):
+            graph_key = self._graphml_metadata_key(metadata_key)
+            export_graph.graph[graph_key] = self._graphml_metadata_value(
+                self.metadata[metadata_key]
+            )
 
         for node, attrs in sorted_nodes:
             cleaned = self._serialize_node(node, attrs)
@@ -323,12 +352,19 @@ class GraphExporter:
             hovertext=hover_texts,
         )
 
-        title_text = self.graph.nodes[self.seed_id].get("title", "CiteMesh")[:50]
+        raw_title = " ".join(
+            str(self.graph.nodes[self.seed_id].get("title", "CiteMesh")).split()
+        )
+        title_text = "<br>".join(
+            textwrap.wrap(raw_title, width=72, break_long_words=False)
+        )
+        if not title_text:
+            title_text = "CiteMesh"
 
         fig = go.Figure(
             data=[edge_trace, node_trace],
             layout=go.Layout(
-                title=f"CiteMesh: {title_text}...",
+                title=f"CiteMesh: {title_text}",
                 showlegend=False,
                 hovermode="closest",
                 margin=dict(b=20, l=5, r=5, t=40),

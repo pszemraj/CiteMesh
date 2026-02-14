@@ -3,6 +3,7 @@
 from .config import (
     API_CONFIG,
     EMBEDDING_CONFIG,
+    EMBEDDING_STORAGE_CONFIG,
     HYBRID_CONFIG,
     TEMPORAL_CONFIG,
     VIZ_CONFIG,
@@ -14,6 +15,7 @@ __all__ = [
     "Paper",
     "API_CONFIG",
     "EMBEDDING_CONFIG",
+    "EMBEDDING_STORAGE_CONFIG",
     "HYBRID_CONFIG",
     "TEMPORAL_CONFIG",
     "VIZ_CONFIG",

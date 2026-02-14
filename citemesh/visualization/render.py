@@ -5,8 +5,9 @@ This module provides a single implementation of the CiteMesh-style
 visualization that all strategies can use, eliminating code duplication.
 """
 
+import hashlib
 import logging
-from hashlib import sha1
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
 
@@ -24,7 +25,7 @@ from .ordering import (
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
-MAX_TITLE_CHARS = 50
+MAX_TITLE_CHARS = 40
 MISSING_YEAR_FALLBACK_MIN = 2000
 MISSING_YEAR_FALLBACK_MAX = 2001
 KK_LAYOUT_DISTANCE_ATTR = "layout_distance"
@@ -64,9 +65,23 @@ def _seed_suffix(seed_id: str, length: int = 8) -> str:
 
     :param str seed_id: Seed paper identifier.
     :param int length: Number of digest characters to keep.
-    :return str: Stable hex suffix used in auto-generated output directories.
+    :return str: Stable hex suffix used in output directory naming.
     """
-    return sha1(seed_id.encode("utf-8")).hexdigest()[:length]
+    return hashlib.sha256(seed_id.encode("utf-8")).hexdigest()[:length]
+
+
+def _output_dir_name(title: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS) -> str:
+    """Build output directory name with stable seed suffix under truncation.
+
+    :param str title: Seed paper title used for the human-readable slug prefix.
+    :param str seed_id: Canonical seed identifier used for stable hash suffix.
+    :param int max_chars: Maximum total directory-name length.
+    :return str: Filesystem-safe directory name containing title slug and hash suffix.
+    """
+    suffix = f"-{_seed_suffix(seed_id)}"
+    title_budget = max_chars - len(suffix)
+    title_budget = max(1, title_budget)
+    return f"{_filename_safe(title, max_chars=title_budget)}{suffix}"
 
 
 def _similarity_to_layout_distance(raw_similarity: object) -> float:
@@ -424,17 +439,17 @@ def draw_labels(
     :return None: Draws all node labels.
     """
 
-    def _shorten_title(title: str, max_chars: int = 34) -> str:
-        """
-        Shorten long seed labels to keep static plots readable.
+    def _wrap_title(title: str, width: int = 34) -> str:
+        """Wrap long seed labels without dropping any title text.
 
         :param str title: Full seed paper title.
-        :param int max_chars: Maximum label width before truncation.
-        :return str: Label-safe title.
+        :param int width: Approximate character width for line wrapping.
+        :return str: Wrapped title label.
         """
-        if len(title) <= max_chars:
-            return title
-        return f"{title[: max_chars - 3].rstrip()}..."
+        title = " ".join((title or "").split())
+        if not title:
+            return "Seed paper"
+        return textwrap.fill(title, width=width, break_long_words=False)
 
     for node in ordered_nodes(graph):
         p = pos[node]
@@ -443,7 +458,7 @@ def draw_labels(
         is_seed = node == seed_id
         if is_seed:
             title = graph.nodes[node].get("title", "Seed paper")
-            label = _shorten_title(title)
+            label = _wrap_title(title)
             fontsize = 9
         else:
             # Extract author surname
@@ -528,9 +543,14 @@ def visualize_graph(
     draw_labels(ax, graph, pos, seed_id, theme)
 
     # Add title
-    title = graph.nodes[seed_id].get("title", "Unknown")[:60]
+    title = graph.nodes[seed_id].get("title", "Unknown")
+    wrapped_title = textwrap.fill(
+        " ".join(str(title).split()),
+        width=72,
+        break_long_words=False,
+    )
     ax.set_title(
-        f"CiteMesh Visualization: {title}...",
+        f"CiteMesh Visualization: {wrapped_title}",
         fontsize=14,
         pad=20,
         color=theme.text_color,
@@ -566,7 +586,7 @@ def generate_output_path(
     :return Path: Path object for output file
     """
     title = graph.nodes[seed_id].get("title", "graph")
-    paper_dir = output_dir / f"{_filename_safe(title)}-{_seed_suffix(seed_id)}"
+    paper_dir = output_dir / _output_dir_name(title=title, seed_id=seed_id)
     paper_dir.mkdir(parents=True, exist_ok=True)
 
     basename = _filename_safe(strategy, max_chars=32) if strategy else "graph"
