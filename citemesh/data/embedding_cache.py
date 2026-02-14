@@ -1306,15 +1306,15 @@ class EmbeddingCache:
         chunk_rows = max(1, min(4096, self.calibration_sample_size))
 
         if dataset is None:
+            compression_kwargs = self._dataset_compression_kwargs()
             return h5_file.create_dataset(
                 EMBEDDINGS_DATASET_NAME,
                 shape=(0, embedding_dim),
                 maxshape=(None, embedding_dim),
                 dtype=target_dtype,
                 chunks=(chunk_rows, embedding_dim),
-                compression=self.compression,
-                compression_opts=self.compression_level,
                 shuffle=True,
+                **compression_kwargs,
             )
 
         if int(dataset.shape[1]) != embedding_dim:
@@ -1346,15 +1346,15 @@ class EmbeddingCache:
         chunk_rows = max(1, min(4096, self.calibration_sample_size))
         dataset = h5_file.get(BINARY_INDEX_DATASET_NAME)
         if dataset is None:
+            compression_kwargs = self._dataset_compression_kwargs()
             return h5_file.create_dataset(
                 BINARY_INDEX_DATASET_NAME,
                 shape=(0, packed_dim),
                 maxshape=(None, packed_dim),
                 dtype=np.uint8,
                 chunks=(chunk_rows, packed_dim),
-                compression=self.compression,
-                compression_opts=self.compression_level,
                 shuffle=True,
+                **compression_kwargs,
             )
 
         if dataset.ndim != 2:
@@ -1390,6 +1390,23 @@ class EmbeddingCache:
         if int(binary_dataset.shape[0]) != int(embedding_rows):
             return False
         return True
+
+    def _dataset_compression_kwargs(self) -> Dict[str, Any]:
+        """Build HDF5 dataset compression kwargs for active cache configuration.
+
+        ``lzf`` does not accept ``compression_opts``. Other configured codecs keep
+        the numeric level behavior used by existing cache settings.
+
+        :return Dict[str, Any]: Keyword args passed into ``create_dataset``.
+        """
+        compression = str(self.compression or "").strip()
+        if not compression:
+            return {}
+
+        kwargs: Dict[str, Any] = {"compression": compression}
+        if compression.lower() != "lzf":
+            kwargs["compression_opts"] = int(self.compression_level)
+        return kwargs
 
     def _ensure_calibration_ranges(
         self,
@@ -1622,12 +1639,12 @@ class EmbeddingCache:
         candidate_dists = np.concatenate(all_dists, axis=0)
 
         if candidate_rows.shape[0] > keep_k:
-            top_idx = np.argpartition(candidate_dists, keep_k - 1)[:keep_k]
-            candidate_rows = candidate_rows[top_idx]
-            candidate_dists = candidate_dists[top_idx]
+            # Choose a deterministic top-k candidate set by (distance, row_idx).
+            ranked_idx = np.lexsort((candidate_rows, candidate_dists))
+            candidate_rows = candidate_rows[ranked_idx[:keep_k]]
 
-        order = np.lexsort((candidate_rows, candidate_dists))
-        return candidate_rows[order]
+        # HDF5 fancy indexing requires monotonically increasing integer indices.
+        return np.sort(candidate_rows.astype(np.int64, copy=False))
 
     def _score_int8_rows(
         self,
@@ -1647,7 +1664,7 @@ class EmbeddingCache:
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
         """
         if row_indices is not None:
-            rows = np.asarray(row_indices, dtype=np.int64)
+            rows = np.unique(np.asarray(row_indices, dtype=np.int64))
             if rows.size == 0:
                 return (
                     np.asarray([], dtype=np.int64),

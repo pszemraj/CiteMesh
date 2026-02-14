@@ -356,6 +356,90 @@ def test_embedding_cache_search_fails_closed_on_int8_calibration_sample_mismatch
             )
 
 
+def test_embedding_cache_search_handles_unsorted_prefilter_candidates() -> None:
+    """Search should normalize unsorted prefilter rows before HDF5 fancy indexing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="unsorted-prefilter-cands")
+        papers = {
+            f"p{idx}": {"title": f"Title {idx}", "abstract": "Abstract"}
+            for idx in range(6)
+        }
+        lookup = LookupEncodeModel(
+            {
+                **{
+                    f"Title {idx}. Abstract": np.asarray([0.0, 1.0], dtype=np.float32)
+                    for idx in range(5)
+                },
+                "Title 5. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            }
+        )
+        cache.get_embeddings(papers, lookup, show_progress=False)
+
+        cache._binary_prefilter_rows = (  # type: ignore[method-assign]
+            lambda **_: np.asarray([5, 1], dtype=np.int64)
+        )
+        results = cache.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=2,
+        )
+
+    assert [result.paper_id for result in results] == ["p5"]
+
+
+def test_embedding_cache_binary_prefilter_rows_are_monotonic_subset() -> None:
+    """Binary prefilter should return monotonic candidate rows for HDF5 locality/safety."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="prefilter-monotonic")
+        papers = {
+            f"p{idx}": {"title": f"Title {idx}", "abstract": "Abstract"}
+            for idx in range(6)
+        }
+        lookup = LookupEncodeModel(
+            {
+                **{
+                    f"Title {idx}. Abstract": np.asarray([0.0, 1.0], dtype=np.float32)
+                    for idx in range(5)
+                },
+                "Title 5. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            }
+        )
+        cache.get_embeddings(papers, lookup, show_progress=False)
+
+        with h5py.File(cache.h5_path, "r") as h5:
+            rows = cache._binary_prefilter_rows(
+                binary_dataset=h5["binary_index"],
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                candidate_count=2,
+            )
+
+    assert rows.shape == (2,)
+    assert np.all(rows[:-1] < rows[1:])
+
+
+def test_embedding_cache_supports_lzf_codec_without_compression_level_opts() -> None:
+    """LZF codec should hydrate cache datasets without invalid compression options."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="lzf-codec",
+            compression="lzf",
+            compression_level=1,
+        )
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel(
+                {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+
+        with h5py.File(cache.h5_path, "r") as h5:
+            assert h5["embeddings"].compression == "lzf"
+            assert h5["binary_index"].compression == "lzf"
+
+
 def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
     """Hydration completion should survive cache re-open in same namespace."""
     with tempfile.TemporaryDirectory() as tmpdir:
