@@ -1071,6 +1071,36 @@ def test_collect_papers_rejects_source_mismatch_when_dataset_load_fails(
     )
 
 
+def test_hydration_reset_restores_model_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Hydration reset should restore resolved model fingerprint metadata."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        use_streaming=False,
+        corpus_size=1,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-before-clear")
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        lambda use_streaming, preferred_dataset_source=None: (
+            "mini-dataset",
+            [{"id": "p1", "title": "Paper 1", "abstract": "A"}],
+        ),
+    )
+    monkeypatch.setattr(builder, "_cache_metadata_batch", lambda batch: len(batch))
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+    assert builder.embedding_cache.get_model_fingerprint() == "fp-before-clear"
+
+
 def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,

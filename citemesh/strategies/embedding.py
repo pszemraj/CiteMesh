@@ -1463,7 +1463,21 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             "all" if self.corpus_size is None else self.corpus_size,
             use_streaming,
         )
+        retained_fingerprint = (
+            str(self._resolved_model_fingerprint).strip()
+            if self._resolved_model_fingerprint is not None
+            else ""
+        )
+        if not retained_fingerprint:
+            fallback_fingerprint = self.embedding_cache.get_model_fingerprint()
+            retained_fingerprint = (
+                str(fallback_fingerprint).strip()
+                if fallback_fingerprint is not None
+                else ""
+            )
         self.embedding_cache.clear()
+        if retained_fingerprint:
+            self.embedding_cache.set_model_fingerprint(retained_fingerprint)
         self.embedding_cache.mark_hydrated(
             dataset_source=dataset_source,
             dataset_split=self.dataset_split,
