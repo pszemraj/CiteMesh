@@ -38,7 +38,7 @@ Historical bullets below may describe superseded behavior; canonical current beh
 - Added cache-native search API with binary Hamming prefilter + float query rescoring.
 - Persisted authors/categories metadata in cache so warm-cache retrieval can skip corpus reloads.
 - Added hydration metadata gating so matching split/corpus-cap runs query directly from cache.
-- Added precision-aware cache namespaces (`storage precision`, `binary mode`, `source dtype`) to isolate incompatible cache layouts.
+- Added precision-aware cache namespaces (`storage precision`, effective `binary mode`) to isolate incompatible cache layouts.
 - Added `CITEMESH_CACHE_DIR` override for custom deployments.
 - Added streaming mode for embedding corpus ingestion as an explicit opt-in.
 - Added model profiles (starting with EmbeddingGemma) for prompts/precision policy.

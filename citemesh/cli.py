@@ -176,6 +176,23 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
     }
 
 
+def _embedding_export_metadata(cli_args: argparse.Namespace) -> Dict[str, object]:
+    """Build embedding provenance payload persisted in export metadata.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :return Dict[str, object]: Effective embedding cache/vector provenance fields.
+    """
+    int8_mode = str(cli_args.storage_precision) == "int8"
+    return {
+        "effective_vector_dtype": "float32",
+        "storage_precision": str(cli_args.storage_precision),
+        "binary_prefilter_enabled": bool(cli_args.binary_prefilter and int8_mode),
+        "binary_rescore_multiplier": (
+            int(cli_args.binary_rescore_multiplier) if int8_mode else 1
+        ),
+    }
+
+
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
     "citation": _StrategyDispatchSpec(
         factory=lambda cli_args: CitationGraphBuilder(
@@ -828,6 +845,8 @@ Examples:
                 "edges": graph.number_of_edges(),
                 "theme": args.theme,
             }
+            if args.strategy in {"embedding", "hybrid"}:
+                metadata["embedding"] = _embedding_export_metadata(args)
             if args.include_timestamp:
                 metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             layout_required = any(fmt in output_paths for fmt in ("png", "plotly"))

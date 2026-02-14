@@ -362,6 +362,59 @@ def test_metadata_timestamp_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
         assert ("timestamp" in metadata) is expected_key
 
 
+def test_embedding_export_metadata_uses_effective_precision_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding export metadata should expose effective runtime precision knobs."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "float32",
+                "--binary-prefilter",
+                "--binary-rescore-multiplier",
+                "9",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["embedding"] == {
+        "effective_vector_dtype": "float32",
+        "storage_precision": "float32",
+        "binary_prefilter_enabled": False,
+        "binary_rescore_multiplier": 1,
+    }
+
+
 def test_strategy_dispatches_to_matching_builder_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

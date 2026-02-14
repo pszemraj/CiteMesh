@@ -179,6 +179,7 @@ def test_exporter_json_graphml_contracts_and_determinism(tmp_path: Path) -> None
     seed_node = graphml.nodes[seed_id]
     assert seed_node["is_seed"] in {"1", 1}
     assert "Alice Smith" in seed_node["authors"]
+    assert graphml.graph["citemesh_meta_strategy"] == "citation"
 
     policy = _graphml_determinism_policy()
     assert graphml.graph[GRAPHML_LAYOUT_METADATA_KEY] == policy

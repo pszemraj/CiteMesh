@@ -123,8 +123,8 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running
 - `--storage-precision {int8,float16,float32}`: persistent embedding-cache precision (default `int8`)
-- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled)
-- `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`)
+- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). This is only effective for `--storage-precision int8`.
+- `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). This is only effective for `--storage-precision int8`; non-int8 runs normalize to effective value `1`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
@@ -144,6 +144,8 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 - `plotly`: interactive Plotly graph (HTML)
 - `json`: structured graph data with nodes, edges, metadata
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
+
+For `embedding` and `hybrid` strategies, export metadata now includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, and effective binary-prefilter settings).
 
 Determinism notes:
 
