@@ -5,8 +5,8 @@ This module provides a single implementation of the CiteMesh-style
 visualization that all strategies can use, eliminating code duplication.
 """
 
-import logging
 import hashlib
+import logging
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
@@ -71,7 +71,13 @@ def _seed_suffix(seed_id: str, length: int = 8) -> str:
 
 
 def _output_dir_name(title: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS) -> str:
-    """Build an output directory name that keeps a stable suffix under truncation."""
+    """Build output directory name with stable seed suffix under truncation.
+
+    :param str title: Seed paper title used for the human-readable slug prefix.
+    :param str seed_id: Canonical seed identifier used for stable hash suffix.
+    :param int max_chars: Maximum total directory-name length.
+    :return str: Filesystem-safe directory name containing title slug and hash suffix.
+    """
     suffix = f"-{_seed_suffix(seed_id)}"
     title_budget = max_chars - len(suffix)
     title_budget = max(1, title_budget)

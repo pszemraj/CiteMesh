@@ -95,12 +95,13 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 
 - `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (default `0.2`).
 - `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
+- `--refresh-reference-cache` applies to `recommendation`, `citation`, and the citation branch of `hybrid` to bypass persisted reference-cache reads.
 - `embedding` and the embedding branch of `hybrid` use embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`, storage/cache flags below).
 
 ### Recommendation Strategy
 
 - Uses Semantic Scholar recommendations as the primary neighborhood signal.
-- Uses cross-strategy controls above (`--similarity-threshold`, `--no-references`).
+- Uses cross-strategy controls above (`--similarity-threshold`, `--no-references`, `--refresh-reference-cache`).
 
 ### Citation Strategy
 
@@ -108,10 +109,12 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 - `--max-references`, `-r`: limit number of referenced papers (default `20`)
 - `--similarity-threshold`, `-t`: minimum edge similarity threshold (`0.0` to `1.0`, default `0.2`)
 - `--no-references`: skip reference-list fetching (faster, no bibliographic coupling)
+- `--refresh-reference-cache`: bypass persisted reference-cache reads and fetch fresh reference IDs
 
 ### Embedding Strategy
 
 - `--model`, `-m`: sentence-transformer model name (for example `all-MiniLM-L6-v2`, `google/embeddinggemma-300m`)
+- `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
 - `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
 - `--all-corpus`: remove corpus-size cap and process the full selected split
@@ -128,8 +131,8 @@ Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.m
 
 ### Hybrid Strategy
 
-- Inherits citation flags for collection, including `--no-references`.
-- Reuses embedding corpus/model/cache controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
+- Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
+- Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
 - `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
   Hybrid reserves this capacity from citation collection (`citation_budget = max_papers - max_semantic`), so valid values are `0` through `max-papers - 1`.
   If omitted, hybrid defaults to `min(10, max-papers - 1)`.

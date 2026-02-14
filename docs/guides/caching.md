@@ -55,23 +55,42 @@ SQLite stores metadata authority fields used for warm-cache retrieval:
 - `title`, `abstract`, `year`
 - `authors_json`, `categories_json`
 - hydration metadata keys (`dataset source`, `split`, `corpus cap`, completion flag)
+- `model_fingerprint` (active model identity guard for namespace reuse)
 
 A vector is recomputed when:
 
 - The paper is missing from cache, or
-- The composed text (`title + abstract`) hash changed.
+- The embedding invalidation hash changed (derived from `title`, `abstract`, `year`,
+  `authors`, `categories`, and composed embedding text).
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
 
+For Hugging Face repo IDs, hydration resolves and stores a commit-SHA fingerprint. If
+fingerprint resolution fails, hydration fails closed rather than reusing cache state
+without model identity verification. If a stored fingerprint differs from the active
+model fingerprint, CiteMesh clears and rebuilds that namespace before reuse.
+
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
+
+During cache-native search, scored embedding rows must map to metadata rows. Missing
+metadata row mappings now fail closed with an integrity error instead of returning
+partial top-k results.
 
 If cache payload files become inconsistent (for example missing matrix file, incompatible layout, or invalid calibration metadata), CiteMesh resets that namespace state and rebuilds on the next hydration run.
 
 ## Semantic Scholar Reference Cache
 
-When reference expansion is enabled, reference-ID lookups are cached under `references/` using hashed filenames.
+When reference expansion is enabled, reference-ID lookups are cached under `references/`
+using hashed filenames.
+
+- Default policy is no TTL: version-matched cache entries are reused until manually
+  cleared or refreshed.
+- `--refresh-reference-cache` bypasses persisted reference-cache reads and fetches
+  fresh reference IDs from the API (write-through cache update).
+- Reference cache directory resolution occurs at call time, so cache-root policy
+  (`CITEMESH_CACHE_DIR`) changes are honored for new lookups.
 
 ## HuggingFace Default Cache
 

@@ -718,7 +718,10 @@ class EmbeddingCache:
         return True
 
     def get_hydrated_dataset_source(self) -> Optional[str]:
-        """Return dataset source captured for the latest hydrated cache attempt."""
+        """Return dataset source captured for the latest hydrated cache attempt.
+
+        :return Optional[str]: Hydrated dataset source token when set.
+        """
         with sqlite3.connect(self.db_path) as conn:
             metadata = self._load_cache_metadata(conn)
         cached_source = metadata.get(HYDRATION_DATASET_SOURCE_KEY)
