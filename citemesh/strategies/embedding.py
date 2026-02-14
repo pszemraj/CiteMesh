@@ -367,6 +367,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.cache_compression_level = int(cache_compression_level)
         self.enable_torch_compile = bool(enable_torch_compile)
         self.model_profile = get_embedding_model_profile(self.model_name)
+        self._document_formatter_fingerprint = (
+            self._resolve_document_formatter_fingerprint()
+        )
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
         self._source_dtype_hint = self._resolve_source_dtype_hint()
         self.top_k = top_k
@@ -381,6 +384,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             compression=self.cache_compression,
             compression_level=self.cache_compression_level,
             source_torch_dtype=self._source_dtype_hint,
+            text_formatter_fingerprint=self._document_formatter_fingerprint,
         )
         if force_rebuild_cache:
             logger.info("Forcing embedding cache rebuild as requested.")
@@ -450,7 +454,42 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self.storage_precision == "int8":
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
         parts.append(f"source_dtype={self._source_dtype_hint}")
+        parts.append(f"doc_formatter={self._document_formatter_fingerprint}")
         return "::".join(parts)
+
+    def _resolve_document_formatter_fingerprint(self) -> str:
+        """Resolve deterministic formatter fingerprint used by embedding cache.
+
+        :return str: SHA-256 digest of profile formatter probes.
+        """
+        probes = (
+            {"title": "Alpha", "abstract": "Beta"},
+            {"title": "Alpha", "abstract": ""},
+            {"title": "", "abstract": "Beta"},
+            {"title": "  Alpha  ", "abstract": "  Beta  "},
+        )
+        outputs = [
+            self.model_profile.format_document(dict(payload)) for payload in probes
+        ]
+        payload = "||".join(
+            (
+                str(self.model_profile.name),
+                str(getattr(self.model_profile.document_formatter, "__module__", "")),
+                str(
+                    getattr(
+                        self.model_profile.document_formatter,
+                        "__qualname__",
+                        getattr(
+                            self.model_profile.document_formatter,
+                            "__name__",
+                            "formatter",
+                        ),
+                    )
+                ),
+                *outputs,
+            )
+        )
+        return sha256(payload.encode("utf-8")).hexdigest()[:16]
 
     def _cache_binary_prefilter_enabled(self) -> bool:
         """Return whether binary-prefilter behavior is active for this cache namespace.

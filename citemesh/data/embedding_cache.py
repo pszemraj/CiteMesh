@@ -54,6 +54,7 @@ HYDRATION_SPLIT_KEY = "hydration_split"
 HYDRATION_CORPUS_SIZE_KEY = "hydration_corpus_size"
 HYDRATION_COMPLETE_KEY = "hydration_complete"
 MODEL_FINGERPRINT_KEY = "model_fingerprint"
+TEXT_FORMATTER_FINGERPRINT_KEY = "text_formatter_fingerprint"
 
 _STORAGE_PRECISIONS = {"float32", "float16", "int8"}
 _COMPRESSION_FILTERS = {"gzip", "lzf"}
@@ -240,6 +241,7 @@ class EmbeddingCache:
         compression: str = "gzip",
         compression_level: int = 1,
         source_torch_dtype: str = "float32",
+        text_formatter_fingerprint: str = "default",
     ):
         """Create a persistent embedding cache for a model variant.
 
@@ -251,6 +253,8 @@ class EmbeddingCache:
         :param str compression: HDF5 compression filter name (``gzip`` or ``lzf``).
         :param int compression_level: Compression level for HDF5 datasets.
         :param str source_torch_dtype: Source inference dtype token, e.g. ``bfloat16``.
+        :param str text_formatter_fingerprint: Deterministic metadata-to-text formatter
+            fingerprint used for cache invalidation boundaries.
         """
         if storage_precision not in _STORAGE_PRECISIONS:
             expected = ", ".join(sorted(_STORAGE_PRECISIONS))
@@ -279,6 +283,9 @@ class EmbeddingCache:
         self.compression = validate_compression_filter(compression)
         self.compression_level = int(compression_level)
         self.source_torch_dtype = str(source_torch_dtype or "float32")
+        self.text_formatter_fingerprint = str(text_formatter_fingerprint).strip()
+        if not self.text_formatter_fingerprint:
+            raise ValueError("text_formatter_fingerprint must be a non-empty string.")
         self.embedding_vector_dtype = "float32"
         self.last_search_used_binary_prefilter: Optional[bool] = None
 
@@ -962,6 +969,11 @@ class EmbeddingCache:
                 conn, EMBEDDING_VECTOR_DTYPE_KEY, self.embedding_vector_dtype
             )
             self._set_cache_metadata(
+                conn,
+                TEXT_FORMATTER_FINGERPRINT_KEY,
+                self.text_formatter_fingerprint,
+            )
+            self._set_cache_metadata(
                 conn, CALIBRATION_SAMPLE_SIZE_KEY, str(self.calibration_sample_size)
             )
             self._set_cache_metadata(
@@ -1050,6 +1062,7 @@ class EmbeddingCache:
             STORAGE_PRECISION_KEY: self.storage_precision,
             SOURCE_TORCH_DTYPE_KEY: self.source_torch_dtype,
             EMBEDDING_VECTOR_DTYPE_KEY: self.embedding_vector_dtype,
+            TEXT_FORMATTER_FINGERPRINT_KEY: self.text_formatter_fingerprint,
             BINARY_PREFILTER_ENABLED_KEY: "1" if self.binary_prefilter else "0",
         }
         if self.storage_precision == "int8":
@@ -1138,6 +1151,16 @@ class EmbeddingCache:
             _fail(
                 f"HDF5 attr {EMBEDDING_VECTOR_DTYPE_KEY!r} mismatch "
                 f"({h5_embedding_dtype!r} != {expected[EMBEDDING_VECTOR_DTYPE_KEY]!r})"
+            )
+
+        h5_text_formatter_fingerprint = self._metadata_value_from_h5_attr(
+            h5_file.attrs.get(TEXT_FORMATTER_FINGERPRINT_KEY)
+        )
+        if h5_text_formatter_fingerprint != expected[TEXT_FORMATTER_FINGERPRINT_KEY]:
+            _fail(
+                f"HDF5 attr {TEXT_FORMATTER_FINGERPRINT_KEY!r} mismatch "
+                f"({h5_text_formatter_fingerprint!r} != "
+                f"{expected[TEXT_FORMATTER_FINGERPRINT_KEY]!r})"
             )
 
         h5_binary_prefilter = self._metadata_value_from_h5_attr(
@@ -1421,6 +1444,7 @@ class EmbeddingCache:
         h5_file.attrs[STORAGE_PRECISION_KEY] = self.storage_precision
         h5_file.attrs[SOURCE_TORCH_DTYPE_KEY] = self.source_torch_dtype
         h5_file.attrs[EMBEDDING_VECTOR_DTYPE_KEY] = self.embedding_vector_dtype
+        h5_file.attrs[TEXT_FORMATTER_FINGERPRINT_KEY] = self.text_formatter_fingerprint
         h5_file.attrs[CALIBRATION_SAMPLE_SIZE_KEY] = int(self.calibration_sample_size)
         h5_file.attrs[BINARY_PREFILTER_ENABLED_KEY] = int(self.binary_prefilter)
 

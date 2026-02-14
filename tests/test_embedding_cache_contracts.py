@@ -22,6 +22,7 @@ from citemesh.data.embedding_cache import (
     HYDRATION_SPLIT_KEY,
     MODEL_FINGERPRINT_KEY,
     SOURCE_TORCH_DTYPE_KEY,
+    TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
     _resolve_cache_lock_timeout_seconds,
 )
@@ -412,6 +413,41 @@ def test_embedding_cache_search_fails_closed_on_int8_calibration_sample_mismatch
         with pytest.raises(
             RuntimeError,
             match="metadata key 'calibration_sample_size' mismatch",
+        ):
+            cache.search(
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
+
+
+def test_embedding_cache_search_fails_closed_on_text_formatter_fingerprint_mismatch() -> (
+    None
+):
+    """Search should fail closed when text-formatter provenance metadata drifts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="search-text-formatter-mismatch",
+            text_formatter_fingerprint="fmt-a",
+        )
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            show_progress=False,
+        )
+
+        with sqlite3.connect(cache.db_path) as conn:
+            conn.execute(
+                "UPDATE cache_metadata SET value = ? WHERE key = ?",
+                ("fmt-b", TEXT_FORMATTER_FINGERPRINT_KEY),
+            )
+            conn.commit()
+
+        with pytest.raises(
+            RuntimeError,
+            match="metadata key 'text_formatter_fingerprint' mismatch",
         ):
             cache.search(
                 query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
