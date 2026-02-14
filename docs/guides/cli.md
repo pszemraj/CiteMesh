@@ -155,6 +155,7 @@ Execution transparency:
 - `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
   Hybrid reserves this capacity from citation collection (`citation_budget = max_papers - max_semantic`), so valid values are `0` through `max-papers - 1`.
   If omitted, hybrid defaults to `min(10, max-papers - 1)`.
+- Setting `--max-semantic 0` disables semantic enrichment; embedding-only flags are rejected to avoid no-op configuration.
 - Hybrid runs fail closed if semantic enrichment fails; CiteMesh does not silently downgrade to citation-only output.
 
 ## Export Formats

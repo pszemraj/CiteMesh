@@ -215,6 +215,23 @@ _BUILD_OPTION_DEST_BY_FLAG: Dict[str, str] = {
     flag: dest for dest, flags in _BUILD_OPTION_FLAGS.items() for flag in flags
 }
 _CACHE_COMPRESSION_CHOICES = ("gzip", "lzf", "szip")
+_HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
+    "model",
+    "model_revision",
+    "dataset_split",
+    "corpus_size",
+    "all_corpus",
+    "truncate_dim",
+    "streaming",
+    "force_rebuild_cache",
+    "storage_precision",
+    "binary_prefilter",
+    "binary_rescore_multiplier",
+    "calibration_sample_size",
+    "cache_compression",
+    "cache_compression_level",
+    "torch_compile",
+}
 
 
 @dataclass(frozen=True)
@@ -407,6 +424,18 @@ def _validate_build_cli_contract(
             build_parser.error(
                 "--max-semantic must be between 0 and --max-papers - 1 for hybrid."
             )
+        if int(args.max_semantic or 0) == 0:
+            ignored_embedding_options = sorted(
+                _BUILD_OPTION_PRIMARY_FLAG[dest]
+                for dest in provided
+                if dest in _HYBRID_EMBEDDING_OPTION_DESTS
+            )
+            if ignored_embedding_options:
+                option_text = ", ".join(ignored_embedding_options)
+                build_parser.error(
+                    "Hybrid semantic branch is disabled with --max-semantic 0; "
+                    f"remove embedding-only option(s): {option_text}."
+                )
 
 
 def _log_build_side_effect_contract(args: argparse.Namespace) -> None:

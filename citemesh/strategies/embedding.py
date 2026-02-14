@@ -303,6 +303,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         _check_embedding_deps()
+        normalized_model_name = str(model_name).strip()
+        if not normalized_model_name:
+            raise ValueError("model_name must be a non-empty string")
+        normalized_dataset_split = str(dataset_split).strip()
+        if not normalized_dataset_split:
+            raise ValueError("dataset_split must be a non-empty string")
+        if corpus_size is not None:
+            if isinstance(corpus_size, bool):
+                raise ValueError("corpus_size must be at least 1 when provided")
+            try:
+                corpus_size = int(corpus_size)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "corpus_size must be at least 1 when provided"
+                ) from exc
+            if corpus_size < 1:
+                raise ValueError("corpus_size must be at least 1 when provided")
+        if str(storage_precision) not in {"int8", "float16", "float32"}:
+            raise ValueError(
+                "storage_precision must be one of {'float32', 'float16', 'int8'}"
+            )
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
         if binary_rescore_multiplier is not None and binary_rescore_multiplier < 1:
@@ -311,14 +332,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError("calibration_sample_size must be at least 1")
         validate_compression_filter(cache_compression)
         super().__init__(max_papers)
-        self.model_name = model_name
+        self.model_name = normalized_model_name
         normalized_revision = (
             str(model_revision).strip() if model_revision is not None else ""
         )
         self.model_revision = normalized_revision or None
-        self.dataset_split = dataset_split
+        self.dataset_split = normalized_dataset_split
         self.corpus_size = corpus_size
-        self.storage_precision = storage_precision
+        self.storage_precision = str(storage_precision)
         resolved_prefilter = (
             EMBEDDING_STORAGE_CONFIG.binary_prefilter
             if binary_prefilter is None and storage_precision == "int8"
@@ -345,7 +366,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.cache_compression = cache_compression
         self.cache_compression_level = int(cache_compression_level)
         self.enable_torch_compile = bool(enable_torch_compile)
-        self.model_profile = get_embedding_model_profile(model_name)
+        self.model_profile = get_embedding_model_profile(self.model_name)
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
         self._source_dtype_hint = self._resolve_source_dtype_hint()
         self.top_k = top_k

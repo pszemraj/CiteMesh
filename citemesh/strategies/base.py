@@ -103,7 +103,16 @@ class GraphBuilderStrategy(ABC):
 
         :param int max_papers: Maximum number of papers to include in graph
         """
-        self.max_papers = max_papers
+        if isinstance(max_papers, bool):
+            raise ValueError("max_papers must be an integer >= 1")
+        try:
+            parsed_max_papers = int(max_papers)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("max_papers must be an integer >= 1") from exc
+        if parsed_max_papers < 1:
+            raise ValueError("max_papers must be at least 1")
+
+        self.max_papers = parsed_max_papers
         self.papers: Dict[str, Paper] = {}  # paper_id -> Paper object
         self._collection_summary: Optional[str] = None
 

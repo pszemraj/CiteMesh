@@ -159,6 +159,14 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         match="truncate_dim=300 is not supported for google/embeddinggemma-300m",
     ):
         EmbeddingGraphBuilder(max_papers=1, truncate_dim=300, client=MagicMock())
+    with pytest.raises(ValueError, match="model_name must be a non-empty string"):
+        EmbeddingGraphBuilder(max_papers=1, model_name="   ", client=MagicMock())
+    with pytest.raises(ValueError, match="dataset_split must be a non-empty string"):
+        EmbeddingGraphBuilder(max_papers=1, dataset_split=" ", client=MagicMock())
+    with pytest.raises(
+        ValueError, match="corpus_size must be at least 1 when provided"
+    ):
+        EmbeddingGraphBuilder(max_papers=1, corpus_size=0, client=MagicMock())
 
     precision_cases = [
         (True, True, True),
