@@ -157,6 +157,8 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
     assert results[0].metadata["categories"] == ["cs.AI"]
     assert results[0].metadata["year"] == 2020
     assert results[0].embedding.dtype == np.float32
+    assert results[0].embedding_dtype == "float32"
+    assert results[0].storage_precision == "int8"
 
 
 def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
@@ -212,6 +214,34 @@ def test_embedding_cache_search_rejects_non_vector_queries() -> None:
         with pytest.raises(ValueError, match="query_embedding must be 1-dimensional"):
             cache.search(
                 query_embedding=np.asarray([[1.0, 0.0]], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
+
+
+def test_embedding_cache_search_fails_closed_on_metadata_dtype_mismatch() -> None:
+    """Search should fail closed when metadata precision diverges from payload dtype."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="search-metadata-mismatch")
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            show_progress=False,
+        )
+
+        with sqlite3.connect(cache.db_path) as conn:
+            conn.execute(
+                "UPDATE cache_metadata SET value = 'float16' WHERE key = 'storage_precision'"
+            )
+            conn.commit()
+
+        with pytest.raises(
+            RuntimeError,
+            match="metadata key 'storage_precision' mismatch",
+        ):
+            cache.search(
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
                 top_k=1,
                 binary_prefilter=True,
                 binary_rescore_multiplier=2,

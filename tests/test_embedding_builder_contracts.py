@@ -334,9 +334,39 @@ def test_embedding_cache_namespace_ignores_binary_prefilter_outside_int8(
         f32_prefilter_on.embedding_cache.model_name
         == f32_prefilter_off.embedding_cache.model_name
     )
+    assert f32_prefilter_on.binary_prefilter is False
+    assert f32_prefilter_off.binary_prefilter is False
+    assert f32_prefilter_on.binary_rescore_multiplier == 1
+    assert f32_prefilter_off.binary_rescore_multiplier == 1
     assert (
         int8_prefilter_on.embedding_cache.model_name
         != int8_prefilter_off.embedding_cache.model_name
+    )
+
+
+def test_embedding_cache_namespace_ignores_source_dtype_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source dtype hints should not fragment namespaces with identical behavior."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+    f32_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "bfloat16",
+    )
+    bf16_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+    assert (
+        f32_hint_builder.embedding_cache.model_name
+        == bf16_hint_builder.embedding_cache.model_name
     )
 
 

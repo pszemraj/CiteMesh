@@ -283,7 +283,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
         :param str storage_precision: Persistent cache precision (``int8``, ``float16``, ``float32``).
         :param bool binary_prefilter: Whether cache search uses binary Hamming prefiltering.
-        :param int binary_rescore_multiplier: Candidate oversampling factor for binary prefilter search.
+            This is only effective when ``storage_precision == "int8"``.
+        :param int binary_rescore_multiplier: Candidate oversampling factor for binary
+            prefilter search. This is only effective when ``storage_precision == "int8"``.
         :param int calibration_sample_size: Calibration sample size used for int8 quantization ranges.
         :param str cache_compression: HDF5 compression filter for embedding datasets.
         :param int cache_compression_level: HDF5 compression level.
@@ -305,8 +307,24 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size
         self.storage_precision = storage_precision
-        self.binary_prefilter = bool(binary_prefilter)
-        self.binary_rescore_multiplier = int(binary_rescore_multiplier)
+        self.binary_prefilter = bool(binary_prefilter and storage_precision == "int8")
+        if storage_precision != "int8" and binary_prefilter:
+            logger.debug(
+                "binary_prefilter is ignored when storage_precision=%s.",
+                storage_precision,
+            )
+
+        requested_multiplier = int(binary_rescore_multiplier)
+        if storage_precision != "int8" and requested_multiplier != 1:
+            logger.debug(
+                "binary_rescore_multiplier=%s is ignored when storage_precision=%s; "
+                "using effective value 1.",
+                requested_multiplier,
+                storage_precision,
+            )
+        self.binary_rescore_multiplier = (
+            requested_multiplier if storage_precision == "int8" else 1
+        )
         self.calibration_sample_size = int(calibration_sample_size)
         self.cache_compression = cache_compression
         self.cache_compression_level = int(cache_compression_level)
@@ -380,7 +398,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             parts.append(f"truncate_dim={self.truncate_dim}")
         parts.append(f"storage_precision={self.storage_precision}")
         parts.append(f"binary_prefilter={int(self._cache_binary_prefilter_enabled())}")
-        parts.append(f"source_dtype={self._source_dtype_hint}")
+        # Namespace includes only behavior-affecting knobs. Source torch dtype is
+        # tracked as metadata, but vectors are normalized to float32 before storage.
         return "::".join(parts)
 
     def _cache_binary_prefilter_enabled(self) -> bool:
@@ -391,10 +410,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         :return bool: Effective binary-prefilter state for cache partitioning.
         """
-        return self.storage_precision == "int8" and self.binary_prefilter
+        return self.binary_prefilter
 
     def _resolve_source_dtype_hint(self) -> str:
-        """Resolve source dtype token used in cache namespace metadata.
+        """Resolve source dtype token used for cache provenance metadata.
 
         :return str: Source dtype token.
         """

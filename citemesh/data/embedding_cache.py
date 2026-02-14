@@ -43,6 +43,7 @@ H5_LAYOUT_MATRIX_VERSION = "matrix-v2-quantized"
 SCHEMA_VERSION_KEY = "schema_version"
 STORAGE_PRECISION_KEY = "storage_precision"
 SOURCE_TORCH_DTYPE_KEY = "source_torch_dtype"
+EMBEDDING_VECTOR_DTYPE_KEY = "embedding_vector_dtype"
 BINARY_PREFILTER_ENABLED_KEY = "binary_prefilter_enabled"
 HYDRATION_DATASET_SOURCE_KEY = "hydration_dataset_source"
 HYDRATION_SPLIT_KEY = "hydration_split"
@@ -154,6 +155,8 @@ class CacheSearchResult:
     score: float
     embedding: np.ndarray
     metadata: Dict[str, Any]
+    embedding_dtype: str = "float32"
+    storage_precision: str = "float32"
 
 
 class EmbeddingCache:
@@ -208,6 +211,7 @@ class EmbeddingCache:
         self.compression = compression
         self.compression_level = int(compression_level)
         self.source_torch_dtype = str(source_torch_dtype or "float32")
+        self.embedding_vector_dtype = "float32"
 
         with self._cache_lock():
             self._init_db()
@@ -260,6 +264,13 @@ class EmbeddingCache:
                 conn, [paper_id for paper_id, _ in items]
             )
             embeddings_dataset = self._get_embeddings_dataset(h5)
+            if embeddings_dataset is not None:
+                self._assert_runtime_cache_consistency(
+                    conn=conn,
+                    h5_file=h5,
+                    embeddings_dataset=embeddings_dataset,
+                    fail_mode="runtime",
+                )
             cached_limit = (
                 int(embeddings_dataset.shape[0])
                 if embeddings_dataset is not None
@@ -436,6 +447,12 @@ class EmbeddingCache:
             embeddings_dataset = self._get_embeddings_dataset(h5)
             if embeddings_dataset is None or embeddings_dataset.shape[0] == 0:
                 return []
+            self._assert_runtime_cache_consistency(
+                conn=conn,
+                h5_file=h5,
+                embeddings_dataset=embeddings_dataset,
+                fail_mode="runtime",
+            )
             if int(embeddings_dataset.shape[1]) != int(query.shape[0]):
                 raise ValueError(
                     "Query embedding dimension mismatch: "
@@ -527,6 +544,8 @@ class EmbeddingCache:
                         score=float(scores[idx]),
                         embedding=np.asarray(embeddings[idx], dtype=np.float32),
                         metadata=result_metadata,
+                        embedding_dtype=self.embedding_vector_dtype,
+                        storage_precision=self.storage_precision,
                     )
                 )
 
@@ -683,6 +702,12 @@ class EmbeddingCache:
                 embeddings_dataset = self._get_embeddings_dataset(h5)
                 if embeddings_dataset is None:
                     return False
+                self._assert_runtime_cache_consistency(
+                    conn=conn,
+                    h5_file=h5,
+                    embeddings_dataset=embeddings_dataset,
+                    fail_mode="runtime",
+                )
                 row_count = int(embeddings_dataset.shape[0])
                 if row_count < 1:
                     return False
@@ -712,7 +737,7 @@ class EmbeddingCache:
                 valid_rows, distinct_rows = cursor.fetchone()
                 if int(valid_rows) != row_count or int(distinct_rows) != row_count:
                     return False
-        except (OSError, ValueError, sqlite3.DatabaseError):
+        except (OSError, ValueError, RuntimeError, sqlite3.DatabaseError):
             return False
 
         return True
@@ -863,6 +888,9 @@ class EmbeddingCache:
                 conn, SOURCE_TORCH_DTYPE_KEY, self.source_torch_dtype
             )
             self._set_cache_metadata(
+                conn, EMBEDDING_VECTOR_DTYPE_KEY, self.embedding_vector_dtype
+            )
+            self._set_cache_metadata(
                 conn,
                 BINARY_PREFILTER_ENABLED_KEY,
                 "1" if self.binary_prefilter else "0",
@@ -919,6 +947,128 @@ class EmbeddingCache:
         rows = conn.execute("SELECT key, value FROM cache_metadata").fetchall()
         return {str(key): str(value) for key, value in rows}
 
+    @staticmethod
+    def _metadata_value_from_h5_attr(value: Any) -> str:
+        """Normalize HDF5 attribute values to comparable metadata strings.
+
+        :param Any value: Raw HDF5 attribute payload.
+        :return str: Normalized string representation.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            try:
+                return value.decode("utf-8")
+            except UnicodeDecodeError:
+                return value.decode("utf-8", errors="replace")
+        if isinstance(value, np.generic):
+            value = value.item()
+        return str(value)
+
+    def _expected_runtime_metadata(self) -> Dict[str, str]:
+        """Return metadata key/value pairs that govern runtime cache semantics.
+
+        :return Dict[str, str]: Expected metadata mapping for this namespace instance.
+        """
+        return {
+            SCHEMA_VERSION_KEY: str(EMBEDDING_CACHE_SCHEMA_VERSION),
+            H5_LAYOUT_KEY: H5_LAYOUT_MATRIX_VERSION,
+            STORAGE_PRECISION_KEY: self.storage_precision,
+            EMBEDDING_VECTOR_DTYPE_KEY: self.embedding_vector_dtype,
+            BINARY_PREFILTER_ENABLED_KEY: "1" if self.binary_prefilter else "0",
+        }
+
+    def _assert_runtime_cache_consistency(
+        self,
+        conn: sqlite3.Connection,
+        h5_file: h5py.File,
+        embeddings_dataset: h5py.Dataset,
+        *,
+        fail_mode: str,
+    ) -> None:
+        """Assert that metadata/attrs/datasets agree on active runtime semantics.
+
+        :param sqlite3.Connection conn: Open SQLite connection for metadata table.
+        :param h5py.File h5_file: Open HDF5 cache handle.
+        :param h5py.Dataset embeddings_dataset: Open embeddings matrix dataset.
+        :param str fail_mode: ``"runtime"`` to fail-closed, ``"repair"`` to signal rebuild.
+        :return None: Raises when metadata and payload state diverge.
+        :raises RuntimeError: If inconsistency is found and ``fail_mode == "runtime"``.
+        :raises ValueError: If inconsistency is found and ``fail_mode == "repair"``.
+        """
+        expected = self._expected_runtime_metadata()
+        metadata = self._load_cache_metadata(conn)
+
+        def _fail(message: str) -> None:
+            """Raise consistency error using mode-specific exception semantics."""
+            detail = (
+                "Embedding cache integrity error: "
+                f"{message}. Rebuild this cache namespace to restore consistency."
+            )
+            if fail_mode == "runtime":
+                raise RuntimeError(detail)
+            if fail_mode == "repair":
+                raise ValueError(detail)
+            raise ValueError(f"Unknown fail_mode={fail_mode!r}")
+
+        for key, expected_value in expected.items():
+            actual_value = metadata.get(key)
+            if actual_value != expected_value:
+                _fail(
+                    f"metadata key {key!r} mismatch "
+                    f"({actual_value!r} != {expected_value!r})"
+                )
+
+        h5_schema = self._metadata_value_from_h5_attr(
+            h5_file.attrs.get(SCHEMA_VERSION_KEY)
+        )
+        if h5_schema != expected[SCHEMA_VERSION_KEY]:
+            _fail(
+                f"HDF5 attr {SCHEMA_VERSION_KEY!r} mismatch "
+                f"({h5_schema!r} != {expected[SCHEMA_VERSION_KEY]!r})"
+            )
+
+        h5_layout = self._metadata_value_from_h5_attr(h5_file.attrs.get(H5_LAYOUT_KEY))
+        if h5_layout != expected[H5_LAYOUT_KEY]:
+            _fail(
+                f"HDF5 attr {H5_LAYOUT_KEY!r} mismatch "
+                f"({h5_layout!r} != {expected[H5_LAYOUT_KEY]!r})"
+            )
+
+        h5_precision = self._metadata_value_from_h5_attr(
+            h5_file.attrs.get(STORAGE_PRECISION_KEY)
+        )
+        if h5_precision != expected[STORAGE_PRECISION_KEY]:
+            _fail(
+                f"HDF5 attr {STORAGE_PRECISION_KEY!r} mismatch "
+                f"({h5_precision!r} != {expected[STORAGE_PRECISION_KEY]!r})"
+            )
+
+        h5_embedding_dtype = self._metadata_value_from_h5_attr(
+            h5_file.attrs.get(EMBEDDING_VECTOR_DTYPE_KEY)
+        )
+        if h5_embedding_dtype != expected[EMBEDDING_VECTOR_DTYPE_KEY]:
+            _fail(
+                f"HDF5 attr {EMBEDDING_VECTOR_DTYPE_KEY!r} mismatch "
+                f"({h5_embedding_dtype!r} != {expected[EMBEDDING_VECTOR_DTYPE_KEY]!r})"
+            )
+
+        h5_binary_prefilter = self._metadata_value_from_h5_attr(
+            h5_file.attrs.get(BINARY_PREFILTER_ENABLED_KEY)
+        )
+        if h5_binary_prefilter != expected[BINARY_PREFILTER_ENABLED_KEY]:
+            _fail(
+                f"HDF5 attr {BINARY_PREFILTER_ENABLED_KEY!r} mismatch "
+                f"({h5_binary_prefilter!r} != {expected[BINARY_PREFILTER_ENABLED_KEY]!r})"
+            )
+
+        target_dtype = _storage_dtype_for_precision(self.storage_precision)
+        if np.dtype(embeddings_dataset.dtype) != np.dtype(target_dtype):
+            _fail(
+                f"embeddings dataset dtype mismatch "
+                f"({embeddings_dataset.dtype} != {target_dtype})"
+            )
+
     def _reconcile_layout_metadata(self, conn: sqlite3.Connection) -> None:
         """Write metadata keys for active matrix-layout state.
 
@@ -954,7 +1104,10 @@ class EmbeddingCache:
                 return
 
         try:
-            with h5py.File(self.h5_path, "a") as h5:
+            with (
+                sqlite3.connect(self.db_path) as conn,
+                h5py.File(self.h5_path, "a") as h5,
+            ):
                 dataset = h5.get(EMBEDDINGS_DATASET_NAME)
                 if dataset is None or dataset.ndim != 2:
                     raise ValueError("incompatible embedding cache layout")
@@ -983,6 +1136,13 @@ class EmbeddingCache:
                             f"{ranges.shape} for embedding dim {embedding_dim}"
                         )
 
+                self._assert_runtime_cache_consistency(
+                    conn=conn,
+                    h5_file=h5,
+                    embeddings_dataset=dataset,
+                    fail_mode="repair",
+                )
+
                 binary_dataset = h5.get(BINARY_INDEX_DATASET_NAME)
                 if (
                     binary_dataset is not None
@@ -999,7 +1159,7 @@ class EmbeddingCache:
                     )
                     del h5[BINARY_INDEX_DATASET_NAME]
                 self._set_h5_attrs(h5)
-        except (OSError, ValueError):
+        except (OSError, ValueError, sqlite3.DatabaseError):
             logger.warning(
                 "Embedding cache %s is incompatible with current schema. "
                 "Clearing namespace cache and rebuilding.",
@@ -1078,6 +1238,7 @@ class EmbeddingCache:
         h5_file.attrs[H5_LAYOUT_KEY] = H5_LAYOUT_MATRIX_VERSION
         h5_file.attrs[STORAGE_PRECISION_KEY] = self.storage_precision
         h5_file.attrs[SOURCE_TORCH_DTYPE_KEY] = self.source_torch_dtype
+        h5_file.attrs[EMBEDDING_VECTOR_DTYPE_KEY] = self.embedding_vector_dtype
         h5_file.attrs[BINARY_PREFILTER_ENABLED_KEY] = int(self.binary_prefilter)
 
     def _load_existing_rows(

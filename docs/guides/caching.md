@@ -36,7 +36,7 @@ citemesh cache root
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
-Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + truncate dim + storage precision + binary prefilter mode + source dtype hint, so incompatible precision modes are isolated by design.
+Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + truncate dim + storage precision + effective binary prefilter mode, so behavior-affecting precision modes are isolated without splitting caches by inert runtime hints.
 
 ## Embedding Cache Behavior
 
@@ -54,6 +54,7 @@ SQLite stores metadata authority fields used for warm-cache retrieval:
 
 - `title`, `abstract`, `year`
 - `authors_json`, `categories_json`
+- runtime cache consistency keys (`storage_precision`, effective embedding vector dtype, binary-prefilter mode)
 - hydration metadata keys (`dataset source`, `split`, `corpus cap`, completion flag)
 - `model_fingerprint` (active model identity guard for namespace reuse)
 
