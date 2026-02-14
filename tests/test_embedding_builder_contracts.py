@@ -299,6 +299,47 @@ def test_embedding_cache_namespace_varies_by_storage_precision(
     )
 
 
+def test_embedding_cache_namespace_ignores_binary_prefilter_outside_int8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-int8 caches should not split namespace by binary prefilter toggles."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    f32_prefilter_on = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        binary_prefilter=True,
+        client=MagicMock(),
+    )
+    f32_prefilter_off = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        binary_prefilter=False,
+        client=MagicMock(),
+    )
+    int8_prefilter_on = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        binary_prefilter=True,
+        client=MagicMock(),
+    )
+    int8_prefilter_off = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        binary_prefilter=False,
+        client=MagicMock(),
+    )
+
+    assert (
+        f32_prefilter_on.embedding_cache.model_name
+        == f32_prefilter_off.embedding_cache.model_name
+    )
+    assert (
+        int8_prefilter_on.embedding_cache.model_name
+        != int8_prefilter_off.embedding_cache.model_name
+    )
+
+
 def test_embedding_model_revision_forwards_to_model_loader(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -379,9 +379,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self.truncate_dim is not None:
             parts.append(f"truncate_dim={self.truncate_dim}")
         parts.append(f"storage_precision={self.storage_precision}")
-        parts.append(f"binary_prefilter={int(self.binary_prefilter)}")
+        parts.append(f"binary_prefilter={int(self._cache_binary_prefilter_enabled())}")
         parts.append(f"source_dtype={self._source_dtype_hint}")
         return "::".join(parts)
+
+    def _cache_binary_prefilter_enabled(self) -> bool:
+        """Return whether binary-prefilter behavior is active for this cache namespace.
+
+        Only int8 caches can use binary-prefilter indexing, so non-int8 precisions
+        always map to ``False`` regardless of the configured flag.
+
+        :return bool: Effective binary-prefilter state for cache partitioning.
+        """
+        return self.storage_precision == "int8" and self.binary_prefilter
 
     def _resolve_source_dtype_hint(self) -> str:
         """Resolve source dtype token used in cache namespace metadata.
