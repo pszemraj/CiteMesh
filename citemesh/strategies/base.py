@@ -205,7 +205,7 @@ class GraphBuilderStrategy(ABC):
             logger.info(summary)
         else:
             logger.info("Collected %s papers", len(self.papers))
-        logger.info("Seed paper: %s...", seed_paper.title[:50])
+        logger.info("Seed paper: %s", seed_paper.title)
 
         # Step 2: Create graph with nodes
         graph = nx.Graph()

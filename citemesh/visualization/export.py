@@ -12,6 +12,7 @@ import html
 import json
 import logging
 import re
+import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
 
@@ -323,12 +324,19 @@ class GraphExporter:
             hovertext=hover_texts,
         )
 
-        title_text = self.graph.nodes[self.seed_id].get("title", "CiteMesh")[:50]
+        raw_title = " ".join(
+            str(self.graph.nodes[self.seed_id].get("title", "CiteMesh")).split()
+        )
+        title_text = "<br>".join(
+            textwrap.wrap(raw_title, width=72, break_long_words=False)
+        )
+        if not title_text:
+            title_text = "CiteMesh"
 
         fig = go.Figure(
             data=[edge_trace, node_trace],
             layout=go.Layout(
-                title=f"CiteMesh: {title_text}...",
+                title=f"CiteMesh: {title_text}",
                 showlegend=False,
                 hovermode="closest",
                 margin=dict(b=20, l=5, r=5, t=40),

@@ -27,6 +27,7 @@ from citemesh.visualization.render import (
     compute_layout,
     compute_node_colors,
     compute_node_sizes,
+    visualize_graph,
 )
 from citemesh.visualization.themes import get_theme
 
@@ -310,6 +311,57 @@ def test_exporter_plotly_with_fake_module(
     assert out_path.exists()
     node_trace = captured["data"][1]
     assert list(node_trace["text"]) == ["Related Paper", "Smith, 2020"]
+    layout = captured["layout"]
+    assert layout["title"] == "CiteMesh: Seed Paper"
+
+
+def test_visualize_graph_uses_full_seed_title_without_ellipsis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Static render title should retain full seed title text."""
+    graph = nx.Graph()
+    seed_title = "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents"
+    graph.add_node(
+        "seed",
+        title=seed_title,
+        year=2025,
+        authors=["Hanyu Lai"],
+        citation_count=15,
+        is_seed=True,
+    )
+    graph.add_node(
+        "related",
+        title="Related Paper",
+        year=2024,
+        authors=["Example Author"],
+        citation_count=3,
+        is_seed=False,
+    )
+    graph.add_edge("seed", "related", weight=0.8)
+
+    captured: dict[str, str] = {}
+    import matplotlib.axes
+
+    original_set_title = matplotlib.axes.Axes.set_title
+
+    def capture_title(self: Any, label: str, *args: Any, **kwargs: Any) -> Any:
+        captured["title"] = label
+        return original_set_title(self, label, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_title", capture_title)
+
+    visualize_graph(
+        graph,
+        "seed",
+        tmp_path / "graph.png",
+        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+    )
+
+    assert "..." not in captured["title"]
+    assert (
+        "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents"
+        in captured["title"].replace("\n", " ")
+    )
 
 
 def test_exporter_plotly_requires_div_id_support(

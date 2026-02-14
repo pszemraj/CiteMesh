@@ -234,7 +234,10 @@ def _build_strategy_graph(
 
 
 def resolve_output_paths(
-    base_output_path: Path, selected_formats: List[str], explicit_output: bool
+    base_output_path: Path,
+    selected_formats: List[str],
+    explicit_output: bool,
+    strategy: str,
 ) -> Dict[str, Path]:
     """
     Resolve final output paths for selected export formats.
@@ -242,6 +245,7 @@ def resolve_output_paths(
     :param Path base_output_path: Path provided by the user or auto-generated filename.
     :param List[str] selected_formats: Export formats selected for this run.
     :param bool explicit_output: True when the user provided ``--output``.
+    :param str strategy: Active strategy name used for multi-format directory outputs.
     :return Dict[str, Path]: Mapping of export format -> resolved output path.
     """
     base_str = str(base_output_path)
@@ -251,6 +255,17 @@ def resolve_output_paths(
     )
 
     output_paths: Dict[str, Path] = {}
+    if explicit_output and len(selected_formats) > 1:
+        output_dir = (
+            Path(base_str[: -len(matched_suffix)])
+            if matched_suffix
+            else base_output_path
+        )
+        basename = strategy or "graph"
+        for fmt in selected_formats:
+            output_paths[fmt] = output_dir / f"{basename}{EXPORT_EXTENSIONS[fmt]}"
+        return output_paths
+
     if explicit_output and len(selected_formats) == 1:
         fmt = selected_formats[0]
         desired_ext = EXPORT_EXTENSIONS[fmt]
@@ -494,7 +509,10 @@ Examples:
         "-o",
         type=str,
         default=None,
-        help="Base output path used for selected export formats (auto-named if not specified)",
+        help=(
+            "Output file path for single export, or output directory base for "
+            "multi-export runs (auto-named if not specified)"
+        ),
     )
 
     build_parser.add_argument(
@@ -767,10 +785,6 @@ Examples:
                     graph, seed_id, strategy=args.strategy
                 )
 
-            output_dir = base_output_path.parent
-            if output_dir and not output_dir.exists():
-                output_dir.mkdir(parents=True, exist_ok=True)
-
             selected_formats = (
                 list(EXPORT_FORMATS) if args.export == "all" else [args.export]
             )
@@ -778,7 +792,11 @@ Examples:
                 base_output_path=base_output_path,
                 selected_formats=selected_formats,
                 explicit_output=bool(args.output),
+                strategy=args.strategy,
             )
+            for parent in {path.parent for path in output_paths.values()}:
+                if parent and not parent.exists():
+                    parent.mkdir(parents=True, exist_ok=True)
 
             # Visualize / export
             logger.info("Creating visualization...")
@@ -865,7 +883,7 @@ Examples:
             table.add_column("#", style="dim", width=3)
             # Keep full IDs copyable for direct use in `citemesh build`.
             table.add_column("ID", style="cyan", overflow="fold")
-            table.add_column("Title", max_width=50)
+            table.add_column("Title", overflow="fold")
             table.add_column("Year", justify="right", width=6)
             table.add_column("Citations", justify="right", width=10)
             table.add_column("Authors", max_width=30)
@@ -878,7 +896,7 @@ Examples:
                 table.add_row(
                     str(i),
                     paper.paper_id,
-                    paper.title[:48] + "..." if len(paper.title) > 48 else paper.title,
+                    paper.title,
                     str(paper.year) if paper.year is not None else "",
                     f"{paper.citation_count:,}",
                     authors_str,

@@ -99,7 +99,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         if self.fetch_references and seed.references:
             self.reference_cache[seed.paper_id] = seed.references
 
-        logger.info(f"Seed: {seed.title[:50]}...")
+        logger.info("Seed: %s", seed.title)
 
         # Step 2: Fetch references (older papers)
         logger.info(f"Fetching up to {self.max_references} references...")

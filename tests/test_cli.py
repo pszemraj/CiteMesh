@@ -511,9 +511,9 @@ def test_resolve_output_paths_contract() -> None:
             ["png", "html", "json"],
             True,
             {
-                "png": Path("out/arxiv-2508.14040-example.png"),
-                "html": Path("out/arxiv-2508.14040-example.html"),
-                "json": Path("out/arxiv-2508.14040-example.json"),
+                "png": Path("out/arxiv-2508.14040-example/hybrid.png"),
+                "html": Path("out/arxiv-2508.14040-example/hybrid.html"),
+                "json": Path("out/arxiv-2508.14040-example/hybrid.json"),
             },
         ),
         (
@@ -534,6 +534,7 @@ def test_resolve_output_paths_contract() -> None:
             base_output_path=base_output_path,
             selected_formats=formats,
             explicit_output=explicit_output,
+            strategy="hybrid",
         )
         assert paths == expected
 
@@ -545,8 +546,8 @@ def test_canonicalize_paper_id_for_metadata_normalizes_urls() -> None:
             assert canonicalize_paper_id_for_metadata(raw_id) == expected
 
 
-def test_generate_output_path_includes_seed_suffix_for_collision_safety() -> None:
-    """Same title with different seeds should produce unique output directories."""
+def test_generate_output_path_reuses_title_directory_without_hash_suffix() -> None:
+    """Same title should map to a stable title-only output directory."""
     graph = nx.Graph()
     graph.add_node("seed-a", title="A Survey of Transformers")
     graph.add_node("seed-b", title="A Survey of Transformers")
@@ -554,9 +555,20 @@ def test_generate_output_path_includes_seed_suffix_for_collision_safety() -> Non
     path_a = generate_output_path(graph, seed_id="seed-a", output_dir=Path("out"))
     path_b = generate_output_path(graph, seed_id="seed-b", output_dir=Path("out"))
 
-    assert path_a.parent != path_b.parent
-    assert path_a.parent.name.startswith("a-survey-of-transformers-")
-    assert path_b.parent.name.startswith("a-survey-of-transformers-")
+    assert path_a.parent == path_b.parent
+    assert path_a.parent.name == "a-survey-of-transformers"
+
+
+def test_generate_output_path_slug_length_is_capped_at_40_chars() -> None:
+    """Auto output directory slug should be capped to 40 characters."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="This title should definitely exceed forty characters for the slug",
+    )
+
+    output_path = generate_output_path(graph, seed_id="seed", output_dir=Path("out"))
+    assert len(output_path.parent.name) <= 40
 
 
 def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
