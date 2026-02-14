@@ -21,6 +21,7 @@ This page is the canonical map of documentation ownership.
 | Cache paths/layout, hydration/invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
 | Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |
 | Historical changes and release notes | [Internals: Changelog](internals/changelog.md) |
+| Developer backlog notes (non-normative) | [Developer Notes](dev.md) |
 
 ## Internal Docs Rule
 
