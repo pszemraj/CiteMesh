@@ -402,6 +402,47 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
         assert token in result.stderr
 
 
+def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid should accept embedding options when default semantic budget is non-zero."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--model",
+                "all-MiniLM-L6-v2",
+                "--dataset-split",
+                "train",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ]
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert (
+        "Hybrid semantic branch is disabled with --max-semantic 0" not in result.stderr
+    )
+
+
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build path should share seeded layout and skip it for JSON-only export."""
     graph = nx.Graph()

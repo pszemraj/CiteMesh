@@ -28,7 +28,7 @@ from citemesh.services import get_client
 from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
-from citemesh.strategies.hybrid import HybridGraphBuilder
+from citemesh.strategies.hybrid import DEFAULT_MAX_SEMANTIC, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.visualization import (
     GraphExporter,
@@ -438,7 +438,15 @@ def _validate_build_cli_contract(
             build_parser.error(
                 "--max-semantic must be between 0 and --max-papers - 1 for hybrid."
             )
-        if int(args.max_semantic or 0) == 0:
+        if args.max_semantic is None:
+            resolved_max_semantic = max(
+                0,
+                min(int(DEFAULT_MAX_SEMANTIC), int(args.max_papers) - 1),
+            )
+        else:
+            resolved_max_semantic = int(args.max_semantic)
+
+        if resolved_max_semantic == 0:
             ignored_embedding_options = sorted(
                 _BUILD_OPTION_PRIMARY_FLAG[dest]
                 for dest in provided
@@ -446,10 +454,17 @@ def _validate_build_cli_contract(
             )
             if ignored_embedding_options:
                 option_text = ", ".join(ignored_embedding_options)
-                build_parser.error(
-                    "Hybrid semantic branch is disabled with --max-semantic 0; "
-                    f"remove embedding-only option(s): {option_text}."
-                )
+                if args.max_semantic is None:
+                    build_parser.error(
+                        "Hybrid semantic branch is disabled (effective --max-semantic "
+                        "is 0 from --max-papers defaulting); remove embedding-only "
+                        f"option(s): {option_text}."
+                    )
+                else:
+                    build_parser.error(
+                        "Hybrid semantic branch is disabled with --max-semantic 0; "
+                        f"remove embedding-only option(s): {option_text}."
+                    )
 
 
 def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
