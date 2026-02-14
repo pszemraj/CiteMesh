@@ -7,55 +7,310 @@ to find conceptually similar papers without relying on citations.
 
 import heapq
 import logging
+import re
 import sys
-from typing import Dict, List, Optional, Tuple
+from contextlib import nullcontext
+from hashlib import sha1
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import networkx as nx
 import numpy as np
-from datasets import load_dataset
 from joblib import Memory
-from sentence_transformers import SentenceTransformer
 from tqdm.auto import tqdm
 
 from citemesh.core import EMBEDDING_CONFIG, Author, Paper
 from citemesh.data import EmbeddingCache, get_cache_dir, get_embedding_model_profile
-from citemesh.services import get_client
-from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.services import SemanticScholarClient, get_client
+from citemesh.strategies.base import (
+    GraphBuilderStrategy,
+    deterministic_sort_key,
+    select_capped_undirected_edges,
+)
 
 logger = logging.getLogger(__name__)
 
 # Set up joblib cache in the user cache directory
-memory = Memory(str(get_cache_dir("joblib")), verbose=0)
+_memory: Optional[Memory] = None
+
+
+def _get_memory() -> Memory:
+    """Get or create the joblib cache lazily.
+
+    :return Memory: Shared joblib cache object for expensive dataset operations.
+    """
+    global _memory
+    if _memory is None:
+        _memory = Memory(str(get_cache_dir("joblib")), verbose=0)
+    return _memory
+
+
+def _check_embedding_deps() -> None:
+    """Verify embedding dependencies are installed."""
+    missing: list[str] = []
+
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        missing.append("torch")
+
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError:
+        missing.append("sentence-transformers")
+
+    try:
+        import datasets  # noqa: F401
+    except ImportError:
+        missing.append("datasets")
+
+    if missing:
+        raise ImportError(
+            f"Embedding strategy requires: {', '.join(missing)}. "
+            f"Install with: pip install citemesh[embeddings]"
+        )
+
 
 STREAMING_BATCH_SIZE = 32
 CANDIDATE_MULTIPLIER = 4
+ARXIV_DATASET_CANDIDATES = (
+    "librarian-bots/arxiv-metadata-snapshot",
+    "CShorten/ML-ArXiv-Papers",
+    "gfissore/arxiv-abstracts-2021",
+)
+ARXIV_IDENTIFIER_PATTERN = re.compile(
+    r"^(?:arxiv:)?((?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z\-]+)?/\d{7})(?:v\d+)?)$",
+    re.IGNORECASE,
+)
 
 
-@memory.cache
+def _canonicalize_embedding_paper_id(raw_id: Any) -> str:
+    """Canonicalize arXiv-like identifiers for downstream lookups.
+
+    :param Any raw_id: Raw dataset record identifier.
+    :return str: Canonicalized identifier.
+    """
+    text = str(raw_id).strip() if raw_id is not None else ""
+    if not text:
+        return ""
+
+    if text.startswith("arxiv_"):
+        return text
+
+    match = ARXIV_IDENTIFIER_PATTERN.match(text)
+    if not match:
+        return text
+
+    normalized = re.sub(r"v\d+$", "", match.group(1), flags=re.IGNORECASE)
+    return f"arxiv:{normalized}"
+
+
+def _query_seed_id(query_text: str) -> str:
+    """Build deterministic query-mode seed node identifier.
+
+    :param str query_text: Raw user query text.
+    :return str: Stable hashed query seed identifier.
+    """
+    digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
+    return f"query:{digest}"
+
+
+def _stream_heap_key(
+    similarity: float, paper_id: str, stable_index: int
+) -> Tuple[float, Tuple[int, ...], int]:
+    """Build total-order key for streaming candidate heap ranking.
+
+    :param float similarity: Similarity score for candidate paper.
+    :param str paper_id: Candidate paper identifier.
+    :param int stable_index: Stable iteration index used as final tie-breaker.
+    :return Tuple[float, Tuple[int, ...], int]: Comparable heap key tuple.
+    """
+    # Invert char ordinals so lexicographically smaller IDs compare as "better"
+    # when similarity ties, without relying on heterogeneous direct comparisons.
+    paper_key = tuple([-ord(ch) for ch in str(paper_id)] + [1])
+    return (
+        float(similarity),
+        paper_key,
+        -int(stable_index),
+    )
+
+
+class _AutocastEncodeProxy:
+    """Wrap model encode calls in a precision context manager."""
+
+    def __init__(self, model: Any, context_factory: Callable[[], Any]):
+        """Create a model proxy for encode-time autocast.
+
+        :param Any model: Wrapped model object exposing ``encode``.
+        :param Callable[[], Any] context_factory: Callable returning a context manager.
+        """
+        self._model = model
+        self._context_factory = context_factory
+
+    def encode(self, *args: Any, **kwargs: Any) -> Any:
+        """Run ``encode`` within the configured context manager.
+
+        :param Any args: Positional arguments forwarded to ``encode``.
+        :param Any kwargs: Keyword arguments forwarded to ``encode``.
+        :return Any: Model ``encode`` return value.
+        """
+        with self._context_factory():
+            return self._model.encode(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate unknown attributes to the wrapped model.
+
+        :param str name: Attribute name.
+        :return Any: Delegated attribute value.
+        """
+        return getattr(self._model, name)
+
+
+def _parse_year(paper: Dict[str, Any]) -> Optional[int]:
+    """Extract publication year from dataset metadata.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :return Optional[int]: Parsed year or ``None`` if missing/invalid.
+    """
+    if paper.get("year"):
+        try:
+            return int(paper["year"])
+        except (TypeError, ValueError):
+            pass
+
+    update_date = paper.get("update_date")
+    if update_date:
+        try:
+            return int(str(update_date)[:4])
+        except (TypeError, ValueError):
+            pass
+
+    return None
+
+
+def _parse_authors(authors_data: Any) -> List[str]:
+    """Normalize author metadata to a list of names.
+
+    :param Any authors_data: Raw ``authors`` field from dataset.
+    :return List[str]: Author names.
+    """
+    if isinstance(authors_data, str):
+        return [name.strip() for name in authors_data.split(",") if name.strip()]
+
+    if isinstance(authors_data, list):
+        author_names: List[str] = []
+        for author in authors_data:
+            if isinstance(author, str):
+                normalized = author.strip()
+                if normalized:
+                    author_names.append(normalized)
+                continue
+
+            if isinstance(author, dict):
+                name = author.get("name")
+                if isinstance(name, str):
+                    normalized = name.strip()
+                    if normalized:
+                        author_names.append(normalized)
+        return author_names
+
+    return []
+
+
+def _parse_categories(categories_data: Any) -> List[str]:
+    """Normalize category metadata to a list of arXiv category codes.
+
+    :param Any categories_data: Raw ``categories`` field from dataset.
+    :return List[str]: Category code list.
+    """
+    if isinstance(categories_data, str):
+        normalized = categories_data.replace(",", " ")
+        return [category.strip() for category in normalized.split() if category.strip()]
+
+    if isinstance(categories_data, list):
+        categories: List[str] = []
+        for raw_value in categories_data:
+            if isinstance(raw_value, str):
+                normalized = raw_value.replace(",", " ")
+                categories.extend(
+                    [
+                        category.strip()
+                        for category in normalized.split()
+                        if category.strip()
+                    ]
+                )
+        return categories
+
+    return []
+
+
+def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) -> Dict:
+    """Normalize a raw dataset record to embedding metadata fields.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :param int fallback_index: Index used for synthetic IDs when missing.
+    :return Dict: Normalized metadata used by embedding selection.
+    """
+    raw_paper_id = (
+        paper.get("id")
+        or paper.get("paper_id")
+        or paper.get("paperId")
+        or f"arxiv_{fallback_index}"
+    )
+    paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
+    title = paper.get("title", "Unknown")
+    if not isinstance(title, str) or not title.strip():
+        title = "Unknown"
+    abstract = paper.get("abstract", paper.get("summary", ""))
+    if not isinstance(abstract, str):
+        abstract = ""
+
+    return {
+        "paper_id": paper_id,
+        "title": title,
+        "abstract": abstract,
+        "year": _parse_year(paper),
+        "authors": _parse_authors(paper.get("authors", [])),
+        "categories": _parse_categories(paper.get("categories", [])),
+    }
+
+
 def load_arxiv_dataset_cached(
     dataset_split: str, max_papers: Optional[int]
 ) -> Dict[str, Dict]:
     """
     Load and cache ArXiv dataset.
 
-    Args:
-        dataset_split: Dataset split (e.g., "train[:2%]")
-        max_papers: Maximum papers to load
-
-    Returns:
-        Dictionary mapping paper IDs to paper data
+    :param str dataset_split: Dataset split (e.g., "train[:2%]")
+    :param Optional[int] max_papers: Maximum papers to load
+    :return Dict[str, Dict]: Dictionary mapping paper IDs to paper data
     """
     papers = {}
 
-    try:
-        dataset = load_dataset("CShorten/ML-ArXiv-Papers", split=dataset_split)
-        logger.info(f"Loaded ML-ArXiv-Papers dataset (split: {dataset_split})")
-    except Exception:
+    from datasets import load_dataset
+
+    dataset = None
+    last_error: Optional[Exception] = None
+    for dataset_name in ARXIV_DATASET_CANDIDATES:
         try:
-            dataset = load_dataset("gfissore/arxiv-abstracts-2021", split=dataset_split)
-            logger.info(f"Loaded arxiv-abstracts-2021 dataset (split: {dataset_split})")
-        except Exception as e:
-            logger.warning(f"Could not load ArXiv dataset: {e}")
-            return papers
+            dataset = load_dataset(dataset_name, split=dataset_split)
+            logger.info(f"Loaded {dataset_name} dataset (split: {dataset_split})")
+            break
+        except Exception as exc:  # pragma: no cover - network/source dependent
+            last_error = exc
+            logger.warning(
+                "Could not load dataset %s: %s. Trying fallback.",
+                dataset_name,
+                exc,
+            )
+
+    if dataset is None:
+        logger.warning(
+            "Could not load any ArXiv dataset for split %s. Returning empty corpus.",
+            dataset_split,
+        )
+        if last_error is not None:
+            logger.debug("Last dataset error: %s", last_error)
+        return papers
 
     for i, paper in enumerate(
         tqdm(dataset, desc="Loading ArXiv papers", total=max_papers or len(dataset))
@@ -63,32 +318,24 @@ def load_arxiv_dataset_cached(
         if max_papers and i >= max_papers:
             break
 
-        paper_id = paper.get("id", paper.get("paper_id", f"arxiv_{i}"))
-
-        # Extract year
-        year = 2020
-        if "year" in paper and paper["year"]:
-            year = int(paper["year"])
-        elif "update_date" in paper:
-            try:
-                year = int(paper["update_date"][:4])
-            except (ValueError, IndexError):
-                pass
-
-        # Extract authors
-        authors_data = paper.get("authors", [])
-        if isinstance(authors_data, str):
-            authors_data = [authors_data]
-
-        papers[paper_id] = {
-            "title": paper.get("title", "Unknown"),
-            "abstract": paper.get("abstract", paper.get("summary", "")),
-            "year": year,
-            "authors": authors_data,
-            "categories": paper.get("categories", []),
-        }
+        metadata = _extract_dataset_paper_metadata(paper, i)
+        paper_id = metadata.pop("paper_id")
+        papers[paper_id] = metadata
 
     return papers
+
+
+def get_arxiv_dataset_cached(
+    dataset_split: str, max_papers: Optional[int]
+) -> Dict[str, Dict]:
+    """Apply joblib caching to dataset loading.
+
+    :param str dataset_split: HuggingFace split expression (e.g. ``train[:2%]``).
+    :param Optional[int] max_papers: Optional paper cap for corpus sampling.
+    :return Dict[str, Dict]: Cached dataset mapping paper ID to metadata.
+    """
+    cache = _get_memory()
+    return cache.cache(load_arxiv_dataset_cached)(dataset_split, max_papers)
 
 
 class EmbeddingGraphBuilder(GraphBuilderStrategy):
@@ -106,69 +353,383 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self,
         max_papers: int = 40,
         model_name: str = "google/embeddinggemma-300m",
-        dataset_split: str = "train",  # Full training set by default (~117k papers)
-        corpus_size: Optional[int] = None,
+        dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
+        corpus_size: Optional[int] = 50000,
+        truncate_dim: Optional[int] = None,
         top_k: int = 2,
-        random_seed: int = None,
+        random_seed: Optional[int] = None,
         use_streaming: bool = False,
+        force_rebuild_cache: bool = False,
+        client: Optional[SemanticScholarClient] = None,
     ):
         """
         Initialize embedding graph builder.
 
-        Args:
-            max_papers: Maximum papers in final graph
-            model_name: Sentence transformer model name
-            dataset_split: HuggingFace dataset split
-            corpus_size: Maximum papers to load from corpus (None = all in split)
-            top_k: Number of most similar neighbors per node
-            random_seed: Random seed for reproducibility
-            use_streaming: Whether to stream the HuggingFace dataset instead of loading it
+        :param int max_papers: Maximum papers in final graph
+        :param str model_name: Sentence transformer model name
+        :param str dataset_split: HuggingFace dataset split
+        :param Optional[int] corpus_size: Maximum papers to load from corpus (``None`` = all in split)
+        :param Optional[int] truncate_dim: Optional embedding truncation dimension. If ``None``,
+            uses profile defaults (e.g. EmbeddingGemma defaults to 256d MRL).
+        :param int top_k: Number of most similar neighbors per node
+        :param Optional[int] random_seed: Random seed for reproducibility
+        :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
+        :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
+        :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
+        _check_embedding_deps()
+        if top_k < 1:
+            raise ValueError("top_k must be at least 1")
         super().__init__(max_papers, random_seed)
         self.model_name = model_name
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size
+        self.model_profile = get_embedding_model_profile(model_name)
+        self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
         self.top_k = top_k
-        self.model: Optional[SentenceTransformer] = None
+        self.model = None
         self.arxiv_corpus: Dict[str, Dict] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
-        self.client = get_client()
-        self.embedding_cache = EmbeddingCache(model_name=model_name)
+        self.client = client or get_client()
+        self.embedding_cache = EmbeddingCache(
+            model_name=self._embedding_cache_namespace()
+        )
+        if force_rebuild_cache:
+            logger.info("Forcing embedding cache rebuild as requested.")
+            self.embedding_cache.clear()
         self.use_streaming = use_streaming
-        self.model_profile = get_embedding_model_profile(model_name)
+        if self.use_streaming and ":" in self.dataset_split:
+            raise ValueError(
+                "Streaming mode does not support sliced dataset splits such as "
+                f"'{self.dataset_split}'. Use --dataset-split train with "
+                "--corpus-size to cap runtime, or disable --streaming."
+            )
         self._profile_logged = False
+        self._dim_logged = False
+        self._autocast_dtype: Optional[Any] = None
+        self._autocast_device_type: Optional[str] = None
+        self._autocast_enabled = False
+        self._encode_model: Optional[Any] = None
+        self._inner_model_compiled = False
 
-    def _load_model(self):
-        """Lazy load sentence transformer model."""
-        if self.model is None:
-            logger.info(f"Loading embedding model: {self.model_name}")
-            self.model = SentenceTransformer(self.model_name)
-            if not self.model_profile.float16_supported:
+    def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
+        """Resolve effective embedding dimension from request + model profile defaults.
+
+        :param Optional[int] requested_dim: Requested truncate dimension from caller.
+        :return Optional[int]: Effective truncate dimension or ``None`` for full embeddings.
+        :raises ValueError: If dimension is invalid for the selected model profile.
+        """
+        if requested_dim is not None and requested_dim < 1:
+            raise ValueError("truncate_dim must be at least 1 when provided")
+
+        available_dims = self.model_profile.available_truncate_dims
+        if requested_dim is None:
+            return self.model_profile.recommended_truncate_dim
+
+        if available_dims and requested_dim not in available_dims:
+            formatted = ", ".join(str(dim) for dim in available_dims)
+            raise ValueError(
+                f"truncate_dim={requested_dim} is not supported for {self.model_name}. "
+                f"Expected one of: {formatted}"
+            )
+        return requested_dim
+
+    def _embedding_cache_namespace(self) -> str:
+        """Build cache namespace key for the active model + embedding dimension.
+
+        :return str: Namespace key used for embedding cache partitioning.
+        """
+        if self.truncate_dim is None:
+            return self.model_name
+        return f"{self.model_name}::truncate_dim={self.truncate_dim}"
+
+    def _log_dimension_policy(self) -> None:
+        """Emit one-time info log for active embedding dimensionality."""
+        if self._dim_logged:
+            return
+
+        available_dims = self.model_profile.available_truncate_dims
+        if available_dims:
+            selected_dim = (
+                self.truncate_dim
+                if self.truncate_dim is not None
+                else available_dims[0]
+            )
+            available_text = ", ".join(f"{dim}d" for dim in available_dims)
+            recommended_dim = self.model_profile.recommended_truncate_dim
+            if recommended_dim is not None:
                 logger.info(
-                    f"{self.model_name} does not support float16 activations; defaulting to float32."
+                    "%s embedding dimension: using %sd (recommended: %sd; available: %s).",
+                    self.model_name,
+                    selected_dim,
+                    recommended_dim,
+                    available_text,
                 )
+            else:
+                logger.info(
+                    "%s embedding dimension: using %sd (available: %s).",
+                    self.model_name,
+                    selected_dim,
+                    available_text,
+                )
+            self._dim_logged = True
+            return
+
+        if self.truncate_dim is not None:
+            logger.info(
+                "%s embedding dimension: using truncate_dim=%sd.",
+                self.model_name,
+                self.truncate_dim,
+            )
+            self._dim_logged = True
+
+    def _reset_precision_runtime(self) -> None:
+        """Clear runtime precision/autocast state."""
+        self._autocast_dtype = None
+        self._autocast_device_type = None
+        self._autocast_enabled = False
+        self._encode_model = None
+
+    def _resolve_model_kwargs(self) -> Dict[str, Any]:
+        """Compute SentenceTransformer kwargs for model precision policy.
+
+        :return Dict[str, Any]: ``SentenceTransformer`` constructor kwargs.
+        """
+        self._reset_precision_runtime()
+        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
+        if preferred_dtype != "bfloat16":
+            return {}
+
+        try:
+            import torch
+        except ImportError:
+            logger.warning(
+                "%s prefers bfloat16, but torch is unavailable; using float32.",
+                self.model_name,
+            )
+            return {}
+
+        if not torch.cuda.is_available():
+            logger.info(
+                "%s prefers bfloat16, but CUDA is unavailable; using float32.",
+                self.model_name,
+            )
+            return {}
+
+        bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
+        if not bf16_supported:
+            logger.info(
+                "%s prefers bfloat16, but CUDA bfloat16 is unsupported; using float32.",
+                self.model_name,
+            )
+            return {}
+
+        self._autocast_dtype = torch.bfloat16
+        self._autocast_device_type = "cuda"
+        self._autocast_enabled = bool(self.model_profile.use_cuda_autocast)
+
+        if self._autocast_enabled:
+            logger.info(
+                "%s will run with torch_dtype=bfloat16 and CUDA autocast.",
+                self.model_name,
+            )
+        else:
+            logger.info("%s will run with torch_dtype=bfloat16.", self.model_name)
+
+        return {"torch_dtype": torch.bfloat16}
+
+    def _autocast_context(self) -> Any:
+        """Return autocast context for model encoding.
+
+        :return Any: Active autocast context manager or no-op context.
+        """
+        if (
+            not self._autocast_enabled
+            or self._autocast_dtype is None
+            or self._autocast_device_type is None
+        ):
+            return nullcontext()
+
+        try:
+            import torch
+        except ImportError:
+            return nullcontext()
+
+        return torch.autocast(
+            device_type=self._autocast_device_type,
+            dtype=self._autocast_dtype,
+        )
+
+    def _get_model_for_encoding(self) -> Any:
+        """Return model object used for embedding encode calls.
+
+        :return Any: Base model or autocast-enabled proxy.
+        """
+        if self.model is None:
+            raise RuntimeError("Embedding model is not loaded.")
+
+        if not self._autocast_enabled:
+            return self.model
+
+        if self._encode_model is None:
+            self._encode_model = _AutocastEncodeProxy(
+                self.model, self._autocast_context
+            )
+
+        return self._encode_model
+
+    def _encode_texts(
+        self,
+        texts: List[str],
+        batch_size: Optional[int] = None,
+        show_progress_bar: bool = False,
+    ) -> np.ndarray:
+        """Encode text inputs and return normalized float32 embeddings.
+
+        :param List[str] texts: Text payload(s) to encode.
+        :param Optional[int] batch_size: Optional batch size override.
+        :param bool show_progress_bar: Whether to display encoding progress.
+        :return np.ndarray: Embeddings with shape ``(len(texts), dim)``.
+        """
+        encode_model = self._get_model_for_encoding()
+
+        encode_kwargs: Dict[str, Any] = {
+            "convert_to_tensor": False,
+            "normalize_embeddings": True,
+            "show_progress_bar": show_progress_bar,
+        }
+        if batch_size is not None:
+            encode_kwargs["batch_size"] = batch_size
+
+        embeddings = encode_model.encode(texts, **encode_kwargs)
+        return np.asarray(embeddings, dtype=np.float32)
+
+    def _load_model(self) -> None:
+        """Lazy load sentence transformer model.
+
+        :return None: Model is initialized in-place on first access.
+        """
+        if self.model is None:
+            from sentence_transformers import SentenceTransformer
+
+            logger.info(f"Loading embedding model: {self.model_name}")
+            model_kwargs = self._resolve_model_kwargs()
+            st_kwargs: Dict[str, Any] = {}
+            if model_kwargs:
+                st_kwargs["model_kwargs"] = model_kwargs
+            if self.truncate_dim is not None:
+                st_kwargs["truncate_dim"] = self.truncate_dim
+
+            if st_kwargs:
+                self.model = SentenceTransformer(self.model_name, **st_kwargs)
+            else:
+                self.model = SentenceTransformer(self.model_name)
+
+            self._maybe_compile_inner_transformer()
+
+            if (
+                not self.model_profile.float16_supported
+                and not model_kwargs
+                and not self.model_profile.preferred_torch_dtype
+            ):
+                logger.info(
+                    "%s does not support float16 activations; using float32.",
+                    self.model_name,
+                )
+            self._log_dimension_policy()
             if self.model_profile.notes and not self._profile_logged:
                 logger.info(self.model_profile.notes)
                 self._profile_logged = True
 
-    def _load_corpus(self):
-        """Load ArXiv corpus if not already loaded."""
+    def _maybe_compile_inner_transformer(self) -> None:
+        """Best-effort compile of the wrapped HF model for selected profiles.
+
+        SentenceTransformer itself is not compiled due wrapper incompatibilities.
+        For supported profiles (currently EmbeddingGemma), we compile only
+        ``model[0].auto_model`` and keep the outer SentenceTransformer intact.
+
+        :return None: Mutates ``self.model`` in place when compilation succeeds.
+        """
+        if self.model is None or self._inner_model_compiled:
+            return
+
+        if not self.model_profile.compile_inner_transformer:
+            return
+
+        try:
+            import torch
+        except ImportError:
+            logger.info(
+                "%s profile supports inner-model torch.compile, but torch is unavailable.",
+                self.model_name,
+            )
+            return
+
+        compile_fn = getattr(torch, "compile", None)
+        if not callable(compile_fn):
+            logger.info(
+                "%s profile supports inner-model torch.compile, but torch.compile is unavailable.",
+                self.model_name,
+            )
+            return
+
+        try:
+            transformer_block = self.model[0]
+        except Exception as exc:  # pragma: no cover - defensive for upstream API drift
+            logger.warning(
+                "Skipping torch.compile for %s: could not access model[0] (%s).",
+                self.model_name,
+                exc,
+            )
+            return
+
+        auto_model = getattr(transformer_block, "auto_model", None)
+        if auto_model is None:
+            logger.warning(
+                "Skipping torch.compile for %s: model[0].auto_model is unavailable.",
+                self.model_name,
+            )
+            return
+
+        if auto_model.__class__.__name__ == "OptimizedModule":
+            self._inner_model_compiled = True
+            return
+
+        try:
+            transformer_block.auto_model = compile_fn(auto_model)
+        except Exception as exc:
+            logger.warning(
+                "torch.compile failed for %s inner transformer; continuing without compile: %s",
+                self.model_name,
+                exc,
+            )
+            return
+
+        self._inner_model_compiled = True
+        logger.info(
+            "Enabled torch.compile for %s inner transformer (model[0].auto_model).",
+            self.model_name,
+        )
+
+    def _load_corpus(self) -> None:
+        """Load ArXiv corpus if not already loaded.
+
+        :return None: Corpus is populated in-place on first access.
+        """
         if not self.arxiv_corpus:
             logger.info(f"Loading ArXiv corpus (split: {self.dataset_split})...")
-            self.arxiv_corpus = load_arxiv_dataset_cached(
+            self.arxiv_corpus = get_arxiv_dataset_cached(
                 self.dataset_split, self.corpus_size
             )
             logger.info(f"Corpus loaded: {len(self.arxiv_corpus)} papers")
 
-    def collect_papers(self, seed_id: str, **kwargs) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
 
-        Args:
-            seed_id: Seed paper identifier (ArXiv ID or text query)
-
-        Returns:
-            Dictionary of paper_id -> Paper objects
+        :param str seed_id: Seed paper identifier (ArXiv ID or text query)
+        :param Any kwargs: Strategy-specific options (currently unused).
+        :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         papers: Dict[str, Paper] = {}
         self.embeddings = {}
@@ -198,27 +759,25 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             logger.info(f"Using '{seed_id}' as text query")
             seed_text = seed_id
             # Create dummy seed paper
-            seed_paper = Paper(paper_id="query", title=seed_id, year=2020, is_seed=True)
-            papers["query"] = seed_paper
+            query_seed = _query_seed_id(seed_id)
+            seed_paper = Paper(
+                paper_id=query_seed,
+                title=seed_id,
+                year=None,
+                is_seed=True,
+            )
+            papers[query_seed] = seed_paper
             seed_metadata = {"title": seed_id, "abstract": ""}
 
         # Compute normalized seed embedding
         logger.info("Computing seed embedding...")
         formatted_seed_text = self.model_profile.format_query(seed_text, seed_metadata)
-        seed_embedding = self.model.encode(
-            [formatted_seed_text],
-            convert_to_tensor=False,
-            normalize_embeddings=True,
-            show_progress_bar=False,
+        seed_embedding = self._encode_texts(
+            [formatted_seed_text], show_progress_bar=False
         )[0]
         self.embeddings[seed_paper.paper_id] = seed_embedding
 
-        # Decide whether to use streaming based on split and corpus_size
-        use_streaming = (
-            self.use_streaming
-            and ":" not in self.dataset_split
-            and self.corpus_size is None
-        )
+        use_streaming = self.use_streaming
 
         if use_streaming:
             logger.info(
@@ -229,9 +788,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._load_corpus()
             candidates = self._select_candidates_from_loaded(seed_embedding)
 
-        # Convert candidates to Paper objects
-        added = 0
+        # Convert candidates to Paper objects while respecting max_papers total.
         for paper_id, metadata, embedding in candidates:
+            if len(papers) >= self.max_papers:
+                break
             if paper_id in papers:
                 continue
 
@@ -240,7 +800,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             paper = Paper(
                 paper_id=paper_id,
                 title=metadata.get("title", "Unknown"),
-                year=metadata.get("year", 2020),
+                year=metadata.get("year"),
                 authors=authors,
                 abstract=metadata.get("abstract", ""),
                 categories=metadata.get("categories", []),
@@ -251,10 +811,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             papers[paper_id] = paper
             self.embeddings[paper_id] = embedding
 
-            added += 1
-            if added >= self.max_papers:
-                break
-
         self._update_citation_counts(papers)
         return papers
 
@@ -264,23 +820,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Select top candidates from an in-memory corpus.
 
-        Args:
-            seed_embedding: Normalized seed embedding vector
-
-        Returns:
-            List of (paper_id, metadata, embedding) tuples sorted by similarity
+        :param np.ndarray seed_embedding: Normalized seed embedding vector
+        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
         if not self.arxiv_corpus:
             return []
 
-        print("Computing corpus embeddings (cache-enabled)...")
+        logger.info("Computing corpus embeddings (cache-enabled)...")
 
         corpus_items = list(self.arxiv_corpus.items())
         metadata_map = {paper_id: metadata for paper_id, metadata in corpus_items}
 
         embeddings_dict = self.embedding_cache.get_embeddings(
             metadata_map,
-            self.model,
+            self._get_model_for_encoding(),
             batch_size=STREAMING_BATCH_SIZE,
             show_progress=sys.stderr.isatty(),
             text_builder=self.model_profile.format_document,
@@ -304,15 +857,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         embeddings_array = np.vstack(ordered_embeddings)
         similarities = embeddings_array @ seed_embedding
-        top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(valid_items))
-        top_indices = np.argsort(similarities)[::-1][:top_k]
+        scored_candidates = [
+            (
+                float(similarities[idx]),
+                paper_id,
+                metadata,
+                embeddings_array[idx],
+                idx,
+            )
+            for idx, (paper_id, metadata) in enumerate(valid_items)
+        ]
+        scored_candidates.sort(
+            key=lambda item: deterministic_sort_key(
+                item[0], item[1], stable_index=item[4]
+            )
+        )
+        top_k = min(self.max_papers * CANDIDATE_MULTIPLIER, len(scored_candidates))
 
-        candidates: List[Tuple[str, Dict, np.ndarray]] = []
-        for idx in top_indices:
-            paper_id, metadata = valid_items[int(idx)]
-            candidates.append((paper_id, metadata, embeddings_array[int(idx)]))
-
-        return candidates
+        return [
+            (paper_id, metadata, embedding)
+            for _, paper_id, metadata, embedding, _ in scored_candidates[:top_k]
+        ]
 
     def _select_candidates_streaming(
         self, seed_embedding: np.ndarray
@@ -320,30 +885,32 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Stream dataset and keep top candidates in a bounded heap.
 
-        Args:
-            seed_embedding: Normalized seed embedding vector
-
-        Returns:
-            List of (paper_id, metadata, embedding) tuples sorted by similarity
+        :param np.ndarray seed_embedding: Normalized seed embedding vector
+        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
-        dataset_names = [
-            "CShorten/ML-ArXiv-Papers",
-            "gfissore/arxiv-abstracts-2021",
-        ]
-
         max_candidates = max(self.max_papers * CANDIDATE_MULTIPLIER, self.max_papers)
-        heap: List[Tuple[float, str, Dict, np.ndarray]] = []
-        last_exception: Optional[Exception] = None
+        heap: List[
+            Tuple[Tuple[float, Tuple[int, ...], int], str, Dict, np.ndarray]
+        ] = []
+        seen_paper_ids: set[str] = set()
 
         progress_enabled = sys.stderr.isatty()
 
-        for dataset_name in dataset_names:
+        from datasets import load_dataset
+
+        last_exception: Optional[Exception] = None
+
+        for dataset_name in ARXIV_DATASET_CANDIDATES:
             try:
                 dataset = load_dataset(
                     dataset_name, split=self.dataset_split, streaming=True
                 )
             except Exception as exc:
-                logger.warning(f"Could not stream dataset {dataset_name}: {exc}")
+                logger.warning(
+                    "Could not stream dataset %s: %s. Trying fallback.",
+                    dataset_name,
+                    exc,
+                )
                 last_exception = exc
                 continue
 
@@ -366,20 +933,28 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
                     if len(batch) >= STREAMING_BATCH_SIZE:
                         self._process_stream_batch(
-                            batch, seed_embedding, heap, max_candidates
+                            batch,
+                            seed_embedding,
+                            heap,
+                            max_candidates,
+                            seen_paper_ids,
                         )
                         batch = []
 
                 if batch:
                     self._process_stream_batch(
-                        batch, seed_embedding, heap, max_candidates
+                        batch,
+                        seed_embedding,
+                        heap,
+                        max_candidates,
+                        seen_paper_ids,
                     )
 
                 if progress_total is None:
                     progress.set_postfix_str(f"processed {progress.n}")
 
             if heap:
-                break  # Successfully collected candidates
+                break
 
         if not heap:
             if last_exception:
@@ -388,9 +963,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         top_candidates = sorted(heap, key=lambda item: item[0], reverse=True)
         limited = top_candidates[: self.max_papers * CANDIDATE_MULTIPLIER]
-
         return [
-            (paper_id, metadata, embedding)
+            (str(paper_id), metadata, embedding)
             for _, paper_id, metadata, embedding in limited
         ]
 
@@ -398,94 +972,68 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self,
         batch: List[Dict],
         seed_embedding: np.ndarray,
-        heap: List[Tuple[float, str, Dict, np.ndarray]],
+        heap: List[Tuple[Tuple[float, Tuple[int, ...], int], str, Dict, np.ndarray]],
         max_candidates: int,
+        seen_paper_ids: set[str],
     ) -> None:
         """
         Encode a batch of records and push to candidate heap.
 
-        Args:
-            batch: List of metadata dictionaries
-            seed_embedding: Normalized seed embedding vector
-            heap: Min-heap storing top candidates
-            max_candidates: Maximum heap size
+        :param List[Dict] batch: List of metadata dictionaries
+        :param np.ndarray seed_embedding: Normalized seed embedding vector
+        :param List[Tuple[float, Tuple[int, ...], str, Dict, np.ndarray]] heap: Min-heap storing top candidates
+        :param int max_candidates: Maximum heap size
+        :param set[str] seen_paper_ids: Paper IDs already emitted to the heap.
         """
         batch_map = {metadata["paper_id"]: metadata for metadata in batch}
         embeddings = self.embedding_cache.get_embeddings(
             batch_map,
-            self.model,
+            self._get_model_for_encoding(),
             batch_size=len(batch_map) or STREAMING_BATCH_SIZE,
             show_progress=False,
             text_builder=self.model_profile.format_document,
         )
 
-        for metadata in batch:
-            raw_embedding = embeddings.get(metadata["paper_id"])
+        for stable_index, metadata in enumerate(batch):
+            paper_id = str(metadata["paper_id"])
+            if paper_id in seen_paper_ids:
+                continue
+
+            raw_embedding = embeddings.get(paper_id)
             if raw_embedding is None:
                 continue
+            seen_paper_ids.add(paper_id)
+
             embedding = np.asarray(raw_embedding, dtype=np.float32)
 
             similarity = float(np.dot(seed_embedding, embedding))
-            candidate = (similarity, metadata["paper_id"], metadata, embedding)
+            candidate = (
+                _stream_heap_key(similarity, paper_id, stable_index),
+                paper_id,
+                metadata,
+                embedding,
+            )
 
             if len(heap) < max_candidates:
                 heapq.heappush(heap, candidate)
-            elif similarity > heap[0][0]:
+            elif candidate > heap[0]:
                 heapq.heapreplace(heap, candidate)
 
     def _extract_paper_metadata(self, paper: Dict, fallback_index: int) -> Dict:
         """
         Normalize dataset record into metadata dictionary.
 
-        Args:
-            paper: Raw dataset record
-            fallback_index: Index used to generate ID if missing
-
-        Returns:
-            Dictionary with normalized fields
+        :param Dict paper: Raw dataset record
+        :param int fallback_index: Index used to generate ID if missing
+        :return Dict: Dictionary with normalized fields
         """
-        paper_id = (
-            paper.get("id")
-            or paper.get("paper_id")
-            or paper.get("paperId")
-            or f"arxiv_{fallback_index}"
-        )
-
-        year = 2020
-        if paper.get("year"):
-            try:
-                year = int(paper["year"])
-            except (TypeError, ValueError):
-                pass
-        elif paper.get("update_date"):
-            try:
-                year = int(str(paper["update_date"])[:4])
-            except (TypeError, ValueError):
-                pass
-
-        authors_data = paper.get("authors", [])
-        if isinstance(authors_data, str):
-            authors_data = [authors_data]
-
-        categories = paper.get("categories", [])
-        if isinstance(categories, str):
-            categories = [categories]
-
-        return {
-            "paper_id": paper_id,
-            "title": paper.get("title", "Unknown"),
-            "abstract": paper.get("abstract", paper.get("summary", "")),
-            "year": year,
-            "authors": authors_data or [],
-            "categories": categories or [],
-        }
+        return _extract_dataset_paper_metadata(paper, fallback_index)
 
     def _update_citation_counts(self, papers: Dict[str, Paper]) -> None:
         """
         Optionally enrich top papers with citation counts from Semantic Scholar.
 
-        Args:
-            papers: Dictionary of collected papers (including seed)
+        :param Dict[str, Paper] papers: Dictionary of collected papers (including seed)
         """
         logger.info("Fetching citation counts from Semantic Scholar (optional)...")
 
@@ -493,7 +1041,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             (pid, paper)
             for pid, paper in list(papers.items())[:10]
             if not paper.is_seed
-            and pid != "query"
+            and not (isinstance(pid, str) and pid.startswith("query:"))
             and not (isinstance(pid, str) and pid.startswith("arxiv_"))
         ]
 
@@ -528,18 +1076,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Compute multi-factor similarity.
 
-        Combines:
-        - Semantic embedding similarity (50%)
-        - Temporal proximity (20%)
-        - Category overlap (20%)
-        - Author collaboration (10%)
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-
-        Returns:
-            Combined similarity score (0.0 to 1.0)
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :return float: Combined similarity score (0.0 to 1.0)
         """
         # Semantic similarity from embeddings
         if paper1.paper_id in self.embeddings and paper2.paper_id in self.embeddings:
@@ -550,8 +1089,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             semantic_sim = 0.0
 
         # Temporal factor
-        year_diff = abs(paper1.year - paper2.year)
-        temporal_factor = EMBEDDING_CONFIG.temporal_factor(year_diff)
+        temporal_factor = self.temporal_similarity(paper1, paper2)
 
         # Category overlap
         category_overlap = paper1.category_overlap(paper2)
@@ -578,62 +1116,38 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         Create edges using top-k strategy.
 
-        Each paper connects to its k most similar neighbors.
-
-        Args:
-            paper1: First paper
-            paper2: Second paper
-            similarity: Computed similarity
-
-        Returns:
-            True if edge should be created
+        :param Paper paper1: First paper
+        :param Paper paper2: Second paper
+        :param float similarity: Computed similarity
+        :return bool: True if edge should be created
         """
         # For embedding strategy, we'll compute top-k after all similarities
         # For now, return True for all non-zero similarities
         # The build_graph method will filter to top-k
         return similarity > 0.1
 
-    def build_graph(self, seed_id: str, **kwargs) -> Tuple:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
         """
         Build graph with top-k edge selection.
 
-        Overrides base class to implement top-k neighbor selection
-        instead of threshold-based edge creation.
-
-        Args:
-            seed_id: Seed paper identifier
-
-        Returns:
-            Tuple of (NetworkX graph, seed paper ID)
+        :param str seed_id: Seed paper identifier
+        :param Any kwargs: Strategy-specific options (currently unused).
+        :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
         """
         # Use base class to collect papers and create nodes
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
-
-        # Now filter edges to keep only top-k per node
-        import networkx as nx
-
-        # Compute all pairwise similarities (already done by base class)
-        # Now for each node, keep only top-k edges
+        # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
         filtered_graph = nx.Graph()
         filtered_graph.add_nodes_from(graph.nodes(data=True))
 
-        for node in graph.nodes():
-            # Get all edges for this node
-            edges = [
-                (node, neighbor, graph[node][neighbor]["weight"])
-                for neighbor in graph.neighbors(node)
-            ]
-
-            # Sort by weight and keep top-k
-            edges.sort(key=lambda x: x[2], reverse=True)
-            top_edges = edges[: EMBEDDING_CONFIG.top_k_neighbors]
-
-            for u, v, weight in top_edges:
-                filtered_graph.add_edge(u, v, weight=weight)
+        for u, v, weight in select_capped_undirected_edges(
+            graph.edges(data=True), self.top_k
+        ):
+            filtered_graph.add_edge(u, v, weight=weight)
 
         logger.info(
             f"Filtered graph: {filtered_graph.number_of_nodes()} nodes, "
-            f"{filtered_graph.number_of_edges()} edges (top-{EMBEDDING_CONFIG.top_k_neighbors})"
+            f"{filtered_graph.number_of_edges()} edges (top-{self.top_k})"
         )
 
         return filtered_graph, actual_seed_id
