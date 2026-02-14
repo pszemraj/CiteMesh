@@ -1,0 +1,1128 @@
+"""Execution-path tests for CLI commands."""
+
+from __future__ import annotations
+
+import argparse
+import io
+import re
+import runpy
+import shlex
+import sys
+import tempfile
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock
+
+import networkx as nx
+import pytest
+
+from citemesh import cli as cli_module
+from citemesh.cli import canonicalize_paper_id_for_metadata, resolve_output_paths
+from citemesh.core import Author, Paper
+from citemesh.visualization import generate_output_path
+from tests._helpers import (
+    build_fake_exporter_factory,
+    build_fake_strategy_builder_factory,
+    build_seed_graph,
+    get_paper_id_normalization_cases,
+)
+
+
+def run_cli_command(args: list[str]) -> SimpleNamespace:
+    """Run CLI in-process and capture stdout/stderr.
+
+    :param list[str] args: CLI arguments.
+    :return SimpleNamespace: Return code and captured streams.
+    """
+    previous_argv = sys.argv[:]
+    sys.argv = ["citemesh"] + list(args)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    try:
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            try:
+                cli_module.main()
+                returncode = 0
+            except SystemExit as exc:
+                code = exc.code
+                if isinstance(code, int):
+                    returncode = code
+                elif code is None:
+                    returncode = 0
+                else:
+                    returncode = 1
+    finally:
+        sys.argv = previous_argv
+
+    return SimpleNamespace(
+        returncode=returncode,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+    )
+
+
+def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
+    """Build argparse namespace fixture for strategy dispatch tests."""
+    values = {
+        "paper_id": "seed",
+        "max_papers": 11,
+        "max_citations": 20,
+        "max_references": 20,
+        "similarity_threshold": 0.2,
+        "no_references": False,
+        "refresh_reference_cache": False,
+        "model": "google/embeddinggemma-300m",
+        "model_revision": None,
+        "dataset_split": "train",
+        "corpus_size": 50000,
+        "all_corpus": False,
+        "top_k": 2,
+        "truncate_dim": None,
+        "streaming": False,
+        "max_semantic": None,
+        "seed": 7,
+        "force_rebuild_cache": False,
+        "storage_precision": "int8",
+        "binary_prefilter": True,
+        "binary_rescore_multiplier": 8,
+        "calibration_sample_size": 2000,
+        "cache_compression": "gzip",
+        "cache_compression_level": 1,
+        "torch_compile": True,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def test_cache_commands_contracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cache clear/scan should honor configured cache root and print usage summary."""
+    cache_root = tmp_path / "citemesh-cache-root"
+    (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
+    (cache_root / "misc").mkdir(parents=True, exist_ok=True)
+    (cache_root / "references").mkdir(parents=True, exist_ok=True)
+    (cache_root / "embeddings" / "vectors.bin").write_bytes(b"a" * 2048)
+    (cache_root / "references" / "payload.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
+
+    scan_result = run_cli_command(["cache", "scan"])
+    assert scan_result.returncode == 0, (
+        f"STDOUT: {scan_result.stdout}\nSTDERR: {scan_result.stderr}"
+    )
+    for token in [
+        "CiteMesh Cache Scan",
+        "embeddings",
+        "references",
+        "TOTAL",
+        "Cache root:",
+    ]:
+        assert token in scan_result.stdout
+
+    clear_result = run_cli_command(["cache", "clear", "--yes"])
+    assert clear_result.returncode == 0, (
+        f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"
+    )
+    assert not cache_root.exists()
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+def test_citation_strategy_runs() -> None:
+    """Citation strategy should complete successfully with a small graph."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "test_output.png"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "-p",
+                "5",
+                "-c",
+                "3",
+                "-r",
+                "3",
+                "--seed",
+                "42",
+                "-o",
+                str(output),
+            ],
+        )
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        assert output.exists()
+        assert output.stat().st_size > 1000
+
+
+def test_search_command_prints_results_to_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Search should print table + full IDs for shell workflows."""
+    long_paper_id = "0123456789abcdef0123456789abcdef01234567"
+    mock_client = MagicMock()
+    mock_client.search_papers.return_value = [
+        Paper(
+            paper_id=long_paper_id,
+            title="Attention Is All You Need",
+            year=2017,
+            authors=[Author(name="Ashish Vaswani")],
+            citation_count=12345,
+            abstract="Transformer model paper",
+        )
+    ]
+    monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+
+    result = run_cli_command(["search", "attention", "--limit", "1"])
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "Search results for 'attention'" in result.stdout
+    assert "Full paper IDs:" in result.stdout
+    assert long_paper_id in result.stdout
+
+
+def test_invalid_paper_id_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Invalid build errors should produce a clean non-zero exit."""
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        MagicMock(side_effect=ValueError("Seed paper not found")),
+    )
+
+    result = run_cli_command(
+        ["build", "this-is-not-a-real-paper-id-12345", "--strategy", "citation"]
+    )
+    assert result.returncode != 0
+    assert error_mock.call_count == 1
+    assert "Seed paper not found" in str(error_mock.call_args)
+    assert "Traceback" not in result.stderr
+
+
+def test_cli_argument_validation_contracts() -> None:
+    """Missing args and numeric validators should fail with clear messages."""
+    result = run_cli_command(["build", "--strategy", "citation"])
+    assert result.returncode != 0
+    assert "required" in result.stderr.lower() or "error" in result.stderr.lower()
+
+    numeric_cases = [
+        (["build", "arxiv:1706.03762", "--max-papers", "0"], "must be at least 1"),
+        (
+            ["build", "arxiv:1706.03762", "--similarity-threshold", "1.2"],
+            "must be between 0.0 and 1.0",
+        ),
+        (
+            ["build", "arxiv:1706.03762", "--similarity-threshold", "nan"],
+            "must be a finite float",
+        ),
+        (["search", "attention", "--limit", "0"], "must be at least 1"),
+        (["search", ""], "must be a non-empty string"),
+        (["build", "", "--strategy", "citation"], "must be a non-empty string"),
+    ]
+    for args, expected_error in numeric_cases:
+        result = run_cli_command(args)
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+
+
+def test_cli_rejects_strategy_incompatible_options() -> None:
+    """Build should reject options that are unsupported for the selected strategy."""
+    cases = [
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "--model",
+                "all-MiniLM-L6-v2",
+            ],
+            "--model",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "-mall-MiniLM-L6-v2",
+            ],
+            "--model",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--max-citations",
+                "10",
+            ],
+            "--max-citations",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "-k4",
+            ],
+            "--top-k",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--max-s",
+                "4",
+            ],
+            "--max-semantic",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--top-k",
+                "4",
+            ],
+            "--top-k",
+        ),
+    ]
+    for args, token in cases:
+        result = run_cli_command(args)
+        assert result.returncode != 0
+        assert "Unsupported option(s)" in result.stderr
+        assert token in result.stderr
+
+
+def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
+    """Build should fail fast for invalid embedding/hybrid option combinations."""
+    cases = [
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--streaming",
+                "--dataset-split",
+                "train[:5%]",
+            ],
+            "Streaming mode does not support sliced --dataset-split",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--max-papers",
+                "5",
+                "--max-semantic",
+                "5",
+            ],
+            "--max-semantic must be between 0 and --max-papers - 1",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "float32",
+                "--binary-prefilter",
+            ],
+            "--binary-prefilter requires --storage-precision int8",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "float32",
+                "--binary-rescore-multiplier",
+                "5",
+            ],
+            "--binary-rescore-multiplier requires --storage-precision int8",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--all-corpus",
+                "--corpus-size",
+                "200",
+            ],
+            "--all-corpus cannot be combined with explicit --corpus-size",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--max-semantic",
+                "0",
+                "--model",
+                "all-MiniLM-L6-v2",
+            ],
+            "Hybrid semantic branch is disabled with --max-semantic 0",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--cache-compression",
+                "brotli",
+            ],
+            "invalid choice",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--cache-compression",
+                "szip",
+            ],
+            "invalid choice",
+        ),
+    ]
+    for args, token in cases:
+        result = run_cli_command(args)
+        assert result.returncode != 0
+        assert token in result.stderr
+
+
+def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid should accept embedding options when default semantic budget is non-zero."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--model",
+                "all-MiniLM-L6-v2",
+                "--dataset-split",
+                "train",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ]
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert (
+        "Hybrid semantic branch is disabled with --max-semantic 0" not in result.stderr
+    )
+
+
+def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build path should share seeded layout and skip it for JSON-only export."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    shared_layout = {"seed": (0.0, 0.0)}
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+
+    def _fake_compute_layout(
+        graph_arg: nx.Graph, iterations: int, layout_seed: int | None
+    ) -> dict[str, tuple[float, float]]:
+        del graph_arg
+        del iterations
+        captured["layout_seed"] = layout_seed
+        return shared_layout
+
+    monkeypatch.setattr(cli_module, "compute_layout", _fake_compute_layout)
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    def _fake_visualize(*args: Any, **kwargs: Any) -> None:
+        del args
+        captured["visualize_layout"] = kwargs.get("layout")
+
+    monkeypatch.setattr(cli_module, "visualize_graph", _fake_visualize)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "seeded.png"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--seed",
+                "123",
+                "--export",
+                "png",
+                "-o",
+                str(output),
+            ],
+        )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert captured["layout_seed"] == 123
+    assert captured["layout"] is shared_layout
+    assert captured["visualize_layout"] is shared_layout
+
+    def _fail_compute_layout(
+        *args: Any, **kwargs: Any
+    ) -> dict[str, tuple[float, float]]:
+        del args
+        del kwargs
+        raise AssertionError("compute_layout should not run for JSON-only export")
+
+    monkeypatch.setattr(cli_module, "compute_layout", _fail_compute_layout)
+    captured.clear()
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert captured["layout"] is None
+
+
+def test_build_metadata_includes_score_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Export metadata should declare score comparability and hybrid adjudication policy."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    score_contract = metadata["score_contract"]
+    assert isinstance(score_contract, dict)
+    assert score_contract["strategy"] == "hybrid"
+    assert score_contract["comparable_across_strategies"] is False
+    assert "adjudication_policy" in score_contract
+
+
+def test_metadata_timestamp_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Metadata timestamp should be opt-in only."""
+    for include_timestamp, expected_key in [(False, False), (True, True)]:
+        graph = nx.Graph()
+        graph.add_node(
+            "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+        )
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(
+            cli_module,
+            "_build_strategy_graph",
+            lambda args, strategy, graph=graph, **_kwargs: (graph, "seed"),
+        )
+        monkeypatch.setattr(
+            cli_module,
+            "GraphExporter",
+            build_fake_exporter_factory(captured, methods=("to_json",)),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "graph.json"
+            args = [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ]
+            if include_timestamp:
+                args.insert(4, "--include-timestamp")
+            result = run_cli_command(args)
+            assert output.exists()
+
+        assert result.returncode == 0, (
+            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+        )
+        metadata = captured["metadata"]
+        assert isinstance(metadata, dict)
+        assert ("timestamp" in metadata) is expected_key
+
+
+def test_embedding_export_metadata_uses_effective_precision_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding metadata should normalize non-int8 defaults to effective values."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "float32",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["embedding"] == {
+        "effective_vector_dtype": "float32",
+        "storage_precision": "float32",
+        "binary_prefilter_enabled": False,
+        "binary_prefilter_used_for_query": False,
+        "binary_rescore_multiplier": 1,
+    }
+
+
+def test_embedding_export_metadata_includes_runtime_prefilter_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding export metadata should include runtime prefilter usage when available."""
+    graph = nx.Graph()
+    graph.graph["embedding_runtime"] = {"binary_prefilter_used": False}
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "int8",
+                "--binary-prefilter",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["embedding"]["binary_prefilter_enabled"] is True
+    assert metadata["embedding"]["binary_prefilter_used_for_query"] is False
+
+
+def test_hybrid_export_omits_embedding_metadata_when_semantic_branch_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid export should omit embedding metadata when --max-semantic resolves to 0."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(captured, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--max-semantic",
+                "0",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    metadata = captured["metadata"]
+    assert isinstance(metadata, dict)
+    assert "embedding" not in metadata
+
+
+def test_embedding_build_logs_side_effect_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding build should emit explicit side-effect contract logs."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    info_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory({}, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    messages = [str(call.args[0]) for call in info_mock.call_args_list if call.args]
+    assert any("Embedding workflow contract" in msg for msg in messages)
+    assert any("Embedding run config" in msg for msg in messages)
+
+
+def test_strategy_dispatches_to_matching_builder_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatch should pass parsed CLI settings into strategy builders."""
+    cases = [
+        (
+            "citation",
+            "CitationGraphBuilder",
+            {
+                "max_citations": 9,
+                "max_references": 7,
+                "similarity_threshold": 0.21,
+                "no_references": True,
+            },
+            {
+                "max_papers": 11,
+                "max_citations": 9,
+                "max_references": 7,
+                "similarity_threshold": 0.21,
+                "fetch_references": False,
+                "refresh_reference_cache": False,
+            },
+        ),
+        (
+            "recommendation",
+            "RecommendationGraphBuilder",
+            {
+                "similarity_threshold": 0.21,
+                "no_references": True,
+            },
+            {
+                "max_papers": 11,
+                "fetch_references": False,
+                "refresh_reference_cache": False,
+                "similarity_threshold": 0.21,
+            },
+        ),
+        (
+            "embedding",
+            "EmbeddingGraphBuilder",
+            {
+                "model": "m",
+                "corpus_size": 1234,
+                "all_corpus": False,
+                "top_k": 4,
+                "truncate_dim": 64,
+                "streaming": True,
+                "binary_rescore_multiplier": 9,
+                "calibration_sample_size": 123,
+            },
+            {
+                "max_papers": 11,
+                "model_name": "m",
+                "model_revision": None,
+                "dataset_split": "train",
+                "corpus_size": 1234,
+                "truncate_dim": 64,
+                "top_k": 4,
+                "force_rebuild_cache": False,
+                "use_streaming": True,
+                "storage_precision": "int8",
+                "binary_prefilter": True,
+                "binary_rescore_multiplier": 9,
+                "calibration_sample_size": 123,
+                "cache_compression": "gzip",
+                "cache_compression_level": 1,
+                "enable_torch_compile": True,
+            },
+        ),
+        (
+            "hybrid",
+            "HybridGraphBuilder",
+            {
+                "max_citations": 9,
+                "max_references": 7,
+                "no_references": True,
+                "max_semantic": 5,
+                "model": "m",
+                "corpus_size": 1234,
+                "all_corpus": False,
+                "truncate_dim": 64,
+                "streaming": True,
+                "binary_rescore_multiplier": 9,
+                "calibration_sample_size": 123,
+            },
+            {
+                "max_papers": 11,
+                "max_citations": 9,
+                "max_references": 7,
+                "fetch_references": False,
+                "refresh_reference_cache": False,
+                "max_semantic": 5,
+                "model_name": "m",
+                "model_revision": None,
+                "dataset_split": "train",
+                "corpus_size": 1234,
+                "truncate_dim": 64,
+                "use_streaming": True,
+                "force_rebuild_cache": False,
+                "storage_precision": "int8",
+                "binary_prefilter": True,
+                "binary_rescore_multiplier": 9,
+                "calibration_sample_size": 123,
+                "cache_compression": "gzip",
+                "cache_compression_level": 1,
+                "enable_torch_compile": True,
+            },
+        ),
+    ]
+    for strategy, builder_name, namespace_overrides, expected_kwargs in cases:
+        captured: dict[str, object] = {}
+        namespace = _dispatch_namespace(**namespace_overrides)
+        monkeypatch.setattr(
+            cli_module,
+            builder_name,
+            build_fake_strategy_builder_factory(
+                captured, graph=build_seed_graph("seed")
+            ),
+        )
+        graph, seed_id = cli_module._build_strategy_graph(namespace, strategy)
+        assert seed_id == "seed"
+        assert graph.number_of_nodes() == 1
+        assert captured == expected_kwargs
+
+
+def test_build_strategy_graph_invalid_and_lazy_exports_contract() -> None:
+    """Unsupported strategies should error and top-level lazy exports should resolve."""
+    namespace = _dispatch_namespace()
+    with pytest.raises(ValueError, match="Unsupported strategy: unknown"):
+        cli_module._build_strategy_graph(namespace, "unknown")
+
+    import citemesh
+
+    assert citemesh.CitationGraphBuilder.__name__ == "CitationGraphBuilder"
+    assert citemesh.RecommendationGraphBuilder.__name__ == "RecommendationGraphBuilder"
+    assert citemesh.EmbeddingGraphBuilder.__name__ == "EmbeddingGraphBuilder"
+    assert citemesh.HybridGraphBuilder.__name__ == "HybridGraphBuilder"
+
+
+def test_build_strategy_graph_rejects_programmatic_contract_violations() -> None:
+    """Programmatic dispatch should still reject strategy-incompatible options."""
+    namespace = _dispatch_namespace(
+        similarity_threshold=0.21,
+        model="all-MiniLM-L6-v2",
+    )
+    with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
+        cli_module._build_strategy_graph(namespace, "recommendation")
+
+
+def test_cli_help_contracts() -> None:
+    """CLI help output should expose stable semantic contracts."""
+    cases = [
+        (["--help"], ["CiteMesh", "build", "cache", "search"]),
+        (
+            ["build", "--help"],
+            [
+                "default: recommendation",
+                "--seed",
+                "--all-corpus",
+                "--storage-precision",
+                "--binary-prefilter",
+                "--binary-rescore-multiplier",
+                "--calibration-sample-size",
+                "--no-torch-compile",
+                "--spring-iterations",
+                "citation/recommendation",
+            ],
+        ),
+        (["search", "--help"], ["search", "--limit"]),
+        (["cache", "--help"], ["clear", "scan"]),
+    ]
+    for args, expected_tokens in cases:
+        result = run_cli_command(args)
+        assert result.returncode == 0
+        lowered = result.stdout.lower()
+        for token in expected_tokens:
+            assert token.lower() in lowered
+
+
+def test_output_path_and_slug_contracts() -> None:
+    """Output path resolver and auto-output slug generation should stay stable."""
+    path_cases = [
+        (
+            Path("out/arxiv-2508.14040-example"),
+            ["png", "html", "json"],
+            True,
+            {
+                "png": Path("out/arxiv-2508.14040-example/hybrid.png"),
+                "html": Path("out/arxiv-2508.14040-example/hybrid.html"),
+                "json": Path("out/arxiv-2508.14040-example/hybrid.json"),
+            },
+        ),
+        (
+            Path("reports/example.graphml"),
+            ["png"],
+            True,
+            {"png": Path("reports/example.png")},
+        ),
+        (
+            Path("reports/example.plotly.html"),
+            ["plotly"],
+            True,
+            {"plotly": Path("reports/example.plotly.html")},
+        ),
+    ]
+    for base_output_path, formats, explicit_output, expected in path_cases:
+        paths = resolve_output_paths(
+            base_output_path=base_output_path,
+            selected_formats=formats,
+            explicit_output=explicit_output,
+            strategy="hybrid",
+        )
+        assert paths == expected
+
+    for raw_id, expected in get_paper_id_normalization_cases():
+        if raw_id.startswith("http://") or raw_id.startswith("https://"):
+            assert canonicalize_paper_id_for_metadata(raw_id) == expected
+
+    graph = nx.Graph()
+    graph.add_node("seed-a", title="A Survey of Transformers")
+    graph.add_node("seed-b", title="A Survey of Transformers")
+    path_a = generate_output_path(graph, seed_id="seed-a", output_dir=Path("out"))
+    path_b = generate_output_path(graph, seed_id="seed-b", output_dir=Path("out"))
+    assert path_a != path_b
+    assert path_a.parent.name != path_b.parent.name
+    assert re.search(r"-[0-9a-f]{8}$", path_a.parent.name)
+    assert re.search(r"-[0-9a-f]{8}$", path_b.parent.name)
+
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="This title should definitely exceed forty characters for the slug",
+    )
+    output_path = generate_output_path(graph, seed_id="seed", output_dir=Path("out"))
+    assert re.search(r"-[0-9a-f]{8}$", output_path.parent.name)
+    assert len(output_path.parent.name) <= 40
+
+
+def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Running ``citemesh.__main__`` should invoke ``citemesh.cli.main``."""
+    called = {"main": False}
+
+    def fake_main() -> None:
+        called["main"] = True
+
+    monkeypatch.setattr("citemesh.cli.main", fake_main)
+    runpy.run_module("citemesh.__main__", run_name="__main__")
+    assert called["main"] is True
+
+
+def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
+    """Extract parseable ``citemesh`` command argv vectors from Markdown bash blocks."""
+    commands: list[list[str]] = []
+    blocks = re.findall(r"```bash\s+(.*?)```", markdown_text, flags=re.DOTALL)
+    for block in blocks:
+        pending = ""
+        for raw_line in block.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if pending:
+                continuation = (
+                    stripped[:-1].strip() if stripped.endswith("\\") else stripped
+                )
+                pending = f"{pending} {continuation}".strip()
+                if stripped.endswith("\\"):
+                    continue
+                tokens = shlex.split(pending)
+                pending = ""
+                if tokens and tokens[0] == "citemesh":
+                    commands.append(tokens[1:])
+                continue
+            if not stripped.startswith("citemesh "):
+                continue
+            if stripped.endswith("\\"):
+                pending = stripped[:-1].strip()
+                continue
+            tokens = shlex.split(stripped)
+            if tokens and tokens[0] == "citemesh":
+                commands.append(tokens[1:])
+    return commands
+
+
+def test_documented_cli_examples_are_parseable() -> None:
+    """README and CLI guide command examples should remain parseable in CI."""
+    parser, _, _ = cli_module._create_parser()
+    docs = [Path("README.md"), Path("docs/guides/cli.md")]
+
+    commands: list[list[str]] = []
+    for doc_path in docs:
+        markdown_text = doc_path.read_text(encoding="utf-8")
+        commands.extend(_extract_citemesh_doc_commands(markdown_text))
+
+    assert commands, "No citemesh commands found in docs; example parser test is stale."
+    for argv in commands:
+        if any(token.startswith("[") or token.endswith("]") for token in argv):
+            continue
+        parser.parse_args(argv)

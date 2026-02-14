@@ -25,7 +25,9 @@ from citemesh.data import get_cache_dir
 
 logger = logging.getLogger(__name__)
 
-REFERENCE_CACHE_DIR = get_cache_dir("references")
+# Optional runtime override for tests and one-off callers.
+# When unset, reference cache paths are resolved from ``get_cache_dir`` per call.
+REFERENCE_CACHE_DIR: Optional[Path] = None
 REFERENCE_CACHE_VERSION = 1
 RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
@@ -40,6 +42,19 @@ DEFAULT_PAPER_FIELDS = (
     "abstract",
     "fieldsOfStudy",
 )
+
+
+def _reference_cache_dir() -> Path:
+    """Resolve reference-cache directory at call time.
+
+    :return Path: Directory where reference cache JSON files are stored.
+    """
+    if REFERENCE_CACHE_DIR is None:
+        return get_cache_dir("references")
+
+    resolved = Path(REFERENCE_CACHE_DIR)
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def _default_paper_fields() -> List[str]:
@@ -174,7 +189,29 @@ def _reference_cache_path(paper_id: str) -> Path:
     :return Path: JSON cache path for the paper's reference IDs.
     """
     digest = hashlib.sha1(paper_id.encode("utf-8")).hexdigest()
-    return REFERENCE_CACHE_DIR / f"{digest}.json"
+    return _reference_cache_dir() / f"{digest}.json"
+
+
+def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
+    """Validate and normalize cached reference ID payloads.
+
+    :param Any payload: Cached ``references`` field from JSON payload.
+    :return Optional[List[str]]: Normalized ID list, or ``None`` when invalid.
+    """
+    if not isinstance(payload, list):
+        return None
+
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw_value in payload:
+        if not isinstance(raw_value, str):
+            return None
+        paper_id = raw_value.strip()
+        if not paper_id or paper_id in seen:
+            continue
+        seen.add(paper_id)
+        normalized.append(paper_id)
+    return normalized
 
 
 def _validate_integer_limit(
@@ -289,6 +326,32 @@ class SemanticScholarClient:
             if tmp_path is not None and tmp_path.exists():
                 with contextlib.suppress(Exception):
                     tmp_path.unlink()
+
+    def _persist_reference_cache_entry(
+        self, cache_path: Path, paper_id: str, reference_ids: List[str]
+    ) -> None:
+        """Persist normalized reference IDs to cache with best-effort durability.
+
+        :param Path cache_path: Target cache file path.
+        :param str paper_id: Normalized paper ID for payload metadata.
+        :param List[str] reference_ids: Reference IDs to persist.
+        :return None: Writes cache payload when filesystem operations succeed.
+        """
+        try:
+            self._atomic_write_json(
+                cache_path,
+                {
+                    "paper_id": paper_id,
+                    "references": reference_ids,
+                    "version": REFERENCE_CACHE_VERSION,
+                },
+            )
+        except OSError as exc:
+            logger.debug(
+                "Failed to persist reference cache for %s: %s",
+                paper_id,
+                exc,
+            )
 
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests."""
@@ -729,103 +792,121 @@ class SemanticScholarClient:
 
         return papers
 
-    def get_reference_ids(self, paper_id: str) -> List[str]:
+    def get_reference_ids(
+        self, paper_id: str, *, force_refresh: bool = False
+    ) -> List[str]:
         """
         Fetch only the reference IDs for a paper (faster than full references).
 
         :param str paper_id: Paper identifier
+        :param bool force_refresh: Whether to bypass cache reads and fetch fresh IDs.
         :return List[str]: List of referenced paper IDs
         """
         normalized_paper_id = normalize_paper_id(paper_id)
         cache_path = _reference_cache_path(normalized_paper_id)
-        if cache_path.exists():
+        if force_refresh:
+            logger.debug(
+                "Bypassing reference cache for %s due to force_refresh.",
+                normalized_paper_id,
+            )
+        if not force_refresh and cache_path.exists():
             try:
                 data = json.loads(cache_path.read_text())
                 if data.get("version") == REFERENCE_CACHE_VERSION:
-                    refs = data.get("references", [])
-                    logger.debug(
-                        "Loaded %d cached references for %s",
-                        len(refs),
-                        normalized_paper_id,
-                    )
-                    return refs
+                    refs = _coerce_cached_reference_ids(data.get("references", []))
+                    if refs is None:
+                        logger.warning(
+                            "Invalid reference cache payload for %s; rebuilding entry.",
+                            normalized_paper_id,
+                        )
+                        cache_path.unlink(missing_ok=True)
+                    else:
+                        logger.debug(
+                            "Loaded %d cached references for %s",
+                            len(refs),
+                            normalized_paper_id,
+                        )
+                        return refs
             except json.JSONDecodeError:
                 cache_path.unlink(missing_ok=True)
 
-        try:
-            for attempt in range(API_CONFIG.max_retries):
-                try:
-                    self._rate_limit()
-                    references = self.client.get_paper_references(
-                        normalized_paper_id, fields=["paperId"]
-                    )
-                    if not references:
-                        return []
-
-                    ref_ids: List[str] = []
-                    for ref in references:
-                        if (
-                            hasattr(ref, "paper")
-                            and ref.paper
-                            and hasattr(ref.paper, "paperId")
-                        ):
-                            ref_ids.append(ref.paper.paperId)
-
-                    try:
-                        self._atomic_write_json(
-                            cache_path,
-                            {
-                                "paper_id": normalized_paper_id,
-                                "references": ref_ids,
-                                "version": REFERENCE_CACHE_VERSION,
-                            },
-                        )
-                    except OSError as exc:
-                        logger.debug(
-                            "Failed to persist reference cache for %s: %s",
-                            normalized_paper_id,
-                            exc,
-                        )
-
-                    return ref_ids
-
-                except TypeError:
-                    logger.debug(
-                        "Reference payload missing for %s (treating as empty)",
+        for attempt in range(API_CONFIG.max_retries):
+            try:
+                self._rate_limit()
+                references = self.client.get_paper_references(
+                    normalized_paper_id, fields=["paperId"]
+                )
+                if not references:
+                    self._persist_reference_cache_entry(
+                        cache_path,
                         normalized_paper_id,
+                        [],
                     )
                     return []
-                except ObjectNotFoundException:
-                    logger.warning(
-                        "Paper not found for reference IDs: %s", normalized_paper_id
-                    )
-                    return []
-                except Exception as exc:
-                    if attempt < API_CONFIG.max_retries - 1:
-                        wait_time = self._retry_wait_time(exc, attempt)
-                        logger.warning(
-                            "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
-                            normalized_paper_id,
-                            attempt + 1,
-                            wait_time,
-                        )
-                        time.sleep(wait_time)
-                    else:
-                        logger.warning(
-                            "Failed to fetch reference IDs for %s after %s attempts: %s",
-                            normalized_paper_id,
-                            API_CONFIG.max_retries,
-                            exc,
-                        )
-                        return []
 
-        except Exception as exc:
-            logger.warning(
-                "Unexpected error fetching reference IDs for %s: %s",
-                normalized_paper_id,
-                exc,
-            )
-            return []
+                ref_ids: List[str] = []
+                for ref in references:
+                    if (
+                        hasattr(ref, "paper")
+                        and ref.paper
+                        and hasattr(ref.paper, "paperId")
+                    ):
+                        ref_ids.append(ref.paper.paperId)
+
+                self._persist_reference_cache_entry(
+                    cache_path,
+                    normalized_paper_id,
+                    ref_ids,
+                )
+                return ref_ids
+
+            except TypeError:
+                logger.debug(
+                    "Reference payload missing for %s (treating as empty)",
+                    normalized_paper_id,
+                )
+                self._persist_reference_cache_entry(
+                    cache_path,
+                    normalized_paper_id,
+                    [],
+                )
+                return []
+            except ObjectNotFoundException:
+                logger.warning(
+                    "Paper not found for reference IDs: %s", normalized_paper_id
+                )
+                self._persist_reference_cache_entry(
+                    cache_path,
+                    normalized_paper_id,
+                    [],
+                )
+                return []
+            except Exception as exc:
+                if attempt < API_CONFIG.max_retries - 1:
+                    wait_time = self._retry_wait_time(exc, attempt)
+                    logger.warning(
+                        "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
+                        normalized_paper_id,
+                        attempt + 1,
+                        wait_time,
+                    )
+                    time.sleep(wait_time)
+                    continue
+
+                logger.warning(
+                    "Failed to fetch reference IDs for %s after %s attempts: %s",
+                    normalized_paper_id,
+                    API_CONFIG.max_retries,
+                    exc,
+                )
+                raise RuntimeError(
+                    "Failed to fetch reference IDs after retries for "
+                    f"{normalized_paper_id}."
+                ) from exc
+
+        raise RuntimeError(
+            f"Failed to fetch reference IDs after retries for {normalized_paper_id}."
+        )
 
     def get_recommended_papers(
         self,

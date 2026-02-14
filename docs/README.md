@@ -9,6 +9,7 @@ This page is the canonical map of documentation ownership.
 - Each topic has one canonical document.
 - Non-canonical documents should summarize in 1-2 lines and link to the canonical source.
 - If documents disagree, the canonical document listed below wins.
+- Use repository-relative Markdown links so references stay clickable on GitHub and in local previews.
 
 ## Source-of-Truth Map
 
@@ -16,9 +17,12 @@ This page is the canonical map of documentation ownership.
 | --- | --- |
 | Project overview, install, and quick start | [Repository README](../README.md) |
 | CLI commands, flags, identifiers, output naming, export behavior | [Guides: CLI Usage](guides/cli.md) |
-| Cache paths/layout, migration, invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
+| Strategy behavior and tradeoffs | [Guides: Strategies](guides/strategies.md) |
+| Cache paths/layout, hydration/invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
+| Runtime environment variables (`S2_API_KEY`, `CITEMESH_*`) | [Reference: Environment Variables](reference/environment.md) |
 | Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |
 | Historical changes and release notes | [Internals: Changelog](internals/changelog.md) |
+| Developer backlog notes (non-normative) | [Developer Notes](dev.md) |
 
 ## Internal Docs Rule
 
@@ -26,3 +30,4 @@ This page is the canonical map of documentation ownership.
 
 - [Guides: CLI Usage](guides/cli.md)
 - [Guides: Caching & Data](guides/caching.md)
+- [Reference: Environment Variables](reference/environment.md)
