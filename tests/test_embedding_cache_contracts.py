@@ -188,6 +188,44 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
     assert results[0].storage_precision == "int8"
 
 
+def test_embedding_cache_metadata_refresh_survives_mixed_batch_encode_failure() -> None:
+    """Metadata-only cache-hit refresh should persist even if miss encoding fails."""
+
+    class _FailingEncodeModel:
+        """Encode model stub that always fails for negative-path simulation."""
+
+        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            del texts, kwargs
+            raise RuntimeError("encode failure")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="metadata-refresh-durable")
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel(
+                {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+
+        with pytest.raises(RuntimeError, match="encode failure"):
+            cache.get_embeddings(
+                {
+                    "p1": {"title": "Alpha", "abstract": "First", "year": 2025},
+                    "p2": {"title": "Beta", "abstract": "Second"},
+                },
+                _FailingEncodeModel(),
+                show_progress=False,
+            )
+
+        with sqlite3.connect(cache.db_path) as conn:
+            refreshed_year = conn.execute(
+                "SELECT year FROM papers WHERE paper_id = 'p1'"
+            ).fetchone()[0]
+
+    assert refreshed_year == 2025
+
+
 def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
     """Search should safely return no candidates when cache file is absent."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -254,7 +292,10 @@ def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:
 
         with pytest.raises(
             RuntimeError,
-            match="Embedding cache integrity error: missing metadata rows",
+            match=(
+                "Embedding cache integrity error: "
+                "(missing metadata rows|embedding row mapping mismatch)"
+            ),
         ):
             cache.search(
                 query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
@@ -847,3 +888,28 @@ def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
     reloaded.clear()
     assert reloaded.db_path.exists()
     assert not reloaded.h5_path.exists()
+
+
+def test_embedding_cache_recovery_clears_orphan_h5_rows(tmp_path: Path) -> None:
+    """Reload should clear namespace when HDF5 has rows missing SQLite metadata mappings."""
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="orphan-h5-row-recovery")
+    cache.get_embeddings(
+        {"seed": {"title": "Seed", "abstract": "x"}},
+        LookupEncodeModel({"Seed. x": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    with h5py.File(cache.h5_path, "a") as h5:
+        embeddings = h5["embeddings"]
+        binary = h5["binary_index"]
+        current_rows = int(embeddings.shape[0])
+        embeddings.resize((current_rows + 1, int(embeddings.shape[1])))
+        embeddings[current_rows] = np.asarray([0, 0], dtype=np.int8)
+        binary.resize((current_rows + 1, int(binary.shape[1])))
+        binary[current_rows] = np.asarray([0], dtype=np.uint8)
+
+    reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="orphan-h5-row-recovery")
+    with sqlite3.connect(reloaded.db_path) as conn:
+        paper_rows = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+
+    assert paper_rows == 0
+    assert not reloaded.has_cached_payload()

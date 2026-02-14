@@ -83,6 +83,8 @@ In that mode, CiteMesh records the assumed fingerprint in cache metadata so futu
 offline checks are explicit and traceable.
 When requested revision is `main` and only a legacy cached SHA is available, reuse
 is still allowed with a warning because `main` cannot be proven offline.
+Set `CITEMESH_STRICT_OFFLINE_FINGERPRINT=1` to disable that legacy `main` reuse
+assumption and force namespace clear/rebuild when identity cannot be verified.
 If compatibility checks fail (for example unresolved revision mismatch), CiteMesh clears
 and rebuilds that namespace before reuse to avoid stale model-version mixing.
 

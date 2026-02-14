@@ -355,10 +355,11 @@ class EmbeddingCache:
                     """,
                     metadata_updates_on_hit,
                 )
+                # Persist metadata-only refreshes before encode to keep them durable
+                # even if mixed hit/miss batches later fail during embedding compute.
+                conn.commit()
 
             if not papers_to_embed:
-                if metadata_updates_on_hit:
-                    conn.commit()
                 return cached_embeddings
 
             texts = [text for _, _, _, text, _ in papers_to_embed]
@@ -1127,6 +1128,33 @@ class EmbeddingCache:
             _fail(
                 f"embeddings dataset dtype mismatch "
                 f"({embeddings_dataset.dtype} != {target_dtype})"
+            )
+
+        row_count = int(embeddings_dataset.shape[0])
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM papers")
+        paper_rows = int(cursor.fetchone()[0])
+        if paper_rows != row_count:
+            _fail(
+                "embedding row mapping mismatch "
+                f"(metadata rows={paper_rows}, embedding rows={row_count})"
+            )
+
+        cursor.execute(
+            """
+            SELECT COUNT(*), COUNT(DISTINCT row_idx)
+            FROM papers
+            WHERE row_idx IS NOT NULL
+              AND row_idx >= 0
+              AND row_idx < ?
+            """,
+            (row_count,),
+        )
+        valid_rows, distinct_rows = cursor.fetchone()
+        if int(valid_rows) != row_count or int(distinct_rows) != row_count:
+            _fail(
+                "embedding row_idx coverage mismatch "
+                f"(valid={int(valid_rows)}, distinct={int(distinct_rows)}, expected={row_count})"
             )
 
     def _reconcile_layout_metadata(self, conn: sqlite3.Connection) -> None:

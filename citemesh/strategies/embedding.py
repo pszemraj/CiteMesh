@@ -6,6 +6,7 @@ to find conceptually similar papers without relying on citations.
 """
 
 import logging
+import os
 import re
 import sys
 from contextlib import nullcontext
@@ -62,6 +63,7 @@ ARXIV_DATASET_CANDIDATES = (
     "CShorten/ML-ArXiv-Papers",
     "gfissore/arxiv-abstracts-2021",
 )
+STRICT_OFFLINE_FINGERPRINT_ENV_VAR = "CITEMESH_STRICT_OFFLINE_FINGERPRINT"
 ARXIV_IDENTIFIER_PATTERN = re.compile(
     r"^(?:arxiv:)?((?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z\-]+)?/\d{7})(?:v\d+)?)$",
     re.IGNORECASE,
@@ -687,7 +689,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return suffix.lower() == requested_revision.lower()
 
         # Legacy sha-only fingerprints do not encode non-default revision tokens.
-        return requested_revision == "main"
+        return requested_revision == "main" and not self._strict_offline_mode_enabled()
+
+    @staticmethod
+    def _strict_offline_mode_enabled() -> bool:
+        """Return whether strict offline fingerprint checks are enabled.
+
+        :return bool: ``True`` when legacy offline identity assumptions are disabled.
+        """
+        raw_value = (
+            str(os.getenv(STRICT_OFFLINE_FINGERPRINT_ENV_VAR, "")).strip().lower()
+        )
+        return raw_value in {"1", "true", "yes", "on"}
 
     def _is_legacy_main_sha_assumption(self, cached_fingerprint: Optional[str]) -> bool:
         """Return whether compatibility relies on legacy ``main`` SHA assumption.

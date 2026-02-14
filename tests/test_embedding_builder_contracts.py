@@ -538,6 +538,43 @@ def test_embedding_cache_reuses_cached_fingerprint_when_lookup_fails(
     )
 
 
+def test_embedding_cache_strict_offline_rejects_legacy_main_sha_assumption(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Strict offline mode should reject legacy main-SHA reuse assumptions."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", "1")
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, model_name="org/offline-strict", client=MagicMock()
+    )
+    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
+    builder.embedding_cache.get_model_fingerprint = MagicMock(
+        return_value="hf::org/offline-strict::0123456789abcdef0123456789abcdef01234567"
+    )
+    builder.embedding_cache.clear = MagicMock()
+    builder.embedding_cache.set_model_fingerprint = MagicMock()
+    builder._resolve_model_fingerprint = MagicMock(
+        side_effect=RuntimeError("network unavailable")
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_model_fingerprint()
+
+    assert (
+        builder._resolved_model_fingerprint
+        == "hf::org/offline-strict::revision=main::offline-unverified"
+    )
+    builder.embedding_cache.clear.assert_called_once()
+    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
+        "hf::org/offline-strict::revision=main::offline-unverified"
+    )
+    assert any(
+        "incompatible with requested identity" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_embedding_cache_clears_stale_cached_fingerprint_when_lookup_fails(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
