@@ -8,6 +8,7 @@ This is the canonical CLI behavior specification.
 
 - Normative here: commands, flags, defaults, validation, identifier normalization, output naming, and export semantics.
 - Non-normative here: cache storage internals and on-disk layout. See [Caching & Data](caching.md).
+- Documentation ownership map: [Documentation Index](../README.md).
 
 ## Basic Invocation
 
@@ -56,6 +57,8 @@ For cache path/layout/hydration details, see [Caching & Data](caching.md).
 When `--output` is omitted, CiteMesh writes to `out/<safe_seed_title[:40]>/<strategy>.<ext>`.
 
 When `--export all` is used, CiteMesh writes every supported format using consistent styling into a directory. With default naming this is `out/<safe_seed_title[:40]>/`; with explicit output it is the directory passed via `-o`.
+
+If explicit `-o` ends with a known export suffix (for example `-o out/my-run.json`), the suffix is stripped and the remaining path is treated as the directory base for multi-export runs.
 
 For multi-export runs, files are named `<strategy>.<ext>` inside the selected directory. Example:
 
@@ -185,5 +188,6 @@ export S2_API_KEY="your-key-here"
 
 Related canonical docs:
 
+- Docs ownership map: [Documentation Index](../README.md)
 - Cache behavior: [Caching & Data](caching.md)
 - Component architecture: [Architecture](../internals/architecture.md)

@@ -9,6 +9,7 @@ This page is the canonical map of documentation ownership.
 - Each topic has one canonical document.
 - Non-canonical documents should summarize in 1-2 lines and link to the canonical source.
 - If documents disagree, the canonical document listed below wins.
+- Use repository-relative Markdown links so references stay clickable on GitHub and in local previews.
 
 ## Source-of-Truth Map
 

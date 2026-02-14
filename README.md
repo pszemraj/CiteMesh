@@ -6,9 +6,10 @@ Build exploration-friendly paper graphs from a single paper or query using recom
 
 This README is intentionally high-level.
 
-- Canonical CLI behavior (flags, defaults, identifier normalization, outputs): [docs/guides/cli.md](docs/guides/cli.md)
-- Canonical cache behavior (paths, layout, hydration/invalidation, cleanup): [docs/guides/caching.md](docs/guides/caching.md)
-- Full docs map: [docs/README.md](docs/README.md)
+- Canonical CLI behavior (flags, defaults, identifier normalization, outputs): [CLI Usage](./docs/guides/cli.md)
+- Canonical cache behavior (paths, layout, hydration/invalidation, cleanup): [Caching & Data](./docs/guides/caching.md)
+- Full docs ownership map: [Documentation Index](./docs/README.md)
+- This file intentionally avoids duplicating CLI/cache contracts; those remain centralized in the canonical docs above.
 
 ## Quick Start
 
@@ -46,7 +47,7 @@ pip install -e ".[all]"
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
-For complete command behavior and examples, use [docs/guides/cli.md](docs/guides/cli.md).
+For complete command behavior and examples, use [CLI Usage](./docs/guides/cli.md).
 
 ## Why CiteMesh
 
@@ -58,7 +59,7 @@ For complete command behavior and examples, use [docs/guides/cli.md](docs/guides
 
 ## Documentation
 
-Use [docs/README.md](docs/README.md) as the source-of-truth index. It maps each topic to one canonical document.
+Use [Documentation Index](./docs/README.md) as the source-of-truth map. It defines ownership for each behavior topic.
 
 ## License
 

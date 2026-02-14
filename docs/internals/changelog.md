@@ -6,8 +6,10 @@ This page is historical context, not a normative behavior specification.
 
 - Use [CLI Usage](../guides/cli.md) for current command/flag behavior.
 - Use [Caching & Data](../guides/caching.md) for current cache behavior.
+- Documentation ownership map: [Documentation Index](../README.md).
 
 This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
+Historical bullets below may describe superseded behavior; canonical current behavior remains in the guides above.
 
 ## Export & Visualization
 
@@ -52,11 +54,12 @@ This changelog summarizes notable changes from early script-based prototypes to 
 - Added embedding/hybrid cache controls: `--storage-precision`, binary prefilter toggles, binary rescore multiplier, calibration sample size, and cache compression knobs.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
-- Preserved dotted custom output basenames across multi-export workflows.
+- Switched multi-export explicit `--output` handling to directory-based exports with strategy-named files.
 - Enforced strict embedding `--top-k` per-node edge caps.
 - Reused a single layout per run across layout-consuming exporters.
 - Made metadata timestamps opt-in (`--include-timestamp`) for deterministic outputs by default.
-- Grouped auto outputs into stable per-paper folder naming.
+- Grouped auto outputs into stable per-paper title folders.
+- Removed title truncation in runtime seed logs and static/Plotly chart titles.
 - Moved interactive exporters to optional `.[viz]` extras.
 
 ## Maintenance Consolidation

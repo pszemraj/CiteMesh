@@ -10,6 +10,7 @@ This document is canonical for component responsibilities and data flow.
 - Non-normative here: CLI flag/default contracts and cache-path rules.
   - CLI contracts: [CLI Usage](../guides/cli.md)
   - Cache contracts: [Caching & Data](../guides/caching.md)
+- Documentation ownership map: [Documentation Index](../README.md)
 
 ## Execution Flow
 

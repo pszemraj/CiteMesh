@@ -8,6 +8,7 @@ This is the canonical cache behavior specification.
 
 - Normative here: cache root resolution, directory layout, quantized embedding cache behavior, and cleanup guidance.
 - Non-normative here: broader CLI command semantics. See [CLI Usage](cli.md) for command contracts.
+- Documentation ownership map: [Documentation Index](../README.md).
 
 ## Cache Root
 
@@ -89,6 +90,8 @@ citemesh cache clear --yes
 ```
 
 Omit `--yes` for interactive confirmation.
+
+Command syntax/defaults remain canonical in [CLI Usage](cli.md); this section documents cache maintenance workflows.
 
 To remove artifacts for one namespace, delete matching `.db` and `.h5` files in `embeddings/`.
 
