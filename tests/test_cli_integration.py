@@ -160,7 +160,7 @@ class TestCLIBasics:
         """
         cache_root = tmp_path / "citemesh-cache-root"
         (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
-        (cache_root / "joblib").mkdir(parents=True, exist_ok=True)
+        (cache_root / "misc").mkdir(parents=True, exist_ok=True)
         (cache_root / "references").mkdir(parents=True, exist_ok=True)
         (cache_root / "embeddings" / "vectors.bin").write_bytes(b"a" * 2048)
         (cache_root / "references" / "payload.json").write_text("{}", encoding="utf-8")
@@ -173,7 +173,7 @@ class TestCLIBasics:
         assert "CiteMesh Cache Scan" in result.stdout
         assert "embeddings" in result.stdout
         assert "references" in result.stdout
-        assert "joblib" in result.stdout
+        assert "misc" in result.stdout
         assert "TOTAL" in result.stdout
         assert "Cache root:" in result.stdout
 

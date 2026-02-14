@@ -14,11 +14,10 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import networkx as nx
 import numpy as np
-from joblib import Memory
 from tqdm.auto import tqdm
 
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
-from citemesh.data import EmbeddingCache, get_cache_dir, get_embedding_model_profile
+from citemesh.data import EmbeddingCache, get_embedding_model_profile
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -27,20 +26,6 @@ from citemesh.strategies.base import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Set up joblib cache in the user cache directory
-_memory: Optional[Memory] = None
-
-
-def _get_memory() -> Memory:
-    """Get or create the joblib cache lazily.
-
-    :return Memory: Shared joblib cache object for expensive dataset operations.
-    """
-    global _memory
-    if _memory is None:
-        _memory = Memory(str(get_cache_dir("joblib")), verbose=0)
-    return _memory
 
 
 def _check_embedding_deps() -> None:
@@ -111,26 +96,6 @@ def _query_seed_id(query_text: str) -> str:
     """
     digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
     return f"query:{digest}"
-
-
-def _stream_heap_key(
-    similarity: float, paper_id: str, stable_index: int
-) -> Tuple[float, Tuple[int, ...], int]:
-    """Build total-order key for streaming candidate heap ranking.
-
-    :param float similarity: Similarity score for candidate paper.
-    :param str paper_id: Candidate paper identifier.
-    :param int stable_index: Stable iteration index used as final tie-breaker.
-    :return Tuple[float, Tuple[int, ...], int]: Comparable heap key tuple.
-    """
-    # Invert char ordinals so lexicographically smaller IDs compare as "better"
-    # when similarity ties, without relying on heterogeneous direct comparisons.
-    paper_key = tuple([-ord(ch) for ch in str(paper_id)] + [1])
-    return (
-        float(similarity),
-        paper_key,
-        -int(stable_index),
-    )
 
 
 class _AutocastEncodeProxy:
@@ -273,78 +238,13 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
     }
 
 
-def load_arxiv_dataset_cached(
-    dataset_split: str, max_papers: Optional[int]
-) -> Dict[str, Dict]:
-    """
-    Load and cache ArXiv dataset.
-
-    :param str dataset_split: Dataset split (e.g., "train[:2%]")
-    :param Optional[int] max_papers: Maximum papers to load
-    :return Dict[str, Dict]: Dictionary mapping paper IDs to paper data
-    """
-    papers = {}
-
-    from datasets import load_dataset
-
-    dataset = None
-    last_error: Optional[Exception] = None
-    for dataset_name in ARXIV_DATASET_CANDIDATES:
-        try:
-            dataset = load_dataset(dataset_name, split=dataset_split)
-            logger.info(f"Loaded {dataset_name} dataset (split: {dataset_split})")
-            break
-        except Exception as exc:  # pragma: no cover - network/source dependent
-            last_error = exc
-            logger.warning(
-                "Could not load dataset %s: %s. Trying fallback.",
-                dataset_name,
-                exc,
-            )
-
-    if dataset is None:
-        logger.warning(
-            "Could not load any ArXiv dataset for split %s. Returning empty corpus.",
-            dataset_split,
-        )
-        if last_error is not None:
-            logger.debug("Last dataset error: %s", last_error)
-        return papers
-
-    for i, paper in enumerate(
-        tqdm(dataset, desc="Loading ArXiv papers", total=max_papers or len(dataset))
-    ):
-        if max_papers and i >= max_papers:
-            break
-
-        metadata = _extract_dataset_paper_metadata(paper, i)
-        paper_id = metadata.pop("paper_id")
-        papers[paper_id] = metadata
-
-    return papers
-
-
-def get_arxiv_dataset_cached(
-    dataset_split: str, max_papers: Optional[int]
-) -> Dict[str, Dict]:
-    """Apply joblib caching to dataset loading.
-
-    :param str dataset_split: HuggingFace split expression (e.g. ``train[:2%]``).
-    :param Optional[int] max_papers: Optional paper cap for corpus sampling.
-    :return Dict[str, Dict]: Cached dataset mapping paper ID to metadata.
-    """
-    cache = _get_memory()
-    return cache.cache(load_arxiv_dataset_cached)(dataset_split, max_papers)
-
-
 class EmbeddingGraphBuilder(GraphBuilderStrategy):
     """
     Build similarity graphs using semantic embeddings.
 
     This strategy:
-    - Loads ArXiv dataset corpus
-    - Computes embeddings for paper abstracts
-    - Finds semantically similar papers
+    - Hydrates a quantized corpus cache from ArXiv metadata
+    - Executes cache-native semantic retrieval
     - Combines semantic with temporal/category/author factors
     """
 
@@ -410,7 +310,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._source_dtype_hint = self._resolve_source_dtype_hint()
         self.top_k = top_k
         self.model = None
-        self.arxiv_corpus: Dict[str, Dict] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
         self.client = client or get_client()
         self.embedding_cache = EmbeddingCache(
@@ -768,18 +667,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.model_name,
         )
 
-    def _load_corpus(self) -> None:
-        """Load ArXiv corpus if not already loaded.
-
-        :return None: Corpus is populated in-place on first access.
-        """
-        if not self.arxiv_corpus:
-            logger.info(f"Loading ArXiv corpus (split: {self.dataset_split})...")
-            self.arxiv_corpus = get_arxiv_dataset_cached(
-                self.dataset_split, self.corpus_size
-            )
-            logger.info(f"Corpus loaded: {len(self.arxiv_corpus)} papers")
-
     def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
@@ -791,7 +678,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         papers: Dict[str, Paper] = {}
         self.embeddings = {}
 
-        # Load model (corpus loaded lazily depending on mode)
+        # Load model lazily.
         self._load_model()
 
         # Try to get seed from Semantic Scholar first

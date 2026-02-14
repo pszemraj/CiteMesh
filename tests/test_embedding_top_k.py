@@ -80,7 +80,6 @@ def test_collect_papers_respects_max_papers_total(
             [[1.0, 0.0] for _ in texts], dtype=np.float32
         ),
     )
-    monkeypatch.setattr(builder, "_load_corpus", lambda: None)
     monkeypatch.setattr(
         builder,
         "_select_candidates_from_loaded",

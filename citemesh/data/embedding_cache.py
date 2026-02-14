@@ -41,8 +41,6 @@ EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS = 60.0
 H5_LAYOUT_KEY = "h5_layout_version"
 H5_LAYOUT_MATRIX_VERSION = "matrix-v2-quantized"
 SCHEMA_VERSION_KEY = "schema_version"
-MIGRATION_STATE_KEY = "migration_state"
-MIGRATION_STATE_ACTIVE = "active"
 STORAGE_PRECISION_KEY = "storage_precision"
 SOURCE_TORCH_DTYPE_KEY = "source_torch_dtype"
 BINARY_PREFILTER_ENABLED_KEY = "binary_prefilter_enabled"
@@ -703,7 +701,6 @@ class EmbeddingCache:
                 conn, SCHEMA_VERSION_KEY, str(EMBEDDING_CACHE_SCHEMA_VERSION)
             )
             self._set_cache_metadata(conn, H5_LAYOUT_KEY, H5_LAYOUT_MATRIX_VERSION)
-            self._set_cache_metadata(conn, MIGRATION_STATE_KEY, MIGRATION_STATE_ACTIVE)
             self._set_cache_metadata(
                 conn, STORAGE_PRECISION_KEY, self.storage_precision
             )
@@ -746,23 +743,13 @@ class EmbeddingCache:
         rows = conn.execute("SELECT key, value FROM cache_metadata").fetchall()
         return {str(key): str(value) for key, value in rows}
 
-    def _invalidate_cached_row_indices(self, conn: sqlite3.Connection) -> None:
-        """Invalidate row-index pointers for all cached papers.
-
-        :param sqlite3.Connection conn: Open SQLite connection.
-        :return None: This method mutates DB state in-place.
-        """
-        conn.execute("UPDATE papers SET row_idx = NULL")
-        self._set_cache_metadata(conn, HYDRATION_COMPLETE_KEY, "0")
-
     def _reconcile_layout_metadata(self, conn: sqlite3.Connection) -> None:
-        """Write metadata keys for active matrix-layout migration state.
+        """Write metadata keys for active matrix-layout state.
 
         :param sqlite3.Connection conn: Open SQLite connection.
         :return None: This method mutates DB state in-place.
         """
         self._set_cache_metadata(conn, H5_LAYOUT_KEY, H5_LAYOUT_MATRIX_VERSION)
-        self._set_cache_metadata(conn, MIGRATION_STATE_KEY, MIGRATION_STATE_ACTIVE)
 
     def _ensure_h5_layout(self) -> None:
         """Ensure cache file uses matrix-based HDF5 layout."""
