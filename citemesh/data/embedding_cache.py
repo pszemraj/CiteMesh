@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import sys
 from contextlib import contextmanager
@@ -39,6 +40,7 @@ BINARY_INDEX_DATASET_NAME = "binary_index"
 CALIBRATION_RANGES_DATASET_NAME = "calibration_ranges"
 EMBEDDING_CACHE_SCHEMA_VERSION = 2
 EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS = 60.0
+EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR = "CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS"
 H5_LAYOUT_KEY = "h5_layout_version"
 H5_LAYOUT_MATRIX_VERSION = "matrix-v2-quantized"
 SCHEMA_VERSION_KEY = "schema_version"
@@ -57,6 +59,37 @@ _STORAGE_PRECISIONS = {"float32", "float16", "int8"}
 _POPCOUNT_LUT = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(
     axis=1
 )
+
+
+def _resolve_cache_lock_timeout_seconds() -> float:
+    """Resolve cache lock timeout from env var with safe fallback.
+
+    :return float: Lock timeout in seconds.
+    """
+    raw_value = os.getenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR)
+    if raw_value is None or not str(raw_value).strip():
+        return EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
+
+    try:
+        parsed = float(raw_value)
+    except ValueError:
+        logger.warning(
+            "Invalid %s value %r; falling back to default %.1fs.",
+            EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR,
+            raw_value,
+            EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS,
+        )
+        return EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
+
+    if not np.isfinite(parsed) or parsed <= 0:
+        logger.warning(
+            "Non-positive/invalid %s value %r; falling back to default %.1fs.",
+            EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR,
+            raw_value,
+            EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS,
+        )
+        return EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
+    return parsed
 
 
 def _metadata_table_create_sql() -> str:
@@ -661,31 +694,6 @@ class EmbeddingCache:
         expected_corpus_size = _corpus_size_token(corpus_size)
         expected_source = None if dataset_source is None else str(dataset_source)
 
-        with sqlite3.connect(self.db_path) as conn:
-            metadata = self._load_cache_metadata(conn)
-
-        metadata_matches = (
-            metadata.get(HYDRATION_COMPLETE_KEY, "0") == "1"
-            and metadata.get(HYDRATION_SPLIT_KEY) == expected_split
-            and metadata.get(HYDRATION_CORPUS_SIZE_KEY) == expected_corpus_size
-        )
-        if not metadata_matches:
-            return False
-
-        cached_source = (metadata.get(HYDRATION_DATASET_SOURCE_KEY) or "").strip()
-        if not cached_source:
-            return False
-
-        if expected_source is not None and cached_source != expected_source:
-            return False
-
-        return self._has_queryable_hydrated_payload()
-
-    def _has_queryable_hydrated_payload(self) -> bool:
-        """Return whether hydrated HDF5 payload exists and can be queried safely.
-
-        :return bool: ``True`` when cache has readable embedding + metadata rows.
-        """
         if not self.h5_path.exists() or not self.db_path.exists():
             return False
 
@@ -695,47 +703,76 @@ class EmbeddingCache:
                 sqlite3.connect(self.db_path) as conn,
                 h5py.File(self.h5_path, "r") as h5,
             ):
-                embeddings_dataset = self._get_embeddings_dataset(h5)
-                if embeddings_dataset is None:
-                    return False
-                self._assert_runtime_cache_consistency(
-                    conn=conn,
-                    h5_file=h5,
-                    embeddings_dataset=embeddings_dataset,
-                    fail_mode="runtime",
+                metadata = self._load_cache_metadata(conn)
+                metadata_matches = (
+                    metadata.get(HYDRATION_COMPLETE_KEY, "0") == "1"
+                    and metadata.get(HYDRATION_SPLIT_KEY) == expected_split
+                    and metadata.get(HYDRATION_CORPUS_SIZE_KEY) == expected_corpus_size
                 )
-                row_count = int(embeddings_dataset.shape[0])
-                if row_count < 1:
+                if not metadata_matches:
                     return False
 
-                if (
-                    self.storage_precision == "int8"
-                    and CALIBRATION_RANGES_DATASET_NAME not in h5
-                ):
+                cached_source = (
+                    metadata.get(HYDRATION_DATASET_SOURCE_KEY) or ""
+                ).strip()
+                if not cached_source:
                     return False
 
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM papers")
-                total_rows = int(cursor.fetchone()[0])
-                if total_rows != row_count:
+                if expected_source is not None and cached_source != expected_source:
                     return False
 
-                cursor.execute(
-                    """
-                    SELECT COUNT(*), COUNT(DISTINCT row_idx)
-                    FROM papers
-                    WHERE row_idx IS NOT NULL
-                      AND row_idx >= 0
-                      AND row_idx < ?
-                    """,
-                    (row_count,),
-                )
-                valid_rows, distinct_rows = cursor.fetchone()
-                if int(valid_rows) != row_count or int(distinct_rows) != row_count:
-                    return False
+                return self._has_queryable_hydrated_payload(conn=conn, h5=h5)
         except (OSError, ValueError, RuntimeError, sqlite3.DatabaseError):
             return False
 
+    def _has_queryable_hydrated_payload(
+        self, conn: sqlite3.Connection, h5: h5py.File
+    ) -> bool:
+        """Return whether hydrated HDF5 payload exists and can be queried safely.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :param h5py.File h5: Open HDF5 cache handle.
+        :return bool: ``True`` when cache has readable embedding + metadata rows.
+        """
+        embeddings_dataset = self._get_embeddings_dataset(h5)
+        if embeddings_dataset is None:
+            return False
+
+        self._assert_runtime_cache_consistency(
+            conn=conn,
+            h5_file=h5,
+            embeddings_dataset=embeddings_dataset,
+            fail_mode="runtime",
+        )
+        row_count = int(embeddings_dataset.shape[0])
+        if row_count < 1:
+            return False
+
+        if (
+            self.storage_precision == "int8"
+            and CALIBRATION_RANGES_DATASET_NAME not in h5
+        ):
+            return False
+
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM papers")
+        total_rows = int(cursor.fetchone()[0])
+        if total_rows != row_count:
+            return False
+
+        cursor.execute(
+            """
+            SELECT COUNT(*), COUNT(DISTINCT row_idx)
+            FROM papers
+            WHERE row_idx IS NOT NULL
+              AND row_idx >= 0
+              AND row_idx < ?
+            """,
+            (row_count,),
+        )
+        valid_rows, distinct_rows = cursor.fetchone()
+        if int(valid_rows) != row_count or int(distinct_rows) != row_count:
+            return False
         return True
 
     def get_hydrated_dataset_source(self) -> Optional[str]:
@@ -743,7 +780,7 @@ class EmbeddingCache:
 
         :return Optional[str]: Hydrated dataset source token when set.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
             metadata = self._load_cache_metadata(conn)
         cached_source = metadata.get(HYDRATION_DATASET_SOURCE_KEY)
         return cached_source if cached_source else None
@@ -753,7 +790,7 @@ class EmbeddingCache:
 
         :return Optional[str]: Active model fingerprint or ``None`` when unset.
         """
-        with sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
             metadata = self._load_cache_metadata(conn)
         fingerprint = str(metadata.get(MODEL_FINGERPRINT_KEY, "")).strip()
         return fingerprint or None
@@ -767,7 +804,7 @@ class EmbeddingCache:
         normalized = str(fingerprint).strip()
         if not normalized:
             raise ValueError("fingerprint must be a non-empty string.")
-        with sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
             self._set_cache_metadata(conn, MODEL_FINGERPRINT_KEY, normalized)
             conn.commit()
 
@@ -792,7 +829,7 @@ class EmbeddingCache:
             raise ValueError(
                 "dataset_source must be non-empty when complete=True for hydration."
             )
-        with sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
             self._set_cache_metadata(
                 conn, HYDRATION_DATASET_SOURCE_KEY, normalized_source
             )
@@ -823,16 +860,16 @@ class EmbeddingCache:
 
         :return Iterator[None]: Context manager yielding once lock is acquired.
         """
-        lock = FileLock(
-            str(self.lock_path), timeout=EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
-        )
+        timeout_seconds = _resolve_cache_lock_timeout_seconds()
+        lock = FileLock(str(self.lock_path), timeout=timeout_seconds)
         try:
             with lock:
                 yield
         except Timeout as exc:
             raise TimeoutError(
                 "Timed out waiting for embedding cache lock "
-                f"at {self.lock_path}. Another process may be holding it."
+                f"at {self.lock_path} after {timeout_seconds:.3f}s. "
+                "Another process may be holding it."
             ) from exc
 
     def _init_db(self) -> None:

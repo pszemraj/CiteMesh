@@ -19,6 +19,9 @@ The following items were intentionally deferred during the easy-win + breaking A
 - Test overlap trims `#2` and `#4`
   - Scope: reduce duplicated normalization assertions and overlapping deterministic-ordering checks.
   - Deferred to avoid accidental loss of edge-case coverage before targeted replacement tests are added.
+- `#10` Embedding cache two-phase lock refactor (`check -> unlock -> encode -> relock -> commit`)
+  - Scope: reduce lock hold duration during long model encode calls by moving compute outside the namespace lock with safe re-check/commit semantics.
+  - Deferred because this touches cache coherence across SQLite/HDF5 writes and needs dedicated race characterization tests.
 
 ## Follow-up Conditions
 

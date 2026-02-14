@@ -14,6 +14,8 @@ import pytest
 
 from citemesh.data.embedding_cache import (
     CALIBRATION_SAMPLE_SIZE_KEY,
+    EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR,
+    EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS,
     HYDRATION_COMPLETE_KEY,
     HYDRATION_CORPUS_SIZE_KEY,
     HYDRATION_DATASET_SOURCE_KEY,
@@ -21,6 +23,7 @@ from citemesh.data.embedding_cache import (
     MODEL_FINGERPRINT_KEY,
     SOURCE_TORCH_DTYPE_KEY,
     EmbeddingCache,
+    _resolve_cache_lock_timeout_seconds,
 )
 from citemesh.data.model_profiles import get_embedding_model_profile
 from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
@@ -107,6 +110,23 @@ def test_embedding_cache_lifecycle_contract() -> None:
     assert rows == [("p1", 0), ("p2", 1)]
     assert row_idx_after_update == 0
     assert p2_metadata_after_refresh == 2024
+
+
+def test_embedding_cache_lock_timeout_env_override_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock-timeout env override should parse valid values and reject invalid ones."""
+    monkeypatch.delenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR, raising=False)
+    assert _resolve_cache_lock_timeout_seconds() == EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
+
+    monkeypatch.setenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR, "120.5")
+    assert _resolve_cache_lock_timeout_seconds() == pytest.approx(120.5)
+
+    monkeypatch.setenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR, "0")
+    assert _resolve_cache_lock_timeout_seconds() == EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
+
+    monkeypatch.setenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR, "not-a-number")
+    assert _resolve_cache_lock_timeout_seconds() == EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
 
 
 def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
