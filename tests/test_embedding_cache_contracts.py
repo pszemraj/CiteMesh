@@ -505,6 +505,18 @@ def test_embedding_cache_supports_lzf_codec_without_compression_level_opts() -> 
             assert h5["binary_index"].compression == "lzf"
 
 
+def test_embedding_cache_rejects_szip_codec_configuration() -> None:
+    """Unsupported szip codec should fail fast with a validation error."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with pytest.raises(ValueError, match="compression='szip' is unsupported"):
+            EmbeddingCache(
+                cache_dir=tmpdir,
+                model_name="szip-codec",
+                compression="szip",
+                compression_level=1,
+            )
+
+
 def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
     """Hydration completion should survive cache re-open in same namespace."""
     with tempfile.TemporaryDirectory() as tmpdir:

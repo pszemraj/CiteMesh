@@ -68,6 +68,7 @@ Historical bullets below may describe superseded behavior; canonical current beh
 - Grouped auto outputs into stable per-paper title folders.
 - Removed title truncation in runtime seed logs and static/Plotly chart titles.
 - Fixed hybrid CLI validation to resolve effective default `--max-semantic` before rejecting embedding-only flags.
+- Removed unsupported `szip` embedding-cache compression mode from CLI/validation.
 - Moved interactive exporters to optional `.[viz]` extras.
 
 ## Maintenance Consolidation

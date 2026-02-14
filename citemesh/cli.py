@@ -214,7 +214,7 @@ _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
 _BUILD_OPTION_DEST_BY_FLAG: Dict[str, str] = {
     flag: dest for dest, flags in _BUILD_OPTION_FLAGS.items() for flag in flags
 }
-_CACHE_COMPRESSION_CHOICES = ("gzip", "lzf", "szip")
+_CACHE_COMPRESSION_CHOICES = ("gzip", "lzf")
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
     "model_revision",

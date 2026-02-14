@@ -395,6 +395,17 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
             ],
             "invalid choice",
         ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--cache-compression",
+                "szip",
+            ],
+            "invalid choice",
+        ),
     ]
     for args, token in cases:
         result = run_cli_command(args)

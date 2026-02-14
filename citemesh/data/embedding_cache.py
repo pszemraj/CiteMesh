@@ -56,11 +56,10 @@ HYDRATION_COMPLETE_KEY = "hydration_complete"
 MODEL_FINGERPRINT_KEY = "model_fingerprint"
 
 _STORAGE_PRECISIONS = {"float32", "float16", "int8"}
-_COMPRESSION_FILTERS = {"gzip", "lzf", "szip"}
+_COMPRESSION_FILTERS = {"gzip", "lzf"}
 _COMPRESSION_FILTER_IDS = {
     "gzip": h5py.h5z.FILTER_DEFLATE,
     "lzf": h5py.h5z.FILTER_LZF,
-    "szip": h5py.h5z.FILTER_SZIP,
 }
 _POPCOUNT_LUT = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(
     axis=1
@@ -175,6 +174,12 @@ def validate_compression_filter(compression: str) -> str:
     :raises ValueError: If filter name is unsupported or unavailable at runtime.
     """
     normalized = str(compression or "").strip().lower()
+    if normalized == "szip":
+        raise ValueError(
+            "compression='szip' is unsupported; HDF5 szip requires codec-specific "
+            "options that are not exposed by current cache settings. Use 'gzip' or "
+            "'lzf'."
+        )
     if normalized not in _COMPRESSION_FILTERS:
         expected = ", ".join(sorted(_COMPRESSION_FILTERS))
         raise ValueError(
@@ -243,7 +248,7 @@ class EmbeddingCache:
         :param str storage_precision: Persistent embedding precision ``float32``/``float16``/``int8``.
         :param bool binary_prefilter: Whether to maintain a binary index for int8 search.
         :param int calibration_sample_size: Target sample size for int8 calibration ranges.
-        :param str compression: HDF5 compression filter name (``gzip``, ``lzf``, ``szip``).
+        :param str compression: HDF5 compression filter name (``gzip`` or ``lzf``).
         :param int compression_level: Compression level for HDF5 datasets.
         :param str source_torch_dtype: Source inference dtype token, e.g. ``bfloat16``.
         """
