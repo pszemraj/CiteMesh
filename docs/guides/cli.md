@@ -8,6 +8,7 @@ This is the canonical CLI behavior specification.
 
 - Normative here: commands, flags, defaults, validation, identifier normalization, output naming, and export semantics.
 - Non-normative here: cache storage internals and on-disk layout. See [Caching & Data](caching.md).
+- Runtime environment-variable definitions are canonical in [Environment Variables](../reference/environment.md).
 - Documentation ownership map: [Documentation Index](../README.md).
 
 ## Basic Invocation
@@ -20,7 +21,7 @@ Other command groups:
 
 ```bash
 # Search by keyword/title
-citemesh search "<query>" [--limit N]
+citemesh search "<query>" [--limit N|-n N]
 
 # Cache management commands
 citemesh cache scan
@@ -28,6 +29,7 @@ citemesh cache clear [--yes]
 ```
 
 For cache path/layout/hydration details, see [Caching & Data](caching.md).
+In non-interactive shells, `citemesh cache clear` requires `--yes`.
 
 ## Accepted Identifiers
 
@@ -127,6 +129,7 @@ ignoring it.
 - `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
 - `--all-corpus`: remove corpus-size cap and process the full selected split
+- `--all-corpus` cannot be combined with an explicit `--corpus-size` value
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `2`)
 - `--truncate-dim`: optional embedding output-dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
@@ -213,14 +216,11 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
 - **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
-- **API limits**: set `S2_API_KEY` for higher Semantic Scholar limits.
-
-```bash
-export S2_API_KEY="your-key-here"
-```
+- **API limits**: configure `S2_API_KEY`; variable contract is canonical in [Environment Variables](../reference/environment.md).
 
 Related canonical docs:
 
 - Docs ownership map: [Documentation Index](../README.md)
 - Cache behavior: [Caching & Data](caching.md)
+- Runtime variables: [Environment Variables](../reference/environment.md)
 - Component architecture: [Architecture](../internals/architecture.md)

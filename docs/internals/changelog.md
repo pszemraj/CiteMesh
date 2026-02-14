@@ -6,6 +6,7 @@ This page is historical context, not a normative behavior specification.
 
 - Use [CLI Usage](../guides/cli.md) for current command/flag behavior.
 - Use [Caching & Data](../guides/caching.md) for current cache behavior.
+- Use [Environment Variables](../reference/environment.md) for current runtime variable contracts.
 - Documentation ownership map: [Documentation Index](../README.md).
 
 This changelog summarizes notable changes from early script-based prototypes to the current package architecture.

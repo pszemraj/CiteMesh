@@ -8,6 +8,7 @@ This is the canonical cache behavior specification.
 
 - Normative here: cache root resolution, directory layout, quantized embedding cache behavior, and cleanup guidance.
 - Non-normative here: broader CLI command semantics. See [CLI Usage](cli.md) for command contracts.
+- Runtime environment-variable definitions are canonical in [Environment Variables](../reference/environment.md).
 - Documentation ownership map: [Documentation Index](../README.md).
 
 ## Cache Root
@@ -23,6 +24,8 @@ Override the root with:
 ```bash
 export CITEMESH_CACHE_DIR=/path/to/custom/cache
 ```
+
+Variable contract details are canonical in [Environment Variables](../reference/environment.md).
 
 ## Directory Layout
 
@@ -70,7 +73,7 @@ not alter embedding input text) refresh SQLite metadata rows without re-encoding
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
 Lock acquisition timeout defaults to `60` seconds and can be overridden with
-`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (must be a positive number).
+`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
 
@@ -86,7 +89,8 @@ offline checks are explicit and traceable.
 When requested revision is `main` and only a legacy cached SHA is available, reuse
 is still allowed with a warning because `main` cannot be proven offline.
 Set `CITEMESH_STRICT_OFFLINE_FINGERPRINT=1` to disable that legacy `main` reuse
-assumption and force namespace clear/rebuild when identity cannot be verified.
+assumption and force namespace clear/rebuild when identity cannot be verified
+(details: [Environment Variables](../reference/environment.md)).
 If compatibility checks fail (for example unresolved revision mismatch), CiteMesh clears
 and rebuilds that namespace before reuse to avoid stale model-version mixing.
 

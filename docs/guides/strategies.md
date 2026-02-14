@@ -10,6 +10,7 @@ This is the canonical description of strategy behavior, data sources, and tradeo
 - Non-normative here: CLI flags/defaults and cache-path rules.
 - CLI contracts: [CLI Usage](cli.md)
 - Cache contracts: [Caching & Data](caching.md)
+- Runtime variables: [Environment Variables](../reference/environment.md)
 - Documentation ownership map: [Documentation Index](../README.md)
 
 ## At a Glance
@@ -62,4 +63,5 @@ Embedding cache behavior, hydration, and precision controls are defined in [Cach
 
 - [CLI Usage](cli.md)
 - [Caching & Data](caching.md)
+- [Environment Variables](../reference/environment.md)
 - [Architecture](../internals/architecture.md)

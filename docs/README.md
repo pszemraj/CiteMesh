@@ -19,6 +19,7 @@ This page is the canonical map of documentation ownership.
 | CLI commands, flags, identifiers, output naming, export behavior | [Guides: CLI Usage](guides/cli.md) |
 | Strategy behavior and tradeoffs | [Guides: Strategies](guides/strategies.md) |
 | Cache paths/layout, hydration/invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
+| Runtime environment variables (`S2_API_KEY`, `CITEMESH_*`) | [Reference: Environment Variables](reference/environment.md) |
 | Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |
 | Historical changes and release notes | [Internals: Changelog](internals/changelog.md) |
 | Developer backlog notes (non-normative) | [Developer Notes](dev.md) |
@@ -29,3 +30,4 @@ This page is the canonical map of documentation ownership.
 
 - [Guides: CLI Usage](guides/cli.md)
 - [Guides: Caching & Data](guides/caching.md)
+- [Reference: Environment Variables](reference/environment.md)
