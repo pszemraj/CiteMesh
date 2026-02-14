@@ -22,9 +22,6 @@ The following items were intentionally deferred during the easy-win + breaking A
 - `#10` Embedding cache two-phase lock refactor (`check -> unlock -> encode -> relock -> commit`)
   - Scope: reduce lock hold duration during long model encode calls by moving compute outside the namespace lock with safe re-check/commit semantics.
   - Deferred because this touches cache coherence across SQLite/HDF5 writes and needs dedicated race characterization tests.
-- `#11` CLI/API validation parity for strategy option contracts
-  - Scope: expose a shared validator callable from both CLI parsing and direct builder/API entrypoints so invalid combinations are rejected consistently outside CLI.
-  - Deferred because current strategy constructors already guard high-risk invariants, and introducing a shared contract layer needs a stable public API boundary decision.
 - `#12` Cross-strategy score taxonomy harmonization
   - Scope: define optional calibrated score bands/labels that can be consumed uniformly across citation/recommendation/embedding/hybrid outputs.
   - Deferred because current workflows intentionally use strategy-specific scoring math and need a calibration design pass before claiming comparability.

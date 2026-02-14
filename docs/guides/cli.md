@@ -84,6 +84,7 @@ For single-export runs, explicit `-o` remains file-style and preserves extension
 
 Numeric validation:
 
+- `build <paper-id>` and `search <query>` require non-empty strings.
 - `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, and `search --limit` must be at least `1`.
 - `--max-citations` and `--max-references` must be at least `0`.
 - `--cache-compression-level` must be at least `0`.
@@ -103,7 +104,8 @@ ignoring it.
 - `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (default `0.2`).
 - `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
 - `--refresh-reference-cache` applies to `recommendation`, `citation`, and the citation branch of `hybrid` to bypass persisted reference-cache reads.
-- `embedding` and the embedding branch of `hybrid` use embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`, storage/cache flags below).
+- `embedding` uses embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`, storage/cache flags below).
+- The embedding branch of `hybrid` reuses embedding controls except `--top-k` (hybrid edge pruning follows its own policy).
 
 ### Recommendation Strategy
 
@@ -133,7 +135,7 @@ ignoring it.
 - `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). Explicit `--binary-prefilter` requires `--storage-precision int8`.
 - `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
-- `--cache-compression`: HDF5 compression filter for cache datasets (default `gzip`)
+- `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`, `szip`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled)
 
@@ -153,6 +155,7 @@ Execution transparency:
 - `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
   Hybrid reserves this capacity from citation collection (`citation_budget = max_papers - max_semantic`), so valid values are `0` through `max-papers - 1`.
   If omitted, hybrid defaults to `min(10, max-papers - 1)`.
+- Hybrid runs fail closed if semantic enrichment fails; CiteMesh does not silently downgrade to citation-only output.
 
 ## Export Formats
 

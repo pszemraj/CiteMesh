@@ -6,6 +6,7 @@ import argparse
 import io
 import re
 import runpy
+import shlex
 import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
@@ -64,35 +65,37 @@ def run_cli_command(args: list[str]) -> SimpleNamespace:
     )
 
 
-def _dispatch_namespace() -> argparse.Namespace:
+def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
     """Build argparse namespace fixture for strategy dispatch tests."""
-    return argparse.Namespace(
-        paper_id="seed",
-        max_papers=11,
-        max_citations=9,
-        max_references=7,
-        similarity_threshold=0.21,
-        no_references=True,
-        refresh_reference_cache=False,
-        model="m",
-        model_revision=None,
-        dataset_split="train",
-        corpus_size=1234,
-        all_corpus=True,
-        top_k=4,
-        truncate_dim=64,
-        streaming=True,
-        max_semantic=5,
-        seed=7,
-        force_rebuild_cache=False,
-        storage_precision="int8",
-        binary_prefilter=True,
-        binary_rescore_multiplier=9,
-        calibration_sample_size=123,
-        cache_compression="gzip",
-        cache_compression_level=1,
-        torch_compile=True,
-    )
+    values = {
+        "paper_id": "seed",
+        "max_papers": 11,
+        "max_citations": 20,
+        "max_references": 20,
+        "similarity_threshold": 0.2,
+        "no_references": False,
+        "refresh_reference_cache": False,
+        "model": "google/embeddinggemma-300m",
+        "model_revision": None,
+        "dataset_split": "train",
+        "corpus_size": 50000,
+        "all_corpus": False,
+        "top_k": 2,
+        "truncate_dim": None,
+        "streaming": False,
+        "max_semantic": None,
+        "seed": 7,
+        "force_rebuild_cache": False,
+        "storage_precision": "int8",
+        "binary_prefilter": True,
+        "binary_rescore_multiplier": 8,
+        "calibration_sample_size": 2000,
+        "cache_compression": "gzip",
+        "cache_compression_level": 1,
+        "torch_compile": True,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
 
 
 def test_cache_commands_contracts(
@@ -219,6 +222,8 @@ def test_cli_argument_validation_contracts() -> None:
             "must be a finite float",
         ),
         (["search", "attention", "--limit", "0"], "must be at least 1"),
+        (["search", ""], "must be a non-empty string"),
+        (["build", "", "--strategy", "citation"], "must be a non-empty string"),
     ]
     for args, expected_error in numeric_cases:
         result = run_cli_command(args)
@@ -366,6 +371,17 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
             ],
             "--all-corpus cannot be combined with explicit --corpus-size",
         ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--cache-compression",
+                "brotli",
+            ],
+            "invalid choice",
+        ),
     ]
     for args, token in cases:
         result = run_cli_command(args)
@@ -384,7 +400,9 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        cli_module, "_build_strategy_graph", lambda args, strategy: (graph, "seed")
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
     )
 
     def _fake_compute_layout(
@@ -476,7 +494,9 @@ def test_build_metadata_includes_score_contract(
 
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        cli_module, "_build_strategy_graph", lambda args, strategy: (graph, "seed")
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
         cli_module,
@@ -522,7 +542,7 @@ def test_metadata_timestamp_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             cli_module,
             "_build_strategy_graph",
-            lambda args, strategy, graph=graph: (graph, "seed"),
+            lambda args, strategy, graph=graph, **_kwargs: (graph, "seed"),
         )
         monkeypatch.setattr(
             cli_module,
@@ -568,7 +588,7 @@ def test_embedding_export_metadata_uses_effective_precision_values(
     monkeypatch.setattr(
         cli_module,
         "_build_strategy_graph",
-        lambda args, strategy: (graph, "seed"),
+        lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
         cli_module,
@@ -617,7 +637,9 @@ def test_embedding_build_logs_side_effect_contract(
     info_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
     monkeypatch.setattr(
-        cli_module, "_build_strategy_graph", lambda args, strategy: (graph, "seed")
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
         cli_module,
@@ -656,6 +678,12 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
             "citation",
             "CitationGraphBuilder",
             {
+                "max_citations": 9,
+                "max_references": 7,
+                "similarity_threshold": 0.21,
+                "no_references": True,
+            },
+            {
                 "max_papers": 11,
                 "max_citations": 9,
                 "max_references": 7,
@@ -668,6 +696,10 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
             "recommendation",
             "RecommendationGraphBuilder",
             {
+                "similarity_threshold": 0.21,
+                "no_references": True,
+            },
+            {
                 "max_papers": 11,
                 "fetch_references": False,
                 "refresh_reference_cache": False,
@@ -678,11 +710,21 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
             "embedding",
             "EmbeddingGraphBuilder",
             {
+                "model": "m",
+                "corpus_size": 1234,
+                "all_corpus": False,
+                "top_k": 4,
+                "truncate_dim": 64,
+                "streaming": True,
+                "binary_rescore_multiplier": 9,
+                "calibration_sample_size": 123,
+            },
+            {
                 "max_papers": 11,
                 "model_name": "m",
                 "model_revision": None,
                 "dataset_split": "train",
-                "corpus_size": None,
+                "corpus_size": 1234,
                 "truncate_dim": 64,
                 "top_k": 4,
                 "force_rebuild_cache": False,
@@ -700,6 +742,19 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
             "hybrid",
             "HybridGraphBuilder",
             {
+                "max_citations": 9,
+                "max_references": 7,
+                "no_references": True,
+                "max_semantic": 5,
+                "model": "m",
+                "corpus_size": 1234,
+                "all_corpus": False,
+                "truncate_dim": 64,
+                "streaming": True,
+                "binary_rescore_multiplier": 9,
+                "calibration_sample_size": 123,
+            },
+            {
                 "max_papers": 11,
                 "max_citations": 9,
                 "max_references": 7,
@@ -709,7 +764,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "model_name": "m",
                 "model_revision": None,
                 "dataset_split": "train",
-                "corpus_size": None,
+                "corpus_size": 1234,
                 "truncate_dim": 64,
                 "use_streaming": True,
                 "force_rebuild_cache": False,
@@ -723,9 +778,9 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
             },
         ),
     ]
-    for strategy, builder_name, expected_kwargs in cases:
+    for strategy, builder_name, namespace_overrides, expected_kwargs in cases:
         captured: dict[str, object] = {}
-        namespace = _dispatch_namespace()
+        namespace = _dispatch_namespace(**namespace_overrides)
         monkeypatch.setattr(
             cli_module,
             builder_name,
@@ -751,6 +806,16 @@ def test_build_strategy_graph_invalid_and_lazy_exports_contract() -> None:
     assert citemesh.RecommendationGraphBuilder.__name__ == "RecommendationGraphBuilder"
     assert citemesh.EmbeddingGraphBuilder.__name__ == "EmbeddingGraphBuilder"
     assert citemesh.HybridGraphBuilder.__name__ == "HybridGraphBuilder"
+
+
+def test_build_strategy_graph_rejects_programmatic_contract_violations() -> None:
+    """Programmatic dispatch should still reject strategy-incompatible options."""
+    namespace = _dispatch_namespace(
+        similarity_threshold=0.21,
+        model="all-MiniLM-L6-v2",
+    )
+    with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
+        cli_module._build_strategy_graph(namespace, "recommendation")
 
 
 def test_cli_help_contracts() -> None:
@@ -852,3 +917,53 @@ def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("citemesh.cli.main", fake_main)
     runpy.run_module("citemesh.__main__", run_name="__main__")
     assert called["main"] is True
+
+
+def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
+    """Extract parseable ``citemesh`` command argv vectors from Markdown bash blocks."""
+    commands: list[list[str]] = []
+    blocks = re.findall(r"```bash\s+(.*?)```", markdown_text, flags=re.DOTALL)
+    for block in blocks:
+        pending = ""
+        for raw_line in block.splitlines():
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if pending:
+                continuation = (
+                    stripped[:-1].strip() if stripped.endswith("\\") else stripped
+                )
+                pending = f"{pending} {continuation}".strip()
+                if stripped.endswith("\\"):
+                    continue
+                tokens = shlex.split(pending)
+                pending = ""
+                if tokens and tokens[0] == "citemesh":
+                    commands.append(tokens[1:])
+                continue
+            if not stripped.startswith("citemesh "):
+                continue
+            if stripped.endswith("\\"):
+                pending = stripped[:-1].strip()
+                continue
+            tokens = shlex.split(stripped)
+            if tokens and tokens[0] == "citemesh":
+                commands.append(tokens[1:])
+    return commands
+
+
+def test_documented_cli_examples_are_parseable() -> None:
+    """README and CLI guide command examples should remain parseable in CI."""
+    parser, _, _ = cli_module._create_parser()
+    docs = [Path("README.md"), Path("docs/guides/cli.md")]
+
+    commands: list[list[str]] = []
+    for doc_path in docs:
+        markdown_text = doc_path.read_text(encoding="utf-8")
+        commands.extend(_extract_citemesh_doc_commands(markdown_text))
+
+    assert commands, "No citemesh commands found in docs; example parser test is stale."
+    for argv in commands:
+        if any(token.startswith("[") or token.endswith("]") for token in argv):
+            continue
+        parser.parse_args(argv)

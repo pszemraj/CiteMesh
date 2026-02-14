@@ -56,6 +56,12 @@ HYDRATION_COMPLETE_KEY = "hydration_complete"
 MODEL_FINGERPRINT_KEY = "model_fingerprint"
 
 _STORAGE_PRECISIONS = {"float32", "float16", "int8"}
+_COMPRESSION_FILTERS = {"gzip", "lzf", "szip"}
+_COMPRESSION_FILTER_IDS = {
+    "gzip": h5py.h5z.FILTER_DEFLATE,
+    "lzf": h5py.h5z.FILTER_LZF,
+    "szip": h5py.h5z.FILTER_SZIP,
+}
 _POPCOUNT_LUT = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(
     axis=1
 )
@@ -161,6 +167,28 @@ def _storage_dtype_for_precision(storage_precision: str) -> np.dtype:
     raise ValueError(f"Unsupported storage precision: {storage_precision}")
 
 
+def validate_compression_filter(compression: str) -> str:
+    """Validate and normalize HDF5 compression filter names.
+
+    :param str compression: Requested HDF5 compression filter token.
+    :return str: Normalized lowercase compression token.
+    :raises ValueError: If filter name is unsupported or unavailable at runtime.
+    """
+    normalized = str(compression or "").strip().lower()
+    if normalized not in _COMPRESSION_FILTERS:
+        expected = ", ".join(sorted(_COMPRESSION_FILTERS))
+        raise ValueError(
+            f"compression must be one of {{{expected}}}, got {compression!r}."
+        )
+
+    filter_id = _COMPRESSION_FILTER_IDS[normalized]
+    if not bool(h5py.h5z.filter_avail(filter_id)):
+        raise ValueError(
+            f"compression filter {normalized!r} is unavailable in this h5py runtime."
+        )
+    return normalized
+
+
 def _sanitize_ranges(ranges: np.ndarray) -> np.ndarray:
     """Ensure per-dimension quantization ranges are strictly non-zero.
 
@@ -215,7 +243,7 @@ class EmbeddingCache:
         :param str storage_precision: Persistent embedding precision ``float32``/``float16``/``int8``.
         :param bool binary_prefilter: Whether to maintain a binary index for int8 search.
         :param int calibration_sample_size: Target sample size for int8 calibration ranges.
-        :param str compression: HDF5 compression filter name.
+        :param str compression: HDF5 compression filter name (``gzip``, ``lzf``, ``szip``).
         :param int compression_level: Compression level for HDF5 datasets.
         :param str source_torch_dtype: Source inference dtype token, e.g. ``bfloat16``.
         """
@@ -243,7 +271,7 @@ class EmbeddingCache:
         self.storage_precision = storage_precision
         self.binary_prefilter = bool(binary_prefilter and storage_precision == "int8")
         self.calibration_sample_size = int(calibration_sample_size)
-        self.compression = compression
+        self.compression = validate_compression_filter(compression)
         self.compression_level = int(compression_level)
         self.source_torch_dtype = str(source_torch_dtype or "float32")
         self.embedding_vector_dtype = "float32"

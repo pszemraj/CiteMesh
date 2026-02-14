@@ -292,6 +292,29 @@ def test_hybrid_collection_merges_and_tracks_sources(
     assert builder.paper_sources["s1"] == "semantic"
 
 
+def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid collection should fail when semantic enrichment cannot complete."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
+
+    seed = _paper("seed")
+    seed.is_seed = True
+    citation_papers = {"seed": seed, "c1": _paper("c1")}
+
+    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.collect_papers = MagicMock(
+        side_effect=RuntimeError("semantic backend unavailable")
+    )
+
+    with pytest.raises(
+        RuntimeError, match="Semantic enrichment failed: semantic backend unavailable"
+    ):
+        builder.collect_papers("seed")
+
+
 def test_hybrid_thresholds_and_default_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

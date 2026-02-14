@@ -19,7 +19,11 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
-from citemesh.data import EmbeddingCache, get_embedding_model_profile
+from citemesh.data import (
+    EmbeddingCache,
+    get_embedding_model_profile,
+    validate_compression_filter,
+)
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -263,8 +267,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
         storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
-        binary_prefilter: bool = EMBEDDING_STORAGE_CONFIG.binary_prefilter,
-        binary_rescore_multiplier: int = EMBEDDING_STORAGE_CONFIG.binary_rescore_multiplier,
+        binary_prefilter: Optional[bool] = None,
+        binary_rescore_multiplier: Optional[int] = None,
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
@@ -285,10 +289,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
         :param str storage_precision: Persistent cache precision (``int8``, ``float16``, ``float32``).
-        :param bool binary_prefilter: Whether cache search uses binary Hamming prefiltering.
-            This is only effective when ``storage_precision == "int8"``.
-        :param int binary_rescore_multiplier: Candidate oversampling factor for binary
-            prefilter search. This is only effective when ``storage_precision == "int8"``.
+        :param Optional[bool] binary_prefilter: Whether cache search uses binary
+            Hamming prefiltering. When ``None``, defaults to enabled only for
+            ``int8`` storage precision.
+        :param Optional[int] binary_rescore_multiplier: Candidate oversampling factor
+            for binary prefilter search. When ``None``, defaults to configured value
+            for ``int8`` and ``1`` for non-int8 precision.
         :param int calibration_sample_size: Calibration sample size used for int8 quantization ranges.
         :param str cache_compression: HDF5 compression filter for embedding datasets.
         :param int cache_compression_level: HDF5 compression level.
@@ -299,10 +305,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         _check_embedding_deps()
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
-        if binary_rescore_multiplier < 1:
+        if binary_rescore_multiplier is not None and binary_rescore_multiplier < 1:
             raise ValueError("binary_rescore_multiplier must be at least 1")
         if calibration_sample_size < 1:
             raise ValueError("calibration_sample_size must be at least 1")
+        validate_compression_filter(cache_compression)
         super().__init__(max_papers)
         self.model_name = model_name
         normalized_revision = (
@@ -312,25 +319,28 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size
         self.storage_precision = storage_precision
-        self.binary_prefilter = bool(binary_prefilter and storage_precision == "int8")
-        if storage_precision != "int8" and binary_prefilter:
-            logger.warning(
-                "binary_prefilter is ignored when storage_precision=%s; "
-                "switch to storage_precision='int8' to enable it.",
-                storage_precision,
-            )
-
-        requested_multiplier = int(binary_rescore_multiplier)
-        if storage_precision != "int8" and requested_multiplier != 1:
-            logger.warning(
-                "binary_rescore_multiplier=%s is ignored when storage_precision=%s; "
-                "using effective value 1.",
-                requested_multiplier,
-                storage_precision,
-            )
-        self.binary_rescore_multiplier = (
-            requested_multiplier if storage_precision == "int8" else 1
+        resolved_prefilter = (
+            EMBEDDING_STORAGE_CONFIG.binary_prefilter
+            if binary_prefilter is None and storage_precision == "int8"
+            else False
+            if binary_prefilter is None
+            else bool(binary_prefilter)
         )
+        requested_multiplier = (
+            EMBEDDING_STORAGE_CONFIG.binary_rescore_multiplier
+            if binary_rescore_multiplier is None and storage_precision == "int8"
+            else 1
+            if binary_rescore_multiplier is None
+            else int(binary_rescore_multiplier)
+        )
+        if storage_precision != "int8" and resolved_prefilter:
+            raise ValueError("--binary-prefilter requires storage_precision='int8'")
+        if storage_precision != "int8" and requested_multiplier != 1:
+            raise ValueError(
+                "--binary-rescore-multiplier requires storage_precision='int8'"
+            )
+        self.binary_prefilter = bool(resolved_prefilter)
+        self.binary_rescore_multiplier = int(requested_multiplier)
         self.calibration_sample_size = int(calibration_sample_size)
         self.cache_compression = cache_compression
         self.cache_compression_level = int(cache_compression_level)

@@ -319,22 +319,36 @@ def test_embedding_cache_namespace_varies_by_storage_precision(
     )
 
 
-def test_embedding_cache_namespace_ignores_binary_prefilter_outside_int8(
+def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Non-int8 caches should not split namespace by binary prefilter toggles."""
+    """Non-int8 precision should reject binary-prefilter-specific controls."""
     _disable_embedding_dep_check(monkeypatch)
 
-    f32_prefilter_on = EmbeddingGraphBuilder(
+    with pytest.raises(
+        ValueError, match="--binary-prefilter requires storage_precision='int8'"
+    ):
+        EmbeddingGraphBuilder(
+            max_papers=1,
+            storage_precision="float32",
+            binary_prefilter=True,
+            client=MagicMock(),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="--binary-rescore-multiplier requires storage_precision='int8'",
+    ):
+        EmbeddingGraphBuilder(
+            max_papers=1,
+            storage_precision="float32",
+            binary_rescore_multiplier=8,
+            client=MagicMock(),
+        )
+
+    f32_default = EmbeddingGraphBuilder(
         max_papers=1,
         storage_precision="float32",
-        binary_prefilter=True,
-        client=MagicMock(),
-    )
-    f32_prefilter_off = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="float32",
-        binary_prefilter=False,
         client=MagicMock(),
     )
     int8_prefilter_on = EmbeddingGraphBuilder(
@@ -350,14 +364,8 @@ def test_embedding_cache_namespace_ignores_binary_prefilter_outside_int8(
         client=MagicMock(),
     )
 
-    assert (
-        f32_prefilter_on.embedding_cache.model_name
-        == f32_prefilter_off.embedding_cache.model_name
-    )
-    assert f32_prefilter_on.binary_prefilter is False
-    assert f32_prefilter_off.binary_prefilter is False
-    assert f32_prefilter_on.binary_rescore_multiplier == 1
-    assert f32_prefilter_off.binary_rescore_multiplier == 1
+    assert f32_default.binary_prefilter is False
+    assert f32_default.binary_rescore_multiplier == 1
     assert (
         int8_prefilter_on.embedding_cache.model_name
         != int8_prefilter_off.embedding_cache.model_name

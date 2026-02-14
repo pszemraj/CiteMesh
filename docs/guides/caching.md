@@ -49,6 +49,8 @@ Default storage mode is quantized:
 - `binary_index`: packed `uint8` matrix (`N x ceil(dim/8)`) used for Hamming prefiltering
 
 Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
+CLI-managed compression filters are `gzip`, `lzf`, and `szip` (runtime availability
+depends on your `h5py` build).
 
 SQLite stores metadata authority fields used for warm-cache retrieval:
 

@@ -50,8 +50,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
         storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
-        binary_prefilter: bool = EMBEDDING_STORAGE_CONFIG.binary_prefilter,
-        binary_rescore_multiplier: int = EMBEDDING_STORAGE_CONFIG.binary_rescore_multiplier,
+        binary_prefilter: Optional[bool] = None,
+        binary_rescore_multiplier: Optional[int] = None,
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
@@ -80,8 +80,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether to stream the embedding corpus.
         :param bool force_rebuild_cache: Whether to clear embedding cache before semantic enrichment.
         :param str storage_precision: Persistent cache precision for semantic branch embeddings.
-        :param bool binary_prefilter: Whether semantic branch uses binary prefiltering.
-        :param int binary_rescore_multiplier: Candidate oversampling factor for semantic branch search.
+        :param Optional[bool] binary_prefilter: Whether semantic branch uses binary
+            prefiltering. When ``None``, defaults are selected by embedding precision.
+        :param Optional[int] binary_rescore_multiplier: Candidate oversampling factor
+            for semantic branch search. When ``None``, defaults are selected by
+            embedding precision.
         :param int calibration_sample_size: Calibration sample size for int8 storage ranges.
         :param str cache_compression: HDF5 compression filter for semantic branch cache.
         :param int cache_compression_level: HDF5 compression level for semantic branch cache.
@@ -188,8 +191,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
                 logger.info(f"Added {added} semantic papers")
 
-            except Exception as e:
-                logger.warning(f"Semantic enrichment failed: {e}")
+            except Exception as exc:
+                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
         return papers
 
