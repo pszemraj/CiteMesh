@@ -504,6 +504,44 @@ def test_collect_papers_revalidates_cache_when_dataset_source_changes(
     assert complete_flags == [False]
 
 
+def test_collect_papers_rejects_source_mismatch_when_dataset_load_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Offline fallback must not reuse cache from a different dataset source."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2, use_streaming=False, client=MagicMock()
+    )
+    builder.embedding_cache.mark_hydrated(
+        dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
+
+    is_hydrated_spy = MagicMock(wraps=builder.embedding_cache.is_hydrated)
+    monkeypatch.setattr(builder.embedding_cache, "is_hydrated", is_hydrated_spy)
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        MagicMock(side_effect=RuntimeError("dataset unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="dataset unavailable"):
+        builder._select_candidates_from_loaded(np.asarray([1.0, 0.0], dtype=np.float32))
+
+    assert is_hydrated_spy.call_count >= 1
+    fallback_check_calls = [
+        call
+        for call in is_hydrated_spy.call_args_list
+        if call.kwargs.get("dataset_source") == "librarian-bots/arxiv-metadata-snapshot"
+    ]
+    assert fallback_check_calls
+
+
 def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,

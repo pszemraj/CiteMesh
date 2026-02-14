@@ -958,7 +958,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 preferred_dataset_source=cached_dataset_source,
             )
         except Exception:
-            if self.embedding_cache.is_hydrated(self.dataset_split, self.corpus_size):
+            if self.embedding_cache.is_hydrated(
+                self.dataset_split,
+                self.corpus_size,
+                dataset_source=cached_dataset_source,
+            ):
                 logger.info(
                     "Using existing hydrated cache; dataset hydration source could not be "
                     "resolved in current environment."
