@@ -402,13 +402,6 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     assert list(papers.keys()) == [expected_seed_id]
     assert papers[expected_seed_id].is_seed is True
 
-    fake_datasets = types.ModuleType("datasets")
-    fake_load_dataset = MagicMock(
-        side_effect=RuntimeError("load_dataset should not be called on warm cache")
-    )
-    fake_datasets.load_dataset = fake_load_dataset
-    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
-
     builder = EmbeddingGraphBuilder(
         max_papers=2, use_streaming=False, random_seed=0, client=MagicMock()
     )
@@ -442,12 +435,73 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
         ]
     )
     monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: _FakeEncodeModel())
+    fake_load_dataset_for_hydration = MagicMock(
+        return_value=("librarian-bots/arxiv-metadata-snapshot", [])
+    )
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        fake_load_dataset_for_hydration,
+    )
 
     candidates = builder._select_candidates_from_loaded(
         np.asarray([1.0, 0.0], dtype=np.float32)
     )
     assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
-    fake_load_dataset.assert_not_called()
+    fake_load_dataset_for_hydration.assert_called_once()
+    assert fake_load_dataset_for_hydration.call_args is not None
+    _, kwargs = fake_load_dataset_for_hydration.call_args
+    assert kwargs["use_streaming"] is False
+    assert "preferred_dataset_source" in kwargs
+
+
+def test_collect_papers_revalidates_cache_when_dataset_source_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Cached hydration should be revalidated against the selected dataset source."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2, use_streaming=False, client=MagicMock()
+    )
+    builder.embedding_cache.mark_hydrated(
+        dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
+
+    mark_hydrated_spy = MagicMock(wraps=builder.embedding_cache.mark_hydrated)
+    monkeypatch.setattr(builder.embedding_cache, "mark_hydrated", mark_hydrated_spy)
+
+    loaded_sources: list[tuple[bool, str | None]] = []
+
+    def fake_load_dataset_for_hydration(
+        use_streaming: bool, preferred_dataset_source: str | None = None
+    ) -> tuple[str, list[dict[str, Any]]]:
+        loaded_sources.append((use_streaming, preferred_dataset_source))
+        return "CShorten/ML-ArXiv-Papers", []
+
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        fake_load_dataset_for_hydration,
+    )
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: _FakeEncodeModel())
+
+    candidates = builder._select_candidates_from_loaded(
+        np.asarray([1.0, 0.0], dtype=np.float32)
+    )
+
+    assert candidates == []
+    assert loaded_sources == [(False, "librarian-bots/arxiv-metadata-snapshot")]
+
+    complete_flags = [
+        call.kwargs["complete"] for call in mark_hydrated_spy.call_args_list
+    ]
+    assert complete_flags == [False]
 
 
 def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
@@ -468,7 +522,7 @@ def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
-        lambda use_streaming: ("empty-snapshot", []),
+        lambda use_streaming, preferred_dataset_source=None: ("empty-snapshot", []),
     )
     monkeypatch.setattr(
         builder,

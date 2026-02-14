@@ -947,16 +947,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether to use streaming dataset hydration.
         :return None: Mutates cache state in-place when hydration is required.
         """
-        # Warm-cache fast path: avoid dataset/network work when split/cap already match.
-        if self.embedding_cache.is_hydrated(self.dataset_split, self.corpus_size):
-            return
+        cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
 
         dataset_source: Optional[str]
         dataset: Iterable[Dict[str, Any]]
 
         try:
             dataset_source, dataset = self._load_dataset_for_hydration(
-                use_streaming=use_streaming
+                use_streaming=use_streaming,
+                preferred_dataset_source=cached_dataset_source,
             )
         except Exception:
             if self.embedding_cache.is_hydrated(self.dataset_split, self.corpus_size):
@@ -1062,17 +1061,33 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
 
     def _load_dataset_for_hydration(
-        self, use_streaming: bool
+        self, use_streaming: bool, preferred_dataset_source: Optional[str] = None
     ) -> Tuple[str, Iterable[Dict[str, Any]]]:
         """Load first available ArXiv dataset for hydration.
 
         :param bool use_streaming: Whether to load streaming dataset iterator.
+        :param Optional[str] preferred_dataset_source: Preferred source if already cached.
         :return Tuple[str, Iterable[Dict[str, Any]]]: Dataset source name and iterable.
         """
         from datasets import load_dataset
 
         last_error: Optional[Exception] = None
-        for dataset_name in ARXIV_DATASET_CANDIDATES:
+        if (
+            preferred_dataset_source is not None
+            and preferred_dataset_source in ARXIV_DATASET_CANDIDATES
+        ):
+            dataset_names = (
+                preferred_dataset_source,
+                *[
+                    dataset_name
+                    for dataset_name in ARXIV_DATASET_CANDIDATES
+                    if dataset_name != preferred_dataset_source
+                ],
+            )
+        else:
+            dataset_names = ARXIV_DATASET_CANDIDATES
+
+        for dataset_name in dataset_names:
             try:
                 dataset = load_dataset(
                     dataset_name,

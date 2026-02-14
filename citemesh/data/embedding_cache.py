@@ -592,7 +592,7 @@ class EmbeddingCache:
         :param str dataset_split: Dataset split token.
         :param Optional[int] corpus_size: Corpus cap or ``None`` for full split.
         :param Optional[str] dataset_source: Expected dataset source token.
-        :return bool: ``True`` when hydration metadata indicates a completed matching cache.
+        :return bool: ``True`` when hydration metadata matches and HDF5 payload is queryable.
         """
         expected_split = str(dataset_split)
         expected_corpus_size = _corpus_size_token(corpus_size)
@@ -606,11 +606,48 @@ class EmbeddingCache:
             if cached_source != expected_source:
                 return False
 
-        return (
+        metadata_matches = (
             metadata.get(HYDRATION_COMPLETE_KEY, "0") == "1"
             and metadata.get(HYDRATION_SPLIT_KEY) == expected_split
             and metadata.get(HYDRATION_CORPUS_SIZE_KEY) == expected_corpus_size
         )
+        if not metadata_matches:
+            return False
+
+        return self._has_queryable_hydrated_payload()
+
+    def _has_queryable_hydrated_payload(self) -> bool:
+        """Return whether hydrated HDF5 payload exists and can be queried safely.
+
+        :return bool: ``True`` when cache has a readable, non-empty embedding matrix.
+        """
+        if not self.h5_path.exists():
+            return False
+
+        try:
+            with self._cache_lock(), h5py.File(self.h5_path, "r") as h5:
+                embeddings_dataset = self._get_embeddings_dataset(h5)
+                if embeddings_dataset is None:
+                    return False
+                if int(embeddings_dataset.shape[0]) < 1:
+                    return False
+
+                if (
+                    self.storage_precision == "int8"
+                    and CALIBRATION_RANGES_DATASET_NAME not in h5
+                ):
+                    return False
+        except (OSError, ValueError):
+            return False
+
+        return True
+
+    def get_hydrated_dataset_source(self) -> Optional[str]:
+        """Return dataset source captured for the latest hydrated cache attempt."""
+        with sqlite3.connect(self.db_path) as conn:
+            metadata = self._load_cache_metadata(conn)
+        cached_source = metadata.get(HYDRATION_DATASET_SOURCE_KEY)
+        return cached_source if cached_source else None
 
     def mark_hydrated(
         self,
@@ -803,6 +840,9 @@ class EmbeddingCache:
             self.h5_path.unlink(missing_ok=True)
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM papers")
+                self._set_cache_metadata(conn, HYDRATION_DATASET_SOURCE_KEY, "")
+                self._set_cache_metadata(conn, HYDRATION_SPLIT_KEY, "")
+                self._set_cache_metadata(conn, HYDRATION_CORPUS_SIZE_KEY, "")
                 self._set_cache_metadata(conn, HYDRATION_COMPLETE_KEY, "0")
                 self._reconcile_layout_metadata(conn)
                 conn.commit()

@@ -12,7 +12,13 @@ from typing import Any
 import h5py
 import numpy as np
 
-from citemesh.data.embedding_cache import EmbeddingCache
+from citemesh.data.embedding_cache import (
+    HYDRATION_COMPLETE_KEY,
+    HYDRATION_CORPUS_SIZE_KEY,
+    HYDRATION_DATASET_SOURCE_KEY,
+    HYDRATION_SPLIT_KEY,
+    EmbeddingCache,
+)
 
 
 class _MockModel:
@@ -196,6 +202,11 @@ def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
     """Hydration completion should survive cache re-open in same namespace."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-persistence")
+        cache.get_embeddings(
+            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            _MockModel(),
+            show_progress=False,
+        )
         cache.mark_hydrated(
             dataset_source="librarian-bots/arxiv-metadata-snapshot",
             dataset_split="train",
@@ -214,6 +225,73 @@ def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
             corpus_size=1024,
             dataset_source="librarian-bots/arxiv-metadata-snapshot",
         )
+
+
+def test_embedding_cache_hydration_requires_h5_payload() -> None:
+    """Hydration should be false when completion metadata exists but HDF5 is missing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-payload")
+        cache.get_embeddings(
+            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            _MockModel(),
+            show_progress=False,
+        )
+        cache.mark_hydrated(
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+            dataset_split="train",
+            corpus_size=512,
+            complete=True,
+        )
+
+        assert cache.is_hydrated(
+            dataset_split="train",
+            corpus_size=512,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+
+        cache.h5_path.unlink(missing_ok=True)
+        assert not cache.is_hydrated(
+            dataset_split="train",
+            corpus_size=512,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+
+
+def test_embedding_cache_recovery_clears_hydration_metadata() -> None:
+    """Invalid HDF5 layout should reset all hydration markers."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="layout-recovery-metadata")
+        cache.mark_hydrated(
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+            dataset_split="train",
+            corpus_size=2048,
+            complete=True,
+        )
+        with h5py.File(cache.h5_path, "w") as h5:
+            h5.create_dataset(
+                "legacy_payload", data=np.array([1, 2, 3], dtype=np.float32)
+            )
+
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="layout-recovery-metadata")
+
+        assert not cache.is_hydrated(
+            dataset_split="train",
+            corpus_size=2048,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+        with sqlite3.connect(cache.db_path) as conn:
+            cursor = conn.cursor()
+            metadata = {
+                key: value
+                for key, value in cursor.execute(
+                    "SELECT key, value FROM cache_metadata"
+                )
+            }
+
+        assert metadata[HYDRATION_COMPLETE_KEY] == "0"
+        assert metadata[HYDRATION_DATASET_SOURCE_KEY] == ""
+        assert metadata[HYDRATION_SPLIT_KEY] == ""
+        assert metadata[HYDRATION_CORPUS_SIZE_KEY] == ""
 
 
 def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
