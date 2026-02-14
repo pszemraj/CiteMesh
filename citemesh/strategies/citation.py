@@ -110,8 +110,10 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param str paper_id: Paper identifier
         :return list: List of referenced paper IDs
         """
-        if paper_id in self.reference_cache:
+        if not self.refresh_reference_cache and paper_id in self.reference_cache:
             return self.reference_cache[paper_id]
+        if self.refresh_reference_cache:
+            self.reference_cache.pop(paper_id, None)
 
         ref_ids = self.client.get_reference_ids(
             paper_id,
@@ -128,6 +130,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
+        # Scope in-memory references to one collection request so stale entries do
+        # not leak across caller boundaries when builders are reused.
+        self.reference_cache.clear()
         papers = {}
 
         # Step 1: Fetch seed paper

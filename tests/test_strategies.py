@@ -216,6 +216,44 @@ def test_citation_refresh_reference_cache_forces_service_refresh() -> None:
     client.get_reference_ids.assert_called_once_with("paper-1", force_refresh=True)
 
 
+def test_citation_refresh_reference_cache_bypasses_in_memory_hits() -> None:
+    """Refresh mode should bypass stale in-memory reference entries."""
+    client = MagicMock()
+    client.get_reference_ids.return_value = ["fresh-ref"]
+    builder = CitationGraphBuilder(
+        fetch_references=True,
+        refresh_reference_cache=True,
+        client=client,
+    )
+    builder.reference_cache["paper-1"] = ["stale-ref"]
+
+    refs = builder._get_references("paper-1")
+
+    assert refs == ["fresh-ref"]
+    client.get_reference_ids.assert_called_once_with("paper-1", force_refresh=True)
+    assert builder.reference_cache["paper-1"] == ["fresh-ref"]
+
+
+def test_citation_collect_clears_in_memory_reference_cache_between_requests() -> None:
+    """Citation collection should scope in-memory reference cache to one request."""
+    seed = _paper("seed", refs=["seed-ref"])
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = []
+    client.get_paper_citations.return_value = []
+
+    builder = CitationGraphBuilder(
+        max_papers=1,
+        fetch_references=False,
+        client=client,
+    )
+    builder.reference_cache["stale"] = ["stale-ref"]
+
+    builder.collect_papers("seed")
+
+    assert builder.reference_cache == {}
+
+
 def test_recommendation_refresh_reference_cache_forces_service_refresh() -> None:
     """Recommendation strategy should pass force-refresh flag to reference lookups."""
     client = MagicMock()
