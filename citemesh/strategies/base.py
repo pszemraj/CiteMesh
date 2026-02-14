@@ -6,8 +6,6 @@ enabling the Strategy pattern for different similarity computation approaches.
 """
 
 import logging
-import math
-import warnings
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -90,22 +88,6 @@ def select_capped_undirected_edges(
     return selected_edges
 
 
-def _exponential_temporal_decay(
-    paper1: Paper, paper2: Paper, decay_factor: float = 8.0
-) -> float:
-    """Compute exponential temporal similarity decay.
-
-    :param Paper paper1: First paper.
-    :param Paper paper2: Second paper.
-    :param float decay_factor: Controls decay rate (higher = slower decay).
-    :return float: Similarity in [0.0, 1.0].
-    """
-    if paper1.year is None or paper2.year is None:
-        return 0.5
-    year_diff = abs(paper1.year - paper2.year)
-    return math.exp(-year_diff / decay_factor)
-
-
 class GraphBuilderStrategy(ABC):
     """
     Abstract base class for all paper graph building strategies.
@@ -115,15 +97,13 @@ class GraphBuilderStrategy(ABC):
     computing similarity, while the base class handles common graph construction logic.
     """
 
-    def __init__(self, max_papers: int = 40, random_seed: Optional[int] = None):
+    def __init__(self, max_papers: int = 40):
         """
         Initialize the graph builder.
 
         :param int max_papers: Maximum number of papers to include in graph
-        :param Optional[int] random_seed: Reserved random seed parameter kept for compatibility.
         """
         self.max_papers = max_papers
-        self.random_seed = random_seed
         self.papers: Dict[str, Paper] = {}  # paper_id -> Paper object
         self._collection_summary: Optional[str] = None
 
@@ -299,22 +279,3 @@ class GraphBuilderStrategy(ABC):
         :return float: Bibliographic coupling coefficient (0.0 to 1.0)
         """
         return paper1.reference_overlap(paper2)
-
-    @staticmethod
-    def exponential_temporal_decay(
-        paper1: Paper, paper2: Paper, decay_factor: float = 8.0
-    ) -> float:
-        """
-        Compute exponential temporal similarity decay.
-
-        :param Paper paper1: First paper
-        :param Paper paper2: Second paper
-        :param float decay_factor: Controls decay rate (higher = slower decay)
-        :return float: Similarity score (0.0 to 1.0)
-        """
-        warnings.warn(
-            "exponential_temporal_decay is retained for compatibility only.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return _exponential_temporal_decay(paper1, paper2, decay_factor=decay_factor)

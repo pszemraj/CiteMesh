@@ -55,7 +55,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
-        random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -85,7 +84,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int calibration_sample_size: Calibration sample size for int8 storage ranges.
         :param str cache_compression: HDF5 compression filter for semantic branch cache.
         :param int cache_compression_level: HDF5 compression level for semantic branch cache.
-        :param Optional[int] random_seed: Random seed for reproducibility
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         if max_semantic is None:
@@ -101,7 +99,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 f"(got max_semantic={resolved_max_semantic}, max_papers={max_papers})"
             )
 
-        super().__init__(max_papers, random_seed)
+        super().__init__(max_papers)
         self.client = client or get_client()
         self.max_semantic = resolved_max_semantic
 
@@ -116,7 +114,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 dataset_split=dataset_split,
                 corpus_size=corpus_size,
                 truncate_dim=truncate_dim,
-                random_seed=random_seed,
                 use_streaming=use_streaming,
                 force_rebuild_cache=force_rebuild_cache,
                 storage_precision=storage_precision,
@@ -138,7 +135,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             max_references=max_references,
             fetch_references=fetch_references,
             refresh_reference_cache=refresh_reference_cache,
-            random_seed=random_seed,
             client=self.client,
         )
 

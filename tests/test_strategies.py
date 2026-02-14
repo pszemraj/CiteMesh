@@ -586,12 +586,11 @@ def test_temporal_similarity_extremes(
     assert GraphBuilderStrategy.temporal_similarity(paper1, paper2) == expected
 
 
-def test_temporal_similarity_and_decay_unknown_year_defaults() -> None:
-    """Unknown years should return neutral fallback for temporal functions."""
+def test_temporal_similarity_unknown_year_defaults() -> None:
+    """Unknown years should return neutral fallback for temporal similarity."""
     paper1 = Paper(paper_id="p1", title="Test 1", year=None)
     paper2 = Paper(paper_id="p2", title="Test 2", year=2020)
     assert GraphBuilderStrategy.temporal_similarity(paper1, paper2) == 0.5
-    assert GraphBuilderStrategy.exponential_temporal_decay(paper1, paper2) == 0.5
 
 
 def test_citation_similarity_branches() -> None:

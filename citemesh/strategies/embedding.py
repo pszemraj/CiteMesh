@@ -258,7 +258,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         corpus_size: Optional[int] = 50000,
         truncate_dim: Optional[int] = None,
         top_k: int = 2,
-        random_seed: Optional[int] = None,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
         storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
@@ -280,7 +279,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] truncate_dim: Optional embedding truncation dimension. If ``None``,
             uses profile defaults (e.g. EmbeddingGemma defaults to 256d MRL).
         :param int top_k: Number of most similar neighbors per node
-        :param Optional[int] random_seed: Random seed for reproducibility
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
         :param str storage_precision: Persistent cache precision (``int8``, ``float16``, ``float32``).
@@ -298,7 +296,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError("binary_rescore_multiplier must be at least 1")
         if calibration_sample_size < 1:
             raise ValueError("calibration_sample_size must be at least 1")
-        super().__init__(max_papers, random_seed)
+        super().__init__(max_papers)
         self.model_name = model_name
         normalized_revision = (
             str(model_revision).strip() if model_revision is not None else ""
@@ -964,8 +962,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param np.ndarray seed_embedding: Normalized seed embedding vector
         :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
-        self._ensure_cache_hydrated(use_streaming=False)
-        return self._search_cache_candidates(seed_embedding)
+        return self._select_candidates(seed_embedding, use_streaming=False)
 
     def _select_candidates_streaming(
         self, seed_embedding: np.ndarray
@@ -976,7 +973,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param np.ndarray seed_embedding: Normalized seed embedding vector
         :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
-        self._ensure_cache_hydrated(use_streaming=True)
+        return self._select_candidates(seed_embedding, use_streaming=True)
+
+    def _select_candidates(
+        self, seed_embedding: np.ndarray, use_streaming: bool
+    ) -> List[Tuple[str, Dict, np.ndarray]]:
+        """Select candidates after hydrating cache with a specific loading mode.
+
+        :param np.ndarray seed_embedding: Normalized seed embedding vector.
+        :param bool use_streaming: Whether hydration should stream the dataset.
+        :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples sorted by similarity.
+        """
+        self._ensure_cache_hydrated(use_streaming=use_streaming)
         return self._search_cache_candidates(seed_embedding)
 
     def _search_cache_candidates(

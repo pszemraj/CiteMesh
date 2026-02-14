@@ -25,7 +25,6 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         fetch_references: bool = False,
         refresh_reference_cache: bool = False,
         similarity_threshold: float = 0.15,
-        random_seed: Optional[int] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
         """Initialize recommendation graph builder.
@@ -34,10 +33,9 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param bool fetch_references: Whether to fetch references for seed and recommended papers.
         :param bool refresh_reference_cache: Whether to bypass persisted reference-cache reads.
         :param float similarity_threshold: Threshold for edge creation.
-        :param Optional[int] random_seed: Seed for reproducibility.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
-        super().__init__(max_papers=max_papers, random_seed=random_seed)
+        super().__init__(max_papers=max_papers)
         self.fetch_references = fetch_references
         self.refresh_reference_cache = bool(refresh_reference_cache)
         self.similarity_threshold = similarity_threshold
