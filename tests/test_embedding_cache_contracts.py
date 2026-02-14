@@ -18,6 +18,7 @@ from citemesh.data.embedding_cache import (
     HYDRATION_CORPUS_SIZE_KEY,
     HYDRATION_DATASET_SOURCE_KEY,
     HYDRATION_SPLIT_KEY,
+    MODEL_FINGERPRINT_KEY,
     EmbeddingCache,
 )
 
@@ -245,6 +246,40 @@ def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
             corpus_size=1024,
             dataset_source="librarian-bots/arxiv-metadata-snapshot",
         )
+
+
+def test_embedding_cache_model_fingerprint_persists_across_restarts() -> None:
+    """Model fingerprint metadata should persist and be queryable across restarts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="fingerprint-persistence")
+        assert cache.get_model_fingerprint() is None
+        cache.set_model_fingerprint("hf::org/model::abc123")
+        assert cache.get_model_fingerprint() == "hf::org/model::abc123"
+
+        reloaded = EmbeddingCache(
+            cache_dir=tmpdir, model_name="fingerprint-persistence"
+        )
+        assert reloaded.get_model_fingerprint() == "hf::org/model::abc123"
+        with sqlite3.connect(reloaded.db_path) as conn:
+            metadata = {
+                key: value
+                for key, value in conn.execute("SELECT key, value FROM cache_metadata")
+            }
+
+    assert metadata[MODEL_FINGERPRINT_KEY] == "hf::org/model::abc123"
+
+
+def test_embedding_cache_has_cached_payload_contract() -> None:
+    """Payload indicator should reflect whether namespace contains embedding rows."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="payload-presence")
+        assert not cache.has_cached_payload()
+        cache.get_embeddings(
+            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            _MockModel(),
+            show_progress=False,
+        )
+        assert cache.has_cached_payload()
 
 
 def test_embedding_cache_hydration_requires_h5_payload() -> None:

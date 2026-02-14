@@ -53,6 +53,15 @@ def _disable_embedding_dep_check(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _pin_model_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+    builder: EmbeddingGraphBuilder,
+    fingerprint: str = "test-fingerprint",
+) -> None:
+    """Pin deterministic model fingerprint for hydration tests."""
+    monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
+
+
 def _install_fake_torch(
     monkeypatch: pytest.MonkeyPatch,
     cuda_available: bool,
@@ -300,6 +309,77 @@ def test_embedding_cache_namespace_varies_by_storage_precision(
     )
 
 
+def test_embedding_model_revision_forwards_to_model_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Configured model revision should be forwarded to SentenceTransformer."""
+    _disable_embedding_dep_check(monkeypatch)
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_revision="refs/pr/12",
+        client=MagicMock(),
+    )
+    builder._load_model()
+
+    assert init_log["kwargs"]["revision"] == "refs/pr/12"
+
+
+def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hydration should clear namespace payload when model fingerprint mismatches."""
+    _disable_embedding_dep_check(monkeypatch)
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-new")
+
+    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value="fp-old")
+    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
+    builder.embedding_cache.clear = MagicMock()
+    builder.embedding_cache.set_model_fingerprint = MagicMock()
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(
+        return_value="cached-source"
+    )
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    builder.embedding_cache.clear.assert_called_once()
+    builder.embedding_cache.set_model_fingerprint.assert_called_once_with("fp-new")
+
+
+def test_embedding_fingerprint_resolution_fails_closed_for_hf_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF-backed model fingerprints should fail closed when SHA cannot be resolved."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    class _FailingHfApi:
+        def model_info(self, repo_id: str, revision: str) -> object:
+            del repo_id, revision
+            raise RuntimeError("network unavailable")
+
+    fake_hf_module = types.ModuleType("huggingface_hub")
+    fake_hf_module.HfApi = _FailingHfApi
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/test-model",
+        model_revision="main",
+        client=MagicMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="Could not resolve Hugging Face commit SHA"):
+        builder._resolve_model_fingerprint()
+
+
 def test_metadata_and_streaming_loader_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -405,6 +485,7 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     builder = EmbeddingGraphBuilder(
         max_papers=2, use_streaming=False, random_seed=0, client=MagicMock()
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
     builder.embedding_cache.get_hydrated_dataset_source = MagicMock(
         return_value="librarian-bots/arxiv-metadata-snapshot"
@@ -465,6 +546,7 @@ def test_collect_papers_revalidates_cache_when_dataset_source_changes(
     builder = EmbeddingGraphBuilder(
         max_papers=2, use_streaming=False, client=MagicMock()
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     builder.embedding_cache.mark_hydrated(
         dataset_source="librarian-bots/arxiv-metadata-snapshot",
         dataset_split=builder.dataset_split,
@@ -514,6 +596,7 @@ def test_collect_papers_rejects_source_mismatch_when_dataset_load_fails(
     builder = EmbeddingGraphBuilder(
         max_papers=2, use_streaming=False, client=MagicMock()
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     builder.embedding_cache.mark_hydrated(
         dataset_source="librarian-bots/arxiv-metadata-snapshot",
         dataset_split=builder.dataset_split,
@@ -529,16 +612,19 @@ def test_collect_papers_rejects_source_mismatch_when_dataset_load_fails(
         MagicMock(side_effect=RuntimeError("dataset unavailable")),
     )
 
-    with pytest.raises(RuntimeError, match="dataset unavailable"):
+    with pytest.raises(
+        RuntimeError,
+        match="Failed to resolve hydration dataset source",
+    ) as exc_info:
         builder._select_candidates_from_loaded(np.asarray([1.0, 0.0], dtype=np.float32))
 
-    assert is_hydrated_spy.call_count >= 1
-    fallback_check_calls = [
-        call
-        for call in is_hydrated_spy.call_args_list
-        if call.kwargs.get("dataset_source") == "librarian-bots/arxiv-metadata-snapshot"
-    ]
-    assert fallback_check_calls
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert str(exc_info.value.__cause__) == "dataset unavailable"
+    assert is_hydrated_spy.call_count == 1
+    assert (
+        is_hydrated_spy.call_args.kwargs.get("dataset_source")
+        == "librarian-bots/arxiv-metadata-snapshot"
+    )
 
 
 def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
@@ -554,6 +640,7 @@ def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
         use_streaming=False,
         client=MagicMock(),
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     mark_hydrated_spy = MagicMock(wraps=builder.embedding_cache.mark_hydrated)
     monkeypatch.setattr(builder.embedding_cache, "mark_hydrated", mark_hydrated_spy)
     monkeypatch.setattr(
@@ -595,6 +682,7 @@ def test_embedding_top_k_validation_and_tie_order(
         EmbeddingGraphBuilder(top_k=0, client=MagicMock())
 
     builder = EmbeddingGraphBuilder(max_papers=2, top_k=2, client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder)
     builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
     builder.embedding_cache.search = MagicMock(
         return_value=[

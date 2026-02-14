@@ -10,6 +10,7 @@ import re
 import sys
 from contextlib import nullcontext
 from hashlib import sha1
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import networkx as nx
@@ -252,6 +253,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self,
         max_papers: int = 40,
         model_name: str = "google/embeddinggemma-300m",
+        model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
         corpus_size: Optional[int] = 50000,
         truncate_dim: Optional[int] = None,
@@ -272,6 +274,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         :param int max_papers: Maximum papers in final graph
         :param str model_name: Sentence transformer model name
+        :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: HuggingFace dataset split
         :param Optional[int] corpus_size: Maximum papers to load from corpus (``None`` = all in split)
         :param Optional[int] truncate_dim: Optional embedding truncation dimension. If ``None``,
@@ -297,6 +300,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError("calibration_sample_size must be at least 1")
         super().__init__(max_papers, random_seed)
         self.model_name = model_name
+        normalized_revision = (
+            str(model_revision).strip() if model_revision is not None else ""
+        )
+        self.model_revision = normalized_revision or None
         self.dataset_split = dataset_split
         self.corpus_size = corpus_size
         self.storage_precision = storage_precision
@@ -341,6 +348,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
         self._tf32_mode = "off"
+        self._resolved_model_fingerprint: Optional[str] = None
 
     def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
         """Resolve effective embedding dimension from request + model profile defaults.
@@ -396,6 +404,72 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)()):
             return "float32"
         return "bfloat16"
+
+    def _resolve_model_fingerprint(self) -> str:
+        """Resolve deterministic model fingerprint for cache validity checks.
+
+        :return str: Model fingerprint token.
+        :raises RuntimeError: If Hugging Face SHA cannot be resolved for hub repo IDs.
+        """
+        if self._resolved_model_fingerprint is not None:
+            return self._resolved_model_fingerprint
+
+        resolved_path = Path(self.model_name).expanduser()
+        if resolved_path.exists():
+            fingerprint = f"local-path::{resolved_path.resolve()}"
+            self._resolved_model_fingerprint = fingerprint
+            return fingerprint
+
+        model_id = str(self.model_name).strip()
+        if "/" not in model_id:
+            revision_token = self.model_revision or "default"
+            fingerprint = f"model-alias::{model_id}::revision={revision_token}"
+            self._resolved_model_fingerprint = fingerprint
+            return fingerprint
+
+        requested_revision = (self.model_revision or "main").strip() or "main"
+        try:
+            from huggingface_hub import HfApi
+
+            model_info = HfApi().model_info(
+                repo_id=model_id,
+                revision=requested_revision,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not resolve Hugging Face commit SHA for "
+                f"{model_id!r} (revision={requested_revision!r}); "
+                "refusing to use embedding cache without model fingerprint."
+            ) from exc
+
+        resolved_sha = str(getattr(model_info, "sha", "") or "").strip()
+        if not resolved_sha:
+            raise RuntimeError(
+                "Could not resolve Hugging Face commit SHA for "
+                f"{model_id!r} (revision={requested_revision!r}); "
+                "refusing to use embedding cache without model fingerprint."
+            )
+
+        fingerprint = f"hf::{model_id}::{resolved_sha}"
+        self._resolved_model_fingerprint = fingerprint
+        return fingerprint
+
+    def _ensure_cache_model_fingerprint(self) -> None:
+        """Verify cache payload is bound to the active model fingerprint."""
+        model_fingerprint = self._resolve_model_fingerprint()
+        cached_fingerprint = self.embedding_cache.get_model_fingerprint()
+        if (
+            self.embedding_cache.has_cached_payload()
+            and cached_fingerprint != model_fingerprint
+        ):
+            logger.warning(
+                "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
+                "Clearing namespace cache.",
+                cached_fingerprint or "missing",
+                model_fingerprint,
+            )
+            self.embedding_cache.clear()
+        self.embedding_cache.set_model_fingerprint(model_fingerprint)
 
     def _log_dimension_policy(self) -> None:
         """Emit one-time debug log for active embedding dimensionality."""
@@ -590,6 +664,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 st_kwargs["model_kwargs"] = model_kwargs
             if self.truncate_dim is not None:
                 st_kwargs["truncate_dim"] = self.truncate_dim
+            if self.model_revision is not None:
+                st_kwargs["revision"] = self.model_revision
 
             if st_kwargs:
                 self.model = SentenceTransformer(self.model_name, **st_kwargs)
@@ -947,6 +1023,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether to use streaming dataset hydration.
         :return None: Mutates cache state in-place when hydration is required.
         """
+        self._ensure_cache_model_fingerprint()
         cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
         if self.embedding_cache.is_hydrated(
             self.dataset_split,
@@ -970,18 +1047,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 use_streaming=use_streaming,
                 preferred_dataset_source=cached_dataset_source,
             )
-        except Exception:
-            if self.embedding_cache.is_hydrated(
-                self.dataset_split,
-                self.corpus_size,
-                dataset_source=cached_dataset_source,
-            ):
-                logger.info(
-                    "Using existing hydrated cache; dataset hydration source could not be "
-                    "resolved in current environment."
-                )
-                return
-            raise
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to resolve hydration dataset source; refusing to reuse "
+                "existing hydrated cache without source revalidation."
+            ) from exc
 
         if self.embedding_cache.is_hydrated(
             self.dataset_split,

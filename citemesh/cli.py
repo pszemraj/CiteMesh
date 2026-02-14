@@ -178,6 +178,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
         factory=lambda cli_args: EmbeddingGraphBuilder(
             max_papers=cli_args.max_papers,
             model_name=cli_args.model,
+            model_revision=cli_args.model_revision,
             dataset_split=cli_args.dataset_split,
             corpus_size=None if cli_args.all_corpus else cli_args.corpus_size,
             truncate_dim=cli_args.truncate_dim,
@@ -202,6 +203,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
             refresh_reference_cache=cli_args.refresh_reference_cache,
             max_semantic=cli_args.max_semantic,
             model_name=cli_args.model,
+            model_revision=cli_args.model_revision,
             dataset_split=cli_args.dataset_split,
             corpus_size=None if cli_args.all_corpus else cli_args.corpus_size,
             truncate_dim=cli_args.truncate_dim,
@@ -617,6 +619,15 @@ Examples:
         type=str,
         default="google/embeddinggemma-300m",
         help="Sentence transformer model name",
+    )
+    embedding_group.add_argument(
+        "--model-revision",
+        type=str,
+        default=None,
+        help=(
+            "Optional model revision token (branch/tag/commit) for hub-backed "
+            "embedding models."
+        ),
     )
 
     embedding_group.add_argument(

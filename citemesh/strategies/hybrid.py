@@ -43,6 +43,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         refresh_reference_cache: bool = False,
         max_semantic: Optional[int] = None,
         model_name: str = "google/embeddinggemma-300m",
+        model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
         corpus_size: Optional[int] = 50000,
         truncate_dim: Optional[int] = None,
@@ -72,6 +73,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             ``min(10, max_papers - 1)`` so small ``max_papers`` values still work
             without extra flags.
         :param str model_name: Embedding model name
+        :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
         :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
@@ -110,6 +112,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 # max_semantic contract counts only added non-seed neighbors.
                 max_papers=self.max_semantic + 1,
                 model_name=model_name,
+                model_revision=model_revision,
                 dataset_split=dataset_split,
                 corpus_size=corpus_size,
                 truncate_dim=truncate_dim,

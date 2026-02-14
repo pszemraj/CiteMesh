@@ -48,6 +48,7 @@ HYDRATION_DATASET_SOURCE_KEY = "hydration_dataset_source"
 HYDRATION_SPLIT_KEY = "hydration_split"
 HYDRATION_CORPUS_SIZE_KEY = "hydration_corpus_size"
 HYDRATION_COMPLETE_KEY = "hydration_complete"
+MODEL_FINGERPRINT_KEY = "model_fingerprint"
 
 _STORAGE_PRECISIONS = {"float32", "float16", "int8"}
 _POPCOUNT_LUT = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(
@@ -546,6 +547,32 @@ class EmbeddingCache:
             "cache_size_mb": total_h5_size / (1024 * 1024),
         }
 
+    def has_cached_payload(self) -> bool:
+        """Return whether namespace contains any cached embedding payload rows.
+
+        :return bool: ``True`` when cache has at least one SQLite/HDF5 embedding row.
+        """
+        if not self.db_path.exists():
+            return False
+
+        try:
+            with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM papers")
+                paper_rows = int(cursor.fetchone()[0])
+                if paper_rows > 0:
+                    return True
+
+                if not self.h5_path.exists():
+                    return False
+                with h5py.File(self.h5_path, "r") as h5:
+                    dataset = self._get_embeddings_dataset(h5)
+                    if dataset is None:
+                        return False
+                    return int(dataset.shape[0]) > 0
+        except (OSError, sqlite3.DatabaseError, ValueError):
+            return False
+
     def has_calibration_ranges(self) -> bool:
         """Return whether int8 calibration ranges exist in cache.
 
@@ -688,6 +715,29 @@ class EmbeddingCache:
         cached_source = metadata.get(HYDRATION_DATASET_SOURCE_KEY)
         return cached_source if cached_source else None
 
+    def get_model_fingerprint(self) -> Optional[str]:
+        """Return model fingerprint captured for this cache namespace.
+
+        :return Optional[str]: Active model fingerprint or ``None`` when unset.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            metadata = self._load_cache_metadata(conn)
+        fingerprint = str(metadata.get(MODEL_FINGERPRINT_KEY, "")).strip()
+        return fingerprint or None
+
+    def set_model_fingerprint(self, fingerprint: str) -> None:
+        """Persist model fingerprint for cache invalidation guardrails.
+
+        :param str fingerprint: Deterministic model fingerprint token.
+        :return None: Mutates SQLite metadata in-place.
+        """
+        normalized = str(fingerprint).strip()
+        if not normalized:
+            raise ValueError("fingerprint must be a non-empty string.")
+        with sqlite3.connect(self.db_path) as conn:
+            self._set_cache_metadata(conn, MODEL_FINGERPRINT_KEY, normalized)
+            conn.commit()
+
     def mark_hydrated(
         self,
         dataset_source: str,
@@ -807,6 +857,7 @@ class EmbeddingCache:
             )
             # Preserve hydration completion across restarts; initialize only once.
             self._set_cache_metadata_default(conn, HYDRATION_COMPLETE_KEY, "0")
+            self._set_cache_metadata_default(conn, MODEL_FINGERPRINT_KEY, "")
             conn.commit()
 
     @staticmethod

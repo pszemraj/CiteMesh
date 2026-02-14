@@ -75,6 +75,7 @@ def _dispatch_namespace() -> argparse.Namespace:
         no_references=True,
         refresh_reference_cache=False,
         model="m",
+        model_revision=None,
         dataset_split="train",
         corpus_size=1234,
         all_corpus=True,
@@ -394,6 +395,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
             {
                 "max_papers": 11,
                 "model_name": "m",
+                "model_revision": None,
                 "dataset_split": "train",
                 "corpus_size": None,
                 "truncate_dim": 64,
@@ -420,6 +422,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "refresh_reference_cache": False,
                 "max_semantic": 5,
                 "model_name": "m",
+                "model_revision": None,
                 "dataset_split": "train",
                 "corpus_size": None,
                 "truncate_dim": 64,
