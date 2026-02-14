@@ -111,6 +111,10 @@ using hashed filenames.
   cleared or refreshed.
 - `--refresh-reference-cache` bypasses persisted reference-cache reads and fetches
   fresh reference IDs from the API (write-through cache update).
+- Successful empty reference responses are cached as explicit empty lists to avoid
+  repeated API calls for papers with no references.
+- Repeated reference-fetch failures now raise a runtime error after retries instead
+  of silently returning an empty list.
 - Reference cache directory resolution occurs at call time, so cache-root policy
   (`CITEMESH_CACHE_DIR`) changes are honored for new lookups.
 

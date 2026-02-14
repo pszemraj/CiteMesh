@@ -432,6 +432,45 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     assert client.get_reference_ids("seed-type-error") == []
 
 
+def test_reference_cache_persists_successful_empty_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Successful empty reference responses should be cached as stable empties."""
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper_references = MagicMock(return_value=[])
+
+    refs = client.get_reference_ids("seed-empty")
+    normalized = s2.normalize_paper_id("seed-empty")
+    cache_path = s2._reference_cache_path(normalized)
+
+    assert refs == []
+    assert cache_path.exists()
+    assert json.loads(cache_path.read_text()) == {
+        "paper_id": normalized,
+        "references": [],
+        "version": s2.REFERENCE_CACHE_VERSION,
+    }
+
+
+def test_reference_cache_fetch_failures_raise_runtime_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repeated reference fetch failures should raise instead of silently returning []."""
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper_references = MagicMock(side_effect=RuntimeError("down"))
+
+    with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"Failed to fetch reference IDs after retries for seed-failure\.",
+        ):
+            client.get_reference_ids("seed-failure")
+
+
 def test_reference_cache_path_uses_runtime_cache_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
