@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "citemesh"
 dynamic = ["version"]
-description = "Build and export exploration-friendly scholarly paper graphs from Semantic Scholar and embedding-based discovery"
+description = "Create exploration-friendly semantic paper graphs"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
 license = "MIT"
@@ -49,10 +49,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-viz = [
-    "plotly>=5.18.0",
-    "pyvis>=0.3.2",
-]
+viz = ["plotly>=5.18.0", "pyvis>=0.3.2"]
 embeddings = [
     "datasets>=2.14.0",
     "sentence-transformers>=3.0.0",
@@ -67,9 +64,7 @@ dev = [
     "sentence-transformers>=3.0.0",
     "torch>=2.0.0",
 ]
-all = [
-    "citemesh[dev,embeddings,viz]",
-]
+all = ["citemesh[dev,embeddings,viz]"]
 
 [project.scripts]
 citemesh = "citemesh.cli:main"

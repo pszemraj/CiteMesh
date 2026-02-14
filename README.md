@@ -35,6 +35,9 @@ pip install -e ".[embeddings]"
 
 # Interactive HTML/Plotly exports
 pip install -e ".[viz]"
+
+# all
+pip install -e ".[all]"
 ```
 
 ### Run One Graph
