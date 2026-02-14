@@ -264,6 +264,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         ):
             filtered_graph.add_edge(u, v, weight=weight)
 
+        logger.info(
+            "Hybrid edge cap applied: %s -> %s edges",
+            graph.number_of_edges(),
+            filtered_graph.number_of_edges(),
+        )
         return filtered_graph, actual_seed_id
 
     def should_create_edge(

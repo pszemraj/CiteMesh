@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from types import MethodType
 from typing import Callable
 from unittest.mock import MagicMock, patch
 
+import networkx as nx
 import numpy as np
 import pytest
 
@@ -284,6 +286,42 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     out_graph, out_seed = builder.build_graph("seed")
     assert out_graph is graph
     assert out_seed == "seed"
+
+
+def test_hybrid_build_graph_logs_post_cap_edge_count(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Hybrid pruning should log original and filtered edge counts."""
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
+    )
+    monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 1)
+
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    graph = nx.Graph()
+    graph.add_node("seed", is_seed=True)
+    graph.add_nodes_from(["a", "b", "c"])
+    graph.add_edge("seed", "a", weight=0.9)
+    graph.add_edge("seed", "b", weight=0.8)
+    graph.add_edge("seed", "c", weight=0.7)
+    graph.add_edge("a", "b", weight=0.95)
+    graph.add_edge("a", "c", weight=0.85)
+    graph.add_edge("b", "c", weight=0.75)
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid.GraphBuilderStrategy.build_graph",
+        lambda self, seed_id, **kwargs: (graph, "seed"),
+    )
+
+    with caplog.at_level(logging.INFO):
+        out_graph, out_seed = builder.build_graph("seed")
+
+    assert out_seed == "seed"
+    assert out_graph.number_of_edges() < graph.number_of_edges()
+    assert any(
+        f"Hybrid edge cap applied: {graph.number_of_edges()} -> {out_graph.number_of_edges()} edges"
+        in record.getMessage()
+        for record in caplog.records
+    )
 
 
 @pytest.mark.parametrize(
