@@ -720,7 +720,8 @@ class EmbeddingCache:
                 BINARY_PREFILTER_ENABLED_KEY,
                 "1" if self.binary_prefilter else "0",
             )
-            self._set_cache_metadata(conn, HYDRATION_COMPLETE_KEY, "0")
+            # Preserve hydration completion across restarts; initialize only once.
+            self._set_cache_metadata_default(conn, HYDRATION_COMPLETE_KEY, "0")
             conn.commit()
 
     @staticmethod
@@ -737,6 +738,25 @@ class EmbeddingCache:
             INSERT INTO cache_metadata (key, value)
             VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+
+    @staticmethod
+    def _set_cache_metadata_default(
+        conn: sqlite3.Connection, key: str, value: str
+    ) -> None:
+        """Insert metadata key-value pair only when the key is absent.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :param str key: Metadata key.
+        :param str value: Metadata value.
+        :return None: This method mutates DB state in-place.
+        """
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO cache_metadata (key, value)
+            VALUES (?, ?)
             """,
             (key, value),
         )

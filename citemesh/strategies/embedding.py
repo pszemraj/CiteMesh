@@ -947,6 +947,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether to use streaming dataset hydration.
         :return None: Mutates cache state in-place when hydration is required.
         """
+        # Warm-cache fast path: avoid dataset/network work when split/cap already match.
+        if self.embedding_cache.is_hydrated(self.dataset_split, self.corpus_size):
+            return
+
         dataset_source: Optional[str]
         dataset: Iterable[Dict[str, Any]]
 

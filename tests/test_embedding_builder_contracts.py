@@ -403,12 +403,10 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     assert papers[expected_seed_id].is_seed is True
 
     fake_datasets = types.ModuleType("datasets")
-
-    def fail_load_dataset(*args: Any, **kwargs: Any) -> None:
-        del args, kwargs
-        raise AssertionError("load_dataset should not be called on warm cache")
-
-    fake_datasets.load_dataset = fail_load_dataset
+    fake_load_dataset = MagicMock(
+        side_effect=RuntimeError("load_dataset should not be called on warm cache")
+    )
+    fake_datasets.load_dataset = fake_load_dataset
     monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
 
     builder = EmbeddingGraphBuilder(
@@ -449,6 +447,7 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
         np.asarray([1.0, 0.0], dtype=np.float32)
     )
     assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
+    fake_load_dataset.assert_not_called()
 
 
 def test_embedding_top_k_validation_and_tie_order(

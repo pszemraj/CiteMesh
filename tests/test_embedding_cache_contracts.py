@@ -178,6 +178,30 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
     assert results[0].embedding.dtype == np.float32
 
 
+def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
+    """Hydration completion should survive cache re-open in same namespace."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-persistence")
+        cache.mark_hydrated(
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+            dataset_split="train",
+            corpus_size=1024,
+            complete=True,
+        )
+        assert cache.is_hydrated(
+            dataset_split="train",
+            corpus_size=1024,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+
+        reloaded = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-persistence")
+        assert reloaded.is_hydrated(
+            dataset_split="train",
+            corpus_size=1024,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+
+
 def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
     """Concurrent processes should serialize writes without HDF5 lock failures."""
     queue: mp.Queue = mp.Queue()
