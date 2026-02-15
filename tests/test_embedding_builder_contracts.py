@@ -104,7 +104,10 @@ def _install_fake_torch(
     def _autocast(*, device_type: str, dtype: object) -> _FakeAutocast:
         return _FakeAutocast(device_type=device_type, dtype=dtype)
 
-    def _compile(model: object) -> object:
+    compile_calls: list[dict[str, object]] = []
+
+    def _compile(model: object, **kwargs: object) -> object:
+        compile_calls.append({"model": model, "kwargs": dict(kwargs)})
         if compile_behavior == "raise":
             raise RuntimeError("compile failure")
         if compile_behavior == "tagged":
@@ -162,6 +165,7 @@ def _install_fake_torch(
     fake_torch.compile = _compile
     fake_torch.set_float32_matmul_precision = _set_float32_matmul_precision
     fake_torch._matmul_precision_calls = matmul_precision_calls
+    fake_torch._compile_calls = compile_calls
     fake_torch.cuda = cuda_module
     fake_torch.backends = fake_backends
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
@@ -276,14 +280,26 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         builder = EmbeddingGraphBuilder(
             max_papers=1, model_name=model_name, client=MagicMock()
         )
+        monkeypatch.setattr(
+            builder,
+            "_should_defer_compile_for_cache_hydration",
+            lambda: False,
+        )
         builder._load_model()
 
         original = init_log["auto_model_before_compile"]
         assert builder.model is not None
         if expect_compiled:
             assert builder.model[0].auto_model == ("compiled", original)
+            assert _fake_torch._compile_calls  # type: ignore[attr-defined]
+            assert _fake_torch._compile_calls[-1]["kwargs"] == {}  # type: ignore[attr-defined]
         else:
             assert builder.model[0].auto_model is original
+            if (
+                compile_behavior == "tagged"
+                and model_name != DEFAULT_EMBEDDING_MODEL_NAME
+            ):
+                assert _fake_torch._compile_calls == []  # type: ignore[attr-defined]
         assert builder._inner_model_compiled is expect_compiled
 
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
@@ -369,6 +385,11 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     )
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    monkeypatch.setattr(
+        builder,
+        "_should_defer_compile_for_cache_hydration",
+        lambda: False,
+    )
     caplog.clear()
     with caplog.at_level(logging.DEBUG):
         builder._load_model()
@@ -400,6 +421,33 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         in message
         for message in debug_messages
     )
+
+
+def test_embedding_compile_is_deferred_when_cache_not_hydrated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cold-cache runs should defer compile to avoid hydration slowdowns."""
+    _disable_embedding_dep_check(monkeypatch)
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        compile_behavior="tagged",
+        torch_version="2.10.0",
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    monkeypatch.setattr(builder, "_cache_hydrated_for_active_spec", lambda: False)
+    builder._load_model()
+
+    original = init_log["auto_model_before_compile"]
+    assert builder.model is not None
+    assert builder.model[0].auto_model is original
+    assert builder._inner_model_compiled is False
+    assert builder._compile_status_reason is not None
+    assert "deferred while hydrating cache" in builder._compile_status_reason
+    assert fake_torch._compile_calls == []  # type: ignore[attr-defined]
 
 
 def test_embedding_default_model_loads_with_fallback_chain(

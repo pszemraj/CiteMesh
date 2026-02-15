@@ -143,7 +143,7 @@ ignoring it.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
-- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled)
+- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled). Compile is deferred on cold-cache hydration runs and applied on warm-cache runs.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workloads is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 

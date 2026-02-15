@@ -1153,6 +1153,34 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             f"{model_id}: {type(exc).__name__}: {exc}" for model_id, exc in errors
         )
 
+    def _cache_hydrated_for_active_spec(self) -> bool:
+        """Return whether cache is hydrated for active split/corpus selection.
+
+        :return bool: ``True`` when active cache namespace has a matching hydrated payload.
+        """
+        cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
+        return self.embedding_cache.is_hydrated(
+            self.dataset_split,
+            self.corpus_size,
+            dataset_source=cached_dataset_source,
+        )
+
+    def _should_defer_compile_for_cache_hydration(self) -> bool:
+        """Return whether compile should be deferred until cache is hydrated.
+
+        :return bool: ``True`` when runtime should skip compile for current cold-cache run.
+        """
+        if not self.enable_torch_compile:
+            return False
+        if not self.model_profile.compile_inner_transformer:
+            return False
+        try:
+            return not self._cache_hydrated_for_active_spec()
+        except Exception:
+            # Conservative fallback: avoid compile when cache state cannot be
+            # validated before hydration.
+            return True
+
     def _load_model(self) -> None:
         """Lazy load sentence transformer model.
 
@@ -1206,7 +1234,16 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 break
 
             self._configure_tf32_runtime()
-            self._maybe_compile_inner_transformer()
+            if self._should_defer_compile_for_cache_hydration():
+                self._compile_status_reason = (
+                    "deferred while hydrating cache; compile resumes on warm-cache runs"
+                )
+                logger.debug(
+                    "Deferring torch.compile for %s until cache hydration completes.",
+                    self.model_name,
+                )
+            else:
+                self._maybe_compile_inner_transformer()
 
             if (
                 not self.model_profile.float16_supported
