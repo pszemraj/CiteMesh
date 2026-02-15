@@ -111,6 +111,11 @@ def _install_fake_torch(
             return ("compiled", model)
         return model
 
+    matmul_precision_calls: list[str] = []
+
+    def _set_float32_matmul_precision(precision: str) -> None:
+        matmul_precision_calls.append(precision)
+
     matmul_backend = types.SimpleNamespace()
     cudnn_backend = types.SimpleNamespace()
     cudnn_conv = types.SimpleNamespace()
@@ -155,6 +160,8 @@ def _install_fake_torch(
     fake_torch.bfloat16 = bf16_token
     fake_torch.autocast = _autocast
     fake_torch.compile = _compile
+    fake_torch.set_float32_matmul_precision = _set_float32_matmul_precision
+    fake_torch._matmul_precision_calls = matmul_precision_calls
     fake_torch.cuda = cuda_module
     fake_torch.backends = fake_backends
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
@@ -181,7 +188,7 @@ def test_embedding_builder_requires_optional_deps(
 def test_embedding_builder_requires_modern_torch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Embedding builder should require torch>=2.9 for TF32 precision APIs."""
+    """Embedding builder should require torch>=2.9 for runtime precision policy."""
     fake_torch = types.ModuleType("torch")
     fake_torch.__version__ = "2.8.1"
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
@@ -243,8 +250,8 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
             assert autocast_log == []
 
     compile_cases = [
-        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (8, 0), "2.9.0", False),
-        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.9.0", False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (8, 0), "2.9.0", True),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.9.0", True),
         (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.10.0", True),
         (DEFAULT_EMBEDDING_MODEL_NAME, "raise", (7, 5), "2.10.0", False),
         ("sentence-transformers/all-MiniLM-L6-v2", "tagged", (8, 0), "2.10.0", False),
@@ -299,11 +306,20 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     assert builder._inner_model_compiled is False
 
     tf32_cases = [
-        ((8, 0), True, "tf32"),
-        ((7, 5), True, "off"),
-        ((8, 0), False, "unsupported"),
+        ((8, 0), True, True, "2.9.0", "tf32-matmul-high", "none", "high"),
+        ((8, 0), True, False, "2.9.0", "tf32", "tf32", None),
+        ((8, 0), False, True, "2.10.0", "tf32-matmul-high", None, "high"),
+        ((7, 5), True, True, "2.10.0", "off", "none", None),
     ]
-    for capability, include_tf32_global_api, expected_mode in tf32_cases:
+    for (
+        capability,
+        include_tf32_global_api,
+        enable_torch_compile,
+        torch_version,
+        expected_mode,
+        expected_backend_precision,
+        expected_matmul_precision,
+    ) in tf32_cases:
         _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
             monkeypatch,
@@ -311,23 +327,35 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
             bf16_supported=True,
             capability=capability,
             include_tf32_global_api=include_tf32_global_api,
+            torch_version=torch_version,
         )
 
-        builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+        builder = EmbeddingGraphBuilder(
+            max_papers=1,
+            enable_torch_compile=enable_torch_compile,
+            client=MagicMock(),
+        )
         builder._load_model()
 
-        if include_tf32_global_api and expected_mode == "tf32":
-            assert fake_torch.backends.fp32_precision == "tf32"
-            assert fake_torch.backends.cuda.matmul.fp32_precision == "tf32"
-            assert fake_torch.backends.cudnn.conv.fp32_precision == "tf32"
-        elif include_tf32_global_api:
-            assert fake_torch.backends.fp32_precision == "none"
-            assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
-            assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
+        if include_tf32_global_api:
+            assert fake_torch.backends.fp32_precision == expected_backend_precision
+            expected_matmul_backend = expected_backend_precision or "none"
+            assert (
+                fake_torch.backends.cuda.matmul.fp32_precision
+                == expected_matmul_backend
+            )
+            assert (
+                fake_torch.backends.cudnn.conv.fp32_precision == expected_matmul_backend
+            )
         else:
             assert not hasattr(fake_torch.backends, "fp32_precision")
             assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
             assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
+
+        if expected_matmul_precision is None:
+            assert fake_torch._matmul_precision_calls == []
+        else:
+            assert fake_torch._matmul_precision_calls == [expected_matmul_precision]
         assert builder._tf32_mode == expected_mode
 
     _install_fake_sentence_transformers(monkeypatch)

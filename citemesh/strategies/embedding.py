@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import warnings
 from contextlib import nullcontext
 from hashlib import sha1, sha256
 from pathlib import Path
@@ -77,7 +78,7 @@ def _check_embedding_deps() -> None:
     torch_version = _parse_torch_major_minor(raw_torch_version)
     if torch_version < _EMBEDDING_MIN_TORCH_VERSION:
         raise ImportError(
-            "Embedding strategy requires torch>=2.9.0 (new TF32 runtime API). "
+            "Embedding strategy requires torch>=2.9.0 (runtime precision policy). "
             f"Detected torch=={raw_torch_version or 'unknown'}."
         )
 
@@ -1267,6 +1268,47 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return
 
+        torch_version = _parse_torch_major_minor(getattr(torch, "__version__", ""))
+        compile_fn = getattr(torch, "compile", None)
+        should_use_compile_bridge = (
+            self.enable_torch_compile
+            and self.model_profile.compile_inner_transformer
+            and callable(compile_fn)
+            and torch_version in {(2, 9), (2, 10)}
+        )
+        if should_use_compile_bridge:
+            set_matmul_precision = getattr(torch, "set_float32_matmul_precision", None)
+            if not callable(set_matmul_precision):
+                self._tf32_mode = "unsupported"
+                logger.debug(
+                    "Skipping TF32 config for %s: compile-safe matmul precision API unavailable.",
+                    self.model_name,
+                )
+                return
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"Please use the new API settings to control TF32 behavior.*",
+                        category=UserWarning,
+                    )
+                    set_matmul_precision("high")
+                self._tf32_mode = "tf32-matmul-high"
+                logger.debug(
+                    "Configured compile-safe TF32 matmul precision for %s on torch %s.",
+                    self.model_name,
+                    getattr(torch, "__version__", "unknown"),
+                )
+                return
+            except Exception as exc:
+                self._tf32_mode = "unsupported"
+                logger.debug(
+                    "Failed setting compile-safe TF32 matmul precision for %s: %s",
+                    self.model_name,
+                    exc,
+                )
+                return
+
         backends = getattr(torch, "backends", None)
         if backends is None or not hasattr(backends, "fp32_precision"):
             self._tf32_mode = "unsupported"
@@ -1279,7 +1321,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         try:
             backends.fp32_precision = "tf32"
             self._tf32_mode = "tf32"
-            logger.info("Enabled TF32 kernels for CUDA matmul/conv (Ampere+ GPU).")
+            logger.debug("Enabled TF32 kernels for CUDA matmul/conv (Ampere+ GPU).")
             return
         except Exception as exc:
             self._tf32_mode = "unsupported"
@@ -1354,20 +1396,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             logger.debug(
                 "%s profile supports inner-model torch.compile, but torch.compile is unavailable.",
                 self.model_name,
-            )
-            return
-
-        cuda_module = getattr(torch, "cuda", None)
-        cuda_available = getattr(cuda_module, "is_available", None)
-        torch_version = _parse_torch_major_minor(getattr(torch, "__version__", ""))
-        if (
-            torch_version == (2, 9)
-            and callable(cuda_available)
-            and bool(cuda_available())
-        ):
-            self._compile_status_reason = (
-                "auto-disabled on torch 2.9 CUDA due to an upstream TorchInductor "
-                "TF32 API conflict in sentence-transformers workloads"
             )
             return
 

@@ -30,12 +30,13 @@ Runtime precision policy:
 
 - EmbeddingGemma prefers `torch_dtype=bfloat16` with CUDA autocast when supported.
 - If CUDA or CUDA bfloat16 is unavailable, CiteMesh falls back to float32.
-- On Ampere+ CUDA devices, TF32 is enabled using the new API only: `torch.backends.fp32_precision = "tf32"`.
+- On Ampere+ CUDA devices in eager mode, TF32 is enabled with the new API: `torch.backends.fp32_precision = "tf32"`.
+- On Ampere+ CUDA devices with `torch.compile` enabled on torch `2.9`/`2.10`, CiteMesh uses `torch.set_float32_matmul_precision("high")` and does not touch `torch.backends.*.fp32_precision` to avoid the release-branch Inductor mixed-API conflict.
 
 Compile policy:
 
 - `torch.compile` is best-effort and profile-gated.
-- On `torch==2.9` with CUDA, CiteMesh auto-disables `torch.compile` for embedding models due to an upstream TorchInductor TF32 API conflict path observed in sentence-transformers workloads.
+- `torch.compile` remains enabled on torch `2.9`/`2.10` CUDA when available; the runtime switches TF32 control to the compile-safe matmul precision bridge above.
 
 ## Dependency Floor
 
