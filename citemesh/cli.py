@@ -41,20 +41,35 @@ from citemesh.visualization import (
     visualize_graph,
 )
 
-log_console = Console(stderr=True)
-output_console = Console()
+DEFAULT_LOG_WIDTH = 160
+LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
+
+log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
+output_console = Console(width=DEFAULT_LOG_WIDTH)
 _LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
 
 
-def _configure_logging() -> None:
+def _configure_logging(
+    *, log_level: str = "info", log_width: int = DEFAULT_LOG_WIDTH
+) -> None:
     """Configure CLI logging once at runtime."""
     global _LOGGING_CONFIGURED
+    global log_console
+    global output_console
     if _LOGGING_CONFIGURED:
         return
 
+    level_name = str(log_level).strip().lower()
+    if level_name not in LOG_LEVEL_CHOICES:
+        level_name = "info"
+    resolved_level = getattr(logging, level_name.upper(), logging.INFO)
+    resolved_width = None if int(log_width) <= 0 else int(log_width)
+    log_console = Console(stderr=True, width=resolved_width)
+    output_console = Console(width=resolved_width)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=resolved_level,
         format="%(message)s",
         datefmt="[%X]",
         handlers=[
@@ -70,6 +85,9 @@ def _configure_logging() -> None:
     # Keep third-party HTTP logs concise without import-time side effects.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+    logging.getLogger("datasets").setLevel(logging.WARNING)
     _LOGGING_CONFIGURED = True
 
 
@@ -134,6 +152,26 @@ def _non_empty_str(value: str) -> str:
     if not normalized:
         raise argparse.ArgumentTypeError("must be a non-empty string")
     return normalized
+
+
+def _add_logging_arguments(target: argparse.ArgumentParser) -> None:
+    """Add shared logging arguments to a parser.
+
+    :param argparse.ArgumentParser target: Parser receiving logging options.
+    :return None: Mutates parser in-place.
+    """
+    target.add_argument(
+        "--log-level",
+        choices=list(LOG_LEVEL_CHOICES),
+        default="info",
+        help="Console log level (default: info)",
+    )
+    target.add_argument(
+        "--log-width",
+        type=_non_negative_int,
+        default=DEFAULT_LOG_WIDTH,
+        help="Rich console wrap width in columns (0 = auto terminal width; default: 160)",
+    )
 
 
 EXPORT_FORMATS = ("png", "html", "plotly", "json", "graphml")
@@ -498,16 +536,12 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
 
     corpus_label = "all" if args.all_corpus else str(args.corpus_size)
     cache_root = get_cache_dir("embeddings")
+    revision_label = args.model_revision or "default"
+    logger.debug("Embedding cache namespace root: %s.", cache_root)
     logger.info(
-        "Embedding workflow contract: may download model/dataset artifacts and mutate "
-        "cache namespace at %s.",
-        cache_root,
-    )
-    logger.info(
-        "Embedding run config: model=%s revision=%s split=%s corpus=%s streaming=%s "
-        "precision=%s.",
+        "Embedding config: model=%s@%s split=%s corpus=%s streaming=%s storage=%s.",
         args.model,
-        args.model_revision or "default",
+        revision_label,
         args.dataset_split,
         corpus_label,
         bool(args.streaming),
@@ -647,8 +681,12 @@ def _create_parser() -> Tuple[
     :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
         Root parser, build subcommand parser, cache subcommand parser.
     """
+    logging_parent = argparse.ArgumentParser(add_help=False)
+    _add_logging_arguments(logging_parent)
+
     parser = argparse.ArgumentParser(
         description="CiteMesh: Create citation graph visualizations",
+        parents=[logging_parent],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -676,7 +714,9 @@ Examples:
 
     # Build command
     build_parser = subparsers.add_parser(
-        "build", help="Build and visualize paper graph"
+        "build",
+        help="Build and visualize paper graph",
+        parents=[logging_parent],
     )
 
     # Required arguments
@@ -970,7 +1010,9 @@ Examples:
 
     # Search subcommand
     search_parser = subparsers.add_parser(
-        "search", help="Search papers by title or keyword"
+        "search",
+        help="Search papers by title or keyword",
+        parents=[logging_parent],
     )
     search_parser.add_argument("query", type=_non_empty_str, help="Search query")
     search_parser.add_argument(
@@ -980,7 +1022,11 @@ Examples:
         default=10,
         help="Maximum results (default: 10)",
     )
-    cache_parser = subparsers.add_parser("cache", help="Manage local CiteMesh caches")
+    cache_parser = subparsers.add_parser(
+        "cache",
+        help="Manage local CiteMesh caches",
+        parents=[logging_parent],
+    )
     cache_subparsers = cache_parser.add_subparsers(
         dest="cache_command", help="Cache operations"
     )
@@ -1221,10 +1267,10 @@ def _scan_cache_directory() -> int:
 
 def main() -> None:
     """Main CLI entry point."""
-    _configure_logging()
     parser, build_parser, cache_parser = _create_parser()
 
     args = parser.parse_args()
+    _configure_logging(log_level=args.log_level, log_width=args.log_width)
     provided_build_options = _collect_provided_build_option_dests(
         build_parser, sys.argv[1:]
     )

@@ -161,7 +161,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.paper_sources = {}
 
         # Step 1: Collect from citations
-        logger.info("Collecting papers via citations...")
+        logger.debug("Collecting papers via citations...")
         citation_papers = self.citation_builder.collect_papers(seed_id)
 
         for paper_id, paper in citation_papers.items():

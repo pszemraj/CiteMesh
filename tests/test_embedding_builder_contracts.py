@@ -991,6 +991,23 @@ def test_metadata_and_streaming_loader_contracts(
         "CShorten/ML-ArXiv-Papers",
     ]
     assert len(list(dataset)) == 1
+    assert load_calls[0][1] == "train"
+
+    load_calls.clear()
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        use_streaming=False,
+        corpus_size=5,
+        client=MagicMock(),
+    )
+    selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=False)
+    assert selected_name == "CShorten/ML-ArXiv-Papers"
+    assert [name for name, _, _ in load_calls] == [
+        "librarian-bots/arxiv-metadata-snapshot",
+        "CShorten/ML-ArXiv-Papers",
+    ]
+    assert load_calls[0][1] == "train[:5]"
+    assert len(list(dataset)) == 1
 
     with pytest.raises(ValueError, match="does not support sliced dataset splits"):
         EmbeddingGraphBuilder(

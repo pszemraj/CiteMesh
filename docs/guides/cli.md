@@ -53,6 +53,8 @@ In non-interactive shells, `citemesh cache clear` requires `--yes`.
 | `--export`, `-e` | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all` | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
+| `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
+| `--log-width` | Rich console wrap width in columns (`0` uses terminal width) | `160` |
 
 When `--output` is omitted, CiteMesh writes to `out/<slug>-<hash>/<strategy>.<ext>`.
 
@@ -126,6 +128,8 @@ ignoring it.
 - `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
 - `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
+- With non-streaming unsliced splits, CiteMesh loads `split[:corpus_size]` directly (it does not download/process the full split just to stop after `corpus_size` rows).
+- For the default `librarian-bots/arxiv-metadata-snapshot` source, current ordering places the newest `update_date` rows first, so the default cap targets recent updates.
 - `--all-corpus`: remove corpus-size cap and process the full selected split
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `2`)
@@ -143,9 +147,10 @@ ignoring it.
 
 Execution transparency:
 
-- Before embedding/hybrid execution, CLI logs a preflight contract describing expected side effects (model/dataset artifact download risk and embedding-cache mutation scope).
+- Embedding/hybrid runs print a compact config summary (model, split, corpus cap, streaming mode, storage precision).
 - With non-int8 precision, implicit binary-prefilter defaults are normalized to effective runtime values (`binary_prefilter=false`, `binary_rescore_multiplier=1`) to avoid no-op ambiguity.
 - Semantic retrieval logs the cache comparison footprint (`compared` and `rescored` embedding counts, plus prefilter usage) for each embedding/hybrid run.
+- Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
 
 ### Hybrid Strategy
 

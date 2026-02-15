@@ -1025,7 +1025,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return {}
 
         if not torch.cuda.is_available():
-            logger.info(
+            logger.debug(
                 "%s prefers bfloat16, but CUDA is unavailable; using float32.",
                 self.model_name,
             )
@@ -1034,7 +1034,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
         if not bf16_supported:
-            logger.info(
+            logger.debug(
                 "%s prefers bfloat16, but CUDA bfloat16 is unsupported; using float32.",
                 self.model_name,
             )
@@ -1047,12 +1047,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._source_dtype_hint = "bfloat16"
 
         if self._autocast_enabled:
-            logger.info(
+            logger.debug(
                 "%s will run with torch_dtype=bfloat16 and CUDA autocast.",
                 self.model_name,
             )
         else:
-            logger.info("%s will run with torch_dtype=bfloat16.", self.model_name)
+            logger.debug("%s will run with torch_dtype=bfloat16.", self.model_name)
 
         return {"torch_dtype": torch.bfloat16}
 
@@ -1212,7 +1212,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 and not model_kwargs
                 and not self.model_profile.preferred_torch_dtype
             ):
-                logger.info(
+                logger.debug(
                     "%s does not support float16 activations; using float32.",
                     self.model_name,
                 )
@@ -1296,15 +1296,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         selected_dim = self._effective_embedding_dim()
         dim_label = "full" if selected_dim is None else f"{selected_dim}d"
+        compute_dtype_label = self._source_dtype_hint
+        if self._autocast_enabled:
+            compute_dtype_label = f"{compute_dtype_label}+autocast"
         logger.info(
-            "%s runtime: dim=%s, compile=%s, tf32=%s.",
+            "%s runtime: dim=%s, compute=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
             self.model_name,
             dim_label,
+            compute_dtype_label,
+            self.storage_precision,
             "on" if self._inner_model_compiled else "off",
             self._tf32_mode,
         )
         if not self._inner_model_compiled and self._compile_status_reason:
-            logger.info(
+            logger.debug(
                 "%s compile status: %s", self.model_name, self._compile_status_reason
             )
         self._runtime_summary_logged = True
@@ -1337,7 +1342,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             import torch
         except ImportError:
             self._compile_status_reason = "torch unavailable"
-            logger.info(
+            logger.debug(
                 "%s profile supports inner-model torch.compile, but torch is unavailable.",
                 self.model_name,
             )
@@ -1346,7 +1351,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         compile_fn = getattr(torch, "compile", None)
         if not callable(compile_fn):
             self._compile_status_reason = "torch.compile unavailable"
-            logger.info(
+            logger.debug(
                 "%s profile supports inner-model torch.compile, but torch.compile is unavailable.",
                 self.model_name,
             )
@@ -1456,7 +1461,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             seed_metadata = {"title": seed_id, "abstract": ""}
 
         # Compute normalized seed embedding
-        logger.info("Computing seed embedding...")
+        logger.debug("Computing seed embedding...")
         formatted_seed_text = self.model_profile.format_query(seed_text, seed_metadata)
         seed_embedding = self._encode_texts(
             [formatted_seed_text], show_progress_bar=False
@@ -1466,12 +1471,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         use_streaming = self.use_streaming
 
         if use_streaming:
-            logger.info(
+            logger.debug(
                 "Using streaming hydration path for cache-native semantic search..."
             )
             candidates = self._select_candidates_streaming(seed_embedding)
         else:
-            logger.info("Using cache-native semantic search...")
+            logger.debug("Using cache-native semantic search...")
             candidates = self._select_candidates_from_loaded(seed_embedding)
 
         # Convert candidates to Paper objects while respecting max_papers total.
@@ -1772,10 +1777,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             dataset_names = ARXIV_DATASET_CANDIDATES
 
         for dataset_name in dataset_names:
+            split_for_load = self.dataset_split
+            if (
+                not use_streaming
+                and self.corpus_size is not None
+                and ":" not in split_for_load
+            ):
+                split_for_load = f"{split_for_load}[:{int(self.corpus_size)}]"
             try:
                 dataset = load_dataset(
                     dataset_name,
-                    split=self.dataset_split,
+                    split=split_for_load,
                     streaming=use_streaming,
                 )
             except Exception as exc:  # pragma: no cover - source/network dependent
@@ -1786,10 +1798,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     exc,
                 )
                 continue
-            logger.info(
+            logger.debug(
                 "Hydration dataset selected: %s (split=%s, streaming=%s).",
                 dataset_name,
-                self.dataset_split,
+                split_for_load,
                 use_streaming,
             )
             return dataset_name, dataset

@@ -788,7 +788,7 @@ def test_hybrid_export_omits_embedding_metadata_when_semantic_branch_disabled(
 def test_embedding_build_logs_side_effect_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Embedding build should emit explicit side-effect contract logs."""
+    """Embedding build should emit concise runtime config logs."""
     graph = nx.Graph()
     graph.add_node(
         "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
@@ -825,8 +825,7 @@ def test_embedding_build_logs_side_effect_contract(
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     messages = [str(call.args[0]) for call in info_mock.call_args_list if call.args]
-    assert any("Embedding workflow contract" in msg for msg in messages)
-    assert any("Embedding run config" in msg for msg in messages)
+    assert any("Embedding config:" in msg for msg in messages)
 
 
 def test_strategy_dispatches_to_matching_builder_kwargs(
