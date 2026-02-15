@@ -41,7 +41,7 @@ from citemesh.visualization import (
     visualize_graph,
 )
 
-DEFAULT_LOG_WIDTH = 160
+DEFAULT_LOG_WIDTH = 140
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
 
 log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
@@ -170,7 +170,7 @@ def _add_logging_arguments(target: argparse.ArgumentParser) -> None:
         "--log-width",
         type=_non_negative_int,
         default=DEFAULT_LOG_WIDTH,
-        help="Rich console wrap width in columns (0 = auto terminal width; default: 160)",
+        help="Rich console wrap width in columns (0 = auto terminal width; default: 140)",
     )
 
 

@@ -54,7 +54,7 @@ In non-interactive shells, `citemesh cache clear` requires `--yes`.
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
-| `--log-width` | Rich console wrap width in columns (`0` uses terminal width) | `160` |
+| `--log-width` | Rich console wrap width in columns (`0` uses terminal width) | `140` |
 
 When `--output` is omitted, CiteMesh writes to `out/<slug>-<hash>/<strategy>.<ext>`.
 
