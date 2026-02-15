@@ -386,6 +386,7 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
         return_value=[
             _make_reference_record("fresh-1"),
             _make_reference_record("fresh-2"),
+            SimpleNamespace(paper=SimpleNamespace(paperId=None)),
         ]
     )
     assert client.get_reference_ids("arxiv:1234.5678", force_refresh=True) == [
@@ -426,6 +427,38 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     assert json.loads(malformed_cache_path.read_text())["references"] == [
         "fixed-1",
         "fixed-2",
+    ]
+
+    mixed_seed = s2.normalize_paper_id("seed-mixed")
+    mixed_cache_path = s2._reference_cache_path(mixed_seed)
+    mixed_cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": mixed_seed,
+                "references": [
+                    "ok-1",
+                    None,
+                    {"paperId": "ok-2"},
+                    {"paper_id": "ok-3"},
+                    {"paper": {"paperId": "ok-4"}},
+                    {"paperId": "   "},
+                    123,
+                    "ok-1",
+                ],
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        side_effect=AssertionError("API should not be called for mixed cache payload")
+    )
+    mixed_refs = client.get_reference_ids("seed-mixed")
+    assert mixed_refs == ["ok-1", "ok-2", "ok-3", "ok-4"]
+    assert json.loads(mixed_cache_path.read_text())["references"] == [
+        "ok-1",
+        "ok-2",
+        "ok-3",
+        "ok-4",
     ]
 
     client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
