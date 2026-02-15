@@ -77,18 +77,21 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param str progress_description: Progress-bar description label.
         :return None: Mutates ``papers`` and optional per-paper references in place.
         """
+        progress_bar = None
         if relation_records:
-            relation_iterator = (
-                tqdm(
+            # Avoid very short-lived progress bars that can render as blank spacer
+            # lines in some terminals when rapidly cleared.
+            should_show_progress = progress_enabled and len(relation_records) > 25
+            if should_show_progress:
+                progress_bar = tqdm(
                     relation_records,
                     desc=progress_description,
                     unit="papers",
-                    leave=False,
                     dynamic_ncols=True,
                 )
-                if progress_enabled
-                else relation_records
-            )
+                relation_iterator = progress_bar
+            else:
+                relation_iterator = relation_records
         else:
             relation_iterator = []
 
@@ -100,8 +103,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             if self.fetch_references and paper.paper_id not in self.reference_cache:
                 paper.references = self._get_references(paper.paper_id)
 
-        if relation_records and progress_enabled:
-            relation_iterator.close()
+        if progress_bar is not None:
+            progress_bar.close()
 
     def _get_references(self, paper_id: str) -> list:
         """

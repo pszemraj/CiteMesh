@@ -1935,18 +1935,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not targets:
             return
 
-        progress_enabled = sys.stderr.isatty()
-        iterator = (
+        progress_enabled = sys.stderr.isatty() and len(targets) > 25
+        progress_bar = (
             tqdm(
                 targets,
                 desc="Citation metadata",
                 unit="papers",
-                leave=False,
                 dynamic_ncols=True,
             )
             if progress_enabled
-            else targets
+            else None
         )
+        iterator = progress_bar if progress_bar is not None else targets
 
         for paper_id, paper in iterator:
             try:
@@ -1956,8 +1956,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             except Exception as exc:
                 logger.warning(f"Could not fetch citation count for {paper_id}: {exc}")
 
-        if progress_enabled:
-            iterator.close()
+        if progress_bar is not None:
+            progress_bar.close()
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """
