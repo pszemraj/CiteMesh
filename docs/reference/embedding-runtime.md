@@ -35,7 +35,7 @@ Runtime precision policy:
 Compile policy:
 
 - `torch.compile` is best-effort and profile-gated.
-- On `torch==2.9`, when TF32 is active on Ampere+, CiteMesh skips `torch.compile` for embedding models due to an upstream TorchInductor TF32 API conflict path.
+- On `torch==2.9` with CUDA, CiteMesh auto-disables `torch.compile` for embedding models due to an upstream TorchInductor TF32 API conflict path observed in sentence-transformers workloads.
 
 ## Dependency Floor
 

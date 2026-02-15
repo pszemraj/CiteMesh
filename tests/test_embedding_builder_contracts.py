@@ -243,12 +243,19 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
             assert autocast_log == []
 
     compile_cases = [
-        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (8, 0), False),
-        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), True),
-        (DEFAULT_EMBEDDING_MODEL_NAME, "raise", (7, 5), False),
-        ("sentence-transformers/all-MiniLM-L6-v2", "tagged", (8, 0), False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (8, 0), "2.9.0", False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.9.0", False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.10.0", True),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "raise", (7, 5), "2.10.0", False),
+        ("sentence-transformers/all-MiniLM-L6-v2", "tagged", (8, 0), "2.10.0", False),
     ]
-    for model_name, compile_behavior, capability, expect_compiled in compile_cases:
+    for (
+        model_name,
+        compile_behavior,
+        capability,
+        torch_version,
+        expect_compiled,
+    ) in compile_cases:
         init_log, _ = _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
             monkeypatch,
@@ -256,6 +263,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
             bf16_supported=True,
             compile_behavior=compile_behavior,
             capability=capability,
+            torch_version=torch_version,
         )
 
         builder = EmbeddingGraphBuilder(
@@ -329,6 +337,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         bf16_supported=True,
         capability=(7, 5),
         compile_behavior="tagged",
+        torch_version="2.10.0",
     )
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
@@ -1295,6 +1304,43 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
     )
     assert candidates == []
     assert builder._embedding_runtime_metadata() == {"binary_prefilter_used": False}
+
+
+def test_embedding_candidate_search_logs_comparison_counts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Candidate search should log compared/rescored embedding counts."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(max_papers=2, top_k=2, client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.last_search_used_binary_prefilter = True
+    builder.embedding_cache.last_search_total_embeddings = 50000
+    builder.embedding_cache.last_search_rescored_embeddings = 640
+    builder.embedding_cache.search = MagicMock(
+        return_value=[
+            CacheSearchResult(
+                paper_id="a",
+                score=0.95,
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                metadata={"title": "A", "abstract": "A", "authors": []},
+            )
+        ]
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        candidates = builder._select_candidates_from_loaded(
+            np.asarray([1.0, 0.0], dtype=np.float32)
+        )
+
+    assert [paper_id for paper_id, _, _ in candidates] == ["a"]
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "compared against 50,000 embeddings (rescored=640, prefilter=on)" in message
+        for message in log_messages
+    )
 
 
 def test_embedding_build_graph_persists_runtime_metadata(

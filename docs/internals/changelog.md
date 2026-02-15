@@ -46,7 +46,7 @@ For current usage details, see:
 - **Embedding**: expanded multi-factor similarity and added citation-count hydration for top matches.
 - **Embedding**: added best-effort `torch.compile` path for EmbeddingGemma internals with safe fallback.
 - **Embedding**: switched TF32 runtime configuration to the PyTorch 2.9+ `torch.backends.fp32_precision` API (new API only; removed legacy `allow_tf32` fallback path).
-- **Embedding**: added a torch 2.9 compatibility guard that skips `torch.compile` when TF32 is active on Ampere+ CUDA to avoid known TorchInductor legacy/new TF32 API conflicts.
+- **Embedding**: added a torch 2.9 CUDA compatibility guard that auto-disables `torch.compile` for embedding models due to a known TorchInductor TF32 API conflict path in sentence-transformers workloads.
 - **Embedding**: changed default checkpoint to `unsloth/embeddinggemma-300m` (ungated) and added automatic fallback to `google/embeddinggemma-300m` for default-revision loads.
 - **Hybrid**: formalized citation-first enrichment with semantic additions and capped edges.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.

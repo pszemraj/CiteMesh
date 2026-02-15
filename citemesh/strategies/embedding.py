@@ -425,6 +425,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._autocast_enabled = False
         self._encode_model: Optional[Any] = None
         self._inner_model_compiled = False
+        self._compile_status_reason: Optional[str] = None
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
         self._tf32_mode = "off"
@@ -1302,6 +1303,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             "on" if self._inner_model_compiled else "off",
             self._tf32_mode,
         )
+        if not self._inner_model_compiled and self._compile_status_reason:
+            logger.info(
+                "%s compile status: %s", self.model_name, self._compile_status_reason
+            )
         self._runtime_summary_logged = True
 
     def _maybe_compile_inner_transformer(self) -> None:
@@ -1317,6 +1322,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         if not self.enable_torch_compile:
+            self._compile_status_reason = "disabled by configuration"
             logger.debug(
                 "Skipping torch.compile for %s: disabled by configuration.",
                 self.model_name,
@@ -1324,11 +1330,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         if not self.model_profile.compile_inner_transformer:
+            self._compile_status_reason = "profile does not support inner-model compile"
             return
 
         try:
             import torch
         except ImportError:
+            self._compile_status_reason = "torch unavailable"
             logger.info(
                 "%s profile supports inner-model torch.compile, but torch is unavailable.",
                 self.model_name,
@@ -1337,25 +1345,31 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         compile_fn = getattr(torch, "compile", None)
         if not callable(compile_fn):
+            self._compile_status_reason = "torch.compile unavailable"
             logger.info(
                 "%s profile supports inner-model torch.compile, but torch.compile is unavailable.",
                 self.model_name,
             )
             return
 
-        if self._tf32_mode == "tf32" and _parse_torch_major_minor(
-            getattr(torch, "__version__", "")
-        ) == (2, 9):
-            logger.debug(
-                "Skipping torch.compile for %s: TF32 + torch.compile is unstable on torch 2.9; "
-                "use --no-torch-compile or disable TF32 to force compile.",
-                self.model_name,
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        torch_version = _parse_torch_major_minor(getattr(torch, "__version__", ""))
+        if (
+            torch_version == (2, 9)
+            and callable(cuda_available)
+            and bool(cuda_available())
+        ):
+            self._compile_status_reason = (
+                "auto-disabled on torch 2.9 CUDA due to an upstream TorchInductor "
+                "TF32 API conflict in sentence-transformers workloads"
             )
             return
 
         try:
             transformer_block = self.model[0]
         except Exception as exc:  # pragma: no cover - defensive for upstream API drift
+            self._compile_status_reason = f"model[0] unavailable ({type(exc).__name__})"
             logger.warning(
                 "Skipping torch.compile for %s: could not access model[0] (%s).",
                 self.model_name,
@@ -1365,6 +1379,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         auto_model = getattr(transformer_block, "auto_model", None)
         if auto_model is None:
+            self._compile_status_reason = "inner auto_model unavailable"
             logger.warning(
                 "Skipping torch.compile for %s: model[0].auto_model is unavailable.",
                 self.model_name,
@@ -1373,11 +1388,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         if auto_model.__class__.__name__ == "OptimizedModule":
             self._inner_model_compiled = True
+            self._compile_status_reason = None
             return
 
         try:
             transformer_block.auto_model = compile_fn(auto_model)
         except Exception as exc:
+            self._compile_status_reason = f"compile failed ({type(exc).__name__})"
             logger.warning(
                 "torch.compile failed for %s inner transformer; continuing without compile: %s",
                 self.model_name,
@@ -1386,6 +1403,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         self._inner_model_compiled = True
+        self._compile_status_reason = None
         logger.debug(
             "Enabled torch.compile for %s inner transformer (model[0].auto_model).",
             self.model_name,
@@ -1551,6 +1569,31 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
         )
         limited = min(top_k, len(scored_candidates))
+        compared_embeddings = getattr(
+            self.embedding_cache, "last_search_total_embeddings", None
+        )
+        rescored_embeddings = getattr(
+            self.embedding_cache, "last_search_rescored_embeddings", None
+        )
+        if compared_embeddings is not None:
+            prefilter_used = (
+                self._last_search_used_binary_prefilter
+                if self._last_search_used_binary_prefilter is not None
+                else False
+            )
+            compared_label = f"{int(compared_embeddings):,}"
+            rescored_label = (
+                f"{int(rescored_embeddings):,}"
+                if rescored_embeddings is not None
+                else "unknown"
+            )
+            logger.info(
+                "Semantic cache search compared against %s embeddings "
+                "(rescored=%s, prefilter=%s).",
+                compared_label,
+                rescored_label,
+                "on" if prefilter_used else "off",
+            )
 
         return [
             (paper_id, metadata, embedding)

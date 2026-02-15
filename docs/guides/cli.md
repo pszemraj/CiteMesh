@@ -145,6 +145,7 @@ Execution transparency:
 
 - Before embedding/hybrid execution, CLI logs a preflight contract describing expected side effects (model/dataset artifact download risk and embedding-cache mutation scope).
 - With non-int8 precision, implicit binary-prefilter defaults are normalized to effective runtime values (`binary_prefilter=false`, `binary_rescore_multiplier=1`) to avoid no-op ambiguity.
+- Semantic retrieval logs the cache comparison footprint (`compared` and `rescored` embedding counts, plus prefilter usage) for each embedding/hybrid run.
 
 ### Hybrid Strategy
 

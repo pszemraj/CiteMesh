@@ -288,6 +288,8 @@ class EmbeddingCache:
             raise ValueError("text_formatter_fingerprint must be a non-empty string.")
         self.embedding_vector_dtype = "float32"
         self.last_search_used_binary_prefilter: Optional[bool] = None
+        self.last_search_total_embeddings: Optional[int] = None
+        self.last_search_rescored_embeddings: Optional[int] = None
 
         with self._cache_lock():
             self._init_db()
@@ -528,6 +530,8 @@ class EmbeddingCache:
             raise ValueError("top_k must be at least 1")
 
         self.last_search_used_binary_prefilter = None
+        self.last_search_total_embeddings = None
+        self.last_search_rescored_embeddings = None
         query = np.asarray(query_embedding, dtype=np.float32)
         if query.ndim != 1:
             raise ValueError("query_embedding must be 1-dimensional")
@@ -541,6 +545,8 @@ class EmbeddingCache:
         ):
             embeddings_dataset = self._get_embeddings_dataset(h5)
             if embeddings_dataset is None or embeddings_dataset.shape[0] == 0:
+                self.last_search_total_embeddings = 0
+                self.last_search_rescored_embeddings = 0
                 return []
             self._assert_runtime_cache_consistency(
                 conn=conn,
@@ -548,6 +554,8 @@ class EmbeddingCache:
                 embeddings_dataset=embeddings_dataset,
                 fail_mode="runtime",
             )
+            embedding_rows = int(embeddings_dataset.shape[0])
+            self.last_search_total_embeddings = embedding_rows
             if int(embeddings_dataset.shape[1]) != int(query.shape[0]):
                 raise ValueError(
                     "Query embedding dimension mismatch: "
@@ -585,6 +593,7 @@ class EmbeddingCache:
                         query_embedding=query,
                         candidate_count=candidate_count,
                     )
+                    self.last_search_rescored_embeddings = int(candidate_rows.size)
                     if candidate_rows.size == 0:
                         return []
                     rows, scores, embeddings = self._score_int8_rows(
@@ -595,6 +604,7 @@ class EmbeddingCache:
                         row_indices=candidate_rows,
                     )
                 else:
+                    self.last_search_rescored_embeddings = embedding_rows
                     rows, scores, embeddings = self._score_int8_rows(
                         embeddings_dataset=embeddings_dataset,
                         h5_file=h5,
@@ -603,6 +613,7 @@ class EmbeddingCache:
                         row_indices=None,
                     )
             else:
+                self.last_search_rescored_embeddings = embedding_rows
                 rows, scores, embeddings = self._score_float_rows(
                     embeddings_dataset=embeddings_dataset,
                     query_embedding=query,
