@@ -1,14 +1,14 @@
 # Developer Notes
 
 This document captures implementation notes and deferred refactor work for future passes.
-It is not a normative behavior spec for CLI, strategies, or cache contracts.
+For user-facing behavior and runtime details, use the guides/reference docs in [docs/README.md](./README.md).
 
 ## Deferred Riskier Consolidations
 
 The following items were intentionally deferred during the easy-win + breaking API cleanup pass:
 
 - `#5` Retry/backoff consolidation in `citemesh/services/semantic_scholar.py`
-  - Scope: unify retry scaffolding used by `_request_json`, `get_paper`, `_get_related_papers`, and `get_reference_ids`.
+  - Goal: unify retry scaffolding used by `_request_json`, `get_paper`, `_get_related_papers`, and `get_reference_ids`.
   - Deferred because endpoint-specific exception handling and fallback return policies differ and are easy to regress.
 - `#7` Title+abstract formatter unification across `citemesh/data/model_profiles.py` and `citemesh/data/embedding_cache.py`
   - Deferred because formatter changes can alter embedding text hashes and trigger broad cache invalidation/rebuilds.
@@ -17,16 +17,16 @@ The following items were intentionally deferred during the easy-win + breaking A
 - `#9` arXiv canonicalization unification across `citemesh/strategies/embedding.py` and `citemesh/services/semantic_scholar.py`
   - Deferred because these layers currently normalize identifiers for different bounded contexts (dataset vs API inputs).
 - Test overlap trims `#2` and `#4`
-  - Scope: reduce duplicated normalization assertions and overlapping deterministic-ordering checks.
+  - Goal: reduce duplicated normalization assertions and overlapping deterministic-ordering checks.
   - Deferred to avoid accidental loss of edge-case coverage before targeted replacement tests are added.
 - `#10` Embedding cache two-phase lock refactor (`check -> unlock -> encode -> relock -> commit`)
-  - Scope: reduce lock hold duration during long model encode calls by moving compute outside the namespace lock with safe re-check/commit semantics.
+  - Goal: reduce lock hold duration during long model encode calls by moving compute outside the namespace lock with safe re-check/commit semantics.
   - Deferred because this touches cache coherence across SQLite/HDF5 writes and needs dedicated race characterization tests.
 - `#12` Cross-strategy score taxonomy harmonization
-  - Scope: define optional calibrated score bands/labels that can be consumed uniformly across citation/recommendation/embedding/hybrid outputs.
+  - Goal: define optional calibrated score bands/labels that can be consumed uniformly across citation/recommendation/embedding/hybrid outputs.
   - Deferred because current workflows intentionally use strategy-specific scoring math and need a calibration design pass before claiming comparability.
 - `#13` Hydration dataset identity hardening beyond source-name checks
-  - Scope: persist and verify immutable dataset revision/fingerprint metadata so warm-cache fast paths can prove equivalence to a fresh hydration when upstream dataset aliases change.
+  - Goal: persist and verify immutable dataset revision/fingerprint metadata so warm-cache fast paths can prove equivalence to a fresh hydration when upstream dataset aliases change.
   - Deferred because current behavior relies on source-name/split/corpus boundaries plus formatter/model provenance; robust revision checks need stable identity contracts across streaming and non-streaming loaders.
 
 ## Follow-up Conditions

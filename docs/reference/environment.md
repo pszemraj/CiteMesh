@@ -1,14 +1,12 @@
 # Environment Variables
 
-Use this page as the canonical source of truth for runtime environment variables consumed by CiteMesh.
+Runtime environment variables consumed by CiteMesh.
 
-## Scope
+Related docs:
 
-- Normative here: variable names, accepted values, defaults, and runtime effect.
-- Non-normative here: command syntax and strategy behavior details.
-  - CLI contracts: [Guides: CLI Usage](../guides/cli.md)
-  - Cache behavior: [Guides: Caching & Data](../guides/caching.md)
-  - Documentation ownership map: [Documentation Index](../README.md)
+- CLI usage: [Guides: CLI Usage](../guides/cli.md)
+- Cache behavior: [Guides: Caching & Data](../guides/caching.md)
+- Docs index: [Documentation](../README.md)
 
 ## CiteMesh Variables
 
@@ -36,4 +34,4 @@ These are not CiteMesh-specific, but CiteMesh honors them when `CITEMESH_CACHE_D
 | `LOCALAPPDATA` | Windows | Primary base for default cache root (`%LOCALAPPDATA%\\CiteMesh`). |
 | `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset. |
 
-Cache-root behavior details remain canonical in [Guides: Caching & Data](../guides/caching.md).
+Cache-root behavior details are covered in [Guides: Caching & Data](../guides/caching.md).

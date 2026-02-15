@@ -2,14 +2,12 @@
 
 CiteMesh uses persistent caches to avoid recomputing expensive datasets and embeddings.
 
-## Scope
+Related docs:
 
-This is the canonical cache behavior specification.
-
-- Normative here: cache root resolution, directory layout, quantized embedding cache behavior, and cleanup guidance.
-- Non-normative here: broader CLI command semantics. See [CLI Usage](cli.md) for command contracts.
-- Runtime environment-variable definitions are canonical in [Environment Variables](../reference/environment.md).
-- Documentation ownership map: [Documentation Index](../README.md).
+- CLI command usage: [CLI Usage](cli.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
+- Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
+- Docs index: [Documentation](../README.md)
 
 ## Cache Root
 
@@ -25,7 +23,7 @@ Override the root with:
 export CITEMESH_CACHE_DIR=/path/to/custom/cache
 ```
 
-Variable contract details are canonical in [Environment Variables](../reference/environment.md).
+Variable details are documented in [Environment Variables](../reference/environment.md).
 
 ## Directory Layout
 
@@ -75,7 +73,7 @@ Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`)
 Lock acquisition timeout defaults to `60` seconds and can be overridden with
 `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
-Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
+Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)).
 
 For Hugging Face repo IDs, hydration resolves and stores a model fingerprint.
 CiteMesh first attempts commit-SHA resolution (online API, then local snapshot SHA).
@@ -143,7 +141,7 @@ citemesh cache clear --yes
 
 Omit `--yes` for interactive confirmation.
 
-Command syntax/defaults remain canonical in [CLI Usage](cli.md); this section documents cache maintenance workflows.
+For command syntax and defaults, see [CLI Usage](cli.md); this section focuses on cache maintenance workflows.
 
 To remove artifacts for one namespace, delete matching `.db` and `.h5` files in `embeddings/`.
 

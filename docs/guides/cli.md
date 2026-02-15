@@ -2,14 +2,12 @@
 
 The `citemesh` command builds paper graphs with one of four strategies: `recommendation`, `citation`, `embedding`, or `hybrid`.
 
-## Scope
+Related docs:
 
-This is the canonical CLI behavior specification.
-
-- Normative here: commands, flags, defaults, validation, identifier normalization, output naming, and export semantics.
-- Non-normative here: cache storage internals and on-disk layout. See [Caching & Data](caching.md).
-- Runtime environment-variable definitions are canonical in [Environment Variables](../reference/environment.md).
-- Documentation ownership map: [Documentation Index](../README.md).
+- Cache layout and hydration: [Caching & Data](caching.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
+- Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
+- Docs index: [Documentation](../README.md)
 
 ## Basic Invocation
 
@@ -95,13 +93,13 @@ Numeric validation:
 
 ## Strategy-Specific Flags
 
-Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.md). Flag contracts live here.
+Strategy behavior and tradeoffs are described in [Strategies Guide](strategies.md). Flag contracts are listed here.
 
 Build command options are strategy-scoped. If you pass a flag that is not supported
 for the selected `--strategy`, CiteMesh exits with a CLI error instead of silently
 ignoring it.
 
-### Cross-Strategy Scope
+### Cross-Strategy Behavior
 
 - `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (default `0.2`).
 - `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
@@ -141,17 +139,7 @@ ignoring it.
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled)
-- On `torch==2.9` with Ampere+ CUDA TF32 enabled, CiteMesh skips `torch.compile` for embedding models to avoid a known upstream TF32 API conflict path in TorchInductor.
-
-Default model policy:
-
-- CiteMesh defaults to `unsloth/embeddinggemma-300m` to keep out-of-the-box usage ungated (no Hugging Face auth requirement).
-- When that default checkpoint fails to load and no explicit `--model-revision` is set, CiteMesh automatically retries `google/embeddinggemma-300m` as a fallback checkpoint.
-- Verification timestamp: on February 15, 2026, both repos had matching Hugging Face file metadata across all 19 files, including identical `config.json` blob IDs and identical `model.safetensors` LFS SHA-256 values.
-
-Runtime precision policy:
-
-- TF32 kernels are auto-enabled on supported Ampere+ CUDA runtimes for embedding inference via `torch.backends.fp32_precision = "tf32"` (new API only; requires `torch>=2.9.0`). This behavior is intentional and currently does not expose a CLI toggle.
+- Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 
 Execution transparency:
 
@@ -224,11 +212,11 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
 - **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
-- **API limits**: configure `S2_API_KEY`; variable contract is canonical in [Environment Variables](../reference/environment.md).
+- **API limits**: configure `S2_API_KEY`; see [Environment Variables](../reference/environment.md).
 
-Related canonical docs:
+Related docs:
 
-- Docs ownership map: [Documentation Index](../README.md)
+- Documentation index: [Documentation](../README.md)
 - Cache behavior: [Caching & Data](caching.md)
 - Runtime variables: [Environment Variables](../reference/environment.md)
 - Component architecture: [Architecture](../internals/architecture.md)

@@ -2,16 +2,13 @@
 
 The `citemesh` CLI can build graphs with four strategies: `recommendation`, `citation`, `embedding`, and `hybrid`. This guide explains how they differ and when to use each.
 
-## Scope
+Related docs:
 
-This is the canonical description of strategy behavior, data sources, and tradeoffs.
-
-- Normative here: strategy collection behavior and conceptual differences.
-- Non-normative here: CLI flags/defaults and cache-path rules.
-- CLI contracts: [CLI Usage](cli.md)
-- Cache contracts: [Caching & Data](caching.md)
-- Runtime variables: [Environment Variables](../reference/environment.md)
-- Documentation ownership map: [Documentation Index](../README.md)
+- CLI flags and defaults: [CLI Usage](cli.md)
+- Cache behavior: [Caching & Data](caching.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
+- Embedding runtime defaults and precision policy: [Embedding Runtime](../reference/embedding-runtime.md)
+- Docs index: [Documentation](../README.md)
 
 ## At a Glance
 
@@ -44,6 +41,7 @@ This is the canonical description of strategy behavior, data sources, and tradeo
 - Typical use: semantic exploration and discovery beyond citation graphs.
 
 Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md).
+Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](../reference/embedding-runtime.md).
 
 ## Hybrid Strategy
 

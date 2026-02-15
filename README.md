@@ -2,16 +2,14 @@
 
 Build exploration-friendly paper graphs from a single paper or query using recommendation, citation, embedding, or hybrid strategies. CiteMesh ships as a single CLI with consistent visuals and export formats so you can switch approaches without changing tools.
 
-## Scope
+## Documentation
 
-This README is intentionally high-level.
-
-- Canonical CLI behavior (flags, defaults, identifier normalization, outputs): [CLI Usage](./docs/guides/cli.md)
-- Strategy behavior and tradeoffs: [Strategies Guide](./docs/guides/strategies.md)
-- Canonical cache behavior (paths, layout, hydration/invalidation, cleanup): [Caching & Data](./docs/guides/caching.md)
-- Canonical runtime environment-variable contracts: [Environment Variables](./docs/reference/environment.md)
-- Full docs ownership map: [Documentation Index](./docs/README.md)
-- This file intentionally avoids duplicating CLI/cache contracts; those remain centralized in the canonical docs above.
+- Documentation index: [docs/README.md](./docs/README.md)
+- CLI guide: [docs/guides/cli.md](./docs/guides/cli.md)
+- Strategy guide: [docs/guides/strategies.md](./docs/guides/strategies.md)
+- Caching and data: [docs/guides/caching.md](./docs/guides/caching.md)
+- Environment variables: [docs/reference/environment.md](./docs/reference/environment.md)
+- Embedding runtime behavior: [docs/reference/embedding-runtime.md](./docs/reference/embedding-runtime.md)
 
 ## Quick Start
 
@@ -58,10 +56,6 @@ For complete command behavior and examples, use [CLI Usage](./docs/guides/cli.md
 - Theme-aware visuals shared across exporters.
 - Persistent user-level caching for embeddings and corpus data.
 - Typed, modular architecture that is straightforward to extend.
-
-## Documentation
-
-Use [Documentation Index](./docs/README.md) as the source-of-truth map. It defines ownership for each behavior topic.
 
 ## License
 

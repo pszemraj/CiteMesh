@@ -1,16 +1,12 @@
 # Changelog & Key Improvements
 
-## Scope
-
-This page is historical context, not a normative behavior specification.
-
-- Use [CLI Usage](../guides/cli.md) for current command/flag behavior.
-- Use [Caching & Data](../guides/caching.md) for current cache behavior.
-- Use [Environment Variables](../reference/environment.md) for current runtime variable contracts.
-- Documentation ownership map: [Documentation Index](../README.md).
-
 This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
-Historical bullets below may describe superseded behavior; canonical current behavior remains in the guides above.
+For current usage details, see:
+
+- [CLI Usage](../guides/cli.md)
+- [Caching & Data](../guides/caching.md)
+- [Environment Variables](../reference/environment.md)
+- [Embedding Runtime](../reference/embedding-runtime.md)
 
 ## Breaking Changes
 
