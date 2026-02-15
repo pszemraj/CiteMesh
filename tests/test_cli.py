@@ -21,6 +21,7 @@ import pytest
 from citemesh import cli as cli_module
 from citemesh.cli import canonicalize_paper_id_for_metadata, resolve_output_paths
 from citemesh.core import Author, Paper
+from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.visualization import generate_output_path
 from tests._helpers import (
     build_fake_exporter_factory,
@@ -75,7 +76,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "similarity_threshold": 0.2,
         "no_references": False,
         "refresh_reference_cache": False,
-        "model": "google/embeddinggemma-300m",
+        "model": DEFAULT_EMBEDDING_MODEL_NAME,
         "model_revision": None,
         "dataset_split": "train",
         "corpus_size": 50000,

@@ -23,7 +23,11 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
-from citemesh.data import get_cache_dir, validate_compression_filter
+from citemesh.data import (
+    DEFAULT_EMBEDDING_MODEL_NAME,
+    get_cache_dir,
+    validate_compression_filter,
+)
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
@@ -804,7 +808,7 @@ Examples:
         "--model",
         "-m",
         type=_non_empty_str,
-        default="google/embeddinggemma-300m",
+        default=DEFAULT_EMBEDDING_MODEL_NAME,
         help="Sentence transformer model name",
     )
     embedding_group.add_argument(

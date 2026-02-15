@@ -20,6 +20,8 @@ from tqdm.auto import tqdm
 
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.data import (
+    DEFAULT_EMBEDDING_MODEL_FALLBACKS,
+    DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
     get_embedding_model_profile,
     validate_compression_filter,
@@ -278,7 +280,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
     def __init__(
         self,
         max_papers: int = 40,
-        model_name: str = "google/embeddinggemma-300m",
+        model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
         corpus_size: Optional[int] = 50000,
@@ -1119,6 +1121,36 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         embeddings = encode_model.encode(texts, **encode_kwargs)
         return np.asarray(embeddings, dtype=np.float32)
 
+    def _model_load_candidates(self) -> Tuple[str, ...]:
+        """Return ordered candidate model IDs used for lazy model loading.
+
+        Fallbacks are intentionally scoped to default-revision checkpoints so
+        explicit revision pins remain deterministic.
+
+        :return Tuple[str, ...]: Ordered model IDs to try.
+        """
+        requested = str(self.model_name).strip()
+        candidates: List[str] = [requested]
+        if self.model_revision is not None:
+            return tuple(candidates)
+        for fallback_model in DEFAULT_EMBEDDING_MODEL_FALLBACKS.get(requested, ()):
+            if fallback_model not in candidates:
+                candidates.append(fallback_model)
+        return tuple(candidates)
+
+    @staticmethod
+    def _model_load_error_summary(
+        errors: List[Tuple[str, Exception]],
+    ) -> str:
+        """Build compact model-load failure summary.
+
+        :param List[Tuple[str, Exception]] errors: Ordered candidate failures.
+        :return str: Readable failure summary for exception messages.
+        """
+        return "; ".join(
+            f"{model_id}: {type(exc).__name__}: {exc}" for model_id, exc in errors
+        )
+
     def _load_model(self) -> None:
         """Lazy load sentence transformer model.
 
@@ -1137,10 +1169,39 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if self.model_revision is not None:
                 st_kwargs["revision"] = self.model_revision
 
-            if st_kwargs:
-                self.model = SentenceTransformer(self.model_name, **st_kwargs)
-            else:
-                self.model = SentenceTransformer(self.model_name)
+            load_candidates = self._model_load_candidates()
+            model_errors: List[Tuple[str, Exception]] = []
+            for idx, candidate_model in enumerate(load_candidates):
+                try:
+                    if st_kwargs:
+                        self.model = SentenceTransformer(candidate_model, **st_kwargs)
+                    else:
+                        self.model = SentenceTransformer(candidate_model)
+                except Exception as exc:
+                    model_errors.append((candidate_model, exc))
+                    has_more_candidates = idx + 1 < len(load_candidates)
+                    if has_more_candidates:
+                        logger.warning(
+                            "Failed to load embedding model %s (%s: %s). "
+                            "Trying fallback checkpoint...",
+                            candidate_model,
+                            type(exc).__name__,
+                            exc,
+                        )
+                        continue
+                    summary = self._model_load_error_summary(model_errors)
+                    raise RuntimeError(
+                        "Could not load embedding model from candidate chain "
+                        f"{load_candidates}: {summary}"
+                    ) from exc
+
+                if candidate_model != self.model_name:
+                    logger.info(
+                        "Using fallback embedding checkpoint: requested=%s active=%s.",
+                        self.model_name,
+                        candidate_model,
+                    )
+                break
 
             self._configure_tf32_runtime()
             self._maybe_compile_inner_transformer()

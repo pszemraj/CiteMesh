@@ -591,6 +591,10 @@ def test_model_profiles_match_expected_formatters() -> None:
         gemma.format_document({"title": " Title ", "abstract": " Abstract "})
         == "title: Title | text: Abstract"
     )
+    unsloth_gemma = get_embedding_model_profile("unsloth/embeddinggemma-300m")
+    assert unsloth_gemma.name == "google/embeddinggemma"
+    assert unsloth_gemma.compile_inner_transformer is True
+    assert unsloth_gemma.format_query("plain").startswith("task: search result")
 
     default = get_embedding_model_profile("all-MiniLM-L6-v2")
     assert default.name == "default"

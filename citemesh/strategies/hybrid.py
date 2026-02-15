@@ -12,6 +12,7 @@ import networkx as nx
 import numpy as np
 
 from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
+from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -42,7 +43,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
         max_semantic: Optional[int] = None,
-        model_name: str = "google/embeddinggemma-300m",
+        model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
         corpus_size: Optional[int] = 50000,

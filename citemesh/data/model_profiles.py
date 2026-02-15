@@ -13,6 +13,11 @@ from typing import Callable, Dict, Mapping, Optional, Tuple
 QueryFormatter = Callable[[str, Optional[Dict[str, str]]], str]
 DocumentFormatter = Callable[[Dict[str, str]], str]
 
+DEFAULT_EMBEDDING_MODEL_NAME = "unsloth/embeddinggemma-300m"
+DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, Tuple[str, ...]] = {
+    "unsloth/embeddinggemma-300m": ("google/embeddinggemma-300m",),
+}
+
 
 def compose_title_abstract_text(metadata: Mapping[str, object]) -> str:
     """Compose a stable document string from title/abstract metadata.
@@ -55,6 +60,7 @@ class EmbeddingModelProfile:
     """Per-model hints used by embedding strategies."""
 
     name: str
+    aliases: Tuple[str, ...] = ()
     query_formatter: QueryFormatter = _identity_query_formatter
     document_formatter: DocumentFormatter = _identity_document_formatter
     float16_supported: bool = True
@@ -81,6 +87,16 @@ class EmbeddingModelProfile:
         :return str: Profile-formatted document text.
         """
         return self.document_formatter(metadata)
+
+    def matches(self, model_name: str) -> bool:
+        """Return whether model identifier maps to this profile.
+
+        :param str model_name: Lowercased model identifier.
+        :return bool: ``True`` when identifier matches profile name or alias.
+        """
+        if model_name.startswith(self.name):
+            return True
+        return any(model_name.startswith(alias) for alias in self.aliases)
 
 
 def _gemma_query_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
@@ -112,6 +128,7 @@ DEFAULT_PROFILE = EmbeddingModelProfile(name="default")
 EMBEDDING_MODEL_PROFILES = (
     EmbeddingModelProfile(
         name="google/embeddinggemma",
+        aliases=("unsloth/embeddinggemma",),
         query_formatter=_gemma_query_formatter,
         document_formatter=_gemma_document_formatter,
         float16_supported=False,
@@ -133,6 +150,6 @@ def get_embedding_model_profile(model_name: str) -> EmbeddingModelProfile:
     """
     normalized = model_name.lower()
     for profile in EMBEDDING_MODEL_PROFILES:
-        if normalized.startswith(profile.name):
+        if profile.matches(normalized):
             return profile
     return DEFAULT_PROFILE

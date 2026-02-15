@@ -124,7 +124,7 @@ ignoring it.
 
 ### Embedding Strategy
 
-- `--model`, `-m`: sentence-transformer model name (for example `all-MiniLM-L6-v2`, `google/embeddinggemma-300m`)
+- `--model`, `-m`: sentence-transformer model name (default `unsloth/embeddinggemma-300m`; examples: `all-MiniLM-L6-v2`, `google/embeddinggemma-300m`)
 - `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
 - `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
@@ -142,6 +142,12 @@ ignoring it.
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled)
 - On `torch==2.9` with Ampere+ CUDA TF32 enabled, CiteMesh skips `torch.compile` for embedding models to avoid a known upstream TF32 API conflict path in TorchInductor.
+
+Default model policy:
+
+- CiteMesh defaults to `unsloth/embeddinggemma-300m` to keep out-of-the-box usage ungated (no Hugging Face auth requirement).
+- When that default checkpoint fails to load and no explicit `--model-revision` is set, CiteMesh automatically retries `google/embeddinggemma-300m` as a fallback checkpoint.
+- Verification timestamp: on February 15, 2026, both repos had matching Hugging Face file metadata across all 19 files, including identical `config.json` blob IDs and identical `model.safetensors` LFS SHA-256 values.
 
 Runtime precision policy:
 

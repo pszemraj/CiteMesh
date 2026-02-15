@@ -13,6 +13,10 @@ import numpy as np
 import pytest
 
 from citemesh.core import Paper
+from citemesh.data import (
+    DEFAULT_EMBEDDING_MODEL_FALLBACKS,
+    DEFAULT_EMBEDDING_MODEL_NAME,
+)
 from citemesh.data.embedding_cache import CacheSearchResult
 from citemesh.strategies.embedding import EmbeddingGraphBuilder, _query_seed_id
 from tests._helpers import ConstantEncodeModel
@@ -20,10 +24,13 @@ from tests._helpers import ConstantEncodeModel
 
 def _install_fake_sentence_transformers(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_model_names: set[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Install fake ``sentence_transformers`` module for precision tests."""
     init_log: dict[str, Any] = {}
     encode_log: list[dict[str, Any]] = []
+    blocked_models = set(fail_model_names or ())
 
     class _FakeInnerBlock:
         def __init__(self) -> None:
@@ -31,6 +38,9 @@ def _install_fake_sentence_transformers(
 
     class _FakeSentenceTransformer:
         def __init__(self, model_name_or_path: str, **kwargs: Any):
+            init_log.setdefault("attempts", []).append(model_name_or_path)
+            if model_name_or_path in blocked_models:
+                raise RuntimeError(f"failed loading {model_name_or_path}")
             init_log["model_name"] = model_name_or_path
             init_log["kwargs"] = kwargs
             self._blocks = [_FakeInnerBlock()]
@@ -193,7 +203,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
 
     with pytest.raises(
         ValueError,
-        match="truncate_dim=300 is not supported for google/embeddinggemma-300m",
+        match=(f"truncate_dim=300 is not supported for {DEFAULT_EMBEDDING_MODEL_NAME}"),
     ):
         EmbeddingGraphBuilder(max_papers=1, truncate_dim=300, client=MagicMock())
     with pytest.raises(ValueError, match="model_name must be a non-empty string"):
@@ -221,7 +231,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         builder._load_model()
         embeddings = builder._encode_texts(["seed"], show_progress_bar=False)
 
-        assert init_log["model_name"] == "google/embeddinggemma-300m"
+        assert init_log["model_name"] == DEFAULT_EMBEDDING_MODEL_NAME
         assert init_log["kwargs"]["truncate_dim"] == 256
         assert embeddings.shape == (1, 2)
         if expects_bf16:
@@ -233,9 +243,9 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
             assert autocast_log == []
 
     compile_cases = [
-        ("google/embeddinggemma-300m", "tagged", (8, 0), False),
-        ("google/embeddinggemma-300m", "tagged", (7, 5), True),
-        ("google/embeddinggemma-300m", "raise", (7, 5), False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (8, 0), False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), True),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "raise", (7, 5), False),
         ("sentence-transformers/all-MiniLM-L6-v2", "tagged", (8, 0), False),
     ]
     for model_name, compile_behavior, capability, expect_compiled in compile_cases:
@@ -349,9 +359,41 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     assert not any("embedding dimension: using" in message for message in info_messages)
     assert any("embedding dimension: using" in message for message in debug_messages)
     assert any(
-        "Enabled torch.compile for google/embeddinggemma-300m inner transformer"
+        f"Enabled torch.compile for {DEFAULT_EMBEDDING_MODEL_NAME} inner transformer"
         in message
         for message in debug_messages
+    )
+
+
+def test_embedding_default_model_loads_with_fallback_chain(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Default embedding model should fail over to configured fallback checkpoint."""
+    _disable_embedding_dep_check(monkeypatch)
+    fallback_candidates = DEFAULT_EMBEDDING_MODEL_FALLBACKS[
+        DEFAULT_EMBEDDING_MODEL_NAME
+    ]
+    fallback_model = fallback_candidates[0]
+    init_log, _ = _install_fake_sentence_transformers(
+        monkeypatch,
+        fail_model_names={DEFAULT_EMBEDDING_MODEL_NAME},
+    )
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        builder._load_model()
+
+    assert init_log["attempts"] == [DEFAULT_EMBEDDING_MODEL_NAME, fallback_model]
+    assert init_log["model_name"] == fallback_model
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "Using fallback embedding checkpoint:" in message for message in log_messages
     )
 
 

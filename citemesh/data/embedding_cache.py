@@ -29,7 +29,7 @@ from filelock import FileLock, Timeout
 from tqdm.auto import tqdm
 
 from .cache import get_cache_dir
-from .model_profiles import compose_title_abstract_text
+from .model_profiles import DEFAULT_EMBEDDING_MODEL_NAME, compose_title_abstract_text
 
 logger = logging.getLogger(__name__)
 
@@ -234,7 +234,7 @@ class EmbeddingCache:
     def __init__(
         self,
         cache_dir: Optional[Path] = None,
-        model_name: str = "google/embeddinggemma-300m",
+        model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         storage_precision: str = "int8",
         binary_prefilter: bool = True,
         calibration_sample_size: int = 2000,
