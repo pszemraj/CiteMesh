@@ -52,7 +52,7 @@ viz = ["plotly>=5.18.0", "pyvis>=0.3.2"]
 embeddings = [
     "datasets>=2.14.0",
     "sentence-transformers>=3.0.0",
-    "torch>=2.0.0",
+    "torch>=2.9.0",
 ]
 dev = [
     "datasets>=2.14.0",
@@ -61,7 +61,7 @@ dev = [
     "pytest-mock>=3.14.0",
     "ruff>=0.9.0",
     "sentence-transformers>=3.0.0",
-    "torch>=2.0.0",
+    "torch>=2.9.0",
 ]
 all = ["citemesh[dev,embeddings,viz]"]
 

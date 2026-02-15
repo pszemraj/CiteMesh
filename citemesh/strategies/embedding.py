@@ -32,14 +32,26 @@ from citemesh.strategies.base import (
 )
 
 logger = logging.getLogger(__name__)
+_EMBEDDING_MIN_TORCH_VERSION = (2, 9)
+
+
+def _parse_torch_major_minor(version: str) -> tuple[int, int]:
+    """Parse major/minor tuple from a torch version string."""
+    version_match = re.match(r"^(\d+)\.(\d+)", str(version).strip())
+    if version_match:
+        return int(version_match.group(1)), int(version_match.group(2))
+    return (0, 0)
 
 
 def _check_embedding_deps() -> None:
     """Verify embedding dependencies are installed."""
     missing: list[str] = []
+    torch_module: Any | None = None
 
     try:
-        import torch  # noqa: F401
+        import torch
+
+        torch_module = torch
     except ImportError:
         missing.append("torch")
 
@@ -57,6 +69,14 @@ def _check_embedding_deps() -> None:
         raise ImportError(
             f"Embedding strategy requires: {', '.join(missing)}. "
             f"Install with: pip install citemesh[embeddings]"
+        )
+
+    raw_torch_version = str(getattr(torch_module, "__version__", "")).strip()
+    torch_version = _parse_torch_major_minor(raw_torch_version)
+    if torch_version < _EMBEDDING_MIN_TORCH_VERSION:
+        raise ImportError(
+            "Embedding strategy requires torch>=2.9.0 (new TF32 runtime API). "
+            f"Detected torch=={raw_torch_version or 'unknown'}."
         )
 
 
@@ -1186,47 +1206,26 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         backends = getattr(torch, "backends", None)
-        cuda_backends = getattr(backends, "cuda", None)
-        matmul_backend = getattr(cuda_backends, "matmul", None)
-        cudnn_backend = getattr(backends, "cudnn", None)
-        cudnn_conv = getattr(cudnn_backend, "conv", None)
+        if backends is None or not hasattr(backends, "fp32_precision"):
+            self._tf32_mode = "unsupported"
+            logger.debug(
+                "Skipping TF32 config for %s: torch.backends.fp32_precision unavailable.",
+                self.model_name,
+            )
+            return
 
         try:
-            if hasattr(matmul_backend, "fp32_precision") and hasattr(
-                cudnn_conv, "fp32_precision"
-            ):
-                matmul_backend.fp32_precision = "tf32"
-                cudnn_conv.fp32_precision = "tf32"
-                self._tf32_mode = "tf32"
-                logger.info("Enabled TF32 kernels for CUDA matmul/conv (Ampere+ GPU).")
-                return
+            backends.fp32_precision = "tf32"
+            self._tf32_mode = "tf32"
+            logger.info("Enabled TF32 kernels for CUDA matmul/conv (Ampere+ GPU).")
+            return
         except Exception as exc:
+            self._tf32_mode = "unsupported"
             logger.debug(
-                "Failed setting TF32 precision APIs for %s: %s",
+                "Failed setting TF32 precision API for %s: %s",
                 self.model_name,
                 exc,
             )
-
-        try:
-            if hasattr(matmul_backend, "allow_tf32") and hasattr(
-                cudnn_backend, "allow_tf32"
-            ):
-                matmul_backend.allow_tf32 = True
-                cudnn_backend.allow_tf32 = True
-                self._tf32_mode = "legacy-tf32"
-                logger.info(
-                    "Enabled TF32 kernels via legacy backend flags (Ampere+ GPU)."
-                )
-                return
-        except Exception as exc:
-            logger.debug(
-                "Failed setting legacy TF32 flags for %s: %s",
-                self.model_name,
-                exc,
-            )
-
-        self._tf32_mode = "unsupported"
-        logger.debug("TF32 configuration API unavailable for %s.", self.model_name)
 
     def _log_runtime_summary(self) -> None:
         """Emit concise one-time runtime summary at info level."""
@@ -1279,6 +1278,16 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not callable(compile_fn):
             logger.info(
                 "%s profile supports inner-model torch.compile, but torch.compile is unavailable.",
+                self.model_name,
+            )
+            return
+
+        if self._tf32_mode == "tf32" and _parse_torch_major_minor(
+            getattr(torch, "__version__", "")
+        ) == (2, 9):
+            logger.debug(
+                "Skipping torch.compile for %s: TF32 + torch.compile is unstable on torch 2.9; "
+                "use --no-torch-compile or disable TF32 to force compile.",
                 self.model_name,
             )
             return

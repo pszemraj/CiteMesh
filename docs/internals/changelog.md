@@ -49,6 +49,8 @@ Historical bullets below may describe superseded behavior; canonical current beh
 - **Citation**: moved to real bibliographic coupling with reference-aware similarity factors.
 - **Embedding**: expanded multi-factor similarity and added citation-count hydration for top matches.
 - **Embedding**: added best-effort `torch.compile` path for EmbeddingGemma internals with safe fallback.
+- **Embedding**: switched TF32 runtime configuration to the PyTorch 2.9+ `torch.backends.fp32_precision` API (new API only; removed legacy `allow_tf32` fallback path).
+- **Embedding**: added a torch 2.9 compatibility guard that skips `torch.compile` when TF32 is active on Ampere+ CUDA to avoid known TorchInductor legacy/new TF32 API conflicts.
 - **Hybrid**: formalized citation-first enrichment with semantic additions and capped edges.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.

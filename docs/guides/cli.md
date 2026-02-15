@@ -141,10 +141,11 @@ ignoring it.
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled)
+- On `torch==2.9` with Ampere+ CUDA TF32 enabled, CiteMesh skips `torch.compile` for embedding models to avoid a known upstream TF32 API conflict path in TorchInductor.
 
 Runtime precision policy:
 
-- TF32 kernels are auto-enabled on supported Ampere+ CUDA runtimes for embedding inference. This behavior is intentional and currently does not expose a CLI toggle.
+- TF32 kernels are auto-enabled on supported Ampere+ CUDA runtimes for embedding inference via `torch.backends.fp32_precision = "tf32"` (new API only; requires `torch>=2.9.0`). This behavior is intentional and currently does not expose a CLI toggle.
 
 Execution transparency:
 

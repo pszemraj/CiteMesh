@@ -72,8 +72,8 @@ def _install_fake_torch(
     *,
     compile_behavior: str = "identity",
     capability: tuple[int, int] | None = (8, 0),
-    include_tf32_precision_api: bool = True,
-    include_tf32_legacy_api: bool = True,
+    include_tf32_global_api: bool = True,
+    torch_version: str = "2.9.0",
 ) -> tuple[object, list[tuple[Any, ...]], object]:
     """Install fake ``torch`` module for precision tests."""
     bf16_token = object()
@@ -105,12 +105,33 @@ def _install_fake_torch(
     cudnn_backend = types.SimpleNamespace()
     cudnn_conv = types.SimpleNamespace()
     cudnn_backend.conv = cudnn_conv
-    if include_tf32_precision_api:
-        matmul_backend.fp32_precision = "none"
-        cudnn_conv.fp32_precision = "none"
-    if include_tf32_legacy_api:
-        matmul_backend.allow_tf32 = False
-        cudnn_backend.allow_tf32 = False
+    matmul_backend.fp32_precision = "none"
+    cudnn_conv.fp32_precision = "none"
+
+    if include_tf32_global_api:
+
+        class _FakeBackends:
+            def __init__(self) -> None:
+                self.cuda = types.SimpleNamespace(matmul=matmul_backend)
+                self.cudnn = cudnn_backend
+                self._fp32_precision = "none"
+
+            @property
+            def fp32_precision(self) -> str:
+                return self._fp32_precision
+
+            @fp32_precision.setter
+            def fp32_precision(self, value: str) -> None:
+                self._fp32_precision = value
+                self.cuda.matmul.fp32_precision = value
+                self.cudnn.conv.fp32_precision = value
+
+        fake_backends: object = _FakeBackends()
+    else:
+        fake_backends = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(matmul=matmul_backend),
+            cudnn=cudnn_backend,
+        )
 
     cuda_module = types.SimpleNamespace(
         is_available=lambda: cuda_available,
@@ -120,14 +141,12 @@ def _install_fake_torch(
         cuda_module.get_device_capability = lambda _index=0: capability
 
     fake_torch = types.ModuleType("torch")
+    fake_torch.__version__ = torch_version
     fake_torch.bfloat16 = bf16_token
     fake_torch.autocast = _autocast
     fake_torch.compile = _compile
     fake_torch.cuda = cuda_module
-    fake_torch.backends = types.SimpleNamespace(
-        cuda=types.SimpleNamespace(matmul=matmul_backend),
-        cudnn=cudnn_backend,
-    )
+    fake_torch.backends = fake_backends
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
     return bf16_token, autocast_log, fake_torch
@@ -147,6 +166,23 @@ def test_embedding_builder_requires_optional_deps(
         r"Install with: pip install citemesh\[embeddings\]",
     ):
         EmbeddingGraphBuilder(max_papers=5, model_name="test-model", client=MagicMock())
+
+
+def test_embedding_builder_requires_modern_torch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding builder should require torch>=2.9 for TF32 precision APIs."""
+    fake_torch = types.ModuleType("torch")
+    fake_torch.__version__ = "2.8.1"
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.ModuleType("st"))
+    monkeypatch.setitem(sys.modules, "datasets", types.ModuleType("datasets"))
+
+    with pytest.raises(
+        ImportError,
+        match=r"Embedding strategy requires torch>=2\.9\.0",
+    ):
+        EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
 
 
 def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
@@ -197,17 +233,19 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
             assert autocast_log == []
 
     compile_cases = [
-        ("google/embeddinggemma-300m", "tagged", True),
-        ("google/embeddinggemma-300m", "raise", False),
-        ("sentence-transformers/all-MiniLM-L6-v2", "tagged", False),
+        ("google/embeddinggemma-300m", "tagged", (8, 0), False),
+        ("google/embeddinggemma-300m", "tagged", (7, 5), True),
+        ("google/embeddinggemma-300m", "raise", (7, 5), False),
+        ("sentence-transformers/all-MiniLM-L6-v2", "tagged", (8, 0), False),
     ]
-    for model_name, compile_behavior, expect_compiled in compile_cases:
+    for model_name, compile_behavior, capability, expect_compiled in compile_cases:
         init_log, _ = _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
             monkeypatch,
             cuda_available=True,
             bf16_supported=True,
             compile_behavior=compile_behavior,
+            capability=capability,
         )
 
         builder = EmbeddingGraphBuilder(
@@ -243,25 +281,33 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     assert builder._inner_model_compiled is False
 
     tf32_cases = [
-        ((8, 0), "tf32"),
-        ((7, 5), "off"),
+        ((8, 0), True, "tf32"),
+        ((7, 5), True, "off"),
+        ((8, 0), False, "unsupported"),
     ]
-    for capability, expected_mode in tf32_cases:
+    for capability, include_tf32_global_api, expected_mode in tf32_cases:
         _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
             monkeypatch,
             cuda_available=True,
             bf16_supported=True,
             capability=capability,
+            include_tf32_global_api=include_tf32_global_api,
         )
 
         builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
         builder._load_model()
 
-        if expected_mode == "tf32":
+        if include_tf32_global_api and expected_mode == "tf32":
+            assert fake_torch.backends.fp32_precision == "tf32"
             assert fake_torch.backends.cuda.matmul.fp32_precision == "tf32"
             assert fake_torch.backends.cudnn.conv.fp32_precision == "tf32"
+        elif include_tf32_global_api:
+            assert fake_torch.backends.fp32_precision == "none"
+            assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
+            assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
         else:
+            assert not hasattr(fake_torch.backends, "fp32_precision")
             assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
             assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
         assert builder._tf32_mode == expected_mode
@@ -271,7 +317,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         monkeypatch,
         cuda_available=True,
         bf16_supported=True,
-        capability=(8, 0),
+        capability=(7, 5),
         compile_behavior="tagged",
     )
 
