@@ -81,7 +81,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "dataset_split": "train",
         "corpus_size": 50000,
         "all_corpus": False,
-        "top_k": 2,
+        "top_k": 3,
         "truncate_dim": None,
         "streaming": False,
         "max_semantic": None,

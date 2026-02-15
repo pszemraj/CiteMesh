@@ -22,7 +22,7 @@ from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder, _check_embedding_deps
 
 logger = logging.getLogger(__name__)
-DEFAULT_MAX_SEMANTIC = 10
+DEFAULT_MAX_SEMANTIC = 12
 
 
 class HybridGraphBuilder(GraphBuilderStrategy):
@@ -71,7 +71,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             enrichment. This reserves capacity from the citation branch
             (``citation_budget = max_papers - max_semantic``), so values must satisfy
             ``0 <= max_semantic <= max_papers - 1``. When omitted, defaults to
-            ``min(10, max_papers - 1)`` so small ``max_papers`` values still work
+            ``min(12, max_papers - 1)`` so small ``max_papers`` values still work
             without extra flags.
         :param str model_name: Embedding model name
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
