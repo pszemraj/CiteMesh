@@ -16,6 +16,7 @@ This index helps you find the right doc quickly.
 
 - Runtime environment variables: [docs/reference/environment.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
 - Embedding model defaults, fallback chain, and precision/compile behavior: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Default-parameter tuning results and methodology: [docs/reference/defaults-tuning-study.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
 
 ## Internals
 

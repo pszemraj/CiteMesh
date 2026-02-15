@@ -7,6 +7,7 @@ Related docs:
 - Cache layout and hydration: [Caching & Data](caching.md)
 - Environment variables: [Environment Variables](../reference/environment.md)
 - Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
+- Defaults parameter study: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
 - Docs index: [Documentation](../README.md)
 
 ## Basic Invocation
@@ -144,6 +145,7 @@ ignoring it.
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled)
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
+- Default-value tuning context for recent-paper workloads is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 
 Execution transparency:
 
