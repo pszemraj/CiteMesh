@@ -14,7 +14,7 @@ Related docs:
 | --- | --- | --- | --- |
 | `S2_API_KEY` | unset | non-empty string | Adds Semantic Scholar API key for higher API limits and authenticated requests. |
 | `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path | Overrides CiteMesh cache root used for embedding/reference caches. |
-| `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `60` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
+| `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
 | `CITEMESH_STRICT_OFFLINE_FINGERPRINT` | disabled | `1`, `true`, `yes`, `on` (case-insensitive) | Disables legacy offline assumption that cached SHA for `main` may still be reused when full fingerprint verification is unavailable. |
 
 Implementation references:

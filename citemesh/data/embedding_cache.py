@@ -39,7 +39,7 @@ EMBEDDINGS_DATASET_NAME = "embeddings"
 BINARY_INDEX_DATASET_NAME = "binary_index"
 CALIBRATION_RANGES_DATASET_NAME = "calibration_ranges"
 EMBEDDING_CACHE_SCHEMA_VERSION = 2
-EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS = 60.0
+EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS = 900.0
 EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR = "CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS"
 H5_LAYOUT_KEY = "h5_layout_version"
 H5_LAYOUT_MATRIX_VERSION = "matrix-v2-quantized"
@@ -925,7 +925,9 @@ class EmbeddingCache:
             raise TimeoutError(
                 "Timed out waiting for embedding cache lock "
                 f"at {self.lock_path} after {timeout_seconds:.3f}s. "
-                "Another process may be holding it."
+                "Another process may be holding it. "
+                f"Increase {EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR} or set "
+                "CITEMESH_CACHE_DIR to an isolated per-run cache root."
             ) from exc
 
     def _init_db(self) -> None:

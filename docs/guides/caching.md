@@ -70,7 +70,7 @@ Metadata-only changes (`year`, `authors`, `categories`, or other stored fields t
 not alter embedding input text) refresh SQLite metadata rows without re-encoding vectors.
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
-Lock acquisition timeout defaults to `60` seconds and can be overridden with
+Lock acquisition timeout defaults to `900` seconds and can be overridden with
 `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)).
