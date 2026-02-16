@@ -39,7 +39,11 @@ _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
 
 
 def _parse_torch_major_minor(version: str) -> tuple[int, int]:
-    """Parse major/minor tuple from a torch version string."""
+    """Parse major/minor tuple from a torch version string.
+
+    :param str version: Raw torch version string.
+    :return tuple[int, int]: Parsed ``(major, minor)`` tuple, ``(0, 0)`` on parse miss.
+    """
     version_match = re.match(r"^(\d+)\.(\d+)", str(version).strip())
     if version_match:
         return int(version_match.group(1)), int(version_match.group(2))
@@ -296,6 +300,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
+        encode_batch_size: int = ENCODE_BATCH_SIZE,
         enable_torch_compile: bool = True,
         client: Optional[SemanticScholarClient] = None,
     ):
@@ -322,6 +327,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int calibration_sample_size: Calibration sample size used for int8 quantization ranges.
         :param str cache_compression: HDF5 compression filter for embedding datasets.
         :param int cache_compression_level: HDF5 compression level.
+        :param int encode_batch_size: Batch size used when encoding text payloads.
         :param bool enable_torch_compile: Whether to enable best-effort inner-model
             ``torch.compile`` optimization for supported profiles.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
@@ -354,6 +360,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError("binary_rescore_multiplier must be at least 1")
         if calibration_sample_size < 1:
             raise ValueError("calibration_sample_size must be at least 1")
+        if encode_batch_size < 1:
+            raise ValueError("encode_batch_size must be at least 1")
         validate_compression_filter(cache_compression)
         super().__init__(max_papers)
         self.model_name = normalized_model_name
@@ -389,6 +397,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.calibration_sample_size = int(calibration_sample_size)
         self.cache_compression = cache_compression
         self.cache_compression_level = int(cache_compression_level)
+        self.encode_batch_size = int(encode_batch_size)
         self.enable_torch_compile = bool(enable_torch_compile)
         self.model_profile = get_embedding_model_profile(self.model_name)
         self._document_formatter_fingerprint = (
@@ -1900,7 +1909,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         ]
         sample_embeddings = self._encode_texts(
             sample_texts,
-            batch_size=ENCODE_BATCH_SIZE,
+            batch_size=self.encode_batch_size,
             show_progress_bar=False,
         )
         ranges = np.vstack(
@@ -1938,7 +1947,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.embedding_cache.get_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
-            batch_size=min(ENCODE_BATCH_SIZE, len(metadata_map)),
+            batch_size=min(self.encode_batch_size, len(metadata_map)),
             show_progress=False,
             text_builder=self.model_profile.format_document,
         )

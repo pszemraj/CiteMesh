@@ -31,7 +31,7 @@ from citemesh.data import (
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
-from citemesh.strategies.embedding import EmbeddingGraphBuilder
+from citemesh.strategies.embedding import ENCODE_BATCH_SIZE, EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import DEFAULT_MAX_SEMANTIC, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.visualization import (
@@ -53,7 +53,12 @@ logger = logging.getLogger(__name__)
 def _configure_logging(
     *, log_level: str = "info", log_width: int = DEFAULT_LOG_WIDTH
 ) -> None:
-    """Configure CLI logging once at runtime."""
+    """Configure CLI logging once at runtime.
+
+    :param str log_level: Log level token.
+    :param int log_width: Rich console width; non-positive values use auto width.
+    :return None: Mutates global logging handlers and consoles once.
+    """
     global _LOGGING_CONFIGURED
     global log_console
     global output_console
@@ -223,6 +228,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "calibration_sample_size": {"embedding", "hybrid"},
     "cache_compression": {"embedding", "hybrid"},
     "cache_compression_level": {"embedding", "hybrid"},
+    "encode_batch_size": {"embedding", "hybrid"},
     "torch_compile": {"embedding", "hybrid"},
     "max_semantic": {"hybrid"},
 }
@@ -247,6 +253,7 @@ _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "calibration_sample_size": ["--calibration-sample-size"],
     "cache_compression": ["--cache-compression"],
     "cache_compression_level": ["--cache-compression-level"],
+    "encode_batch_size": ["--encode-batch-size"],
     "torch_compile": ["--torch-compile", "--no-torch-compile"],
     "max_semantic": ["--max-semantic"],
 }
@@ -272,6 +279,7 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "calibration_sample_size",
     "cache_compression",
     "cache_compression_level",
+    "encode_batch_size",
     "torch_compile",
 }
 
@@ -303,6 +311,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "calibration_sample_size": cli_args.calibration_sample_size,
         "cache_compression": cli_args.cache_compression,
         "cache_compression_level": cli_args.cache_compression_level,
+        "encode_batch_size": cli_args.encode_batch_size,
         "enable_torch_compile": cli_args.torch_compile,
     }
 
@@ -539,13 +548,14 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     revision_label = args.model_revision or "default"
     logger.debug("Embedding cache namespace root: %s.", cache_root)
     logger.info(
-        "Embedding config: model=%s@%s split=%s corpus=%s streaming=%s storage=%s.",
+        "Embedding config: model=%s@%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
         args.model,
         revision_label,
         args.dataset_split,
         corpus_label,
         bool(args.streaming),
         args.storage_precision,
+        int(args.encode_batch_size),
     )
     if args.force_rebuild_cache:
         logger.warning(
@@ -974,6 +984,16 @@ Examples:
         default=EMBEDDING_STORAGE_CONFIG.compression_level,
         help=(
             "HDF5 compression level for embedding cache datasets (default: %(default)s)"
+        ),
+    )
+
+    embedding_group.add_argument(
+        "--encode-batch-size",
+        type=_positive_int,
+        default=ENCODE_BATCH_SIZE,
+        help=(
+            "Batch size for embedding model encode passes during hydration/search "
+            "(default: %(default)s)"
         ),
     )
 

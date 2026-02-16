@@ -76,6 +76,7 @@ Lock acquisition timeout defaults to `900` seconds and can be overridden with
 Hydration write policy:
 
 - Encoding uses conservative model micro-batches (`32`) for runtime stability.
+- Encoding uses conservative model micro-batches by default (`32`), configurable via `--encode-batch-size`.
 - Cache persistence flushes metadata/embedding appends in larger bursts (`256` records) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)).

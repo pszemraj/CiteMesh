@@ -22,6 +22,7 @@ from citemesh import cli as cli_module
 from citemesh.cli import canonicalize_paper_id_for_metadata, resolve_output_paths
 from citemesh.core import Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.strategies.embedding import ENCODE_BATCH_SIZE
 from citemesh.visualization import generate_output_path
 from tests._helpers import (
     build_fake_exporter_factory,
@@ -93,6 +94,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "calibration_sample_size": 2000,
         "cache_compression": "gzip",
         "cache_compression_level": 1,
+        "encode_batch_size": ENCODE_BATCH_SIZE,
         "torch_compile": True,
     }
     values.update(overrides)
@@ -877,6 +879,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "streaming": True,
                 "binary_rescore_multiplier": 9,
                 "calibration_sample_size": 123,
+                "encode_batch_size": 48,
             },
             {
                 "max_papers": 11,
@@ -894,6 +897,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "calibration_sample_size": 123,
                 "cache_compression": "gzip",
                 "cache_compression_level": 1,
+                "encode_batch_size": 48,
                 "enable_torch_compile": True,
             },
         ),
@@ -912,6 +916,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "streaming": True,
                 "binary_rescore_multiplier": 9,
                 "calibration_sample_size": 123,
+                "encode_batch_size": 48,
             },
             {
                 "max_papers": 11,
@@ -933,6 +938,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "calibration_sample_size": 123,
                 "cache_compression": "gzip",
                 "cache_compression_level": 1,
+                "encode_batch_size": 48,
                 "enable_torch_compile": True,
             },
         ),
@@ -991,6 +997,7 @@ def test_cli_help_contracts() -> None:
                 "--binary-prefilter",
                 "--binary-rescore-multiplier",
                 "--calibration-sample-size",
+                "--encode-batch-size",
                 "--no-torch-compile",
                 "--spring-iterations",
                 "citation/recommendation",

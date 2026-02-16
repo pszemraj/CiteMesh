@@ -229,6 +229,8 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         ValueError, match="corpus_size must be at least 1 when provided"
     ):
         EmbeddingGraphBuilder(max_papers=1, corpus_size=0, client=MagicMock())
+    with pytest.raises(ValueError, match="encode_batch_size must be at least 1"):
+        EmbeddingGraphBuilder(max_papers=1, encode_batch_size=0, client=MagicMock())
 
     precision_cases = [
         (True, True, True),
