@@ -75,11 +75,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param bool fetch_references: Whether citation branch fetches reference lists.
         :param bool refresh_reference_cache: Whether citation/reference lookups bypass persisted cache reads.
         :param Optional[int] max_semantic: Maximum non-seed semantic papers added during
-            enrichment. This reserves capacity from the citation branch
-            (``citation_budget = max_papers - max_semantic``), so values must satisfy
-            ``0 <= max_semantic <= max_papers - 1``. When omitted, defaults to
-            ``min(12, max_papers - 1)`` so small ``max_papers`` values still work
-            without extra flags.
+            enrichment. Values must satisfy ``0 <= max_semantic <= max_papers - 1``.
+            When omitted, defaults to ``min(12, max_papers - 1)`` and hybrid keeps an
+            implicit citation-depth floor before allocating remaining capacity to the
+            semantic branch.
         :param str model_name: Embedding model name
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
