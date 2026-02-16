@@ -52,7 +52,7 @@ For complete command behavior and examples, use [CLI Usage](./docs/guides/cli.md
 ## Why CiteMesh
 
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
-- Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, JSON, GraphML.
+- Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, JSON, GraphML, plus a per-run config sidecar.
 - Theme-aware visuals shared across exporters.
 - Persistent user-level caching for embeddings and corpus data.
 - Typed, modular architecture that is straightforward to extend.

@@ -48,7 +48,9 @@ For current usage details, see:
 - **Embedding**: switched eager TF32 runtime configuration to the PyTorch 2.9+ `torch.backends.fp32_precision` API.
 - **Embedding**: for torch 2.9/2.10 CUDA compile paths, switched TF32 control to `torch.set_float32_matmul_precision("high")` so `torch.compile` remains available without tripping the mixed TF32 API conflict in release-branch Inductor.
 - **Embedding**: changed default checkpoint to `unsloth/embeddinggemma-300m` (ungated) and added automatic fallback to `google/embeddinggemma-300m` for default-revision loads.
+- **Embedding**: citation-count enrichment logs now show bounded target counts and render a visible progress bar on TTY runs.
 - **Hybrid**: formalized citation-first enrichment with semantic additions and capped edges.
+- **Hybrid**: implicit defaults now reserve citation depth floors before semantic expansion.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.
 - Added explicit streaming split validation for embedding mode.
@@ -64,6 +66,8 @@ For current usage details, see:
 - Enforced strict embedding `--top-k` per-node edge caps.
 - Reused a single layout per run across layout-consuming exporters.
 - Made metadata timestamps opt-in (`--include-timestamp`) for deterministic outputs by default.
+- Added per-run `*.config.json` sidecar exports containing rebuild parameters and run metadata.
+- Simplified export completion logging to one summary line per run.
 - Grouped auto outputs into stable per-paper title folders.
 - Removed title truncation in runtime seed logs and static/Plotly chart titles.
 - Fixed hybrid CLI validation to resolve effective default `--max-semantic` before rejecting embedding-only flags.

@@ -24,7 +24,8 @@ GraphBuilderStrategy (base class)
             ↓
 Visualization + Export
     ├── visualization.visualize_graph -> PNG
-    └── export.GraphExporter -> HTML / Plotly / JSON / GraphML
+    ├── export.GraphExporter -> HTML / Plotly / JSON / GraphML
+    └── cli sidecar writer -> *.config.json (rebuild params + run metadata)
 ```
 
 Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `is_seed`) so visualization and export layers remain strategy-agnostic.
@@ -36,7 +37,7 @@ Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `a
 - Defines `citemesh` entry point and command dispatch.
 - Parses validated arguments and resolves output paths.
 - Selects strategy implementations and triggers graph construction.
-- Coordinates render/export steps and passes run metadata downstream.
+- Coordinates render/export steps, writes sidecar config artifacts, and passes run metadata downstream.
 
 Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 

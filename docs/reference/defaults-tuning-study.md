@@ -94,6 +94,7 @@ Defaults were adjusted to:
 
 - `--top-k` default: `3` (from `2`)
 - Hybrid implicit semantic cap: `min(12, max-papers - 1)` (from `min(10, max-papers - 1)`)
+- Hybrid implicit collection policy now preserves citation depth floors before semantic expansion (`15` references + `15` citations when budget allows).
 - `--log-width` default: `140` (from `160`) for more readable terminal output
 - Hydration cache flush window: `256` records (encode micro-batch remains `32`)
 

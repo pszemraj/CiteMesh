@@ -67,7 +67,7 @@ If explicit `-o` ends with a known export suffix (for example `-o out/my-run.jso
 If explicit `-o` has no known suffix, it is treated as the directory base for multi-export runs.
 Example: `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
 normalizes to directory `out/` and writes files like `out/hybrid.png`, `out/hybrid.html`,
-`out/hybrid.plotly.html`, `out/hybrid.json`, and `out/hybrid.graphml`.
+`out/hybrid.plotly.html`, `out/hybrid.json`, `out/hybrid.graphml`, and `out/hybrid.config.json`.
 
 For multi-export runs, files are named `<strategy>.<ext>` inside the selected directory. Example:
 
@@ -80,6 +80,7 @@ writes:
 - `out/arxiv-2508.14040-hybrid-full/hybrid.plotly.html`
 - `out/arxiv-2508.14040-hybrid-full/hybrid.json`
 - `out/arxiv-2508.14040-hybrid-full/hybrid.graphml`
+- `out/arxiv-2508.14040-hybrid-full/hybrid.config.json`
 
 For single-export runs, explicit `-o` remains file-style and preserves extension replacement/appending behavior.
 
@@ -160,7 +161,8 @@ Execution transparency:
 - Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
 - Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
 - `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
-  Hybrid reserves this capacity from citation collection (`citation_budget = max_papers - max_semantic`), so valid values are `0` through `max-papers - 1`.
+  Valid values are `0` through `max-papers - 1`.
+  With implicit defaults (`--max-semantic` omitted), hybrid also preserves minimum citation depth before semantic expansion.
   If omitted, hybrid defaults to `min(12, max-papers - 1)`.
 - Setting `--max-semantic 0` disables semantic enrichment; embedding-only flags are rejected to avoid no-op configuration.
 - If `--max-semantic` is omitted and `--max-papers` is `1`, the effective default is also `0`; embedding-only hybrid flags are rejected in that configuration for the same reason.
@@ -171,12 +173,13 @@ Execution transparency:
 - `png`: Matplotlib static render with theme-aware background and labels
 - `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
 - `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
-- `json`: structured graph data with nodes, edges, metadata
+- `json`: structured graph data with nodes/edges and readable edge-side context
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
+- `*.config.json`: sidecar run config with rebuild parameters, resolved outputs, and metadata
 
-For `embedding` and `hybrid` strategies, export metadata includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, configured binary-prefilter state, and `binary_prefilter_used_for_query` when runtime retrieval metadata is available).
-All strategies include a `score_contract` object in export metadata describing score semantics (`score_type`) and explicitly marking scores as non-comparable across strategies.
-Hybrid exports also include `score_contract.adjudication_policy` describing citation/semantic merge behavior.
+For `embedding` and `hybrid` strategies, sidecar metadata includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, configured binary-prefilter state, and `binary_prefilter_used_for_query` when runtime retrieval metadata is available).
+All strategies include a `score_contract` object in sidecar metadata describing score semantics (`score_type`) and explicitly marking scores as non-comparable across strategies.
+Hybrid sidecars also include `score_contract.adjudication_policy` describing citation/semantic merge behavior.
 
 Determinism notes:
 
