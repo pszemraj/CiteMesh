@@ -325,78 +325,53 @@ def test_embedding_cache_search_rejects_non_vector_queries() -> None:
             )
 
 
-def test_embedding_cache_search_fails_closed_on_metadata_dtype_mismatch() -> None:
-    """Search should fail closed when metadata precision diverges from payload dtype."""
+@pytest.mark.parametrize(
+    ("model_name", "cache_kwargs", "metadata_key", "metadata_value", "match"),
+    [
+        pytest.param(
+            "search-metadata-mismatch",
+            {},
+            "storage_precision",
+            "float16",
+            "metadata key 'storage_precision' mismatch",
+            id="storage_precision",
+        ),
+        pytest.param(
+            "search-source-dtype-mismatch",
+            {"source_torch_dtype": "float32"},
+            SOURCE_TORCH_DTYPE_KEY,
+            "bfloat16",
+            "metadata key 'source_torch_dtype' mismatch",
+            id="source_torch_dtype",
+        ),
+        pytest.param(
+            "search-calibration-sample-mismatch",
+            {"storage_precision": "int8", "calibration_sample_size": 8},
+            CALIBRATION_SAMPLE_SIZE_KEY,
+            "32",
+            "metadata key 'calibration_sample_size' mismatch",
+            id="calibration_sample_size",
+        ),
+        pytest.param(
+            "search-text-formatter-mismatch",
+            {"text_formatter_fingerprint": "fmt-a"},
+            TEXT_FORMATTER_FINGERPRINT_KEY,
+            "fmt-b",
+            "metadata key 'text_formatter_fingerprint' mismatch",
+            id="text_formatter_fingerprint",
+        ),
+    ],
+)
+def test_embedding_cache_search_fails_closed_on_metadata_provenance_mismatch(
+    model_name: str,
+    cache_kwargs: dict[str, object],
+    metadata_key: str,
+    metadata_value: str,
+    match: str,
+) -> None:
+    """Search should fail closed when persisted provenance metadata drifts."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="search-metadata-mismatch")
-        cache.get_embeddings(
-            {"p1": {"title": "Alpha", "abstract": "First"}},
-            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
-            show_progress=False,
-        )
-
-        with sqlite3.connect(cache.db_path) as conn:
-            conn.execute(
-                "UPDATE cache_metadata SET value = 'float16' WHERE key = 'storage_precision'"
-            )
-            conn.commit()
-
-        with pytest.raises(
-            RuntimeError,
-            match="metadata key 'storage_precision' mismatch",
-        ):
-            cache.search(
-                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-                top_k=1,
-                binary_prefilter=True,
-                binary_rescore_multiplier=2,
-            )
-
-
-def test_embedding_cache_search_fails_closed_on_source_dtype_mismatch() -> None:
-    """Search should fail closed when source dtype metadata drifts."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(
-            cache_dir=tmpdir,
-            model_name="search-source-dtype-mismatch",
-            source_torch_dtype="float32",
-        )
-        cache.get_embeddings(
-            {"p1": {"title": "Alpha", "abstract": "First"}},
-            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
-            show_progress=False,
-        )
-
-        with sqlite3.connect(cache.db_path) as conn:
-            conn.execute(
-                "UPDATE cache_metadata SET value = ? WHERE key = ?",
-                ("bfloat16", SOURCE_TORCH_DTYPE_KEY),
-            )
-            conn.commit()
-
-        with pytest.raises(
-            RuntimeError,
-            match="metadata key 'source_torch_dtype' mismatch",
-        ):
-            cache.search(
-                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-                top_k=1,
-                binary_prefilter=True,
-                binary_rescore_multiplier=2,
-            )
-
-
-def test_embedding_cache_search_fails_closed_on_int8_calibration_sample_mismatch() -> (
-    None
-):
-    """Int8 search should fail closed when calibration sample metadata drifts."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(
-            cache_dir=tmpdir,
-            model_name="search-calibration-sample-mismatch",
-            storage_precision="int8",
-            calibration_sample_size=8,
-        )
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name=model_name, **cache_kwargs)
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
             LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
@@ -406,49 +381,11 @@ def test_embedding_cache_search_fails_closed_on_int8_calibration_sample_mismatch
         with sqlite3.connect(cache.db_path) as conn:
             conn.execute(
                 "UPDATE cache_metadata SET value = ? WHERE key = ?",
-                ("32", CALIBRATION_SAMPLE_SIZE_KEY),
+                (metadata_value, metadata_key),
             )
             conn.commit()
 
-        with pytest.raises(
-            RuntimeError,
-            match="metadata key 'calibration_sample_size' mismatch",
-        ):
-            cache.search(
-                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
-                top_k=1,
-                binary_prefilter=True,
-                binary_rescore_multiplier=2,
-            )
-
-
-def test_embedding_cache_search_fails_closed_on_text_formatter_fingerprint_mismatch() -> (
-    None
-):
-    """Search should fail closed when text-formatter provenance metadata drifts."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(
-            cache_dir=tmpdir,
-            model_name="search-text-formatter-mismatch",
-            text_formatter_fingerprint="fmt-a",
-        )
-        cache.get_embeddings(
-            {"p1": {"title": "Alpha", "abstract": "First"}},
-            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
-            show_progress=False,
-        )
-
-        with sqlite3.connect(cache.db_path) as conn:
-            conn.execute(
-                "UPDATE cache_metadata SET value = ? WHERE key = ?",
-                ("fmt-b", TEXT_FORMATTER_FINGERPRINT_KEY),
-            )
-            conn.commit()
-
-        with pytest.raises(
-            RuntimeError,
-            match="metadata key 'text_formatter_fingerprint' mismatch",
-        ):
+        with pytest.raises(RuntimeError, match=match):
             cache.search(
                 query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
                 top_k=1,
