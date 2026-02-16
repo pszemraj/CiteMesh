@@ -48,6 +48,12 @@ When `--storage-precision int8` is active, retrieval uses a two-stage path:
 - Stage 1 (`binary_prefilter`): approximate shortlist with Hamming distance over bit-packed binary sign sketches.
 - Stage 2 (`binary_rescore_multiplier`): exact dot-product rescoring on int8/dequantized vectors for the shortlist.
 
+Important distinction:
+
+- This is not end-to-end "binary embeddings" storage/retrieval in the SBERT sense.
+- Primary cache vectors remain `int8` (or `float16`/`float32` by config), and final ranking is computed from those vectors.
+- The binary representation is only a prefilter index for candidate pruning before exact rescoring.
+
 Interpretation:
 
 - `binary_prefilter_enabled=true` means the namespace is configured to use Stage 1.

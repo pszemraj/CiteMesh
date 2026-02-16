@@ -153,6 +153,7 @@ Execution transparency:
 
 - Embedding/hybrid runs print a compact config summary (model, split, corpus cap, streaming mode, storage precision).
 - `binary_prefilter` means a fast Hamming-distance prefilter over bit-packed sign sketches of int8 embeddings before exact int8 rescoring.
+- `binary_prefilter` does not switch the system to binary embedding storage; it only adds a shortlist stage before exact scoring.
 - `binary_rescore_multiplier` controls how many prefiltered candidates are rescored exactly (`top_k * multiplier`).
 - With non-int8 precision, implicit binary-prefilter defaults are normalized to effective runtime values (`binary_prefilter=false`, `binary_rescore_multiplier=1`) to avoid no-op ambiguity.
 - Semantic retrieval logs the cache comparison footprint (`compared` and `rescored` embedding counts, plus prefilter usage) for each embedding/hybrid run.

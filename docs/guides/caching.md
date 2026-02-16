@@ -49,6 +49,9 @@ Default storage mode is quantized:
 - `calibration_ranges`: float32 per-dimension min/max (`2 x dim`)
 - `binary_index`: packed `uint8` matrix (`N x ceil(dim/8)`) used for Hamming prefiltering
 
+The `binary_index` is an auxiliary retrieval index, not the primary embedding store.
+Final ranking still uses the cached `int8`/`float16`/`float32` vectors.
+
 Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
 CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected).
 Runtime availability still depends on your `h5py` build.
