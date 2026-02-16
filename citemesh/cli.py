@@ -832,16 +832,16 @@ Examples:
         "--max-citations",
         "-c",
         type=_non_negative_int,
-        default=20,
-        help="Maximum citing papers to fetch (default: 20)",
+        default=25,
+        help="Maximum citing papers to fetch (default: 25)",
     )
 
     citation_group.add_argument(
         "--max-references",
         "-r",
         type=_non_negative_int,
-        default=20,
-        help="Maximum referenced papers to fetch (default: 20)",
+        default=25,
+        help="Maximum referenced papers to fetch (default: 25)",
     )
 
     citation_group.add_argument(
@@ -1038,7 +1038,7 @@ Examples:
         help=(
             "Maximum non-seed semantic papers to add (must be <= max-papers - 1). "
             "When omitted, hybrid uses implicit citation-depth reservation before "
-            "semantic expansion (default cap: min(12, max-papers - 1))."
+            "semantic expansion (default cap: min(25, max-papers - 1))."
         ),
     )
 

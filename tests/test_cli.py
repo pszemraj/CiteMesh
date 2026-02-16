@@ -77,8 +77,8 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
     values = {
         "paper_id": "seed",
         "max_papers": 11,
-        "max_citations": 20,
-        "max_references": 20,
+        "max_citations": 25,
+        "max_references": 25,
         "similarity_threshold": 0.2,
         "no_references": False,
         "refresh_reference_cache": False,

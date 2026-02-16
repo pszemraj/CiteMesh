@@ -118,8 +118,8 @@ ignoring it.
 
 ### Citation Strategy
 
-- `--max-citations`, `-c`: limit number of citing papers (default `20`)
-- `--max-references`, `-r`: limit number of referenced papers (default `20`)
+- `--max-citations`, `-c`: limit number of citing papers (default `25`)
+- `--max-references`, `-r`: limit number of referenced papers (default `25`)
 - `--similarity-threshold`, `-t`: minimum edge similarity threshold (`0.0` to `1.0`, default `0.2`)
 - `--no-references`: skip reference-list fetching (faster, no bibliographic coupling)
 - `--refresh-reference-cache`: bypass persisted reference-cache reads and fetch fresh reference IDs
@@ -165,7 +165,7 @@ Execution transparency:
 - Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
 - `--max-semantic`: maximum non-seed semantic neighbors to add after hybrid reranking.
   Valid values are `0` through `max-papers - 1`.
-  If omitted, hybrid defaults to `min(12, max-papers - 1)`.
+  If omitted, hybrid defaults to `min(25, max-papers - 1)`.
 - Hybrid adjudication policy:
   - fetches full citation candidates up to `max_references + max_citations`
   - fetches semantic candidates (expanded pool) and merges duplicates

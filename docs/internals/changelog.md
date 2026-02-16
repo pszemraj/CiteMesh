@@ -51,6 +51,7 @@ For current usage details, see:
 - **Embedding**: citation-count enrichment logs now show bounded target counts and render a visible progress bar on TTY runs.
 - **Hybrid**: formalized citation-first enrichment with semantic additions and capped edges.
 - **Hybrid**: implicit defaults now reserve citation depth floors before semantic expansion.
+- **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.
 - Added explicit streaming split validation for embedding mode.
