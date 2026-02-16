@@ -73,6 +73,11 @@ Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`)
 Lock acquisition timeout defaults to `900` seconds and can be overridden with
 `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
+Hydration write policy:
+
+- Encoding uses conservative model micro-batches (`32`) for runtime stability.
+- Cache persistence flushes metadata/embedding appends in larger bursts (`256` records) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
+
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)).
 
 For Hugging Face repo IDs, hydration resolves and stores a model fingerprint.

@@ -83,7 +83,8 @@ def _check_embedding_deps() -> None:
         )
 
 
-STREAMING_BATCH_SIZE = 32
+ENCODE_BATCH_SIZE = 32
+HYDRATION_FLUSH_SIZE = 256
 CANDIDATE_MULTIPLIER = 4
 ARXIV_DATASET_CANDIDATES = (
     "librarian-bots/arxiv-metadata-snapshot",
@@ -1781,7 +1782,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     continue
 
                 batch.append(metadata)
-                if len(batch) >= STREAMING_BATCH_SIZE:
+                if len(batch) >= HYDRATION_FLUSH_SIZE:
                     hydrated_records += self._cache_metadata_batch(batch)
                     batch = []
                 progress.update(1)
@@ -1899,7 +1900,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         ]
         sample_embeddings = self._encode_texts(
             sample_texts,
-            batch_size=STREAMING_BATCH_SIZE,
+            batch_size=ENCODE_BATCH_SIZE,
             show_progress_bar=False,
         )
         ranges = np.vstack(
@@ -1937,7 +1938,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.embedding_cache.get_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
-            batch_size=min(STREAMING_BATCH_SIZE, len(metadata_map)),
+            batch_size=min(ENCODE_BATCH_SIZE, len(metadata_map)),
             show_progress=False,
             text_builder=self.model_profile.format_document,
         )

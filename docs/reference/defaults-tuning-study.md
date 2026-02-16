@@ -66,6 +66,28 @@ Targeted validation of leading candidates:
 
 \* First 100k run includes one-time cache hydration cost; warm-cache subsequent runs were substantially faster.
 
+## Hydration Throughput Follow-Up (February 16, 2026)
+
+A focused follow-up benchmark isolated long-hydration throughput effects using:
+
+- model: `unsloth/embeddinggemma-300m`
+- split: `train[:80000]`
+- storage: `int8`
+- compile: disabled (`--no-torch-compile`) to isolate cache-write behavior
+
+Measured variants:
+
+| Config | Encode Batch | Flush Size | Compression | Hydration Rate (papers/s) | H5 Size (MiB) |
+| --- | ---: | ---: | --- | ---: | ---: |
+| baseline | 32 | 32 | gzip-1 | 266.97 | 333.1 |
+| tuned | 32 | 256 | gzip-1 | 398.61 | 57.3 |
+| tuned | 32 | 256 | lzf | 401.47 | 62.2 |
+
+Conclusion:
+
+- Throughput regression was dominated by too-frequent cache flushes, not embedding micro-batch size.
+- Increasing flush size to `256` while keeping encode batch at `32` improved sustained hydration throughput by about `1.5x` in this setup.
+
 ## Outcome
 
 Defaults were adjusted to:
@@ -73,12 +95,14 @@ Defaults were adjusted to:
 - `--top-k` default: `3` (from `2`)
 - Hybrid implicit semantic cap: `min(12, max-papers - 1)` (from `min(10, max-papers - 1)`)
 - `--log-width` default: `140` (from `160`) for more readable terminal output
+- Hydration cache flush window: `256` records (encode micro-batch remains `32`)
 
 Rationale:
 
 - `top_k=2` produced overly fragmented embedding graphs.
 - `top_k=3` gave the best quality/speed balance in this set.
 - Hybrid semantic cap `12` improved coverage and similarity quality without harming connectivity.
+- Larger hydration flush windows dramatically reduced long-run cache append overhead while preserving stable encode batch sizing.
 
 ## Artifacts
 

@@ -18,7 +18,11 @@ from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
 )
 from citemesh.data.embedding_cache import CacheSearchResult
-from citemesh.strategies.embedding import EmbeddingGraphBuilder, _query_seed_id
+from citemesh.strategies.embedding import (
+    ENCODE_BATCH_SIZE,
+    EmbeddingGraphBuilder,
+    _query_seed_id,
+)
 from tests._helpers import ConstantEncodeModel
 
 
@@ -1298,6 +1302,98 @@ def test_hydration_reset_restores_model_fingerprint(
 
     builder._ensure_cache_hydrated(use_streaming=False)
     assert builder.embedding_cache.get_model_fingerprint() == "fp-before-clear"
+
+
+def test_hydration_flush_size_controls_cache_write_bursting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Hydration should flush metadata batches using configured flush threshold."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    monkeypatch.setattr("citemesh.strategies.embedding.HYDRATION_FLUSH_SIZE", 3)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        use_streaming=False,
+        corpus_size=7,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-flush-threshold")
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        lambda use_streaming, preferred_dataset_source=None: (
+            "mini-dataset",
+            [
+                {"id": f"p{i}", "title": f"Paper {i}", "abstract": f"A{i}"}
+                for i in range(7)
+            ],
+        ),
+    )
+
+    flushed_batch_sizes: list[int] = []
+
+    def _capture_flush(batch: list[dict[str, Any]]) -> int:
+        flushed_batch_sizes.append(len(batch))
+        return len(batch)
+
+    monkeypatch.setattr(builder, "_cache_metadata_batch", _capture_flush)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+    assert flushed_batch_sizes == [3, 3, 1]
+
+
+def test_cache_metadata_batch_caps_model_encode_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache writes should keep encode batch size bounded for stable runtime."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        use_streaming=False,
+        corpus_size=1,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: object())
+
+    captured: dict[str, int] = {}
+
+    def _capture_get_embeddings(
+        papers: dict[str, dict[str, Any]],
+        model: object,
+        batch_size: int = 32,
+        show_progress: bool = True,
+        text_builder: Any = None,
+    ) -> dict[str, np.ndarray]:
+        del model, show_progress, text_builder
+        captured["batch_size"] = int(batch_size)
+        captured["paper_count"] = int(len(papers))
+        return {}
+
+    monkeypatch.setattr(
+        builder.embedding_cache, "get_embeddings", _capture_get_embeddings
+    )
+
+    batch = [
+        {
+            "paper_id": f"paper-{idx}",
+            "title": f"Title {idx}",
+            "abstract": f"Abstract {idx}",
+            "year": 2025,
+            "authors": ["A"],
+            "categories": ["cs.AI"],
+        }
+        for idx in range(ENCODE_BATCH_SIZE + 17)
+    ]
+
+    routed = builder._cache_metadata_batch(batch)
+    assert routed == len(batch)
+    assert captured["paper_count"] == len(batch)
+    assert captured["batch_size"] == ENCODE_BATCH_SIZE
 
 
 def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
