@@ -461,6 +461,26 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
         "ok-4",
     ]
 
+    invalid_only_seed = s2.normalize_paper_id("seed-invalid-only")
+    invalid_only_cache_path = s2._reference_cache_path(invalid_only_seed)
+    invalid_only_cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": invalid_only_seed,
+                "references": [None, {"paperId": "   "}, {"paper": {}}, 123],
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        return_value=[_make_reference_record("rebuilt-1")]
+    )
+    rebuilt_invalid_only_refs = client.get_reference_ids("seed-invalid-only")
+    assert rebuilt_invalid_only_refs == ["rebuilt-1"]
+    assert json.loads(invalid_only_cache_path.read_text())["references"] == [
+        "rebuilt-1"
+    ]
+
     client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
     assert client.get_reference_ids("seed-type-error") == []
 

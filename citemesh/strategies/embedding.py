@@ -442,6 +442,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
         self._tf32_mode = "off"
+        self._active_model_name: Optional[str] = None
         self._resolved_model_fingerprint: Optional[str] = None
         self._resolved_offline_fingerprint: Optional[str] = None
         self._last_search_used_binary_prefilter: Optional[bool] = None
@@ -454,6 +455,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         return {
             "binary_prefilter_used": self._last_search_used_binary_prefilter,
         }
+
+    def _cache_model_identity(self) -> str:
+        """Return model identity used for cache fingerprinting.
+
+        When model loading falls back to another checkpoint, cache validation
+        should follow the active checkpoint identity rather than the requested
+        model token.
+
+        :return str: Active model identifier for cache fingerprint checks.
+        """
+        active_model_name = str(self._active_model_name or "").strip()
+        if active_model_name:
+            return active_model_name
+        return str(self.model_name).strip()
 
     def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
         """Resolve effective embedding dimension from request + model profile defaults.
@@ -566,13 +581,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self._resolved_model_fingerprint is not None:
             return self._resolved_model_fingerprint
 
-        resolved_path = Path(self.model_name).expanduser()
+        model_identity = self._cache_model_identity()
+        resolved_path = Path(model_identity).expanduser()
         if resolved_path.exists():
             fingerprint = f"local-path::{resolved_path.resolve()}"
             self._resolved_model_fingerprint = fingerprint
             return fingerprint
 
-        model_id = str(self.model_name).strip()
+        model_id = model_identity
         if "/" not in model_id:
             revision_token = self.model_revision or "default"
             fingerprint = f"model-alias::{model_id}::revision={revision_token}"
@@ -742,7 +758,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self._resolved_offline_fingerprint is not None:
             return self._resolved_offline_fingerprint
 
-        model_id = str(self.model_name).strip()
+        model_id = self._cache_model_identity()
         if "/" not in model_id:
             revision_token = self.model_revision or "default"
             fingerprint = f"model-alias::{model_id}::revision={revision_token}"
@@ -781,7 +797,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not fingerprint:
             return False
 
-        model_id = str(self.model_name).strip()
+        model_id = self._cache_model_identity()
         if "/" not in model_id:
             return fingerprint == self._offline_model_fingerprint_fallback()
 
@@ -829,7 +845,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         fingerprint = str(cached_fingerprint).strip()
         if not fingerprint:
             return False
-        model_id = str(self.model_name).strip()
+        model_id = self._cache_model_identity()
         if "/" not in model_id:
             return False
         if self._requested_hf_revision_token() != "main":
@@ -1243,6 +1259,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                         self.model_name,
                         candidate_model,
                     )
+                if self._active_model_name != candidate_model:
+                    self._resolved_model_fingerprint = None
+                    self._resolved_offline_fingerprint = None
+                self._active_model_name = candidate_model
                 break
 
             self._configure_tf32_runtime()

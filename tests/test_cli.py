@@ -131,6 +131,12 @@ def test_cache_commands_contracts(
     ]:
         assert token in scan_result.stdout
 
+    scan_debug_result = run_cli_command(["cache", "scan", "--log-level", "debug"])
+    assert scan_debug_result.returncode == 0, (
+        f"STDOUT: {scan_debug_result.stdout}\nSTDERR: {scan_debug_result.stderr}"
+    )
+    assert "CiteMesh Cache Scan" in scan_debug_result.stdout
+
     clear_result = run_cli_command(["cache", "clear", "--yes"])
     assert clear_result.returncode == 0, (
         f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"

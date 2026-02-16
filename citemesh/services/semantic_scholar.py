@@ -230,6 +230,10 @@ def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
         seen.add(paper_id)
         normalized.append(paper_id)
 
+    # Empty payloads are valid cache states (no references). Non-empty payloads
+    # that yield no usable IDs are treated as invalid so callers can rebuild.
+    if payload and not normalized:
+        return None
     return normalized
 
 

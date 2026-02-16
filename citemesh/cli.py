@@ -1062,7 +1062,9 @@ Examples:
         dest="cache_command", help="Cache operations"
     )
     cache_clear_parser = cache_subparsers.add_parser(
-        "clear", help="Delete the entire CiteMesh cache directory"
+        "clear",
+        help="Delete the entire CiteMesh cache directory",
+        parents=[logging_parent],
     )
     cache_clear_parser.add_argument(
         "--yes",
@@ -1071,7 +1073,9 @@ Examples:
         help="Skip confirmation prompt and clear cache immediately",
     )
     cache_subparsers.add_parser(
-        "scan", help="Scan cache usage (sections, file counts, and total size)"
+        "scan",
+        help="Scan cache usage (sections, file counts, and total size)",
+        parents=[logging_parent],
     )
     return parser, build_parser, cache_parser
 

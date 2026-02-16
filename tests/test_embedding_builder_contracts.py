@@ -488,6 +488,42 @@ def test_embedding_default_model_loads_with_fallback_chain(
     )
 
 
+def test_embedding_fingerprint_uses_active_fallback_model_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fingerprint checks should bind to active fallback checkpoint identity."""
+    _disable_embedding_dep_check(monkeypatch)
+    fallback_model = DEFAULT_EMBEDDING_MODEL_FALLBACKS[DEFAULT_EMBEDDING_MODEL_NAME][0]
+    _install_fake_sentence_transformers(
+        monkeypatch,
+        fail_model_names={DEFAULT_EMBEDDING_MODEL_NAME},
+    )
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+
+    class _FakeHfApi:
+        def model_info(self, repo_id: str, revision: str) -> object:
+            assert repo_id == fallback_model
+            assert revision == "main"
+            return types.SimpleNamespace(sha="0123456789abcdef0123456789abcdef01234567")
+
+    fake_hf_module = types.ModuleType("huggingface_hub")
+    fake_hf_module.HfApi = _FakeHfApi
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+    fingerprint = builder._resolve_model_fingerprint()
+
+    assert builder._active_model_name == fallback_model
+    assert (
+        fingerprint == f"hf::{fallback_model}::0123456789abcdef0123456789abcdef01234567"
+    )
+
+
 def test_embedding_cache_namespace_varies_by_storage_precision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
