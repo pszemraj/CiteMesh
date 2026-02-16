@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 from pathlib import Path
 from queue import Empty
+from typing import Any
 
 import h5py
 import numpy as np
@@ -456,8 +457,8 @@ def test_embedding_cache_binary_prefilter_rows_are_monotonic_subset() -> None:
     assert np.all(rows[:-1] < rows[1:])
 
 
-def test_embedding_cache_supports_lzf_codec_without_compression_level_opts() -> None:
-    """LZF codec should hydrate cache datasets without invalid compression options."""
+def test_embedding_cache_compression_codec_contracts() -> None:
+    """Supported codecs should hydrate; unsupported codecs should fail fast."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(
             cache_dir=tmpdir,
@@ -477,9 +478,6 @@ def test_embedding_cache_supports_lzf_codec_without_compression_level_opts() -> 
             assert h5["embeddings"].compression == "lzf"
             assert h5["binary_index"].compression == "lzf"
 
-
-def test_embedding_cache_rejects_szip_codec_configuration() -> None:
-    """Unsupported szip codec should fail fast with a validation error."""
     with tempfile.TemporaryDirectory() as tmpdir:
         with pytest.raises(ValueError, match="compression='szip' is unsupported"):
             EmbeddingCache(
@@ -490,59 +488,54 @@ def test_embedding_cache_rejects_szip_codec_configuration() -> None:
             )
 
 
-def test_embedding_cache_preserves_hydration_metadata_across_restarts() -> None:
-    """Hydration completion should survive cache re-open in same namespace."""
+def test_embedding_cache_restart_persistence_contracts() -> None:
+    """Hydration/fingerprint metadata and payload state should survive restarts."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-persistence")
-        cache.get_embeddings(
+        hydration_cache = EmbeddingCache(
+            cache_dir=tmpdir, model_name="hydration-persistence"
+        )
+        hydration_cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
             SeededRandomEncodeModel(),
             show_progress=False,
         )
-        cache.mark_hydrated(
+        hydration_cache.mark_hydrated(
             dataset_source="librarian-bots/arxiv-metadata-snapshot",
             dataset_split="train",
             corpus_size=1024,
             complete=True,
         )
-        assert cache.is_hydrated(
+        assert hydration_cache.is_hydrated(
+            dataset_split="train",
+            corpus_size=1024,
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        )
+        reloaded_hydration = EmbeddingCache(
+            cache_dir=tmpdir, model_name="hydration-persistence"
+        )
+        assert reloaded_hydration.is_hydrated(
             dataset_split="train",
             corpus_size=1024,
             dataset_source="librarian-bots/arxiv-metadata-snapshot",
         )
 
-        reloaded = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-persistence")
-        assert reloaded.is_hydrated(
-            dataset_split="train",
-            corpus_size=1024,
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        )
-
-
-def test_embedding_cache_model_fingerprint_persists_across_restarts() -> None:
-    """Model fingerprint metadata should persist and be queryable across restarts."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="fingerprint-persistence")
-        assert cache.get_model_fingerprint() is None
-        cache.set_model_fingerprint("hf::org/model::abc123")
-        assert cache.get_model_fingerprint() == "hf::org/model::abc123"
-
-        reloaded = EmbeddingCache(
+        fingerprint_cache = EmbeddingCache(
             cache_dir=tmpdir, model_name="fingerprint-persistence"
         )
-        assert reloaded.get_model_fingerprint() == "hf::org/model::abc123"
-        with sqlite3.connect(reloaded.db_path) as conn:
+        assert fingerprint_cache.get_model_fingerprint() is None
+        fingerprint_cache.set_model_fingerprint("hf::org/model::abc123")
+        assert fingerprint_cache.get_model_fingerprint() == "hf::org/model::abc123"
+        reloaded_fingerprint = EmbeddingCache(
+            cache_dir=tmpdir, model_name="fingerprint-persistence"
+        )
+        assert reloaded_fingerprint.get_model_fingerprint() == "hf::org/model::abc123"
+        with sqlite3.connect(reloaded_fingerprint.db_path) as conn:
             metadata = {
                 key: value
                 for key, value in conn.execute("SELECT key, value FROM cache_metadata")
             }
+        assert metadata[MODEL_FINGERPRINT_KEY] == "hf::org/model::abc123"
 
-    assert metadata[MODEL_FINGERPRINT_KEY] == "hf::org/model::abc123"
-
-
-def test_embedding_cache_has_cached_payload_contract() -> None:
-    """Payload indicator should reflect whether namespace contains embedding rows."""
-    with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="payload-presence")
         assert not cache.has_cached_payload()
         cache.get_embeddings(
@@ -553,89 +546,20 @@ def test_embedding_cache_has_cached_payload_contract() -> None:
         assert cache.has_cached_payload()
 
 
-def test_embedding_cache_hydration_requires_h5_payload() -> None:
-    """Hydration should be false when completion metadata exists but HDF5 is missing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-payload")
-        cache.get_embeddings(
-            {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            SeededRandomEncodeModel(),
-            show_progress=False,
-        )
-        cache.mark_hydrated(
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-            dataset_split="train",
-            corpus_size=512,
-            complete=True,
-        )
+def test_embedding_cache_hydration_validation_contracts() -> None:
+    """Hydration validity should fail closed when payload or metadata integrity drifts."""
 
-        assert cache.is_hydrated(
-            dataset_split="train",
-            corpus_size=512,
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        )
+    source = "librarian-bots/arxiv-metadata-snapshot"
 
+    def _remove_h5_payload(cache: EmbeddingCache) -> None:
         cache.h5_path.unlink(missing_ok=True)
-        assert not cache.is_hydrated(
-            dataset_split="train",
-            corpus_size=512,
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        )
 
-
-def test_embedding_cache_hydration_requires_metadata_row_integrity() -> None:
-    """Hydration should be false when embedding rows have no matching metadata rows."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-metadata-rows")
-        cache.get_embeddings(
-            {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            SeededRandomEncodeModel(),
-            show_progress=False,
-        )
-        cache.mark_hydrated(
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-            dataset_split="train",
-            corpus_size=256,
-            complete=True,
-        )
-        assert cache.is_hydrated(
-            dataset_split="train",
-            corpus_size=256,
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        )
-
+    def _delete_metadata_rows(cache: EmbeddingCache) -> None:
         with sqlite3.connect(cache.db_path) as conn:
             conn.execute("DELETE FROM papers")
             conn.commit()
 
-        assert not cache.is_hydrated(
-            dataset_split="train",
-            corpus_size=256,
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        )
-
-
-def test_embedding_cache_hydration_requires_dataset_source_metadata() -> None:
-    """Hydration should be false when completion exists but dataset source is missing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-source-required")
-        cache.get_embeddings(
-            {"p1": {"title": "Seed", "abstract": "Abstract"}},
-            SeededRandomEncodeModel(),
-            show_progress=False,
-        )
-        cache.mark_hydrated(
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-            dataset_split="train",
-            corpus_size=128,
-            complete=True,
-        )
-        assert cache.is_hydrated(
-            dataset_split="train",
-            corpus_size=128,
-            dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        )
-
+    def _clear_dataset_source(cache: EmbeddingCache) -> None:
         with sqlite3.connect(cache.db_path) as conn:
             conn.execute(
                 "UPDATE cache_metadata SET value = '' WHERE key = ?",
@@ -643,7 +567,59 @@ def test_embedding_cache_hydration_requires_dataset_source_metadata() -> None:
             )
             conn.commit()
 
-        assert not cache.is_hydrated(dataset_split="train", corpus_size=128)
+    cases = [
+        {
+            "label": "missing h5 payload",
+            "model_name": "hydration-payload",
+            "corpus_size": 512,
+            "invalidate": _remove_h5_payload,
+            "include_source_arg_after_invalidation": True,
+        },
+        {
+            "label": "orphaned embedding metadata rows",
+            "model_name": "hydration-metadata-rows",
+            "corpus_size": 256,
+            "invalidate": _delete_metadata_rows,
+            "include_source_arg_after_invalidation": True,
+        },
+        {
+            "label": "missing dataset source metadata",
+            "model_name": "hydration-source-required",
+            "corpus_size": 128,
+            "invalidate": _clear_dataset_source,
+            "include_source_arg_after_invalidation": False,
+        },
+    ]
+
+    for case in cases:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache = EmbeddingCache(cache_dir=tmpdir, model_name=case["model_name"])
+            cache.get_embeddings(
+                {"p1": {"title": "Seed", "abstract": "Abstract"}},
+                SeededRandomEncodeModel(),
+                show_progress=False,
+            )
+            cache.mark_hydrated(
+                dataset_source=source,
+                dataset_split="train",
+                corpus_size=case["corpus_size"],
+                complete=True,
+            )
+            assert cache.is_hydrated(
+                dataset_split="train",
+                corpus_size=case["corpus_size"],
+                dataset_source=source,
+            ), case["label"]
+
+            case["invalidate"](cache)
+
+            hydrated_kwargs: dict[str, Any] = {
+                "dataset_split": "train",
+                "corpus_size": case["corpus_size"],
+            }
+            if case["include_source_arg_after_invalidation"]:
+                hydrated_kwargs["dataset_source"] = source
+            assert not cache.is_hydrated(**hydrated_kwargs), case["label"]
 
 
 def test_embedding_cache_mark_hydrated_rejects_empty_source_when_complete() -> None:

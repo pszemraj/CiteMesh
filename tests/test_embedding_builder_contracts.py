@@ -524,10 +524,10 @@ def test_embedding_fingerprint_uses_active_fallback_model_identity(
     )
 
 
-def test_embedding_cache_namespace_varies_by_storage_precision(
+def test_embedding_cache_namespace_partition_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cache namespace should isolate incompatible storage precision settings."""
+    """Namespace identity should partition precision, source dtype, and calibration."""
     _disable_embedding_dep_check(monkeypatch)
 
     int8_builder = EmbeddingGraphBuilder(
@@ -536,11 +536,62 @@ def test_embedding_cache_namespace_varies_by_storage_precision(
     f32_builder = EmbeddingGraphBuilder(
         max_papers=1, storage_precision="float32", client=MagicMock()
     )
-
     assert (
         int8_builder.embedding_cache.model_name
         != f32_builder.embedding_cache.model_name
     )
+
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+    f32_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "bfloat16",
+    )
+    bf16_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    assert (
+        f32_hint_builder.embedding_cache.model_name
+        != bf16_hint_builder.embedding_cache.model_name
+    )
+
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+    int8_small = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        calibration_sample_size=32,
+        client=MagicMock(),
+    )
+    int8_large = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        calibration_sample_size=128,
+        client=MagicMock(),
+    )
+    f32_small = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        calibration_sample_size=32,
+        client=MagicMock(),
+    )
+    f32_large = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        calibration_sample_size=128,
+        client=MagicMock(),
+    )
+    assert (
+        int8_small.embedding_cache.model_name != int8_large.embedding_cache.model_name
+    )
+    assert f32_small.embedding_cache.model_name == f32_large.embedding_cache.model_name
 
 
 def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
@@ -594,74 +645,6 @@ def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
         int8_prefilter_on.embedding_cache.model_name
         != int8_prefilter_off.embedding_cache.model_name
     )
-
-
-def test_embedding_cache_namespace_varies_by_source_dtype_hint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Source dtype hints should participate in namespace identity."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_source_dtype_hint",
-        lambda self: "float32",
-    )
-    f32_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_source_dtype_hint",
-        lambda self: "bfloat16",
-    )
-    bf16_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-
-    assert (
-        f32_hint_builder.embedding_cache.model_name
-        != bf16_hint_builder.embedding_cache.model_name
-    )
-
-
-def test_embedding_cache_namespace_includes_int8_calibration_sample_size(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Int8 caches should include calibration sample size in namespace identity."""
-    _disable_embedding_dep_check(monkeypatch)
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_source_dtype_hint",
-        lambda self: "float32",
-    )
-
-    int8_small = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="int8",
-        calibration_sample_size=32,
-        client=MagicMock(),
-    )
-    int8_large = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="int8",
-        calibration_sample_size=128,
-        client=MagicMock(),
-    )
-    f32_small = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="float32",
-        calibration_sample_size=32,
-        client=MagicMock(),
-    )
-    f32_large = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="float32",
-        calibration_sample_size=128,
-        client=MagicMock(),
-    )
-
-    assert (
-        int8_small.embedding_cache.model_name != int8_large.embedding_cache.model_name
-    )
-    assert f32_small.embedding_cache.model_name == f32_large.embedding_cache.model_name
 
 
 def test_embedding_cache_namespace_matches_default_and_explicit_truncate_dim(
@@ -736,185 +719,131 @@ def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
     builder.embedding_cache.set_model_fingerprint.assert_called_once_with("fp-new")
 
 
-def test_embedding_cache_reuses_cached_fingerprint_when_lookup_fails(
+def test_embedding_cache_offline_fingerprint_lookup_contracts(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Offline fingerprint lookup failures should not block reuse of a hydrated cache."""
+    """Offline lookup outcomes should preserve cache safety across identity states."""
     _disable_embedding_dep_check(monkeypatch)
 
-    builder = EmbeddingGraphBuilder(
-        max_papers=1, model_name="org/offline-test", client=MagicMock()
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(
-        return_value="hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
-    )
-    builder.embedding_cache.clear = MagicMock()
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
+    compatible_fp = "hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
+    cases = [
+        {
+            "label": "compatible cached fingerprint is reused",
+            "model_name": "org/offline-test",
+            "model_revision": None,
+            "strict_mode": False,
+            "has_cached_payload": True,
+            "cached_fingerprint": compatible_fp,
+            "expected_resolved": compatible_fp,
+            "expect_clear": False,
+            "expect_set_fingerprint": None,
+            "expected_log_fragment": "Reusing compatible cached fingerprint",
+        },
+        {
+            "label": "strict mode rejects legacy main sha assumption",
+            "model_name": "org/offline-strict",
+            "model_revision": None,
+            "strict_mode": True,
+            "has_cached_payload": True,
+            "cached_fingerprint": (
+                "hf::org/offline-strict::0123456789abcdef0123456789abcdef01234567"
+            ),
+            "expected_resolved": "hf::org/offline-strict::revision=main::offline-unverified",
+            "expect_clear": True,
+            "expect_set_fingerprint": "hf::org/offline-strict::revision=main::offline-unverified",
+            "expected_log_fragment": "incompatible with requested identity",
+        },
+        {
+            "label": "incompatible cached fingerprint clears payload",
+            "model_name": "org/offline-test",
+            "model_revision": "refs/pr/12",
+            "strict_mode": False,
+            "has_cached_payload": True,
+            "cached_fingerprint": compatible_fp,
+            "expected_resolved": "hf::org/offline-test::revision=refs/pr/12::offline-unverified",
+            "expect_clear": True,
+            "expect_set_fingerprint": "hf::org/offline-test::revision=refs/pr/12::offline-unverified",
+            "expected_log_fragment": "is incompatible with requested identity",
+        },
+        {
+            "label": "missing cached fingerprint reuses payload with fallback identity",
+            "model_name": "org/offline-no-fingerprint",
+            "model_revision": "refs/pr/12",
+            "strict_mode": False,
+            "has_cached_payload": True,
+            "cached_fingerprint": None,
+            "expected_resolved": (
+                "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
+            ),
+            "expect_clear": False,
+            "expect_set_fingerprint": (
+                "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
+            ),
+            "expected_log_fragment": "Reusing cached payload with fallback identity",
+        },
+        {
+            "label": "offline initialization sets fallback for empty namespace",
+            "model_name": "org/offline-init",
+            "model_revision": "refs/pr/34",
+            "strict_mode": False,
+            "has_cached_payload": False,
+            "cached_fingerprint": None,
+            "expected_resolved": "hf::org/offline-init::revision=refs/pr/34::offline-unverified",
+            "expect_clear": False,
+            "expect_set_fingerprint": (
+                "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
+            ),
+            "expected_log_fragment": "offline initialization",
+        },
+    ]
 
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
+    for case in cases:
+        caplog.clear()
+        if case["strict_mode"]:
+            monkeypatch.setenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", "1")
+        else:
+            monkeypatch.delenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", raising=False)
 
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
-    )
-    assert builder.embedding_cache.clear.call_count == 0
-    builder.embedding_cache.set_model_fingerprint.assert_not_called()
-    assert any(
-        "Reusing compatible cached fingerprint" in record.getMessage()
-        for record in caplog.records
-    )
+        builder = EmbeddingGraphBuilder(
+            max_papers=1,
+            model_name=case["model_name"],
+            model_revision=case["model_revision"],
+            client=MagicMock(),
+        )
+        builder.embedding_cache.has_cached_payload = MagicMock(
+            return_value=bool(case["has_cached_payload"])
+        )
+        builder.embedding_cache.get_model_fingerprint = MagicMock(
+            return_value=case["cached_fingerprint"]
+        )
+        builder.embedding_cache.clear = MagicMock()
+        builder.embedding_cache.set_model_fingerprint = MagicMock()
+        builder._resolve_model_fingerprint = MagicMock(
+            side_effect=RuntimeError("network unavailable")
+        )
 
+        with caplog.at_level(logging.WARNING):
+            builder._ensure_cache_model_fingerprint()
 
-def test_embedding_cache_strict_offline_rejects_legacy_main_sha_assumption(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Strict offline mode should reject legacy main-SHA reuse assumptions."""
-    _disable_embedding_dep_check(monkeypatch)
-    monkeypatch.setenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", "1")
+        assert builder._resolved_model_fingerprint == case["expected_resolved"], case[
+            "label"
+        ]
+        if case["expect_clear"]:
+            builder.embedding_cache.clear.assert_called_once()
+        else:
+            assert builder.embedding_cache.clear.call_count == 0
 
-    builder = EmbeddingGraphBuilder(
-        max_papers=1, model_name="org/offline-strict", client=MagicMock()
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(
-        return_value="hf::org/offline-strict::0123456789abcdef0123456789abcdef01234567"
-    )
-    builder.embedding_cache.clear = MagicMock()
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
-
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
-
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-strict::revision=main::offline-unverified"
-    )
-    builder.embedding_cache.clear.assert_called_once()
-    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-strict::revision=main::offline-unverified"
-    )
-    assert any(
-        "incompatible with requested identity" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_embedding_cache_clears_stale_cached_fingerprint_when_lookup_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Offline fallback should clear payload when cached fingerprint is incompatible."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        model_name="org/offline-test",
-        model_revision="refs/pr/12",
-        client=MagicMock(),
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(
-        return_value="hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
-    )
-    builder.embedding_cache.clear = MagicMock()
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
-
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
-
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-test::revision=refs/pr/12::offline-unverified"
-    )
-    builder.embedding_cache.clear.assert_called_once()
-    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-test::revision=refs/pr/12::offline-unverified"
-    )
-    assert any(
-        "is incompatible with requested identity" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_embedding_cache_reuses_cached_payload_with_fallback_fingerprint_when_lookup_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Old caches without stored fingerprint should still be reusable offline."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        model_name="org/offline-no-fingerprint",
-        model_revision="refs/pr/12",
-        client=MagicMock(),
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value=None)
-    builder.embedding_cache.clear = MagicMock()
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
-
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
-
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
-    )
-    assert builder.embedding_cache.clear.call_count == 0
-    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
-    )
-    assert any(
-        "Reusing cached payload with fallback identity" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_embedding_cache_initializes_offline_without_payload(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """No-payload namespaces should initialize fingerprint metadata in offline mode."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        model_name="org/offline-init",
-        model_revision="refs/pr/34",
-        client=MagicMock(),
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=False)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value=None)
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
-
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
-
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
-    )
-    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
-    )
-    assert any(
-        "offline initialization" in record.getMessage() for record in caplog.records
-    )
+        expected_set_fingerprint = case["expect_set_fingerprint"]
+        if expected_set_fingerprint is None:
+            builder.embedding_cache.set_model_fingerprint.assert_not_called()
+        else:
+            builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
+                expected_set_fingerprint
+            )
+        assert any(
+            case["expected_log_fragment"] in record.getMessage()
+            for record in caplog.records
+        ), case["label"]
 
 
 def test_embedding_cache_sets_missing_cached_fingerprint_after_lookup(
@@ -940,10 +869,10 @@ def test_embedding_cache_sets_missing_cached_fingerprint_after_lookup(
     assert builder.embedding_cache.clear.call_count == 0
 
 
-def test_embedding_fingerprint_resolution_fails_closed_for_hf_repo(
-    monkeypatch: pytest.MonkeyPatch,
+def test_embedding_fingerprint_resolution_contracts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """HF-backed model fingerprints should fail closed when SHA cannot be resolved."""
+    """Fingerprint resolution should cover fail-closed, snapshot, and artifact paths."""
     _disable_embedding_dep_check(monkeypatch)
 
     class _FailingHfApi:
@@ -955,61 +884,33 @@ def test_embedding_fingerprint_resolution_fails_closed_for_hf_repo(
     fake_hf_module.HfApi = _FailingHfApi
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
 
-    builder = EmbeddingGraphBuilder(
+    fail_closed_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="org/test-model",
         model_revision="main",
         client=MagicMock(),
     )
-
     with pytest.raises(RuntimeError, match="Could not resolve Hugging Face commit SHA"):
-        builder._resolve_model_fingerprint()
+        fail_closed_builder._resolve_model_fingerprint()
 
-
-def test_embedding_fingerprint_resolution_uses_local_snapshot_sha_when_offline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """HF fingerprint resolution should fall back to local snapshot SHA without API."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    class _FailingHfApi:
-        def model_info(self, repo_id: str, revision: str) -> object:
-            del repo_id, revision
-            raise RuntimeError("network unavailable")
-
-    def _snapshot_download(repo_id: str, revision: str, local_files_only: bool) -> str:
+    def _snapshot_download_with_sha(
+        repo_id: str, revision: str, local_files_only: bool
+    ) -> str:
         del repo_id, revision
         assert local_files_only is True
         return "/tmp/models--org--test-model/snapshots/0123456789abcdef0123456789abcdef01234567"
 
-    fake_hf_module = types.ModuleType("huggingface_hub")
-    fake_hf_module.HfApi = _FailingHfApi
-    fake_hf_module.snapshot_download = _snapshot_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
-
-    builder = EmbeddingGraphBuilder(
+    fake_hf_module.snapshot_download = _snapshot_download_with_sha
+    snapshot_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="org/test-model",
         model_revision="refs/pr/12",
         client=MagicMock(),
     )
-
     assert (
-        builder._resolve_model_fingerprint()
+        snapshot_builder._resolve_model_fingerprint()
         == "hf::org/test-model::0123456789abcdef0123456789abcdef01234567"
     )
-
-
-def test_embedding_fingerprint_resolution_uses_local_artifact_hashes_when_sha_unavailable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """HF fingerprint resolution should hash config + weights when SHA is unavailable."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    class _FailingHfApi:
-        def model_info(self, repo_id: str, revision: str) -> object:
-            del repo_id, revision
-            raise RuntimeError("network unavailable")
 
     snapshot_root = tmp_path / "models--org--artifact-model"
     snapshot_root.mkdir(parents=True, exist_ok=True)
@@ -1018,18 +919,16 @@ def test_embedding_fingerprint_resolution_uses_local_artifact_hashes_when_sha_un
     (snapshot_root / "config.json").write_bytes(config_bytes)
     (snapshot_root / "model.safetensors").write_bytes(weights_bytes)
 
-    def _snapshot_download(repo_id: str, revision: str, local_files_only: bool) -> str:
+    def _snapshot_download_artifact_only(
+        repo_id: str, revision: str, local_files_only: bool
+    ) -> str:
         assert repo_id == "org/artifact-model"
         assert revision == "refs/pr/7"
         assert local_files_only is True
         return str(snapshot_root)
 
-    fake_hf_module = types.ModuleType("huggingface_hub")
-    fake_hf_module.HfApi = _FailingHfApi
-    fake_hf_module.snapshot_download = _snapshot_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
-
-    builder = EmbeddingGraphBuilder(
+    fake_hf_module.snapshot_download = _snapshot_download_artifact_only
+    artifact_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="org/artifact-model",
         model_revision="refs/pr/7",
@@ -1038,7 +937,7 @@ def test_embedding_fingerprint_resolution_uses_local_artifact_hashes_when_sha_un
 
     expected_config = sha256(config_bytes).hexdigest()
     expected_weights = sha256(weights_bytes).hexdigest()
-    assert builder._resolve_model_fingerprint() == (
+    assert artifact_builder._resolve_model_fingerprint() == (
         "hf::org/artifact-model::revision=refs/pr/7"
         f"::config={expected_config}::weights={expected_weights}"
     )
@@ -1218,28 +1117,35 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     fake_load_dataset_for_hydration.assert_not_called()
 
 
-def test_collect_papers_revalidates_cache_when_dataset_source_changes(
+def test_collect_papers_dataset_source_revalidation_contracts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """Cached hydration should be revalidated against the selected dataset source."""
+    """Dataset-source mismatches should revalidate or fail closed when unresolved."""
     _disable_embedding_dep_check(monkeypatch)
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    source = "librarian-bots/arxiv-metadata-snapshot"
 
-    builder = EmbeddingGraphBuilder(
-        max_papers=2, use_streaming=False, client=MagicMock()
+    def _build_hydrated_builder(cache_root: str) -> EmbeddingGraphBuilder:
+        monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / cache_root))
+        local_builder = EmbeddingGraphBuilder(
+            max_papers=2, use_streaming=False, client=MagicMock()
+        )
+        _pin_model_fingerprint(monkeypatch, local_builder)
+        local_builder.embedding_cache.mark_hydrated(
+            dataset_source=source,
+            dataset_split=local_builder.dataset_split,
+            corpus_size=local_builder.corpus_size,
+            complete=True,
+        )
+        return local_builder
+
+    revalidate_builder = _build_hydrated_builder("cache-root-revalidate")
+    mark_hydrated_spy = MagicMock(
+        wraps=revalidate_builder.embedding_cache.mark_hydrated
     )
-    _pin_model_fingerprint(monkeypatch, builder)
-    builder.embedding_cache.mark_hydrated(
-        dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        dataset_split=builder.dataset_split,
-        corpus_size=builder.corpus_size,
-        complete=True,
+    monkeypatch.setattr(
+        revalidate_builder.embedding_cache, "mark_hydrated", mark_hydrated_spy
     )
-
-    mark_hydrated_spy = MagicMock(wraps=builder.embedding_cache.mark_hydrated)
-    monkeypatch.setattr(builder.embedding_cache, "mark_hydrated", mark_hydrated_spy)
-
     loaded_sources: list[tuple[bool, str | None]] = []
 
     def fake_load_dataset_for_hydration(
@@ -1249,50 +1155,35 @@ def test_collect_papers_revalidates_cache_when_dataset_source_changes(
         return "CShorten/ML-ArXiv-Papers", []
 
     monkeypatch.setattr(
-        builder,
+        revalidate_builder,
         "_load_dataset_for_hydration",
         fake_load_dataset_for_hydration,
     )
     monkeypatch.setattr(
-        builder, "_get_model_for_encoding", lambda: ConstantEncodeModel()
+        revalidate_builder,
+        "_get_model_for_encoding",
+        lambda: ConstantEncodeModel(),
     )
 
-    candidates = builder._select_candidates_from_loaded(
+    candidates = revalidate_builder._select_candidates_from_loaded(
         np.asarray([1.0, 0.0], dtype=np.float32)
     )
-
     assert candidates == []
-    assert loaded_sources == [(False, "librarian-bots/arxiv-metadata-snapshot")]
-
+    assert loaded_sources == [(False, source)]
     complete_flags = [
         call.kwargs["complete"] for call in mark_hydrated_spy.call_args_list
     ]
     assert complete_flags == [False]
 
-
-def test_collect_papers_rejects_source_mismatch_when_dataset_load_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
-) -> None:
-    """Offline fallback must not reuse cache from a different dataset source."""
-    _disable_embedding_dep_check(monkeypatch)
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=2, use_streaming=False, client=MagicMock()
-    )
-    _pin_model_fingerprint(monkeypatch, builder)
-    builder.embedding_cache.mark_hydrated(
-        dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        dataset_split=builder.dataset_split,
-        corpus_size=builder.corpus_size,
-        complete=True,
-    )
-
-    is_hydrated_spy = MagicMock(wraps=builder.embedding_cache.is_hydrated)
-    monkeypatch.setattr(builder.embedding_cache, "is_hydrated", is_hydrated_spy)
+    fail_closed_builder = _build_hydrated_builder("cache-root-fail-closed")
+    is_hydrated_spy = MagicMock(wraps=fail_closed_builder.embedding_cache.is_hydrated)
     monkeypatch.setattr(
-        builder,
+        fail_closed_builder.embedding_cache,
+        "is_hydrated",
+        is_hydrated_spy,
+    )
+    monkeypatch.setattr(
+        fail_closed_builder,
         "_load_dataset_for_hydration",
         MagicMock(side_effect=RuntimeError("dataset unavailable")),
     )
@@ -1301,15 +1192,14 @@ def test_collect_papers_rejects_source_mismatch_when_dataset_load_fails(
         RuntimeError,
         match="Failed to resolve hydration dataset source",
     ) as exc_info:
-        builder._select_candidates_from_loaded(np.asarray([1.0, 0.0], dtype=np.float32))
+        fail_closed_builder._select_candidates_from_loaded(
+            np.asarray([1.0, 0.0], dtype=np.float32)
+        )
 
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert str(exc_info.value.__cause__) == "dataset unavailable"
     assert is_hydrated_spy.call_count == 1
-    assert (
-        is_hydrated_spy.call_args.kwargs.get("dataset_source")
-        == "librarian-bots/arxiv-metadata-snapshot"
-    )
+    assert is_hydrated_spy.call_args.kwargs.get("dataset_source") == source
 
 
 def test_hydration_reset_restores_model_fingerprint(
