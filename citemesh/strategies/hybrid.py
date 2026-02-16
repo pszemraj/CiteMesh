@@ -297,6 +297,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 if isinstance(embedded, dict):
                     embeddings_map.update(embedded)
 
+        # Transient seed-encode failures should degrade to non-semantic reranking.
         if seed_embedding is None:
             return None
         return np.asarray(seed_embedding, dtype=np.float32)
