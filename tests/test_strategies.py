@@ -379,6 +379,24 @@ def test_hybrid_thresholds_and_default_budget(
     assert small_builder.max_semantic == 4
 
 
+def test_hybrid_implicit_defaults_preserve_citation_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Implicit hybrid defaults should reserve citation depth before semantic slots."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(
+        max_papers=40,
+        max_semantic=None,
+        max_references=20,
+        max_citations=20,
+        client=MagicMock(),
+    )
+
+    assert builder.citation_builder.max_papers == 31
+    assert builder.citation_builder.max_references == 15
+    assert builder.citation_builder.max_citations == 20
+
+
 def test_hybrid_propagates_refresh_reference_cache_to_citation_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

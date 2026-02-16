@@ -8,6 +8,7 @@ providing a single interface to all graph building strategies.
 
 import argparse
 import copy
+import json
 import logging
 import math
 import shutil
@@ -361,20 +362,24 @@ def _plot_overlay_metadata(export_metadata: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _resolved_hybrid_max_semantic(cli_args: argparse.Namespace) -> int:
+    """Resolve effective hybrid semantic cap from CLI arguments.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :return int: Effective ``max_semantic`` value.
+    """
+    if cli_args.max_semantic is None:
+        return max(0, min(int(DEFAULT_MAX_SEMANTIC), int(cli_args.max_papers) - 1))
+    return int(cli_args.max_semantic)
+
+
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
     """Return whether hybrid semantic branch is effectively enabled.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
     :return bool: ``True`` when hybrid semantic branch can run.
     """
-    if cli_args.max_semantic is None:
-        resolved_max_semantic = max(
-            0,
-            min(int(DEFAULT_MAX_SEMANTIC), int(cli_args.max_papers) - 1),
-        )
-    else:
-        resolved_max_semantic = int(cli_args.max_semantic)
-    return resolved_max_semantic > 0
+    return _resolved_hybrid_max_semantic(cli_args) > 0
 
 
 def _strategy_score_contract(strategy: str) -> Dict[str, object]:
@@ -519,13 +524,7 @@ def _validate_build_cli_contract(
             build_parser.error(
                 "--max-semantic must be between 0 and --max-papers - 1 for hybrid."
             )
-        if args.max_semantic is None:
-            resolved_max_semantic = max(
-                0,
-                min(int(DEFAULT_MAX_SEMANTIC), int(args.max_papers) - 1),
-            )
-        else:
-            resolved_max_semantic = int(args.max_semantic)
+        resolved_max_semantic = _resolved_hybrid_max_semantic(args)
 
         if resolved_max_semantic == 0:
             ignored_embedding_options = sorted(
@@ -1036,9 +1035,9 @@ Examples:
         type=_non_negative_int,
         default=None,
         help=(
-            "Maximum non-seed semantic papers to add. Reserves citation capacity via "
-            "max-papers - max-semantic and must be <= max-papers - 1 "
-            "(default: min(12, max-papers - 1))"
+            "Maximum non-seed semantic papers to add (must be <= max-papers - 1). "
+            "When omitted, hybrid uses implicit citation-depth reservation before "
+            "semantic expansion (default cap: min(12, max-papers - 1))."
         ),
     )
 
@@ -1136,6 +1135,133 @@ def resolve_output_paths(
         output_paths[fmt] = Path(output_base + EXPORT_EXTENSIONS[fmt])
 
     return output_paths
+
+
+def _strip_known_export_suffix(filename: str) -> str:
+    """Strip a known export suffix from a filename-like token.
+
+    :param str filename: Candidate filename token.
+    :return str: Filename with trailing known export suffix removed.
+    """
+    lowered = filename.lower()
+    for suffix in KNOWN_EXPORT_SUFFIXES:
+        if lowered.endswith(suffix):
+            return filename[: -len(suffix)]
+    return filename
+
+
+def resolve_graph_config_path(output_paths: Dict[str, Path], strategy: str) -> Path:
+    """Resolve sidecar graph-config output path for a build run.
+
+    :param Dict[str, Path] output_paths: Resolved export artifact paths.
+    :param str strategy: Active strategy name.
+    :return Path: Graph-config JSON output path.
+    """
+    if not output_paths:
+        return Path(f"{strategy or 'graph'}.config.json")
+
+    anchor_path = next(iter(output_paths.values()))
+    stem = _strip_known_export_suffix(anchor_path.name)
+    if not stem:
+        stem = strategy or "graph"
+    return anchor_path.parent / f"{stem}.config.json"
+
+
+def _drop_none_values(value: Any) -> Any:
+    """Recursively drop ``None`` entries from dictionaries/lists.
+
+    :param Any value: Arbitrary JSON-serializable object.
+    :return Any: Copy with ``None``-valued mapping entries removed.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _drop_none_values(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_drop_none_values(item) for item in value]
+    return value
+
+
+def _build_graph_config_payload(
+    cli_args: argparse.Namespace,
+    seed_id: str,
+    metadata: Dict[str, Any],
+    selected_formats: List[str],
+    output_paths: Dict[str, Path],
+) -> Dict[str, Any]:
+    """Build sidecar graph-config payload for reproducibility and auditability.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :param str seed_id: Resolved seed paper identifier.
+    :param Dict[str, Any] metadata: Run metadata payload used by exporters.
+    :param List[str] selected_formats: Formats requested for export.
+    :param Dict[str, Path] output_paths: Resolved export artifact paths.
+    :return Dict[str, Any]: JSON-safe run configuration payload.
+    """
+    strategy = str(cli_args.strategy)
+    semantic_enabled = strategy == "embedding" or (
+        strategy == "hybrid" and _hybrid_semantic_branch_enabled(cli_args)
+    )
+    embedding_config: Optional[Dict[str, Any]] = None
+    if semantic_enabled:
+        embedding_config = {
+            "model": cli_args.model,
+            "model_revision": cli_args.model_revision,
+            "dataset_split": cli_args.dataset_split,
+            "corpus_size": None if cli_args.all_corpus else int(cli_args.corpus_size),
+            "all_corpus": bool(cli_args.all_corpus),
+            "truncate_dim": cli_args.truncate_dim,
+            "streaming": bool(cli_args.streaming),
+            "storage_precision": cli_args.storage_precision,
+            "binary_prefilter": bool(cli_args.binary_prefilter),
+            "binary_rescore_multiplier": int(cli_args.binary_rescore_multiplier),
+            "calibration_sample_size": int(cli_args.calibration_sample_size),
+            "cache_compression": cli_args.cache_compression,
+            "cache_compression_level": int(cli_args.cache_compression_level),
+            "encode_batch_size": int(cli_args.encode_batch_size),
+            "torch_compile": bool(cli_args.torch_compile),
+            "force_rebuild_cache": bool(cli_args.force_rebuild_cache),
+        }
+
+    payload = {
+        "schema_version": 1,
+        "build": {
+            "paper_id_input": cli_args.paper_id,
+            "paper_id_canonical": canonicalize_paper_id_for_metadata(cli_args.paper_id),
+            "seed_id": seed_id,
+            "strategy": strategy,
+            "max_papers": int(cli_args.max_papers),
+            "citation": (
+                {
+                    "max_citations": int(cli_args.max_citations),
+                    "max_references": int(cli_args.max_references),
+                    "fetch_references": not bool(cli_args.no_references),
+                    "refresh_reference_cache": bool(cli_args.refresh_reference_cache),
+                }
+                if strategy in {"citation", "hybrid", "recommendation"}
+                else None
+            ),
+            "hybrid": (
+                {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}
+                if strategy == "hybrid"
+                else None
+            ),
+            "embedding": embedding_config,
+            "layout": {
+                "spring_iterations": int(cli_args.spring_iterations),
+                "seed": cli_args.seed,
+                "dpi": int(cli_args.dpi),
+                "theme": cli_args.theme,
+            },
+            "timestamp_included": bool(cli_args.include_timestamp),
+            "exports_requested": list(selected_formats),
+        },
+        "outputs": {fmt: str(path) for fmt, path in sorted(output_paths.items())},
+        "metadata": metadata,
+    }
+    return _drop_none_values(payload)
 
 
 def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
@@ -1410,8 +1536,27 @@ def main() -> None:
 
             if "graphml" in output_paths:
                 exporter.to_graphml(output_paths["graphml"])
-            saved_artifact_count = len(output_paths)
-            output_dirs = sorted({str(path.parent) for path in output_paths.values()})
+
+            graph_config_path = resolve_graph_config_path(
+                output_paths=output_paths,
+                strategy=args.strategy,
+            )
+            graph_config_payload = _build_graph_config_payload(
+                cli_args=args,
+                seed_id=seed_id,
+                metadata=metadata,
+                selected_formats=selected_formats,
+                output_paths=output_paths,
+            )
+            graph_config_path.write_text(
+                json.dumps(graph_config_payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            artifact_paths = dict(output_paths)
+            artifact_paths["config"] = graph_config_path
+            saved_artifact_count = len(artifact_paths)
+            output_dirs = sorted({str(path.parent) for path in artifact_paths.values()})
             if saved_artifact_count:
                 if len(output_dirs) == 1:
                     logger.info(

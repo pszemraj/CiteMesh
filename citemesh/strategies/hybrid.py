@@ -27,6 +27,8 @@ from citemesh.strategies.embedding import (
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_SEMANTIC = 12
+HYBRID_REFERENCE_FLOOR = 15
+HYBRID_CITATION_FLOOR = 15
 
 
 class HybridGraphBuilder(GraphBuilderStrategy):
@@ -99,6 +101,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             best-effort inner-model ``torch.compile`` optimization.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
+        semantic_cap_is_implicit = max_semantic is None
         if max_semantic is None:
             resolved_max_semantic = max(0, min(DEFAULT_MAX_SEMANTIC, max_papers - 1))
         else:
@@ -115,6 +118,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         super().__init__(max_papers)
         self.client = client or get_client()
         self.max_semantic = resolved_max_semantic
+        self._semantic_cap_is_implicit = semantic_cap_is_implicit
 
         if self.max_semantic > 0:
             _check_embedding_deps()
@@ -142,12 +146,36 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         else:
             self.embedding_builder = None
 
-        # Create citation and embedding builders (with same seed for consistency)
+        # Create citation and embedding builders (with same seed for consistency).
         citation_papers = max_papers - self.max_semantic
+        effective_max_references = max_references
+        if self._semantic_cap_is_implicit:
+            citation_floor = (
+                1
+                + min(max_references, HYBRID_REFERENCE_FLOOR)
+                + min(max_citations, HYBRID_CITATION_FLOOR)
+            )
+            citation_papers = min(max_papers, max(citation_papers, citation_floor))
+
+            citation_slots = max(0, citation_papers - 1)
+            reserved_citations = min(
+                max_citations, HYBRID_CITATION_FLOOR, citation_slots
+            )
+            reference_cap = max(0, citation_slots - reserved_citations)
+            effective_max_references = min(max_references, reference_cap)
+            if effective_max_references < max_references:
+                logger.debug(
+                    "Hybrid implicit defaults reserve citation depth: "
+                    "max_references adjusted %d -> %d (citation_budget=%d).",
+                    max_references,
+                    effective_max_references,
+                    citation_papers,
+                )
+
         self.citation_builder = CitationGraphBuilder(
             max_papers=citation_papers,
             max_citations=max_citations,
-            max_references=max_references,
+            max_references=effective_max_references,
             fetch_references=fetch_references,
             refresh_reference_cache=refresh_reference_cache,
             client=self.client,
@@ -177,7 +205,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         # Step 2: Enrich with semantic matches
         if self.max_semantic > 0:
-            logger.info(f"Enriching with up to {self.max_semantic} semantic matches...")
+            semantic_budget = min(
+                self.max_semantic, max(0, self.max_papers - len(papers))
+            )
+            if semantic_budget <= 0:
+                return papers
+            logger.info(f"Enriching with up to {semantic_budget} semantic matches...")
 
             try:
                 semantic_papers = self.embedding_builder.collect_papers(seed_id)
@@ -185,7 +218,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 # Add new papers not already in collection
                 added = 0
                 for paper_id, paper in semantic_papers.items():
-                    if added >= self.max_semantic:
+                    if added >= semantic_budget:
                         break
                     if len(papers) >= self.max_papers:
                         break

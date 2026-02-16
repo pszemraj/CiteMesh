@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import re
 import runpy
 import shlex
@@ -19,7 +20,11 @@ import networkx as nx
 import pytest
 
 from citemesh import cli as cli_module
-from citemesh.cli import canonicalize_paper_id_for_metadata, resolve_output_paths
+from citemesh.cli import (
+    canonicalize_paper_id_for_metadata,
+    resolve_graph_config_path,
+    resolve_output_paths,
+)
 from citemesh.core import Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE
@@ -602,6 +607,9 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
                 str(output),
             ],
         )
+        config_files = sorted(Path(tmpdir).rglob("*.config.json"))
+        assert len(config_files) == 1
+        config_payload = json.loads(config_files[0].read_text())
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     assert "plot_metadata" in captured
@@ -616,6 +624,12 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
     assert all("PNG saved to" not in message for message in logged)
     assert all("Graph JSON saved to" not in message for message in logged)
     assert all("Creating visualization..." not in message for message in logged)
+    assert config_payload["build"]["strategy"] == "hybrid"
+    assert config_payload["build"]["paper_id_canonical"] == "arxiv:2508.14040"
+    assert config_payload["metadata"]["strategy"] == "hybrid"
+    assert config_payload["metadata"]["score_contract"]["score_type"] == (
+        "hybrid_similarity_composite"
+    )
 
 
 def test_build_metadata_includes_score_contract(
@@ -1115,6 +1129,24 @@ def test_output_path_and_slug_contracts() -> None:
             strategy="hybrid",
         )
         assert paths == expected
+    config_cases = [
+        (
+            {"png": Path("out/seed/hybrid.png")},
+            Path("out/seed/hybrid.config.json"),
+        ),
+        (
+            {"json": Path("reports/example.json")},
+            Path("reports/example.config.json"),
+        ),
+        (
+            {"plotly": Path("reports/example.plotly.html")},
+            Path("reports/example.config.json"),
+        ),
+    ]
+    for output_paths, expected_path in config_cases:
+        assert (
+            resolve_graph_config_path(output_paths, strategy="hybrid") == expected_path
+        )
 
     for raw_id, expected in get_paper_id_normalization_cases():
         if raw_id.startswith("http://") or raw_id.startswith("https://"):

@@ -172,9 +172,12 @@ def test_exporter_json_graphml_contracts_and_determinism(tmp_path: Path) -> None
 
     payload = json.loads(json_path.read_text())
     assert payload["seed_id"] == seed_id
-    assert payload["metadata"]["strategy"] == "citation"
+    assert "metadata" not in payload
+    assert payload["summary"] == {"nodes": 2, "edges": 1}
     assert len(payload["nodes"]) == 2
     assert payload["edges"][0]["weight"] == pytest.approx(0.7)
+    assert payload["edges"][0]["source_title"] == "Related Paper"
+    assert payload["edges"][0]["target_title"] == "Seed Paper"
 
     graphml = nx.read_graphml(graphml_path)
     seed_node = graphml.nodes[seed_id]
@@ -522,10 +525,14 @@ def test_export_ordering_is_stable_across_json_graphml_and_plotly_edge_trace(
 
     payload = json.loads(json_path.read_text())
     assert [node["id"] for node in payload["nodes"]] == ["a", "seed", "z"]
-    assert payload["edges"] == [
-        {"source": "a", "target": "z", "weight": pytest.approx(0.5)},
-        {"source": "seed", "target": "z", "weight": pytest.approx(0.7)},
+    assert [edge["source"] for edge in payload["edges"]] == ["a", "seed"]
+    assert [edge["target"] for edge in payload["edges"]] == ["z", "z"]
+    assert [edge["weight"] for edge in payload["edges"]] == [
+        pytest.approx(0.5),
+        pytest.approx(0.7),
     ]
+    assert payload["edges"][0]["source_title"] == "Node A"
+    assert payload["edges"][0]["target_title"] == "Node Z"
 
     graphml_xml = ET.fromstring(graphml_path.read_text())
     ns = {"g": "http://graphml.graphdrawing.org/xmlns"}

@@ -90,6 +90,7 @@ def _check_embedding_deps() -> None:
 ENCODE_BATCH_SIZE = 32
 HYDRATION_FLUSH_SIZE = 256
 CANDIDATE_MULTIPLIER = 4
+CITATION_COUNT_ENRICHMENT_LIMIT = 20
 ARXIV_DATASET_CANDIDATES = (
     "librarian-bots/arxiv-metadata-snapshot",
     "CShorten/ML-ArXiv-Papers",
@@ -1965,15 +1966,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
     def _update_citation_counts(self, papers: Dict[str, Paper]) -> None:
         """
-        Optionally enrich top papers with citation counts from Semantic Scholar.
+        Enrich top semantic candidates with citation counts from Semantic Scholar.
 
         :param Dict[str, Paper] papers: Dictionary of collected papers (including seed)
         """
-        logger.info("Fetching citation counts from Semantic Scholar (optional)...")
-
         targets = [
             (pid, paper)
-            for pid, paper in list(papers.items())[:10]
+            for pid, paper in list(papers.items())[:CITATION_COUNT_ENRICHMENT_LIMIT]
             if not paper.is_seed
             and not (isinstance(pid, str) and pid.startswith("query:"))
             and not (isinstance(pid, str) and pid.startswith("arxiv_"))
@@ -1982,13 +1981,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not targets:
             return
 
-        progress_enabled = sys.stderr.isatty() and len(targets) > 25
+        logger.info(
+            "Fetching citation counts from Semantic Scholar for up to %d papers...",
+            len(targets),
+        )
+
+        progress_enabled = sys.stderr.isatty() and len(targets) > 1
         progress_bar = (
             tqdm(
                 targets,
-                desc="Citation metadata",
+                desc="Citation counts",
                 unit="papers",
                 dynamic_ncols=True,
+                leave=False,
             )
             if progress_enabled
             else None

@@ -1534,6 +1534,54 @@ def test_embedding_candidate_search_logs_comparison_counts(
     )
 
 
+def test_embedding_citation_enrichment_logs_target_count(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Citation enrichment should log bounded target count and update paper metadata."""
+    _disable_embedding_dep_check(monkeypatch)
+    builder = EmbeddingGraphBuilder(max_papers=5, top_k=2, client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder)
+
+    target = Paper(
+        paper_id="paper-1",
+        title="Paper One",
+        year=2024,
+        abstract="paper one abstract",
+        is_seed=False,
+    )
+    enriched = Paper(
+        paper_id="paper-1",
+        title="Paper One",
+        year=2024,
+        abstract="paper one abstract",
+        citation_count=77,
+        is_seed=False,
+    )
+    builder.client.get_paper = MagicMock(return_value=enriched)
+    papers = {
+        "seed": Paper(
+            paper_id="seed",
+            title="Seed",
+            year=2024,
+            abstract="seed abstract",
+            is_seed=True,
+        ),
+        "paper-1": target,
+    }
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        builder._update_citation_counts(papers)
+
+    assert papers["paper-1"].citation_count == 77
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "Fetching citation counts from Semantic Scholar for up to 1 papers..."
+        in message
+        for message in log_messages
+    )
+
+
 def test_embedding_build_graph_persists_runtime_metadata(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
