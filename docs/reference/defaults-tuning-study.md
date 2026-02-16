@@ -94,7 +94,7 @@ Defaults were adjusted to:
 
 - `--top-k` default: `3` (from `2`)
 - Hybrid implicit semantic cap: `min(12, max-papers - 1)` (from `min(10, max-papers - 1)`)
-- Hybrid implicit collection policy now preserves citation depth floors before semantic expansion (`15` references + `15` citations when budget allows).
+- Hybrid adjudication now reranks a merged citation+semantic candidate pool against the seed and applies `max_semantic` only to semantic-only additions.
 - `--log-width` default: `140` (from `160`) for more readable terminal output
 - Hydration cache flush window: `256` records (encode micro-batch remains `32`)
 
@@ -103,6 +103,7 @@ Rationale:
 - `top_k=2` produced overly fragmented embedding graphs.
 - `top_k=3` gave the best quality/speed balance in this set.
 - Hybrid semantic cap `12` improved coverage and similarity quality without harming connectivity.
+- Seed-centric reranking of merged candidates removes low-relevance citation outliers while preserving high-confidence overlap papers.
 - Larger hydration flush windows dramatically reduced long-run cache append overhead while preserving stable encode batch sizing.
 
 ## Artifacts

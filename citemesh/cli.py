@@ -413,8 +413,9 @@ def _strategy_score_contract(strategy: str) -> Dict[str, object]:
             **base_contract,
             "score_type": "hybrid_similarity_composite",
             "adjudication_policy": (
-                "citation-first union; semantic additions include only new papers "
-                "up to max_semantic."
+                "seed-relevance-ranked union across citation+semantic candidates "
+                "with overlap priority; purely semantic additions are capped by "
+                "max_semantic."
             ),
         }
     return {

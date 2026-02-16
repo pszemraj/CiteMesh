@@ -6,7 +6,7 @@ comprehensive paper discovery.
 """
 
 import logging
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
 import numpy as np
@@ -16,6 +16,7 @@ from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
+    deterministic_sort_key,
     select_capped_undirected_edges,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
@@ -27,8 +28,10 @@ from citemesh.strategies.embedding import (
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_SEMANTIC = 12
-HYBRID_REFERENCE_FLOOR = 15
-HYBRID_CITATION_FLOOR = 15
+HYBRID_SEMANTIC_CANDIDATE_MULTIPLIER = 3
+HYBRID_SEED_RERANK_WEIGHTS = (0.62, 0.16, 0.14, 0.08)
+HYBRID_SOURCE_OVERLAP_BONUS = 0.10
+HYBRID_CITATION_SOURCE_BONUS = 0.02
 
 
 class HybridGraphBuilder(GraphBuilderStrategy):
@@ -76,9 +79,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param bool refresh_reference_cache: Whether citation/reference lookups bypass persisted cache reads.
         :param Optional[int] max_semantic: Maximum non-seed semantic papers added during
             enrichment. Values must satisfy ``0 <= max_semantic <= max_papers - 1``.
-            When omitted, defaults to ``min(12, max_papers - 1)`` and hybrid keeps an
-            implicit citation-depth floor before allocating remaining capacity to the
-            semantic branch.
+            When omitted, defaults to ``min(12, max_papers - 1)``.
         :param str model_name: Embedding model name
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
@@ -100,7 +101,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             best-effort inner-model ``torch.compile`` optimization.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
-        semantic_cap_is_implicit = max_semantic is None
         if max_semantic is None:
             resolved_max_semantic = max(0, min(DEFAULT_MAX_SEMANTIC, max_papers - 1))
         else:
@@ -117,14 +117,21 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         super().__init__(max_papers)
         self.client = client or get_client()
         self.max_semantic = resolved_max_semantic
-        self._semantic_cap_is_implicit = semantic_cap_is_implicit
+        self._semantic_candidate_cap = 0
 
         if self.max_semantic > 0:
             _check_embedding_deps()
+            self._semantic_candidate_cap = max(
+                self.max_semantic,
+                min(
+                    max_papers - 1,
+                    self.max_semantic * HYBRID_SEMANTIC_CANDIDATE_MULTIPLIER,
+                ),
+            )
             self.embedding_builder = EmbeddingGraphBuilder(
                 # Embedding strategy budgets include the seed node; hybrid's
                 # max_semantic contract counts only added non-seed neighbors.
-                max_papers=self.max_semantic + 1,
+                max_papers=self._semantic_candidate_cap + 1,
                 model_name=model_name,
                 model_revision=model_revision,
                 dataset_split=dataset_split,
@@ -145,43 +152,235 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         else:
             self.embedding_builder = None
 
-        # Create citation and embedding builders (with same seed for consistency).
-        citation_papers = max_papers - self.max_semantic
-        effective_max_references = max_references
-        if self._semantic_cap_is_implicit:
-            citation_floor = (
-                1
-                + min(max_references, HYBRID_REFERENCE_FLOOR)
-                + min(max_citations, HYBRID_CITATION_FLOOR)
-            )
-            citation_papers = min(max_papers, max(citation_papers, citation_floor))
-
-            citation_slots = max(0, citation_papers - 1)
-            reserved_citations = min(
-                max_citations, HYBRID_CITATION_FLOOR, citation_slots
-            )
-            reference_cap = max(0, citation_slots - reserved_citations)
-            effective_max_references = min(max_references, reference_cap)
-            if effective_max_references < max_references:
-                logger.debug(
-                    "Hybrid implicit defaults reserve citation depth: "
-                    "max_references adjusted %d -> %d (citation_budget=%d).",
-                    max_references,
-                    effective_max_references,
-                    citation_papers,
-                )
+        citation_candidates = (
+            max_papers
+            if self.max_semantic <= 0
+            else 1 + int(max_references) + int(max_citations)
+        )
+        self._citation_candidate_cap = citation_candidates
 
         self.citation_builder = CitationGraphBuilder(
-            max_papers=citation_papers,
+            max_papers=citation_candidates,
             max_citations=max_citations,
-            max_references=effective_max_references,
+            max_references=max_references,
             fetch_references=fetch_references,
             refresh_reference_cache=refresh_reference_cache,
             client=self.client,
         )
 
         # Track paper sources for adaptive similarity
-        self.paper_sources: Dict[str, str] = {}  # paper_id -> "citation" or "semantic"
+        self.paper_sources: Dict[str, str] = {}  # paper_id -> citation|semantic|both
+
+    def _merge_paper_metadata(self, preferred: Paper, incoming: Paper) -> Paper:
+        """Merge supplemental metadata from an alternate source into ``preferred``.
+
+        :param Paper preferred: Canonical paper record to retain.
+        :param Paper incoming: Supplemental paper record to merge.
+        :return Paper: ``preferred`` with missing metadata hydrated.
+        """
+        if not preferred.abstract and incoming.abstract:
+            preferred.abstract = incoming.abstract
+        if preferred.year is None and incoming.year is not None:
+            preferred.year = incoming.year
+        if (not preferred.authors) and incoming.authors:
+            preferred.authors = incoming.authors
+        if preferred.citation_count <= 0 and incoming.citation_count > 0:
+            preferred.citation_count = incoming.citation_count
+        if (not preferred.categories) and incoming.categories:
+            preferred.categories = incoming.categories
+        if (not preferred.references) and incoming.references:
+            preferred.references = incoming.references
+        return preferred
+
+    def _paper_embedding_metadata(self, paper: Paper) -> Dict[str, object]:
+        """Build embedding-cache metadata payload for a paper.
+
+        :param Paper paper: Paper to normalize.
+        :return Dict[str, object]: Metadata payload accepted by embedding cache.
+        """
+        return {
+            "title": paper.title or "",
+            "abstract": paper.abstract or "",
+            "year": paper.year,
+            "authors": [author.name for author in paper.authors],
+            "categories": list(paper.categories or []),
+        }
+
+    def _seed_query_text(self, seed_paper: Paper) -> str:
+        """Build query text used to embed the hybrid seed paper.
+
+        :param Paper seed_paper: Seed paper record.
+        :return str: Query text payload used for encoding.
+        """
+        title = (seed_paper.title or "").strip()
+        abstract = (seed_paper.abstract or "").strip()
+        if not title and not abstract:
+            return str(seed_paper.paper_id)
+        return ". ".join(part for part in (title, abstract) if part)
+
+    def _ensure_candidate_embeddings(
+        self, seed_paper: Paper, candidates: Dict[str, Paper]
+    ) -> Optional[np.ndarray]:
+        """Ensure seed/candidate embeddings are materialized for reranking.
+
+        :param Paper seed_paper: Seed paper.
+        :param Dict[str, Paper] candidates: Candidate paper pool.
+        :return Optional[np.ndarray]: Seed embedding when available.
+        """
+        if self.embedding_builder is None:
+            return None
+
+        embeddings_map = getattr(self.embedding_builder, "embeddings", None)
+        if not isinstance(embeddings_map, dict):
+            return None
+
+        seed_embedding = embeddings_map.get(seed_paper.paper_id)
+        if seed_embedding is None:
+            try:
+                seed_text = self.embedding_builder.model_profile.format_query(
+                    self._seed_query_text(seed_paper),
+                    {
+                        "title": seed_paper.title or "",
+                        "abstract": seed_paper.abstract or "",
+                    },
+                )
+                seed_embedding = self.embedding_builder._encode_texts(
+                    [seed_text], show_progress_bar=False
+                )[0]
+            except Exception:
+                seed_embedding = None
+            if seed_embedding is not None:
+                embeddings_map[seed_paper.paper_id] = seed_embedding
+
+        missing_ids = [
+            paper_id for paper_id in candidates if paper_id not in embeddings_map
+        ]
+        if missing_ids and seed_embedding is not None:
+            metadata_map = {
+                paper_id: self._paper_embedding_metadata(candidates[paper_id])
+                for paper_id in missing_ids
+            }
+            embedding_cache = getattr(self.embedding_builder, "embedding_cache", None)
+            get_model_for_encoding = getattr(
+                self.embedding_builder, "_get_model_for_encoding", None
+            )
+            model_profile = getattr(self.embedding_builder, "model_profile", None)
+            if (
+                embedding_cache is not None
+                and callable(getattr(embedding_cache, "get_embeddings", None))
+                and callable(get_model_for_encoding)
+                and model_profile is not None
+                and callable(getattr(model_profile, "format_document", None))
+            ):
+                try:
+                    embedded = embedding_cache.get_embeddings(
+                        metadata_map,
+                        get_model_for_encoding(),
+                        batch_size=min(
+                            int(
+                                getattr(self.embedding_builder, "encode_batch_size", 32)
+                            ),
+                            len(metadata_map),
+                        ),
+                        show_progress=False,
+                        text_builder=model_profile.format_document,
+                    )
+                except Exception:
+                    embedded = {}
+                if isinstance(embedded, dict):
+                    embeddings_map.update(embedded)
+
+        return np.asarray(seed_embedding, dtype=np.float32)
+
+    def _seed_relevance_score(
+        self,
+        seed_embedding: Optional[np.ndarray],
+        seed_paper: Paper,
+        candidate: Paper,
+        source_tags: Set[str],
+        max_citation_count: int,
+    ) -> float:
+        """Score candidate relevance to seed for hybrid adjudication.
+
+        :param Optional[np.ndarray] seed_embedding: Seed embedding vector when available.
+        :param Paper seed_paper: Seed paper.
+        :param Paper candidate: Candidate paper.
+        :param Set[str] source_tags: Candidate provenance tags.
+        :param int max_citation_count: Max citation count in candidate pool.
+        :return float: Relevance score in ``[0, 1]``.
+        """
+        semantic_score = 0.0
+        if (
+            seed_embedding is not None
+            and self.embedding_builder is not None
+            and isinstance(getattr(self.embedding_builder, "embeddings", None), dict)
+            and candidate.paper_id in self.embedding_builder.embeddings
+        ):
+            candidate_embedding = np.asarray(
+                self.embedding_builder.embeddings[candidate.paper_id], dtype=np.float32
+            )
+            cosine = float(
+                np.clip(np.dot(seed_embedding, candidate_embedding), -1.0, 1.0)
+            )
+            semantic_score = 0.5 * (cosine + 1.0)
+
+        temporal_score = self.temporal_similarity(seed_paper, candidate)
+        citation_denominator = max(max_citation_count, 1)
+        citation_score = float(
+            np.log1p(max(candidate.citation_count, 0))
+            / np.log1p(citation_denominator + 1)
+        )
+        biblio_score = self.bibliographic_coupling(seed_paper, candidate)
+
+        semantic_w, temporal_w, citation_w, biblio_w = HYBRID_SEED_RERANK_WEIGHTS
+        score = (
+            semantic_w * semantic_score
+            + temporal_w * temporal_score
+            + citation_w * citation_score
+            + biblio_w * biblio_score
+        )
+        if "citation" in source_tags and "semantic" in source_tags:
+            score += HYBRID_SOURCE_OVERLAP_BONUS
+        elif "citation" in source_tags:
+            score += HYBRID_CITATION_SOURCE_BONUS
+        return float(min(score, 1.0))
+
+    def _rank_candidates(
+        self,
+        seed_paper: Paper,
+        candidates: Dict[str, Paper],
+        candidate_sources: Dict[str, Set[str]],
+    ) -> List[str]:
+        """Return candidate IDs ranked by seed-centric hybrid relevance.
+
+        :param Paper seed_paper: Seed paper.
+        :param Dict[str, Paper] candidates: Candidate paper pool.
+        :param Dict[str, Set[str]] candidate_sources: Candidate provenance mapping.
+        :return List[str]: Ranked candidate IDs.
+        """
+        if not candidates:
+            return []
+
+        seed_embedding = self._ensure_candidate_embeddings(seed_paper, candidates)
+        max_citation_count = max(
+            (paper.citation_count for paper in candidates.values()), default=0
+        )
+        scored: List[Tuple[float, str, int]] = []
+        for idx, (paper_id, paper) in enumerate(candidates.items()):
+            score = self._seed_relevance_score(
+                seed_embedding=seed_embedding,
+                seed_paper=seed_paper,
+                candidate=paper,
+                source_tags=candidate_sources.get(paper_id, {"citation"}),
+                max_citation_count=max_citation_count,
+            )
+            scored.append((score, paper_id, idx))
+        scored.sort(
+            key=lambda item: deterministic_sort_key(
+                item[0], item[1], stable_index=item[2]
+            )
+        )
+        return [paper_id for _, paper_id, _ in scored]
 
     def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
@@ -191,48 +390,87 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Combined dictionary of papers
         """
-        papers = {}
+        papers: Dict[str, Paper] = {}
         self.paper_sources = {}
 
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")
         citation_papers = self.citation_builder.collect_papers(seed_id)
+        seed_paper = next(
+            (paper for paper in citation_papers.values() if paper.is_seed), None
+        )
+        if seed_paper is None:
+            raise RuntimeError(
+                "Hybrid collection failed: citation branch returned no seed"
+            )
+        papers[seed_paper.paper_id] = seed_paper
+        self.paper_sources[seed_paper.paper_id] = "citation"
 
+        candidate_pool: Dict[str, Paper] = {}
+        candidate_sources: Dict[str, Set[str]] = {}
         for paper_id, paper in citation_papers.items():
-            papers[paper_id] = paper
-            self.paper_sources[paper_id] = "citation"
+            if paper_id == seed_paper.paper_id or paper.is_seed:
+                continue
+            candidate_pool[paper_id] = paper
+            candidate_sources[paper_id] = {"citation"}
+
+        if self.embedding_builder is None:
+            for paper_id, paper in candidate_pool.items():
+                if len(papers) >= self.max_papers:
+                    break
+                papers[paper_id] = paper
+                self.paper_sources[paper_id] = "citation"
+            return papers
 
         # Step 2: Enrich with semantic matches
-        if self.max_semantic > 0:
-            semantic_budget = min(
-                self.max_semantic, max(0, self.max_papers - len(papers))
+        semantic_budget = min(self.max_semantic, max(0, self.max_papers - 1))
+        if semantic_budget <= 0:
+            ranked_ids = self._rank_candidates(
+                seed_paper, candidate_pool, candidate_sources
             )
-            if semantic_budget <= 0:
-                return papers
-            logger.info(f"Enriching with up to {semantic_budget} semantic matches...")
+            for paper_id in ranked_ids:
+                if len(papers) >= self.max_papers:
+                    break
+                papers[paper_id] = candidate_pool[paper_id]
+                self.paper_sources[paper_id] = "citation"
+            return papers
 
-            try:
-                semantic_papers = self.embedding_builder.collect_papers(seed_id)
+        logger.info("Enriching with up to %s semantic matches...", semantic_budget)
 
-                # Add new papers not already in collection
-                added = 0
-                for paper_id, paper in semantic_papers.items():
-                    if added >= semantic_budget:
-                        break
-                    if len(papers) >= self.max_papers:
-                        break
-                    if paper.is_seed:
-                        continue
-                    if paper_id in papers:
-                        continue
-                    papers[paper_id] = paper
-                    self.paper_sources[paper_id] = "semantic"
-                    added += 1
+        try:
+            semantic_papers = self.embedding_builder.collect_papers(seed_id)
+        except Exception as exc:
+            raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
-                logger.info(f"Added {added} semantic papers")
+        for paper_id, paper in semantic_papers.items():
+            if paper.is_seed:
+                continue
+            if paper_id in candidate_pool:
+                candidate_pool[paper_id] = self._merge_paper_metadata(
+                    candidate_pool[paper_id], paper
+                )
+                candidate_sources[paper_id].add("semantic")
+                continue
+            candidate_pool[paper_id] = paper
+            candidate_sources[paper_id] = {"semantic"}
 
-            except Exception as exc:
-                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
+        ranked_ids = self._rank_candidates(
+            seed_paper, candidate_pool, candidate_sources
+        )
+        added_semantic = 0
+        for paper_id in ranked_ids:
+            if len(papers) >= self.max_papers:
+                break
+            tags = candidate_sources.get(paper_id, {"citation"})
+            semantic_only = "semantic" in tags and "citation" not in tags
+            if semantic_only and added_semantic >= semantic_budget:
+                continue
+            papers[paper_id] = candidate_pool[paper_id]
+            if semantic_only:
+                added_semantic += 1
+            self.paper_sources[paper_id] = "both" if len(tags) > 1 else next(iter(tags))
+
+        logger.info("Added %s semantic papers", added_semantic)
 
         return papers
 
@@ -263,11 +501,24 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             emb2 = self.embedding_builder.embeddings[paper2.paper_id]
             embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
 
+        source1_has_semantic = source1 in {"semantic", "both"}
+        source2_has_semantic = source2 in {"semantic", "both"}
+        source1_has_citation = source1 in {"citation", "both"}
+        source2_has_citation = source2 in {"citation", "both"}
+
         # Adaptive weighting by relationship provenance.
-        if source1 == "semantic" and source2 == "semantic":
+        if (
+            source1_has_semantic
+            and source2_has_semantic
+            and not (source1_has_citation and source2_has_citation)
+        ):
             # Both semantic: emphasize embeddings.
             weights = HYBRID_CONFIG.semantic_semantic_weights
-        elif source1 == "citation" and source2 == "citation":
+        elif (
+            source1_has_citation
+            and source2_has_citation
+            and not (source1_has_semantic and source2_has_semantic)
+        ):
             # Both citation: emphasize bibliographic coupling.
             weights = HYBRID_CONFIG.citation_citation_weights
         else:

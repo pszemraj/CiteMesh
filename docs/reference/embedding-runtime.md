@@ -41,6 +41,19 @@ Compile policy:
 - On cold-cache runs that must hydrate embeddings, compile is deferred for that run to avoid Inductor compile/recompile overhead during long corpus hydration.
 - On warm-cache runs (matching hydrated cache already present), compile is attempted normally.
 
+## Int8 Retrieval Pipeline
+
+When `--storage-precision int8` is active, retrieval uses a two-stage path:
+
+- Stage 1 (`binary_prefilter`): approximate shortlist with Hamming distance over bit-packed binary sign sketches.
+- Stage 2 (`binary_rescore_multiplier`): exact dot-product rescoring on int8/dequantized vectors for the shortlist.
+
+Interpretation:
+
+- `binary_prefilter_enabled=true` means the namespace is configured to use Stage 1.
+- `binary_prefilter_used_for_query=true` means Stage 1 was actually used for this query (not bypassed due compatibility fallback).
+- `binary_rescore_multiplier=8` means CiteMesh rescored `top_k * 8` shortlisted candidates exactly before taking final top-k.
+
 ## Dependency Floor
 
 - Embedding workflows require `torch>=2.9.0` (plus `sentence-transformers` and `datasets`).

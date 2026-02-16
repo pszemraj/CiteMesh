@@ -152,6 +152,8 @@ ignoring it.
 Execution transparency:
 
 - Embedding/hybrid runs print a compact config summary (model, split, corpus cap, streaming mode, storage precision).
+- `binary_prefilter` means a fast Hamming-distance prefilter over bit-packed sign sketches of int8 embeddings before exact int8 rescoring.
+- `binary_rescore_multiplier` controls how many prefiltered candidates are rescored exactly (`top_k * multiplier`).
 - With non-int8 precision, implicit binary-prefilter defaults are normalized to effective runtime values (`binary_prefilter=false`, `binary_rescore_multiplier=1`) to avoid no-op ambiguity.
 - Semantic retrieval logs the cache comparison footprint (`compared` and `rescored` embedding counts, plus prefilter usage) for each embedding/hybrid run.
 - Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
@@ -160,10 +162,14 @@ Execution transparency:
 
 - Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
 - Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
-- `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
+- `--max-semantic`: maximum non-seed semantic neighbors to add after hybrid reranking.
   Valid values are `0` through `max-papers - 1`.
-  With implicit defaults (`--max-semantic` omitted), hybrid also preserves minimum citation depth before semantic expansion.
   If omitted, hybrid defaults to `min(12, max-papers - 1)`.
+- Hybrid adjudication policy:
+  - fetches full citation candidates up to `max_references + max_citations`
+  - fetches semantic candidates (expanded pool) and merges duplicates
+  - reranks the union by seed relevance (semantic/citation/temporal/bibliographic signals) with a boost for papers found by both branches
+  - applies the `max_semantic` cap only to semantic-only additions
 - Setting `--max-semantic 0` disables semantic enrichment; embedding-only flags are rejected to avoid no-op configuration.
 - If `--max-semantic` is omitted and `--max-papers` is `1`, the effective default is also `0`; embedding-only hybrid flags are rejected in that configuration for the same reason.
 - Hybrid runs fail closed if semantic enrichment fails; CiteMesh does not silently downgrade to citation-only output.

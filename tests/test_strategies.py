@@ -379,10 +379,10 @@ def test_hybrid_thresholds_and_default_budget(
     assert small_builder.max_semantic == 4
 
 
-def test_hybrid_implicit_defaults_preserve_citation_depth(
+def test_hybrid_semantic_branch_collects_full_citation_candidate_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Implicit hybrid defaults should reserve citation depth before semantic slots."""
+    """Hybrid semantic mode should fetch full reference+citation candidate pools."""
     _disable_embedding_strategy_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(
         max_papers=40,
@@ -392,8 +392,8 @@ def test_hybrid_implicit_defaults_preserve_citation_depth(
         client=MagicMock(),
     )
 
-    assert builder.citation_builder.max_papers == 31
-    assert builder.citation_builder.max_references == 15
+    assert builder.citation_builder.max_papers == 41
+    assert builder.citation_builder.max_references == 20
     assert builder.citation_builder.max_citations == 20
 
 
@@ -410,6 +410,44 @@ def test_hybrid_propagates_refresh_reference_cache_to_citation_branch(
     )
 
     assert builder.citation_builder.refresh_reference_cache is True
+
+
+def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid rerank should cap semantic-only additions while preserving overlap papers."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=5, max_semantic=1, client=MagicMock())
+
+    seed = _paper("seed")
+    seed.is_seed = True
+    citation_papers = {
+        "seed": seed,
+        "c1": _paper("c1"),
+        "c2": _paper("c2"),
+        "o1": _paper("o1"),
+    }
+    semantic_papers = {
+        "seed": seed,
+        "s1": _paper("s1"),
+        "s2": _paper("s2"),
+        "o1": _paper("o1"),
+    }
+    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda *_args, **_kwargs: ["o1", "s1", "s2", "c2", "c1"],
+    )
+
+    papers = builder.collect_papers("seed")
+
+    assert list(papers.keys()) == ["seed", "o1", "s1", "c2", "c1"]
+    assert builder.paper_sources["o1"] == "both"
+    assert builder.paper_sources["s1"] == "semantic"
+    assert "s2" not in papers
 
 
 def test_hybrid_build_graph_skips_pruning_when_disabled(

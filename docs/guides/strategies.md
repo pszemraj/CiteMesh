@@ -46,9 +46,10 @@ Embedding model defaults/fallbacks and compile policy are defined in [Embedding 
 ## Hybrid Strategy
 
 - Data source: citation collection plus semantic enrichment.
-- Strengths: combines grounded citation edges with additional semantic neighbors.
+- Strengths: combines grounded citation edges with semantic reranking of the whole candidate pool.
 - Limitations: inherits dependency and cache requirements from the embedding path.
-- Default behavior prioritizes citation depth first, then uses remaining graph capacity for semantic additions.
+- Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.
+- `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
 - Typical use: balanced graphs when you want citation structure plus semantic recall.
 
 ## Choosing a Strategy
