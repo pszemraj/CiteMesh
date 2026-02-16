@@ -353,6 +353,38 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
         builder.collect_papers("seed")
 
 
+def test_hybrid_rerank_falls_back_when_seed_embedding_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid rerank should continue when seed embedding encode is unavailable."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
+    assert builder.embedding_builder is not None
+
+    seed = _seed_paper("seed")
+    candidate = _paper("c1")
+    builder.embedding_builder.embeddings = {
+        candidate.paper_id: np.asarray([0.2, 0.1, 0.3], dtype=np.float32)
+    }
+    builder.embedding_builder.model_profile = MagicMock(
+        format_query=lambda text, _metadata: text
+    )
+    builder.embedding_builder._encode_texts = MagicMock(
+        side_effect=RuntimeError("temporary seed encode failure")
+    )
+
+    seed_embedding = builder._ensure_candidate_embeddings(
+        seed, {candidate.paper_id: candidate}
+    )
+
+    assert seed_embedding is None
+    assert builder._rank_candidates(
+        seed,
+        {candidate.paper_id: candidate},
+        {candidate.paper_id: {"semantic"}},
+    ) == [candidate.paper_id]
+
+
 def test_hybrid_thresholds_and_default_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

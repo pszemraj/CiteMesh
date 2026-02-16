@@ -247,7 +247,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 seed_embedding = self.embedding_builder._encode_texts(
                     [seed_text], show_progress_bar=False
                 )[0]
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "Hybrid seed embedding unavailable for %s; rerank falls back to "
+                    "non-semantic seed scoring (%s: %s).",
+                    seed_paper.paper_id,
+                    type(exc).__name__,
+                    exc,
+                )
                 seed_embedding = None
             if seed_embedding is not None:
                 embeddings_map[seed_paper.paper_id] = seed_embedding
@@ -290,6 +297,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 if isinstance(embedded, dict):
                     embeddings_map.update(embedded)
 
+        if seed_embedding is None:
+            return None
         return np.asarray(seed_embedding, dtype=np.float32)
 
     def _seed_relevance_score(
