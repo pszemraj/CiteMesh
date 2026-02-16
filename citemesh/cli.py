@@ -347,6 +347,20 @@ def _embedding_export_metadata(
     }
 
 
+def _plot_overlay_metadata(export_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Return compact metadata suitable for static image overlays.
+
+    :param Dict[str, Any] export_metadata: Full export metadata payload.
+    :return Dict[str, Any]: Reduced metadata subset for on-plot annotation.
+    """
+    overlay_keys = ("paper_id", "strategy", "nodes", "edges", "theme", "timestamp")
+    return {
+        key: export_metadata[key]
+        for key in overlay_keys
+        if key in export_metadata and export_metadata[key] is not None
+    }
+
+
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
     """Return whether hybrid semantic branch is effectively enabled.
 
@@ -1331,7 +1345,6 @@ def main() -> None:
                     parent.mkdir(parents=True, exist_ok=True)
 
             # Visualize / export
-            logger.info("Creating visualization...")
             metadata = {
                 "paper_id": canonicalize_paper_id_for_metadata(args.paper_id),
                 "seed_id": seed_id,
@@ -1354,6 +1367,7 @@ def main() -> None:
                 )
             if args.include_timestamp:
                 metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            plot_metadata = _plot_overlay_metadata(metadata)
             layout_required = any(fmt in output_paths for fmt in ("png", "plotly"))
             shared_layout = (
                 compute_layout(
@@ -1380,30 +1394,43 @@ def main() -> None:
                     output_paths["png"],
                     iterations=args.spring_iterations,
                     dpi=args.dpi,
-                    metadata=metadata,
+                    metadata=plot_metadata,
                     theme_name=args.theme,
                     layout=shared_layout,
                 )
-                logger.info(f"✓ PNG saved to {output_paths['png']}")
 
             if "html" in output_paths:
                 exporter.to_interactive_html(output_paths["html"], theme=args.theme)
-                logger.info(f"✓ Interactive HTML saved to {output_paths['html']}")
 
             if "plotly" in output_paths:
                 exporter.to_plotly_html(output_paths["plotly"], theme=args.theme)
-                logger.info(f"✓ Plotly HTML saved to {output_paths['plotly']}")
 
             if "json" in output_paths:
                 exporter.to_json(output_paths["json"])
-                logger.info(f"✓ Graph JSON saved to {output_paths['json']}")
 
             if "graphml" in output_paths:
                 exporter.to_graphml(output_paths["graphml"])
-                logger.info(f"✓ GraphML saved to {output_paths['graphml']}")
+            saved_artifact_count = len(output_paths)
+            output_dirs = sorted({str(path.parent) for path in output_paths.values()})
+            if saved_artifact_count:
+                if len(output_dirs) == 1:
+                    logger.info(
+                        "%d export artifacts saved to:\t%s",
+                        saved_artifact_count,
+                        output_dirs[0],
+                    )
+                else:
+                    logger.info(
+                        "%d export artifacts saved across %d directories: %s",
+                        saved_artifact_count,
+                        len(output_dirs),
+                        ", ".join(output_dirs),
+                    )
 
             logger.info(
-                f"  Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}"
+                "Graph summary: nodes=%d, edges=%d",
+                graph.number_of_nodes(),
+                graph.number_of_edges(),
             )
 
         except Exception as e:

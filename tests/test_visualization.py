@@ -24,6 +24,7 @@ from citemesh.visualization.export import (
 )
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
+    _normalize_layout_positions,
     compute_layout,
     compute_node_colors,
     compute_node_sizes,
@@ -346,6 +347,82 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
 
     assert "..." not in captured["title"]
     assert seed_title in captured["title"].replace("\n", " ")
+
+
+def test_normalize_layout_positions_recenters_and_bounds() -> None:
+    """Layout normalization should center and bound coordinates deterministically."""
+    raw = {
+        "a": np.array([10.0, -2.0]),
+        "b": np.array([22.0, 4.0]),
+        "c": np.array([16.0, 8.0]),
+    }
+
+    normalized = _normalize_layout_positions(raw, padding_ratio=0.1)
+    coords = np.array(list(normalized.values()), dtype=float)
+    bounds_center = (coords.max(axis=0) + coords.min(axis=0)) * 0.5
+
+    assert np.allclose(bounds_center, np.array([0.0, 0.0]), atol=1e-9)
+    assert float(np.max(np.abs(coords[:, 0]))) <= 0.9 + 1e-9
+    assert float(np.max(np.abs(coords[:, 1]))) <= 0.9 + 1e-9
+
+
+def test_visualize_graph_metadata_overlay_is_compact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Static render metadata should exclude large nested debug payloads."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="Seed Paper",
+        year=2025,
+        authors=["A"],
+        citation_count=5,
+        is_seed=True,
+    )
+    graph.add_node(
+        "related",
+        title="Related Paper",
+        year=2024,
+        authors=["B"],
+        citation_count=3,
+        is_seed=False,
+    )
+    graph.add_edge("seed", "related", weight=0.8)
+
+    captured_text: dict[str, str] = {}
+    import matplotlib.axes
+
+    original_text = matplotlib.axes.Axes.text
+
+    def capture_text(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if len(args) >= 3:
+            captured_text["text"] = str(args[2])
+        return original_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "text", capture_text)
+
+    visualize_graph(
+        graph,
+        "seed",
+        tmp_path / "graph.png",
+        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+        metadata={
+            "paper_id": "https://arxiv.org/abs/2508.14040",
+            "strategy": "hybrid",
+            "nodes": 2,
+            "edges": 1,
+            "theme": "dark",
+            "score_contract": {"strategy": "hybrid", "range_hint": "[0,1]"},
+            "embedding": {"storage_precision": "int8"},
+        },
+    )
+
+    text = captured_text["text"]
+    assert "Strategy: hybrid" in text
+    assert "Nodes: 2" in text
+    assert "Edges: 1" in text
+    assert "Score Contract" not in text
+    assert "Embedding" not in text
 
 
 def test_exporter_plotly_and_graphml_handle_missing_year_data(

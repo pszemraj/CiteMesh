@@ -551,6 +551,73 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["layout"] is None
 
 
+def test_build_uses_compact_plot_metadata_and_summary_export_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CLI should pass compact PNG metadata and emit one export summary line."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    captured: dict[str, object] = {}
+    logged: list[str] = []
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured,
+            methods=("to_json", "to_graphml", "to_interactive_html", "to_plotly_html"),
+        ),
+    )
+
+    def _fake_visualize(*args: Any, **kwargs: Any) -> None:
+        captured["plot_metadata"] = kwargs.get("metadata")
+        Path(args[2]).write_bytes(b"png")
+
+    def _capture_info(message: str, *args: Any, **kwargs: Any) -> None:
+        del kwargs
+        rendered = message % args if args else message
+        logged.append(str(rendered))
+
+    monkeypatch.setattr(cli_module, "visualize_graph", _fake_visualize)
+    monkeypatch.setattr(cli_module.logger, "info", _capture_info)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.png"
+        result = run_cli_command(
+            [
+                "build",
+                "https://arxiv.org/abs/2508.14040",
+                "--strategy",
+                "hybrid",
+                "--export",
+                "all",
+                "-o",
+                str(output),
+            ],
+        )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "plot_metadata" in captured
+    assert captured["plot_metadata"] == {
+        "paper_id": "arxiv:2508.14040",
+        "strategy": "hybrid",
+        "nodes": 1,
+        "edges": 0,
+        "theme": "light",
+    }
+    assert any("export artifacts saved to:" in message for message in logged)
+    assert all("PNG saved to" not in message for message in logged)
+    assert all("Graph JSON saved to" not in message for message in logged)
+    assert all("Creating visualization..." not in message for message in logged)
+
+
 def test_build_metadata_includes_score_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
