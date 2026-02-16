@@ -24,17 +24,32 @@ For single-export runs, only the requested format is written.
 
 ## Output Location
 
-When `--output` is omitted, CiteMesh writes to:
+Path components:
 
-- `out/<slug>-<hash>/<strategy>.<ext>`
+- `<slug>` is a filesystem-safe version of the seed title
+- `<hash>` is the first 8 chars of `sha256(seed_id)`
 
-Where:
+Canonical path-normalization rules:
 
-- `<slug>` is a filesystem-safe version of the seed title.
-- `<hash>` is the first 8 chars of `sha256(seed_id)`.
+- `--output` omitted:
+  - artifacts are written under `out/<slug>-<hash>/` as `<strategy>.<ext>`
+- single-export run (`--export <one-format>`) with explicit `--output`:
+  - if `--output` ends with the target format suffix, it is used as-is
+  - if `--output` ends with a different known export suffix, that suffix is replaced
+  - if `--output` has no known export suffix, the target suffix is appended
+- multi-export run (`--export all` or multiple formats) with explicit `--output`:
+  - if `--output` ends with a known export suffix (for example `out.png`), that suffix
+    is stripped and the remainder is treated as directory base
+  - if `--output` has no known suffix, it is treated directly as directory base
+  - each format is written as `<directory-base>/<strategy>.<ext>`
 
-When `--output` is provided with `--export all`, CiteMesh treats `--output` as
-the directory base and writes strategy-named files inside it.
+Examples:
+
+- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
+  writes `out/hybrid.png`, `out/hybrid.html`, `out/hybrid.plotly.html`,
+  `out/hybrid.json`, `out/hybrid.graphml`, `out/hybrid.config.json`
+- `citemesh build "<paper-id>" --strategy citation --export json -o report.graphml`
+  writes `report.json`
 
 ## JSON vs Sidecar
 
@@ -42,6 +57,12 @@ the directory base and writes strategy-named files inside it.
 
 - `<strategy>.json`: graph payload (`nodes`, `edges`, basic summary) for downstream graph/data work.
 - `<strategy>.config.json`: run contract (CLI parameters, resolved outputs, and metadata) for reproducibility and audit trails.
+
+Sidecar path contract:
+
+- for strategy-named outputs, sidecar is `<strategy>.config.json` in the same directory
+- for explicit single-file outputs, sidecar uses the resolved output stem
+  (for example `report.json` -> `report.config.json`)
 
 ### Graph JSON (`<strategy>.json`)
 

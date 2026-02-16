@@ -25,6 +25,7 @@ citemesh search "<query>" [--limit N|-n N]
 
 # Cache management commands
 citemesh cache scan
+citemesh cache scan --log-level debug
 citemesh cache clear [--yes]
 ```
 
@@ -58,34 +59,16 @@ In non-interactive shells, `citemesh cache clear` requires `--yes`.
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
 | `--log-width` | Rich console wrap width in columns (`0` uses terminal width) | `140` |
 
-When `--output` is omitted, CiteMesh writes to `out/<slug>-<hash>/<strategy>.<ext>`.
+Output-path normalization, file naming, and sidecar placement are defined in
+[Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md).
+Use that reference as the canonical source for `--output` behavior in single-export
+and multi-export runs.
 
-`<slug>` is a filesystem-safe version of the seed title, `<hash>` is the first 8 hex characters of `sha256(seed_id)`, and the combined directory name is capped at 40 characters.
+`--log-level` and `--log-width` are shared command options and are accepted for
+`build`, `search`, and `cache` command trees (including `cache scan` / `cache clear`).
 
-When `--export all` is used, CiteMesh writes every supported format using consistent styling into a directory. With default naming this is `out/<slug>-<hash>/`; with explicit output it uses the directory base derived from `-o`.
-
-If explicit `-o` ends with a known export suffix (for example `-o out/my-run.json`), the suffix is stripped and the remaining path is treated as the directory base for multi-export runs.
-If explicit `-o` has no known suffix, it is treated as the directory base for multi-export runs.
-Example: `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
-normalizes to directory `out/` and writes files like `out/hybrid.png`, `out/hybrid.html`,
-`out/hybrid.plotly.html`, `out/hybrid.json`, `out/hybrid.graphml`, and `out/hybrid.config.json`.
-
-For multi-export runs, files are named `<strategy>.<ext>` inside the selected directory. Example:
-
-`citemesh build "<paper-id>" --strategy hybrid --export all -o out/arxiv-2508.14040-hybrid-full`
-
-writes:
-
-- `out/arxiv-2508.14040-hybrid-full/hybrid.png`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.html`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.plotly.html`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.json`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.graphml`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.config.json`
-
-For single-export runs, explicit `-o` remains file-style and preserves extension replacement/appending behavior.
-
-`--seed` controls shared layout generation for `png` and `plotly` exports. Pyvis `html` exports use vis.js browser physics and do not consume this precomputed layout.
+`--seed` controls shared layout generation for `png` and `plotly` exports. Pyvis
+`html` exports use vis.js browser physics and do not consume this precomputed layout.
 
 Numeric validation:
 
@@ -153,9 +136,9 @@ ignoring it.
 Execution transparency:
 
 - Embedding/hybrid runs print a compact config summary (model, split, corpus cap, streaming mode, storage precision).
-- Semantic retrieval logs the cache comparison footprint (`compared` and `rescored` embedding counts, plus prefilter usage) for each embedding/hybrid run.
-- Prefilter semantics, precision behavior, and compile policy are defined in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
-- Hydration/cache-write behavior and lock policy are defined in [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
+- Retrieval/caching internals (prefilter semantics, compared/rescored counts, compile guard behavior, hydration/lock policy) are defined in:
+  - [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+  - [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
 - Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
 
 ### Hybrid Strategy

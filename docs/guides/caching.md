@@ -85,6 +85,8 @@ Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuil
 
 For Hugging Face repo IDs, hydration resolves and stores a model fingerprint.
 CiteMesh first attempts commit-SHA resolution (online API, then local snapshot SHA).
+If model loading falls back to another checkpoint candidate, fingerprint checks bind to
+the runtime-active checkpoint identity to avoid cross-checkpoint cache reuse.
 If SHA resolution is unavailable, CiteMesh falls back to hashing two local artifact
 files when present: `config.json` and `model.safetensors`.
 If neither strong SHA nor local artifact hashes are available, CiteMesh uses a
@@ -124,6 +126,8 @@ using hashed filenames.
   fresh reference IDs from the API (write-through cache update).
 - Successful empty reference responses are cached as explicit empty lists to avoid
   repeated API calls for papers with no references.
+- Non-empty cached payloads that contain no valid reference IDs are treated as invalid
+  and rebuilt from API data instead of being reused as implicit empties.
 - Repeated reference-fetch failures now raise a runtime error after retries instead
   of silently returning an empty list.
 - Reference cache directory resolution occurs at call time, so cache-root policy

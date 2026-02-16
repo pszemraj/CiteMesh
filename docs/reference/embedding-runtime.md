@@ -20,6 +20,8 @@ Fallback behavior:
 - The fallback chain is used only for default-revision loads (no explicit `--model-revision`).
 - If `--model-revision` is set, fallback retries are disabled to preserve deterministic revision pinning.
 - If all candidates fail, CiteMesh raises a runtime error with per-candidate failure summaries.
+- When fallback succeeds, cache fingerprint checks follow the active loaded checkpoint
+  identity (not just the originally requested model token).
 
 ## EmbeddingGemma Profile Mapping
 

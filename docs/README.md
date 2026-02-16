@@ -19,6 +19,16 @@ This index helps you find the right doc quickly.
 - Embedding model defaults, fallback chain, and precision/compile behavior: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
 - Default-parameter tuning results and methodology: [docs/reference/defaults-tuning-study.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
 
+## Canonical Sources
+
+Use these as the primary definitions for each concept:
+
+- CLI flags and command contracts: [docs/guides/cli.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Output naming/path normalization and sidecar schema: [docs/reference/output-artifacts.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
+- Cache layout, hydration, and fingerprint/invalidation semantics: [docs/guides/caching.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Embedding model/fallback/precision/compile policy: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Environment-variable contracts: [docs/reference/environment.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+
 ## Internals
 
 - Package structure and execution flow: [docs/internals/architecture.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/architecture.md)
