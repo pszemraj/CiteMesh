@@ -4,11 +4,12 @@ The `citemesh` CLI can build graphs with four strategies: `recommendation`, `cit
 
 Related docs:
 
-- CLI flags and defaults: [CLI Usage](cli.md)
-- Cache behavior: [Caching & Data](caching.md)
-- Environment variables: [Environment Variables](../reference/environment.md)
-- Embedding runtime defaults and precision policy: [Embedding Runtime](../reference/embedding-runtime.md)
-- Docs index: [Documentation](../README.md)
+- CLI flags and defaults: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Cache behavior: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Embedding runtime defaults and precision policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Default-parameter sweep rationale: [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
+- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## At a Glance
 
@@ -40,8 +41,8 @@ Related docs:
 - Limitations: first run hydrates a cache for the selected corpus spec; requires optional embedding dependencies.
 - Typical use: semantic exploration and discovery beyond citation graphs.
 
-Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md).
-Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](../reference/embedding-runtime.md).
+Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
+Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
 
 ## Hybrid Strategy
 
@@ -50,6 +51,7 @@ Embedding model defaults/fallbacks and compile policy are defined in [Embedding 
 - Limitations: inherits dependency and cache requirements from the embedding path.
 - Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.
 - `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
+- Hybrid defaults are tuned for the seed-paper discovery workflow (recent follow-up + foundational prior work), with current depth targets documented in the defaults study.
 - Typical use: balanced graphs when you want citation structure plus semantic recall.
 
 ## Choosing a Strategy
@@ -61,7 +63,7 @@ Embedding model defaults/fallbacks and compile policy are defined in [Embedding 
 
 ## Related Docs
 
-- [CLI Usage](cli.md)
-- [Caching & Data](caching.md)
-- [Environment Variables](../reference/environment.md)
-- [Architecture](../internals/architecture.md)
+- [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- [Architecture](https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/architecture.md)

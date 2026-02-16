@@ -4,10 +4,10 @@ The CLI orchestrates a consistent pipeline regardless of strategy (`recommendati
 
 Related docs:
 
-- CLI flags and command examples: [CLI Usage](../guides/cli.md)
-- Cache layout and hydration details: [Caching & Data](../guides/caching.md)
-- Environment variables: [Environment Variables](../reference/environment.md)
-- Docs index: [Documentation](../README.md)
+- CLI flags and command examples: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Cache layout and hydration details: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## Execution Flow
 
@@ -39,7 +39,7 @@ Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `a
 - Selects strategy implementations and triggers graph construction.
 - Coordinates render/export steps, writes sidecar config artifacts, and passes run metadata downstream.
 
-Command-line behavior is documented in [CLI Usage](../guides/cli.md).
+Command-line behavior is documented in [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md).
 
 ### `citemesh/strategies/base.py`
 
@@ -54,10 +54,10 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 | `citation` | Pull seed, references, and citations from Semantic Scholar | Similarity from bibliographic and metadata features |
 | `embedding` | Hydrate/query quantized cache and compute semantic neighbors | Int8/binary cache-native retrieval, metadata-authoritative warm runs, capped edge pruning |
 | `recommendation` | Use Semantic Scholar recommendations as primary neighborhood signal | Fast topical discovery path |
-| `hybrid` | Start with citation graph and enrich with semantic neighbors | Relationship-aware weighting and per-node cap behavior |
+| `hybrid` | Merge citation and semantic candidates, then rerank | Seed-relevance rerank with semantic-only cap enforcement |
 
 Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
-Strategy behavior and selection guidance are documented in [Guides: Strategies](../guides/strategies.md).
+Strategy behavior and selection guidance are documented in [Guides: Strategies](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md).
 
 ### `citemesh/core/models.py`
 
@@ -88,7 +88,7 @@ Strategy behavior and selection guidance are documented in [Guides: Strategies](
 - `citemesh/data/embedding_cache.py` manages quantized SQLite/HDF5 embedding cache state (`int8` matrix, calibration ranges, optional binary index, hydration metadata).
 - `citemesh/data/model_profiles.py` stores model-specific runtime profile metadata.
 
-On-disk layout and invalidation behavior are documented in [Caching & Data](../guides/caching.md).
+On-disk layout and invalidation behavior are documented in [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
 
 ### Service Client (`citemesh/services/semantic_scholar.py`)
 

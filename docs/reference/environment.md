@@ -4,9 +4,9 @@ Runtime environment variables consumed by CiteMesh.
 
 Related docs:
 
-- CLI usage: [Guides: CLI Usage](../guides/cli.md)
-- Cache behavior: [Guides: Caching & Data](../guides/caching.md)
-- Docs index: [Documentation](../README.md)
+- CLI usage: [Guides: CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Cache behavior: [Guides: Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## CiteMesh Variables
 
@@ -34,4 +34,4 @@ These are not CiteMesh-specific, but CiteMesh honors them when `CITEMESH_CACHE_D
 | `LOCALAPPDATA` | Windows | Primary base for default cache root (`%LOCALAPPDATA%\\CiteMesh`). |
 | `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset. |
 
-Cache-root behavior details are covered in [Guides: Caching & Data](../guides/caching.md).
+Cache-root behavior details are covered in [Guides: Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).

@@ -4,11 +4,11 @@ The `citemesh` command builds paper graphs with one of four strategies: `recomme
 
 Related docs:
 
-- Cache layout and hydration: [Caching & Data](caching.md)
-- Environment variables: [Environment Variables](../reference/environment.md)
-- Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
-- Defaults parameter study: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
-- Docs index: [Documentation](../README.md)
+- Cache layout and hydration: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Defaults parameter study: [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
+- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## Basic Invocation
 
@@ -27,7 +27,7 @@ citemesh cache scan
 citemesh cache clear [--yes]
 ```
 
-For cache path/layout/hydration details, see [Caching & Data](caching.md).
+For cache path/layout/hydration details, see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
 In non-interactive shells, `citemesh cache clear` requires `--yes`.
 
 ## Accepted Identifiers
@@ -97,7 +97,7 @@ Numeric validation:
 
 ## Strategy-Specific Flags
 
-Strategy behavior and tradeoffs are described in [Strategies Guide](strategies.md). Flag contracts are listed here.
+Strategy behavior and tradeoffs are described in [Strategies Guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md). Flag contracts are listed here.
 
 Build command options are strategy-scoped. If you pass a flag that is not supported
 for the selected `--strategy`, CiteMesh exits with a CLI error instead of silently
@@ -146,17 +146,15 @@ ignoring it.
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled). Compile is deferred on cold-cache hydration runs and applied on warm-cache runs.
-- Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
-- Default-value tuning context for recent-paper workloads is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
+- Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
+- Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md).
 
 Execution transparency:
 
 - Embedding/hybrid runs print a compact config summary (model, split, corpus cap, streaming mode, storage precision).
-- `binary_prefilter` means a fast Hamming-distance prefilter over bit-packed sign sketches of int8 embeddings before exact int8 rescoring.
-- `binary_prefilter` does not switch the system to binary embedding storage; it only adds a shortlist stage before exact scoring.
-- `binary_rescore_multiplier` controls how many prefiltered candidates are rescored exactly (`top_k * multiplier`).
-- With non-int8 precision, implicit binary-prefilter defaults are normalized to effective runtime values (`binary_prefilter=false`, `binary_rescore_multiplier=1`) to avoid no-op ambiguity.
 - Semantic retrieval logs the cache comparison footprint (`compared` and `rescored` embedding counts, plus prefilter usage) for each embedding/hybrid run.
+- Prefilter semantics, precision behavior, and compile policy are defined in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
+- Hydration/cache-write behavior and lock policy are defined in [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
 - Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
 
 ### Hybrid Strategy
@@ -229,13 +227,13 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 ## Troubleshooting
 
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
-- **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
+- **Slow first embedding run**: see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md) for hydration behavior, cache reuse, and tuning guidance.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
-- **API limits**: configure `S2_API_KEY`; see [Environment Variables](../reference/environment.md).
+- **API limits**: configure `S2_API_KEY`; see [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md).
 
 Related docs:
 
-- Documentation index: [Documentation](../README.md)
-- Cache behavior: [Caching & Data](caching.md)
-- Runtime variables: [Environment Variables](../reference/environment.md)
-- Component architecture: [Architecture](../internals/architecture.md)
+- Documentation index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- Cache behavior: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Runtime variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Component architecture: [Architecture](https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/architecture.md)

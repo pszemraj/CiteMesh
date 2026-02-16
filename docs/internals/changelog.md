@@ -3,10 +3,10 @@
 This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
 For current usage details, see:
 
-- [CLI Usage](../guides/cli.md)
-- [Caching & Data](../guides/caching.md)
-- [Environment Variables](../reference/environment.md)
-- [Embedding Runtime](../reference/embedding-runtime.md)
+- [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
 
 ## Breaking Changes
 
@@ -49,8 +49,7 @@ For current usage details, see:
 - **Embedding**: for torch 2.9/2.10 CUDA compile paths, switched TF32 control to `torch.set_float32_matmul_precision("high")` so `torch.compile` remains available without tripping the mixed TF32 API conflict in release-branch Inductor.
 - **Embedding**: changed default checkpoint to `unsloth/embeddinggemma-300m` (ungated) and added automatic fallback to `google/embeddinggemma-300m` for default-revision loads.
 - **Embedding**: citation-count enrichment logs now show bounded target counts and render a visible progress bar on TTY runs.
-- **Hybrid**: formalized citation-first enrichment with semantic additions and capped edges.
-- **Hybrid**: implicit defaults now reserve citation depth floors before semantic expansion.
+- **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
 - **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.

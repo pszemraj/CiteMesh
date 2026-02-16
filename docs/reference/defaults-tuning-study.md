@@ -2,6 +2,12 @@
 
 This document records the sweep work used to choose current graph-building defaults for hybrid discovery workflows.
 
+Related docs:
+
+- CLI defaults and flags: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Strategy behavior overview: [Strategy Guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
+- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+
 ## Scope
 
 ### Seeds
@@ -67,6 +73,11 @@ This was the deciding signal for the default choice.
 ### Runtime note
 
 Per-run elapsed time has heavy-tail behavior driven by network-bound citation-count enrichment. Use median and upper-quantile runtime when comparing configs; means alone are noisy.
+
+## Remaining Work
+
+- Citation-count enrichment still shows long-tail latency on some runs; adding a tighter timeout/retry budget would make end-to-end runtime more predictable.
+- Static plot readability in dense clusters can still improve (label collision handling and optional label-priority filtering).
 
 ## Default Decision
 
