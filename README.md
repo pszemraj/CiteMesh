@@ -18,6 +18,7 @@ The default hybrid workflow is tuned around this discovery pattern rather than m
 - Strategy guide: [docs/guides/strategies.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
 - Caching and data: [docs/guides/caching.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
 - Environment variables: [docs/reference/environment.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Output files and sidecar schema: [docs/reference/output-artifacts.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
 - Embedding runtime behavior: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
 
 ## Quick Start

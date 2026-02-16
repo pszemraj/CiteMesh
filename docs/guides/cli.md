@@ -6,6 +6,7 @@ Related docs:
 
 - Cache layout and hydration: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
 - Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Output files and sidecar schema: [Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
 - Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
 - Defaults parameter study: [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
 - Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
@@ -178,21 +179,12 @@ Execution transparency:
 - `png`: Matplotlib static render with theme-aware background and labels
 - `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
 - `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
-- `json`: structured graph data with nodes/edges and readable edge-side context
+- `json`: structured graph data payload (nodes/edges)
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
-- `*.config.json`: sidecar run config with rebuild parameters, resolved outputs, and metadata
+- `*.config.json`: run config + metadata sidecar
 
-For `embedding` and `hybrid` strategies, sidecar metadata includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, configured binary-prefilter state, and `binary_prefilter_used_for_query` when runtime retrieval metadata is available).
-All strategies include a `score_contract` object in sidecar metadata describing score semantics (`score_type`) and explicitly marking scores as non-comparable across strategies.
-Hybrid sidecars also include `score_contract.adjudication_policy` describing citation/semantic merge behavior.
-
-Determinism notes:
-
-- `json` exports are deterministic (stable key order and indentation).
-- `graphml` export is deterministic on NetworkX versions with stable writer ordering (`>=2.8` uses strict node/edge sorting metadata).
-- `png` is deterministic for the same input graph and `--seed`.
-- `plotly` is deterministic for the same input graph and `--seed` when Plotly supports `write_html(div_id=...)` (CiteMesh fails fast if unavailable).
-- Pyvis `html` export has deterministic serialized ordering, but runtime browser physics remain non-deterministic.
+For field-level JSON/sidecar schema and determinism details, see
+[Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md).
 
 Interactive exports require optional viz dependencies:
 
@@ -230,10 +222,3 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 - **Slow first embedding run**: see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md) for hydration behavior, cache reuse, and tuning guidance.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
 - **API limits**: configure `S2_API_KEY`; see [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md).
-
-Related docs:
-
-- Documentation index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
-- Cache behavior: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- Runtime variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- Component architecture: [Architecture](https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/architecture.md)

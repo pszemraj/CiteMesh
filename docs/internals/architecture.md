@@ -7,6 +7,7 @@ Related docs:
 - CLI flags and command examples: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
 - Cache layout and hydration details: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
 - Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Export/sidecar file contracts: [Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
 - Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## Execution Flow
@@ -81,6 +82,9 @@ Strategy behavior and selection guidance are documented in [Guides: Strategies](
 - `GraphExporter` writes JSON, GraphML, Pyvis HTML, and Plotly HTML.
 - Reuses computed layout and style values for cross-format consistency.
 - Normalizes node attributes for serializer compatibility (for example GraphML-safe fields).
+
+Artifact-level format details and sidecar schema are documented in
+[Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md).
 
 ### Caching Support
 
