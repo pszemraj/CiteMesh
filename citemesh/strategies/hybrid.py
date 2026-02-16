@@ -13,6 +13,7 @@ import numpy as np
 
 from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -157,7 +158,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if self.max_semantic <= 0
             else 1 + int(max_references) + int(max_citations)
         )
-        self._citation_candidate_cap = citation_candidates
 
         self.citation_builder = CitationGraphBuilder(
             max_papers=citation_candidates,
@@ -212,11 +212,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Paper seed_paper: Seed paper record.
         :return str: Query text payload used for encoding.
         """
-        title = (seed_paper.title or "").strip()
-        abstract = (seed_paper.abstract or "").strip()
-        if not title and not abstract:
-            return str(seed_paper.paper_id)
-        return ". ".join(part for part in (title, abstract) if part)
+        text = compose_title_abstract_text(
+            {
+                "title": seed_paper.title,
+                "abstract": seed_paper.abstract,
+            }
+        )
+        return text or str(seed_paper.paper_id)
 
     def _ensure_candidate_embeddings(
         self, seed_paper: Paper, candidates: Dict[str, Paper]

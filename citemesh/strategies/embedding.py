@@ -27,6 +27,7 @@ from citemesh.data import (
     get_embedding_model_profile,
     validate_compression_filter,
 )
+from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -1515,8 +1516,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             papers[seed_paper.paper_id] = seed_paper
             seed_title = (seed_paper.title or "").strip()
             seed_abstract = (seed_paper.abstract or "").strip()
-            pieces = [part for part in (seed_title, seed_abstract) if part]
-            seed_text = ". ".join(pieces) if pieces else seed_id
+            seed_text = (
+                compose_title_abstract_text(
+                    {"title": seed_title, "abstract": seed_abstract}
+                )
+                or seed_id
+            )
             seed_metadata = {
                 "title": seed_title,
                 "abstract": seed_abstract,
