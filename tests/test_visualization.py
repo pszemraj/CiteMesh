@@ -30,6 +30,7 @@ from citemesh.visualization.render import (
     compute_node_sizes,
     visualize_graph,
 )
+from citemesh.visualization.text_limits import MAX_RENDER_TEXT_CHARS, clamp_render_text
 from citemesh.visualization.themes import get_theme
 
 
@@ -408,6 +409,62 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     assert seed_title in captured["title"].replace("\n", " ")
 
 
+def test_render_text_guard_contracts() -> None:
+    """Render text clamp should cap oversized payloads with an explicit marker."""
+    raw = "x" * (MAX_RENDER_TEXT_CHARS + 57)
+    bounded = clamp_render_text(raw)
+    assert len(bounded) == MAX_RENDER_TEXT_CHARS
+    assert bounded.endswith("...[truncated +57 chars]")
+    assert clamp_render_text("short text") == "short text"
+    with pytest.raises(ValueError, match="max_chars must be at least 1"):
+        clamp_render_text("x", max_chars=0)
+
+
+def test_visualize_graph_truncates_extreme_seed_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Static render title should clamp pathological seed titles with a marker."""
+    graph = nx.Graph()
+    long_title = "x" * (MAX_RENDER_TEXT_CHARS + 57)
+    graph.add_node(
+        "seed",
+        title=long_title,
+        year=2025,
+        authors=["A"],
+        citation_count=5,
+        is_seed=True,
+    )
+    graph.add_node(
+        "related",
+        title="Related Paper",
+        year=2024,
+        authors=["B"],
+        citation_count=3,
+        is_seed=False,
+    )
+    graph.add_edge("seed", "related", weight=0.8)
+
+    captured: dict[str, str] = {}
+    import matplotlib.axes
+
+    original_set_title = matplotlib.axes.Axes.set_title
+
+    def capture_title(self: Any, label: str, *args: Any, **kwargs: Any) -> Any:
+        captured["title"] = label
+        return original_set_title(self, label, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_title", capture_title)
+
+    visualize_graph(
+        graph,
+        "seed",
+        tmp_path / "graph.png",
+        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+    )
+
+    assert "[truncated +57 chars]" in captured["title"]
+
+
 def test_visualize_graph_metadata_overlay_is_compact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -548,6 +605,46 @@ def test_missing_year_visual_contracts(
     size_map_2 = dict(zip(ordered_nodes, compute_node_sizes(graph_2)))
     assert size_map_1 == size_map_2
     assert size_map_1["a"] >= size_map_1["b"]
+
+
+def test_plotly_render_text_guard_truncates_extreme_titles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plotly export should clamp oversized labels, hover text, and chart title."""
+    captured: dict[str, object] = {}
+
+    class FakeFigure(_BaseFakeFigure):
+        def __init__(self, data: Any, layout: Any) -> None:
+            super().__init__(data, layout)
+            captured["data"] = data
+            captured["layout"] = layout
+
+        def write_html(self, path: str, **kwargs: Any) -> None:
+            del kwargs
+            Path(path).write_text("<html>plotly</html>")
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+
+    long_title = "x" * (MAX_RENDER_TEXT_CHARS + 57)
+    graph = nx.Graph()
+    graph.add_node("seed", title=long_title, year=2020, authors=[], is_seed=True)
+    graph.add_node("related", title=long_title, year=2021, authors=[], is_seed=False)
+    graph.add_edge("seed", "related", weight=0.7)
+
+    exporter = GraphExporter(
+        graph,
+        "seed",
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "guard.plotly.html"
+    exporter.to_plotly_html(out_path)
+
+    marker = "[truncated +57 chars]"
+    node_trace = captured["data"][1]
+    assert any(marker in text for text in node_trace["text"])
+    assert any(marker in text for text in node_trace["hovertext"])
+    layout = captured["layout"]
+    assert marker in layout["title"]
 
 
 def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) -> None:

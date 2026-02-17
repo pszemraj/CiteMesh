@@ -71,6 +71,7 @@ For current usage details, see:
 - Simplified export completion logging to one summary line per run.
 - Grouped auto outputs into stable per-paper title folders.
 - Removed title truncation in runtime seed logs and static/Plotly chart titles.
+- Added a hard 10,000-character render-text guard for PNG/Pyvis/Plotly titles and labels, with an explicit `...[truncated +N chars]` marker on overflow.
 - Reclassified non-empty reference-cache payloads with zero valid IDs as invalid so corrupted payloads are rebuilt instead of silently suppressing references.
 - Fixed hybrid CLI validation to resolve effective default `--max-semantic` before rejecting embedding-only flags.
 - Fixed cache-subcommand CLI parsing so shared logging flags are accepted after `cache scan/clear` tokens (for example `citemesh cache scan --log-level debug`).

@@ -28,6 +28,7 @@ from .render import (
     compute_node_colors,
     compute_node_sizes,
 )
+from .text_limits import clamp_render_text
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
@@ -242,20 +243,28 @@ class GraphExporter:
             size = self._node_size(node)
             color = self._node_color_hex(node, theme_obj)
 
-            label = paper.label if paper else attrs.get("title", node)
+            label = clamp_render_text(
+                paper.label if paper else attrs.get("title", node)
+            )
 
             tooltip_lines = []
             if paper:
-                tooltip_lines.append(f"<b>{html.escape(paper.title)}</b>")
+                tooltip_lines.append(
+                    f"<b>{html.escape(clamp_render_text(paper.title))}</b>"
+                )
                 tooltip_lines.append(
                     f"{html.escape(paper.first_author_surname)} et al., {paper.year}"
                 )
                 tooltip_lines.append(f"Citations: {paper.citation_count}")
                 if paper.categories:
-                    cats = ", ".join(html.escape(cat) for cat in paper.categories[:3])
-                    tooltip_lines.append(f"Categories: {cats}")
+                    cats = clamp_render_text(
+                        ", ".join(str(cat) for cat in paper.categories[:3])
+                    )
+                    tooltip_lines.append(f"Categories: {html.escape(cats)}")
             else:
-                tooltip_lines.append(html.escape(attrs.get("title", "")))
+                tooltip_lines.append(
+                    html.escape(clamp_render_text(attrs.get("title", "")))
+                )
 
             net.add_node(
                 node,
@@ -309,9 +318,9 @@ class GraphExporter:
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
         node_years, year_min, year_max = self._plotly_year_scale(node_ids)
         node_labels = [
-            self.graph.nodes[node].get("paper").label
+            clamp_render_text(self.graph.nodes[node].get("paper").label)
             if self.graph.nodes[node].get("paper")
-            else self.graph.nodes[node].get("title", node)
+            else clamp_render_text(self.graph.nodes[node].get("title", node))
             for node in node_ids
         ]
 
@@ -323,15 +332,17 @@ class GraphExporter:
                 hover_texts.append(
                     "<br>".join(
                         [
-                            f"<b>{html.escape(paper.title)}</b>",
-                            html.escape(authors),
+                            f"<b>{html.escape(clamp_render_text(paper.title))}</b>",
+                            html.escape(clamp_render_text(authors)),
                             f"Year: {paper.year} | Citations: {paper.citation_count}",
                         ]
                     )
                 )
             else:
                 hover_texts.append(
-                    html.escape(self.graph.nodes[node].get("title", node))
+                    html.escape(
+                        clamp_render_text(self.graph.nodes[node].get("title", node))
+                    )
                 )
 
         node_trace = go.Scatter(
@@ -359,8 +370,10 @@ class GraphExporter:
             hovertext=hover_texts,
         )
 
-        raw_title = " ".join(
-            str(self.graph.nodes[self.seed_id].get("title", "CiteMesh")).split()
+        raw_title = clamp_render_text(
+            " ".join(
+                str(self.graph.nodes[self.seed_id].get("title", "CiteMesh")).split()
+            )
         )
         title_text = "<br>".join(
             textwrap.wrap(raw_title, width=72, break_long_words=False)

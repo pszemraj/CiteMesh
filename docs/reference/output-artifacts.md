@@ -100,6 +100,19 @@ Top-level fields:
 See embedding metadata term definitions in
 [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
 
+## Render Text Guard
+
+To prevent pathological single-line payloads (for example pasted minified JSON) from
+degrading render performance, visualization-facing text fields are capped at 10,000
+characters per field for:
+
+- static PNG title/labels
+- Pyvis node labels/tooltips
+- Plotly node labels/hover text/chart title
+
+When clamping is applied, the rendered value includes an explicit suffix marker:
+`...[truncated +N chars]`.
+
 ## Determinism Notes
 
 - `json`: deterministic key order + indentation.
