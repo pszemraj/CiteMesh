@@ -157,8 +157,10 @@ def _build_graph() -> tuple[nx.Graph, str]:
     return graph, seed.paper_id
 
 
-def test_exporter_json_graphml_contracts_and_determinism(tmp_path: Path) -> None:
-    """JSON and GraphML exports should preserve fields, metadata, and determinism."""
+def test_exporter_serialization_contracts_and_determinism(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exporter outputs should preserve metadata, ordering, and determinism."""
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
 
@@ -194,6 +196,60 @@ def test_exporter_json_graphml_contracts_and_determinism(tmp_path: Path) -> None
         assert _canonicalize_graphml(graphml_path) == _canonicalize_graphml(
             graphml_again_path
         )
+
+    captured: dict[str, object] = {}
+
+    class FakeFigure(_BaseFakeFigure):
+        def __init__(self, data: Any, layout: Any) -> None:
+            super().__init__(data, layout)
+            captured["data"] = data
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+
+    ordered_graph = nx.Graph()
+    ordered_graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
+    ordered_graph.add_node("seed", title="Seed", year=2020, authors=[], is_seed=True)
+    ordered_graph.add_node("a", title="Node A", year=2021, authors=[], citation_count=0)
+    ordered_graph.add_edge("seed", "z", weight=0.7)
+    ordered_graph.add_edge("z", "a", weight=0.5)
+
+    ordered_exporter = GraphExporter(
+        ordered_graph,
+        "seed",
+        layout={"a": (0.0, 0.0), "seed": (1.0, 0.0), "z": (2.0, 0.0)},
+    )
+    ordered_json_path = tmp_path / "ordered.json"
+    ordered_graphml_path = tmp_path / "ordered.graphml"
+    ordered_plotly_path = tmp_path / "ordered.plotly.html"
+    ordered_exporter.to_json(ordered_json_path)
+    ordered_exporter.to_graphml(ordered_graphml_path)
+    ordered_exporter.to_plotly_html(ordered_plotly_path)
+
+    ordered_payload = json.loads(ordered_json_path.read_text())
+    assert [node["id"] for node in ordered_payload["nodes"]] == ["a", "seed", "z"]
+    assert [edge["source"] for edge in ordered_payload["edges"]] == ["a", "seed"]
+    assert [edge["target"] for edge in ordered_payload["edges"]] == ["z", "z"]
+    assert [edge["weight"] for edge in ordered_payload["edges"]] == [
+        pytest.approx(0.5),
+        pytest.approx(0.7),
+    ]
+    assert ordered_payload["edges"][0]["source_title"] == "Node A"
+    assert ordered_payload["edges"][0]["target_title"] == "Node Z"
+
+    graphml_xml = ET.fromstring(ordered_graphml_path.read_text())
+    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
+    graph_element = graphml_xml.find("g:graph", ns)
+    assert graph_element is not None
+    node_ids = [node.attrib["id"] for node in graph_element.findall("g:node", ns)]
+    edge_pairs = [
+        (edge.attrib["source"], edge.attrib["target"])
+        for edge in graph_element.findall("g:edge", ns)
+    ]
+    assert node_ids == ["a", "seed", "z"]
+    assert edge_pairs == [("a", "z"), ("seed", "z")]
+
+    edge_trace = captured["data"][0]
+    assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
 
 
 def test_exporter_interactive_html_contracts(
@@ -352,23 +408,6 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     assert seed_title in captured["title"].replace("\n", " ")
 
 
-def test_normalize_layout_positions_recenters_and_bounds() -> None:
-    """Layout normalization should center and bound coordinates deterministically."""
-    raw = {
-        "a": np.array([10.0, -2.0]),
-        "b": np.array([22.0, 4.0]),
-        "c": np.array([16.0, 8.0]),
-    }
-
-    normalized = _normalize_layout_positions(raw, padding_ratio=0.1)
-    coords = np.array(list(normalized.values()), dtype=float)
-    bounds_center = (coords.max(axis=0) + coords.min(axis=0)) * 0.5
-
-    assert np.allclose(bounds_center, np.array([0.0, 0.0]), atol=1e-9)
-    assert float(np.max(np.abs(coords[:, 0]))) <= 0.9 + 1e-9
-    assert float(np.max(np.abs(coords[:, 1]))) <= 0.9 + 1e-9
-
-
 def test_visualize_graph_metadata_overlay_is_compact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -428,10 +467,10 @@ def test_visualize_graph_metadata_overlay_is_compact(
     assert "Embedding" not in text
 
 
-def test_exporter_plotly_and_graphml_handle_missing_year_data(
+def test_missing_year_visual_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly colors and GraphML year serialization should be stable with null years."""
+    """Missing-year fallbacks should stay stable across exporters and render helpers."""
     captured: dict[str, object] = {}
 
     def fake_scatter(**kwargs: Any) -> dict[str, object]:
@@ -490,64 +529,25 @@ def test_exporter_plotly_and_graphml_handle_missing_year_data(
     graphml = nx.read_graphml(graphml_path)
     assert str(graphml.nodes["missing-year"]["year"]) == "0"
 
+    graph_1 = nx.Graph()
+    graph_1.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
+    graph_1.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
+    graph_1.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
 
-def test_export_ordering_is_stable_across_json_graphml_and_plotly_edge_trace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Node and edge ordering should remain deterministic across exporters."""
-    captured: dict[str, object] = {}
+    graph_2 = nx.Graph()
+    graph_2.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
+    graph_2.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
+    graph_2.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
 
-    class FakeFigure(_BaseFakeFigure):
-        def __init__(self, data: Any, layout: Any) -> None:
-            super().__init__(data, layout)
-            captured["data"] = data
+    _, min_year, max_year = compute_node_colors(graph_1, "seed", get_theme("light"))
+    assert min_year == 2000
+    assert max_year == 2001
 
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
-
-    graph = nx.Graph()
-    graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
-    graph.add_node("seed", title="Seed", year=2020, authors=[], is_seed=True)
-    graph.add_node("a", title="Node A", year=2021, authors=[], citation_count=0)
-    graph.add_edge("seed", "z", weight=0.7)
-    graph.add_edge("z", "a", weight=0.5)
-
-    exporter = GraphExporter(
-        graph,
-        "seed",
-        layout={"a": (0.0, 0.0), "seed": (1.0, 0.0), "z": (2.0, 0.0)},
-    )
-    json_path = tmp_path / "ordered.json"
-    graphml_path = tmp_path / "ordered.graphml"
-    plotly_path = tmp_path / "ordered.plotly.html"
-    exporter.to_json(json_path)
-    exporter.to_graphml(graphml_path)
-    exporter.to_plotly_html(plotly_path)
-
-    payload = json.loads(json_path.read_text())
-    assert [node["id"] for node in payload["nodes"]] == ["a", "seed", "z"]
-    assert [edge["source"] for edge in payload["edges"]] == ["a", "seed"]
-    assert [edge["target"] for edge in payload["edges"]] == ["z", "z"]
-    assert [edge["weight"] for edge in payload["edges"]] == [
-        pytest.approx(0.5),
-        pytest.approx(0.7),
-    ]
-    assert payload["edges"][0]["source_title"] == "Node A"
-    assert payload["edges"][0]["target_title"] == "Node Z"
-
-    graphml_xml = ET.fromstring(graphml_path.read_text())
-    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
-    graph_element = graphml_xml.find("g:graph", ns)
-    assert graph_element is not None
-    node_ids = [node.attrib["id"] for node in graph_element.findall("g:node", ns)]
-    edge_pairs = [
-        (edge.attrib["source"], edge.attrib["target"])
-        for edge in graph_element.findall("g:edge", ns)
-    ]
-    assert node_ids == ["a", "seed", "z"]
-    assert edge_pairs == [("a", "z"), ("seed", "z")]
-
-    edge_trace = captured["data"][0]
-    assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
+    ordered_nodes = sorted(graph_1.nodes(), key=str)
+    size_map_1 = dict(zip(ordered_nodes, compute_node_sizes(graph_1)))
+    size_map_2 = dict(zip(ordered_nodes, compute_node_sizes(graph_2)))
+    assert size_map_1 == size_map_2
+    assert size_map_1["a"] >= size_map_1["b"]
 
 
 def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) -> None:
@@ -567,10 +567,23 @@ def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) ->
     assert out_a.read_text() == out_b.read_text()
 
 
-def test_compute_layout_stability_and_distance_weight(
+def test_layout_positioning_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Layout perturbations and distance-weight wiring should both be deterministic."""
+    """Layout normalization, perturbation stability, and distance weighting should hold."""
+
+    raw = {
+        "a": np.array([10.0, -2.0]),
+        "b": np.array([22.0, 4.0]),
+        "c": np.array([16.0, 8.0]),
+    }
+    normalized = _normalize_layout_positions(raw, padding_ratio=0.1)
+    coords = np.array(list(normalized.values()), dtype=float)
+    bounds_center = (coords.max(axis=0) + coords.min(axis=0)) * 0.5
+
+    assert np.allclose(bounds_center, np.array([0.0, 0.0]), atol=1e-9)
+    assert float(np.max(np.abs(coords[:, 0]))) <= 0.9 + 1e-9
+    assert float(np.max(np.abs(coords[:, 1]))) <= 0.9 + 1e-9
 
     captured: dict[str, object] = {}
 
@@ -613,29 +626,6 @@ def test_compute_layout_stability_and_distance_weight(
     distances = captured["distances"]
     assert isinstance(distances, dict)
     assert distances[("high", "seed")] < distances[("low", "seed")]
-
-
-def test_compute_node_colors_and_sizes_are_stable_for_missing_years_and_ties() -> None:
-    """Color fallback bounds and size ties should be deterministic."""
-    graph_1 = nx.Graph()
-    graph_1.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
-    graph_1.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
-    graph_1.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
-
-    graph_2 = nx.Graph()
-    graph_2.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
-    graph_2.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
-    graph_2.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
-
-    _, min_year, max_year = compute_node_colors(graph_1, "seed", get_theme("light"))
-    assert min_year == 2000
-    assert max_year == 2001
-
-    ordered_nodes = sorted(graph_1.nodes(), key=str)
-    size_map_1 = dict(zip(ordered_nodes, compute_node_sizes(graph_1)))
-    size_map_2 = dict(zip(ordered_nodes, compute_node_sizes(graph_2)))
-    assert size_map_1 == size_map_2
-    assert size_map_1["a"] >= size_map_1["b"]
 
 
 def test_get_theme_auto_detection_and_unknown_default(
