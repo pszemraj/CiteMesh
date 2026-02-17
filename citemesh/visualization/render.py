@@ -23,7 +23,6 @@ from .ordering import (
     ordered_edges_with_data,
     ordered_nodes,
 )
-from .text_limits import clamp_render_text
 from .themes import Theme, get_theme
 
 logger = logging.getLogger(__name__)
@@ -489,7 +488,7 @@ def draw_labels(
         :param int width: Approximate character width for line wrapping.
         :return str: Wrapped title label.
         """
-        title = clamp_render_text(" ".join((title or "").split()))
+        title = " ".join((title or "").split())
         if not title:
             return "Seed paper"
         return textwrap.fill(title, width=width, break_long_words=False)
@@ -537,7 +536,6 @@ def draw_labels(
             year = graph.nodes[node].get("year")
             year_label = "n.d." if year is None else str(year)
             label = f"{last_name}, {year_label}"
-            label = clamp_render_text(label)
             fontsize = VIZ_CONFIG.font_size
             xytext = (0, -3)
             vertical_alignment = "top"
@@ -632,9 +630,8 @@ def visualize_graph(
 
     # Add title
     title = graph.nodes[seed_id].get("title", "Unknown")
-    bounded_title = clamp_render_text(" ".join(str(title).split()))
     wrapped_title = textwrap.fill(
-        bounded_title,
+        " ".join(str(title).split()),
         width=72,
         break_long_words=False,
     )
