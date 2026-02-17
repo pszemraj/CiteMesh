@@ -12,7 +12,12 @@ class _AbstractIndexProtocol(Protocol):
     """Protocol for abstract-similarity indexes used by strategies."""
 
     def similarity(self, paper_id_a: str, paper_id_b: str) -> float:
-        """Return similarity score between two paper IDs."""
+        """Return similarity score between two paper IDs.
+
+        :param str paper_id_a: First paper identifier.
+        :param str paper_id_b: Second paper identifier.
+        :return float: Similarity score in ``[0, 1]``.
+        """
         ...
 
 

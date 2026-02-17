@@ -144,6 +144,27 @@ def test_cache_commands_contracts(
     assert not cache_root.exists()
 
 
+def test_cli_logging_flags_are_position_agnostic() -> None:
+    """Logging options should parse identically before/after subcommands."""
+    parser, _, _ = cli_module._create_parser()
+    cases = [
+        ["--log-level", "debug", "build", "arxiv:1706.03762"],
+        ["build", "arxiv:1706.03762", "--log-level", "debug"],
+        ["--log-level", "debug", "cache", "scan"],
+        ["cache", "--log-level", "debug", "scan"],
+        ["cache", "scan", "--log-level", "debug"],
+        ["--log-width", "0", "build", "arxiv:1706.03762"],
+        ["build", "arxiv:1706.03762", "--log-width", "0"],
+    ]
+
+    for argv in cases:
+        parsed = parser.parse_args(argv)
+        if "--log-level" in argv:
+            assert parsed.log_level == "debug"
+        if "--log-width" in argv:
+            assert parsed.log_width == 0
+
+
 @pytest.mark.slow
 @pytest.mark.integration
 def test_citation_strategy_runs() -> None:
@@ -318,6 +339,25 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
         assert result.returncode != 0
         assert "Unsupported option(s)" in result.stderr
         assert token in result.stderr
+
+
+def test_cli_rejects_strategy_incompatible_options_with_global_prefix() -> None:
+    """Unsupported build options should still fail when global flags precede build."""
+    result = run_cli_command(
+        [
+            "--log-level",
+            "debug",
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "citation",
+            "--top-k",
+            "4",
+        ]
+    )
+    assert result.returncode != 0
+    assert "Unsupported option(s)" in result.stderr
+    assert "--top-k" in result.stderr
 
 
 def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:

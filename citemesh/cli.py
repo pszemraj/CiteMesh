@@ -160,22 +160,31 @@ def _non_empty_str(value: str) -> str:
     return normalized
 
 
-def _add_logging_arguments(target: argparse.ArgumentParser) -> None:
+def _add_logging_arguments(
+    target: argparse.ArgumentParser, *, suppress_defaults: bool = False
+) -> None:
     """Add shared logging arguments to a parser.
 
     :param argparse.ArgumentParser target: Parser receiving logging options.
+    :param bool suppress_defaults: Whether logging defaults should be suppressed.
     :return None: Mutates parser in-place.
     """
+    default_log_level: object = "info"
+    default_log_width: object = DEFAULT_LOG_WIDTH
+    if suppress_defaults:
+        default_log_level = argparse.SUPPRESS
+        default_log_width = argparse.SUPPRESS
+
     target.add_argument(
         "--log-level",
         choices=list(LOG_LEVEL_CHOICES),
-        default="info",
+        default=default_log_level,
         help="Console log level (default: info)",
     )
     target.add_argument(
         "--log-width",
         type=_non_negative_int,
-        default=DEFAULT_LOG_WIDTH,
+        default=default_log_width,
         help="Rich console wrap width in columns (0 = auto terminal width; default: 140)",
     )
 
@@ -430,7 +439,12 @@ def _collect_provided_build_option_dests(
     :param List[str] argv: Raw argv list without executable name.
     :return Set[str]: Explicitly provided build option destinations.
     """
-    if not argv or argv[0] != "build":
+    if not argv:
+        return set()
+
+    try:
+        build_idx = argv.index("build")
+    except ValueError:
         return set()
 
     provided: Set[str] = set()
@@ -445,7 +459,7 @@ def _collect_provided_build_option_dests(
     probe_parser.set_defaults(**{key: probe_default for key in probe_parser._defaults})
 
     try:
-        parsed, _ = probe_parser.parse_known_args(argv[1:])
+        parsed, _ = probe_parser.parse_known_args(argv[build_idx + 1 :])
     except SystemExit:
         return provided
 
@@ -702,12 +716,14 @@ def _create_parser() -> Tuple[
     :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
         Root parser, build subcommand parser, cache subcommand parser.
     """
-    logging_parent = argparse.ArgumentParser(add_help=False)
-    _add_logging_arguments(logging_parent)
+    root_logging_parent = argparse.ArgumentParser(add_help=False)
+    _add_logging_arguments(root_logging_parent)
+    command_logging_parent = argparse.ArgumentParser(add_help=False)
+    _add_logging_arguments(command_logging_parent, suppress_defaults=True)
 
     parser = argparse.ArgumentParser(
         description="CiteMesh: Create citation graph visualizations",
-        parents=[logging_parent],
+        parents=[root_logging_parent],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -737,7 +753,7 @@ Examples:
     build_parser = subparsers.add_parser(
         "build",
         help="Build and visualize paper graph",
-        parents=[logging_parent],
+        parents=[command_logging_parent],
     )
 
     # Required arguments
@@ -1043,7 +1059,7 @@ Examples:
     search_parser = subparsers.add_parser(
         "search",
         help="Search papers by title or keyword",
-        parents=[logging_parent],
+        parents=[command_logging_parent],
     )
     search_parser.add_argument("query", type=_non_empty_str, help="Search query")
     search_parser.add_argument(
@@ -1056,7 +1072,7 @@ Examples:
     cache_parser = subparsers.add_parser(
         "cache",
         help="Manage local CiteMesh caches",
-        parents=[logging_parent],
+        parents=[command_logging_parent],
     )
     cache_subparsers = cache_parser.add_subparsers(
         dest="cache_command", help="Cache operations"
@@ -1064,7 +1080,7 @@ Examples:
     cache_clear_parser = cache_subparsers.add_parser(
         "clear",
         help="Delete the entire CiteMesh cache directory",
-        parents=[logging_parent],
+        parents=[command_logging_parent],
     )
     cache_clear_parser.add_argument(
         "--yes",
@@ -1075,7 +1091,7 @@ Examples:
     cache_subparsers.add_parser(
         "scan",
         help="Scan cache usage (sections, file counts, and total size)",
-        parents=[logging_parent],
+        parents=[command_logging_parent],
     )
     return parser, build_parser, cache_parser
 
