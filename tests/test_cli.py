@@ -638,66 +638,32 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
     )
 
 
-def test_build_metadata_includes_score_contract(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Export metadata should declare score comparability and hybrid adjudication policy."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Build export metadata should satisfy score, timestamp, and embedding contracts."""
 
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        cli_module,
-        "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "GraphExporter",
-        build_fake_exporter_factory(captured, methods=("to_json",)),
-    )
+    def _capture_metadata(
+        *,
+        strategy: str,
+        extra_args: list[str] | None = None,
+        graph: nx.Graph | None = None,
+    ) -> dict[str, Any]:
+        local_graph = graph if graph is not None else nx.Graph()
+        if "seed" not in local_graph:
+            local_graph.add_node(
+                "seed",
+                title="Seed",
+                year=2020,
+                authors=[],
+                citation_count=0,
+                is_seed=True,
+            )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "graph.json"
-        result = run_cli_command(
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "hybrid",
-                "--export",
-                "json",
-                "-o",
-                str(output),
-            ],
-        )
-        assert output.exists()
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    metadata = captured["metadata"]
-    assert isinstance(metadata, dict)
-    score_contract = metadata["score_contract"]
-    assert isinstance(score_contract, dict)
-    assert score_contract["strategy"] == "hybrid"
-    assert score_contract["comparable_across_strategies"] is False
-    assert "adjudication_policy" in score_contract
-
-
-def test_metadata_timestamp_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Metadata timestamp should be opt-in only."""
-    for include_timestamp, expected_key in [(False, False), (True, True)]:
-        graph = nx.Graph()
-        graph.add_node(
-            "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-        )
-
+        graph = local_graph.copy()
         captured: dict[str, object] = {}
         monkeypatch.setattr(
             cli_module,
             "_build_strategy_graph",
-            lambda args, strategy, graph=graph, **_kwargs: (graph, "seed"),
+            lambda args, strategy_name, **_kwargs: (graph, "seed"),
         )
         monkeypatch.setattr(
             cli_module,
@@ -707,71 +673,46 @@ def test_metadata_timestamp_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "graph.json"
-            args = [
+            command = [
                 "build",
                 "arxiv:1706.03762",
                 "--strategy",
-                "recommendation",
+                strategy,
                 "--export",
                 "json",
                 "-o",
                 str(output),
             ]
-            if include_timestamp:
-                args.insert(4, "--include-timestamp")
-            result = run_cli_command(args)
+            if extra_args:
+                command = command[:4] + extra_args + command[4:]
+            result = run_cli_command(command)
             assert output.exists()
-
         assert result.returncode == 0, (
             f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
         )
         metadata = captured["metadata"]
         assert isinstance(metadata, dict)
+        return metadata
+
+    hybrid_metadata = _capture_metadata(strategy="hybrid")
+    score_contract = hybrid_metadata["score_contract"]
+    assert isinstance(score_contract, dict)
+    assert score_contract["strategy"] == "hybrid"
+    assert score_contract["comparable_across_strategies"] is False
+    assert "adjudication_policy" in score_contract
+
+    for include_timestamp, expected_key in [(False, False), (True, True)]:
+        extra_args = ["--include-timestamp"] if include_timestamp else []
+        metadata = _capture_metadata(
+            strategy="recommendation",
+            extra_args=extra_args,
+        )
         assert ("timestamp" in metadata) is expected_key
 
-
-def test_embedding_export_metadata_uses_effective_precision_values(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Embedding metadata should normalize non-int8 defaults to effective values."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    metadata = _capture_metadata(
+        strategy="embedding",
+        extra_args=["--storage-precision", "float32"],
     )
-
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        cli_module,
-        "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "GraphExporter",
-        build_fake_exporter_factory(captured, methods=("to_json",)),
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "graph.json"
-        result = run_cli_command(
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "embedding",
-                "--storage-precision",
-                "float32",
-                "--export",
-                "json",
-                "-o",
-                str(output),
-            ],
-        )
-        assert output.exists()
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    metadata = captured["metadata"]
-    assert isinstance(metadata, dict)
     assert metadata["embedding"] == {
         "effective_vector_dtype": "float32",
         "storage_precision": "float32",
@@ -780,97 +721,28 @@ def test_embedding_export_metadata_uses_effective_precision_values(
         "binary_rescore_multiplier": 1,
     }
 
-
-def test_embedding_export_metadata_includes_runtime_prefilter_truth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Embedding export metadata should include runtime prefilter usage when available."""
-    graph = nx.Graph()
-    graph.graph["embedding_runtime"] = {"binary_prefilter_used": False}
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    runtime_graph = nx.Graph()
+    runtime_graph.graph["embedding_runtime"] = {"binary_prefilter_used": False}
+    runtime_graph.add_node(
+        "seed",
+        title="Seed",
+        year=2020,
+        authors=[],
+        citation_count=0,
+        is_seed=True,
     )
-
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        cli_module,
-        "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
+    metadata = _capture_metadata(
+        strategy="embedding",
+        extra_args=["--storage-precision", "int8", "--binary-prefilter"],
+        graph=runtime_graph,
     )
-    monkeypatch.setattr(
-        cli_module,
-        "GraphExporter",
-        build_fake_exporter_factory(captured, methods=("to_json",)),
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "graph.json"
-        result = run_cli_command(
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "embedding",
-                "--storage-precision",
-                "int8",
-                "--binary-prefilter",
-                "--export",
-                "json",
-                "-o",
-                str(output),
-            ],
-        )
-        assert output.exists()
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    metadata = captured["metadata"]
-    assert isinstance(metadata, dict)
     assert metadata["embedding"]["binary_prefilter_enabled"] is True
     assert metadata["embedding"]["binary_prefilter_used_for_query"] is False
 
-
-def test_hybrid_export_omits_embedding_metadata_when_semantic_branch_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hybrid export should omit embedding metadata when --max-semantic resolves to 0."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    metadata = _capture_metadata(
+        strategy="hybrid",
+        extra_args=["--max-semantic", "0"],
     )
-
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        cli_module,
-        "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "GraphExporter",
-        build_fake_exporter_factory(captured, methods=("to_json",)),
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "graph.json"
-        result = run_cli_command(
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "hybrid",
-                "--max-semantic",
-                "0",
-                "--export",
-                "json",
-                "-o",
-                str(output),
-            ],
-        )
-        assert output.exists()
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    metadata = captured["metadata"]
-    assert isinstance(metadata, dict)
     assert "embedding" not in metadata
 
 
@@ -1046,11 +918,18 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         assert captured == expected_kwargs
 
 
-def test_build_strategy_graph_invalid_and_lazy_exports_contract() -> None:
-    """Unsupported strategies should error and top-level lazy exports should resolve."""
+def test_programmatic_strategy_dispatch_contracts() -> None:
+    """Programmatic dispatch should enforce strategy validation and lazy exports."""
     namespace = _dispatch_namespace()
     with pytest.raises(ValueError, match="Unsupported strategy: unknown"):
         cli_module._build_strategy_graph(namespace, "unknown")
+
+    invalid_namespace = _dispatch_namespace(
+        similarity_threshold=0.21,
+        model="all-MiniLM-L6-v2",
+    )
+    with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
+        cli_module._build_strategy_graph(invalid_namespace, "recommendation")
 
     import citemesh
 
@@ -1058,16 +937,6 @@ def test_build_strategy_graph_invalid_and_lazy_exports_contract() -> None:
     assert citemesh.RecommendationGraphBuilder.__name__ == "RecommendationGraphBuilder"
     assert citemesh.EmbeddingGraphBuilder.__name__ == "EmbeddingGraphBuilder"
     assert citemesh.HybridGraphBuilder.__name__ == "HybridGraphBuilder"
-
-
-def test_build_strategy_graph_rejects_programmatic_contract_violations() -> None:
-    """Programmatic dispatch should still reject strategy-incompatible options."""
-    namespace = _dispatch_namespace(
-        similarity_threshold=0.21,
-        model="all-MiniLM-L6-v2",
-    )
-    with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
-        cli_module._build_strategy_graph(namespace, "recommendation")
 
 
 def test_cli_help_contracts() -> None:
