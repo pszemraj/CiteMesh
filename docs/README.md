@@ -1,33 +1,39 @@
-# CiteMesh Documentation
+# Documentation
 
-Use this index to navigate docs by topic and keep behavior definitions centralized.
+This index helps you find the right doc quickly.
 
-## Scope
+## Start Here
 
-This page is the canonical map of documentation ownership.
+- Project overview and installation: [README.md](https://github.com/pszemraj/CiteMesh/blob/main/README.md)
+- Command usage: [docs/guides/cli.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
 
-- Each topic has one canonical document.
-- Non-canonical documents should summarize in 1-2 lines and link to the canonical source.
-- If documents disagree, the canonical document listed below wins.
-- Use repository-relative Markdown links so references stay clickable on GitHub and in local previews.
+## Guides
 
-## Source-of-Truth Map
+- Strategies and when to use them: [docs/guides/strategies.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
+- Caches, hydration, and cleanup: [docs/guides/caching.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
 
-| Topic | Canonical doc |
-| --- | --- |
-| Project overview, install, and quick start | [Repository README](../README.md) |
-| CLI commands, flags, identifiers, output naming, export behavior | [Guides: CLI Usage](guides/cli.md) |
-| Strategy behavior and tradeoffs | [Guides: Strategies](guides/strategies.md) |
-| Cache paths/layout, hydration/invalidation, cleanup | [Guides: Caching & Data](guides/caching.md) |
-| Runtime environment variables (`S2_API_KEY`, `CITEMESH_*`) | [Reference: Environment Variables](reference/environment.md) |
-| Component responsibilities and data flow | [Internals: Architecture](internals/architecture.md) |
-| Historical changes and release notes | [Internals: Changelog](internals/changelog.md) |
-| Developer backlog notes (non-normative) | [Developer Notes](dev.md) |
+## Reference
 
-## Internal Docs Rule
+- Runtime environment variables: [docs/reference/environment.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Output formats and sidecar schema: [docs/reference/output-artifacts.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
+- Embedding model defaults, fallback chain, and precision/compile behavior: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Default-parameter tuning results and methodology: [docs/reference/defaults-tuning-study.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
 
-`docs/internals/architecture.md` and `docs/internals/changelog.md` are not normative for CLI flag contracts or cache behavior details. Those remain canonical in:
+## Canonical Sources
 
-- [Guides: CLI Usage](guides/cli.md)
-- [Guides: Caching & Data](guides/caching.md)
-- [Reference: Environment Variables](reference/environment.md)
+Use these as the primary definitions for each concept:
+
+- CLI flags and command contracts: [docs/guides/cli.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Output naming/path normalization and sidecar schema: [docs/reference/output-artifacts.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
+- Cache layout, hydration, and fingerprint/invalidation semantics: [docs/guides/caching.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Embedding model/fallback/precision/compile policy: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Environment-variable contracts: [docs/reference/environment.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+
+## Internals
+
+- Package structure and execution flow: [docs/internals/architecture.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/architecture.md)
+- Change history and notable shifts: [docs/internals/changelog.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/changelog.md)
+
+## Development Notes
+
+- Deferred refactors and backlog notes: [docs/dev.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/dev.md)

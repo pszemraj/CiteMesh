@@ -13,17 +13,28 @@ import numpy as np
 import pytest
 
 from citemesh.core import Paper
+from citemesh.data import (
+    DEFAULT_EMBEDDING_MODEL_FALLBACKS,
+    DEFAULT_EMBEDDING_MODEL_NAME,
+)
 from citemesh.data.embedding_cache import CacheSearchResult
-from citemesh.strategies.embedding import EmbeddingGraphBuilder, _query_seed_id
+from citemesh.strategies.embedding import (
+    ENCODE_BATCH_SIZE,
+    EmbeddingGraphBuilder,
+    _query_seed_id,
+)
 from tests._helpers import ConstantEncodeModel
 
 
 def _install_fake_sentence_transformers(
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_model_names: set[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Install fake ``sentence_transformers`` module for precision tests."""
     init_log: dict[str, Any] = {}
     encode_log: list[dict[str, Any]] = []
+    blocked_models = set(fail_model_names or ())
 
     class _FakeInnerBlock:
         def __init__(self) -> None:
@@ -31,6 +42,9 @@ def _install_fake_sentence_transformers(
 
     class _FakeSentenceTransformer:
         def __init__(self, model_name_or_path: str, **kwargs: Any):
+            init_log.setdefault("attempts", []).append(model_name_or_path)
+            if model_name_or_path in blocked_models:
+                raise RuntimeError(f"failed loading {model_name_or_path}")
             init_log["model_name"] = model_name_or_path
             init_log["kwargs"] = kwargs
             self._blocks = [_FakeInnerBlock()]
@@ -72,8 +86,8 @@ def _install_fake_torch(
     *,
     compile_behavior: str = "identity",
     capability: tuple[int, int] | None = (8, 0),
-    include_tf32_precision_api: bool = True,
-    include_tf32_legacy_api: bool = True,
+    include_tf32_global_api: bool = True,
+    torch_version: str = "2.9.0",
 ) -> tuple[object, list[tuple[Any, ...]], object]:
     """Install fake ``torch`` module for precision tests."""
     bf16_token = object()
@@ -94,23 +108,52 @@ def _install_fake_torch(
     def _autocast(*, device_type: str, dtype: object) -> _FakeAutocast:
         return _FakeAutocast(device_type=device_type, dtype=dtype)
 
-    def _compile(model: object) -> object:
+    compile_calls: list[dict[str, object]] = []
+
+    def _compile(model: object, **kwargs: object) -> object:
+        compile_calls.append({"model": model, "kwargs": dict(kwargs)})
         if compile_behavior == "raise":
             raise RuntimeError("compile failure")
         if compile_behavior == "tagged":
             return ("compiled", model)
         return model
 
+    matmul_precision_calls: list[str] = []
+
+    def _set_float32_matmul_precision(precision: str) -> None:
+        matmul_precision_calls.append(precision)
+
     matmul_backend = types.SimpleNamespace()
     cudnn_backend = types.SimpleNamespace()
     cudnn_conv = types.SimpleNamespace()
     cudnn_backend.conv = cudnn_conv
-    if include_tf32_precision_api:
-        matmul_backend.fp32_precision = "none"
-        cudnn_conv.fp32_precision = "none"
-    if include_tf32_legacy_api:
-        matmul_backend.allow_tf32 = False
-        cudnn_backend.allow_tf32 = False
+    matmul_backend.fp32_precision = "none"
+    cudnn_conv.fp32_precision = "none"
+
+    if include_tf32_global_api:
+
+        class _FakeBackends:
+            def __init__(self) -> None:
+                self.cuda = types.SimpleNamespace(matmul=matmul_backend)
+                self.cudnn = cudnn_backend
+                self._fp32_precision = "none"
+
+            @property
+            def fp32_precision(self) -> str:
+                return self._fp32_precision
+
+            @fp32_precision.setter
+            def fp32_precision(self, value: str) -> None:
+                self._fp32_precision = value
+                self.cuda.matmul.fp32_precision = value
+                self.cudnn.conv.fp32_precision = value
+
+        fake_backends: object = _FakeBackends()
+    else:
+        fake_backends = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(matmul=matmul_backend),
+            cudnn=cudnn_backend,
+        )
 
     cuda_module = types.SimpleNamespace(
         is_available=lambda: cuda_available,
@@ -120,14 +163,15 @@ def _install_fake_torch(
         cuda_module.get_device_capability = lambda _index=0: capability
 
     fake_torch = types.ModuleType("torch")
+    fake_torch.__version__ = torch_version
     fake_torch.bfloat16 = bf16_token
     fake_torch.autocast = _autocast
     fake_torch.compile = _compile
+    fake_torch.set_float32_matmul_precision = _set_float32_matmul_precision
+    fake_torch._matmul_precision_calls = matmul_precision_calls
+    fake_torch._compile_calls = compile_calls
     fake_torch.cuda = cuda_module
-    fake_torch.backends = types.SimpleNamespace(
-        cuda=types.SimpleNamespace(matmul=matmul_backend),
-        cudnn=cudnn_backend,
-    )
+    fake_torch.backends = fake_backends
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
     return bf16_token, autocast_log, fake_torch
@@ -149,6 +193,23 @@ def test_embedding_builder_requires_optional_deps(
         EmbeddingGraphBuilder(max_papers=5, model_name="test-model", client=MagicMock())
 
 
+def test_embedding_builder_requires_modern_torch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding builder should require torch>=2.9 for runtime precision policy."""
+    fake_torch = types.ModuleType("torch")
+    fake_torch.__version__ = "2.8.1"
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.ModuleType("st"))
+    monkeypatch.setitem(sys.modules, "datasets", types.ModuleType("datasets"))
+
+    with pytest.raises(
+        ImportError,
+        match=r"Embedding strategy requires torch>=2\.9\.0",
+    ):
+        EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+
 def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -157,7 +218,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
 
     with pytest.raises(
         ValueError,
-        match="truncate_dim=300 is not supported for google/embeddinggemma-300m",
+        match=(f"truncate_dim=300 is not supported for {DEFAULT_EMBEDDING_MODEL_NAME}"),
     ):
         EmbeddingGraphBuilder(max_papers=1, truncate_dim=300, client=MagicMock())
     with pytest.raises(ValueError, match="model_name must be a non-empty string"):
@@ -168,6 +229,8 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         ValueError, match="corpus_size must be at least 1 when provided"
     ):
         EmbeddingGraphBuilder(max_papers=1, corpus_size=0, client=MagicMock())
+    with pytest.raises(ValueError, match="encode_batch_size must be at least 1"):
+        EmbeddingGraphBuilder(max_papers=1, encode_batch_size=0, client=MagicMock())
 
     precision_cases = [
         (True, True, True),
@@ -185,7 +248,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         builder._load_model()
         embeddings = builder._encode_texts(["seed"], show_progress_bar=False)
 
-        assert init_log["model_name"] == "google/embeddinggemma-300m"
+        assert init_log["model_name"] == DEFAULT_EMBEDDING_MODEL_NAME
         assert init_log["kwargs"]["truncate_dim"] == 256
         assert embeddings.shape == (1, 2)
         if expects_bf16:
@@ -197,21 +260,36 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
             assert autocast_log == []
 
     compile_cases = [
-        ("google/embeddinggemma-300m", "tagged", True),
-        ("google/embeddinggemma-300m", "raise", False),
-        ("sentence-transformers/all-MiniLM-L6-v2", "tagged", False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (8, 0), "2.9.0", True),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.9.0", True),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.10.0", True),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "raise", (7, 5), "2.10.0", False),
+        ("sentence-transformers/all-MiniLM-L6-v2", "tagged", (8, 0), "2.10.0", False),
     ]
-    for model_name, compile_behavior, expect_compiled in compile_cases:
+    for (
+        model_name,
+        compile_behavior,
+        capability,
+        torch_version,
+        expect_compiled,
+    ) in compile_cases:
         init_log, _ = _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
             monkeypatch,
             cuda_available=True,
             bf16_supported=True,
             compile_behavior=compile_behavior,
+            capability=capability,
+            torch_version=torch_version,
         )
 
         builder = EmbeddingGraphBuilder(
             max_papers=1, model_name=model_name, client=MagicMock()
+        )
+        monkeypatch.setattr(
+            builder,
+            "_should_defer_compile_for_cache_hydration",
+            lambda: False,
         )
         builder._load_model()
 
@@ -219,8 +297,15 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         assert builder.model is not None
         if expect_compiled:
             assert builder.model[0].auto_model == ("compiled", original)
+            assert _fake_torch._compile_calls  # type: ignore[attr-defined]
+            assert _fake_torch._compile_calls[-1]["kwargs"] == {}  # type: ignore[attr-defined]
         else:
             assert builder.model[0].auto_model is original
+            if (
+                compile_behavior == "tagged"
+                and model_name != DEFAULT_EMBEDDING_MODEL_NAME
+            ):
+                assert _fake_torch._compile_calls == []  # type: ignore[attr-defined]
         assert builder._inner_model_compiled is expect_compiled
 
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
@@ -243,27 +328,56 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     assert builder._inner_model_compiled is False
 
     tf32_cases = [
-        ((8, 0), "tf32"),
-        ((7, 5), "off"),
+        ((8, 0), True, True, "2.9.0", "tf32-matmul-high", "none", "high"),
+        ((8, 0), True, False, "2.9.0", "tf32", "tf32", None),
+        ((8, 0), False, True, "2.10.0", "tf32-matmul-high", None, "high"),
+        ((7, 5), True, True, "2.10.0", "off", "none", None),
     ]
-    for capability, expected_mode in tf32_cases:
+    for (
+        capability,
+        include_tf32_global_api,
+        enable_torch_compile,
+        torch_version,
+        expected_mode,
+        expected_backend_precision,
+        expected_matmul_precision,
+    ) in tf32_cases:
         _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
             monkeypatch,
             cuda_available=True,
             bf16_supported=True,
             capability=capability,
+            include_tf32_global_api=include_tf32_global_api,
+            torch_version=torch_version,
         )
 
-        builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+        builder = EmbeddingGraphBuilder(
+            max_papers=1,
+            enable_torch_compile=enable_torch_compile,
+            client=MagicMock(),
+        )
         builder._load_model()
 
-        if expected_mode == "tf32":
-            assert fake_torch.backends.cuda.matmul.fp32_precision == "tf32"
-            assert fake_torch.backends.cudnn.conv.fp32_precision == "tf32"
+        if include_tf32_global_api:
+            assert fake_torch.backends.fp32_precision == expected_backend_precision
+            expected_matmul_backend = expected_backend_precision or "none"
+            assert (
+                fake_torch.backends.cuda.matmul.fp32_precision
+                == expected_matmul_backend
+            )
+            assert (
+                fake_torch.backends.cudnn.conv.fp32_precision == expected_matmul_backend
+            )
         else:
+            assert not hasattr(fake_torch.backends, "fp32_precision")
             assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
             assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
+
+        if expected_matmul_precision is None:
+            assert fake_torch._matmul_precision_calls == []
+        else:
+            assert fake_torch._matmul_precision_calls == [expected_matmul_precision]
         assert builder._tf32_mode == expected_mode
 
     _install_fake_sentence_transformers(monkeypatch)
@@ -271,11 +385,17 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         monkeypatch,
         cuda_available=True,
         bf16_supported=True,
-        capability=(8, 0),
+        capability=(7, 5),
         compile_behavior="tagged",
+        torch_version="2.10.0",
     )
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    monkeypatch.setattr(
+        builder,
+        "_should_defer_compile_for_cache_hydration",
+        lambda: False,
+    )
     caplog.clear()
     with caplog.at_level(logging.DEBUG):
         builder._load_model()
@@ -303,16 +423,111 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     assert not any("embedding dimension: using" in message for message in info_messages)
     assert any("embedding dimension: using" in message for message in debug_messages)
     assert any(
-        "Enabled torch.compile for google/embeddinggemma-300m inner transformer"
+        f"Enabled torch.compile for {DEFAULT_EMBEDDING_MODEL_NAME} inner transformer"
         in message
         for message in debug_messages
     )
 
 
-def test_embedding_cache_namespace_varies_by_storage_precision(
+def test_embedding_compile_is_deferred_when_cache_not_hydrated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cache namespace should isolate incompatible storage precision settings."""
+    """Cold-cache runs should defer compile to avoid hydration slowdowns."""
+    _disable_embedding_dep_check(monkeypatch)
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        compile_behavior="tagged",
+        torch_version="2.10.0",
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    monkeypatch.setattr(builder, "_cache_hydrated_for_active_spec", lambda: False)
+    builder._load_model()
+
+    original = init_log["auto_model_before_compile"]
+    assert builder.model is not None
+    assert builder.model[0].auto_model is original
+    assert builder._inner_model_compiled is False
+    assert builder._compile_status_reason is not None
+    assert "deferred while hydrating cache" in builder._compile_status_reason
+    assert fake_torch._compile_calls == []  # type: ignore[attr-defined]
+
+
+def test_embedding_default_model_loads_with_fallback_chain(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Default embedding model should fail over to configured fallback checkpoint."""
+    _disable_embedding_dep_check(monkeypatch)
+    fallback_candidates = DEFAULT_EMBEDDING_MODEL_FALLBACKS[
+        DEFAULT_EMBEDDING_MODEL_NAME
+    ]
+    fallback_model = fallback_candidates[0]
+    init_log, _ = _install_fake_sentence_transformers(
+        monkeypatch,
+        fail_model_names={DEFAULT_EMBEDDING_MODEL_NAME},
+    )
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        builder._load_model()
+
+    assert init_log["attempts"] == [DEFAULT_EMBEDDING_MODEL_NAME, fallback_model]
+    assert init_log["model_name"] == fallback_model
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "Using fallback embedding checkpoint:" in message for message in log_messages
+    )
+
+
+def test_embedding_fingerprint_uses_active_fallback_model_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fingerprint checks should bind to active fallback checkpoint identity."""
+    _disable_embedding_dep_check(monkeypatch)
+    fallback_model = DEFAULT_EMBEDDING_MODEL_FALLBACKS[DEFAULT_EMBEDDING_MODEL_NAME][0]
+    _install_fake_sentence_transformers(
+        monkeypatch,
+        fail_model_names={DEFAULT_EMBEDDING_MODEL_NAME},
+    )
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+
+    class _FakeHfApi:
+        def model_info(self, repo_id: str, revision: str) -> object:
+            assert repo_id == fallback_model
+            assert revision == "main"
+            return types.SimpleNamespace(sha="0123456789abcdef0123456789abcdef01234567")
+
+    fake_hf_module = types.ModuleType("huggingface_hub")
+    fake_hf_module.HfApi = _FakeHfApi
+    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+    fingerprint = builder._resolve_model_fingerprint()
+
+    assert builder._active_model_name == fallback_model
+    assert (
+        fingerprint == f"hf::{fallback_model}::0123456789abcdef0123456789abcdef01234567"
+    )
+
+
+def test_embedding_cache_namespace_partition_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Namespace identity should partition precision, source dtype, and calibration."""
     _disable_embedding_dep_check(monkeypatch)
 
     int8_builder = EmbeddingGraphBuilder(
@@ -321,11 +536,62 @@ def test_embedding_cache_namespace_varies_by_storage_precision(
     f32_builder = EmbeddingGraphBuilder(
         max_papers=1, storage_precision="float32", client=MagicMock()
     )
-
     assert (
         int8_builder.embedding_cache.model_name
         != f32_builder.embedding_cache.model_name
     )
+
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+    f32_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "bfloat16",
+    )
+    bf16_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    assert (
+        f32_hint_builder.embedding_cache.model_name
+        != bf16_hint_builder.embedding_cache.model_name
+    )
+
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+    int8_small = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        calibration_sample_size=32,
+        client=MagicMock(),
+    )
+    int8_large = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        calibration_sample_size=128,
+        client=MagicMock(),
+    )
+    f32_small = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        calibration_sample_size=32,
+        client=MagicMock(),
+    )
+    f32_large = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="float32",
+        calibration_sample_size=128,
+        client=MagicMock(),
+    )
+    assert (
+        int8_small.embedding_cache.model_name != int8_large.embedding_cache.model_name
+    )
+    assert f32_small.embedding_cache.model_name == f32_large.embedding_cache.model_name
 
 
 def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
@@ -379,74 +645,6 @@ def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
         int8_prefilter_on.embedding_cache.model_name
         != int8_prefilter_off.embedding_cache.model_name
     )
-
-
-def test_embedding_cache_namespace_varies_by_source_dtype_hint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Source dtype hints should participate in namespace identity."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_source_dtype_hint",
-        lambda self: "float32",
-    )
-    f32_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_source_dtype_hint",
-        lambda self: "bfloat16",
-    )
-    bf16_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-
-    assert (
-        f32_hint_builder.embedding_cache.model_name
-        != bf16_hint_builder.embedding_cache.model_name
-    )
-
-
-def test_embedding_cache_namespace_includes_int8_calibration_sample_size(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Int8 caches should include calibration sample size in namespace identity."""
-    _disable_embedding_dep_check(monkeypatch)
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_source_dtype_hint",
-        lambda self: "float32",
-    )
-
-    int8_small = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="int8",
-        calibration_sample_size=32,
-        client=MagicMock(),
-    )
-    int8_large = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="int8",
-        calibration_sample_size=128,
-        client=MagicMock(),
-    )
-    f32_small = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="float32",
-        calibration_sample_size=32,
-        client=MagicMock(),
-    )
-    f32_large = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="float32",
-        calibration_sample_size=128,
-        client=MagicMock(),
-    )
-
-    assert (
-        int8_small.embedding_cache.model_name != int8_large.embedding_cache.model_name
-    )
-    assert f32_small.embedding_cache.model_name == f32_large.embedding_cache.model_name
 
 
 def test_embedding_cache_namespace_matches_default_and_explicit_truncate_dim(
@@ -521,185 +719,131 @@ def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
     builder.embedding_cache.set_model_fingerprint.assert_called_once_with("fp-new")
 
 
-def test_embedding_cache_reuses_cached_fingerprint_when_lookup_fails(
+def test_embedding_cache_offline_fingerprint_lookup_contracts(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Offline fingerprint lookup failures should not block reuse of a hydrated cache."""
+    """Offline lookup outcomes should preserve cache safety across identity states."""
     _disable_embedding_dep_check(monkeypatch)
 
-    builder = EmbeddingGraphBuilder(
-        max_papers=1, model_name="org/offline-test", client=MagicMock()
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(
-        return_value="hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
-    )
-    builder.embedding_cache.clear = MagicMock()
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
+    compatible_fp = "hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
+    cases = [
+        {
+            "label": "compatible cached fingerprint is reused",
+            "model_name": "org/offline-test",
+            "model_revision": None,
+            "strict_mode": False,
+            "has_cached_payload": True,
+            "cached_fingerprint": compatible_fp,
+            "expected_resolved": compatible_fp,
+            "expect_clear": False,
+            "expect_set_fingerprint": None,
+            "expected_log_fragment": "Reusing compatible cached fingerprint",
+        },
+        {
+            "label": "strict mode rejects legacy main sha assumption",
+            "model_name": "org/offline-strict",
+            "model_revision": None,
+            "strict_mode": True,
+            "has_cached_payload": True,
+            "cached_fingerprint": (
+                "hf::org/offline-strict::0123456789abcdef0123456789abcdef01234567"
+            ),
+            "expected_resolved": "hf::org/offline-strict::revision=main::offline-unverified",
+            "expect_clear": True,
+            "expect_set_fingerprint": "hf::org/offline-strict::revision=main::offline-unverified",
+            "expected_log_fragment": "incompatible with requested identity",
+        },
+        {
+            "label": "incompatible cached fingerprint clears payload",
+            "model_name": "org/offline-test",
+            "model_revision": "refs/pr/12",
+            "strict_mode": False,
+            "has_cached_payload": True,
+            "cached_fingerprint": compatible_fp,
+            "expected_resolved": "hf::org/offline-test::revision=refs/pr/12::offline-unverified",
+            "expect_clear": True,
+            "expect_set_fingerprint": "hf::org/offline-test::revision=refs/pr/12::offline-unverified",
+            "expected_log_fragment": "is incompatible with requested identity",
+        },
+        {
+            "label": "missing cached fingerprint reuses payload with fallback identity",
+            "model_name": "org/offline-no-fingerprint",
+            "model_revision": "refs/pr/12",
+            "strict_mode": False,
+            "has_cached_payload": True,
+            "cached_fingerprint": None,
+            "expected_resolved": (
+                "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
+            ),
+            "expect_clear": False,
+            "expect_set_fingerprint": (
+                "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
+            ),
+            "expected_log_fragment": "Reusing cached payload with fallback identity",
+        },
+        {
+            "label": "offline initialization sets fallback for empty namespace",
+            "model_name": "org/offline-init",
+            "model_revision": "refs/pr/34",
+            "strict_mode": False,
+            "has_cached_payload": False,
+            "cached_fingerprint": None,
+            "expected_resolved": "hf::org/offline-init::revision=refs/pr/34::offline-unverified",
+            "expect_clear": False,
+            "expect_set_fingerprint": (
+                "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
+            ),
+            "expected_log_fragment": "offline initialization",
+        },
+    ]
 
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
+    for case in cases:
+        caplog.clear()
+        if case["strict_mode"]:
+            monkeypatch.setenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", "1")
+        else:
+            monkeypatch.delenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", raising=False)
 
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
-    )
-    assert builder.embedding_cache.clear.call_count == 0
-    builder.embedding_cache.set_model_fingerprint.assert_not_called()
-    assert any(
-        "Reusing compatible cached fingerprint" in record.getMessage()
-        for record in caplog.records
-    )
+        builder = EmbeddingGraphBuilder(
+            max_papers=1,
+            model_name=case["model_name"],
+            model_revision=case["model_revision"],
+            client=MagicMock(),
+        )
+        builder.embedding_cache.has_cached_payload = MagicMock(
+            return_value=bool(case["has_cached_payload"])
+        )
+        builder.embedding_cache.get_model_fingerprint = MagicMock(
+            return_value=case["cached_fingerprint"]
+        )
+        builder.embedding_cache.clear = MagicMock()
+        builder.embedding_cache.set_model_fingerprint = MagicMock()
+        builder._resolve_model_fingerprint = MagicMock(
+            side_effect=RuntimeError("network unavailable")
+        )
 
+        with caplog.at_level(logging.WARNING):
+            builder._ensure_cache_model_fingerprint()
 
-def test_embedding_cache_strict_offline_rejects_legacy_main_sha_assumption(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Strict offline mode should reject legacy main-SHA reuse assumptions."""
-    _disable_embedding_dep_check(monkeypatch)
-    monkeypatch.setenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", "1")
+        assert builder._resolved_model_fingerprint == case["expected_resolved"], case[
+            "label"
+        ]
+        if case["expect_clear"]:
+            builder.embedding_cache.clear.assert_called_once()
+        else:
+            assert builder.embedding_cache.clear.call_count == 0
 
-    builder = EmbeddingGraphBuilder(
-        max_papers=1, model_name="org/offline-strict", client=MagicMock()
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(
-        return_value="hf::org/offline-strict::0123456789abcdef0123456789abcdef01234567"
-    )
-    builder.embedding_cache.clear = MagicMock()
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
-
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
-
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-strict::revision=main::offline-unverified"
-    )
-    builder.embedding_cache.clear.assert_called_once()
-    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-strict::revision=main::offline-unverified"
-    )
-    assert any(
-        "incompatible with requested identity" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_embedding_cache_clears_stale_cached_fingerprint_when_lookup_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Offline fallback should clear payload when cached fingerprint is incompatible."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        model_name="org/offline-test",
-        model_revision="refs/pr/12",
-        client=MagicMock(),
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(
-        return_value="hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
-    )
-    builder.embedding_cache.clear = MagicMock()
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
-
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
-
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-test::revision=refs/pr/12::offline-unverified"
-    )
-    builder.embedding_cache.clear.assert_called_once()
-    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-test::revision=refs/pr/12::offline-unverified"
-    )
-    assert any(
-        "is incompatible with requested identity" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_embedding_cache_reuses_cached_payload_with_fallback_fingerprint_when_lookup_fails(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Old caches without stored fingerprint should still be reusable offline."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        model_name="org/offline-no-fingerprint",
-        model_revision="refs/pr/12",
-        client=MagicMock(),
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value=None)
-    builder.embedding_cache.clear = MagicMock()
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
-
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
-
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
-    )
-    assert builder.embedding_cache.clear.call_count == 0
-    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
-    )
-    assert any(
-        "Reusing cached payload with fallback identity" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_embedding_cache_initializes_offline_without_payload(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """No-payload namespaces should initialize fingerprint metadata in offline mode."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        model_name="org/offline-init",
-        model_revision="refs/pr/34",
-        client=MagicMock(),
-    )
-    builder.embedding_cache.has_cached_payload = MagicMock(return_value=False)
-    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value=None)
-    builder.embedding_cache.set_model_fingerprint = MagicMock()
-    builder._resolve_model_fingerprint = MagicMock(
-        side_effect=RuntimeError("network unavailable")
-    )
-
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_model_fingerprint()
-
-    assert (
-        builder._resolved_model_fingerprint
-        == "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
-    )
-    builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-        "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
-    )
-    assert any(
-        "offline initialization" in record.getMessage() for record in caplog.records
-    )
+        expected_set_fingerprint = case["expect_set_fingerprint"]
+        if expected_set_fingerprint is None:
+            builder.embedding_cache.set_model_fingerprint.assert_not_called()
+        else:
+            builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
+                expected_set_fingerprint
+            )
+        assert any(
+            case["expected_log_fragment"] in record.getMessage()
+            for record in caplog.records
+        ), case["label"]
 
 
 def test_embedding_cache_sets_missing_cached_fingerprint_after_lookup(
@@ -725,10 +869,10 @@ def test_embedding_cache_sets_missing_cached_fingerprint_after_lookup(
     assert builder.embedding_cache.clear.call_count == 0
 
 
-def test_embedding_fingerprint_resolution_fails_closed_for_hf_repo(
-    monkeypatch: pytest.MonkeyPatch,
+def test_embedding_fingerprint_resolution_contracts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    """HF-backed model fingerprints should fail closed when SHA cannot be resolved."""
+    """Fingerprint resolution should cover fail-closed, snapshot, and artifact paths."""
     _disable_embedding_dep_check(monkeypatch)
 
     class _FailingHfApi:
@@ -740,61 +884,33 @@ def test_embedding_fingerprint_resolution_fails_closed_for_hf_repo(
     fake_hf_module.HfApi = _FailingHfApi
     monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
 
-    builder = EmbeddingGraphBuilder(
+    fail_closed_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="org/test-model",
         model_revision="main",
         client=MagicMock(),
     )
-
     with pytest.raises(RuntimeError, match="Could not resolve Hugging Face commit SHA"):
-        builder._resolve_model_fingerprint()
+        fail_closed_builder._resolve_model_fingerprint()
 
-
-def test_embedding_fingerprint_resolution_uses_local_snapshot_sha_when_offline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """HF fingerprint resolution should fall back to local snapshot SHA without API."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    class _FailingHfApi:
-        def model_info(self, repo_id: str, revision: str) -> object:
-            del repo_id, revision
-            raise RuntimeError("network unavailable")
-
-    def _snapshot_download(repo_id: str, revision: str, local_files_only: bool) -> str:
+    def _snapshot_download_with_sha(
+        repo_id: str, revision: str, local_files_only: bool
+    ) -> str:
         del repo_id, revision
         assert local_files_only is True
         return "/tmp/models--org--test-model/snapshots/0123456789abcdef0123456789abcdef01234567"
 
-    fake_hf_module = types.ModuleType("huggingface_hub")
-    fake_hf_module.HfApi = _FailingHfApi
-    fake_hf_module.snapshot_download = _snapshot_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
-
-    builder = EmbeddingGraphBuilder(
+    fake_hf_module.snapshot_download = _snapshot_download_with_sha
+    snapshot_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="org/test-model",
         model_revision="refs/pr/12",
         client=MagicMock(),
     )
-
     assert (
-        builder._resolve_model_fingerprint()
+        snapshot_builder._resolve_model_fingerprint()
         == "hf::org/test-model::0123456789abcdef0123456789abcdef01234567"
     )
-
-
-def test_embedding_fingerprint_resolution_uses_local_artifact_hashes_when_sha_unavailable(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
-    """HF fingerprint resolution should hash config + weights when SHA is unavailable."""
-    _disable_embedding_dep_check(monkeypatch)
-
-    class _FailingHfApi:
-        def model_info(self, repo_id: str, revision: str) -> object:
-            del repo_id, revision
-            raise RuntimeError("network unavailable")
 
     snapshot_root = tmp_path / "models--org--artifact-model"
     snapshot_root.mkdir(parents=True, exist_ok=True)
@@ -803,18 +919,16 @@ def test_embedding_fingerprint_resolution_uses_local_artifact_hashes_when_sha_un
     (snapshot_root / "config.json").write_bytes(config_bytes)
     (snapshot_root / "model.safetensors").write_bytes(weights_bytes)
 
-    def _snapshot_download(repo_id: str, revision: str, local_files_only: bool) -> str:
+    def _snapshot_download_artifact_only(
+        repo_id: str, revision: str, local_files_only: bool
+    ) -> str:
         assert repo_id == "org/artifact-model"
         assert revision == "refs/pr/7"
         assert local_files_only is True
         return str(snapshot_root)
 
-    fake_hf_module = types.ModuleType("huggingface_hub")
-    fake_hf_module.HfApi = _FailingHfApi
-    fake_hf_module.snapshot_download = _snapshot_download
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
-
-    builder = EmbeddingGraphBuilder(
+    fake_hf_module.snapshot_download = _snapshot_download_artifact_only
+    artifact_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="org/artifact-model",
         model_revision="refs/pr/7",
@@ -823,7 +937,7 @@ def test_embedding_fingerprint_resolution_uses_local_artifact_hashes_when_sha_un
 
     expected_config = sha256(config_bytes).hexdigest()
     expected_weights = sha256(weights_bytes).hexdigest()
-    assert builder._resolve_model_fingerprint() == (
+    assert artifact_builder._resolve_model_fingerprint() == (
         "hf::org/artifact-model::revision=refs/pr/7"
         f"::config={expected_config}::weights={expected_weights}"
     )
@@ -893,6 +1007,23 @@ def test_metadata_and_streaming_loader_contracts(
         "librarian-bots/arxiv-metadata-snapshot",
         "CShorten/ML-ArXiv-Papers",
     ]
+    assert len(list(dataset)) == 1
+    assert load_calls[0][1] == "train"
+
+    load_calls.clear()
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        use_streaming=False,
+        corpus_size=5,
+        client=MagicMock(),
+    )
+    selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=False)
+    assert selected_name == "CShorten/ML-ArXiv-Papers"
+    assert [name for name, _, _ in load_calls] == [
+        "librarian-bots/arxiv-metadata-snapshot",
+        "CShorten/ML-ArXiv-Papers",
+    ]
+    assert load_calls[0][1] == "train[:5]"
     assert len(list(dataset)) == 1
 
     with pytest.raises(ValueError, match="does not support sliced dataset splits"):
@@ -986,28 +1117,35 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     fake_load_dataset_for_hydration.assert_not_called()
 
 
-def test_collect_papers_revalidates_cache_when_dataset_source_changes(
+def test_collect_papers_dataset_source_revalidation_contracts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """Cached hydration should be revalidated against the selected dataset source."""
+    """Dataset-source mismatches should revalidate or fail closed when unresolved."""
     _disable_embedding_dep_check(monkeypatch)
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    source = "librarian-bots/arxiv-metadata-snapshot"
 
-    builder = EmbeddingGraphBuilder(
-        max_papers=2, use_streaming=False, client=MagicMock()
+    def _build_hydrated_builder(cache_root: str) -> EmbeddingGraphBuilder:
+        monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / cache_root))
+        local_builder = EmbeddingGraphBuilder(
+            max_papers=2, use_streaming=False, client=MagicMock()
+        )
+        _pin_model_fingerprint(monkeypatch, local_builder)
+        local_builder.embedding_cache.mark_hydrated(
+            dataset_source=source,
+            dataset_split=local_builder.dataset_split,
+            corpus_size=local_builder.corpus_size,
+            complete=True,
+        )
+        return local_builder
+
+    revalidate_builder = _build_hydrated_builder("cache-root-revalidate")
+    mark_hydrated_spy = MagicMock(
+        wraps=revalidate_builder.embedding_cache.mark_hydrated
     )
-    _pin_model_fingerprint(monkeypatch, builder)
-    builder.embedding_cache.mark_hydrated(
-        dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        dataset_split=builder.dataset_split,
-        corpus_size=builder.corpus_size,
-        complete=True,
+    monkeypatch.setattr(
+        revalidate_builder.embedding_cache, "mark_hydrated", mark_hydrated_spy
     )
-
-    mark_hydrated_spy = MagicMock(wraps=builder.embedding_cache.mark_hydrated)
-    monkeypatch.setattr(builder.embedding_cache, "mark_hydrated", mark_hydrated_spy)
-
     loaded_sources: list[tuple[bool, str | None]] = []
 
     def fake_load_dataset_for_hydration(
@@ -1017,50 +1155,35 @@ def test_collect_papers_revalidates_cache_when_dataset_source_changes(
         return "CShorten/ML-ArXiv-Papers", []
 
     monkeypatch.setattr(
-        builder,
+        revalidate_builder,
         "_load_dataset_for_hydration",
         fake_load_dataset_for_hydration,
     )
     monkeypatch.setattr(
-        builder, "_get_model_for_encoding", lambda: ConstantEncodeModel()
+        revalidate_builder,
+        "_get_model_for_encoding",
+        lambda: ConstantEncodeModel(),
     )
 
-    candidates = builder._select_candidates_from_loaded(
+    candidates = revalidate_builder._select_candidates_from_loaded(
         np.asarray([1.0, 0.0], dtype=np.float32)
     )
-
     assert candidates == []
-    assert loaded_sources == [(False, "librarian-bots/arxiv-metadata-snapshot")]
-
+    assert loaded_sources == [(False, source)]
     complete_flags = [
         call.kwargs["complete"] for call in mark_hydrated_spy.call_args_list
     ]
     assert complete_flags == [False]
 
-
-def test_collect_papers_rejects_source_mismatch_when_dataset_load_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
-) -> None:
-    """Offline fallback must not reuse cache from a different dataset source."""
-    _disable_embedding_dep_check(monkeypatch)
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
-
-    builder = EmbeddingGraphBuilder(
-        max_papers=2, use_streaming=False, client=MagicMock()
-    )
-    _pin_model_fingerprint(monkeypatch, builder)
-    builder.embedding_cache.mark_hydrated(
-        dataset_source="librarian-bots/arxiv-metadata-snapshot",
-        dataset_split=builder.dataset_split,
-        corpus_size=builder.corpus_size,
-        complete=True,
-    )
-
-    is_hydrated_spy = MagicMock(wraps=builder.embedding_cache.is_hydrated)
-    monkeypatch.setattr(builder.embedding_cache, "is_hydrated", is_hydrated_spy)
+    fail_closed_builder = _build_hydrated_builder("cache-root-fail-closed")
+    is_hydrated_spy = MagicMock(wraps=fail_closed_builder.embedding_cache.is_hydrated)
     monkeypatch.setattr(
-        builder,
+        fail_closed_builder.embedding_cache,
+        "is_hydrated",
+        is_hydrated_spy,
+    )
+    monkeypatch.setattr(
+        fail_closed_builder,
         "_load_dataset_for_hydration",
         MagicMock(side_effect=RuntimeError("dataset unavailable")),
     )
@@ -1069,15 +1192,14 @@ def test_collect_papers_rejects_source_mismatch_when_dataset_load_fails(
         RuntimeError,
         match="Failed to resolve hydration dataset source",
     ) as exc_info:
-        builder._select_candidates_from_loaded(np.asarray([1.0, 0.0], dtype=np.float32))
+        fail_closed_builder._select_candidates_from_loaded(
+            np.asarray([1.0, 0.0], dtype=np.float32)
+        )
 
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert str(exc_info.value.__cause__) == "dataset unavailable"
     assert is_hydrated_spy.call_count == 1
-    assert (
-        is_hydrated_spy.call_args.kwargs.get("dataset_source")
-        == "librarian-bots/arxiv-metadata-snapshot"
-    )
+    assert is_hydrated_spy.call_args.kwargs.get("dataset_source") == source
 
 
 def test_hydration_reset_restores_model_fingerprint(
@@ -1108,6 +1230,98 @@ def test_hydration_reset_restores_model_fingerprint(
 
     builder._ensure_cache_hydrated(use_streaming=False)
     assert builder.embedding_cache.get_model_fingerprint() == "fp-before-clear"
+
+
+def test_hydration_flush_size_controls_cache_write_bursting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Hydration should flush metadata batches using configured flush threshold."""
+    _disable_embedding_dep_check(monkeypatch)
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    monkeypatch.setattr("citemesh.strategies.embedding.HYDRATION_FLUSH_SIZE", 3)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        use_streaming=False,
+        corpus_size=7,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-flush-threshold")
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        lambda use_streaming, preferred_dataset_source=None: (
+            "mini-dataset",
+            [
+                {"id": f"p{i}", "title": f"Paper {i}", "abstract": f"A{i}"}
+                for i in range(7)
+            ],
+        ),
+    )
+
+    flushed_batch_sizes: list[int] = []
+
+    def _capture_flush(batch: list[dict[str, Any]]) -> int:
+        flushed_batch_sizes.append(len(batch))
+        return len(batch)
+
+    monkeypatch.setattr(builder, "_cache_metadata_batch", _capture_flush)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+    assert flushed_batch_sizes == [3, 3, 1]
+
+
+def test_cache_metadata_batch_caps_model_encode_batch_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache writes should keep encode batch size bounded for stable runtime."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        use_streaming=False,
+        corpus_size=1,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: object())
+
+    captured: dict[str, int] = {}
+
+    def _capture_get_embeddings(
+        papers: dict[str, dict[str, Any]],
+        model: object,
+        batch_size: int = 32,
+        show_progress: bool = True,
+        text_builder: Any = None,
+    ) -> dict[str, np.ndarray]:
+        del model, show_progress, text_builder
+        captured["batch_size"] = int(batch_size)
+        captured["paper_count"] = int(len(papers))
+        return {}
+
+    monkeypatch.setattr(
+        builder.embedding_cache, "get_embeddings", _capture_get_embeddings
+    )
+
+    batch = [
+        {
+            "paper_id": f"paper-{idx}",
+            "title": f"Title {idx}",
+            "abstract": f"Abstract {idx}",
+            "year": 2025,
+            "authors": ["A"],
+            "categories": ["cs.AI"],
+        }
+        for idx in range(ENCODE_BATCH_SIZE + 17)
+    ]
+
+    routed = builder._cache_metadata_batch(batch)
+    assert routed == len(batch)
+    assert captured["paper_count"] == len(batch)
+    assert captured["batch_size"] == ENCODE_BATCH_SIZE
 
 
 def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
@@ -1207,6 +1421,91 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
     )
     assert candidates == []
     assert builder._embedding_runtime_metadata() == {"binary_prefilter_used": False}
+
+
+def test_embedding_candidate_search_logs_comparison_counts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Candidate search should log compared/rescored embedding counts."""
+    _disable_embedding_dep_check(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(max_papers=2, top_k=2, client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.last_search_used_binary_prefilter = True
+    builder.embedding_cache.last_search_total_embeddings = 50000
+    builder.embedding_cache.last_search_rescored_embeddings = 640
+    builder.embedding_cache.search = MagicMock(
+        return_value=[
+            CacheSearchResult(
+                paper_id="a",
+                score=0.95,
+                embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                metadata={"title": "A", "abstract": "A", "authors": []},
+            )
+        ]
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        candidates = builder._select_candidates_from_loaded(
+            np.asarray([1.0, 0.0], dtype=np.float32)
+        )
+
+    assert [paper_id for paper_id, _, _ in candidates] == ["a"]
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "compared against 50,000 embeddings (rescored=640, prefilter=on)" in message
+        for message in log_messages
+    )
+
+
+def test_embedding_citation_enrichment_logs_target_count(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Citation enrichment should log bounded target count and update paper metadata."""
+    _disable_embedding_dep_check(monkeypatch)
+    builder = EmbeddingGraphBuilder(max_papers=5, top_k=2, client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder)
+
+    target = Paper(
+        paper_id="paper-1",
+        title="Paper One",
+        year=2024,
+        abstract="paper one abstract",
+        is_seed=False,
+    )
+    enriched = Paper(
+        paper_id="paper-1",
+        title="Paper One",
+        year=2024,
+        abstract="paper one abstract",
+        citation_count=77,
+        is_seed=False,
+    )
+    builder.client.get_paper = MagicMock(return_value=enriched)
+    papers = {
+        "seed": Paper(
+            paper_id="seed",
+            title="Seed",
+            year=2024,
+            abstract="seed abstract",
+            is_seed=True,
+        ),
+        "paper-1": target,
+    }
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        builder._update_citation_counts(papers)
+
+    assert papers["paper-1"].citation_count == 77
+    log_messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "Fetching citation counts from Semantic Scholar for up to 1 papers..."
+        in message
+        for message in log_messages
+    )
 
 
 def test_embedding_build_graph_persists_runtime_metadata(

@@ -2,16 +2,24 @@
 
 Build exploration-friendly paper graphs from a single paper or query using recommendation, citation, embedding, or hybrid strategies. CiteMesh ships as a single CLI with consistent visuals and export formats so you can switch approaches without changing tools.
 
-## Scope
+## Core Use Case
 
-This README is intentionally high-level.
+Start from one paper you already know, then quickly discover:
 
-- Canonical CLI behavior (flags, defaults, identifier normalization, outputs): [CLI Usage](./docs/guides/cli.md)
-- Strategy behavior and tradeoffs: [Strategies Guide](./docs/guides/strategies.md)
-- Canonical cache behavior (paths, layout, hydration/invalidation, cleanup): [Caching & Data](./docs/guides/caching.md)
-- Canonical runtime environment-variable contracts: [Environment Variables](./docs/reference/environment.md)
-- Full docs ownership map: [Documentation Index](./docs/README.md)
-- This file intentionally avoids duplicating CLI/cache contracts; those remain centralized in the canonical docs above.
+- newer papers that are genuinely related to that paper's core topic
+- older, high-quality foundational papers that matter for understanding the same area
+
+The default hybrid workflow is tuned around this discovery pattern rather than maximizing raw graph size.
+
+## Documentation
+
+- Documentation index: [docs/README.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- CLI guide: [docs/guides/cli.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Strategy guide: [docs/guides/strategies.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
+- Caching and data: [docs/guides/caching.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Environment variables: [docs/reference/environment.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Output files and sidecar schema: [docs/reference/output-artifacts.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
+- Embedding runtime behavior: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
 
 ## Quick Start
 
@@ -49,20 +57,17 @@ pip install -e ".[all]"
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
-For complete command behavior and examples, use [CLI Usage](./docs/guides/cli.md).
+For complete command behavior and examples, use [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md).
 
 ## Why CiteMesh
 
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
-- Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, JSON, GraphML.
+- Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
+- Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, JSON, GraphML, plus a per-run config sidecar.
 - Theme-aware visuals shared across exporters.
 - Persistent user-level caching for embeddings and corpus data.
 - Typed, modular architecture that is straightforward to extend.
 
-## Documentation
-
-Use [Documentation Index](./docs/README.md) as the source-of-truth map. It defines ownership for each behavior topic.
-
 ## License
 
-MIT License. See [LICENSE](LICENSE).
+MIT License. See [LICENSE](https://github.com/pszemraj/CiteMesh/blob/main/LICENSE).

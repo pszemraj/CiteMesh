@@ -2,14 +2,14 @@
 
 The `citemesh` command builds paper graphs with one of four strategies: `recommendation`, `citation`, `embedding`, or `hybrid`.
 
-## Scope
+Related docs:
 
-This is the canonical CLI behavior specification.
-
-- Normative here: commands, flags, defaults, validation, identifier normalization, output naming, and export semantics.
-- Non-normative here: cache storage internals and on-disk layout. See [Caching & Data](caching.md).
-- Runtime environment-variable definitions are canonical in [Environment Variables](../reference/environment.md).
-- Documentation ownership map: [Documentation Index](../README.md).
+- Cache layout and hydration: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Output files and sidecar schema: [Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
+- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Defaults parameter study: [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
+- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## Basic Invocation
 
@@ -25,10 +25,11 @@ citemesh search "<query>" [--limit N|-n N]
 
 # Cache management commands
 citemesh cache scan
+citemesh cache scan --log-level debug
 citemesh cache clear [--yes]
 ```
 
-For cache path/layout/hydration details, see [Caching & Data](caching.md).
+For cache path/layout/hydration details, see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
 In non-interactive shells, `citemesh cache clear` requires `--yes`.
 
 ## Accepted Identifiers
@@ -55,34 +56,19 @@ In non-interactive shells, `citemesh cache clear` requires `--yes`.
 | `--export`, `-e` | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all` | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
+| `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
+| `--log-width` | Rich console wrap width in columns (`0` uses terminal width) | `140` |
 
-When `--output` is omitted, CiteMesh writes to `out/<slug>-<hash>/<strategy>.<ext>`.
+Output-path normalization, file naming, and sidecar placement are defined in
+[Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md).
+Use that reference as the canonical source for `--output` behavior in single-export
+and multi-export runs.
 
-`<slug>` is a filesystem-safe version of the seed title, `<hash>` is the first 8 hex characters of `sha256(seed_id)`, and the combined directory name is capped at 40 characters.
+`--log-level` and `--log-width` are shared command options and are accepted for
+`build`, `search`, and `cache` command trees (including `cache scan` / `cache clear`).
 
-When `--export all` is used, CiteMesh writes every supported format using consistent styling into a directory. With default naming this is `out/<slug>-<hash>/`; with explicit output it uses the directory base derived from `-o`.
-
-If explicit `-o` ends with a known export suffix (for example `-o out/my-run.json`), the suffix is stripped and the remaining path is treated as the directory base for multi-export runs.
-If explicit `-o` has no known suffix, it is treated as the directory base for multi-export runs.
-Example: `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
-normalizes to directory `out/` and writes files like `out/hybrid.png`, `out/hybrid.html`,
-`out/hybrid.plotly.html`, `out/hybrid.json`, and `out/hybrid.graphml`.
-
-For multi-export runs, files are named `<strategy>.<ext>` inside the selected directory. Example:
-
-`citemesh build "<paper-id>" --strategy hybrid --export all -o out/arxiv-2508.14040-hybrid-full`
-
-writes:
-
-- `out/arxiv-2508.14040-hybrid-full/hybrid.png`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.html`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.plotly.html`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.json`
-- `out/arxiv-2508.14040-hybrid-full/hybrid.graphml`
-
-For single-export runs, explicit `-o` remains file-style and preserves extension replacement/appending behavior.
-
-`--seed` controls shared layout generation for `png` and `plotly` exports. Pyvis `html` exports use vis.js browser physics and do not consume this precomputed layout.
+`--seed` controls shared layout generation for `png` and `plotly` exports. Pyvis
+`html` exports use vis.js browser physics and do not consume this precomputed layout.
 
 Numeric validation:
 
@@ -95,13 +81,13 @@ Numeric validation:
 
 ## Strategy-Specific Flags
 
-Strategy behavior and tradeoffs are canonical in [Strategies Guide](strategies.md). Flag contracts live here.
+Strategy behavior and tradeoffs are described in [Strategies Guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md). Flag contracts are listed here.
 
 Build command options are strategy-scoped. If you pass a flag that is not supported
 for the selected `--strategy`, CiteMesh exits with a CLI error instead of silently
 ignoring it.
 
-### Cross-Strategy Scope
+### Cross-Strategy Behavior
 
 - `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (default `0.2`).
 - `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
@@ -116,21 +102,23 @@ ignoring it.
 
 ### Citation Strategy
 
-- `--max-citations`, `-c`: limit number of citing papers (default `20`)
-- `--max-references`, `-r`: limit number of referenced papers (default `20`)
+- `--max-citations`, `-c`: limit number of citing papers (default `25`)
+- `--max-references`, `-r`: limit number of referenced papers (default `25`)
 - `--similarity-threshold`, `-t`: minimum edge similarity threshold (`0.0` to `1.0`, default `0.2`)
 - `--no-references`: skip reference-list fetching (faster, no bibliographic coupling)
 - `--refresh-reference-cache`: bypass persisted reference-cache reads and fetch fresh reference IDs
 
 ### Embedding Strategy
 
-- `--model`, `-m`: sentence-transformer model name (for example `all-MiniLM-L6-v2`, `google/embeddinggemma-300m`)
+- `--model`, `-m`: sentence-transformer model name (default `unsloth/embeddinggemma-300m`; examples: `all-MiniLM-L6-v2`, `google/embeddinggemma-300m`)
 - `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
 - `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
+- With non-streaming unsliced splits, CiteMesh loads `split[:corpus_size]` directly (it does not download/process the full split just to stop after `corpus_size` rows).
+- For the default `librarian-bots/arxiv-metadata-snapshot` source, current ordering places the newest `update_date` rows first, so the default cap targets recent updates.
 - `--all-corpus`: remove corpus-size cap and process the full selected split
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
-- `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `2`)
+- `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `3`)
 - `--truncate-dim`: optional embedding output-dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running
@@ -138,26 +126,33 @@ ignoring it.
 - `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). Explicit `--binary-prefilter` requires `--storage-precision int8`.
 - `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
+- `--encode-batch-size`: embedding-model encode batch size used during hydration/search (default `32`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
-- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled)
-
-Runtime precision policy:
-
-- TF32 kernels are auto-enabled on supported Ampere+ CUDA runtimes for embedding inference. This behavior is intentional and currently does not expose a CLI toggle.
+- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled). Compile is deferred on cold-cache hydration runs and applied on warm-cache runs.
+- Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
+- Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md).
 
 Execution transparency:
 
-- Before embedding/hybrid execution, CLI logs a preflight contract describing expected side effects (model/dataset artifact download risk and embedding-cache mutation scope).
-- With non-int8 precision, implicit binary-prefilter defaults are normalized to effective runtime values (`binary_prefilter=false`, `binary_rescore_multiplier=1`) to avoid no-op ambiguity.
+- Embedding/hybrid runs print a compact config summary (model, split, corpus cap, streaming mode, storage precision).
+- Retrieval/caching internals (prefilter semantics, compared/rescored counts, compile guard behavior, hydration/lock policy) are defined in:
+  - [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+  - [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
 
 ### Hybrid Strategy
 
 - Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
 - Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
-- `--max-semantic`: maximum non-seed semantic neighbors to add when enriching the citation graph.
-  Hybrid reserves this capacity from citation collection (`citation_budget = max_papers - max_semantic`), so valid values are `0` through `max-papers - 1`.
-  If omitted, hybrid defaults to `min(10, max-papers - 1)`.
+- `--max-semantic`: maximum non-seed semantic neighbors to add after hybrid reranking.
+  Valid values are `0` through `max-papers - 1`.
+  If omitted, hybrid defaults to `min(25, max-papers - 1)`.
+- Hybrid adjudication policy:
+  - fetches full citation candidates up to `max_references + max_citations`
+  - fetches semantic candidates (expanded pool) and merges duplicates
+  - reranks the union by seed relevance (semantic/citation/temporal/bibliographic signals) with a boost for papers found by both branches
+  - applies the `max_semantic` cap only to semantic-only additions
 - Setting `--max-semantic 0` disables semantic enrichment; embedding-only flags are rejected to avoid no-op configuration.
 - If `--max-semantic` is omitted and `--max-papers` is `1`, the effective default is also `0`; embedding-only hybrid flags are rejected in that configuration for the same reason.
 - Hybrid runs fail closed if semantic enrichment fails; CiteMesh does not silently downgrade to citation-only output.
@@ -167,20 +162,12 @@ Execution transparency:
 - `png`: Matplotlib static render with theme-aware background and labels
 - `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
 - `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
-- `json`: structured graph data with nodes, edges, metadata
+- `json`: structured graph data payload (nodes/edges)
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
+- `*.config.json`: run config + metadata sidecar
 
-For `embedding` and `hybrid` strategies, export metadata includes embedding provenance fields (`effective_vector_dtype`, `storage_precision`, configured binary-prefilter state, and `binary_prefilter_used_for_query` when runtime retrieval metadata is available).
-All strategies include a `score_contract` object in export metadata describing score semantics (`score_type`) and explicitly marking scores as non-comparable across strategies.
-Hybrid exports also include `score_contract.adjudication_policy` describing citation/semantic merge behavior.
-
-Determinism notes:
-
-- `json` exports are deterministic (stable key order and indentation).
-- `graphml` export is deterministic on NetworkX versions with stable writer ordering (`>=2.8` uses strict node/edge sorting metadata).
-- `png` is deterministic for the same input graph and `--seed`.
-- `plotly` is deterministic for the same input graph and `--seed` when Plotly supports `write_html(div_id=...)` (CiteMesh fails fast if unavailable).
-- Pyvis `html` export has deterministic serialized ordering, but runtime browser physics remain non-deterministic.
+For field-level JSON/sidecar schema and determinism details, see
+[Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md).
 
 Interactive exports require optional viz dependencies:
 
@@ -215,13 +202,6 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 ## Troubleshooting
 
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
-- **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
+- **Slow first embedding run**: see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md) for hydration behavior, cache reuse, and tuning guidance.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
-- **API limits**: configure `S2_API_KEY`; variable contract is canonical in [Environment Variables](../reference/environment.md).
-
-Related canonical docs:
-
-- Docs ownership map: [Documentation Index](../README.md)
-- Cache behavior: [Caching & Data](caching.md)
-- Runtime variables: [Environment Variables](../reference/environment.md)
-- Component architecture: [Architecture](../internals/architecture.md)
+- **API limits**: configure `S2_API_KEY`; see [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md).

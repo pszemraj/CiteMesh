@@ -200,38 +200,45 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
     ]
 
 
-def test_citation_refresh_reference_cache_forces_service_refresh() -> None:
-    """Citation strategy should pass force-refresh flag to reference lookups."""
-    client = MagicMock()
-    client.get_reference_ids.return_value = ["r1"]
-    builder = CitationGraphBuilder(
+def test_refresh_reference_cache_force_lookup_contracts() -> None:
+    """Refresh mode should bypass stale memory entries and force service lookups."""
+    citation_client = MagicMock()
+    citation_client.get_reference_ids.return_value = ["fresh-ref"]
+    citation_builder = CitationGraphBuilder(
         fetch_references=True,
         refresh_reference_cache=True,
-        client=client,
+        client=citation_client,
     )
+    citation_builder.reference_cache["paper-1"] = ["stale-ref"]
 
-    refs = builder._get_references("paper-1")
-
-    assert refs == ["r1"]
-    client.get_reference_ids.assert_called_once_with("paper-1", force_refresh=True)
-
-
-def test_citation_refresh_reference_cache_bypasses_in_memory_hits() -> None:
-    """Refresh mode should bypass stale in-memory reference entries."""
-    client = MagicMock()
-    client.get_reference_ids.return_value = ["fresh-ref"]
-    builder = CitationGraphBuilder(
-        fetch_references=True,
-        refresh_reference_cache=True,
-        client=client,
-    )
-    builder.reference_cache["paper-1"] = ["stale-ref"]
-
-    refs = builder._get_references("paper-1")
+    refs = citation_builder._get_references("paper-1")
 
     assert refs == ["fresh-ref"]
-    client.get_reference_ids.assert_called_once_with("paper-1", force_refresh=True)
-    assert builder.reference_cache["paper-1"] == ["fresh-ref"]
+    citation_client.get_reference_ids.assert_called_once_with(
+        "paper-1", force_refresh=True
+    )
+    assert citation_builder.reference_cache["paper-1"] == ["fresh-ref"]
+
+    recommendation_client = MagicMock()
+    recommendation_client.get_reference_ids.return_value = ["r2"]
+    recommendation_builder = RecommendationGraphBuilder(
+        fetch_references=True,
+        refresh_reference_cache=True,
+        client=recommendation_client,
+    )
+    paper = Paper(
+        paper_id="paper-2",
+        title="Paper 2",
+        year=2020,
+        abstract="paper two",
+    )
+
+    recommendation_builder._hydrate_references(paper)
+
+    assert paper.references == ["r2"]
+    recommendation_client.get_reference_ids.assert_called_once_with(
+        "paper-2", force_refresh=True
+    )
 
 
 def test_citation_collect_clears_in_memory_reference_cache_between_requests() -> None:
@@ -252,28 +259,6 @@ def test_citation_collect_clears_in_memory_reference_cache_between_requests() ->
     builder.collect_papers("seed")
 
     assert builder.reference_cache == {}
-
-
-def test_recommendation_refresh_reference_cache_forces_service_refresh() -> None:
-    """Recommendation strategy should pass force-refresh flag to reference lookups."""
-    client = MagicMock()
-    client.get_reference_ids.return_value = ["r2"]
-    builder = RecommendationGraphBuilder(
-        fetch_references=True,
-        refresh_reference_cache=True,
-        client=client,
-    )
-    paper = Paper(
-        paper_id="paper-2",
-        title="Paper 2",
-        year=2020,
-        abstract="paper two",
-    )
-
-    builder._hydrate_references(paper)
-
-    assert paper.references == ["r2"]
-    client.get_reference_ids.assert_called_once_with("paper-2", force_refresh=True)
 
 
 def test_citation_similarity_uses_reference_and_fallback_branches(
@@ -353,6 +338,82 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
         builder.collect_papers("seed")
 
 
+def test_hybrid_rerank_falls_back_when_seed_embedding_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid rerank should continue when seed embedding encode is unavailable."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
+    assert builder.embedding_builder is not None
+
+    seed = _seed_paper("seed")
+    candidate = _paper("c1")
+    builder.embedding_builder.embeddings = {
+        candidate.paper_id: np.asarray([0.2, 0.1, 0.3], dtype=np.float32)
+    }
+    builder.embedding_builder.model_profile = MagicMock(
+        format_query=lambda text, _metadata: text
+    )
+    builder.embedding_builder._encode_texts = MagicMock(
+        side_effect=RuntimeError("temporary seed encode failure")
+    )
+
+    seed_embedding = builder._ensure_candidate_embeddings(
+        seed, {candidate.paper_id: candidate}
+    )
+
+    assert seed_embedding is None
+    assert builder._rank_candidates(
+        seed,
+        {candidate.paper_id: candidate},
+        {candidate.paper_id: {"semantic"}},
+    ) == [candidate.paper_id]
+
+
+def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid rerank should not persist citation-candidate embeddings into cache."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
+    assert builder.embedding_builder is not None
+
+    seed = _seed_paper("seed")
+    candidate = _paper("c1")
+    builder.embedding_builder.embeddings = {}
+    builder.embedding_builder.model_profile = MagicMock(
+        format_query=lambda text, _metadata: text,
+        format_document=lambda metadata: (
+            f"{metadata.get('title', '')}. {metadata.get('abstract', '')}"
+        ),
+    )
+    builder.embedding_builder._encode_texts = MagicMock(
+        side_effect=[
+            np.asarray([[0.4, 0.1, 0.2]], dtype=np.float32),
+            np.asarray([[0.3, 0.2, 0.1]], dtype=np.float32),
+        ]
+    )
+    builder.embedding_builder.embedding_cache = MagicMock()
+    builder.embedding_builder.embedding_cache.get_embeddings = MagicMock(
+        side_effect=AssertionError(
+            "Hybrid rerank candidate hydration must not write into persistent cache."
+        )
+    )
+
+    seed_embedding = builder._ensure_candidate_embeddings(
+        seed, {candidate.paper_id: candidate}
+    )
+
+    np.testing.assert_allclose(
+        seed_embedding, np.asarray([0.4, 0.1, 0.2], dtype=np.float32)
+    )
+    np.testing.assert_allclose(
+        builder.embedding_builder.embeddings[candidate.paper_id],
+        np.asarray([0.3, 0.2, 0.1], dtype=np.float32),
+    )
+    builder.embedding_builder.embedding_cache.get_embeddings.assert_not_called()
+
+
 def test_hybrid_thresholds_and_default_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -379,6 +440,24 @@ def test_hybrid_thresholds_and_default_budget(
     assert small_builder.max_semantic == 4
 
 
+def test_hybrid_semantic_branch_collects_full_citation_candidate_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid semantic mode should fetch full reference+citation candidate pools."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(
+        max_papers=40,
+        max_semantic=None,
+        max_references=20,
+        max_citations=20,
+        client=MagicMock(),
+    )
+
+    assert builder.citation_builder.max_papers == 41
+    assert builder.citation_builder.max_references == 20
+    assert builder.citation_builder.max_citations == 20
+
+
 def test_hybrid_propagates_refresh_reference_cache_to_citation_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -392,6 +471,44 @@ def test_hybrid_propagates_refresh_reference_cache_to_citation_branch(
     )
 
     assert builder.citation_builder.refresh_reference_cache is True
+
+
+def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid rerank should cap semantic-only additions while preserving overlap papers."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=5, max_semantic=1, client=MagicMock())
+
+    seed = _paper("seed")
+    seed.is_seed = True
+    citation_papers = {
+        "seed": seed,
+        "c1": _paper("c1"),
+        "c2": _paper("c2"),
+        "o1": _paper("o1"),
+    }
+    semantic_papers = {
+        "seed": seed,
+        "s1": _paper("s1"),
+        "s2": _paper("s2"),
+        "o1": _paper("o1"),
+    }
+    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda *_args, **_kwargs: ["o1", "s1", "s2", "c2", "c1"],
+    )
+
+    papers = builder.collect_papers("seed")
+
+    assert list(papers.keys()) == ["seed", "o1", "s1", "c2", "c1"]
+    assert builder.paper_sources["o1"] == "both"
+    assert builder.paper_sources["s1"] == "semantic"
+    assert "s2" not in papers
 
 
 def test_hybrid_build_graph_skips_pruning_when_disabled(

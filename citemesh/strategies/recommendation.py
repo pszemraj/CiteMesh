@@ -9,7 +9,7 @@ from citemesh.core import Paper
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
-from citemesh.strategies.similarity import compute_similarity_features
+from citemesh.strategies.similarity import compute_indexed_similarity_score
 
 logger = logging.getLogger(__name__)
 
@@ -133,20 +133,15 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param Paper paper2: Second paper.
         :return float: Similarity score in [0.0, 1.0].
         """
-        features = compute_similarity_features(
+        return compute_indexed_similarity_score(
             paper1,
             paper2,
-            abstract_similarity_fn=lambda a, b: self._abstract_index.similarity(
-                a.paper_id, b.paper_id
-            ),
+            abstract_index=self._abstract_index,
             temporal_similarity_fn=self.temporal_similarity,
             citation_similarity_fn=self.citation_similarity,
             bibliographic_coupling_fn=self.bibliographic_coupling,
-            use_bibliographic_coupling=bool(
-                self.fetch_references and paper1.references and paper2.references
-            ),
+            fetch_references=self.fetch_references,
             with_references_weights=(0.60, 0.15, 0.00, 0.25),
             without_references_weights=(0.75, 0.25, 0.00, 0.00),
+            cap_at_one=True,
         )
-
-        return min(features.combined_score, 1.0)

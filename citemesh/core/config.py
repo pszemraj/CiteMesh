@@ -134,7 +134,6 @@ class APIConfig:
 
     # Timeout settings (seconds)
     default_timeout: float = 30.0
-    long_timeout: float = 60.0
 
     # Retry settings
     max_retries: int = 3

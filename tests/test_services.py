@@ -386,6 +386,7 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
         return_value=[
             _make_reference_record("fresh-1"),
             _make_reference_record("fresh-2"),
+            SimpleNamespace(paper=SimpleNamespace(paperId=None)),
         ]
     )
     assert client.get_reference_ids("arxiv:1234.5678", force_refresh=True) == [
@@ -428,71 +429,104 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
         "fixed-2",
     ]
 
+    mixed_seed = s2.normalize_paper_id("seed-mixed")
+    mixed_cache_path = s2._reference_cache_path(mixed_seed)
+    mixed_cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": mixed_seed,
+                "references": [
+                    "ok-1",
+                    None,
+                    {"paperId": "ok-2"},
+                    {"paper_id": "ok-3"},
+                    {"paper": {"paperId": "ok-4"}},
+                    {"paperId": "   "},
+                    123,
+                    "ok-1",
+                ],
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        side_effect=AssertionError("API should not be called for mixed cache payload")
+    )
+    mixed_refs = client.get_reference_ids("seed-mixed")
+    assert mixed_refs == ["ok-1", "ok-2", "ok-3", "ok-4"]
+    assert json.loads(mixed_cache_path.read_text())["references"] == [
+        "ok-1",
+        "ok-2",
+        "ok-3",
+        "ok-4",
+    ]
+
+    invalid_only_seed = s2.normalize_paper_id("seed-invalid-only")
+    invalid_only_cache_path = s2._reference_cache_path(invalid_only_seed)
+    invalid_only_cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": invalid_only_seed,
+                "references": [None, {"paperId": "   "}, {"paper": {}}, 123],
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        return_value=[_make_reference_record("rebuilt-1")]
+    )
+    rebuilt_invalid_only_refs = client.get_reference_ids("seed-invalid-only")
+    assert rebuilt_invalid_only_refs == ["rebuilt-1"]
+    assert json.loads(invalid_only_cache_path.read_text())["references"] == [
+        "rebuilt-1"
+    ]
+
     client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
     assert client.get_reference_ids("seed-type-error") == []
 
 
-def test_reference_cache_persists_successful_empty_payload(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_reference_cache_resilience_contracts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Successful empty reference responses should be cached as stable empties."""
-    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    """Reference cache pathing, empty persistence, failures, and atomicity should hold."""
+
+    cache_root = tmp_path / "runtime-root"
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", None)
+    normalized = s2.normalize_paper_id("arxiv:1234.5678")
+    path = s2._reference_cache_path(normalized)
+    assert path.parent == cache_root / "references"
+    assert path.parent.exists()
+
+    cache_dir = tmp_path / "cache-resilience"
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", cache_dir)
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
     client.client.get_paper_references = MagicMock(return_value=[])
-
     refs = client.get_reference_ids("seed-empty")
-    normalized = s2.normalize_paper_id("seed-empty")
-    cache_path = s2._reference_cache_path(normalized)
-
+    normalized_empty = s2.normalize_paper_id("seed-empty")
+    cache_path_empty = s2._reference_cache_path(normalized_empty)
     assert refs == []
-    assert cache_path.exists()
-    assert json.loads(cache_path.read_text()) == {
-        "paper_id": normalized,
+    assert cache_path_empty.exists()
+    assert json.loads(cache_path_empty.read_text()) == {
+        "paper_id": normalized_empty,
         "references": [],
         "version": s2.REFERENCE_CACHE_VERSION,
     }
 
-
-def test_reference_cache_fetch_failures_raise_runtime_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Repeated reference fetch failures should raise instead of silently returning []."""
-    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
-    client = SemanticScholarClient(timeout=1)
-    client._rate_limit = lambda: None
-    client.client.get_paper_references = MagicMock(side_effect=RuntimeError("down"))
-
+    failing_client = SemanticScholarClient(timeout=1)
+    failing_client._rate_limit = lambda: None
+    failing_client.client.get_paper_references = MagicMock(
+        side_effect=RuntimeError("down")
+    )
     with patch("citemesh.services.semantic_scholar.time.sleep"):
         with pytest.raises(
             RuntimeError,
             match=r"Failed to fetch reference IDs after retries for seed-failure\.",
         ):
-            client.get_reference_ids("seed-failure")
+            failing_client.get_reference_ids("seed-failure")
 
-
-def test_reference_cache_path_uses_runtime_cache_root(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Reference cache paths should resolve cache root at call time."""
-    cache_root = tmp_path / "runtime-root"
-    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
-    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", None)
-
-    normalized = s2.normalize_paper_id("arxiv:1234.5678")
-    path = s2._reference_cache_path(normalized)
-
-    assert path.parent == cache_root / "references"
-    assert path.parent.exists()
-
-
-def test_atomic_reference_cache_write_preserves_existing_file_on_replace_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Atomic writes must keep valid cache data when filesystem rename fails."""
-    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     monkeypatch.setattr(
         s2.os,
         "replace",
@@ -500,9 +534,9 @@ def test_atomic_reference_cache_write_preserves_existing_file_on_replace_error(
             OSError("simulated replace failure")
         ),
     )
-    client = SemanticScholarClient(timeout=1)
-    client._rate_limit = lambda: None
-    client.client.get_paper_references = MagicMock(
+    atomic_client = SemanticScholarClient(timeout=1)
+    atomic_client._rate_limit = lambda: None
+    atomic_client.client.get_paper_references = MagicMock(
         side_effect=AssertionError("API should not be called on replace failure")
     )
 
@@ -516,13 +550,13 @@ def test_atomic_reference_cache_write_preserves_existing_file_on_replace_error(
     }
     cache_path.write_text(json.dumps(prior_payload))
 
-    refs = client.get_reference_ids("seed")
+    refs = atomic_client.get_reference_ids("seed")
     assert refs == ["cached-ref"]
     assert json.loads(cache_path.read_text()) == prior_payload
 
 
-def test_singleton_and_context_lifecycle_behaviors() -> None:
-    """Client singleton reset and context manager should close owned sessions."""
+def test_service_module_lifecycle_contracts() -> None:
+    """Singleton/context lifecycle and reload behavior should preserve global state."""
     first_client = get_client()
     reset_client()
     second_client = get_client()
@@ -553,20 +587,13 @@ def test_singleton_and_context_lifecycle_behaviors() -> None:
     finally:
         semantic_module.requests.Session = previous_session
         semantic_module.SemanticScholar = previous_client
-
-
-def test_module_reload_does_not_mutate_http_logger_levels() -> None:
-    """Reloading service module should not mutate global HTTP logger levels."""
     httpx_logger = logging.getLogger("httpx")
     httpcore_logger = logging.getLogger("httpcore")
     original_levels = (httpx_logger.level, httpcore_logger.level)
-
     try:
         httpx_logger.setLevel(logging.ERROR)
         httpcore_logger.setLevel(logging.CRITICAL)
-
         importlib.reload(semantic_module)
-
         assert httpx_logger.level == logging.ERROR
         assert httpcore_logger.level == logging.CRITICAL
     finally:

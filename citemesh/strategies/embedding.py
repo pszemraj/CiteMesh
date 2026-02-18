@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import sys
+import warnings
 from contextlib import nullcontext
 from hashlib import sha1, sha256
 from pathlib import Path
@@ -20,10 +21,13 @@ from tqdm.auto import tqdm
 
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.data import (
+    DEFAULT_EMBEDDING_MODEL_FALLBACKS,
+    DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
     get_embedding_model_profile,
     validate_compression_filter,
 )
+from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -32,14 +36,30 @@ from citemesh.strategies.base import (
 )
 
 logger = logging.getLogger(__name__)
+_EMBEDDING_MIN_TORCH_VERSION = (2, 9)
+
+
+def _parse_torch_major_minor(version: str) -> tuple[int, int]:
+    """Parse major/minor tuple from a torch version string.
+
+    :param str version: Raw torch version string.
+    :return tuple[int, int]: Parsed ``(major, minor)`` tuple, ``(0, 0)`` on parse miss.
+    """
+    version_match = re.match(r"^(\d+)\.(\d+)", str(version).strip())
+    if version_match:
+        return int(version_match.group(1)), int(version_match.group(2))
+    return (0, 0)
 
 
 def _check_embedding_deps() -> None:
     """Verify embedding dependencies are installed."""
     missing: list[str] = []
+    torch_module: Any | None = None
 
     try:
-        import torch  # noqa: F401
+        import torch
+
+        torch_module = torch
     except ImportError:
         missing.append("torch")
 
@@ -59,9 +79,19 @@ def _check_embedding_deps() -> None:
             f"Install with: pip install citemesh[embeddings]"
         )
 
+    raw_torch_version = str(getattr(torch_module, "__version__", "")).strip()
+    torch_version = _parse_torch_major_minor(raw_torch_version)
+    if torch_version < _EMBEDDING_MIN_TORCH_VERSION:
+        raise ImportError(
+            "Embedding strategy requires torch>=2.9.0 (runtime precision policy). "
+            f"Detected torch=={raw_torch_version or 'unknown'}."
+        )
 
-STREAMING_BATCH_SIZE = 32
+
+ENCODE_BATCH_SIZE = 32
+HYDRATION_FLUSH_SIZE = 256
 CANDIDATE_MULTIPLIER = 4
+CITATION_COUNT_ENRICHMENT_LIMIT = 20
 ARXIV_DATASET_CANDIDATES = (
     "librarian-bots/arxiv-metadata-snapshot",
     "CShorten/ML-ArXiv-Papers",
@@ -258,7 +288,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
     def __init__(
         self,
         max_papers: int = 40,
-        model_name: str = "google/embeddinggemma-300m",
+        model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
         corpus_size: Optional[int] = 50000,
@@ -272,6 +302,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
+        encode_batch_size: int = ENCODE_BATCH_SIZE,
         enable_torch_compile: bool = True,
         client: Optional[SemanticScholarClient] = None,
     ):
@@ -298,6 +329,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int calibration_sample_size: Calibration sample size used for int8 quantization ranges.
         :param str cache_compression: HDF5 compression filter for embedding datasets.
         :param int cache_compression_level: HDF5 compression level.
+        :param int encode_batch_size: Batch size used when encoding text payloads.
         :param bool enable_torch_compile: Whether to enable best-effort inner-model
             ``torch.compile`` optimization for supported profiles.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
@@ -330,6 +362,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError("binary_rescore_multiplier must be at least 1")
         if calibration_sample_size < 1:
             raise ValueError("calibration_sample_size must be at least 1")
+        if encode_batch_size < 1:
+            raise ValueError("encode_batch_size must be at least 1")
         validate_compression_filter(cache_compression)
         super().__init__(max_papers)
         self.model_name = normalized_model_name
@@ -365,6 +399,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.calibration_sample_size = int(calibration_sample_size)
         self.cache_compression = cache_compression
         self.cache_compression_level = int(cache_compression_level)
+        self.encode_batch_size = int(encode_batch_size)
         self.enable_torch_compile = bool(enable_torch_compile)
         self.model_profile = get_embedding_model_profile(self.model_name)
         self._document_formatter_fingerprint = (
@@ -403,9 +438,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._autocast_enabled = False
         self._encode_model: Optional[Any] = None
         self._inner_model_compiled = False
+        self._compile_status_reason: Optional[str] = None
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
         self._tf32_mode = "off"
+        self._active_model_name: Optional[str] = None
         self._resolved_model_fingerprint: Optional[str] = None
         self._resolved_offline_fingerprint: Optional[str] = None
         self._last_search_used_binary_prefilter: Optional[bool] = None
@@ -418,6 +455,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         return {
             "binary_prefilter_used": self._last_search_used_binary_prefilter,
         }
+
+    def _cache_model_identity(self) -> str:
+        """Return model identity used for cache fingerprinting.
+
+        When model loading falls back to another checkpoint, cache validation
+        should follow the active checkpoint identity rather than the requested
+        model token.
+
+        :return str: Active model identifier for cache fingerprint checks.
+        """
+        active_model_name = str(self._active_model_name or "").strip()
+        if active_model_name:
+            return active_model_name
+        return str(self.model_name).strip()
 
     def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
         """Resolve effective embedding dimension from request + model profile defaults.
@@ -530,13 +581,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self._resolved_model_fingerprint is not None:
             return self._resolved_model_fingerprint
 
-        resolved_path = Path(self.model_name).expanduser()
+        model_identity = self._cache_model_identity()
+        resolved_path = Path(model_identity).expanduser()
         if resolved_path.exists():
             fingerprint = f"local-path::{resolved_path.resolve()}"
             self._resolved_model_fingerprint = fingerprint
             return fingerprint
 
-        model_id = str(self.model_name).strip()
+        model_id = model_identity
         if "/" not in model_id:
             revision_token = self.model_revision or "default"
             fingerprint = f"model-alias::{model_id}::revision={revision_token}"
@@ -706,7 +758,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self._resolved_offline_fingerprint is not None:
             return self._resolved_offline_fingerprint
 
-        model_id = str(self.model_name).strip()
+        model_id = self._cache_model_identity()
         if "/" not in model_id:
             revision_token = self.model_revision or "default"
             fingerprint = f"model-alias::{model_id}::revision={revision_token}"
@@ -745,7 +797,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not fingerprint:
             return False
 
-        model_id = str(self.model_name).strip()
+        model_id = self._cache_model_identity()
         if "/" not in model_id:
             return fingerprint == self._offline_model_fingerprint_fallback()
 
@@ -793,7 +845,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         fingerprint = str(cached_fingerprint).strip()
         if not fingerprint:
             return False
-        model_id = str(self.model_name).strip()
+        model_id = self._cache_model_identity()
         if "/" not in model_id:
             return False
         if self._requested_hf_revision_token() != "main":
@@ -1002,7 +1054,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return {}
 
         if not torch.cuda.is_available():
-            logger.info(
+            logger.debug(
                 "%s prefers bfloat16, but CUDA is unavailable; using float32.",
                 self.model_name,
             )
@@ -1011,7 +1063,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
         if not bf16_supported:
-            logger.info(
+            logger.debug(
                 "%s prefers bfloat16, but CUDA bfloat16 is unsupported; using float32.",
                 self.model_name,
             )
@@ -1024,12 +1076,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._source_dtype_hint = "bfloat16"
 
         if self._autocast_enabled:
-            logger.info(
+            logger.debug(
                 "%s will run with torch_dtype=bfloat16 and CUDA autocast.",
                 self.model_name,
             )
         else:
-            logger.info("%s will run with torch_dtype=bfloat16.", self.model_name)
+            logger.debug("%s will run with torch_dtype=bfloat16.", self.model_name)
 
         return {"torch_dtype": torch.bfloat16}
 
@@ -1099,6 +1151,64 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         embeddings = encode_model.encode(texts, **encode_kwargs)
         return np.asarray(embeddings, dtype=np.float32)
 
+    def _model_load_candidates(self) -> Tuple[str, ...]:
+        """Return ordered candidate model IDs used for lazy model loading.
+
+        Fallbacks are intentionally scoped to default-revision checkpoints so
+        explicit revision pins remain deterministic.
+
+        :return Tuple[str, ...]: Ordered model IDs to try.
+        """
+        requested = str(self.model_name).strip()
+        candidates: List[str] = [requested]
+        if self.model_revision is not None:
+            return tuple(candidates)
+        for fallback_model in DEFAULT_EMBEDDING_MODEL_FALLBACKS.get(requested, ()):
+            if fallback_model not in candidates:
+                candidates.append(fallback_model)
+        return tuple(candidates)
+
+    @staticmethod
+    def _model_load_error_summary(
+        errors: List[Tuple[str, Exception]],
+    ) -> str:
+        """Build compact model-load failure summary.
+
+        :param List[Tuple[str, Exception]] errors: Ordered candidate failures.
+        :return str: Readable failure summary for exception messages.
+        """
+        return "; ".join(
+            f"{model_id}: {type(exc).__name__}: {exc}" for model_id, exc in errors
+        )
+
+    def _cache_hydrated_for_active_spec(self) -> bool:
+        """Return whether cache is hydrated for active split/corpus selection.
+
+        :return bool: ``True`` when active cache namespace has a matching hydrated payload.
+        """
+        cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
+        return self.embedding_cache.is_hydrated(
+            self.dataset_split,
+            self.corpus_size,
+            dataset_source=cached_dataset_source,
+        )
+
+    def _should_defer_compile_for_cache_hydration(self) -> bool:
+        """Return whether compile should be deferred until cache is hydrated.
+
+        :return bool: ``True`` when runtime should skip compile for current cold-cache run.
+        """
+        if not self.enable_torch_compile:
+            return False
+        if not self.model_profile.compile_inner_transformer:
+            return False
+        try:
+            return not self._cache_hydrated_for_active_spec()
+        except Exception:
+            # Conservative fallback: avoid compile when cache state cannot be
+            # validated before hydration.
+            return True
+
     def _load_model(self) -> None:
         """Lazy load sentence transformer model.
 
@@ -1117,20 +1227,62 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if self.model_revision is not None:
                 st_kwargs["revision"] = self.model_revision
 
-            if st_kwargs:
-                self.model = SentenceTransformer(self.model_name, **st_kwargs)
-            else:
-                self.model = SentenceTransformer(self.model_name)
+            load_candidates = self._model_load_candidates()
+            model_errors: List[Tuple[str, Exception]] = []
+            for idx, candidate_model in enumerate(load_candidates):
+                try:
+                    if st_kwargs:
+                        self.model = SentenceTransformer(candidate_model, **st_kwargs)
+                    else:
+                        self.model = SentenceTransformer(candidate_model)
+                except Exception as exc:
+                    model_errors.append((candidate_model, exc))
+                    has_more_candidates = idx + 1 < len(load_candidates)
+                    if has_more_candidates:
+                        logger.warning(
+                            "Failed to load embedding model %s (%s: %s). "
+                            "Trying fallback checkpoint...",
+                            candidate_model,
+                            type(exc).__name__,
+                            exc,
+                        )
+                        continue
+                    summary = self._model_load_error_summary(model_errors)
+                    raise RuntimeError(
+                        "Could not load embedding model from candidate chain "
+                        f"{load_candidates}: {summary}"
+                    ) from exc
+
+                if candidate_model != self.model_name:
+                    logger.info(
+                        "Using fallback embedding checkpoint: requested=%s active=%s.",
+                        self.model_name,
+                        candidate_model,
+                    )
+                if self._active_model_name != candidate_model:
+                    self._resolved_model_fingerprint = None
+                    self._resolved_offline_fingerprint = None
+                self._active_model_name = candidate_model
+                break
 
             self._configure_tf32_runtime()
-            self._maybe_compile_inner_transformer()
+            if self._should_defer_compile_for_cache_hydration():
+                self._compile_status_reason = (
+                    "deferred while hydrating cache; compile resumes on warm-cache runs"
+                )
+                logger.debug(
+                    "Deferring torch.compile for %s until cache hydration completes.",
+                    self.model_name,
+                )
+            else:
+                self._maybe_compile_inner_transformer()
 
             if (
                 not self.model_profile.float16_supported
                 and not model_kwargs
                 and not self.model_profile.preferred_torch_dtype
             ):
-                logger.info(
+                logger.debug(
                     "%s does not support float16 activations; using float32.",
                     self.model_name,
                 )
@@ -1185,48 +1337,68 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return
 
-        backends = getattr(torch, "backends", None)
-        cuda_backends = getattr(backends, "cuda", None)
-        matmul_backend = getattr(cuda_backends, "matmul", None)
-        cudnn_backend = getattr(backends, "cudnn", None)
-        cudnn_conv = getattr(cudnn_backend, "conv", None)
-
-        try:
-            if hasattr(matmul_backend, "fp32_precision") and hasattr(
-                cudnn_conv, "fp32_precision"
-            ):
-                matmul_backend.fp32_precision = "tf32"
-                cudnn_conv.fp32_precision = "tf32"
-                self._tf32_mode = "tf32"
-                logger.info("Enabled TF32 kernels for CUDA matmul/conv (Ampere+ GPU).")
-                return
-        except Exception as exc:
-            logger.debug(
-                "Failed setting TF32 precision APIs for %s: %s",
-                self.model_name,
-                exc,
-            )
-
-        try:
-            if hasattr(matmul_backend, "allow_tf32") and hasattr(
-                cudnn_backend, "allow_tf32"
-            ):
-                matmul_backend.allow_tf32 = True
-                cudnn_backend.allow_tf32 = True
-                self._tf32_mode = "legacy-tf32"
-                logger.info(
-                    "Enabled TF32 kernels via legacy backend flags (Ampere+ GPU)."
+        torch_version = _parse_torch_major_minor(getattr(torch, "__version__", ""))
+        compile_fn = getattr(torch, "compile", None)
+        should_use_compile_bridge = (
+            self.enable_torch_compile
+            and self.model_profile.compile_inner_transformer
+            and callable(compile_fn)
+            and torch_version in {(2, 9), (2, 10)}
+        )
+        if should_use_compile_bridge:
+            set_matmul_precision = getattr(torch, "set_float32_matmul_precision", None)
+            if not callable(set_matmul_precision):
+                self._tf32_mode = "unsupported"
+                logger.debug(
+                    "Skipping TF32 config for %s: compile-safe matmul precision API unavailable.",
+                    self.model_name,
                 )
                 return
-        except Exception as exc:
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"Please use the new API settings to control TF32 behavior.*",
+                        category=UserWarning,
+                    )
+                    set_matmul_precision("high")
+                self._tf32_mode = "tf32-matmul-high"
+                logger.debug(
+                    "Configured compile-safe TF32 matmul precision for %s on torch %s.",
+                    self.model_name,
+                    getattr(torch, "__version__", "unknown"),
+                )
+                return
+            except Exception as exc:
+                self._tf32_mode = "unsupported"
+                logger.debug(
+                    "Failed setting compile-safe TF32 matmul precision for %s: %s",
+                    self.model_name,
+                    exc,
+                )
+                return
+
+        backends = getattr(torch, "backends", None)
+        if backends is None or not hasattr(backends, "fp32_precision"):
+            self._tf32_mode = "unsupported"
             logger.debug(
-                "Failed setting legacy TF32 flags for %s: %s",
+                "Skipping TF32 config for %s: torch.backends.fp32_precision unavailable.",
+                self.model_name,
+            )
+            return
+
+        try:
+            backends.fp32_precision = "tf32"
+            self._tf32_mode = "tf32"
+            logger.debug("Enabled TF32 kernels for CUDA matmul/conv (Ampere+ GPU).")
+            return
+        except Exception as exc:
+            self._tf32_mode = "unsupported"
+            logger.debug(
+                "Failed setting TF32 precision API for %s: %s",
                 self.model_name,
                 exc,
             )
-
-        self._tf32_mode = "unsupported"
-        logger.debug("TF32 configuration API unavailable for %s.", self.model_name)
 
     def _log_runtime_summary(self) -> None:
         """Emit concise one-time runtime summary at info level."""
@@ -1235,13 +1407,22 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         selected_dim = self._effective_embedding_dim()
         dim_label = "full" if selected_dim is None else f"{selected_dim}d"
+        compute_dtype_label = self._source_dtype_hint
+        if self._autocast_enabled:
+            compute_dtype_label = f"{compute_dtype_label}+autocast"
         logger.info(
-            "%s runtime: dim=%s, compile=%s, tf32=%s.",
+            "%s runtime: dim=%s, compute=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
             self.model_name,
             dim_label,
+            compute_dtype_label,
+            self.storage_precision,
             "on" if self._inner_model_compiled else "off",
             self._tf32_mode,
         )
+        if not self._inner_model_compiled and self._compile_status_reason:
+            logger.debug(
+                "%s compile status: %s", self.model_name, self._compile_status_reason
+            )
         self._runtime_summary_logged = True
 
     def _maybe_compile_inner_transformer(self) -> None:
@@ -1257,6 +1438,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         if not self.enable_torch_compile:
+            self._compile_status_reason = "disabled by configuration"
             logger.debug(
                 "Skipping torch.compile for %s: disabled by configuration.",
                 self.model_name,
@@ -1264,12 +1446,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         if not self.model_profile.compile_inner_transformer:
+            self._compile_status_reason = "profile does not support inner-model compile"
             return
 
         try:
             import torch
         except ImportError:
-            logger.info(
+            self._compile_status_reason = "torch unavailable"
+            logger.debug(
                 "%s profile supports inner-model torch.compile, but torch is unavailable.",
                 self.model_name,
             )
@@ -1277,7 +1461,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         compile_fn = getattr(torch, "compile", None)
         if not callable(compile_fn):
-            logger.info(
+            self._compile_status_reason = "torch.compile unavailable"
+            logger.debug(
                 "%s profile supports inner-model torch.compile, but torch.compile is unavailable.",
                 self.model_name,
             )
@@ -1286,6 +1471,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         try:
             transformer_block = self.model[0]
         except Exception as exc:  # pragma: no cover - defensive for upstream API drift
+            self._compile_status_reason = f"model[0] unavailable ({type(exc).__name__})"
             logger.warning(
                 "Skipping torch.compile for %s: could not access model[0] (%s).",
                 self.model_name,
@@ -1295,6 +1481,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         auto_model = getattr(transformer_block, "auto_model", None)
         if auto_model is None:
+            self._compile_status_reason = "inner auto_model unavailable"
             logger.warning(
                 "Skipping torch.compile for %s: model[0].auto_model is unavailable.",
                 self.model_name,
@@ -1303,11 +1490,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         if auto_model.__class__.__name__ == "OptimizedModule":
             self._inner_model_compiled = True
+            self._compile_status_reason = None
             return
 
         try:
             transformer_block.auto_model = compile_fn(auto_model)
         except Exception as exc:
+            self._compile_status_reason = f"compile failed ({type(exc).__name__})"
             logger.warning(
                 "torch.compile failed for %s inner transformer; continuing without compile: %s",
                 self.model_name,
@@ -1316,6 +1505,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         self._inner_model_compiled = True
+        self._compile_status_reason = None
         logger.debug(
             "Enabled torch.compile for %s inner transformer (model[0].auto_model).",
             self.model_name,
@@ -1346,8 +1536,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             papers[seed_paper.paper_id] = seed_paper
             seed_title = (seed_paper.title or "").strip()
             seed_abstract = (seed_paper.abstract or "").strip()
-            pieces = [part for part in (seed_title, seed_abstract) if part]
-            seed_text = ". ".join(pieces) if pieces else seed_id
+            seed_text = (
+                compose_title_abstract_text(
+                    {"title": seed_title, "abstract": seed_abstract}
+                )
+                or seed_id
+            )
             seed_metadata = {
                 "title": seed_title,
                 "abstract": seed_abstract,
@@ -1368,7 +1562,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             seed_metadata = {"title": seed_id, "abstract": ""}
 
         # Compute normalized seed embedding
-        logger.info("Computing seed embedding...")
+        logger.debug("Computing seed embedding...")
         formatted_seed_text = self.model_profile.format_query(seed_text, seed_metadata)
         seed_embedding = self._encode_texts(
             [formatted_seed_text], show_progress_bar=False
@@ -1378,12 +1572,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         use_streaming = self.use_streaming
 
         if use_streaming:
-            logger.info(
+            logger.debug(
                 "Using streaming hydration path for cache-native semantic search..."
             )
             candidates = self._select_candidates_streaming(seed_embedding)
         else:
-            logger.info("Using cache-native semantic search...")
+            logger.debug("Using cache-native semantic search...")
             candidates = self._select_candidates_from_loaded(seed_embedding)
 
         # Convert candidates to Paper objects while respecting max_papers total.
@@ -1481,6 +1675,31 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
         )
         limited = min(top_k, len(scored_candidates))
+        compared_embeddings = getattr(
+            self.embedding_cache, "last_search_total_embeddings", None
+        )
+        rescored_embeddings = getattr(
+            self.embedding_cache, "last_search_rescored_embeddings", None
+        )
+        if compared_embeddings is not None:
+            prefilter_used = (
+                self._last_search_used_binary_prefilter
+                if self._last_search_used_binary_prefilter is not None
+                else False
+            )
+            compared_label = f"{int(compared_embeddings):,}"
+            rescored_label = (
+                f"{int(rescored_embeddings):,}"
+                if rescored_embeddings is not None
+                else "unknown"
+            )
+            logger.info(
+                "Semantic cache search compared against %s embeddings "
+                "(rescored=%s, prefilter=%s).",
+                compared_label,
+                rescored_label,
+                "on" if prefilter_used else "off",
+            )
 
         return [
             (paper_id, metadata, embedding)
@@ -1598,7 +1817,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     continue
 
                 batch.append(metadata)
-                if len(batch) >= STREAMING_BATCH_SIZE:
+                if len(batch) >= HYDRATION_FLUSH_SIZE:
                     hydrated_records += self._cache_metadata_batch(batch)
                     batch = []
                 progress.update(1)
@@ -1659,10 +1878,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             dataset_names = ARXIV_DATASET_CANDIDATES
 
         for dataset_name in dataset_names:
+            split_for_load = self.dataset_split
+            if (
+                not use_streaming
+                and self.corpus_size is not None
+                and ":" not in split_for_load
+            ):
+                split_for_load = f"{split_for_load}[:{int(self.corpus_size)}]"
             try:
                 dataset = load_dataset(
                     dataset_name,
-                    split=self.dataset_split,
+                    split=split_for_load,
                     streaming=use_streaming,
                 )
             except Exception as exc:  # pragma: no cover - source/network dependent
@@ -1673,10 +1899,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     exc,
                 )
                 continue
-            logger.info(
+            logger.debug(
                 "Hydration dataset selected: %s (split=%s, streaming=%s).",
                 dataset_name,
-                self.dataset_split,
+                split_for_load,
                 use_streaming,
             )
             return dataset_name, dataset
@@ -1709,7 +1935,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         ]
         sample_embeddings = self._encode_texts(
             sample_texts,
-            batch_size=STREAMING_BATCH_SIZE,
+            batch_size=self.encode_batch_size,
             show_progress_bar=False,
         )
         ranges = np.vstack(
@@ -1747,7 +1973,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.embedding_cache.get_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
-            batch_size=min(STREAMING_BATCH_SIZE, len(metadata_map)),
+            batch_size=min(self.encode_batch_size, len(metadata_map)),
             show_progress=False,
             text_builder=self.model_profile.format_document,
         )
@@ -1765,15 +1991,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
     def _update_citation_counts(self, papers: Dict[str, Paper]) -> None:
         """
-        Optionally enrich top papers with citation counts from Semantic Scholar.
+        Enrich top semantic candidates with citation counts from Semantic Scholar.
 
         :param Dict[str, Paper] papers: Dictionary of collected papers (including seed)
         """
-        logger.info("Fetching citation counts from Semantic Scholar (optional)...")
-
         targets = [
             (pid, paper)
-            for pid, paper in list(papers.items())[:10]
+            for pid, paper in list(papers.items())[:CITATION_COUNT_ENRICHMENT_LIMIT]
             if not paper.is_seed
             and not (isinstance(pid, str) and pid.startswith("query:"))
             and not (isinstance(pid, str) and pid.startswith("arxiv_"))
@@ -1782,18 +2006,24 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not targets:
             return
 
-        progress_enabled = sys.stderr.isatty()
-        iterator = (
+        logger.info(
+            "Fetching citation counts from Semantic Scholar for up to %d papers...",
+            len(targets),
+        )
+
+        progress_enabled = sys.stderr.isatty() and len(targets) > 1
+        progress_bar = (
             tqdm(
                 targets,
-                desc="Citation metadata",
+                desc="Citation counts",
                 unit="papers",
-                leave=False,
                 dynamic_ncols=True,
+                leave=False,
             )
             if progress_enabled
-            else targets
+            else None
         )
+        iterator = progress_bar if progress_bar is not None else targets
 
         for paper_id, paper in iterator:
             try:
@@ -1803,8 +2033,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             except Exception as exc:
                 logger.warning(f"Could not fetch citation count for {paper_id}: {exc}")
 
-        if progress_enabled:
-            iterator.close()
+        if progress_bar is not None:
+            progress_bar.close()
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

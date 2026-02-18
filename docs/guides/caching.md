@@ -2,14 +2,12 @@
 
 CiteMesh uses persistent caches to avoid recomputing expensive datasets and embeddings.
 
-## Scope
+Related docs:
 
-This is the canonical cache behavior specification.
-
-- Normative here: cache root resolution, directory layout, quantized embedding cache behavior, and cleanup guidance.
-- Non-normative here: broader CLI command semantics. See [CLI Usage](cli.md) for command contracts.
-- Runtime environment-variable definitions are canonical in [Environment Variables](../reference/environment.md).
-- Documentation ownership map: [Documentation Index](../README.md).
+- CLI command usage: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## Cache Root
 
@@ -25,7 +23,7 @@ Override the root with:
 export CITEMESH_CACHE_DIR=/path/to/custom/cache
 ```
 
-Variable contract details are canonical in [Environment Variables](../reference/environment.md).
+Variable details are documented in [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md).
 
 ## Directory Layout
 
@@ -51,6 +49,9 @@ Default storage mode is quantized:
 - `calibration_ranges`: float32 per-dimension min/max (`2 x dim`)
 - `binary_index`: packed `uint8` matrix (`N x ceil(dim/8)`) used for Hamming prefiltering
 
+The `binary_index` is an auxiliary retrieval index, not the primary embedding store.
+Final ranking still uses the cached `int8`/`float16`/`float32` vectors.
+
 Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
 CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected).
 Runtime availability still depends on your `h5py` build.
@@ -72,13 +73,20 @@ Metadata-only changes (`year`, `authors`, `categories`, or other stored fields t
 not alter embedding input text) refresh SQLite metadata rows without re-encoding vectors.
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
-Lock acquisition timeout defaults to `60` seconds and can be overridden with
-`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
+Lock acquisition timeout defaults to `900` seconds and can be overridden with
+`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)).
 
-Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (flag semantics are canonical in [CLI Usage](cli.md)).
+Hydration write policy:
+
+- Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--encode-batch-size`.
+- Cache persistence flushes metadata/embedding appends in larger bursts (`256` records) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
+
+Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)).
 
 For Hugging Face repo IDs, hydration resolves and stores a model fingerprint.
 CiteMesh first attempts commit-SHA resolution (online API, then local snapshot SHA).
+If model loading falls back to another checkpoint candidate, fingerprint checks bind to
+the runtime-active checkpoint identity to avoid cross-checkpoint cache reuse.
 If SHA resolution is unavailable, CiteMesh falls back to hashing two local artifact
 files when present: `config.json` and `model.safetensors`.
 If neither strong SHA nor local artifact hashes are available, CiteMesh uses a
@@ -90,7 +98,7 @@ When requested revision is `main` and only a legacy cached SHA is available, reu
 is still allowed with a warning because `main` cannot be proven offline.
 Set `CITEMESH_STRICT_OFFLINE_FINGERPRINT=1` to disable that legacy `main` reuse
 assumption and force namespace clear/rebuild when identity cannot be verified
-(details: [Environment Variables](../reference/environment.md)).
+(details: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)).
 If compatibility checks fail (for example unresolved revision mismatch), CiteMesh clears
 and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
@@ -118,6 +126,8 @@ using hashed filenames.
   fresh reference IDs from the API (write-through cache update).
 - Successful empty reference responses are cached as explicit empty lists to avoid
   repeated API calls for papers with no references.
+- Non-empty cached payloads that contain no valid reference IDs are treated as invalid
+  and rebuilt from API data instead of being reused as implicit empties.
 - Repeated reference-fetch failures now raise a runtime error after retries instead
   of silently returning an empty list.
 - Reference cache directory resolution occurs at call time, so cache-root policy
@@ -143,7 +153,7 @@ citemesh cache clear --yes
 
 Omit `--yes` for interactive confirmation.
 
-Command syntax/defaults remain canonical in [CLI Usage](cli.md); this section documents cache maintenance workflows.
+For command syntax and defaults, see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md); this section focuses on cache maintenance workflows.
 
 To remove artifacts for one namespace, delete matching `.db` and `.h5` files in `embeddings/`.
 

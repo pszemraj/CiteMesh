@@ -2,16 +2,14 @@
 
 The `citemesh` CLI can build graphs with four strategies: `recommendation`, `citation`, `embedding`, and `hybrid`. This guide explains how they differ and when to use each.
 
-## Scope
+Related docs:
 
-This is the canonical description of strategy behavior, data sources, and tradeoffs.
-
-- Normative here: strategy collection behavior and conceptual differences.
-- Non-normative here: CLI flags/defaults and cache-path rules.
-- CLI contracts: [CLI Usage](cli.md)
-- Cache contracts: [Caching & Data](caching.md)
-- Runtime variables: [Environment Variables](../reference/environment.md)
-- Documentation ownership map: [Documentation Index](../README.md)
+- CLI flags and defaults: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Cache behavior: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- Embedding runtime defaults and precision policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Default-parameter sweep rationale: [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
+- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## At a Glance
 
@@ -43,13 +41,17 @@ This is the canonical description of strategy behavior, data sources, and tradeo
 - Limitations: first run hydrates a cache for the selected corpus spec; requires optional embedding dependencies.
 - Typical use: semantic exploration and discovery beyond citation graphs.
 
-Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md).
+Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
+Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
 
 ## Hybrid Strategy
 
 - Data source: citation collection plus semantic enrichment.
-- Strengths: combines grounded citation edges with additional semantic neighbors.
+- Strengths: combines grounded citation edges with semantic reranking of the whole candidate pool.
 - Limitations: inherits dependency and cache requirements from the embedding path.
+- Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.
+- `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
+- Hybrid defaults are tuned for the seed-paper discovery workflow (recent follow-up + foundational prior work), with current depth targets documented in the defaults study.
 - Typical use: balanced graphs when you want citation structure plus semantic recall.
 
 ## Choosing a Strategy
@@ -61,7 +63,7 @@ Embedding cache behavior, hydration, and precision controls are defined in [Cach
 
 ## Related Docs
 
-- [CLI Usage](cli.md)
-- [Caching & Data](caching.md)
-- [Environment Variables](../reference/environment.md)
-- [Architecture](../internals/architecture.md)
+- [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- [Architecture](https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/architecture.md)
