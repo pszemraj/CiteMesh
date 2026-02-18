@@ -370,6 +370,50 @@ def test_hybrid_rerank_falls_back_when_seed_embedding_unavailable(
     ) == [candidate.paper_id]
 
 
+def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid rerank should not persist citation-candidate embeddings into cache."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
+    assert builder.embedding_builder is not None
+
+    seed = _seed_paper("seed")
+    candidate = _paper("c1")
+    builder.embedding_builder.embeddings = {}
+    builder.embedding_builder.model_profile = MagicMock(
+        format_query=lambda text, _metadata: text,
+        format_document=lambda metadata: (
+            f"{metadata.get('title', '')}. {metadata.get('abstract', '')}"
+        ),
+    )
+    builder.embedding_builder._encode_texts = MagicMock(
+        side_effect=[
+            np.asarray([[0.4, 0.1, 0.2]], dtype=np.float32),
+            np.asarray([[0.3, 0.2, 0.1]], dtype=np.float32),
+        ]
+    )
+    builder.embedding_builder.embedding_cache = MagicMock()
+    builder.embedding_builder.embedding_cache.get_embeddings = MagicMock(
+        side_effect=AssertionError(
+            "Hybrid rerank candidate hydration must not write into persistent cache."
+        )
+    )
+
+    seed_embedding = builder._ensure_candidate_embeddings(
+        seed, {candidate.paper_id: candidate}
+    )
+
+    np.testing.assert_allclose(
+        seed_embedding, np.asarray([0.4, 0.1, 0.2], dtype=np.float32)
+    )
+    np.testing.assert_allclose(
+        builder.embedding_builder.embeddings[candidate.paper_id],
+        np.asarray([0.3, 0.2, 0.1], dtype=np.float32),
+    )
+    builder.embedding_builder.embedding_cache.get_embeddings.assert_not_called()
+
+
 def test_hybrid_thresholds_and_default_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

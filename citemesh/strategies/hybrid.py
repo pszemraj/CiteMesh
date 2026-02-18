@@ -220,6 +220,83 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
         return text or str(seed_paper.paper_id)
 
+    def _embed_candidates_in_memory(
+        self,
+        candidate_ids: List[str],
+        candidates: Dict[str, Paper],
+        embeddings_map: Dict[str, np.ndarray],
+    ) -> None:
+        """Embed rerank candidates without mutating the persistent corpus cache.
+
+        :param List[str] candidate_ids: Candidate IDs needing embeddings.
+        :param Dict[str, Paper] candidates: Candidate paper payloads.
+        :param Dict[str, np.ndarray] embeddings_map: In-memory embedding map to update.
+        :return None: Mutates ``embeddings_map`` in place when encoding succeeds.
+        """
+        if not candidate_ids or self.embedding_builder is None:
+            return
+
+        model_profile = getattr(self.embedding_builder, "model_profile", None)
+        encode_texts = getattr(self.embedding_builder, "_encode_texts", None)
+        if model_profile is None or not callable(
+            getattr(model_profile, "format_document", None)
+        ):
+            return
+        if not callable(encode_texts):
+            return
+
+        texts: List[str] = []
+        ordered_candidate_ids: List[str] = []
+        for paper_id in candidate_ids:
+            paper = candidates.get(paper_id)
+            if paper is None:
+                continue
+
+            document_text = str(
+                model_profile.format_document(self._paper_embedding_metadata(paper))
+            ).strip()
+            if not document_text:
+                document_text = str(paper.paper_id)
+            texts.append(document_text)
+            ordered_candidate_ids.append(paper_id)
+
+        if not ordered_candidate_ids:
+            return
+
+        batch_size = min(
+            int(getattr(self.embedding_builder, "encode_batch_size", 32)),
+            len(ordered_candidate_ids),
+        )
+        try:
+            encoded = encode_texts(
+                texts,
+                batch_size=batch_size,
+                show_progress_bar=False,
+            )
+        except Exception as exc:
+            logger.debug(
+                "Hybrid in-memory candidate embedding encode failed; rerank falls back "
+                "to non-semantic scoring (%s: %s).",
+                type(exc).__name__,
+                exc,
+            )
+            return
+
+        encoded_array = np.asarray(encoded, dtype=np.float32)
+        if encoded_array.ndim == 1:
+            encoded_array = encoded_array.reshape(1, -1)
+        if encoded_array.shape[0] != len(ordered_candidate_ids):
+            logger.warning(
+                "Hybrid candidate encode returned %d rows for %d candidates; "
+                "skipping semantic rerank enrichment for this batch.",
+                int(encoded_array.shape[0]),
+                len(ordered_candidate_ids),
+            )
+            return
+
+        for idx, paper_id in enumerate(ordered_candidate_ids):
+            embeddings_map[paper_id] = encoded_array[idx]
+
     def _ensure_candidate_embeddings(
         self, seed_paper: Paper, candidates: Dict[str, Paper]
     ) -> Optional[np.ndarray]:
@@ -265,39 +342,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             paper_id for paper_id in candidates if paper_id not in embeddings_map
         ]
         if missing_ids and seed_embedding is not None:
-            metadata_map = {
-                paper_id: self._paper_embedding_metadata(candidates[paper_id])
-                for paper_id in missing_ids
-            }
-            embedding_cache = getattr(self.embedding_builder, "embedding_cache", None)
-            get_model_for_encoding = getattr(
-                self.embedding_builder, "_get_model_for_encoding", None
+            self._embed_candidates_in_memory(
+                candidate_ids=missing_ids,
+                candidates=candidates,
+                embeddings_map=embeddings_map,
             )
-            model_profile = getattr(self.embedding_builder, "model_profile", None)
-            if (
-                embedding_cache is not None
-                and callable(getattr(embedding_cache, "get_embeddings", None))
-                and callable(get_model_for_encoding)
-                and model_profile is not None
-                and callable(getattr(model_profile, "format_document", None))
-            ):
-                try:
-                    embedded = embedding_cache.get_embeddings(
-                        metadata_map,
-                        get_model_for_encoding(),
-                        batch_size=min(
-                            int(
-                                getattr(self.embedding_builder, "encode_batch_size", 32)
-                            ),
-                            len(metadata_map),
-                        ),
-                        show_progress=False,
-                        text_builder=model_profile.format_document,
-                    )
-                except Exception:
-                    embedded = {}
-                if isinstance(embedded, dict):
-                    embeddings_map.update(embedded)
 
         # Transient seed-encode failures should degrade to non-semantic reranking.
         if seed_embedding is None:
