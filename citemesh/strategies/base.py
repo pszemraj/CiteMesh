@@ -184,7 +184,7 @@ class GraphBuilderStrategy(ABC):
         :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed paper ID)
         """
         # Step 1: Collect papers
-        logger.info("Collecting papers using %s...", self.__class__.__name__)
+        logger.debug("Collecting papers using %s...", self.__class__.__name__)
         self.papers = self.collect_papers(seed_id, **kwargs)
 
         if not self.papers:

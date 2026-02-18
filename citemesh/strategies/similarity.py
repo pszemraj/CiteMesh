@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Tuple
+from typing import Callable, Protocol, Tuple
 
 from citemesh.core import Paper
+
+
+class _AbstractIndexProtocol(Protocol):
+    """Protocol for abstract-similarity indexes used by strategies."""
+
+    def similarity(self, paper_id_a: str, paper_id_b: str) -> float:
+        """Return similarity score between two paper IDs.
+
+        :param str paper_id_a: First paper identifier.
+        :param str paper_id_b: Second paper identifier.
+        :return float: Similarity score in ``[0, 1]``.
+        """
+        ...
 
 
 @dataclass(frozen=True)
@@ -88,3 +101,50 @@ def compute_similarity_features(
         has_bibliographic_coupling=has_bibliographic_coupling,
         combined_score=combined_score,
     )
+
+
+def compute_indexed_similarity_score(
+    paper1: Paper,
+    paper2: Paper,
+    *,
+    abstract_index: _AbstractIndexProtocol,
+    temporal_similarity_fn: Callable[[Paper, Paper], float],
+    citation_similarity_fn: Callable[[Paper, Paper], float],
+    bibliographic_coupling_fn: Callable[[Paper, Paper], float],
+    fetch_references: bool,
+    with_references_weights: Tuple[float, float, float, float],
+    without_references_weights: Tuple[float, float, float, float],
+    cap_at_one: bool = False,
+) -> float:
+    """Compute weighted similarity score using a shared abstract index.
+
+    :param Paper paper1: First paper node.
+    :param Paper paper2: Second paper node.
+    :param _AbstractIndexProtocol abstract_index: Abstract similarity index.
+    :param Callable[[Paper, Paper], float] temporal_similarity_fn: Temporal component.
+    :param Callable[[Paper, Paper], float] citation_similarity_fn: Citation component.
+    :param Callable[[Paper, Paper], float] bibliographic_coupling_fn: Bibliographic component.
+    :param bool fetch_references: Whether reference-based scoring is enabled.
+    :param Tuple[float, float, float, float] with_references_weights: Weights with references.
+    :param Tuple[float, float, float, float] without_references_weights: Weights without references.
+    :param bool cap_at_one: Whether to clamp result to 1.0.
+    :return float: Combined similarity score.
+    """
+    features = compute_similarity_features(
+        paper1,
+        paper2,
+        abstract_similarity_fn=lambda a, b: abstract_index.similarity(
+            a.paper_id, b.paper_id
+        ),
+        temporal_similarity_fn=temporal_similarity_fn,
+        citation_similarity_fn=citation_similarity_fn,
+        bibliographic_coupling_fn=bibliographic_coupling_fn,
+        use_bibliographic_coupling=bool(
+            fetch_references and paper1.references and paper2.references
+        ),
+        with_references_weights=with_references_weights,
+        without_references_weights=without_references_weights,
+    )
+    if cap_at_one:
+        return min(features.combined_score, 1.0)
+    return features.combined_score

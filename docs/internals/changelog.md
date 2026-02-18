@@ -1,16 +1,12 @@
 # Changelog & Key Improvements
 
-## Scope
-
-This page is historical context, not a normative behavior specification.
-
-- Use [CLI Usage](../guides/cli.md) for current command/flag behavior.
-- Use [Caching & Data](../guides/caching.md) for current cache behavior.
-- Use [Environment Variables](../reference/environment.md) for current runtime variable contracts.
-- Documentation ownership map: [Documentation Index](../README.md).
-
 This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
-Historical bullets below may describe superseded behavior; canonical current behavior remains in the guides above.
+For current usage details, see:
+
+- [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
+- [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
 
 ## Breaking Changes
 
@@ -49,7 +45,13 @@ Historical bullets below may describe superseded behavior; canonical current beh
 - **Citation**: moved to real bibliographic coupling with reference-aware similarity factors.
 - **Embedding**: expanded multi-factor similarity and added citation-count hydration for top matches.
 - **Embedding**: added best-effort `torch.compile` path for EmbeddingGemma internals with safe fallback.
-- **Hybrid**: formalized citation-first enrichment with semantic additions and capped edges.
+- **Embedding**: switched eager TF32 runtime configuration to the PyTorch 2.9+ `torch.backends.fp32_precision` API.
+- **Embedding**: for torch 2.9/2.10 CUDA compile paths, switched TF32 control to `torch.set_float32_matmul_precision("high")` so `torch.compile` remains available without tripping the mixed TF32 API conflict in release-branch Inductor.
+- **Embedding**: changed default checkpoint to `unsloth/embeddinggemma-300m` (ungated) and added automatic fallback to `google/embeddinggemma-300m` for default-revision loads.
+- **Embedding**: citation-count enrichment logs now show bounded target counts and render a visible progress bar on TTY runs.
+- **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection, preventing stale cross-checkpoint reuse in shared namespaces.
+- **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
+- **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.
 - Added explicit streaming split validation for embedding mode.
@@ -65,9 +67,13 @@ Historical bullets below may describe superseded behavior; canonical current beh
 - Enforced strict embedding `--top-k` per-node edge caps.
 - Reused a single layout per run across layout-consuming exporters.
 - Made metadata timestamps opt-in (`--include-timestamp`) for deterministic outputs by default.
+- Added per-run `*.config.json` sidecar exports containing rebuild parameters and run metadata.
+- Simplified export completion logging to one summary line per run.
 - Grouped auto outputs into stable per-paper title folders.
 - Removed title truncation in runtime seed logs and static/Plotly chart titles.
+- Reclassified non-empty reference-cache payloads with zero valid IDs as invalid so corrupted payloads are rebuilt instead of silently suppressing references.
 - Fixed hybrid CLI validation to resolve effective default `--max-semantic` before rejecting embedding-only flags.
+- Fixed cache-subcommand CLI parsing so shared logging flags are accepted after `cache scan/clear` tokens (for example `citemesh cache scan --log-level debug`).
 - Removed unsupported `szip` embedding-cache compression mode from CLI/validation.
 - Moved interactive exporters to optional `.[viz]` extras.
 

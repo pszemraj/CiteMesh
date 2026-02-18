@@ -118,19 +118,26 @@ class GraphExporter:
     # Public export methods
 
     def to_json(self, path: Path) -> None:
-        """Export full graph with metadata as JSON."""
+        """Export graph data JSON focused on nodes/edges and readable edge context."""
         sorted_nodes = self._sorted_nodes()
         sorted_edges = self._sorted_edges()
         data = {
-            "metadata": self.metadata,
-            "seed_id": self.seed_id,
+            "seed_id": str(self.seed_id),
+            "summary": {
+                "nodes": len(sorted_nodes),
+                "edges": len(sorted_edges),
+            },
             "nodes": [
                 self._serialize_node(node, attrs) for node, attrs in sorted_nodes
             ],
             "edges": [
                 {
-                    "source": u,
-                    "target": v,
+                    "source": str(u),
+                    "target": str(v),
+                    "source_title": self._node_title(self.graph.nodes[u], u),
+                    "target_title": self._node_title(self.graph.nodes[v], v),
+                    "source_label": self._node_short_label(self.graph.nodes[u], u),
+                    "target_label": self._node_short_label(self.graph.nodes[v], v),
                     "weight": float(data.get("weight", 0.0)),
                 }
                 for u, v, data in sorted_edges
@@ -558,6 +565,41 @@ class GraphExporter:
             node_data.setdefault("categories", [])
 
         return node_data
+
+    @staticmethod
+    def _node_title(attrs: Dict[str, Any], node_id: Hashable) -> str:
+        """Return stable node title for edge-sidecar export fields.
+
+        :param Dict[str, Any] attrs: Node attributes map.
+        :param Hashable node_id: Node identifier fallback.
+        :return str: Human-readable title fallback.
+        """
+        title = str(attrs.get("title") or "").strip()
+        if title:
+            return title
+        return str(node_id)
+
+    @classmethod
+    def _node_short_label(cls, attrs: Dict[str, Any], node_id: Hashable) -> str:
+        """Return compact node label for edge export fields.
+
+        :param Dict[str, Any] attrs: Node attributes map.
+        :param Hashable node_id: Node identifier fallback.
+        :return str: Compact label (author/year or title fallback).
+        """
+        title = cls._node_title(attrs, node_id)
+        raw_authors = attrs.get("authors", [])
+        surname = ""
+        if isinstance(raw_authors, list) and raw_authors:
+            first_author = str(raw_authors[0]).strip()
+            surname = first_author.split()[-1] if first_author else ""
+
+        year = cls._coerce_year(attrs.get("year"))
+        if surname and year > 0:
+            return f"{surname}, {year}"
+        if year > 0:
+            return f"{title} ({year})"
+        return title
 
 
 def _rgb_tuple_to_hex(color: tuple) -> str:

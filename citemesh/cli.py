@@ -8,6 +8,7 @@ providing a single interface to all graph building strategies.
 
 import argparse
 import copy
+import json
 import logging
 import math
 import shutil
@@ -23,11 +24,15 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
-from citemesh.data import get_cache_dir, validate_compression_filter
+from citemesh.data import (
+    DEFAULT_EMBEDDING_MODEL_NAME,
+    get_cache_dir,
+    validate_compression_filter,
+)
 from citemesh.services import get_client
 from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
-from citemesh.strategies.embedding import EmbeddingGraphBuilder
+from citemesh.strategies.embedding import ENCODE_BATCH_SIZE, EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import DEFAULT_MAX_SEMANTIC, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.visualization import (
@@ -37,20 +42,40 @@ from citemesh.visualization import (
     visualize_graph,
 )
 
-log_console = Console(stderr=True)
-output_console = Console()
+DEFAULT_LOG_WIDTH = 140
+LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
+
+log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
+output_console = Console(width=DEFAULT_LOG_WIDTH)
 _LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
 
 
-def _configure_logging() -> None:
-    """Configure CLI logging once at runtime."""
+def _configure_logging(
+    *, log_level: str = "info", log_width: int = DEFAULT_LOG_WIDTH
+) -> None:
+    """Configure CLI logging once at runtime.
+
+    :param str log_level: Log level token.
+    :param int log_width: Rich console width; non-positive values use auto width.
+    :return None: Mutates global logging handlers and consoles once.
+    """
     global _LOGGING_CONFIGURED
+    global log_console
+    global output_console
     if _LOGGING_CONFIGURED:
         return
 
+    level_name = str(log_level).strip().lower()
+    if level_name not in LOG_LEVEL_CHOICES:
+        level_name = "info"
+    resolved_level = getattr(logging, level_name.upper(), logging.INFO)
+    resolved_width = None if int(log_width) <= 0 else int(log_width)
+    log_console = Console(stderr=True, width=resolved_width)
+    output_console = Console(width=resolved_width)
+
     logging.basicConfig(
-        level=logging.INFO,
+        level=resolved_level,
         format="%(message)s",
         datefmt="[%X]",
         handlers=[
@@ -66,6 +91,9 @@ def _configure_logging() -> None:
     # Keep third-party HTTP logs concise without import-time side effects.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+    logging.getLogger("datasets").setLevel(logging.WARNING)
     _LOGGING_CONFIGURED = True
 
 
@@ -132,6 +160,35 @@ def _non_empty_str(value: str) -> str:
     return normalized
 
 
+def _add_logging_arguments(
+    target: argparse.ArgumentParser, *, suppress_defaults: bool = False
+) -> None:
+    """Add shared logging arguments to a parser.
+
+    :param argparse.ArgumentParser target: Parser receiving logging options.
+    :param bool suppress_defaults: Whether logging defaults should be suppressed.
+    :return None: Mutates parser in-place.
+    """
+    default_log_level: object = "info"
+    default_log_width: object = DEFAULT_LOG_WIDTH
+    if suppress_defaults:
+        default_log_level = argparse.SUPPRESS
+        default_log_width = argparse.SUPPRESS
+
+    target.add_argument(
+        "--log-level",
+        choices=list(LOG_LEVEL_CHOICES),
+        default=default_log_level,
+        help="Console log level (default: info)",
+    )
+    target.add_argument(
+        "--log-width",
+        type=_non_negative_int,
+        default=default_log_width,
+        help="Rich console wrap width in columns (0 = auto terminal width; default: 140)",
+    )
+
+
 EXPORT_FORMATS = ("png", "html", "plotly", "json", "graphml")
 EXPORT_EXTENSIONS: Dict[str, str] = {
     "png": ".png",
@@ -181,6 +238,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "calibration_sample_size": {"embedding", "hybrid"},
     "cache_compression": {"embedding", "hybrid"},
     "cache_compression_level": {"embedding", "hybrid"},
+    "encode_batch_size": {"embedding", "hybrid"},
     "torch_compile": {"embedding", "hybrid"},
     "max_semantic": {"hybrid"},
 }
@@ -205,14 +263,12 @@ _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "calibration_sample_size": ["--calibration-sample-size"],
     "cache_compression": ["--cache-compression"],
     "cache_compression_level": ["--cache-compression-level"],
+    "encode_batch_size": ["--encode-batch-size"],
     "torch_compile": ["--torch-compile", "--no-torch-compile"],
     "max_semantic": ["--max-semantic"],
 }
 _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
     dest: flags[0] for dest, flags in _BUILD_OPTION_FLAGS.items()
-}
-_BUILD_OPTION_DEST_BY_FLAG: Dict[str, str] = {
-    flag: dest for dest, flags in _BUILD_OPTION_FLAGS.items() for flag in flags
 }
 _CACHE_COMPRESSION_CHOICES = ("gzip", "lzf")
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
@@ -230,6 +286,7 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "calibration_sample_size",
     "cache_compression",
     "cache_compression_level",
+    "encode_batch_size",
     "torch_compile",
 }
 
@@ -261,6 +318,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "calibration_sample_size": cli_args.calibration_sample_size,
         "cache_compression": cli_args.cache_compression,
         "cache_compression_level": cli_args.cache_compression_level,
+        "encode_batch_size": cli_args.encode_batch_size,
         "enable_torch_compile": cli_args.torch_compile,
     }
 
@@ -296,20 +354,38 @@ def _embedding_export_metadata(
     }
 
 
+def _plot_overlay_metadata(export_metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Return compact metadata suitable for static image overlays.
+
+    :param Dict[str, Any] export_metadata: Full export metadata payload.
+    :return Dict[str, Any]: Reduced metadata subset for on-plot annotation.
+    """
+    overlay_keys = ("paper_id", "strategy", "nodes", "edges", "theme", "timestamp")
+    return {
+        key: export_metadata[key]
+        for key in overlay_keys
+        if key in export_metadata and export_metadata[key] is not None
+    }
+
+
+def _resolved_hybrid_max_semantic(cli_args: argparse.Namespace) -> int:
+    """Resolve effective hybrid semantic cap from CLI arguments.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :return int: Effective ``max_semantic`` value.
+    """
+    if cli_args.max_semantic is None:
+        return max(0, min(int(DEFAULT_MAX_SEMANTIC), int(cli_args.max_papers) - 1))
+    return int(cli_args.max_semantic)
+
+
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
     """Return whether hybrid semantic branch is effectively enabled.
 
     :param argparse.Namespace cli_args: Parsed CLI arguments.
     :return bool: ``True`` when hybrid semantic branch can run.
     """
-    if cli_args.max_semantic is None:
-        resolved_max_semantic = max(
-            0,
-            min(int(DEFAULT_MAX_SEMANTIC), int(cli_args.max_papers) - 1),
-        )
-    else:
-        resolved_max_semantic = int(cli_args.max_semantic)
-    return resolved_max_semantic > 0
+    return _resolved_hybrid_max_semantic(cli_args) > 0
 
 
 def _strategy_score_contract(strategy: str) -> Dict[str, object]:
@@ -343,8 +419,9 @@ def _strategy_score_contract(strategy: str) -> Dict[str, object]:
             **base_contract,
             "score_type": "hybrid_similarity_composite",
             "adjudication_policy": (
-                "citation-first union; semantic additions include only new papers "
-                "up to max_semantic."
+                "seed-relevance-ranked union across citation+semantic candidates "
+                "with overlap priority; purely semantic additions are capped by "
+                "max_semantic."
             ),
         }
     return {
@@ -362,7 +439,12 @@ def _collect_provided_build_option_dests(
     :param List[str] argv: Raw argv list without executable name.
     :return Set[str]: Explicitly provided build option destinations.
     """
-    if not argv or argv[0] != "build":
+    if not argv:
+        return set()
+
+    try:
+        build_idx = argv.index("build")
+    except ValueError:
         return set()
 
     provided: Set[str] = set()
@@ -377,7 +459,7 @@ def _collect_provided_build_option_dests(
     probe_parser.set_defaults(**{key: probe_default for key in probe_parser._defaults})
 
     try:
-        parsed, _ = probe_parser.parse_known_args(argv[1:])
+        parsed, _ = probe_parser.parse_known_args(argv[build_idx + 1 :])
     except SystemExit:
         return provided
 
@@ -454,13 +536,7 @@ def _validate_build_cli_contract(
             build_parser.error(
                 "--max-semantic must be between 0 and --max-papers - 1 for hybrid."
             )
-        if args.max_semantic is None:
-            resolved_max_semantic = max(
-                0,
-                min(int(DEFAULT_MAX_SEMANTIC), int(args.max_papers) - 1),
-            )
-        else:
-            resolved_max_semantic = int(args.max_semantic)
+        resolved_max_semantic = _resolved_hybrid_max_semantic(args)
 
         if resolved_max_semantic == 0:
             ignored_embedding_options = sorted(
@@ -494,20 +570,17 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
 
     corpus_label = "all" if args.all_corpus else str(args.corpus_size)
     cache_root = get_cache_dir("embeddings")
+    revision_label = args.model_revision or "default"
+    logger.debug("Embedding cache namespace root: %s.", cache_root)
     logger.info(
-        "Embedding workflow contract: may download model/dataset artifacts and mutate "
-        "cache namespace at %s.",
-        cache_root,
-    )
-    logger.info(
-        "Embedding run config: model=%s revision=%s split=%s corpus=%s streaming=%s "
-        "precision=%s.",
+        "Embedding config: model=%s@%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
         args.model,
-        args.model_revision or "default",
+        revision_label,
         args.dataset_split,
         corpus_label,
         bool(args.streaming),
         args.storage_precision,
+        int(args.encode_batch_size),
     )
     if args.force_rebuild_cache:
         logger.warning(
@@ -643,8 +716,14 @@ def _create_parser() -> Tuple[
     :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
         Root parser, build subcommand parser, cache subcommand parser.
     """
+    root_logging_parent = argparse.ArgumentParser(add_help=False)
+    _add_logging_arguments(root_logging_parent)
+    command_logging_parent = argparse.ArgumentParser(add_help=False)
+    _add_logging_arguments(command_logging_parent, suppress_defaults=True)
+
     parser = argparse.ArgumentParser(
         description="CiteMesh: Create citation graph visualizations",
+        parents=[root_logging_parent],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -672,7 +751,9 @@ Examples:
 
     # Build command
     build_parser = subparsers.add_parser(
-        "build", help="Build and visualize paper graph"
+        "build",
+        help="Build and visualize paper graph",
+        parents=[command_logging_parent],
     )
 
     # Required arguments
@@ -764,16 +845,16 @@ Examples:
         "--max-citations",
         "-c",
         type=_non_negative_int,
-        default=20,
-        help="Maximum citing papers to fetch (default: 20)",
+        default=25,
+        help="Maximum citing papers to fetch (default: 25)",
     )
 
     citation_group.add_argument(
         "--max-references",
         "-r",
         type=_non_negative_int,
-        default=20,
-        help="Maximum referenced papers to fetch (default: 20)",
+        default=25,
+        help="Maximum referenced papers to fetch (default: 25)",
     )
 
     citation_group.add_argument(
@@ -804,7 +885,7 @@ Examples:
         "--model",
         "-m",
         type=_non_empty_str,
-        default="google/embeddinggemma-300m",
+        default=DEFAULT_EMBEDDING_MODEL_NAME,
         help="Sentence transformer model name",
     )
     embedding_group.add_argument(
@@ -844,8 +925,8 @@ Examples:
         "--top-k",
         "-k",
         type=_positive_int,
-        default=2,
-        help="Top-k neighbors per node (default: 2)",
+        default=3,
+        help="Top-k neighbors per node (default: 3)",
     )
 
     embedding_group.add_argument(
@@ -933,6 +1014,16 @@ Examples:
         ),
     )
 
+    embedding_group.add_argument(
+        "--encode-batch-size",
+        type=_positive_int,
+        default=ENCODE_BATCH_SIZE,
+        help=(
+            "Batch size for embedding model encode passes during hydration/search "
+            "(default: %(default)s)"
+        ),
+    )
+
     torch_compile_group = embedding_group.add_mutually_exclusive_group()
     torch_compile_group.add_argument(
         "--torch-compile",
@@ -958,15 +1049,17 @@ Examples:
         type=_non_negative_int,
         default=None,
         help=(
-            "Maximum non-seed semantic papers to add. Reserves citation capacity via "
-            "max-papers - max-semantic and must be <= max-papers - 1 "
-            "(default: min(10, max-papers - 1))"
+            "Maximum non-seed semantic papers to add (must be <= max-papers - 1). "
+            "When omitted, hybrid uses implicit citation-depth reservation before "
+            "semantic expansion (default cap: min(25, max-papers - 1))."
         ),
     )
 
     # Search subcommand
     search_parser = subparsers.add_parser(
-        "search", help="Search papers by title or keyword"
+        "search",
+        help="Search papers by title or keyword",
+        parents=[command_logging_parent],
     )
     search_parser.add_argument("query", type=_non_empty_str, help="Search query")
     search_parser.add_argument(
@@ -976,12 +1069,18 @@ Examples:
         default=10,
         help="Maximum results (default: 10)",
     )
-    cache_parser = subparsers.add_parser("cache", help="Manage local CiteMesh caches")
+    cache_parser = subparsers.add_parser(
+        "cache",
+        help="Manage local CiteMesh caches",
+        parents=[command_logging_parent],
+    )
     cache_subparsers = cache_parser.add_subparsers(
         dest="cache_command", help="Cache operations"
     )
     cache_clear_parser = cache_subparsers.add_parser(
-        "clear", help="Delete the entire CiteMesh cache directory"
+        "clear",
+        help="Delete the entire CiteMesh cache directory",
+        parents=[command_logging_parent],
     )
     cache_clear_parser.add_argument(
         "--yes",
@@ -990,7 +1089,9 @@ Examples:
         help="Skip confirmation prompt and clear cache immediately",
     )
     cache_subparsers.add_parser(
-        "scan", help="Scan cache usage (sections, file counts, and total size)"
+        "scan",
+        help="Scan cache usage (sections, file counts, and total size)",
+        parents=[command_logging_parent],
     )
     return parser, build_parser, cache_parser
 
@@ -1052,6 +1153,133 @@ def resolve_output_paths(
         output_paths[fmt] = Path(output_base + EXPORT_EXTENSIONS[fmt])
 
     return output_paths
+
+
+def _strip_known_export_suffix(filename: str) -> str:
+    """Strip a known export suffix from a filename-like token.
+
+    :param str filename: Candidate filename token.
+    :return str: Filename with trailing known export suffix removed.
+    """
+    lowered = filename.lower()
+    for suffix in KNOWN_EXPORT_SUFFIXES:
+        if lowered.endswith(suffix):
+            return filename[: -len(suffix)]
+    return filename
+
+
+def resolve_graph_config_path(output_paths: Dict[str, Path], strategy: str) -> Path:
+    """Resolve sidecar graph-config output path for a build run.
+
+    :param Dict[str, Path] output_paths: Resolved export artifact paths.
+    :param str strategy: Active strategy name.
+    :return Path: Graph-config JSON output path.
+    """
+    if not output_paths:
+        return Path(f"{strategy or 'graph'}.config.json")
+
+    anchor_path = next(iter(output_paths.values()))
+    stem = _strip_known_export_suffix(anchor_path.name)
+    if not stem:
+        stem = strategy or "graph"
+    return anchor_path.parent / f"{stem}.config.json"
+
+
+def _drop_none_values(value: Any) -> Any:
+    """Recursively drop ``None`` entries from dictionaries/lists.
+
+    :param Any value: Arbitrary JSON-serializable object.
+    :return Any: Copy with ``None``-valued mapping entries removed.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _drop_none_values(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, list):
+        return [_drop_none_values(item) for item in value]
+    return value
+
+
+def _build_graph_config_payload(
+    cli_args: argparse.Namespace,
+    seed_id: str,
+    metadata: Dict[str, Any],
+    selected_formats: List[str],
+    output_paths: Dict[str, Path],
+) -> Dict[str, Any]:
+    """Build sidecar graph-config payload for reproducibility and auditability.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :param str seed_id: Resolved seed paper identifier.
+    :param Dict[str, Any] metadata: Run metadata payload used by exporters.
+    :param List[str] selected_formats: Formats requested for export.
+    :param Dict[str, Path] output_paths: Resolved export artifact paths.
+    :return Dict[str, Any]: JSON-safe run configuration payload.
+    """
+    strategy = str(cli_args.strategy)
+    semantic_enabled = strategy == "embedding" or (
+        strategy == "hybrid" and _hybrid_semantic_branch_enabled(cli_args)
+    )
+    embedding_config: Optional[Dict[str, Any]] = None
+    if semantic_enabled:
+        embedding_config = {
+            "model": cli_args.model,
+            "model_revision": cli_args.model_revision,
+            "dataset_split": cli_args.dataset_split,
+            "corpus_size": None if cli_args.all_corpus else int(cli_args.corpus_size),
+            "all_corpus": bool(cli_args.all_corpus),
+            "truncate_dim": cli_args.truncate_dim,
+            "streaming": bool(cli_args.streaming),
+            "storage_precision": cli_args.storage_precision,
+            "binary_prefilter": bool(cli_args.binary_prefilter),
+            "binary_rescore_multiplier": int(cli_args.binary_rescore_multiplier),
+            "calibration_sample_size": int(cli_args.calibration_sample_size),
+            "cache_compression": cli_args.cache_compression,
+            "cache_compression_level": int(cli_args.cache_compression_level),
+            "encode_batch_size": int(cli_args.encode_batch_size),
+            "torch_compile": bool(cli_args.torch_compile),
+            "force_rebuild_cache": bool(cli_args.force_rebuild_cache),
+        }
+
+    payload = {
+        "schema_version": 1,
+        "build": {
+            "paper_id_input": cli_args.paper_id,
+            "paper_id_canonical": canonicalize_paper_id_for_metadata(cli_args.paper_id),
+            "seed_id": seed_id,
+            "strategy": strategy,
+            "max_papers": int(cli_args.max_papers),
+            "citation": (
+                {
+                    "max_citations": int(cli_args.max_citations),
+                    "max_references": int(cli_args.max_references),
+                    "fetch_references": not bool(cli_args.no_references),
+                    "refresh_reference_cache": bool(cli_args.refresh_reference_cache),
+                }
+                if strategy in {"citation", "hybrid", "recommendation"}
+                else None
+            ),
+            "hybrid": (
+                {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}
+                if strategy == "hybrid"
+                else None
+            ),
+            "embedding": embedding_config,
+            "layout": {
+                "spring_iterations": int(cli_args.spring_iterations),
+                "seed": cli_args.seed,
+                "dpi": int(cli_args.dpi),
+                "theme": cli_args.theme,
+            },
+            "timestamp_included": bool(cli_args.include_timestamp),
+            "exports_requested": list(selected_formats),
+        },
+        "outputs": {fmt: str(path) for fmt, path in sorted(output_paths.items())},
+        "metadata": metadata,
+    }
+    return _drop_none_values(payload)
 
 
 def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
@@ -1217,10 +1445,10 @@ def _scan_cache_directory() -> int:
 
 def main() -> None:
     """Main CLI entry point."""
-    _configure_logging()
     parser, build_parser, cache_parser = _create_parser()
 
     args = parser.parse_args()
+    _configure_logging(log_level=args.log_level, log_width=args.log_width)
     provided_build_options = _collect_provided_build_option_dests(
         build_parser, sys.argv[1:]
     )
@@ -1261,7 +1489,6 @@ def main() -> None:
                     parent.mkdir(parents=True, exist_ok=True)
 
             # Visualize / export
-            logger.info("Creating visualization...")
             metadata = {
                 "paper_id": canonicalize_paper_id_for_metadata(args.paper_id),
                 "seed_id": seed_id,
@@ -1284,6 +1511,7 @@ def main() -> None:
                 )
             if args.include_timestamp:
                 metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            plot_metadata = _plot_overlay_metadata(metadata)
             layout_required = any(fmt in output_paths for fmt in ("png", "plotly"))
             shared_layout = (
                 compute_layout(
@@ -1310,30 +1538,62 @@ def main() -> None:
                     output_paths["png"],
                     iterations=args.spring_iterations,
                     dpi=args.dpi,
-                    metadata=metadata,
+                    metadata=plot_metadata,
                     theme_name=args.theme,
                     layout=shared_layout,
                 )
-                logger.info(f"✓ PNG saved to {output_paths['png']}")
 
             if "html" in output_paths:
                 exporter.to_interactive_html(output_paths["html"], theme=args.theme)
-                logger.info(f"✓ Interactive HTML saved to {output_paths['html']}")
 
             if "plotly" in output_paths:
                 exporter.to_plotly_html(output_paths["plotly"], theme=args.theme)
-                logger.info(f"✓ Plotly HTML saved to {output_paths['plotly']}")
 
             if "json" in output_paths:
                 exporter.to_json(output_paths["json"])
-                logger.info(f"✓ Graph JSON saved to {output_paths['json']}")
 
             if "graphml" in output_paths:
                 exporter.to_graphml(output_paths["graphml"])
-                logger.info(f"✓ GraphML saved to {output_paths['graphml']}")
+
+            graph_config_path = resolve_graph_config_path(
+                output_paths=output_paths,
+                strategy=args.strategy,
+            )
+            graph_config_payload = _build_graph_config_payload(
+                cli_args=args,
+                seed_id=seed_id,
+                metadata=metadata,
+                selected_formats=selected_formats,
+                output_paths=output_paths,
+            )
+            graph_config_path.write_text(
+                json.dumps(graph_config_payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            artifact_paths = dict(output_paths)
+            artifact_paths["config"] = graph_config_path
+            saved_artifact_count = len(artifact_paths)
+            output_dirs = sorted({str(path.parent) for path in artifact_paths.values()})
+            if saved_artifact_count:
+                if len(output_dirs) == 1:
+                    logger.info(
+                        "%d export artifacts saved to:\t%s",
+                        saved_artifact_count,
+                        output_dirs[0],
+                    )
+                else:
+                    logger.info(
+                        "%d export artifacts saved across %d directories: %s",
+                        saved_artifact_count,
+                        len(output_dirs),
+                        ", ".join(output_dirs),
+                    )
 
             logger.info(
-                f"  Nodes: {graph.number_of_nodes()}, Edges: {graph.number_of_edges()}"
+                "Graph summary: nodes=%d, edges=%d",
+                graph.number_of_nodes(),
+                graph.number_of_edges(),
             )
 
         except Exception as e:

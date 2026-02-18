@@ -7,6 +7,7 @@ visualization that all strategies can use, eliminating code duplication.
 
 import hashlib
 import logging
+import math
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
@@ -30,6 +31,10 @@ MISSING_YEAR_FALLBACK_MIN = 2000
 MISSING_YEAR_FALLBACK_MAX = 2001
 KK_LAYOUT_DISTANCE_ATTR = "layout_distance"
 KK_LAYOUT_DISTANCE_EPSILON = 1e-6
+LAYOUT_PADDING_RATIO = 0.1
+LABEL_COLLISION_MIN_DISTANCE = 0.075
+LABEL_COLLISION_MAX_DISTANCE = 0.14
+METADATA_VALUE_MAX_CHARS = 64
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -149,6 +154,42 @@ def _choose_metadata_anchor(
     return x, y, ha, va
 
 
+def _normalize_layout_positions(
+    pos: Dict[Hashable, np.ndarray], padding_ratio: float = LAYOUT_PADDING_RATIO
+) -> Dict[Hashable, np.ndarray]:
+    """Normalize layout positions to a centered square viewport.
+
+    :param Dict[Hashable, np.ndarray] pos: Raw layout map from NetworkX.
+    :param float padding_ratio: Fractional interior padding around graph extents.
+    :return Dict[Hashable, np.ndarray]: Centered and scaled layout in approximately [-1, 1].
+    """
+    if not pos:
+        return {}
+
+    keys = list(pos.keys())
+    coords = np.array([np.asarray(pos[key], dtype=float) for key in keys], dtype=float)
+    if coords.ndim != 2 or coords.shape[1] != 2:
+        return {key: np.asarray(value, dtype=float) for key, value in pos.items()}
+
+    min_xy = coords.min(axis=0)
+    max_xy = coords.max(axis=0)
+    center_xy = (min_xy + max_xy) * 0.5
+    span_xy = max_xy - min_xy
+    max_span = float(np.max(span_xy))
+    target_half_extent = max(1e-6, 1.0 - float(padding_ratio))
+
+    if max_span <= 1e-9:
+        normalized = np.zeros_like(coords)
+    else:
+        normalized = (coords - center_xy) / (max_span * 0.5)
+        normalized *= target_half_extent
+
+    return {
+        key: np.array([float(normalized[idx, 0]), float(normalized[idx, 1])])
+        for idx, key in enumerate(keys)
+    }
+
+
 def add_metadata_box(
     ax: plt.Axes,
     metadata: Dict[str, Any],
@@ -167,22 +208,20 @@ def add_metadata_box(
     lines = []
     label_map = {
         "paper_id": "Query",
-        "seed_id": "Seed",
         "strategy": "Strategy",
-        "timestamp": "Generated",
         "nodes": "Nodes",
         "edges": "Edges",
+        "theme": "Theme",
+        "timestamp": "Generated",
     }
 
     for key, label in label_map.items():
         value = metadata.get(key)
         if value is not None:
-            lines.append(f"{label}: {value}")
-
-    # Include any extra metadata fields not in the predefined map
-    for key, value in metadata.items():
-        if key not in label_map and value is not None:
-            lines.append(f"{key.replace('_', ' ').title()}: {value}")
+            compact = " ".join(str(value).split())
+            if len(compact) > METADATA_VALUE_MAX_CHARS:
+                compact = f"{compact[: METADATA_VALUE_MAX_CHARS - 3]}..."
+            lines.append(f"{label}: {compact}")
 
     if not lines:
         return
@@ -203,9 +242,10 @@ def add_metadata_box(
         ha=ha,
         va=va,
         bbox=dict(
-            boxstyle="round,pad=0.4", facecolor=facecolor, alpha=0.8, linewidth=0
+            boxstyle="round,pad=0.3", facecolor=facecolor, alpha=0.55, linewidth=0
         ),
         color=text_color,
+        zorder=10,
     )
 
 
@@ -427,6 +467,7 @@ def draw_labels(
     pos: Dict[Hashable, np.ndarray],
     seed_id: str,
     theme: Theme,
+    sizes: Optional[List[float]] = None,
 ) -> None:
     """
     Draw paper labels in "Author, Year" format.
@@ -436,6 +477,7 @@ def draw_labels(
     :param Dict[Hashable, np.ndarray] pos: Node positions dictionary.
     :param str seed_id: ID of seed paper (gets bold label)
     :param Theme theme: Theme palette for text color.
+    :param Optional[List[float]] sizes: Optional node-size list aligned with ``ordered_nodes(graph)``.
     :return None: Draws all node labels.
     """
 
@@ -451,7 +493,22 @@ def draw_labels(
             return "Seed paper"
         return textwrap.fill(title, width=width, break_long_words=False)
 
-    for node in ordered_nodes(graph):
+    ordered = ordered_nodes(graph)
+    size_map: Dict[Hashable, float] = {}
+    if sizes is not None and len(sizes) == len(ordered):
+        size_map = {node: float(sizes[idx]) for idx, node in enumerate(ordered)}
+
+    candidate_nodes = sorted(
+        ordered,
+        key=lambda node: (
+            0 if node == seed_id else 1,
+            -_citation_count(graph.nodes[node]),
+            str(node),
+        ),
+    )
+
+    placed: List[np.ndarray] = []
+    for node in candidate_nodes:
         p = pos[node]
 
         # Seed paper gets larger, bold label
@@ -460,6 +517,14 @@ def draw_labels(
             title = graph.nodes[node].get("title", "Seed paper")
             label = _wrap_title(title)
             fontsize = 9
+            xytext = (0, 8)
+            vertical_alignment = "bottom"
+            label_bbox = dict(
+                boxstyle="round,pad=0.2",
+                facecolor=theme.background,
+                alpha=0.75,
+                linewidth=0,
+            )
         else:
             # Extract author surname
             authors = graph.nodes[node].get("authors", [])
@@ -472,20 +537,40 @@ def draw_labels(
             year_label = "n.d." if year is None else str(year)
             label = f"{last_name}, {year_label}"
             fontsize = VIZ_CONFIG.font_size
+            xytext = (0, -3)
+            vertical_alignment = "top"
+            label_bbox = None
 
         fontweight = "bold" if is_seed else VIZ_CONFIG.font_weight
+        if not is_seed:
+            node_size = size_map.get(node, float(VIZ_CONFIG.min_size))
+            scaled = min(
+                max(node_size / max(float(VIZ_CONFIG.seed_size), 1.0), 0.0), 1.0
+            )
+            min_distance = (
+                LABEL_COLLISION_MIN_DISTANCE
+                + (LABEL_COLLISION_MAX_DISTANCE - LABEL_COLLISION_MIN_DISTANCE) * scaled
+            )
+            if any(
+                math.dist((float(p[0]), float(p[1])), (float(prev[0]), float(prev[1])))
+                < min_distance
+                for prev in placed
+            ):
+                continue
 
         ax.annotate(
             label,
             xy=p,
-            xytext=(0, -3),
+            xytext=xytext,
             textcoords="offset points",
             ha="center",
-            va="top",
+            va=vertical_alignment,
             fontsize=fontsize,
             fontweight=fontweight,
             color=theme.text_color,
+            bbox=label_bbox,
         )
+        placed.append(np.asarray(p, dtype=float))
 
 
 def visualize_graph(
@@ -520,11 +605,12 @@ def visualize_graph(
     theme = get_theme(theme_name)
 
     # Compute layout
-    pos = (
+    raw_pos = (
         layout
         if layout is not None
         else compute_layout(graph, iterations, layout_seed=layout_seed)
     )
+    pos = _normalize_layout_positions(raw_pos)
 
     # Compute visual properties
     sizes = compute_node_sizes(graph)
@@ -540,7 +626,7 @@ def visualize_graph(
     # Draw graph components
     draw_edges(ax, graph, pos, theme)
     draw_nodes(ax, graph, pos, sizes, colors, theme)
-    draw_labels(ax, graph, pos, seed_id, theme)
+    draw_labels(ax, graph, pos, seed_id, theme, sizes=sizes)
 
     # Add title
     title = graph.nodes[seed_id].get("title", "Unknown")
@@ -560,17 +646,17 @@ def visualize_graph(
     if metadata:
         add_metadata_box(ax, metadata, pos, theme)
 
+    ax.set_xlim(-1.05, 1.05)
+    ax.set_ylim(-1.05, 1.05)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.02)
+
     # Save figure
-    plt.tight_layout()
     plt.savefig(
         output_path,
         dpi=dpi,
-        bbox_inches="tight",
         facecolor=theme.background,
     )
     plt.close()
-
-    logger.info(f"Visualization saved to {output_path}")
 
 
 def generate_output_path(

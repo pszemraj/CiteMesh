@@ -15,7 +15,7 @@ from citemesh.core import Paper
 from citemesh.services import SemanticScholarClient, get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
-from citemesh.strategies.similarity import compute_similarity_features
+from citemesh.strategies.similarity import compute_indexed_similarity_score
 
 logger = logging.getLogger(__name__)
 
@@ -77,18 +77,21 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param str progress_description: Progress-bar description label.
         :return None: Mutates ``papers`` and optional per-paper references in place.
         """
+        progress_bar = None
         if relation_records:
-            relation_iterator = (
-                tqdm(
+            # Avoid very short-lived progress bars that can render as blank spacer
+            # lines in some terminals when rapidly cleared.
+            should_show_progress = progress_enabled and len(relation_records) > 25
+            if should_show_progress:
+                progress_bar = tqdm(
                     relation_records,
                     desc=progress_description,
                     unit="papers",
-                    leave=False,
                     dynamic_ncols=True,
                 )
-                if progress_enabled
-                else relation_records
-            )
+                relation_iterator = progress_bar
+            else:
+                relation_iterator = relation_records
         else:
             relation_iterator = []
 
@@ -100,8 +103,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             if self.fetch_references and paper.paper_id not in self.reference_cache:
                 paper.references = self._get_references(paper.paper_id)
 
-        if relation_records and progress_enabled:
-            relation_iterator.close()
+        if progress_bar is not None:
+            progress_bar.close()
 
     def _get_references(self, paper_id: str) -> list:
         """
@@ -197,20 +200,14 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param Paper paper2: Second paper
         :return float: Similarity score (0.0 to 1.0)
         """
-        features = compute_similarity_features(
+        return compute_indexed_similarity_score(
             paper1,
             paper2,
-            abstract_similarity_fn=lambda a, b: self._abstract_index.similarity(
-                a.paper_id, b.paper_id
-            ),
+            abstract_index=self._abstract_index,
             temporal_similarity_fn=self.temporal_similarity,
             citation_similarity_fn=self.citation_similarity,
             bibliographic_coupling_fn=self.bibliographic_coupling,
-            use_bibliographic_coupling=bool(
-                self.fetch_references and paper1.references and paper2.references
-            ),
+            fetch_references=self.fetch_references,
             with_references_weights=(0.40, 0.20, 0.00, 0.40),
             without_references_weights=(0.65, 0.20, 0.15, 0.00),
         )
-
-        return features.combined_score

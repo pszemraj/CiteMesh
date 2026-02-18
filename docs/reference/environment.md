@@ -1,14 +1,12 @@
 # Environment Variables
 
-Use this page as the canonical source of truth for runtime environment variables consumed by CiteMesh.
+Runtime environment variables consumed by CiteMesh.
 
-## Scope
+Related docs:
 
-- Normative here: variable names, accepted values, defaults, and runtime effect.
-- Non-normative here: command syntax and strategy behavior details.
-  - CLI contracts: [Guides: CLI Usage](../guides/cli.md)
-  - Cache behavior: [Guides: Caching & Data](../guides/caching.md)
-  - Documentation ownership map: [Documentation Index](../README.md)
+- CLI usage: [Guides: CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
+- Cache behavior: [Guides: Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
 
 ## CiteMesh Variables
 
@@ -16,7 +14,7 @@ Use this page as the canonical source of truth for runtime environment variables
 | --- | --- | --- | --- |
 | `S2_API_KEY` | unset | non-empty string | Adds Semantic Scholar API key for higher API limits and authenticated requests. |
 | `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path | Overrides CiteMesh cache root used for embedding/reference caches. |
-| `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `60` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
+| `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
 | `CITEMESH_STRICT_OFFLINE_FINGERPRINT` | disabled | `1`, `true`, `yes`, `on` (case-insensitive) | Disables legacy offline assumption that cached SHA for `main` may still be reused when full fingerprint verification is unavailable. |
 
 Implementation references:
@@ -36,4 +34,4 @@ These are not CiteMesh-specific, but CiteMesh honors them when `CITEMESH_CACHE_D
 | `LOCALAPPDATA` | Windows | Primary base for default cache root (`%LOCALAPPDATA%\\CiteMesh`). |
 | `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset. |
 
-Cache-root behavior details remain canonical in [Guides: Caching & Data](../guides/caching.md).
+Cache-root behavior details are covered in [Guides: Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).

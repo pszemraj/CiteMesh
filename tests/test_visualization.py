@@ -24,6 +24,7 @@ from citemesh.visualization.export import (
 )
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
+    _normalize_layout_positions,
     compute_layout,
     compute_node_colors,
     compute_node_sizes,
@@ -156,8 +157,10 @@ def _build_graph() -> tuple[nx.Graph, str]:
     return graph, seed.paper_id
 
 
-def test_exporter_json_graphml_contracts_and_determinism(tmp_path: Path) -> None:
-    """JSON and GraphML exports should preserve fields, metadata, and determinism."""
+def test_exporter_serialization_contracts_and_determinism(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exporter outputs should preserve metadata, ordering, and determinism."""
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
 
@@ -171,9 +174,12 @@ def test_exporter_json_graphml_contracts_and_determinism(tmp_path: Path) -> None
 
     payload = json.loads(json_path.read_text())
     assert payload["seed_id"] == seed_id
-    assert payload["metadata"]["strategy"] == "citation"
+    assert "metadata" not in payload
+    assert payload["summary"] == {"nodes": 2, "edges": 1}
     assert len(payload["nodes"]) == 2
     assert payload["edges"][0]["weight"] == pytest.approx(0.7)
+    assert payload["edges"][0]["source_title"] == "Related Paper"
+    assert payload["edges"][0]["target_title"] == "Seed Paper"
 
     graphml = nx.read_graphml(graphml_path)
     seed_node = graphml.nodes[seed_id]
@@ -190,6 +196,60 @@ def test_exporter_json_graphml_contracts_and_determinism(tmp_path: Path) -> None
         assert _canonicalize_graphml(graphml_path) == _canonicalize_graphml(
             graphml_again_path
         )
+
+    captured: dict[str, object] = {}
+
+    class FakeFigure(_BaseFakeFigure):
+        def __init__(self, data: Any, layout: Any) -> None:
+            super().__init__(data, layout)
+            captured["data"] = data
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+
+    ordered_graph = nx.Graph()
+    ordered_graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
+    ordered_graph.add_node("seed", title="Seed", year=2020, authors=[], is_seed=True)
+    ordered_graph.add_node("a", title="Node A", year=2021, authors=[], citation_count=0)
+    ordered_graph.add_edge("seed", "z", weight=0.7)
+    ordered_graph.add_edge("z", "a", weight=0.5)
+
+    ordered_exporter = GraphExporter(
+        ordered_graph,
+        "seed",
+        layout={"a": (0.0, 0.0), "seed": (1.0, 0.0), "z": (2.0, 0.0)},
+    )
+    ordered_json_path = tmp_path / "ordered.json"
+    ordered_graphml_path = tmp_path / "ordered.graphml"
+    ordered_plotly_path = tmp_path / "ordered.plotly.html"
+    ordered_exporter.to_json(ordered_json_path)
+    ordered_exporter.to_graphml(ordered_graphml_path)
+    ordered_exporter.to_plotly_html(ordered_plotly_path)
+
+    ordered_payload = json.loads(ordered_json_path.read_text())
+    assert [node["id"] for node in ordered_payload["nodes"]] == ["a", "seed", "z"]
+    assert [edge["source"] for edge in ordered_payload["edges"]] == ["a", "seed"]
+    assert [edge["target"] for edge in ordered_payload["edges"]] == ["z", "z"]
+    assert [edge["weight"] for edge in ordered_payload["edges"]] == [
+        pytest.approx(0.5),
+        pytest.approx(0.7),
+    ]
+    assert ordered_payload["edges"][0]["source_title"] == "Node A"
+    assert ordered_payload["edges"][0]["target_title"] == "Node Z"
+
+    graphml_xml = ET.fromstring(ordered_graphml_path.read_text())
+    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
+    graph_element = graphml_xml.find("g:graph", ns)
+    assert graph_element is not None
+    node_ids = [node.attrib["id"] for node in graph_element.findall("g:node", ns)]
+    edge_pairs = [
+        (edge.attrib["source"], edge.attrib["target"])
+        for edge in graph_element.findall("g:edge", ns)
+    ]
+    assert node_ids == ["a", "seed", "z"]
+    assert edge_pairs == [("a", "z"), ("seed", "z")]
+
+    edge_trace = captured["data"][0]
+    assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
 
 
 def test_exporter_interactive_html_contracts(
@@ -348,10 +408,69 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     assert seed_title in captured["title"].replace("\n", " ")
 
 
-def test_exporter_plotly_and_graphml_handle_missing_year_data(
+def test_visualize_graph_metadata_overlay_is_compact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plotly colors and GraphML year serialization should be stable with null years."""
+    """Static render metadata should exclude large nested debug payloads."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="Seed Paper",
+        year=2025,
+        authors=["A"],
+        citation_count=5,
+        is_seed=True,
+    )
+    graph.add_node(
+        "related",
+        title="Related Paper",
+        year=2024,
+        authors=["B"],
+        citation_count=3,
+        is_seed=False,
+    )
+    graph.add_edge("seed", "related", weight=0.8)
+
+    captured_text: dict[str, str] = {}
+    import matplotlib.axes
+
+    original_text = matplotlib.axes.Axes.text
+
+    def capture_text(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if len(args) >= 3:
+            captured_text["text"] = str(args[2])
+        return original_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "text", capture_text)
+
+    visualize_graph(
+        graph,
+        "seed",
+        tmp_path / "graph.png",
+        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+        metadata={
+            "paper_id": "https://arxiv.org/abs/2508.14040",
+            "strategy": "hybrid",
+            "nodes": 2,
+            "edges": 1,
+            "theme": "dark",
+            "score_contract": {"strategy": "hybrid", "range_hint": "[0,1]"},
+            "embedding": {"storage_precision": "int8"},
+        },
+    )
+
+    text = captured_text["text"]
+    assert "Strategy: hybrid" in text
+    assert "Nodes: 2" in text
+    assert "Edges: 1" in text
+    assert "Score Contract" not in text
+    assert "Embedding" not in text
+
+
+def test_missing_year_visual_contracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing-year fallbacks should stay stable across exporters and render helpers."""
     captured: dict[str, object] = {}
 
     def fake_scatter(**kwargs: Any) -> dict[str, object]:
@@ -410,60 +529,25 @@ def test_exporter_plotly_and_graphml_handle_missing_year_data(
     graphml = nx.read_graphml(graphml_path)
     assert str(graphml.nodes["missing-year"]["year"]) == "0"
 
+    graph_1 = nx.Graph()
+    graph_1.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
+    graph_1.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
+    graph_1.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
 
-def test_export_ordering_is_stable_across_json_graphml_and_plotly_edge_trace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Node and edge ordering should remain deterministic across exporters."""
-    captured: dict[str, object] = {}
+    graph_2 = nx.Graph()
+    graph_2.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
+    graph_2.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
+    graph_2.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
 
-    class FakeFigure(_BaseFakeFigure):
-        def __init__(self, data: Any, layout: Any) -> None:
-            super().__init__(data, layout)
-            captured["data"] = data
+    _, min_year, max_year = compute_node_colors(graph_1, "seed", get_theme("light"))
+    assert min_year == 2000
+    assert max_year == 2001
 
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
-
-    graph = nx.Graph()
-    graph.add_node("z", title="Node Z", year=2022, authors=[], citation_count=0)
-    graph.add_node("seed", title="Seed", year=2020, authors=[], is_seed=True)
-    graph.add_node("a", title="Node A", year=2021, authors=[], citation_count=0)
-    graph.add_edge("seed", "z", weight=0.7)
-    graph.add_edge("z", "a", weight=0.5)
-
-    exporter = GraphExporter(
-        graph,
-        "seed",
-        layout={"a": (0.0, 0.0), "seed": (1.0, 0.0), "z": (2.0, 0.0)},
-    )
-    json_path = tmp_path / "ordered.json"
-    graphml_path = tmp_path / "ordered.graphml"
-    plotly_path = tmp_path / "ordered.plotly.html"
-    exporter.to_json(json_path)
-    exporter.to_graphml(graphml_path)
-    exporter.to_plotly_html(plotly_path)
-
-    payload = json.loads(json_path.read_text())
-    assert [node["id"] for node in payload["nodes"]] == ["a", "seed", "z"]
-    assert payload["edges"] == [
-        {"source": "a", "target": "z", "weight": pytest.approx(0.5)},
-        {"source": "seed", "target": "z", "weight": pytest.approx(0.7)},
-    ]
-
-    graphml_xml = ET.fromstring(graphml_path.read_text())
-    ns = {"g": "http://graphml.graphdrawing.org/xmlns"}
-    graph_element = graphml_xml.find("g:graph", ns)
-    assert graph_element is not None
-    node_ids = [node.attrib["id"] for node in graph_element.findall("g:node", ns)]
-    edge_pairs = [
-        (edge.attrib["source"], edge.attrib["target"])
-        for edge in graph_element.findall("g:edge", ns)
-    ]
-    assert node_ids == ["a", "seed", "z"]
-    assert edge_pairs == [("a", "z"), ("seed", "z")]
-
-    edge_trace = captured["data"][0]
-    assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
+    ordered_nodes = sorted(graph_1.nodes(), key=str)
+    size_map_1 = dict(zip(ordered_nodes, compute_node_sizes(graph_1)))
+    size_map_2 = dict(zip(ordered_nodes, compute_node_sizes(graph_2)))
+    assert size_map_1 == size_map_2
+    assert size_map_1["a"] >= size_map_1["b"]
 
 
 def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) -> None:
@@ -483,10 +567,23 @@ def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) ->
     assert out_a.read_text() == out_b.read_text()
 
 
-def test_compute_layout_stability_and_distance_weight(
+def test_layout_positioning_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Layout perturbations and distance-weight wiring should both be deterministic."""
+    """Layout normalization, perturbation stability, and distance weighting should hold."""
+
+    raw = {
+        "a": np.array([10.0, -2.0]),
+        "b": np.array([22.0, 4.0]),
+        "c": np.array([16.0, 8.0]),
+    }
+    normalized = _normalize_layout_positions(raw, padding_ratio=0.1)
+    coords = np.array(list(normalized.values()), dtype=float)
+    bounds_center = (coords.max(axis=0) + coords.min(axis=0)) * 0.5
+
+    assert np.allclose(bounds_center, np.array([0.0, 0.0]), atol=1e-9)
+    assert float(np.max(np.abs(coords[:, 0]))) <= 0.9 + 1e-9
+    assert float(np.max(np.abs(coords[:, 1]))) <= 0.9 + 1e-9
 
     captured: dict[str, object] = {}
 
@@ -531,29 +628,6 @@ def test_compute_layout_stability_and_distance_weight(
     assert distances[("high", "seed")] < distances[("low", "seed")]
 
 
-def test_compute_node_colors_and_sizes_are_stable_for_missing_years_and_ties() -> None:
-    """Color fallback bounds and size ties should be deterministic."""
-    graph_1 = nx.Graph()
-    graph_1.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
-    graph_1.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
-    graph_1.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
-
-    graph_2 = nx.Graph()
-    graph_2.add_node("seed", title="Seed", year=None, citation_count=0, is_seed=True)
-    graph_2.add_node("a", title="A", year=None, citation_count=0, is_seed=False)
-    graph_2.add_node("b", title="B", year=None, citation_count=0, is_seed=False)
-
-    _, min_year, max_year = compute_node_colors(graph_1, "seed", get_theme("light"))
-    assert min_year == 2000
-    assert max_year == 2001
-
-    ordered_nodes = sorted(graph_1.nodes(), key=str)
-    size_map_1 = dict(zip(ordered_nodes, compute_node_sizes(graph_1)))
-    size_map_2 = dict(zip(ordered_nodes, compute_node_sizes(graph_2)))
-    assert size_map_1 == size_map_2
-    assert size_map_1["a"] >= size_map_1["b"]
-
-
 def test_get_theme_auto_detection_and_unknown_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -591,6 +665,10 @@ def test_model_profiles_match_expected_formatters() -> None:
         gemma.format_document({"title": " Title ", "abstract": " Abstract "})
         == "title: Title | text: Abstract"
     )
+    unsloth_gemma = get_embedding_model_profile("unsloth/embeddinggemma-300m")
+    assert unsloth_gemma.name == "google/embeddinggemma"
+    assert unsloth_gemma.compile_inner_transformer is True
+    assert unsloth_gemma.format_query("plain").startswith("task: search result")
 
     default = get_embedding_model_profile("all-MiniLM-L6-v2")
     assert default.name == "default"
