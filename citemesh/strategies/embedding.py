@@ -12,6 +12,7 @@ import sys
 import warnings
 from contextlib import nullcontext
 from hashlib import sha1, sha256
+from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -1734,6 +1735,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.corpus_size,
             dataset_source=cached_dataset_source,
         ):
+            try:
+                self._refresh_hydrated_full_corpus_cache(
+                    use_streaming=use_streaming,
+                    cached_dataset_source=cached_dataset_source,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Incremental full-corpus refresh check failed for source=%s; "
+                    "continuing with existing hydrated cache: %s",
+                    cached_dataset_source or "unknown",
+                    exc,
+                )
             logger.debug(
                 "Embedding cache already hydrated for split=%s corpus_size=%s source=%s; "
                 "skipping dataset load.",
@@ -1797,12 +1810,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             complete=False,
         )
 
-        hydrated_records = 0
-        calibration_records: List[Dict] = []
-        calibration_ready = (
-            self.storage_precision != "int8"
-            or self.embedding_cache.has_calibration_ranges()
-        )
         progress_total = self.corpus_size if self.corpus_size else None
         if not use_streaming and self.corpus_size is None:
             try:
@@ -1810,9 +1817,52 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             except TypeError:  # pragma: no cover - defensive for dataset APIs
                 progress_total = None
 
+        hydrated_records = self._hydrate_dataset_records(
+            dataset=dataset,
+            progress_total=progress_total,
+            progress_label=f"Hydrating {dataset_source}",
+        )
+
+        if hydrated_records == 0:
+            logger.warning(
+                "Hydration produced zero records for split=%s corpus_size=%s; "
+                "cache remains incomplete.",
+                self.dataset_split,
+                "all" if self.corpus_size is None else self.corpus_size,
+            )
+            return
+
+        self.embedding_cache.mark_hydrated(
+            dataset_source=dataset_source,
+            dataset_split=self.dataset_split,
+            corpus_size=self.corpus_size,
+            complete=True,
+        )
+
+    def _hydrate_dataset_records(
+        self,
+        dataset: Iterable[Dict[str, Any]],
+        *,
+        progress_total: Optional[int],
+        progress_label: str,
+    ) -> int:
+        """Hydrate cache records from dataset iterator without clearing namespace.
+
+        :param Iterable[Dict[str, Any]] dataset: Dataset records to process.
+        :param Optional[int] progress_total: Optional progress-bar total.
+        :param str progress_label: Progress-bar description label.
+        :return int: Number of records routed into cache batching.
+        """
+        hydrated_records = 0
+        calibration_records: List[Dict] = []
+        calibration_ready = (
+            self.storage_precision != "int8"
+            or self.embedding_cache.has_calibration_ranges()
+        )
+
         with tqdm(
             total=progress_total,
-            desc=f"Hydrating {dataset_source}",
+            desc=progress_label,
             unit="papers",
             dynamic_ncols=True,
             disable=not sys.stderr.isatty(),
@@ -1854,35 +1904,155 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if progress_total is None:
                 progress.set_postfix_str(f"processed {progress.n}")
 
-        if hydrated_records == 0:
+        return hydrated_records
+
+    def _cached_payload_row_count(self) -> int:
+        """Return best-effort hydrated payload row count for this namespace.
+
+        :return int: Maximum of SQLite and HDF5 embedding row counts.
+        """
+        stats = self.embedding_cache.payload_stats()
+        return max(int(stats.sqlite_rows), int(stats.embedding_rows))
+
+    def _resolve_dataset_split_row_count(self, dataset_source: str) -> Optional[int]:
+        """Resolve dataset split row count from HuggingFace metadata when available.
+
+        :param str dataset_source: Dataset source identifier.
+        :return Optional[int]: Split row count, or ``None`` when unavailable.
+        """
+        if ":" in str(self.dataset_split):
+            return None
+
+        from datasets import load_dataset_builder
+
+        try:
+            builder = load_dataset_builder(dataset_source)
+            splits = getattr(getattr(builder, "info", None), "splits", None)
+            if splits is None:
+                return None
+            if hasattr(splits, "get"):
+                split_info = splits.get(self.dataset_split)
+            elif self.dataset_split in splits:
+                split_info = splits[self.dataset_split]
+            else:
+                split_info = None
+            if split_info is None:
+                return None
+            num_examples = getattr(split_info, "num_examples", None)
+            if num_examples is None:
+                return None
+            parsed = int(num_examples)
+            return parsed if parsed >= 0 else None
+        except Exception as exc:  # pragma: no cover - source/network dependent
             logger.warning(
-                "Hydration produced zero records for split=%s corpus_size=%s; "
-                "cache remains incomplete.",
+                "Could not resolve split row count for %s/%s: %s",
+                dataset_source,
                 self.dataset_split,
-                "all" if self.corpus_size is None else self.corpus_size,
+                exc,
             )
+            return None
+
+    def _refresh_hydrated_full_corpus_cache(
+        self, *, use_streaming: bool, cached_dataset_source: Optional[str]
+    ) -> None:
+        """Incrementally refresh hydrated full-corpus cache when source row count grows.
+
+        This avoids clearing/re-encoding existing payload when a source only appends
+        new records.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param Optional[str] cached_dataset_source: Hydrated dataset source token.
+        :return None: Mutates cache in-place when incremental refresh is required.
+        """
+        if self.corpus_size is not None:
+            return
+        if ":" in str(self.dataset_split):
+            return
+        source = str(cached_dataset_source or "").strip()
+        if not source:
             return
 
-        self.embedding_cache.mark_hydrated(
-            dataset_source=dataset_source,
-            dataset_split=self.dataset_split,
-            corpus_size=self.corpus_size,
-            complete=True,
+        cached_rows = self._cached_payload_row_count()
+        if cached_rows < 1:
+            return
+
+        upstream_rows = self._resolve_dataset_split_row_count(source)
+        if upstream_rows is None:
+            return
+        if upstream_rows <= cached_rows:
+            if upstream_rows < cached_rows:
+                logger.warning(
+                    "Cached embedding payload rows (%d) exceed upstream split rows (%d) "
+                    "for %s/%s; retaining existing cache.",
+                    cached_rows,
+                    upstream_rows,
+                    source,
+                    self.dataset_split,
+                )
+            return
+
+        delta_rows = upstream_rows - cached_rows
+        logger.info(
+            "Detected %d new dataset rows for %s/%s (cached=%d, upstream=%d). "
+            "Running incremental cache refresh.",
+            delta_rows,
+            source,
+            self.dataset_split,
+            cached_rows,
+            upstream_rows,
+        )
+        refreshed_source, dataset = self._load_dataset_for_hydration(
+            use_streaming=use_streaming,
+            preferred_dataset_source=source,
+            row_limit=delta_rows,
+            allow_source_fallback=False,
+        )
+        if refreshed_source != source:
+            raise RuntimeError(
+                "Incremental refresh resolved unexpected dataset source "
+                f"{refreshed_source!r} (expected {source!r})."
+            )
+
+        refreshed_records = self._hydrate_dataset_records(
+            dataset=dataset,
+            progress_total=delta_rows,
+            progress_label=f"Refreshing {source}",
+        )
+        if refreshed_records > 0:
+            self.embedding_cache.mark_hydrated(
+                dataset_source=source,
+                dataset_split=self.dataset_split,
+                corpus_size=self.corpus_size,
+                complete=True,
+            )
+        logger.info(
+            "Incremental refresh processed %d rows for %s/%s.",
+            refreshed_records,
+            source,
+            self.dataset_split,
         )
 
     def _load_dataset_for_hydration(
-        self, use_streaming: bool, preferred_dataset_source: Optional[str] = None
+        self,
+        use_streaming: bool,
+        preferred_dataset_source: Optional[str] = None,
+        row_limit: Optional[int] = None,
+        allow_source_fallback: bool = True,
     ) -> Tuple[str, Iterable[Dict[str, Any]]]:
         """Load first available ArXiv dataset for hydration.
 
         :param bool use_streaming: Whether to load streaming dataset iterator.
         :param Optional[str] preferred_dataset_source: Preferred source if already cached.
+        :param Optional[int] row_limit: Optional row cap override for dataset loading.
+        :param bool allow_source_fallback: Whether alternate sources may be tried.
         :return Tuple[str, Iterable[Dict[str, Any]]]: Dataset source name and iterable.
         """
         from datasets import load_dataset
 
         last_error: Optional[Exception] = None
-        if (
+        if preferred_dataset_source is not None and not allow_source_fallback:
+            dataset_names = (preferred_dataset_source,)
+        elif (
             preferred_dataset_source is not None
             and preferred_dataset_source in ARXIV_DATASET_CANDIDATES
         ):
@@ -1899,7 +2069,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         for dataset_name in dataset_names:
             split_for_load = self.dataset_split
+            if row_limit is not None and int(row_limit) < 1:
+                raise ValueError("row_limit must be at least 1 when provided")
             if (
+                not use_streaming
+                and ":" not in split_for_load
+                and row_limit is not None
+            ):
+                split_for_load = f"{split_for_load}[:{int(row_limit)}]"
+            elif (
                 not use_streaming
                 and self.corpus_size is not None
                 and ":" not in split_for_load
@@ -1919,11 +2097,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     exc,
                 )
                 continue
+            if use_streaming and row_limit is not None:
+                dataset = islice(dataset, int(row_limit))
             logger.debug(
-                "Hydration dataset selected: %s (split=%s, streaming=%s).",
+                "Hydration dataset selected: %s (split=%s, streaming=%s, row_limit=%s).",
                 dataset_name,
                 split_for_load,
                 use_streaming,
+                "none" if row_limit is None else int(row_limit),
             )
             return dataset_name, dataset
 

@@ -40,6 +40,7 @@ For current usage details, see:
 - Added streaming mode for embedding corpus ingestion as an explicit opt-in.
 - Added model profiles (starting with EmbeddingGemma) for prompts/precision policy.
 - Added reason-tagged embedding namespace clear logs with payload-size/row summaries for cache invalidation transparency.
+- Added incremental full-corpus hydration growth checks so upstream row-count increases append only delta records instead of forcing full namespace rebuilds.
 
 ## Strategy Evolution
 

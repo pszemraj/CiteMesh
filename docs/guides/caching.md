@@ -106,6 +106,11 @@ and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 
+For hydrated full-corpus runs (`--all-corpus`), CiteMesh now performs an incremental
+growth check using upstream split row counts. When upstream rows increased, it loads
+only the new-row delta and appends those records to cache instead of clearing and
+re-encoding the entire namespace.
+
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus
 metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias
 mutates upstream without changing source name, treat cache reuse as a performance
