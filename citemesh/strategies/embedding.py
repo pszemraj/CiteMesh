@@ -423,7 +423,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
         if force_rebuild_cache:
             logger.info("Forcing embedding cache rebuild as requested.")
-            self.embedding_cache.clear()
+            self._clear_embedding_cache("explicit --force-rebuild-cache request")
         self.use_streaming = use_streaming
         if self.use_streaming and ":" in self.dataset_split:
             raise ValueError(
@@ -446,6 +446,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._resolved_model_fingerprint: Optional[str] = None
         self._resolved_offline_fingerprint: Optional[str] = None
         self._last_search_used_binary_prefilter: Optional[bool] = None
+
+    def _clear_embedding_cache(self, reason: str) -> None:
+        """Clear embedding namespace payload with explicit reason logging.
+
+        :param str reason: Human-readable reason for cache reset.
+        :return None: Mutates cache files/metadata in-place.
+        """
+        normalized_reason = str(reason).strip() or "unspecified"
+        self.embedding_cache.clear(reason=normalized_reason)
 
     def _embedding_runtime_metadata(self) -> Dict[str, object]:
         """Return runtime metadata describing effective embedding retrieval behavior.
@@ -898,7 +907,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                         cached_fingerprint,
                         fallback_fingerprint,
                     )
-                    self.embedding_cache.clear()
+                    self._clear_embedding_cache(
+                        "cached fingerprint incompatible with requested identity "
+                        f"(cached={cached_fingerprint}, requested={fallback_fingerprint})"
+                    )
                     self.embedding_cache.set_model_fingerprint(fallback_fingerprint)
                     self._resolved_model_fingerprint = fallback_fingerprint
                     logger.debug(
@@ -931,7 +943,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     cached_fingerprint or "missing",
                     model_fingerprint,
                 )
-                self.embedding_cache.clear()
+                self._clear_embedding_cache(
+                    "model fingerprint mismatch "
+                    f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint})"
+                )
                 self._resolved_model_fingerprint = model_fingerprint
                 self.embedding_cache.set_model_fingerprint(model_fingerprint)
                 return
@@ -1767,7 +1782,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 if fallback_fingerprint is not None
                 else ""
             )
-        self.embedding_cache.clear()
+        self._clear_embedding_cache(
+            "hydration metadata mismatch requires rebuild "
+            f"(requested_split={self.dataset_split}, "
+            f"requested_corpus={'all' if self.corpus_size is None else self.corpus_size}, "
+            f"resolved_source={dataset_source}, cached_source={cached_dataset_source or 'unknown'})"
+        )
         if retained_fingerprint:
             self.embedding_cache.set_model_fingerprint(retained_fingerprint)
         self.embedding_cache.mark_hydrated(

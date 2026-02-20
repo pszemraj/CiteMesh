@@ -43,6 +43,7 @@ from citemesh.visualization import (
 )
 
 DEFAULT_LOG_WIDTH = 140
+LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
 
 log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
@@ -232,6 +233,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "truncate_dim": {"embedding", "hybrid"},
     "streaming": {"embedding", "hybrid"},
     "force_rebuild_cache": {"embedding", "hybrid"},
+    "overwrite_cache": {"embedding", "hybrid"},
     "storage_precision": {"embedding", "hybrid"},
     "binary_prefilter": {"embedding", "hybrid"},
     "binary_rescore_multiplier": {"embedding", "hybrid"},
@@ -257,6 +259,7 @@ _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "truncate_dim": ["--truncate-dim"],
     "streaming": ["--streaming"],
     "force_rebuild_cache": ["--force-rebuild-cache"],
+    "overwrite_cache": ["--overwrite-cache"],
     "storage_precision": ["--storage-precision"],
     "binary_prefilter": ["--binary-prefilter", "--no-binary-prefilter"],
     "binary_rescore_multiplier": ["--binary-rescore-multiplier"],
@@ -280,6 +283,7 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "truncate_dim",
     "streaming",
     "force_rebuild_cache",
+    "overwrite_cache",
     "storage_precision",
     "binary_prefilter",
     "binary_rescore_multiplier",
@@ -507,6 +511,8 @@ def _validate_build_cli_contract(
                 "(for example train[:5%]). Use unsliced split (e.g. train) or "
                 "disable --streaming."
             )
+        if bool(args.overwrite_cache) and not bool(args.force_rebuild_cache):
+            build_parser.error("--overwrite-cache requires --force-rebuild-cache.")
         if args.all_corpus and "corpus_size" in provided:
             build_parser.error(
                 "--all-corpus cannot be combined with explicit --corpus-size."
@@ -583,9 +589,14 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
         int(args.encode_batch_size),
     )
     if args.force_rebuild_cache:
-        logger.warning(
-            "--force-rebuild-cache enabled; existing embedding namespace payload will be cleared."
-        )
+        if bool(args.overwrite_cache):
+            logger.warning(
+                "--force-rebuild-cache enabled with --overwrite-cache; existing embedding namespace payload will be cleared without prompt."
+            )
+        else:
+            logger.warning(
+                "--force-rebuild-cache enabled; existing embedding namespace payload will be cleared after confirmation."
+            )
 
 
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
@@ -950,6 +961,14 @@ Examples:
         action="store_true",
         help="Forcefully clear and rebuild embedding cache for this model before running.",
     )
+    embedding_group.add_argument(
+        "--overwrite-cache",
+        action="store_true",
+        help=(
+            "Acknowledge destructive cache overwrite for --force-rebuild-cache and "
+            "skip interactive confirmation."
+        ),
+    )
 
     embedding_group.add_argument(
         "--storage-precision",
@@ -1241,6 +1260,7 @@ def _build_graph_config_payload(
             "encode_batch_size": int(cli_args.encode_batch_size),
             "torch_compile": bool(cli_args.torch_compile),
             "force_rebuild_cache": bool(cli_args.force_rebuild_cache),
+            "overwrite_cache": bool(cli_args.overwrite_cache),
         }
 
     payload = {
@@ -1293,6 +1313,89 @@ def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
         return normalize_paper_id(paper_id)
     except ValueError:
         return paper_id
+
+
+def _embedding_cache_directory_stats() -> tuple[Path, int, int]:
+    """Return embedding cache directory path + file/size totals.
+
+    :return tuple[Path, int, int]: ``(path, files, size_bytes)``.
+    """
+    embedding_cache_dir = (
+        get_cache_dir("embeddings", create=False).expanduser().resolve()
+    )
+    if not embedding_cache_dir.exists():
+        return embedding_cache_dir, 0, 0
+    files, size_bytes = _scan_path_stats(embedding_cache_dir)
+    return embedding_cache_dir, files, size_bytes
+
+
+def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
+    """Confirm destructive embedding namespace rebuild requested by CLI flags.
+
+    :param argparse.Namespace args: Parsed build CLI arguments.
+    :return bool: ``True`` when build may proceed.
+    """
+    if (
+        str(args.command) != "build"
+        or str(args.strategy) not in {"embedding", "hybrid"}
+        or not bool(args.force_rebuild_cache)
+    ):
+        return True
+
+    embedding_cache_dir, total_files, total_bytes = _embedding_cache_directory_stats()
+    total_size_label = _format_bytes(total_bytes)
+    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
+    large_threshold_label = _format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+
+    if bool(args.overwrite_cache):
+        logger.warning(
+            "--overwrite-cache acknowledged destructive rebuild "
+            "(embedding cache dir=%s files=%d size=%s).",
+            embedding_cache_dir,
+            total_files,
+            total_size_label,
+        )
+        if large_cache:
+            logger.warning(
+                "Large embedding cache footprint detected (%s >= %s).",
+                total_size_label,
+                large_threshold_label,
+            )
+        return True
+
+    if not sys.stdin.isatty():
+        logger.error(
+            "Refusing --force-rebuild-cache in non-interactive mode without "
+            "--overwrite-cache. Re-run with --overwrite-cache to proceed."
+        )
+        return False
+
+    logger.warning(
+        "--force-rebuild-cache will clear the active embedding cache namespace before this run."
+    )
+    logger.warning(
+        "Embedding cache directory snapshot: root=%s files=%d size=%s.",
+        embedding_cache_dir,
+        total_files,
+        total_size_label,
+    )
+    if large_cache:
+        logger.warning(
+            "Large cache warning: %s >= %s. Clearing may require long rehydration.",
+            total_size_label,
+            large_threshold_label,
+        )
+    logger.warning(
+        "Use --overwrite-cache to bypass this prompt in scripted/non-interactive workflows."
+    )
+    try:
+        response = (
+            input("Proceed with embedding cache overwrite? [y/N]: ").strip().lower()
+        )
+    except EOFError:
+        logger.error("No confirmation input received; build aborted.")
+        return False
+    return response in {"y", "yes"}
 
 
 def _confirmed_cache_clear(cache_root: Path, assume_yes: bool) -> bool:
@@ -1460,6 +1563,9 @@ def main() -> None:
     if args.command == "build":
         _validate_build_cli_contract(args, build_parser, provided_build_options)
         try:
+            if not _confirm_force_rebuild_cache(args):
+                logger.info("Build aborted.")
+                sys.exit(1)
             _log_build_side_effect_contract(args)
             # Build graph based on strategy
             logger.info(f"Building graph using {args.strategy} strategy...")

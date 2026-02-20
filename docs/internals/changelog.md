@@ -39,6 +39,7 @@ For current usage details, see:
 - Added `CITEMESH_CACHE_DIR` override for custom deployments.
 - Added streaming mode for embedding corpus ingestion as an explicit opt-in.
 - Added model profiles (starting with EmbeddingGemma) for prompts/precision policy.
+- Added reason-tagged embedding namespace clear logs with payload-size/row summaries for cache invalidation transparency.
 
 ## Strategy Evolution
 
@@ -61,6 +62,7 @@ For current usage details, see:
 - Added `--export all` for multi-format runs.
 - Improved parser validation and test coverage around CLI ergonomics.
 - Added embedding/hybrid cache controls: `--storage-precision`, binary prefilter toggles, binary rescore multiplier, calibration sample size, and cache compression knobs.
+- Added explicit overwrite acknowledgement for embedding cache rebuilds (`--force-rebuild-cache` + `--overwrite-cache`) with default confirmation prompts.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
 - Switched multi-export explicit `--output` handling to directory-based exports with strategy-named files.

@@ -93,6 +93,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "max_semantic": None,
         "seed": 7,
         "force_rebuild_cache": False,
+        "overwrite_cache": False,
         "storage_precision": "int8",
         "binary_prefilter": True,
         "binary_rescore_multiplier": 8,
@@ -142,6 +143,102 @@ def test_cache_commands_contracts(
         f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"
     )
     assert not cache_root.exists()
+
+
+def test_force_rebuild_cache_confirmation_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Build should require confirmation for force-rebuild unless overwrite is explicit."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+
+    build_graph_mock = MagicMock(return_value=(graph, "seed"))
+    monkeypatch.setattr(cli_module, "_build_strategy_graph", build_graph_mock)
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory({}, methods=("to_json",)),
+    )
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    cancelled = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--force-rebuild-cache",
+            "--export",
+            "json",
+            "-o",
+            str(Path("out") / "cancelled.json"),
+        ]
+    )
+    assert cancelled.returncode != 0
+    assert build_graph_mock.call_count == 0
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    non_interactive = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--force-rebuild-cache",
+            "--export",
+            "json",
+            "-o",
+            str(Path("out") / "non-interactive.json"),
+        ]
+    )
+    assert non_interactive.returncode != 0
+    assert any("--overwrite-cache" in str(call) for call in error_mock.call_args_list)
+
+
+def test_force_rebuild_cache_allows_non_interactive_overwrite_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-interactive build should proceed when overwrite is explicitly acknowledged."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory({}, methods=("to_json",)),
+    )
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--force-rebuild-cache",
+                "--overwrite-cache",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ]
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
 def test_cli_logging_flags_are_position_agnostic() -> None:
@@ -424,6 +521,16 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "200",
             ],
             "--all-corpus cannot be combined with explicit --corpus-size",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--overwrite-cache",
+            ],
+            "--overwrite-cache requires --force-rebuild-cache",
         ),
         (
             [

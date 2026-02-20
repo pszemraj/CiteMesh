@@ -120,6 +120,25 @@ def _corpus_size_token(corpus_size: Optional[int]) -> str:
     return "all" if corpus_size is None else str(int(corpus_size))
 
 
+def _format_bytes(num_bytes: int) -> str:
+    """Format bytes using binary units for human-readable logs.
+
+    :param int num_bytes: Raw byte count.
+    :return str: Human-readable size string.
+    """
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    value = float(max(int(num_bytes), 0))
+    unit = units[0]
+    for candidate in units:
+        unit = candidate
+        if value < 1024.0 or candidate == units[-1]:
+            break
+        value /= 1024.0
+    if unit == "B":
+        return f"{int(value)} {unit}"
+    return f"{value:.1f} {unit}"
+
+
 def _safe_json_list(value: Any) -> str:
     """Serialize metadata list values as JSON arrays.
 
@@ -226,6 +245,20 @@ class CacheSearchResult:
     metadata: Dict[str, Any]
     embedding_dtype: str = "float32"
     storage_precision: str = "float32"
+
+
+@dataclass(frozen=True)
+class CacheNamespacePayloadStats:
+    """Namespace payload summary used for clear-impact reporting."""
+
+    file_count: int
+    size_bytes: int
+    sqlite_rows: int
+    embedding_rows: int
+    hydration_complete: bool
+    hydration_split: Optional[str]
+    hydration_corpus_size: Optional[str]
+    hydration_dataset_source: Optional[str]
 
 
 class EmbeddingCache:
@@ -851,6 +884,14 @@ class EmbeddingCache:
         fingerprint = str(metadata.get(MODEL_FINGERPRINT_KEY, "")).strip()
         return fingerprint or None
 
+    def payload_stats(self) -> CacheNamespacePayloadStats:
+        """Return a summary of cache payload currently stored for this namespace.
+
+        :return CacheNamespacePayloadStats: File/row/hydration stats snapshot.
+        """
+        with self._cache_lock():
+            return self._collect_namespace_payload_stats_locked()
+
     def set_model_fingerprint(self, fingerprint: str) -> None:
         """Persist model fingerprint for cache invalidation guardrails.
 
@@ -900,9 +941,41 @@ class EmbeddingCache:
             )
             conn.commit()
 
-    def clear(self) -> None:
-        """Purge cache artifacts for this cache namespace."""
+    def clear(self, reason: Optional[str] = None) -> None:
+        """Purge cache artifacts for this cache namespace.
+
+        :param Optional[str] reason: Optional rationale for the clear operation.
+        :return None: Removes namespace payload files and reinitializes metadata.
+        """
+        normalized_reason = str(reason).strip() or "unspecified"
         with self._cache_lock():
+            stats = self._collect_namespace_payload_stats_locked()
+            if (
+                stats.file_count > 0
+                or stats.sqlite_rows > 0
+                or stats.embedding_rows > 0
+            ):
+                logger.warning(
+                    "Clearing embedding cache namespace '%s' (reason=%s, files=%d, "
+                    "size=%s, sqlite_rows=%d, embedding_rows=%d, hydrated=%s, "
+                    "split=%s, corpus=%s, source=%s).",
+                    self.model_name,
+                    normalized_reason,
+                    stats.file_count,
+                    _format_bytes(stats.size_bytes),
+                    stats.sqlite_rows,
+                    stats.embedding_rows,
+                    "yes" if stats.hydration_complete else "no",
+                    stats.hydration_split or "unknown",
+                    stats.hydration_corpus_size or "unknown",
+                    stats.hydration_dataset_source or "unknown",
+                )
+            else:
+                logger.info(
+                    "Embedding cache namespace '%s' is already empty (reason=%s).",
+                    self.model_name,
+                    normalized_reason,
+                )
             self.db_path.unlink(missing_ok=True)
             self.h5_path.unlink(missing_ok=True)
             self._init_db()
@@ -998,6 +1071,71 @@ class EmbeddingCache:
             self._set_cache_metadata_default(conn, HYDRATION_COMPLETE_KEY, "0")
             self._set_cache_metadata_default(conn, MODEL_FINGERPRINT_KEY, "")
             conn.commit()
+
+    def _collect_namespace_payload_stats_locked(self) -> CacheNamespacePayloadStats:
+        """Collect namespace payload stats while cache lock is held.
+
+        :return CacheNamespacePayloadStats: Snapshot of files/rows/hydration metadata.
+        """
+        file_count = 0
+        size_bytes = 0
+        for payload_path in (self.db_path, self.h5_path):
+            if not payload_path.exists() or not payload_path.is_file():
+                continue
+            file_count += 1
+            try:
+                size_bytes += int(payload_path.stat().st_size)
+            except OSError:
+                continue
+
+        sqlite_rows = 0
+        hydration_complete = False
+        hydration_split: Optional[str] = None
+        hydration_corpus_size: Optional[str] = None
+        hydration_dataset_source: Optional[str] = None
+        if self.db_path.exists():
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM papers")
+                    sqlite_rows = int(cursor.fetchone()[0])
+                    metadata = self._load_cache_metadata(conn)
+                    hydration_complete = (
+                        metadata.get(HYDRATION_COMPLETE_KEY, "0") == "1"
+                    )
+                    hydration_split = (
+                        str(metadata.get(HYDRATION_SPLIT_KEY, "")).strip() or None
+                    )
+                    hydration_corpus_size = (
+                        str(metadata.get(HYDRATION_CORPUS_SIZE_KEY, "")).strip() or None
+                    )
+                    hydration_dataset_source = (
+                        str(metadata.get(HYDRATION_DATASET_SOURCE_KEY, "")).strip()
+                        or None
+                    )
+            except (OSError, sqlite3.DatabaseError):
+                sqlite_rows = 0
+
+        embedding_rows = 0
+        if self.h5_path.exists():
+            try:
+                with h5py.File(self.h5_path, "r") as h5:
+                    embeddings = self._get_embeddings_dataset(h5)
+                    if embeddings is not None:
+                        embedding_rows = int(embeddings.shape[0])
+            except (OSError, ValueError):
+                embedding_rows = 0
+
+        return CacheNamespacePayloadStats(
+            file_count=file_count,
+            size_bytes=size_bytes,
+            sqlite_rows=sqlite_rows,
+            embedding_rows=embedding_rows,
+            hydration_complete=hydration_complete,
+            hydration_split=hydration_split,
+            hydration_corpus_size=hydration_corpus_size,
+            hydration_dataset_source=hydration_dataset_source,
+        )
 
     @staticmethod
     def _set_cache_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:

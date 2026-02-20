@@ -82,6 +82,8 @@ Hydration write policy:
 - Cache persistence flushes metadata/embedding appends in larger bursts (`256` records) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)).
+By default, CiteMesh asks for confirmation before applying this destructive rebuild.
+Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts).
 
 For Hugging Face repo IDs, hydration resolves and stores a model fingerprint.
 CiteMesh first attempts commit-SHA resolution (online API, then local snapshot SHA).
