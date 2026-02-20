@@ -562,6 +562,28 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
         assert cache.get_cached_paper_ids() == {"p1", "p2"}
 
 
+def test_embedding_cache_hydration_rowcount_reconciliation_marker_contract() -> None:
+    """Row-count reconciliation marker metadata should persist and reset cleanly."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="rowcount-marker")
+        assert cache.get_hydration_rowcount_reconciliation() is None
+
+        cache.set_hydration_rowcount_reconciliation(upstream_rows=110, cached_rows=100)
+        assert cache.get_hydration_rowcount_reconciliation() == (110, 100)
+
+        cache.clear_hydration_rowcount_reconciliation()
+        assert cache.get_hydration_rowcount_reconciliation() is None
+
+        cache.set_hydration_rowcount_reconciliation(upstream_rows=111, cached_rows=101)
+        cache.mark_hydrated(
+            dataset_source="librarian-bots/arxiv-metadata-snapshot",
+            dataset_split="train",
+            corpus_size=None,
+            complete=True,
+        )
+        assert cache.get_hydration_rowcount_reconciliation() is None
+
+
 def test_embedding_cache_hydration_validation_contracts() -> None:
     """Hydration validity should fail closed when payload or metadata integrity drifts."""
 

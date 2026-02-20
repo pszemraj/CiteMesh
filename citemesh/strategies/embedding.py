@@ -2027,6 +2027,21 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     source,
                     self.dataset_split,
                 )
+            self.embedding_cache.clear_hydration_rowcount_reconciliation()
+            return
+
+        previous_reconciliation = (
+            self.embedding_cache.get_hydration_rowcount_reconciliation()
+        )
+        if previous_reconciliation == (upstream_rows, cached_rows):
+            logger.info(
+                "Skipping incremental refresh for %s/%s: prior reconciliation already "
+                "verified this row-count delta (cache_rows=%d, upstream_rows=%d).",
+                source,
+                self.dataset_split,
+                cached_rows,
+                upstream_rows,
+            )
             return
 
         delta_rows = upstream_rows - cached_rows
@@ -2058,13 +2073,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             progress_label=f"Refreshing {source}",
         )
         updated_rows = self._cached_payload_row_count()
-        reconciled_records = 0
+        head_reconciled_records = 0
+        full_reconciled_records = 0
 
         if updated_rows < upstream_rows:
             remaining_rows = upstream_rows - updated_rows
             logger.warning(
                 "Tail delta refresh left %d unresolved rows for %s/%s "
-                "(cache_rows=%d, upstream=%d). Running full-split missing-ID reconciliation.",
+                "(cache_rows=%d, upstream=%d). Running head-slice missing-ID reconciliation.",
                 remaining_rows,
                 source,
                 self.dataset_split,
@@ -2072,24 +2088,55 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 upstream_rows,
             )
             cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
-            reconciled_source, full_dataset = self._load_dataset_for_hydration(
+            reconciled_source, head_dataset = self._load_dataset_for_hydration(
                 use_streaming=use_streaming,
                 preferred_dataset_source=source,
+                row_limit=delta_rows,
+                row_offset=0,
                 allow_source_fallback=False,
             )
             if reconciled_source != source:
                 raise RuntimeError(
-                    "Full-split reconciliation resolved unexpected dataset source "
+                    "Head-slice reconciliation resolved unexpected dataset source "
                     f"{reconciled_source!r} (expected {source!r})."
                 )
-            reconciled_records = self._hydrate_dataset_records(
-                dataset=full_dataset,
-                progress_total=upstream_rows,
-                progress_label=f"Reconciling {source}",
+            head_reconciled_records = self._hydrate_dataset_records(
+                dataset=head_dataset,
+                progress_total=delta_rows,
+                progress_label=f"Reconciling head {source}",
                 existing_paper_ids=cached_paper_ids,
                 max_new_records=remaining_rows,
             )
             updated_rows = self._cached_payload_row_count()
+            if updated_rows < upstream_rows:
+                remaining_rows = upstream_rows - updated_rows
+                logger.warning(
+                    "Head-slice reconciliation left %d unresolved rows for %s/%s "
+                    "(cache_rows=%d, upstream=%d). Running full-split missing-ID reconciliation.",
+                    remaining_rows,
+                    source,
+                    self.dataset_split,
+                    updated_rows,
+                    upstream_rows,
+                )
+                reconciled_source, full_dataset = self._load_dataset_for_hydration(
+                    use_streaming=use_streaming,
+                    preferred_dataset_source=source,
+                    allow_source_fallback=False,
+                )
+                if reconciled_source != source:
+                    raise RuntimeError(
+                        "Full-split reconciliation resolved unexpected dataset source "
+                        f"{reconciled_source!r} (expected {source!r})."
+                    )
+                full_reconciled_records = self._hydrate_dataset_records(
+                    dataset=full_dataset,
+                    progress_total=upstream_rows,
+                    progress_label=f"Reconciling full {source}",
+                    existing_paper_ids=cached_paper_ids,
+                    max_new_records=None,
+                )
+                updated_rows = self._cached_payload_row_count()
 
         if updated_rows > 0:
             self.embedding_cache.mark_hydrated(
@@ -2099,25 +2146,33 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 complete=True,
             )
         logger.info(
-            "Incremental refresh processed %d tail rows and %d reconciliation rows "
+            "Incremental refresh processed tail=%d head=%d full=%d rows "
             "for %s/%s (cache_rows=%d, upstream_rows=%d).",
             tail_refreshed_records,
-            reconciled_records,
+            head_reconciled_records,
+            full_reconciled_records,
             source,
             self.dataset_split,
             updated_rows,
             upstream_rows,
         )
         if updated_rows < upstream_rows:
-            logger.warning(
-                "Incremental refresh did not reach upstream row count for %s/%s "
-                "(cache_rows=%d < upstream_rows=%d). Cache remains usable, and "
-                "future runs will continue reconciliation attempts.",
+            self.embedding_cache.set_hydration_rowcount_reconciliation(
+                upstream_rows=upstream_rows,
+                cached_rows=updated_rows,
+            )
+            logger.info(
+                "Full-split reconciliation completed for %s/%s with cache_rows=%d "
+                "and upstream_rows=%d. Remaining row-count delta likely reflects "
+                "duplicate upstream paper IDs; this state is memoized to skip "
+                "repeat full-split scans until row counts change.",
                 source,
                 self.dataset_split,
                 updated_rows,
                 upstream_rows,
             )
+        else:
+            self.embedding_cache.clear_hydration_rowcount_reconciliation()
 
     def _load_dataset_for_hydration(
         self,

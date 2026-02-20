@@ -108,11 +108,18 @@ and rebuilds that namespace before reuse to avoid stale model-version mixing.
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 
 For hydrated full-corpus runs (`--all-corpus`), CiteMesh performs an incremental
-growth check using upstream split row counts. When upstream rows increased, it first
-loads the tail delta slice (`cached_rows:upstream_rows`) and appends those records.
-If that tail scan under-fills (for example due dataset reordering), CiteMesh falls
-back to full-split missing-ID reconciliation and appends only uncached paper IDs.
-This avoids namespace clears/re-encodes for ordinary upstream growth.
+growth check using upstream split row counts. When upstream rows increased, it uses a
+staged reconciliation flow:
+
+- tail delta slice (`cached_rows:upstream_rows`)
+- head delta slice (`0:delta_rows`) if tail under-fills
+- full-split missing-ID reconciliation only when needed
+
+All reconciliation steps are ID-aware and append only uncached paper IDs.
+If full reconciliation confirms no uncached IDs while row-count delta remains,
+CiteMesh treats that as duplicate-ID upstream growth (not a cache failure), records
+the reconciled row-count state, and skips repeated full-split scans until row counts
+change again.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus
 metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias

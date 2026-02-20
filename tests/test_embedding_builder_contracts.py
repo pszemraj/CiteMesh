@@ -1447,6 +1447,8 @@ def test_full_corpus_incremental_refresh_reconciles_missing_ids_when_tail_scan_u
     assert second_call.kwargs == {
         "use_streaming": False,
         "preferred_dataset_source": source,
+        "row_limit": 10,
+        "row_offset": 0,
         "allow_source_fallback": False,
     }
     assert hydrate_mock.call_count == 2
@@ -1458,6 +1460,163 @@ def test_full_corpus_incremental_refresh_reconciles_missing_ids_when_tail_scan_u
         corpus_size=builder.corpus_size,
         complete=True,
     )
+
+
+def test_full_corpus_rowcount_delta_memoizes_duplicate_only_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full-split reconciliation should memoize duplicate-only row-count deltas."""
+    _disable_embedding_dep_check(monkeypatch)
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    builder.embedding_cache.get_cached_paper_ids = MagicMock(
+        return_value={f"old-{idx}" for idx in range(100)}
+    )
+    builder.embedding_cache.get_hydration_rowcount_reconciliation = MagicMock(
+        return_value=None
+    )
+    builder.embedding_cache.set_hydration_rowcount_reconciliation = MagicMock()
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
+    builder.embedding_cache.payload_stats = MagicMock(
+        side_effect=[
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=100,
+                embedding_rows=100,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=100,
+                embedding_rows=100,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=100,
+                embedding_rows=100,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=100,
+                embedding_rows=100,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+        ]
+    )
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 110)
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        MagicMock(
+            side_effect=[
+                (
+                    source,
+                    [
+                        {"id": f"tail-{idx}", "title": f"Tail {idx}", "abstract": "A"}
+                        for idx in range(10)
+                    ],
+                ),
+                (
+                    source,
+                    [
+                        {"id": f"head-{idx}", "title": f"Head {idx}", "abstract": "B"}
+                        for idx in range(10)
+                    ],
+                ),
+                (
+                    source,
+                    [
+                        {
+                            "id": f"full-{idx}",
+                            "title": f"Full {idx}",
+                            "abstract": "C",
+                        }
+                        for idx in range(110)
+                    ],
+                ),
+            ]
+        ),
+    )
+    hydrate_mock = MagicMock(side_effect=[10, 0, 0])
+    monkeypatch.setattr(builder, "_hydrate_dataset_records", hydrate_mock)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert builder._load_dataset_for_hydration.call_count == 3
+    builder.embedding_cache.set_hydration_rowcount_reconciliation.assert_called_once_with(
+        upstream_rows=110,
+        cached_rows=100,
+    )
+    assert (
+        builder.embedding_cache.clear_hydration_rowcount_reconciliation.call_count == 0
+    )
+
+
+def test_full_corpus_rowcount_delta_memoization_skips_repeat_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Previously reconciled duplicate-only row-count deltas should skip re-scan."""
+    _disable_embedding_dep_check(monkeypatch)
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    builder.embedding_cache.get_hydration_rowcount_reconciliation = MagicMock(
+        return_value=(110, 100)
+    )
+    builder.embedding_cache.payload_stats = MagicMock(
+        return_value=CacheNamespacePayloadStats(
+            file_count=2,
+            size_bytes=1024,
+            sqlite_rows=100,
+            embedding_rows=100,
+            hydration_complete=True,
+            hydration_split="train",
+            hydration_corpus_size="all",
+            hydration_dataset_source=source,
+        )
+    )
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 110)
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", MagicMock())
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    builder._load_dataset_for_hydration.assert_not_called()
 
 
 def test_hydration_reset_restores_model_fingerprint(

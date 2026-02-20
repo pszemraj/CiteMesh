@@ -54,6 +54,8 @@ HYDRATION_DATASET_SOURCE_KEY = "hydration_dataset_source"
 HYDRATION_SPLIT_KEY = "hydration_split"
 HYDRATION_CORPUS_SIZE_KEY = "hydration_corpus_size"
 HYDRATION_COMPLETE_KEY = "hydration_complete"
+HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY = "hydration_reconciled_upstream_rows"
+HYDRATION_RECONCILED_CACHE_ROWS_KEY = "hydration_reconciled_cache_rows"
 MODEL_FINGERPRINT_KEY = "model_fingerprint"
 TEXT_FORMATTER_FINGERPRINT_KEY = "text_formatter_fingerprint"
 
@@ -910,6 +912,64 @@ class EmbeddingCache:
         fingerprint = str(metadata.get(MODEL_FINGERPRINT_KEY, "")).strip()
         return fingerprint or None
 
+    def get_hydration_rowcount_reconciliation(self) -> Optional[Tuple[int, int]]:
+        """Return persisted full-split reconciliation marker for row-count deltas.
+
+        :return Optional[Tuple[int, int]]: ``(upstream_rows, cached_rows)`` when
+            a prior full-split reconciliation confirmed no uncached paper IDs for
+            that row-count state; ``None`` when unset/invalid.
+        """
+        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+            metadata = self._load_cache_metadata(conn)
+        raw_upstream = str(
+            metadata.get(HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, "")
+        ).strip()
+        raw_cached = str(metadata.get(HYDRATION_RECONCILED_CACHE_ROWS_KEY, "")).strip()
+        if not raw_upstream or not raw_cached:
+            return None
+        try:
+            upstream_rows = int(raw_upstream)
+            cached_rows = int(raw_cached)
+        except ValueError:
+            return None
+        if upstream_rows < 1 or cached_rows < 0:
+            return None
+        return upstream_rows, cached_rows
+
+    def set_hydration_rowcount_reconciliation(
+        self, *, upstream_rows: int, cached_rows: int
+    ) -> None:
+        """Persist a reconciliation marker for row-count deltas.
+
+        :param int upstream_rows: Upstream split row count observed during reconciliation.
+        :param int cached_rows: Local cached row count after reconciliation.
+        :return None: Mutates SQLite metadata in-place.
+        """
+        resolved_upstream = int(upstream_rows)
+        resolved_cached = int(cached_rows)
+        if resolved_upstream < 1:
+            raise ValueError("upstream_rows must be at least 1")
+        if resolved_cached < 0:
+            raise ValueError("cached_rows must be non-negative")
+        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+            self._set_cache_metadata(
+                conn, HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, str(resolved_upstream)
+            )
+            self._set_cache_metadata(
+                conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, str(resolved_cached)
+            )
+            conn.commit()
+
+    def clear_hydration_rowcount_reconciliation(self) -> None:
+        """Clear persisted row-count reconciliation marker metadata.
+
+        :return None: Mutates SQLite metadata in-place.
+        """
+        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+            self._set_cache_metadata(conn, HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, "")
+            self._set_cache_metadata(conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, "")
+            conn.commit()
+
     def payload_stats(self) -> CacheNamespacePayloadStats:
         """Return a summary of cache payload currently stored for this namespace.
 
@@ -965,6 +1025,8 @@ class EmbeddingCache:
             self._set_cache_metadata(
                 conn, HYDRATION_COMPLETE_KEY, "1" if complete else "0"
             )
+            self._set_cache_metadata(conn, HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, "")
+            self._set_cache_metadata(conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, "")
             conn.commit()
 
     def clear(self, reason: Optional[str] = None) -> None:
@@ -1095,6 +1157,12 @@ class EmbeddingCache:
             )
             # Preserve hydration completion across restarts; initialize only once.
             self._set_cache_metadata_default(conn, HYDRATION_COMPLETE_KEY, "0")
+            self._set_cache_metadata_default(
+                conn, HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, ""
+            )
+            self._set_cache_metadata_default(
+                conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, ""
+            )
             self._set_cache_metadata_default(conn, MODEL_FINGERPRINT_KEY, "")
             conn.commit()
 
@@ -1513,6 +1581,12 @@ class EmbeddingCache:
         EmbeddingCache._set_cache_metadata(conn, HYDRATION_SPLIT_KEY, "")
         EmbeddingCache._set_cache_metadata(conn, HYDRATION_CORPUS_SIZE_KEY, "")
         EmbeddingCache._set_cache_metadata(conn, HYDRATION_COMPLETE_KEY, "0")
+        EmbeddingCache._set_cache_metadata(
+            conn, HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, ""
+        )
+        EmbeddingCache._set_cache_metadata(
+            conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, ""
+        )
 
     @staticmethod
     def _metadata_tuple(

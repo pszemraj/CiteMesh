@@ -41,7 +41,7 @@ For current usage details, see:
 - Added model profiles (starting with EmbeddingGemma) for prompts/precision policy.
 - Added reason-tagged embedding namespace clear logs with payload-size/row summaries for cache invalidation transparency.
 - Added incremental full-corpus hydration growth checks so upstream row-count increases append only delta records instead of forcing full namespace rebuilds.
-- Strengthened full-corpus incremental hydration with tail-slice refresh plus missing-ID reconciliation fallback to avoid stale caches when source ordering drifts.
+- Strengthened full-corpus incremental hydration with staged tail/head delta checks plus missing-ID reconciliation fallback, and memoized duplicate-only row-count deltas to avoid repeated full-split rescans.
 - Fixed incremental full-corpus hydration to fetch tail slices (`offset=cached_rows`) so delta refreshes hydrate newly appended records instead of reloading leading rows.
 - Hardened reference-cache reuse against unreadable/non-object JSON entries and improved atomic write durability with parent-directory fsync.
 
