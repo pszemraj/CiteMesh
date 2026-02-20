@@ -546,6 +546,22 @@ def test_embedding_cache_restart_persistence_contracts() -> None:
         assert cache.has_cached_payload()
 
 
+def test_embedding_cache_get_cached_paper_ids_contract() -> None:
+    """Cached paper ID listing should reflect persisted SQLite rows."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="paper-id-listing")
+        assert cache.get_cached_paper_ids() == set()
+        cache.get_embeddings(
+            {
+                "p1": {"title": "Seed 1", "abstract": "A"},
+                "p2": {"title": "Seed 2", "abstract": "B"},
+            },
+            SeededRandomEncodeModel(),
+            show_progress=False,
+        )
+        assert cache.get_cached_paper_ids() == {"p1", "p2"}
+
+
 def test_embedding_cache_hydration_validation_contracts() -> None:
     """Hydration validity should fail closed when payload or metadata integrity drifts."""
 

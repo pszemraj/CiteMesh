@@ -26,7 +26,7 @@ citemesh search "<query>" [--limit N|-n N]
 # Cache management commands
 citemesh cache scan
 citemesh cache scan --log-level debug
-citemesh cache clear [--yes]
+citemesh cache clear [--yes] [--reason "<text>"]
 ```
 
 For cache path/layout/hydration details, see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
@@ -124,6 +124,7 @@ ignoring it.
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)
 - `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows)
+- `--cache-overwrite-reason`: optional rationale string logged when `--force-rebuild-cache` clears embedding cache state
 - `--storage-precision {int8,float16,float32}`: persistent embedding-cache precision (default `int8`)
 - `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). Explicit `--binary-prefilter` requires `--storage-precision int8`.
 - `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.

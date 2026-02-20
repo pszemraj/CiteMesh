@@ -84,6 +84,7 @@ Hydration write policy:
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)).
 By default, CiteMesh asks for confirmation before applying this destructive rebuild.
 Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts).
+Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata.
 
 For Hugging Face repo IDs, hydration resolves and stores a model fingerprint.
 CiteMesh first attempts commit-SHA resolution (online API, then local snapshot SHA).
@@ -106,10 +107,12 @@ and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 
-For hydrated full-corpus runs (`--all-corpus`), CiteMesh now performs an incremental
-growth check using upstream split row counts. When upstream rows increased, it loads
-only the new-row delta and appends those records to cache instead of clearing and
-re-encoding the entire namespace.
+For hydrated full-corpus runs (`--all-corpus`), CiteMesh performs an incremental
+growth check using upstream split row counts. When upstream rows increased, it first
+loads the tail delta slice (`cached_rows:upstream_rows`) and appends those records.
+If that tail scan under-fills (for example due dataset reordering), CiteMesh falls
+back to full-split missing-ID reconciliation and appends only uncached paper IDs.
+This avoids namespace clears/re-encodes for ordinary upstream growth.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus
 metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias
@@ -135,6 +138,8 @@ using hashed filenames.
   repeated API calls for papers with no references.
 - Non-empty cached payloads that contain no valid reference IDs are treated as invalid
   and rebuilt from API data instead of being reused as implicit empties.
+- Corrupt/unreadable JSON cache entries (including non-object payloads) are treated as
+  invalid and rebuilt from API data.
 - Repeated reference-fetch failures now raise a runtime error after retries instead
   of silently returning an empty list.
 - Reference cache directory resolution occurs at call time, so cache-root policy
@@ -155,7 +160,7 @@ citemesh cache scan
 Clear entire CiteMesh cache root:
 
 ```bash
-citemesh cache clear --yes
+citemesh cache clear --yes --reason "manual local reset"
 ```
 
 Omit `--yes` for interactive confirmation.

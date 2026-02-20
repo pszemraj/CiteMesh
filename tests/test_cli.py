@@ -94,6 +94,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "seed": 7,
         "force_rebuild_cache": False,
         "overwrite_cache": False,
+        "cache_overwrite_reason": None,
         "storage_precision": "int8",
         "binary_prefilter": True,
         "binary_rescore_multiplier": 8,
@@ -138,7 +139,9 @@ def test_cache_commands_contracts(
     )
     assert "CiteMesh Cache Scan" in scan_debug_result.stdout
 
-    clear_result = run_cli_command(["cache", "clear", "--yes"])
+    clear_result = run_cli_command(
+        ["cache", "clear", "--yes", "--reason", "manual local reset"]
+    )
     assert clear_result.returncode == 0, (
         f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"
     )
@@ -537,6 +540,17 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "build",
                 "arxiv:1706.03762",
                 "--strategy",
+                "embedding",
+                "--cache-overwrite-reason",
+                "sync stale branch cache",
+            ],
+            "--cache-overwrite-reason requires --force-rebuild-cache",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
                 "hybrid",
                 "--max-semantic",
                 "0",
@@ -866,6 +880,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "binary_prefilter_enabled": False,
         "binary_prefilter_used_for_query": False,
         "binary_rescore_multiplier": 1,
+        "cache_overwrite_reason": None,
     }
 
     runtime_graph = nx.Graph()
@@ -996,6 +1011,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "truncate_dim": 64,
                 "top_k": 4,
                 "force_rebuild_cache": False,
+                "force_rebuild_reason": None,
                 "use_streaming": True,
                 "storage_precision": "int8",
                 "binary_prefilter": True,
@@ -1038,6 +1054,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "truncate_dim": 64,
                 "use_streaming": True,
                 "force_rebuild_cache": False,
+                "force_rebuild_reason": None,
                 "storage_precision": "int8",
                 "binary_prefilter": True,
                 "binary_rescore_multiplier": 9,

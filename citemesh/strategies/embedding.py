@@ -14,7 +14,7 @@ from contextlib import nullcontext
 from hashlib import sha1, sha256
 from itertools import islice
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import networkx as nx
 import numpy as np
@@ -297,6 +297,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         top_k: int = 2,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
+        force_rebuild_reason: Optional[str] = None,
         storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
         binary_prefilter: Optional[bool] = None,
         binary_rescore_multiplier: Optional[int] = None,
@@ -320,6 +321,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int top_k: Number of most similar neighbors per node
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
+        :param Optional[str] force_rebuild_reason: Optional operator rationale logged
+            when ``force_rebuild_cache`` clears the embedding namespace.
         :param str storage_precision: Persistent cache precision (``int8``, ``float16``, ``float32``).
         :param Optional[bool] binary_prefilter: Whether cache search uses binary
             Hamming prefiltering. When ``None``, defaults to enabled only for
@@ -422,9 +425,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             source_torch_dtype=self._source_dtype_hint,
             text_formatter_fingerprint=self._document_formatter_fingerprint,
         )
+        normalized_force_rebuild_reason = (
+            " ".join(str(force_rebuild_reason).split())
+            if force_rebuild_reason is not None
+            else ""
+        )
         if force_rebuild_cache:
             logger.info("Forcing embedding cache rebuild as requested.")
-            self._clear_embedding_cache("explicit --force-rebuild-cache request")
+            clear_reason = "explicit --force-rebuild-cache request"
+            if normalized_force_rebuild_reason:
+                clear_reason = (
+                    f"{clear_reason}; user_reason={normalized_force_rebuild_reason}"
+                )
+            self._clear_embedding_cache(clear_reason)
         self.use_streaming = use_streaming
         if self.use_streaming and ":" in self.dataset_split:
             raise ValueError(
@@ -1845,15 +1858,24 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         *,
         progress_total: Optional[int],
         progress_label: str,
+        existing_paper_ids: Optional[Set[str]] = None,
+        max_new_records: Optional[int] = None,
     ) -> int:
         """Hydrate cache records from dataset iterator without clearing namespace.
 
         :param Iterable[Dict[str, Any]] dataset: Dataset records to process.
         :param Optional[int] progress_total: Optional progress-bar total.
         :param str progress_label: Progress-bar description label.
+        :param Optional[Set[str]] existing_paper_ids: Optional set used to skip
+            already-cached paper IDs while hydrating.
+        :param Optional[int] max_new_records: Optional cap on newly selected records.
         :return int: Number of records routed into cache batching.
         """
+        if max_new_records is not None and int(max_new_records) < 1:
+            raise ValueError("max_new_records must be at least 1 when provided")
+
         hydrated_records = 0
+        selected_records = 0
         calibration_records: List[Dict] = []
         calibration_ready = (
             self.storage_precision != "int8"
@@ -1873,6 +1895,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     break
 
                 metadata = self._extract_paper_metadata(raw_record, idx)
+                if existing_paper_ids is not None:
+                    paper_id = str(metadata.get("paper_id", "")).strip()
+                    if not paper_id or paper_id in existing_paper_ids:
+                        progress.update(1)
+                        continue
+                    existing_paper_ids.add(paper_id)
+
+                selected_records += 1
                 if (
                     not calibration_ready
                     and len(calibration_records) < self.calibration_sample_size
@@ -1884,6 +1914,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                         batch.extend(calibration_records)
                         calibration_records = []
                     progress.update(1)
+                    if max_new_records is not None and selected_records >= int(
+                        max_new_records
+                    ):
+                        break
                     continue
 
                 batch.append(metadata)
@@ -1891,6 +1925,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     hydrated_records += self._cache_metadata_batch(batch)
                     batch = []
                 progress.update(1)
+                if max_new_records is not None and selected_records >= int(
+                    max_new_records
+                ):
+                    break
 
             if calibration_records and not calibration_ready:
                 self._initialize_calibration_ranges(calibration_records)
@@ -2005,6 +2043,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             use_streaming=use_streaming,
             preferred_dataset_source=source,
             row_limit=delta_rows,
+            row_offset=cached_rows,
             allow_source_fallback=False,
         )
         if refreshed_source != source:
@@ -2013,12 +2052,46 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 f"{refreshed_source!r} (expected {source!r})."
             )
 
-        refreshed_records = self._hydrate_dataset_records(
+        tail_refreshed_records = self._hydrate_dataset_records(
             dataset=dataset,
             progress_total=delta_rows,
             progress_label=f"Refreshing {source}",
         )
-        if refreshed_records > 0:
+        updated_rows = self._cached_payload_row_count()
+        reconciled_records = 0
+
+        if updated_rows < upstream_rows:
+            remaining_rows = upstream_rows - updated_rows
+            logger.warning(
+                "Tail delta refresh left %d unresolved rows for %s/%s "
+                "(cache_rows=%d, upstream=%d). Running full-split missing-ID reconciliation.",
+                remaining_rows,
+                source,
+                self.dataset_split,
+                updated_rows,
+                upstream_rows,
+            )
+            cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
+            reconciled_source, full_dataset = self._load_dataset_for_hydration(
+                use_streaming=use_streaming,
+                preferred_dataset_source=source,
+                allow_source_fallback=False,
+            )
+            if reconciled_source != source:
+                raise RuntimeError(
+                    "Full-split reconciliation resolved unexpected dataset source "
+                    f"{reconciled_source!r} (expected {source!r})."
+                )
+            reconciled_records = self._hydrate_dataset_records(
+                dataset=full_dataset,
+                progress_total=upstream_rows,
+                progress_label=f"Reconciling {source}",
+                existing_paper_ids=cached_paper_ids,
+                max_new_records=remaining_rows,
+            )
+            updated_rows = self._cached_payload_row_count()
+
+        if updated_rows > 0:
             self.embedding_cache.mark_hydrated(
                 dataset_source=source,
                 dataset_split=self.dataset_split,
@@ -2026,17 +2099,32 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 complete=True,
             )
         logger.info(
-            "Incremental refresh processed %d rows for %s/%s.",
-            refreshed_records,
+            "Incremental refresh processed %d tail rows and %d reconciliation rows "
+            "for %s/%s (cache_rows=%d, upstream_rows=%d).",
+            tail_refreshed_records,
+            reconciled_records,
             source,
             self.dataset_split,
+            updated_rows,
+            upstream_rows,
         )
+        if updated_rows < upstream_rows:
+            logger.warning(
+                "Incremental refresh did not reach upstream row count for %s/%s "
+                "(cache_rows=%d < upstream_rows=%d). Cache remains usable, and "
+                "future runs will continue reconciliation attempts.",
+                source,
+                self.dataset_split,
+                updated_rows,
+                upstream_rows,
+            )
 
     def _load_dataset_for_hydration(
         self,
         use_streaming: bool,
         preferred_dataset_source: Optional[str] = None,
         row_limit: Optional[int] = None,
+        row_offset: Optional[int] = None,
         allow_source_fallback: bool = True,
     ) -> Tuple[str, Iterable[Dict[str, Any]]]:
         """Load first available ArXiv dataset for hydration.
@@ -2044,10 +2132,21 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether to load streaming dataset iterator.
         :param Optional[str] preferred_dataset_source: Preferred source if already cached.
         :param Optional[int] row_limit: Optional row cap override for dataset loading.
+        :param Optional[int] row_offset: Optional row offset for delta refresh loading.
         :param bool allow_source_fallback: Whether alternate sources may be tried.
         :return Tuple[str, Iterable[Dict[str, Any]]]: Dataset source name and iterable.
         """
         from datasets import load_dataset
+
+        parsed_row_limit: Optional[int] = None
+        if row_limit is not None:
+            parsed_row_limit = int(row_limit)
+            if parsed_row_limit < 1:
+                raise ValueError("row_limit must be at least 1 when provided")
+
+        parsed_row_offset = 0 if row_offset is None else int(row_offset)
+        if parsed_row_offset < 0:
+            raise ValueError("row_offset must be at least 0 when provided")
 
         last_error: Optional[Exception] = None
         if preferred_dataset_source is not None and not allow_source_fallback:
@@ -2069,14 +2168,30 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         for dataset_name in dataset_names:
             split_for_load = self.dataset_split
-            if row_limit is not None and int(row_limit) < 1:
-                raise ValueError("row_limit must be at least 1 when provided")
+            if not use_streaming and parsed_row_offset > 0 and ":" in split_for_load:
+                raise ValueError(
+                    "row_offset requires a non-sliced dataset_split in non-streaming mode"
+                )
             if (
                 not use_streaming
                 and ":" not in split_for_load
-                and row_limit is not None
+                and parsed_row_limit is not None
+                and parsed_row_offset > 0
             ):
-                split_for_load = f"{split_for_load}[:{int(row_limit)}]"
+                stop_idx = parsed_row_offset + parsed_row_limit
+                split_for_load = f"{split_for_load}[{parsed_row_offset}:{stop_idx}]"
+            elif (
+                not use_streaming
+                and ":" not in split_for_load
+                and parsed_row_limit is not None
+            ):
+                split_for_load = f"{split_for_load}[:{parsed_row_limit}]"
+            elif (
+                not use_streaming
+                and ":" not in split_for_load
+                and parsed_row_offset > 0
+            ):
+                split_for_load = f"{split_for_load}[{parsed_row_offset}:]"
             elif (
                 not use_streaming
                 and self.corpus_size is not None
@@ -2097,14 +2212,22 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     exc,
                 )
                 continue
-            if use_streaming and row_limit is not None:
-                dataset = islice(dataset, int(row_limit))
+            if use_streaming and (
+                parsed_row_limit is not None or parsed_row_offset > 0
+            ):
+                stop_idx = (
+                    None
+                    if parsed_row_limit is None
+                    else parsed_row_offset + parsed_row_limit
+                )
+                dataset = islice(dataset, parsed_row_offset, stop_idx)
             logger.debug(
-                "Hydration dataset selected: %s (split=%s, streaming=%s, row_limit=%s).",
+                "Hydration dataset selected: %s (split=%s, streaming=%s, row_limit=%s, row_offset=%s).",
                 dataset_name,
                 split_for_load,
                 use_streaming,
-                "none" if row_limit is None else int(row_limit),
+                "none" if parsed_row_limit is None else parsed_row_limit,
+                parsed_row_offset,
             )
             return dataset_name, dataset
 

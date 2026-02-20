@@ -60,6 +60,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         truncate_dim: Optional[int] = None,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
+        force_rebuild_reason: Optional[str] = None,
         storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
         binary_prefilter: Optional[bool] = None,
         binary_rescore_multiplier: Optional[int] = None,
@@ -88,6 +89,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
         :param bool use_streaming: Whether to stream the embedding corpus.
         :param bool force_rebuild_cache: Whether to clear embedding cache before semantic enrichment.
+        :param Optional[str] force_rebuild_reason: Optional operator rationale logged
+            when ``force_rebuild_cache`` clears embedding namespace state.
         :param str storage_precision: Persistent cache precision for semantic branch embeddings.
         :param Optional[bool] binary_prefilter: Whether semantic branch uses binary
             prefiltering. When ``None``, defaults are selected by embedding precision.
@@ -140,6 +143,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 truncate_dim=truncate_dim,
                 use_streaming=use_streaming,
                 force_rebuild_cache=force_rebuild_cache,
+                force_rebuild_reason=force_rebuild_reason,
                 storage_precision=storage_precision,
                 binary_prefilter=binary_prefilter,
                 binary_rescore_multiplier=binary_rescore_multiplier,

@@ -234,6 +234,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "streaming": {"embedding", "hybrid"},
     "force_rebuild_cache": {"embedding", "hybrid"},
     "overwrite_cache": {"embedding", "hybrid"},
+    "cache_overwrite_reason": {"embedding", "hybrid"},
     "storage_precision": {"embedding", "hybrid"},
     "binary_prefilter": {"embedding", "hybrid"},
     "binary_rescore_multiplier": {"embedding", "hybrid"},
@@ -260,6 +261,7 @@ _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "streaming": ["--streaming"],
     "force_rebuild_cache": ["--force-rebuild-cache"],
     "overwrite_cache": ["--overwrite-cache"],
+    "cache_overwrite_reason": ["--cache-overwrite-reason"],
     "storage_precision": ["--storage-precision"],
     "binary_prefilter": ["--binary-prefilter", "--no-binary-prefilter"],
     "binary_rescore_multiplier": ["--binary-rescore-multiplier"],
@@ -284,6 +286,7 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "streaming",
     "force_rebuild_cache",
     "overwrite_cache",
+    "cache_overwrite_reason",
     "storage_precision",
     "binary_prefilter",
     "binary_rescore_multiplier",
@@ -316,6 +319,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "truncate_dim": cli_args.truncate_dim,
         "use_streaming": cli_args.streaming,
         "force_rebuild_cache": cli_args.force_rebuild_cache,
+        "force_rebuild_reason": getattr(cli_args, "cache_overwrite_reason", None),
         "storage_precision": cli_args.storage_precision,
         "binary_prefilter": cli_args.binary_prefilter,
         "binary_rescore_multiplier": cli_args.binary_rescore_multiplier,
@@ -325,6 +329,18 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "encode_batch_size": cli_args.encode_batch_size,
         "enable_torch_compile": cli_args.torch_compile,
     }
+
+
+def _normalized_cache_reason(raw_reason: Optional[str]) -> Optional[str]:
+    """Normalize optional cache-clear rationale into a compact single-line token.
+
+    :param Optional[str] raw_reason: Raw user-provided rationale text.
+    :return Optional[str]: Normalized reason, or ``None`` when absent.
+    """
+    if raw_reason is None:
+        return None
+    normalized = " ".join(str(raw_reason).split())
+    return normalized or None
 
 
 def _embedding_export_metadata(
@@ -354,6 +370,9 @@ def _embedding_export_metadata(
         "binary_prefilter_used_for_query": binary_prefilter_used_for_query,
         "binary_rescore_multiplier": (
             int(cli_args.binary_rescore_multiplier) if int8_mode else 1
+        ),
+        "cache_overwrite_reason": _normalized_cache_reason(
+            getattr(cli_args, "cache_overwrite_reason", None)
         ),
     }
 
@@ -513,6 +532,12 @@ def _validate_build_cli_contract(
             )
         if bool(args.overwrite_cache) and not bool(args.force_rebuild_cache):
             build_parser.error("--overwrite-cache requires --force-rebuild-cache.")
+        if _normalized_cache_reason(
+            getattr(args, "cache_overwrite_reason", None)
+        ) and not bool(args.force_rebuild_cache):
+            build_parser.error(
+                "--cache-overwrite-reason requires --force-rebuild-cache."
+            )
         if args.all_corpus and "corpus_size" in provided:
             build_parser.error(
                 "--all-corpus cannot be combined with explicit --corpus-size."
@@ -589,6 +614,9 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
         int(args.encode_batch_size),
     )
     if args.force_rebuild_cache:
+        overwrite_reason = _normalized_cache_reason(
+            getattr(args, "cache_overwrite_reason", None)
+        )
         if bool(args.overwrite_cache):
             logger.warning(
                 "--force-rebuild-cache enabled with --overwrite-cache; existing embedding namespace payload will be cleared without prompt."
@@ -596,6 +624,11 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
         else:
             logger.warning(
                 "--force-rebuild-cache enabled; existing embedding namespace payload will be cleared after confirmation."
+            )
+        if overwrite_reason:
+            logger.warning(
+                "Cache overwrite rationale: %s",
+                overwrite_reason,
             )
 
 
@@ -969,6 +1002,15 @@ Examples:
             "skip interactive confirmation."
         ),
     )
+    embedding_group.add_argument(
+        "--cache-overwrite-reason",
+        type=str,
+        default=None,
+        help=(
+            "Optional rationale string logged when --force-rebuild-cache clears "
+            "embedding cache state."
+        ),
+    )
 
     embedding_group.add_argument(
         "--storage-precision",
@@ -1106,6 +1148,12 @@ Examples:
         "-y",
         action="store_true",
         help="Skip confirmation prompt and clear cache immediately",
+    )
+    cache_clear_parser.add_argument(
+        "--reason",
+        type=str,
+        default=None,
+        help="Optional rationale string logged when cache clear is executed.",
     )
     cache_subparsers.add_parser(
         "scan",
@@ -1261,6 +1309,9 @@ def _build_graph_config_payload(
             "torch_compile": bool(cli_args.torch_compile),
             "force_rebuild_cache": bool(cli_args.force_rebuild_cache),
             "overwrite_cache": bool(cli_args.overwrite_cache),
+            "cache_overwrite_reason": _normalized_cache_reason(
+                getattr(cli_args, "cache_overwrite_reason", None)
+            ),
         }
 
     payload = {
@@ -1346,6 +1397,9 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
     total_size_label = _format_bytes(total_bytes)
     large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
     large_threshold_label = _format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+    overwrite_reason = _normalized_cache_reason(
+        getattr(args, "cache_overwrite_reason", None)
+    )
 
     if bool(args.overwrite_cache):
         logger.warning(
@@ -1361,6 +1415,8 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
                 total_size_label,
                 large_threshold_label,
             )
+        if overwrite_reason:
+            logger.warning("Cache overwrite rationale: %s", overwrite_reason)
         return True
 
     if not sys.stdin.isatty():
@@ -1385,6 +1441,8 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
             total_size_label,
             large_threshold_label,
         )
+    if overwrite_reason:
+        logger.warning("Cache overwrite rationale: %s", overwrite_reason)
     logger.warning(
         "Use --overwrite-cache to bypass this prompt in scripted/non-interactive workflows."
     )
@@ -1398,14 +1456,37 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
     return response in {"y", "yes"}
 
 
-def _confirmed_cache_clear(cache_root: Path, assume_yes: bool) -> bool:
+def _confirmed_cache_clear(
+    cache_root: Path, assume_yes: bool, clear_reason: Optional[str]
+) -> bool:
     """Return whether cache directory deletion is confirmed.
 
     :param Path cache_root: Cache root directory targeted for deletion.
     :param bool assume_yes: Skip interactive prompt when ``True``.
+    :param Optional[str] clear_reason: Optional operator rationale for cache clear.
     :return bool: ``True`` if cache deletion should proceed.
     """
+    total_files, total_bytes = _scan_path_stats(cache_root)
+    total_size_label = _format_bytes(total_bytes)
+    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
+    large_threshold_label = _format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+    normalized_reason = _normalized_cache_reason(clear_reason)
+
     if assume_yes:
+        logger.warning(
+            "--yes acknowledged destructive cache clear (root=%s files=%d size=%s).",
+            cache_root,
+            total_files,
+            total_size_label,
+        )
+        if large_cache:
+            logger.warning(
+                "Large cache warning: %s >= %s.",
+                total_size_label,
+                large_threshold_label,
+            )
+        if normalized_reason:
+            logger.warning("Cache clear rationale: %s", normalized_reason)
         return True
 
     if not sys.stdin.isatty():
@@ -1415,6 +1496,20 @@ def _confirmed_cache_clear(cache_root: Path, assume_yes: bool) -> bool:
         )
         return False
 
+    logger.warning(
+        "Cache directory snapshot: root=%s files=%d size=%s.",
+        cache_root,
+        total_files,
+        total_size_label,
+    )
+    if large_cache:
+        logger.warning(
+            "Large cache warning: %s >= %s. Deletion is immediate and irreversible.",
+            total_size_label,
+            large_threshold_label,
+        )
+    if normalized_reason:
+        logger.warning("Cache clear rationale: %s", normalized_reason)
     prompt = f"Delete CiteMesh cache directory '{cache_root}'? [y/N]: "
     try:
         response = input(prompt).strip().lower()
@@ -1424,10 +1519,11 @@ def _confirmed_cache_clear(cache_root: Path, assume_yes: bool) -> bool:
     return response in {"y", "yes"}
 
 
-def _clear_cache_directory(*, assume_yes: bool) -> int:
+def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> int:
     """Clear the entire CiteMesh cache root.
 
     :param bool assume_yes: Whether to bypass interactive confirmation.
+    :param Optional[str] clear_reason: Optional operator rationale for cache clear.
     :return int: Process exit code (``0`` success, ``1`` failure/cancelled).
     """
     raw_cache_root = get_cache_dir(create=False)
@@ -1444,7 +1540,7 @@ def _clear_cache_directory(*, assume_yes: bool) -> int:
         logger.info("Cache directory does not exist: %s", cache_root)
         return 0
 
-    if not _confirmed_cache_clear(cache_root, assume_yes):
+    if not _confirmed_cache_clear(cache_root, assume_yes, clear_reason=clear_reason):
         logger.info("Cache clear aborted.")
         return 1
 
@@ -1454,7 +1550,13 @@ def _clear_cache_directory(*, assume_yes: bool) -> int:
         logger.error("Failed to clear cache directory %s: %s", cache_root, exc)
         return 1
 
-    logger.info("✓ Cleared cache directory: %s", cache_root)
+    normalized_reason = _normalized_cache_reason(clear_reason)
+    if normalized_reason:
+        logger.info(
+            "✓ Cleared cache directory: %s (reason=%s)", cache_root, normalized_reason
+        )
+    else:
+        logger.info("✓ Cleared cache directory: %s", cache_root)
     return 0
 
 
@@ -1760,7 +1862,10 @@ def main() -> None:
             if exit_code != 0:
                 sys.exit(exit_code)
         elif args.cache_command == "clear":
-            exit_code = _clear_cache_directory(assume_yes=bool(args.yes))
+            exit_code = _clear_cache_directory(
+                assume_yes=bool(args.yes),
+                clear_reason=getattr(args, "reason", None),
+            )
             if exit_code != 0:
                 sys.exit(exit_code)
         else:

@@ -20,6 +20,7 @@ from typing import (
     List,
     Optional,
     Sequence,
+    Set,
     Tuple,
 )
 
@@ -718,6 +719,31 @@ class EmbeddingCache:
                     return int(dataset.shape[0]) > 0
         except (OSError, sqlite3.DatabaseError, ValueError):
             return False
+
+    def get_cached_paper_ids(self) -> Set[str]:
+        """Return all cached paper IDs for this namespace.
+
+        :return Set[str]: Cached paper IDs loaded from SQLite metadata rows.
+        """
+        if not self.db_path.exists():
+            return set()
+
+        paper_ids: Set[str] = set()
+        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT paper_id FROM papers")
+            while True:
+                rows = cursor.fetchmany(SQLITE_QUERY_BATCH_SIZE)
+                if not rows:
+                    break
+                for row in rows:
+                    raw_paper_id = row[0]
+                    if raw_paper_id is None:
+                        continue
+                    paper_id = str(raw_paper_id).strip()
+                    if paper_id:
+                        paper_ids.add(paper_id)
+        return paper_ids
 
     def has_calibration_ranges(self) -> bool:
         """Return whether int8 calibration ranges exist in cache.

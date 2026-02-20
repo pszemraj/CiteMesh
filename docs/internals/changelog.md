@@ -41,6 +41,9 @@ For current usage details, see:
 - Added model profiles (starting with EmbeddingGemma) for prompts/precision policy.
 - Added reason-tagged embedding namespace clear logs with payload-size/row summaries for cache invalidation transparency.
 - Added incremental full-corpus hydration growth checks so upstream row-count increases append only delta records instead of forcing full namespace rebuilds.
+- Strengthened full-corpus incremental hydration with tail-slice refresh plus missing-ID reconciliation fallback to avoid stale caches when source ordering drifts.
+- Fixed incremental full-corpus hydration to fetch tail slices (`offset=cached_rows`) so delta refreshes hydrate newly appended records instead of reloading leading rows.
+- Hardened reference-cache reuse against unreadable/non-object JSON entries and improved atomic write durability with parent-directory fsync.
 
 ## Strategy Evolution
 
@@ -64,6 +67,7 @@ For current usage details, see:
 - Improved parser validation and test coverage around CLI ergonomics.
 - Added embedding/hybrid cache controls: `--storage-precision`, binary prefilter toggles, binary rescore multiplier, calibration sample size, and cache compression knobs.
 - Added explicit overwrite acknowledgement for embedding cache rebuilds (`--force-rebuild-cache` + `--overwrite-cache`) with default confirmation prompts.
+- Added optional cache-clear rationale flags (`--cache-overwrite-reason`, `cache clear --reason`) and standardized destructive-clear logs with file/size snapshots and large-cache warnings.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
 - Switched multi-export explicit `--output` handling to directory-based exports with strategy-named files.

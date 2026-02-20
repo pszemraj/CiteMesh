@@ -1026,6 +1026,40 @@ def test_metadata_and_streaming_loader_contracts(
     assert load_calls[0][1] == "train[:5]"
     assert len(list(dataset)) == 1
 
+    load_calls.clear()
+    selected_name, dataset = builder._load_dataset_for_hydration(
+        use_streaming=False,
+        row_limit=3,
+        row_offset=5,
+    )
+    assert selected_name == "CShorten/ML-ArXiv-Papers"
+    assert [name for name, _, _ in load_calls] == [
+        "librarian-bots/arxiv-metadata-snapshot",
+        "CShorten/ML-ArXiv-Papers",
+    ]
+    assert load_calls[0][1] == "train[5:8]"
+    assert len(list(dataset)) == 1
+
+    load_calls.clear()
+    streaming_builder = EmbeddingGraphBuilder(
+        max_papers=1, use_streaming=True, client=MagicMock()
+    )
+    selected_name, dataset = streaming_builder._load_dataset_for_hydration(
+        use_streaming=True,
+        row_limit=1,
+        row_offset=1,
+    )
+    assert selected_name == "CShorten/ML-ArXiv-Papers"
+    assert [name for name, _, _ in load_calls] == [
+        "librarian-bots/arxiv-metadata-snapshot",
+        "CShorten/ML-ArXiv-Papers",
+    ]
+    assert load_calls[0][1] == "train"
+    assert len(list(dataset)) == 0
+
+    with pytest.raises(ValueError, match="row_offset must be at least 0"):
+        builder._load_dataset_for_hydration(use_streaming=False, row_offset=-1)
+
     with pytest.raises(ValueError, match="does not support sliced dataset splits"):
         EmbeddingGraphBuilder(
             max_papers=1,
@@ -1219,16 +1253,28 @@ def test_full_corpus_hydrated_cache_refreshes_incremental_delta(
     builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
     builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
     builder.embedding_cache.payload_stats = MagicMock(
-        return_value=CacheNamespacePayloadStats(
-            file_count=2,
-            size_bytes=1024,
-            sqlite_rows=100,
-            embedding_rows=100,
-            hydration_complete=True,
-            hydration_split="train",
-            hydration_corpus_size="all",
-            hydration_dataset_source=source,
-        )
+        side_effect=[
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=100,
+                embedding_rows=100,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=110,
+                embedding_rows=110,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+        ]
     )
     builder.embedding_cache.clear = MagicMock()
     builder.embedding_cache.mark_hydrated = MagicMock()
@@ -1254,6 +1300,7 @@ def test_full_corpus_hydrated_cache_refreshes_incremental_delta(
         use_streaming=False,
         preferred_dataset_source=source,
         row_limit=10,
+        row_offset=100,
         allow_source_fallback=False,
     )
     assert builder.embedding_cache.clear.call_count == 0
@@ -1299,6 +1346,118 @@ def test_full_corpus_hydrated_cache_skips_incremental_refresh_without_growth(
     builder._ensure_cache_hydrated(use_streaming=False)
 
     builder._load_dataset_for_hydration.assert_not_called()
+
+
+def test_full_corpus_incremental_refresh_reconciles_missing_ids_when_tail_scan_underfills(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incremental refresh should reconcile missing IDs when tail slice is insufficient."""
+    _disable_embedding_dep_check(monkeypatch)
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    builder.embedding_cache.get_cached_paper_ids = MagicMock(
+        return_value={f"old-{idx}" for idx in range(100)}
+    )
+    builder.embedding_cache.payload_stats = MagicMock(
+        side_effect=[
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=100,
+                embedding_rows=100,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=100,
+                embedding_rows=100,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=110,
+                embedding_rows=110,
+                hydration_complete=True,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+        ]
+    )
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 110)
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        MagicMock(
+            side_effect=[
+                (
+                    source,
+                    [
+                        {"id": f"tail-{idx}", "title": f"Tail {idx}", "abstract": "A"}
+                        for idx in range(10)
+                    ],
+                ),
+                (
+                    source,
+                    [
+                        {
+                            "id": f"full-{idx}",
+                            "title": f"Full {idx}",
+                            "abstract": "B",
+                        }
+                        for idx in range(110)
+                    ],
+                ),
+            ]
+        ),
+    )
+    hydrate_mock = MagicMock(side_effect=[10, 10])
+    monkeypatch.setattr(builder, "_hydrate_dataset_records", hydrate_mock)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert builder._load_dataset_for_hydration.call_count == 2
+    first_call = builder._load_dataset_for_hydration.call_args_list[0]
+    second_call = builder._load_dataset_for_hydration.call_args_list[1]
+    assert first_call.kwargs == {
+        "use_streaming": False,
+        "preferred_dataset_source": source,
+        "row_limit": 10,
+        "row_offset": 100,
+        "allow_source_fallback": False,
+    }
+    assert second_call.kwargs == {
+        "use_streaming": False,
+        "preferred_dataset_source": source,
+        "allow_source_fallback": False,
+    }
+    assert hydrate_mock.call_count == 2
+    assert "existing_paper_ids" in hydrate_mock.call_args_list[1].kwargs
+    assert hydrate_mock.call_args_list[1].kwargs["max_new_records"] == 10
+    builder.embedding_cache.mark_hydrated.assert_called_once_with(
+        dataset_source=source,
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
 
 
 def test_hydration_reset_restores_model_fingerprint(
