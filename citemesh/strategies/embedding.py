@@ -1092,13 +1092,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         if self._autocast_enabled:
             logger.debug(
-                "%s will run with torch_dtype=bfloat16 and CUDA autocast.",
+                "%s will run with dtype=bfloat16 and CUDA autocast.",
                 self.model_name,
             )
         else:
-            logger.debug("%s will run with torch_dtype=bfloat16.", self.model_name)
+            logger.debug("%s will run with dtype=bfloat16.", self.model_name)
 
-        return {"torch_dtype": torch.bfloat16}
+        return {"dtype": torch.bfloat16}
 
     def _autocast_context(self) -> Any:
         """Return autocast context for model encoding.

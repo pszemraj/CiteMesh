@@ -252,7 +252,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         assert init_log["kwargs"]["truncate_dim"] == 256
         assert embeddings.shape == (1, 2)
         if expects_bf16:
-            assert init_log["kwargs"]["model_kwargs"]["torch_dtype"] is bf16_token
+            assert init_log["kwargs"]["model_kwargs"]["dtype"] is bf16_token
             assert ("call", "cuda", bf16_token) in autocast_log
             assert ("enter",) in autocast_log and ("exit",) in autocast_log
         else:
