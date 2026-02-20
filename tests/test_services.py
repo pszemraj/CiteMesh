@@ -405,6 +405,36 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     assert refs == ["a", "b"]
     assert json.loads(seed_cache_path.read_text())["references"] == ["a", "b"]
 
+    unicode_seed = s2.normalize_paper_id("seed-unicode")
+    unicode_cache_path = s2._reference_cache_path(unicode_seed)
+    unicode_cache_path.write_bytes(b"\xff\xfe")
+    client.client.get_paper_references = MagicMock(
+        return_value=[_make_reference_record("unicode-fixed")]
+    )
+    unicode_refs = client.get_reference_ids("seed-unicode")
+    assert unicode_refs == ["unicode-fixed"]
+    assert json.loads(unicode_cache_path.read_text())["references"] == ["unicode-fixed"]
+
+    non_object_seed = s2.normalize_paper_id("seed-non-object")
+    non_object_cache_path = s2._reference_cache_path(non_object_seed)
+    non_object_cache_path.write_text(
+        json.dumps(
+            [
+                "not",
+                "a",
+                "dict",
+            ]
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        return_value=[_make_reference_record("non-object-fixed")]
+    )
+    rebuilt_non_object_refs = client.get_reference_ids("seed-non-object")
+    assert rebuilt_non_object_refs == ["non-object-fixed"]
+    assert json.loads(non_object_cache_path.read_text())["references"] == [
+        "non-object-fixed"
+    ]
+
     malformed_seed = s2.normalize_paper_id("seed-malformed")
     malformed_cache_path = s2._reference_cache_path(malformed_seed)
     malformed_cache_path.write_text(

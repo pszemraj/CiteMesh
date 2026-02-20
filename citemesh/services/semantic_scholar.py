@@ -345,6 +345,15 @@ class SemanticScholarClient:
             os.replace(tmp_name, cache_path)
             with cache_path.open("r+b") as final_file:
                 os.fsync(final_file.fileno())
+            directory_fd: Optional[int] = None
+            try:
+                directory_fd = os.open(str(cache_path.parent), os.O_RDONLY)
+                os.fsync(directory_fd)
+            except OSError:
+                pass
+            finally:
+                if directory_fd is not None:
+                    os.close(directory_fd)
         finally:
             if tmp_path is not None and tmp_path.exists():
                 with contextlib.suppress(Exception):
@@ -838,7 +847,9 @@ class SemanticScholarClient:
             )
         if not force_refresh and cache_path.exists():
             try:
-                data = json.loads(cache_path.read_text())
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("reference cache payload must be a JSON object")
                 if data.get("version") == REFERENCE_CACHE_VERSION:
                     cached_references = data.get("references", [])
                     refs = _coerce_cached_reference_ids(cached_references)
@@ -847,7 +858,8 @@ class SemanticScholarClient:
                             "Invalid reference cache payload for %s; rebuilding entry.",
                             normalized_paper_id,
                         )
-                        cache_path.unlink(missing_ok=True)
+                        with contextlib.suppress(OSError):
+                            cache_path.unlink(missing_ok=True)
                     else:
                         if cached_references != refs:
                             self._persist_reference_cache_entry(
@@ -861,8 +873,9 @@ class SemanticScholarClient:
                             normalized_paper_id,
                         )
                         return refs
-            except json.JSONDecodeError:
-                cache_path.unlink(missing_ok=True)
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
+                with contextlib.suppress(OSError):
+                    cache_path.unlink(missing_ok=True)
 
         for attempt in range(API_CONFIG.max_retries):
             try:
