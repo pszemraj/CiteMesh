@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import types
 import xml.etree.ElementTree as ET
@@ -122,6 +123,7 @@ def _build_graph() -> tuple[nx.Graph, str]:
         authors=[Author(name="Alice Smith")],
         citation_count=42,
         abstract="Seed abstract",
+        venue="TestConf",
         categories=["cs.AI"],
         is_seed=True,
     )
@@ -132,6 +134,7 @@ def _build_graph() -> tuple[nx.Graph, str]:
         authors=[Author(name="Bob Jones")],
         citation_count=10,
         abstract="Related abstract",
+        venue="Related Journal",
         categories=["cs.LG"],
     )
 
@@ -147,10 +150,12 @@ def _build_graph() -> tuple[nx.Graph, str]:
     )
     graph.add_node(
         related.paper_id,
+        paper=related,
         title=related.title,
         year=related.year,
         authors=[author.name for author in related.authors],
         citation_count=related.citation_count,
+        venue=related.venue,
         is_seed=False,
     )
     graph.add_edge(seed.paper_id, related.paper_id, weight=0.7)
@@ -249,7 +254,14 @@ def test_exporter_serialization_contracts_and_determinism(
     assert edge_pairs == [("a", "z"), ("seed", "z")]
 
     edge_trace = captured["data"][0]
-    assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
+    normalized_layout = ordered_exporter._get_layout()
+    edge_x = list(edge_trace["x"])
+    assert edge_x[2] is None
+    assert edge_x[5] is None
+    assert edge_x[0] == pytest.approx(float(normalized_layout["a"][0]))
+    assert edge_x[1] == pytest.approx(float(normalized_layout["z"][0]))
+    assert edge_x[3] == pytest.approx(float(normalized_layout["seed"][0]))
+    assert edge_x[4] == pytest.approx(float(normalized_layout["z"][0]))
 
 
 def test_exporter_interactive_html_contracts(
@@ -337,7 +349,7 @@ def test_exporter_plotly_contracts(
 
     assert out_path.exists()
     node_trace = captured["data"][1]
-    assert list(node_trace["text"]) == ["Related Paper", "Smith, 2020"]
+    assert list(node_trace["text"]) == ["Jones, 2021", "Smith, 2020"]
     layout = captured["layout"]
     assert layout["title"] == "CiteMesh: Seed Paper"
     kwargs = captured["kwargs"]
@@ -360,6 +372,241 @@ def test_exporter_plotly_contracts(
     )
     with pytest.raises(RuntimeError, match="Deterministic Plotly export requires"):
         exporter.to_plotly_html(tmp_path / "nodivid.plotly.html")
+
+
+def _extract_dashboard_payload(html_text: str) -> dict[str, Any]:
+    """Extract dashboard JSON payload from exported HTML."""
+    match = re.search(
+        r'<script id="citemesh-dashboard-data" type="application/json">(.*?)</script>',
+        html_text,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+def _extract_dashboard_figure(html_text: str) -> dict[str, Any]:
+    """Extract embedded Plotly figure JSON from exported dashboard HTML."""
+    match = re.search(
+        r'<script id="citemesh-dashboard-figure" type="application/json">(.*?)</script>',
+        html_text,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
+    """Dashboard export should render tri-pane shell and derived payload fields."""
+    pytest.importorskip("plotly")
+
+    graph, seed_id = _build_graph()
+    graph.graph["paper_sources"] = {"related": "semantic", "seed": "citation"}
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "hybrid"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "graph.dashboard.html"
+    exporter.to_dashboard_html(out_path, theme="dark")
+
+    assert out_path.exists()
+    rendered = out_path.read_text()
+    for token in [
+        'id="global-nav"',
+        'id="filters-toggle"',
+        'id="detail-why-lines"',
+        'id="dashboard-root"',
+        'id="paper-list-pane"',
+        'id="graph-pane"',
+        'id="detail-pane"',
+        'id="citemesh-dashboard-data"',
+        'id="citemesh-dashboard-figure"',
+    ]:
+        assert token in rendered
+    for css_token in [
+        "html, body {\n      margin: 0;\n      height: 100%;\n      overflow: hidden;",
+        "#dashboard-root {\n      display: grid;\n      gap: 12px;\n      padding: 12px;\n      flex: 1 1 auto;",
+        "#paper-list {\n      margin: 0;\n      padding: 0;\n      list-style: none;\n      overflow-y: auto;",
+        "#detail-content {\n      padding: 14px 13px 12px;\n      flex: 1;\n      min-height: 0;\n      display: flex;\n      flex-direction: column;\n      gap: 16px;\n      overflow-y: auto;",
+        "width: 100%;\n      height: 100%;\n      min-height: 0;",
+    ]:
+        assert css_token in rendered
+    for script_token in [
+        "is-filter-hidden",
+        "is-neighbor",
+        "neighborhood-edges",
+        "renderWhyLines(",
+        "state.hoverId || state.selectedId",
+        "overlayState",
+        "neighborhoodKey",
+    ]:
+        assert script_token in rendered
+    assert "data-point-number" in rendered
+    assert "path.parentNode.appendChild(path)" not in rendered
+
+    payload = _extract_dashboard_payload(rendered)
+    assert payload["meta"]["seed_id"] == "seed"
+    assert payload["meta"]["strategy"] == "hybrid"
+    assert payload["meta"]["summary"] == {"nodes": 2, "edges": 1}
+    assert payload["meta"]["plotly_node_order"] == ["related", "seed"]
+    seed_node = next(node for node in payload["nodes"] if node["id"] == "seed")
+    related_node = next(node for node in payload["nodes"] if node["id"] == "related")
+    assert seed_node["provenance"] == "seed"
+    assert seed_node["provenance_base"] == "citation"
+    assert "arxiv_id" in seed_node
+    assert "doi" in seed_node
+    assert seed_node["venue"] == "TestConf"
+    assert related_node["provenance"] == "semantic"
+    assert related_node["venue"] == "Related Journal"
+    assert related_node["seed_relation"] == "semantic_only"
+    assert "seed_relevance" in seed_node
+    assert isinstance(seed_node["seed_relevance"], float)
+    assert seed_node["links"]["semantic_scholar"] is not None
+    assert isinstance(seed_node["bibtex"], str)
+
+    figure = _extract_dashboard_figure(rendered)
+    assert len(figure["data"]) == 3
+    assert len(figure["layout"].get("shapes", [])) == 1
+    assert figure["layout"]["uirevision"] == "citemesh-dashboard-static-layout-v1"
+    assert figure["layout"]["xaxis"]["autorange"] is False
+    assert figure["layout"]["yaxis"]["autorange"] is False
+    assert len(figure["layout"]["xaxis"]["range"]) == 2
+    assert len(figure["layout"]["yaxis"]["range"]) == 2
+    edge_shape = figure["layout"]["shapes"][0]
+    assert edge_shape["type"] == "path"
+    assert " Q " in edge_shape["path"]
+    halo_trace = next(
+        trace for trace in figure["data"] if trace.get("name") == "selection-halo"
+    )
+    neighborhood_trace = next(
+        trace for trace in figure["data"] if trace.get("name") == "neighborhood-edges"
+    )
+    node_trace = next(trace for trace in figure["data"] if trace.get("name") == "nodes")
+    halo_marker = halo_trace["marker"]
+    assert halo_trace["mode"] == "markers"
+    assert halo_trace["hoverinfo"] == "none"
+    assert halo_marker["line"]["width"] == 0
+    assert neighborhood_trace["mode"] == "lines"
+    assert neighborhood_trace["x"] == []
+    assert neighborhood_trace["y"] == []
+    marker = node_trace["marker"]
+    assert marker["showscale"] is False
+    assert marker["sizemode"] == "area"
+    assert marker["sizeref"] > 0
+    assert max(marker["line"]["width"]) >= 4
+    assert min(marker["line"]["width"]) == 0
+
+
+def test_exporter_dashboard_missing_plotly_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dashboard export should fail clearly when plotly dependency is missing."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id)
+
+    monkeypatch.setitem(sys.modules, "plotly", None)
+    monkeypatch.setitem(sys.modules, "plotly.offline", None)
+    with pytest.raises(RuntimeError, match="plotly is required for Dashboard export"):
+        exporter.to_dashboard_html(tmp_path / "missing.dashboard.html")
+
+
+def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
+    """Dashboard payload should derive arXiv/DOI/S2 links from IDs and metadata."""
+    pytest.importorskip("plotly")
+
+    graph = nx.Graph()
+    graph.add_node(
+        "arxiv:2411.03884",
+        title="Seed",
+        year=2024,
+        authors=["A"],
+        citation_count=10,
+        is_seed=True,
+    )
+    graph.add_node(
+        "10.1145/3133956.3134029",
+        title="DOI Paper",
+        year=2017,
+        authors=["B"],
+        citation_count=5,
+        is_seed=False,
+    )
+    graph.add_node(
+        "abcdef123456",
+        title="S2 Paper",
+        year=2018,
+        authors=["C"],
+        citation_count=1,
+        is_seed=False,
+    )
+    graph.add_node(
+        "s2-candidate-arxiv",
+        title="S2 with arXiv external ID",
+        year=2024,
+        authors=["D"],
+        citation_count=2,
+        arxiv_id="2501.00001v3",
+        is_seed=False,
+    )
+    graph.add_node(
+        "s2-candidate-doi",
+        title="S2 with DOI external ID",
+        year=2022,
+        authors=["E"],
+        citation_count=3,
+        doi="10.1109/5.771073",
+        is_seed=False,
+    )
+    graph.add_edge("arxiv:2411.03884", "10.1145/3133956.3134029", weight=0.9)
+    graph.add_edge("arxiv:2411.03884", "abcdef123456", weight=0.7)
+    graph.add_edge("arxiv:2411.03884", "s2-candidate-arxiv", weight=0.8)
+    graph.add_edge("arxiv:2411.03884", "s2-candidate-doi", weight=0.75)
+
+    exporter = GraphExporter(
+        graph,
+        "arxiv:2411.03884",
+        metadata={"strategy": "citation"},
+        layout={
+            "arxiv:2411.03884": (0.0, 0.0),
+            "10.1145/3133956.3134029": (1.0, 0.0),
+            "abcdef123456": (0.0, 1.0),
+            "s2-candidate-arxiv": (-1.0, 0.0),
+            "s2-candidate-doi": (0.0, -1.0),
+        },
+    )
+    out_path = tmp_path / "links.dashboard.html"
+    exporter.to_dashboard_html(out_path, theme="light")
+
+    payload = _extract_dashboard_payload(out_path.read_text())
+    nodes = {node["id"]: node for node in payload["nodes"]}
+
+    arxiv_links = nodes["arxiv:2411.03884"]["links"]
+    assert arxiv_links["arxiv_abs"] == "https://arxiv.org/abs/2411.03884"
+    assert arxiv_links["arxiv_pdf"] == "https://arxiv.org/pdf/2411.03884.pdf"
+    assert arxiv_links["doi"] is None
+    assert "semanticscholar.org" in arxiv_links["semantic_scholar"]
+
+    doi_links = nodes["10.1145/3133956.3134029"]["links"]
+    assert doi_links["doi"] == "https://doi.org/10.1145/3133956.3134029"
+    assert doi_links["arxiv_abs"] is None
+
+    s2_links = nodes["abcdef123456"]["links"]
+    assert s2_links["arxiv_abs"] is None
+    assert s2_links["doi"] is None
+    assert s2_links["semantic_scholar"] == (
+        "https://www.semanticscholar.org/paper/abcdef123456"
+    )
+
+    s2_arxiv_links = nodes["s2-candidate-arxiv"]["links"]
+    assert s2_arxiv_links["arxiv_abs"] == "https://arxiv.org/abs/2501.00001"
+    assert s2_arxiv_links["arxiv_pdf"] == "https://arxiv.org/pdf/2501.00001.pdf"
+    assert s2_arxiv_links["doi"] is None
+
+    s2_doi_links = nodes["s2-candidate-doi"]["links"]
+    assert s2_doi_links["doi"] == "https://doi.org/10.1109/5.771073"
+    assert s2_doi_links["arxiv_abs"] is None
 
 
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(
@@ -550,21 +797,32 @@ def test_missing_year_visual_contracts(
     assert size_map_1["a"] >= size_map_1["b"]
 
 
-def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) -> None:
-    """Real Plotly exports should be byte-stable for identical graph/layout inputs."""
+def test_exporter_html_exports_are_byte_stable_with_real_plotly(
+    tmp_path: Path,
+) -> None:
+    """Plotly and dashboard HTML exports should be byte-stable for identical inputs."""
     pytest.importorskip("plotly")
+    layout = {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    scenarios = [
+        ("plotly", "to_plotly_html", None, None),
+        (
+            "dashboard",
+            "to_dashboard_html",
+            {"strategy": "hybrid"},
+            {"related": "semantic", "seed": "citation"},
+        ),
+    ]
 
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
-    )
-    out_a = tmp_path / "first.plotly.html"
-    out_b = tmp_path / "second.plotly.html"
-
-    exporter.to_plotly_html(out_a)
-    exporter.to_plotly_html(out_b)
-
-    assert out_a.read_text() == out_b.read_text()
+    for name, method_name, metadata, paper_sources in scenarios:
+        graph, seed_id = _build_graph()
+        if paper_sources is not None:
+            graph.graph["paper_sources"] = paper_sources
+        exporter = GraphExporter(graph, seed_id, metadata=metadata, layout=layout)
+        out_a = tmp_path / f"first.{name}.html"
+        out_b = tmp_path / f"second.{name}.html"
+        getattr(exporter, method_name)(out_a)
+        getattr(exporter, method_name)(out_b)
+        assert out_a.read_text() == out_b.read_text()
 
 
 def test_layout_positioning_contracts(
@@ -626,6 +884,50 @@ def test_layout_positioning_contracts(
     distances = captured["distances"]
     assert isinstance(distances, dict)
     assert distances[("high", "seed")] < distances[("low", "seed")]
+
+
+def test_layout_applies_community_separation_offsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Community-aware layout should separate detected clusters before normalization."""
+    graph = nx.Graph()
+    graph.add_edge("a1", "a2", weight=0.9)
+    graph.add_edge("b1", "b2", weight=0.9)
+    graph.add_edge("a1", "b1", weight=0.01)
+
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.algorithms.community.greedy_modularity_communities",
+        lambda *_args, **_kwargs: [set(["a1", "a2"]), set(["b1", "b2"])],
+    )
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.kamada_kawai_layout",
+        lambda layout_graph, **_kwargs: {
+            node: np.array([0.0, 0.0], dtype=np.float64)
+            for node in layout_graph.nodes()
+        },
+    )
+
+    def fake_spring_layout(
+        layout_graph: nx.Graph, **_kwargs: Any
+    ) -> dict[int, np.ndarray]:
+        if all(isinstance(node, int) for node in layout_graph.nodes()):
+            return {
+                0: np.array([-1.0, 0.0], dtype=np.float64),
+                1: np.array([1.0, 0.0], dtype=np.float64),
+            }
+        return {
+            node: np.array([0.0, 0.0], dtype=np.float64)
+            for node in layout_graph.nodes()
+        }
+
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.spring_layout", fake_spring_layout
+    )
+
+    pos = compute_layout(graph, iterations=20, layout_seed=99)
+    left_center = np.mean([pos["a1"], pos["a2"]], axis=0)
+    right_center = np.mean([pos["b1"], pos["b2"]], axis=0)
+    assert left_center[0] < right_center[0]
 
 
 def test_get_theme_auto_detection_and_unknown_default(

@@ -83,21 +83,22 @@ Per-run elapsed time has heavy-tail behavior driven by network-bound citation-co
 
 Defaults are set to:
 
-- `--max-references`: `25`
-- `--max-citations`: `25`
-- hybrid implicit `--max-semantic`: `min(25, max-papers - 1)`
+- `--max-papers`: `45` (hybrid when omitted)
+- `--max-references`: `12` (hybrid when omitted)
+- `--max-citations`: `45` (hybrid when omitted)
+- hybrid implicit `--max-semantic`: `min(20, max-papers - 1)`
 
 Why:
 
-- Best overall quality score in the full matrix.
-- Near-best recent-paper quality while materially improving legacy connectivity.
-- Better citation-depth coverage for foundational-paper recovery without sacrificing modern-paper discovery.
+- Broad multi-seed sweep established a stable baseline but over-selected off-goal papers in manual relevance checks.
+- Follow-up fuzzy-match + abstract review study (PolyCom seed, in-process run set) favored citation-heavy / reference-light allocation (`45/12/20`) for the discovery goal.
+- The updated defaults improve practical triage for "recent follow-up + foundational prior work" without forcing users to set branch-specific knobs each run.
 
 ## Related Outcomes From Earlier Tuning
 
 These remain in effect from earlier study stages:
 
-- embedding `--top-k` default `3`
+- embedding `--top-k` default `4`
 - hydration flush window `256`
 - log width default `140`
 
@@ -110,3 +111,4 @@ Local raw outputs for this sweep are under:
 - `out/studies/defaults-sweep-v4-2026-02-16/summary_all.csv`
 - `out/studies/defaults-sweep-v4-2026-02-16/summary_recent.csv`
 - `out/studies/defaults-sweep-v4-2026-02-16/summary_legacy.csv`
+- `out/OLD-polynomial-composition-activati-b68d34de/study-inproc-20260220-224514/guidance.md`

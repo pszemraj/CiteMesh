@@ -7,8 +7,9 @@ bibliographic coupling (shared references), and co-citation analysis.
 
 import logging
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
+import networkx as nx
 from tqdm.auto import tqdm
 
 from citemesh.core import Paper
@@ -60,7 +61,84 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.refresh_reference_cache = bool(refresh_reference_cache)
         self.client: SemanticScholarClient = client or get_client()
         self.reference_cache: Dict[str, list] = {}  # Cache reference lists
+        self.seed_relations: Dict[str, str] = {}
         self._abstract_index = AbstractSimilarityIndex()
+
+    @staticmethod
+    def _merge_relation_paper(existing: Paper, incoming: Paper) -> Paper:
+        """Merge supplemental relation payloads without replacing canonical objects.
+
+        :param Paper existing: Existing paper object retained in the collection map.
+        :param Paper incoming: Newly observed payload for the same paper ID.
+        :return Paper: Mutated ``existing`` paper instance.
+        """
+        if (
+            (not existing.title or existing.title == "Unknown")
+            and incoming.title
+            and incoming.title != "Unknown"
+        ):
+            existing.title = incoming.title
+        if (not existing.abstract) and incoming.abstract:
+            existing.abstract = incoming.abstract
+        if existing.year is None and incoming.year is not None:
+            existing.year = incoming.year
+        if (not existing.authors) and incoming.authors:
+            existing.authors = incoming.authors
+        if existing.citation_count <= 0 and incoming.citation_count > 0:
+            existing.citation_count = incoming.citation_count
+        if (not existing.venue) and incoming.venue:
+            existing.venue = incoming.venue
+        if (not existing.arxiv_id) and incoming.arxiv_id:
+            existing.arxiv_id = incoming.arxiv_id
+        if (not existing.doi) and incoming.doi:
+            existing.doi = incoming.doi
+        if (not existing.categories) and incoming.categories:
+            existing.categories = incoming.categories
+
+        if incoming.references:
+            if not existing.references:
+                existing.references = [
+                    str(ref_id).strip()
+                    for ref_id in incoming.references
+                    if str(ref_id).strip()
+                ]
+            else:
+                existing_refs = [ref for ref in existing.references if str(ref).strip()]
+                seen = set(existing_refs)
+                for ref_id in incoming.references:
+                    normalized_ref_id = str(ref_id).strip()
+                    if not normalized_ref_id or normalized_ref_id in seen:
+                        continue
+                    existing_refs.append(normalized_ref_id)
+                    seen.add(normalized_ref_id)
+                existing.references = existing_refs
+
+        existing.is_seed = bool(existing.is_seed or incoming.is_seed)
+        return existing
+
+    def _ensure_paper_references(self, paper: Paper) -> None:
+        """Hydrate reference IDs for a paper without clobbering existing payload.
+
+        :param Paper paper: Paper record to hydrate in-place.
+        :return None: Mutates ``paper.references`` when needed.
+        """
+        if not self.fetch_references:
+            return
+
+        paper_id = str(paper.paper_id).strip()
+        if not paper_id:
+            return
+
+        if paper.references:
+            self.reference_cache.setdefault(paper_id, list(paper.references))
+            return
+
+        cached_refs = self.reference_cache.get(paper_id)
+        if cached_refs is not None:
+            paper.references = list(cached_refs)
+            return
+
+        paper.references = self._get_references(paper_id)
 
     def _ingest_relation_batch(
         self,
@@ -68,15 +146,16 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         relation_records: list[Paper],
         progress_enabled: bool,
         progress_description: str,
-    ) -> None:
+    ) -> list[str]:
         """Add related papers and hydrate references while respecting graph limits.
 
         :param Dict[str, Paper] papers: Collected paper mapping updated in-place.
         :param list[Paper] relation_records: Reference/citation papers from the API.
         :param bool progress_enabled: Whether to wrap records with ``tqdm``.
         :param str progress_description: Progress-bar description label.
-        :return None: Mutates ``papers`` and optional per-paper references in place.
+        :return list[str]: Processed relation paper IDs in traversal order.
         """
+        processed_ids: list[str] = []
         progress_bar = None
         if relation_records:
             # Avoid very short-lived progress bars that can render as blank spacer
@@ -96,15 +175,46 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             relation_iterator = []
 
         for paper in relation_iterator:
-            if len(papers) >= self.max_papers:
-                break
-            papers[paper.paper_id] = paper
+            normalized_paper_id = str(paper.paper_id).strip()
+            if not normalized_paper_id:
+                continue
+            processed_ids.append(normalized_paper_id)
 
-            if self.fetch_references and paper.paper_id not in self.reference_cache:
-                paper.references = self._get_references(paper.paper_id)
+            existing = papers.get(normalized_paper_id)
+            if existing is not None:
+                self._merge_relation_paper(existing, paper)
+                self._ensure_paper_references(existing)
+                continue
+
+            if len(papers) >= self.max_papers:
+                continue
+
+            papers[normalized_paper_id] = paper
+            self._ensure_paper_references(paper)
 
         if progress_bar is not None:
             progress_bar.close()
+
+        return processed_ids
+
+    def _record_seed_relations(self, paper_ids: list[str], relation: str) -> None:
+        """Merge relation-to-seed labels for a paper batch.
+
+        :param list[str] paper_ids: Relation batch paper IDs.
+        :param str relation: Relation label.
+        :return None: Updates ``self.seed_relations`` in place.
+        """
+        for paper_id in paper_ids:
+            normalized_id = str(paper_id).strip()
+            if not normalized_id:
+                continue
+            existing = self.seed_relations.get(normalized_id)
+            if existing is None:
+                self.seed_relations[normalized_id] = relation
+                continue
+            if existing == "seed" or existing == relation or existing == "overlap":
+                continue
+            self.seed_relations[normalized_id] = "overlap"
 
     def _get_references(self, paper_id: str) -> list:
         """
@@ -136,6 +246,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         # Scope in-memory references to one collection request so stale entries do
         # not leak across caller boundaries when builders are reused.
         self.reference_cache.clear()
+        self.seed_relations = {}
         papers = {}
 
         # Step 1: Fetch seed paper
@@ -147,6 +258,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         seed.is_seed = True
         papers[seed.paper_id] = seed
+        self.seed_relations[seed.paper_id] = "seed"
 
         # Store seed references in cache
         if self.fetch_references and seed.references:
@@ -160,12 +272,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             seed.paper_id, limit=self.max_references
         )
         progress_enabled = sys.stderr.isatty()
-        self._ingest_relation_batch(
+        reference_ids = self._ingest_relation_batch(
             papers,
             references,
             progress_enabled=progress_enabled,
             progress_description="Downloading references",
         )
+        self._record_seed_relations(reference_ids, "referenced_by_seed")
 
         # Step 3: Fetch citations (newer papers)
         remaining = self.max_papers - len(papers)
@@ -176,12 +289,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             citations = self.client.get_paper_citations(
                 seed.paper_id, limit=min(remaining, self.max_citations)
             )
-            self._ingest_relation_batch(
+            citation_ids = self._ingest_relation_batch(
                 papers,
                 citations,
                 progress_enabled=progress_enabled,
                 progress_description="Downloading citations",
             )
+            self._record_seed_relations(citation_ids, "cites_seed")
 
         reference_lists = len(self.reference_cache)
         summary = (
@@ -191,6 +305,23 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self._set_collection_summary(summary)
 
         return papers
+
+    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
+        """Build citation graph and persist seed-relation metadata.
+
+        :param str seed_id: Seed paper identifier.
+        :param Any kwargs: Strategy-specific options forwarded to parent build.
+        :return Tuple[nx.Graph, str]: Built graph and canonical seed identifier.
+        """
+        graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph.graph["seed_relations"] = {
+            str(node_id): str(relation)
+            for node_id, relation in sorted(
+                self.seed_relations.items(), key=lambda x: x[0]
+            )
+            if str(node_id) in graph.nodes
+        }
+        return graph, actual_seed_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

@@ -54,13 +54,14 @@ Final ranking still uses the cached `int8`/`float16`/`float32` vectors.
 
 Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
 CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected).
+`lzf` does not support configurable levels; CiteMesh normalizes level to `0`.
 Runtime availability still depends on your `h5py` build.
 
 SQLite stores metadata authority fields used for warm-cache retrieval:
 
 - `title`, `abstract`, `year`
 - `authors_json`, `categories_json`
-- runtime cache consistency keys (`storage_precision`, source torch dtype, effective embedding vector dtype, text-formatter fingerprint, binary-prefilter mode, and `int8` calibration sample size)
+- runtime cache consistency keys (`storage_precision`, source torch dtype, effective embedding vector dtype, text-formatter fingerprint, binary-prefilter mode, compression filter/level, and `int8` calibration sample size)
 - hydration metadata keys (`dataset source`, `split`, `corpus cap`, completion flag)
 - `model_fingerprint` (active model identity guard for namespace reuse)
 
@@ -82,6 +83,9 @@ Hydration write policy:
 - Cache persistence flushes metadata/embedding appends in larger bursts (`256` records) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)).
+By default, CiteMesh asks for confirmation before applying this destructive rebuild.
+Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts).
+Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata.
 
 For Hugging Face repo IDs, hydration resolves and stores a model fingerprint.
 CiteMesh first attempts commit-SHA resolution (online API, then local snapshot SHA).
@@ -103,6 +107,23 @@ If compatibility checks fail (for example unresolved revision mismatch), CiteMes
 and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
+
+For hydrated full-corpus runs (`--all-corpus`), CiteMesh performs an incremental
+growth check using upstream split row counts. When upstream rows increased, it uses a
+staged reconciliation flow:
+
+- tail delta slice (`cached_rows:upstream_rows`)
+- head delta slice (`0:delta_rows`) if tail under-fills
+- full-split missing-ID reconciliation only when needed
+
+All reconciliation steps are ID-aware and append only uncached paper IDs.
+If upstream split row counts shrink below cached payload size, CiteMesh marks
+the namespace hydration state incomplete and forces full source revalidation
+instead of serving stale over-cap rows from the prior cache snapshot.
+If full reconciliation confirms no uncached IDs while row-count delta remains,
+CiteMesh treats that as duplicate-ID upstream growth (not a cache failure), records
+the reconciled row-count state, and skips repeated full-split scans until row counts
+change again.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus
 metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias
@@ -128,6 +149,8 @@ using hashed filenames.
   repeated API calls for papers with no references.
 - Non-empty cached payloads that contain no valid reference IDs are treated as invalid
   and rebuilt from API data instead of being reused as implicit empties.
+- Corrupt/unreadable JSON cache entries (including non-object payloads) are treated as
+  invalid and rebuilt from API data.
 - Repeated reference-fetch failures now raise a runtime error after retries instead
   of silently returning an empty list.
 - Reference cache directory resolution occurs at call time, so cache-root policy
@@ -148,7 +171,7 @@ citemesh cache scan
 Clear entire CiteMesh cache root:
 
 ```bash
-citemesh cache clear --yes
+citemesh cache clear --yes --reason "manual local reset"
 ```
 
 Omit `--yes` for interactive confirmation.

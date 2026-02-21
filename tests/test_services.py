@@ -264,6 +264,8 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         "year": None,
         "abstract": "",
         "citationCount": 0,
+        "publicationVenue": {"name": "ICLR"},
+        "externalIds": {"ArXiv": "2411.03884v2", "DOI": "10.1145/3133956.3134029"},
         "authors": [{"name": ""}, {}],
         "fieldsOfStudy": ["cs.AI", "cs.LG"],
     }
@@ -274,6 +276,9 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     assert paper.title == "Unknown"
     assert paper.year is None
     assert paper.abstract == ""
+    assert paper.venue == "ICLR"
+    assert paper.arxiv_id == "2411.03884v2"
+    assert paper.doi == "10.1145/3133956.3134029"
     assert paper.authors == []
     assert paper.categories == ["cs.AI", "cs.LG"]
 
@@ -322,6 +327,13 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     assert [paper.paper_id for paper in search_results] == ["search1"]
 
     client = SemanticScholarClient(timeout=1)
+    client._request_json = MagicMock(return_value={"recommendedPapers": []})
+    client.get_recommended_papers("seed", limit=1, include_references=True)
+    request_params = client._request_json.call_args.args[1]
+    assert isinstance(request_params, dict)
+    assert "references" not in str(request_params.get("fields", ""))
+
+    client = SemanticScholarClient(timeout=1)
     validation_cases = [
         ("get_recommended_papers", ("seed",), "limit must be at least 1"),
         ("search_papers", ("attention",), "limit must be at least 1"),
@@ -355,6 +367,40 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         client.get_recommended_papers(raw_id, limit=1)
         url = client._request_json.call_args.args[0]
         assert url.endswith(expected_suffix)
+
+
+def test_external_id_fallback_from_paper_id_contracts() -> None:
+    """Paper-ID fallback should populate arXiv/DOI fields when external IDs are absent."""
+    client = SemanticScholarClient(timeout=1)
+
+    arxiv_payload = {
+        "paperId": "arxiv:2411.03884v2",
+        "title": "ArXiv Paper",
+        "year": 2024,
+        "abstract": "A",
+        "citationCount": 1,
+        "authors": [],
+        "fieldsOfStudy": [],
+    }
+    doi_payload = {
+        "paperId": "10.1145/3133956.3134029",
+        "title": "DOI Paper",
+        "year": 2017,
+        "abstract": "B",
+        "citationCount": 2,
+        "authors": [],
+        "fieldsOfStudy": [],
+    }
+
+    arxiv = client._convert_recommendation(arxiv_payload)
+    doi = client._convert_recommendation(doi_payload)
+
+    assert arxiv is not None
+    assert arxiv.arxiv_id == "2411.03884"
+    assert arxiv.doi == ""
+    assert doi is not None
+    assert doi.arxiv_id == ""
+    assert doi.doi == "10.1145/3133956.3134029"
 
 
 def test_reference_cache_hit_corrupt_and_type_error_paths(
@@ -404,6 +450,36 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     refs = client.get_reference_ids("seed")
     assert refs == ["a", "b"]
     assert json.loads(seed_cache_path.read_text())["references"] == ["a", "b"]
+
+    unicode_seed = s2.normalize_paper_id("seed-unicode")
+    unicode_cache_path = s2._reference_cache_path(unicode_seed)
+    unicode_cache_path.write_bytes(b"\xff\xfe")
+    client.client.get_paper_references = MagicMock(
+        return_value=[_make_reference_record("unicode-fixed")]
+    )
+    unicode_refs = client.get_reference_ids("seed-unicode")
+    assert unicode_refs == ["unicode-fixed"]
+    assert json.loads(unicode_cache_path.read_text())["references"] == ["unicode-fixed"]
+
+    non_object_seed = s2.normalize_paper_id("seed-non-object")
+    non_object_cache_path = s2._reference_cache_path(non_object_seed)
+    non_object_cache_path.write_text(
+        json.dumps(
+            [
+                "not",
+                "a",
+                "dict",
+            ]
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        return_value=[_make_reference_record("non-object-fixed")]
+    )
+    rebuilt_non_object_refs = client.get_reference_ids("seed-non-object")
+    assert rebuilt_non_object_refs == ["non-object-fixed"]
+    assert json.loads(non_object_cache_path.read_text())["references"] == [
+        "non-object-fixed"
+    ]
 
     malformed_seed = s2.normalize_paper_id("seed-malformed")
     malformed_cache_path = s2._reference_cache_path(malformed_seed)

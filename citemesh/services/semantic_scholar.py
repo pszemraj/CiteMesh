@@ -41,6 +41,10 @@ DEFAULT_PAPER_FIELDS = (
     "citationCount",
     "abstract",
     "fieldsOfStudy",
+    "externalIds",
+    "venue",
+    "publicationVenue",
+    "journal",
 )
 
 
@@ -345,6 +349,15 @@ class SemanticScholarClient:
             os.replace(tmp_name, cache_path)
             with cache_path.open("r+b") as final_file:
                 os.fsync(final_file.fileno())
+            directory_fd: Optional[int] = None
+            try:
+                directory_fd = os.open(str(cache_path.parent), os.O_RDONLY)
+                os.fsync(directory_fd)
+            except OSError:
+                pass
+            finally:
+                if directory_fd is not None:
+                    os.close(directory_fd)
         finally:
             if tmp_path is not None and tmp_path.exists():
                 with contextlib.suppress(Exception):
@@ -457,6 +470,122 @@ class SemanticScholarClient:
                 )
         return API_CONFIG.retry_delay
 
+    @staticmethod
+    def _extract_venue_from_api_paper(api_paper: Any) -> str:
+        """Extract publication venue label from Semantic Scholar API objects.
+
+        :param Any api_paper: Raw API object.
+        :return str: Normalized venue name (or empty string when unavailable).
+        """
+        direct_venue = getattr(api_paper, "venue", None)
+        if isinstance(direct_venue, str) and direct_venue.strip():
+            return direct_venue.strip()
+
+        publication_venue = getattr(api_paper, "publicationVenue", None)
+        publication_venue_name = getattr(publication_venue, "name", None)
+        if isinstance(publication_venue_name, str) and publication_venue_name.strip():
+            return publication_venue_name.strip()
+
+        journal = getattr(api_paper, "journal", None)
+        journal_name = getattr(journal, "name", None)
+        if isinstance(journal_name, str) and journal_name.strip():
+            return journal_name.strip()
+
+        return ""
+
+    @staticmethod
+    def _extract_venue_from_record(record: Dict[str, Any]) -> str:
+        """Extract publication venue label from recommendation/search payloads.
+
+        :param Dict[str, Any] record: Recommendation/search payload dict.
+        :return str: Normalized venue string (empty when unknown).
+        """
+        for key in ("venue", "publicationVenue", "journal"):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                name = value.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+        return ""
+
+    @staticmethod
+    def _normalize_external_id(raw_value: object) -> str:
+        """Normalize optional external-id strings.
+
+        :param object raw_value: Raw external ID payload.
+        :return str: Normalized external ID string (empty when unavailable).
+        """
+        if not isinstance(raw_value, str):
+            return ""
+        return raw_value.strip()
+
+    @classmethod
+    def _extract_external_ids_from_mapping(
+        cls, mapping: Dict[str, Any]
+    ) -> tuple[str, str]:
+        """Extract arXiv and DOI IDs from external-id style mappings.
+
+        :param Dict[str, Any] mapping: External IDs map.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
+        """
+        normalized = {str(key).lower(): value for key, value in mapping.items()}
+        arxiv_id = cls._normalize_external_id(normalized.get("arxiv"))
+        doi = cls._normalize_external_id(normalized.get("doi"))
+        return arxiv_id, doi
+
+    @classmethod
+    def _extract_external_ids_from_api_paper(cls, api_paper: Any) -> tuple[str, str]:
+        """Extract arXiv and DOI values from API paper payloads.
+
+        :param Any api_paper: Raw Semantic Scholar API object.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
+        """
+        external_ids = getattr(api_paper, "externalIds", None)
+        if isinstance(external_ids, dict):
+            return cls._extract_external_ids_from_mapping(external_ids)
+
+        return "", ""
+
+    @classmethod
+    def _extract_external_ids_from_record(
+        cls, record: Dict[str, Any]
+    ) -> tuple[str, str]:
+        """Extract arXiv and DOI values from recommendation/search dict records.
+
+        :param Dict[str, Any] record: Recommendation/search record.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
+        """
+        external_ids = record.get("externalIds")
+        if isinstance(external_ids, dict):
+            return cls._extract_external_ids_from_mapping(external_ids)
+        return "", ""
+
+    @staticmethod
+    def _external_ids_from_paper_id(paper_id: str) -> tuple[str, str]:
+        """Infer arXiv/DOI identifiers from canonical paper IDs when possible.
+
+        :param str paper_id: Canonical paper ID.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` inference tuple.
+        """
+        normalized = str(paper_id or "").strip()
+        if not normalized:
+            return "", ""
+
+        lowered = normalized.lower()
+        if lowered.startswith("arxiv:"):
+            return _strip_arxiv_version(normalized.split(":", 1)[1]), ""
+
+        if lowered.startswith("doi:"):
+            suffix = normalized.split(":", 1)[1].strip()
+            return "", suffix
+
+        if re.match(r"^10\.\d{4,9}/\S+$", normalized):
+            return "", normalized
+
+        return "", ""
+
     def _convert_api_paper(self, api_paper: Any) -> Optional[Paper]:
         """
         Convert Semantic Scholar API response to Paper model.
@@ -485,6 +614,12 @@ class SemanticScholarClient:
                 categories = [f for f in api_paper.fields if f]
             elif hasattr(api_paper, "fieldsOfStudy") and api_paper.fieldsOfStudy:
                 categories = [f for f in api_paper.fieldsOfStudy if f]
+            arxiv_id, doi = self._extract_external_ids_from_api_paper(api_paper)
+            fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
+                str(api_paper.paperId)
+            )
+            arxiv_id = arxiv_id or fallback_arxiv_id
+            doi = doi or fallback_doi
 
             return Paper(
                 paper_id=api_paper.paperId,
@@ -493,6 +628,9 @@ class SemanticScholarClient:
                 authors=authors,
                 citation_count=api_paper.citationCount or 0,
                 abstract=getattr(api_paper, "abstract", "") or "",
+                venue=self._extract_venue_from_api_paper(api_paper),
+                arxiv_id=arxiv_id,
+                doi=doi,
                 categories=categories,
                 references=[],  # Will be populated separately if needed
                 is_seed=False,
@@ -529,6 +667,12 @@ class SemanticScholarClient:
             if isinstance(categories, str):
                 categories = [categories]
             references = self._extract_reference_ids(rec.get("references"))
+            arxiv_id, doi = self._extract_external_ids_from_record(rec)
+            fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
+                str(paper_id)
+            )
+            arxiv_id = arxiv_id or fallback_arxiv_id
+            doi = doi or fallback_doi
 
             return Paper(
                 paper_id=paper_id,
@@ -537,6 +681,9 @@ class SemanticScholarClient:
                 authors=authors,
                 citation_count=rec.get("citationCount", 0) or 0,
                 abstract=rec.get("abstract") or "",
+                venue=self._extract_venue_from_record(rec),
+                arxiv_id=arxiv_id,
+                doi=doi,
                 categories=categories,
                 references=references,
                 is_seed=False,
@@ -838,7 +985,9 @@ class SemanticScholarClient:
             )
         if not force_refresh and cache_path.exists():
             try:
-                data = json.loads(cache_path.read_text())
+                data = json.loads(cache_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("reference cache payload must be a JSON object")
                 if data.get("version") == REFERENCE_CACHE_VERSION:
                     cached_references = data.get("references", [])
                     refs = _coerce_cached_reference_ids(cached_references)
@@ -847,7 +996,8 @@ class SemanticScholarClient:
                             "Invalid reference cache payload for %s; rebuilding entry.",
                             normalized_paper_id,
                         )
-                        cache_path.unlink(missing_ok=True)
+                        with contextlib.suppress(OSError):
+                            cache_path.unlink(missing_ok=True)
                     else:
                         if cached_references != refs:
                             self._persist_reference_cache_entry(
@@ -861,8 +1011,9 @@ class SemanticScholarClient:
                             normalized_paper_id,
                         )
                         return refs
-            except json.JSONDecodeError:
-                cache_path.unlink(missing_ok=True)
+            except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
+                with contextlib.suppress(OSError):
+                    cache_path.unlink(missing_ok=True)
 
         for attempt in range(API_CONFIG.max_retries):
             try:
@@ -964,8 +1115,13 @@ class SemanticScholarClient:
         """
         if fields is None:
             fields = _default_paper_fields()
-        if include_references and "references" not in fields:
-            fields = [*fields, "references"]
+        # Semantic Scholar's recommendations endpoint does not currently support
+        # requesting ``references`` in field lists (returns HTTP 400 with
+        # unsupported nested-reference field tokens). Keep the request field set
+        # endpoint-compatible and let callers hydrate references via dedicated
+        # reference-ID methods when needed.
+        if include_references and "references" in fields:
+            fields = [field for field in fields if field != "references"]
         parsed_limit = _validate_integer_limit(limit, "limit")
 
         normalized_paper_id = normalize_paper_id(paper_id)

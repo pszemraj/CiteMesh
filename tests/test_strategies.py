@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import logging
 from types import MethodType
-from typing import Callable
+from typing import Callable, Optional
 from unittest.mock import MagicMock, call, patch
 
 import networkx as nx
 import numpy as np
 import pytest
 
-from citemesh.core import HYBRID_CONFIG, Paper
+from citemesh.core import HYBRID_CONFIG, Author, Paper
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     deterministic_sort_key,
@@ -21,7 +21,7 @@ from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
-from tests._helpers import build_top_k_papers
+from tests._helpers import build_top_k_papers, disable_embedding_dep_checks
 
 
 class _Tagged:
@@ -61,18 +61,6 @@ def _seed_paper(paper_id: str = "seed") -> Paper:
     )
 
 
-def _disable_embedding_strategy_dep_checks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Disable embedding optional dependency checks for strategy unit tests."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
-    monkeypatch.setattr(
-        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
-    )
-
-
 def _make_constant_similarity_builder(
     builder_factory: Callable[[], object], monkeypatch: pytest.MonkeyPatch
 ) -> tuple[object, int]:
@@ -80,10 +68,10 @@ def _make_constant_similarity_builder(
     builder = builder_factory()
     if isinstance(builder, EmbeddingGraphBuilder):
         cap = builder.top_k
-        _disable_embedding_strategy_dep_checks(monkeypatch)
+        disable_embedding_dep_checks(monkeypatch)
     elif isinstance(builder, HybridGraphBuilder):
         cap = 1
-        _disable_embedding_strategy_dep_checks(monkeypatch)
+        disable_embedding_dep_checks(monkeypatch)
         monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", cap)
     else:
         cap = 1
@@ -200,6 +188,90 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
     ]
 
 
+def test_citation_collect_preserves_seed_when_relation_reuses_seed_id() -> None:
+    """Duplicate relation payloads should not unset the canonical seed marker."""
+    seed = _paper("seed", refs=["seed-ref"])
+    duplicate_seed_record = _paper("seed", year=2021)
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [duplicate_seed_record]
+    client.get_paper_citations.return_value = []
+
+    builder = CitationGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=0,
+        fetch_references=False,
+        similarity_threshold=0.0,
+        client=client,
+    )
+
+    papers = builder.collect_papers("seed")
+    assert papers["seed"].is_seed is True
+
+    graph, seed_id = builder.build_graph("seed")
+    assert seed_id == "seed"
+    assert graph.nodes["seed"]["is_seed"] is True
+
+
+def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates() -> (
+    None
+):
+    """Overlap duplicates should retain hydrated references on the canonical object."""
+    seed = _paper("seed", refs=["seed-ref"])
+    overlap_from_references = _paper("overlap")
+    overlap_from_citations = _paper("overlap")
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [overlap_from_references]
+    client.get_paper_citations.return_value = [overlap_from_citations]
+    client.get_reference_ids.return_value = ["overlap-ref"]
+
+    builder = CitationGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        fetch_references=True,
+        client=client,
+    )
+    papers = builder.collect_papers("seed")
+
+    assert papers["overlap"].references == ["overlap-ref"]
+    assert builder.seed_relations["overlap"] == "overlap"
+    client.get_reference_ids.assert_called_once_with("overlap", force_refresh=False)
+
+
+def test_citation_build_graph_persists_seed_relation_metadata() -> None:
+    """Citation graph export metadata should preserve seed relation classes."""
+    seed = _paper("seed", refs=["seed-ref"])
+    ref = _paper("ref1")
+    cit = _paper("cit1")
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [ref]
+    client.get_paper_citations.return_value = [cit]
+
+    builder = CitationGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        fetch_references=False,
+        similarity_threshold=0.0,
+        client=client,
+    )
+    graph, seed_id = builder.build_graph("seed")
+
+    assert seed_id == "seed"
+    assert graph.graph["seed_relations"] == {
+        "cit1": "cites_seed",
+        "ref1": "referenced_by_seed",
+        "seed": "seed",
+    }
+
+
 def test_refresh_reference_cache_force_lookup_contracts() -> None:
     """Refresh mode should bypass stale memory entries and force service lookups."""
     citation_client = MagicMock()
@@ -296,7 +368,7 @@ def test_hybrid_collection_merges_and_tracks_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should merge citation+semantic papers and source labels."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
 
     seed = _paper("seed")
@@ -305,6 +377,10 @@ def test_hybrid_collection_merges_and_tracks_sources(
     semantic_papers = {"c1": _paper("c1"), "s1": _paper("s1"), "s2": _paper("s2")}
 
     builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
+    builder.citation_builder.seed_relations = {
+        "seed": "seed",
+        "c1": "referenced_by_seed",
+    }
     assert builder.embedding_builder is not None
     builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
 
@@ -313,13 +389,16 @@ def test_hybrid_collection_merges_and_tracks_sources(
     assert set(papers) == {"seed", "c1", "s1", "s2"}
     assert builder.paper_sources["seed"] == "citation"
     assert builder.paper_sources["s1"] == "semantic"
+    assert builder.seed_relations["seed"] == "seed"
+    assert builder.seed_relations["c1"] == "referenced_by_seed"
+    assert builder.seed_relations["s1"] == "semantic_only"
 
 
 def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should fail when semantic enrichment cannot complete."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
 
     seed = _paper("seed")
@@ -342,7 +421,7 @@ def test_hybrid_rerank_falls_back_when_seed_embedding_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid rerank should continue when seed embedding encode is unavailable."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
     assert builder.embedding_builder is not None
 
@@ -374,7 +453,7 @@ def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid rerank should not persist citation-candidate embeddings into cache."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
     assert builder.embedding_builder is not None
 
@@ -418,7 +497,7 @@ def test_hybrid_thresholds_and_default_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid should enforce seed/non-seed threshold and semantic budget rules."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
 
     builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
     seed = _paper("seed")
@@ -444,7 +523,7 @@ def test_hybrid_semantic_branch_collects_full_citation_candidate_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid semantic mode should fetch full reference+citation candidate pools."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(
         max_papers=40,
         max_semantic=None,
@@ -462,7 +541,7 @@ def test_hybrid_propagates_refresh_reference_cache_to_citation_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid should forward refresh-reference policy to citation builder."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(
         max_papers=4,
         max_semantic=0,
@@ -477,7 +556,7 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid rerank should cap semantic-only additions while preserving overlap papers."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=5, max_semantic=1, client=MagicMock())
 
     seed = _paper("seed")
@@ -511,15 +590,69 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     assert "s2" not in papers
 
 
+def test_hybrid_collection_dedupes_semantic_seed_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid collection should collapse semantic seed aliases into the citation seed."""
+    disable_embedding_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
+
+    seed = Paper(
+        paper_id="ca997f1a733e53ad0fa29041246ff655243e8c1b",
+        title="Polynomial Composition Activations: Unleashing the Dynamics of Large Language Models",
+        year=2024,
+        abstract=(
+            "Transformers have found extensive applications across various domains due "
+            "to the powerful fitting capabilities."
+        ),
+        authors=[Author(name="Zhijian Zhou"), Author(name="Ya Wang")],
+        is_seed=True,
+    )
+    citation_papers = {"seed": seed, "c1": _paper("c1")}
+    semantic_seed_alias = Paper(
+        paper_id="arXiv:2411.03884v2",
+        title=(
+            "Polynomial Composition Activations: Unleashing the Dynamics of Large\n"
+            "  Language Models"
+        ),
+        year=2025,
+        abstract=seed.abstract,
+        authors=[Author(name="Zhijian Zhou"), Author(name="Yitao Zeng")],
+    )
+    semantic_papers = {
+        semantic_seed_alias.paper_id: semantic_seed_alias,
+        "s1": _paper("s1"),
+    }
+    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda *_args, **_kwargs: ["c1", "s1"],
+    )
+
+    papers = builder.collect_papers("arXiv:2411.03884")
+
+    assert set(papers) == {seed.paper_id, "c1", "s1"}
+    assert "arXiv:2411.03884v2" not in papers
+    assert papers[seed.paper_id].year == 2024
+    assert builder.paper_sources[seed.paper_id] == "citation"
+
+
 def test_hybrid_build_graph_skips_pruning_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid build should return parent graph unchanged when pruning disabled."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 0)
 
     builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
-    graph = np.random.default_rng(0)
+    builder.paper_sources = {"seed": "citation", "a": "semantic"}
+    builder.seed_relations = {"seed": "seed", "a": "semantic_only"}
+    graph = nx.Graph()
+    graph.add_node("seed", is_seed=True)
+    graph.add_node("a", is_seed=False)
     monkeypatch.setattr(
         "citemesh.strategies.hybrid.GraphBuilderStrategy.build_graph",
         lambda self, seed_id, **kwargs: (graph, "seed"),
@@ -528,13 +661,15 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     out_graph, out_seed = builder.build_graph("seed")
     assert out_graph is graph
     assert out_seed == "seed"
+    assert out_graph.graph["paper_sources"] == {"a": "semantic", "seed": "citation"}
+    assert out_graph.graph["seed_relations"] == {"a": "semantic_only", "seed": "seed"}
 
 
 def test_hybrid_build_graph_logs_post_cap_edge_count(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Hybrid pruning should log original and filtered edge counts."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 1)
 
     builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
@@ -604,7 +739,7 @@ def test_max_papers_is_total_node_cap_including_seed(
         return
 
     if strategy == "embedding":
-        _disable_embedding_strategy_dep_checks(monkeypatch)
+        disable_embedding_dep_checks(monkeypatch)
         builder = EmbeddingGraphBuilder(
             max_papers=3,
             model_name="dummy",
@@ -639,7 +774,7 @@ def test_max_papers_is_total_node_cap_including_seed(
         assert len(papers) == 3
         assert "seed" in papers
         return
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
 
     class FakeCitationBuilder:
         def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:
@@ -708,31 +843,45 @@ def test_degree_capping_preserves_per_node_limit(
     assert {(min(u, v), max(u, v)) for u, v in graph.edges()} == expected_edges
 
 
-def test_select_capped_undirected_edges_tie_break_and_dedupe() -> None:
-    """Equal-weight and duplicated undirected edges should stay deterministic."""
-    edges = [
-        ("b", "a", {"weight": 1.0}),
-        ("a", "b", {"weight": 0.6}),
-        ("c", "a", {"weight": 1.0}),
-        ("c", "a", {"weight": 0.9}),
-        ("b", "c", {"weight": 0.9}),
-    ]
-    selected = select_capped_undirected_edges(edges, max_edges_per_node=1)
-    assert selected == [("a", "b", 1.0)]
-
-
-def test_select_capped_undirected_edges_is_deterministic_with_mixed_id_types() -> None:
-    """Mixed node-id types should still sort using total-order key tuples."""
-    edges = [
-        (1, 2, {"weight": 0.2}),
-        (_Tagged("alpha"), _Tagged("beta"), {"weight": 0.2}),
-        ("2", 1, {"weight": 0.2}),
-        (_Tagged("01"), "01", {"weight": 0.2}),
-    ]
-
-    first = select_capped_undirected_edges(edges, max_edges_per_node=10)
-    second = select_capped_undirected_edges(edges, max_edges_per_node=10)
+@pytest.mark.parametrize(
+    ("edges", "max_edges_per_node", "expected"),
+    [
+        (
+            [
+                ("b", "a", {"weight": 1.0}),
+                ("a", "b", {"weight": 0.6}),
+                ("c", "a", {"weight": 1.0}),
+                ("c", "a", {"weight": 0.9}),
+                ("b", "c", {"weight": 0.9}),
+            ],
+            1,
+            [("a", "b", 1.0)],
+        ),
+        (
+            [
+                (1, 2, {"weight": 0.2}),
+                (_Tagged("alpha"), _Tagged("beta"), {"weight": 0.2}),
+                ("2", 1, {"weight": 0.2}),
+                (_Tagged("01"), "01", {"weight": 0.2}),
+            ],
+            10,
+            None,
+        ),
+    ],
+)
+def test_select_capped_undirected_edges_is_deterministic_and_dedupes(
+    edges: list[tuple[object, object, dict[str, float]]],
+    max_edges_per_node: int,
+    expected: Optional[list[tuple[object, object, float]]],
+) -> None:
+    """Edge capping should be deterministic across duplicate and mixed-id inputs."""
+    first = select_capped_undirected_edges(edges, max_edges_per_node=max_edges_per_node)
+    second = select_capped_undirected_edges(
+        edges, max_edges_per_node=max_edges_per_node
+    )
     assert first == second
+    if expected is not None:
+        assert first == expected
 
 
 def test_deterministic_sort_key_is_total_for_secondary_and_stable_fields() -> None:

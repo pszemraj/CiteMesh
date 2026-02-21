@@ -15,6 +15,7 @@ When `--export all` is used, CiteMesh writes:
 - `<strategy>.png` (static Matplotlib render)
 - `<strategy>.html` (Pyvis interactive network)
 - `<strategy>.plotly.html` (Plotly interactive graph)
+- `<strategy>.dashboard.html` (standalone tri-pane research dashboard)
 - `<strategy>.json` (graph data payload)
 - `<strategy>.graphml` (exchange format for Gephi/Cytoscape)
 - `<strategy>.config.json` (run config + metadata sidecar)
@@ -47,7 +48,8 @@ Examples:
 
 - `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
   writes `out/hybrid.png`, `out/hybrid.html`, `out/hybrid.plotly.html`,
-  `out/hybrid.json`, `out/hybrid.graphml`, `out/hybrid.config.json`
+  `out/hybrid.dashboard.html`, `out/hybrid.json`, `out/hybrid.graphml`,
+  `out/hybrid.config.json`
 - `citemesh build "<paper-id>" --strategy citation --export json -o report.graphml`
   writes `report.json`
 
@@ -71,10 +73,22 @@ Top-level fields:
 - `seed_id`
 - `summary` (`nodes`, `edges`)
 - `nodes` (id/title/year/authors/abstract/categories/is_seed/citation_count)
+- `nodes` (id/title/year/authors/abstract/venue/arxiv_id/doi/categories/is_seed/citation_count)
 - `edges` (`source`, `target`, `weight`, plus readable source/target title/label fields)
 
 `source`/`target` are canonical node IDs for unambiguous graph processing.
 The extra `*_title` and `*_label` fields are provided for readable inspection.
+
+### Dashboard HTML Payload Notes
+
+The embedded dashboard payload (inside `<strategy>.dashboard.html`) includes
+derived interactive fields used by the static client UI, including:
+
+- `seed_relevance` (seed-centric personalized PageRank score)
+- `provenance` / `provenance_base`
+- `seed_relation` (when strategy metadata is available)
+- `links` (arXiv/DOI/S2 URLs derived from node IDs and external IDs)
+- `bibtex` (deterministic inline entry for copy/download actions)
 
 ### Sidecar (`<strategy>.config.json`)
 

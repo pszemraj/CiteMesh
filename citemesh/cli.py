@@ -26,6 +26,7 @@ from rich.table import Table
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
+    format_bytes,
     get_cache_dir,
     validate_compression_filter,
 )
@@ -33,7 +34,13 @@ from citemesh.services import get_client
 from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE, EmbeddingGraphBuilder
-from citemesh.strategies.hybrid import DEFAULT_MAX_SEMANTIC, HybridGraphBuilder
+from citemesh.strategies.hybrid import (
+    DEFAULT_MAX_SEMANTIC,
+    HYBRID_DEFAULT_MAX_CITATIONS,
+    HYBRID_DEFAULT_MAX_PAPERS,
+    HYBRID_DEFAULT_MAX_REFERENCES,
+    HybridGraphBuilder,
+)
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.visualization import (
     GraphExporter,
@@ -43,6 +50,7 @@ from citemesh.visualization import (
 )
 
 DEFAULT_LOG_WIDTH = 140
+LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
 
 log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
@@ -97,36 +105,39 @@ def _configure_logging(
     _LOGGING_CONFIGURED = True
 
 
-def _positive_int(value: str) -> int:
-    """Parse a positive integer CLI argument.
+def _bounded_int(value: str, *, minimum: int) -> int:
+    """Parse an integer CLI argument constrained by a minimum value.
 
     :param str value: Raw argparse value.
+    :param int minimum: Inclusive lower bound for parsed values.
     :return int: Parsed integer.
-    :raises argparse.ArgumentTypeError: If value is not >= 1.
+    :raises argparse.ArgumentTypeError: If parsing fails or value is below minimum.
     """
     try:
         parsed = int(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be an integer") from exc
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
+    if parsed < minimum:
+        raise argparse.ArgumentTypeError(f"must be at least {minimum}")
     return parsed
+
+
+def _positive_int(value: str) -> int:
+    """Parse a positive integer CLI argument.
+
+    :param str value: Raw argparse value.
+    :return int: Parsed integer constrained to be >= 1.
+    """
+    return _bounded_int(value, minimum=1)
 
 
 def _non_negative_int(value: str) -> int:
     """Parse a non-negative integer CLI argument.
 
     :param str value: Raw argparse value.
-    :return int: Parsed integer.
-    :raises argparse.ArgumentTypeError: If value is negative.
+    :return int: Parsed integer constrained to be >= 0.
     """
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be an integer") from exc
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("must be at least 0")
-    return parsed
+    return _bounded_int(value, minimum=0)
 
 
 def _threshold_float(value: str) -> float:
@@ -189,11 +200,12 @@ def _add_logging_arguments(
     )
 
 
-EXPORT_FORMATS = ("png", "html", "plotly", "json", "graphml")
+EXPORT_FORMATS = ("png", "html", "plotly", "dashboard", "json", "graphml")
 EXPORT_EXTENSIONS: Dict[str, str] = {
     "png": ".png",
     "html": ".html",
     "plotly": ".plotly.html",
+    "dashboard": ".dashboard.html",
     "json": ".json",
     "graphml": ".graphml",
 }
@@ -232,6 +244,8 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "truncate_dim": {"embedding", "hybrid"},
     "streaming": {"embedding", "hybrid"},
     "force_rebuild_cache": {"embedding", "hybrid"},
+    "overwrite_cache": {"embedding", "hybrid"},
+    "cache_overwrite_reason": {"embedding", "hybrid"},
     "storage_precision": {"embedding", "hybrid"},
     "binary_prefilter": {"embedding", "hybrid"},
     "binary_rescore_multiplier": {"embedding", "hybrid"},
@@ -257,6 +271,8 @@ _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "truncate_dim": ["--truncate-dim"],
     "streaming": ["--streaming"],
     "force_rebuild_cache": ["--force-rebuild-cache"],
+    "overwrite_cache": ["--overwrite-cache"],
+    "cache_overwrite_reason": ["--cache-overwrite-reason"],
     "storage_precision": ["--storage-precision"],
     "binary_prefilter": ["--binary-prefilter", "--no-binary-prefilter"],
     "binary_rescore_multiplier": ["--binary-rescore-multiplier"],
@@ -271,6 +287,20 @@ _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
     dest: flags[0] for dest, flags in _BUILD_OPTION_FLAGS.items()
 }
 _CACHE_COMPRESSION_CHOICES = ("gzip", "lzf")
+_HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
+    "max_papers": HYBRID_DEFAULT_MAX_PAPERS,
+    "max_citations": HYBRID_DEFAULT_MAX_CITATIONS,
+    "max_references": HYBRID_DEFAULT_MAX_REFERENCES,
+}
+_VALIDATION_NORMALIZED_FIELDS: Tuple[str, ...] = (
+    "binary_prefilter",
+    "binary_rescore_multiplier",
+    "cache_compression",
+    "cache_compression_level",
+    "max_papers",
+    "max_citations",
+    "max_references",
+)
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
     "model_revision",
@@ -280,6 +310,8 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "truncate_dim",
     "streaming",
     "force_rebuild_cache",
+    "overwrite_cache",
+    "cache_overwrite_reason",
     "storage_precision",
     "binary_prefilter",
     "binary_rescore_multiplier",
@@ -312,6 +344,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "truncate_dim": cli_args.truncate_dim,
         "use_streaming": cli_args.streaming,
         "force_rebuild_cache": cli_args.force_rebuild_cache,
+        "force_rebuild_reason": getattr(cli_args, "cache_overwrite_reason", None),
         "storage_precision": cli_args.storage_precision,
         "binary_prefilter": cli_args.binary_prefilter,
         "binary_rescore_multiplier": cli_args.binary_rescore_multiplier,
@@ -321,6 +354,18 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "encode_batch_size": cli_args.encode_batch_size,
         "enable_torch_compile": cli_args.torch_compile,
     }
+
+
+def _normalized_cache_reason(raw_reason: Optional[str]) -> Optional[str]:
+    """Normalize optional cache-clear rationale into a compact single-line token.
+
+    :param Optional[str] raw_reason: Raw user-provided rationale text.
+    :return Optional[str]: Normalized reason, or ``None`` when absent.
+    """
+    if raw_reason is None:
+        return None
+    normalized = " ".join(str(raw_reason).split())
+    return normalized or None
 
 
 def _embedding_export_metadata(
@@ -351,6 +396,9 @@ def _embedding_export_metadata(
         "binary_rescore_multiplier": (
             int(cli_args.binary_rescore_multiplier) if int8_mode else 1
         ),
+        "cache_overwrite_reason": _normalized_cache_reason(
+            getattr(cli_args, "cache_overwrite_reason", None)
+        ),
     }
 
 
@@ -377,6 +425,24 @@ def _resolved_hybrid_max_semantic(cli_args: argparse.Namespace) -> int:
     if cli_args.max_semantic is None:
         return max(0, min(int(DEFAULT_MAX_SEMANTIC), int(cli_args.max_papers) - 1))
     return int(cli_args.max_semantic)
+
+
+def _apply_hybrid_default_overrides(
+    args: argparse.Namespace, provided: Set[str]
+) -> None:
+    """Apply tuned hybrid defaults when budget knobs are omitted.
+
+    :param argparse.Namespace args: Parsed build arguments.
+    :param Set[str] provided: Explicit option destinations found in argv.
+    :return None: Mutates ``args`` in place for omitted hybrid budget fields.
+    """
+    if str(args.strategy) != "hybrid":
+        return
+
+    for dest, value in _HYBRID_BEST_PRACTICE_DEFAULTS.items():
+        if dest in provided:
+            continue
+        setattr(args, dest, int(value))
 
 
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
@@ -448,9 +514,6 @@ def _collect_provided_build_option_dests(
         return set()
 
     provided: Set[str] = set()
-    if not build_parser:
-        return provided
-
     probe_parser = copy.deepcopy(build_parser)
     probe_default = object()
     for action in probe_parser._actions:
@@ -486,6 +549,7 @@ def _validate_build_cli_contract(
     :return None: Mutates normalized args for effective no-op elimination.
     """
     strategy = str(args.strategy)
+    _apply_hybrid_default_overrides(args, provided)
     unsupported: List[str] = []
     for dest in sorted(provided):
         allowed = _BUILD_STRATEGY_OPTION_SUPPORT.get(dest)
@@ -507,14 +571,38 @@ def _validate_build_cli_contract(
                 "(for example train[:5%]). Use unsliced split (e.g. train) or "
                 "disable --streaming."
             )
+        if bool(args.overwrite_cache) and not bool(args.force_rebuild_cache):
+            build_parser.error("--overwrite-cache requires --force-rebuild-cache.")
+        if _normalized_cache_reason(
+            getattr(args, "cache_overwrite_reason", None)
+        ) and not bool(args.force_rebuild_cache):
+            build_parser.error(
+                "--cache-overwrite-reason requires --force-rebuild-cache."
+            )
         if args.all_corpus and "corpus_size" in provided:
             build_parser.error(
                 "--all-corpus cannot be combined with explicit --corpus-size."
             )
         try:
-            validate_compression_filter(str(args.cache_compression))
+            args.cache_compression = validate_compression_filter(
+                str(args.cache_compression)
+            )
         except ValueError as exc:
             build_parser.error(str(exc))
+        try:
+            resolved_compression_level = int(args.cache_compression_level)
+        except (TypeError, ValueError):
+            build_parser.error("--cache-compression-level must be an integer.")
+        if resolved_compression_level < 0:
+            build_parser.error("--cache-compression-level must be at least 0.")
+        if args.cache_compression == "lzf":
+            if "cache_compression_level" in provided:
+                build_parser.error(
+                    "--cache-compression-level is unsupported with "
+                    "--cache-compression lzf."
+                )
+            resolved_compression_level = 0
+        args.cache_compression_level = int(resolved_compression_level)
         if str(args.storage_precision) != "int8":
             if "binary_prefilter" in provided and bool(args.binary_prefilter):
                 build_parser.error(
@@ -523,6 +611,10 @@ def _validate_build_cli_contract(
             if "binary_rescore_multiplier" in provided:
                 build_parser.error(
                     "--binary-rescore-multiplier requires --storage-precision int8."
+                )
+            if "calibration_sample_size" in provided:
+                build_parser.error(
+                    "--calibration-sample-size requires --storage-precision int8."
                 )
             # Normalize implicit non-int8 defaults to effective values to avoid
             # strategy-level runtime warnings about ignored options.
@@ -583,9 +675,22 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
         int(args.encode_batch_size),
     )
     if args.force_rebuild_cache:
-        logger.warning(
-            "--force-rebuild-cache enabled; existing embedding namespace payload will be cleared."
+        overwrite_reason = _normalized_cache_reason(
+            getattr(args, "cache_overwrite_reason", None)
         )
+        if bool(args.overwrite_cache):
+            logger.warning(
+                "--force-rebuild-cache enabled with --overwrite-cache; existing embedding namespace payload will be cleared without prompt."
+            )
+        else:
+            logger.warning(
+                "--force-rebuild-cache enabled; existing embedding namespace payload will be cleared after confirmation."
+            )
+        if overwrite_reason:
+            logger.warning(
+                "Cache overwrite rationale: %s",
+                overwrite_reason,
+            )
 
 
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
@@ -675,8 +780,8 @@ def _build_strategy_graph(
             _ProgrammaticBuildParser(),  # type: ignore[arg-type]
             inferred_provided,
         )
-        # Preserve validation-time no-op normalization for downstream builder parity.
-        for field in ("binary_prefilter", "binary_rescore_multiplier"):
+        # Preserve validation-time normalization for downstream builder parity.
+        for field in _VALIDATION_NORMALIZED_FIELDS:
             if hasattr(args_for_validation, field):
                 setattr(args, field, getattr(args_for_validation, field))
 
@@ -698,7 +803,10 @@ def _infer_provided_build_option_dests(
     :return Set[str]: Option destinations inferred as explicitly set.
     """
     provided: Set[str] = set()
-    for dest in _BUILD_STRATEGY_OPTION_SUPPORT:
+    for action in build_parser._actions:
+        if not action.option_strings:
+            continue
+        dest = action.dest
         if not hasattr(args, dest):
             continue
         current_value = getattr(args, dest)
@@ -788,7 +896,7 @@ Examples:
     build_parser.add_argument(
         "--export",
         "-e",
-        choices=["png", "html", "plotly", "json", "graphml", "all"],
+        choices=["png", "html", "plotly", "dashboard", "json", "graphml", "all"],
         default="png",
         help="Export format (default: png)",
     )
@@ -805,7 +913,10 @@ Examples:
         "-p",
         type=_positive_int,
         default=40,
-        help=("Maximum papers in final graph (seed included; default: 40)"),
+        help=(
+            "Maximum papers in final graph (seed included; default: 40; "
+            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_PAPERS})"
+        ),
     )
 
     build_parser.add_argument(
@@ -846,7 +957,10 @@ Examples:
         "-c",
         type=_non_negative_int,
         default=25,
-        help="Maximum citing papers to fetch (default: 25)",
+        help=(
+            "Maximum citing papers to fetch (default: 25; "
+            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_CITATIONS})"
+        ),
     )
 
     citation_group.add_argument(
@@ -854,7 +968,10 @@ Examples:
         "-r",
         type=_non_negative_int,
         default=25,
-        help="Maximum referenced papers to fetch (default: 25)",
+        help=(
+            "Maximum referenced papers to fetch (default: 25; "
+            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_REFERENCES})"
+        ),
     )
 
     citation_group.add_argument(
@@ -925,8 +1042,8 @@ Examples:
         "--top-k",
         "-k",
         type=_positive_int,
-        default=3,
-        help="Top-k neighbors per node (default: 3)",
+        default=4,
+        help="Top-k neighbors per node (default: 4)",
     )
 
     embedding_group.add_argument(
@@ -949,6 +1066,23 @@ Examples:
         "--force-rebuild-cache",
         action="store_true",
         help="Forcefully clear and rebuild embedding cache for this model before running.",
+    )
+    embedding_group.add_argument(
+        "--overwrite-cache",
+        action="store_true",
+        help=(
+            "Acknowledge destructive cache overwrite for --force-rebuild-cache and "
+            "skip interactive confirmation."
+        ),
+    )
+    embedding_group.add_argument(
+        "--cache-overwrite-reason",
+        type=str,
+        default=None,
+        help=(
+            "Optional rationale string logged when --force-rebuild-cache clears "
+            "embedding cache state."
+        ),
     )
 
     embedding_group.add_argument(
@@ -1010,7 +1144,8 @@ Examples:
         type=_non_negative_int,
         default=EMBEDDING_STORAGE_CONFIG.compression_level,
         help=(
-            "HDF5 compression level for embedding cache datasets (default: %(default)s)"
+            "HDF5 compression level for embedding cache datasets (default: %(default)s; "
+            "only applies to --cache-compression gzip)"
         ),
     )
 
@@ -1051,7 +1186,8 @@ Examples:
         help=(
             "Maximum non-seed semantic papers to add (must be <= max-papers - 1). "
             "When omitted, hybrid uses implicit citation-depth reservation before "
-            "semantic expansion (default cap: min(25, max-papers - 1))."
+            "semantic expansion (default cap: "
+            f"min({DEFAULT_MAX_SEMANTIC}, max-papers - 1))."
         ),
     )
 
@@ -1087,6 +1223,12 @@ Examples:
         "-y",
         action="store_true",
         help="Skip confirmation prompt and clear cache immediately",
+    )
+    cache_clear_parser.add_argument(
+        "--reason",
+        type=str,
+        default=None,
+        help="Optional rationale string logged when cache clear is executed.",
     )
     cache_subparsers.add_parser(
         "scan",
@@ -1241,6 +1383,10 @@ def _build_graph_config_payload(
             "encode_batch_size": int(cli_args.encode_batch_size),
             "torch_compile": bool(cli_args.torch_compile),
             "force_rebuild_cache": bool(cli_args.force_rebuild_cache),
+            "overwrite_cache": bool(cli_args.overwrite_cache),
+            "cache_overwrite_reason": _normalized_cache_reason(
+                getattr(cli_args, "cache_overwrite_reason", None)
+            ),
         }
 
     payload = {
@@ -1295,14 +1441,127 @@ def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
         return paper_id
 
 
-def _confirmed_cache_clear(cache_root: Path, assume_yes: bool) -> bool:
+def _embedding_cache_directory_stats() -> tuple[Path, int, int]:
+    """Return embedding cache directory path + file/size totals.
+
+    :return tuple[Path, int, int]: ``(path, files, size_bytes)``.
+    """
+    embedding_cache_dir = (
+        get_cache_dir("embeddings", create=False).expanduser().resolve()
+    )
+    if not embedding_cache_dir.exists():
+        return embedding_cache_dir, 0, 0
+    files, size_bytes = _scan_path_stats(embedding_cache_dir)
+    return embedding_cache_dir, files, size_bytes
+
+
+def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
+    """Confirm destructive embedding namespace rebuild requested by CLI flags.
+
+    :param argparse.Namespace args: Parsed build CLI arguments.
+    :return bool: ``True`` when build may proceed.
+    """
+    if (
+        str(args.command) != "build"
+        or str(args.strategy) not in {"embedding", "hybrid"}
+        or not bool(args.force_rebuild_cache)
+    ):
+        return True
+
+    embedding_cache_dir, total_files, total_bytes = _embedding_cache_directory_stats()
+    total_size_label = format_bytes(total_bytes)
+    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
+    large_threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+    overwrite_reason = _normalized_cache_reason(
+        getattr(args, "cache_overwrite_reason", None)
+    )
+
+    if bool(args.overwrite_cache):
+        logger.warning(
+            "--overwrite-cache acknowledged destructive rebuild "
+            "(embedding cache dir=%s files=%d size=%s).",
+            embedding_cache_dir,
+            total_files,
+            total_size_label,
+        )
+        if large_cache:
+            logger.warning(
+                "Large embedding cache footprint detected (%s >= %s).",
+                total_size_label,
+                large_threshold_label,
+            )
+        if overwrite_reason:
+            logger.warning("Cache overwrite rationale: %s", overwrite_reason)
+        return True
+
+    if not sys.stdin.isatty():
+        logger.error(
+            "Refusing --force-rebuild-cache in non-interactive mode without "
+            "--overwrite-cache. Re-run with --overwrite-cache to proceed."
+        )
+        return False
+
+    logger.warning(
+        "--force-rebuild-cache will clear the active embedding cache namespace before this run."
+    )
+    logger.warning(
+        "Embedding cache directory snapshot: root=%s files=%d size=%s.",
+        embedding_cache_dir,
+        total_files,
+        total_size_label,
+    )
+    if large_cache:
+        logger.warning(
+            "Large cache warning: %s >= %s. Clearing may require long rehydration.",
+            total_size_label,
+            large_threshold_label,
+        )
+    if overwrite_reason:
+        logger.warning("Cache overwrite rationale: %s", overwrite_reason)
+    logger.warning(
+        "Use --overwrite-cache to bypass this prompt in scripted/non-interactive workflows."
+    )
+    try:
+        response = (
+            input("Proceed with embedding cache overwrite? [y/N]: ").strip().lower()
+        )
+    except EOFError:
+        logger.error("No confirmation input received; build aborted.")
+        return False
+    return response in {"y", "yes"}
+
+
+def _confirmed_cache_clear(
+    cache_root: Path, assume_yes: bool, clear_reason: Optional[str]
+) -> bool:
     """Return whether cache directory deletion is confirmed.
 
     :param Path cache_root: Cache root directory targeted for deletion.
     :param bool assume_yes: Skip interactive prompt when ``True``.
+    :param Optional[str] clear_reason: Optional operator rationale for cache clear.
     :return bool: ``True`` if cache deletion should proceed.
     """
+    total_files, total_bytes = _scan_path_stats(cache_root)
+    total_size_label = format_bytes(total_bytes)
+    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
+    large_threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+    normalized_reason = _normalized_cache_reason(clear_reason)
+
     if assume_yes:
+        logger.warning(
+            "--yes acknowledged destructive cache clear (root=%s files=%d size=%s).",
+            cache_root,
+            total_files,
+            total_size_label,
+        )
+        if large_cache:
+            logger.warning(
+                "Large cache warning: %s >= %s.",
+                total_size_label,
+                large_threshold_label,
+            )
+        if normalized_reason:
+            logger.warning("Cache clear rationale: %s", normalized_reason)
         return True
 
     if not sys.stdin.isatty():
@@ -1312,6 +1571,20 @@ def _confirmed_cache_clear(cache_root: Path, assume_yes: bool) -> bool:
         )
         return False
 
+    logger.warning(
+        "Cache directory snapshot: root=%s files=%d size=%s.",
+        cache_root,
+        total_files,
+        total_size_label,
+    )
+    if large_cache:
+        logger.warning(
+            "Large cache warning: %s >= %s. Deletion is immediate and irreversible.",
+            total_size_label,
+            large_threshold_label,
+        )
+    if normalized_reason:
+        logger.warning("Cache clear rationale: %s", normalized_reason)
     prompt = f"Delete CiteMesh cache directory '{cache_root}'? [y/N]: "
     try:
         response = input(prompt).strip().lower()
@@ -1321,10 +1594,11 @@ def _confirmed_cache_clear(cache_root: Path, assume_yes: bool) -> bool:
     return response in {"y", "yes"}
 
 
-def _clear_cache_directory(*, assume_yes: bool) -> int:
+def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> int:
     """Clear the entire CiteMesh cache root.
 
     :param bool assume_yes: Whether to bypass interactive confirmation.
+    :param Optional[str] clear_reason: Optional operator rationale for cache clear.
     :return int: Process exit code (``0`` success, ``1`` failure/cancelled).
     """
     raw_cache_root = get_cache_dir(create=False)
@@ -1341,7 +1615,7 @@ def _clear_cache_directory(*, assume_yes: bool) -> int:
         logger.info("Cache directory does not exist: %s", cache_root)
         return 0
 
-    if not _confirmed_cache_clear(cache_root, assume_yes):
+    if not _confirmed_cache_clear(cache_root, assume_yes, clear_reason=clear_reason):
         logger.info("Cache clear aborted.")
         return 1
 
@@ -1351,27 +1625,14 @@ def _clear_cache_directory(*, assume_yes: bool) -> int:
         logger.error("Failed to clear cache directory %s: %s", cache_root, exc)
         return 1
 
-    logger.info("✓ Cleared cache directory: %s", cache_root)
+    normalized_reason = _normalized_cache_reason(clear_reason)
+    if normalized_reason:
+        logger.info(
+            "✓ Cleared cache directory: %s (reason=%s)", cache_root, normalized_reason
+        )
+    else:
+        logger.info("✓ Cleared cache directory: %s", cache_root)
     return 0
-
-
-def _format_bytes(num_bytes: int) -> str:
-    """Format byte counts into readable binary units.
-
-    :param int num_bytes: Raw byte count.
-    :return str: Human-readable size string.
-    """
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    value = float(max(num_bytes, 0))
-    unit = units[0]
-    for candidate in units:
-        unit = candidate
-        if value < 1024.0 or candidate == units[-1]:
-            break
-        value /= 1024.0
-    if unit == "B":
-        return f"{int(value)} {unit}"
-    return f"{value:.1f} {unit}"
 
 
 def _scan_path_stats(path: Path) -> tuple[int, int]:
@@ -1430,14 +1691,14 @@ def _scan_cache_directory() -> int:
 
     if section_rows:
         for name, files, size_bytes in section_rows:
-            table.add_row(name, str(files), _format_bytes(size_bytes))
+            table.add_row(name, str(files), format_bytes(size_bytes))
     else:
         table.add_row("(empty)", "0", "0 B")
 
     table.add_row(
         "[bold]TOTAL[/bold]",
         f"[bold]{total_files}[/bold]",
-        f"[bold]{_format_bytes(total_bytes)}[/bold]",
+        f"[bold]{format_bytes(total_bytes)}[/bold]",
     )
     output_console.print(table)
     return 0
@@ -1460,6 +1721,9 @@ def main() -> None:
     if args.command == "build":
         _validate_build_cli_contract(args, build_parser, provided_build_options)
         try:
+            if not _confirm_force_rebuild_cache(args):
+                logger.info("Build aborted.")
+                sys.exit(1)
             _log_build_side_effect_contract(args)
             # Build graph based on strategy
             logger.info(f"Building graph using {args.strategy} strategy...")
@@ -1512,7 +1776,9 @@ def main() -> None:
             if args.include_timestamp:
                 metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             plot_metadata = _plot_overlay_metadata(metadata)
-            layout_required = any(fmt in output_paths for fmt in ("png", "plotly"))
+            layout_required = any(
+                fmt in output_paths for fmt in ("png", "plotly", "dashboard")
+            )
             shared_layout = (
                 compute_layout(
                     graph,
@@ -1548,6 +1814,9 @@ def main() -> None:
 
             if "plotly" in output_paths:
                 exporter.to_plotly_html(output_paths["plotly"], theme=args.theme)
+
+            if "dashboard" in output_paths:
+                exporter.to_dashboard_html(output_paths["dashboard"], theme=args.theme)
 
             if "json" in output_paths:
                 exporter.to_json(output_paths["json"])
@@ -1654,7 +1923,10 @@ def main() -> None:
             if exit_code != 0:
                 sys.exit(exit_code)
         elif args.cache_command == "clear":
-            exit_code = _clear_cache_directory(assume_yes=bool(args.yes))
+            exit_code = _clear_cache_directory(
+                assume_yes=bool(args.yes),
+                clear_reason=getattr(args, "reason", None),
+            )
             if exit_code != 0:
                 sys.exit(exit_code)
         else:
