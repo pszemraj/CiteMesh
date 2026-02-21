@@ -28,6 +28,12 @@ from citemesh.cli import (
 from citemesh.core import Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE
+from citemesh.strategies.hybrid import (
+    DEFAULT_MAX_SEMANTIC,
+    HYBRID_DEFAULT_MAX_CITATIONS,
+    HYBRID_DEFAULT_MAX_PAPERS,
+    HYBRID_DEFAULT_MAX_REFERENCES,
+)
 from citemesh.visualization import generate_output_path
 from tests._helpers import (
     build_fake_exporter_factory,
@@ -87,12 +93,14 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "dataset_split": "train",
         "corpus_size": 50000,
         "all_corpus": False,
-        "top_k": 3,
+        "top_k": 4,
         "truncate_dim": None,
         "streaming": False,
         "max_semantic": None,
         "seed": 7,
         "force_rebuild_cache": False,
+        "overwrite_cache": False,
+        "cache_overwrite_reason": None,
         "storage_precision": "int8",
         "binary_prefilter": True,
         "binary_rescore_multiplier": 8,
@@ -137,11 +145,87 @@ def test_cache_commands_contracts(
     )
     assert "CiteMesh Cache Scan" in scan_debug_result.stdout
 
-    clear_result = run_cli_command(["cache", "clear", "--yes"])
+    clear_result = run_cli_command(
+        ["cache", "clear", "--yes", "--reason", "manual local reset"]
+    )
     assert clear_result.returncode == 0, (
         f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"
     )
     assert not cache_root.exists()
+
+
+def test_force_rebuild_cache_confirmation_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Force-rebuild should require explicit confirmation or overwrite acknowledgement."""
+    graph = build_seed_graph("seed")
+
+    build_graph_mock = MagicMock(return_value=(graph, "seed"))
+    monkeypatch.setattr(cli_module, "_build_strategy_graph", build_graph_mock)
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory({}, methods=("to_json",)),
+    )
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    cancelled = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--force-rebuild-cache",
+            "--export",
+            "json",
+            "-o",
+            str(Path("out") / "cancelled.json"),
+        ]
+    )
+    assert cancelled.returncode != 0
+    assert build_graph_mock.call_count == 0
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    non_interactive = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--force-rebuild-cache",
+            "--export",
+            "json",
+            "-o",
+            str(Path("out") / "non-interactive.json"),
+        ]
+    )
+    assert non_interactive.returncode != 0
+    assert any("--overwrite-cache" in str(call) for call in error_mock.call_args_list)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        acknowledged = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--force-rebuild-cache",
+                "--overwrite-cache",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ]
+        )
+        assert output.exists()
+
+    assert acknowledged.returncode == 0, (
+        f"STDOUT: {acknowledged.stdout}\nSTDERR: {acknowledged.stderr}"
+    )
 
 
 def test_cli_logging_flags_are_position_agnostic() -> None:
@@ -267,7 +351,7 @@ def test_cli_argument_validation_contracts() -> None:
 
 
 def test_cli_rejects_strategy_incompatible_options() -> None:
-    """Build should reject options that are unsupported for the selected strategy."""
+    """Build should reject unsupported options for each strategy and argv shape."""
     cases = [
         (
             [
@@ -333,31 +417,25 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
             ],
             "--top-k",
         ),
+        (
+            [
+                "--log-level",
+                "debug",
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "--top-k",
+                "4",
+            ],
+            "--top-k",
+        ),
     ]
     for args, token in cases:
         result = run_cli_command(args)
         assert result.returncode != 0
         assert "Unsupported option(s)" in result.stderr
         assert token in result.stderr
-
-
-def test_cli_rejects_strategy_incompatible_options_with_global_prefix() -> None:
-    """Unsupported build options should still fail when global flags precede build."""
-    result = run_cli_command(
-        [
-            "--log-level",
-            "debug",
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "citation",
-            "--top-k",
-            "4",
-        ]
-    )
-    assert result.returncode != 0
-    assert "Unsupported option(s)" in result.stderr
-    assert "--top-k" in result.stderr
 
 
 def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
@@ -430,6 +508,40 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "build",
                 "arxiv:1706.03762",
                 "--strategy",
+                "embedding",
+                "--overwrite-cache",
+            ],
+            "--overwrite-cache requires --force-rebuild-cache",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--cache-overwrite-reason",
+                "sync stale branch cache",
+            ],
+            "--cache-overwrite-reason requires --force-rebuild-cache",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "float32",
+                "--calibration-sample-size",
+                "512",
+            ],
+            "--calibration-sample-size requires --storage-precision int8",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
                 "hybrid",
                 "--max-semantic",
                 "0",
@@ -437,6 +549,19 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "all-MiniLM-L6-v2",
             ],
             "Hybrid semantic branch is disabled with --max-semantic 0",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--cache-compression",
+                "lzf",
+                "--cache-compression-level",
+                "0",
+            ],
+            "--cache-compression-level is unsupported with --cache-compression lzf",
         ),
         (
             [
@@ -471,10 +596,7 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid should accept embedding options when default semantic budget is non-zero."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     monkeypatch.setattr(
         cli_module,
@@ -508,12 +630,62 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
     )
 
 
+def test_embedding_lzf_compression_level_normalization_contract() -> None:
+    """Embedding validation should normalize implicit lzf compression level to 0."""
+    _, build_parser, _ = cli_module._create_parser()
+    args = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
+    )
+    cli_module._validate_build_cli_contract(
+        args, build_parser, provided={"cache_compression"}
+    )
+    assert args.cache_compression == "lzf"
+    assert args.cache_compression_level == 0
+
+
+def test_hybrid_implicit_budget_defaults_contract() -> None:
+    """Hybrid should apply tuned defaults only when budget knobs are omitted."""
+    _, build_parser, _ = cli_module._create_parser()
+    hybrid_defaults = build_parser.parse_args(["seed", "--strategy", "hybrid"])
+    cli_module._validate_build_cli_contract(
+        hybrid_defaults, build_parser, provided=set()
+    )
+    assert hybrid_defaults.max_papers == HYBRID_DEFAULT_MAX_PAPERS
+    assert hybrid_defaults.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
+    assert hybrid_defaults.max_references == HYBRID_DEFAULT_MAX_REFERENCES
+    assert cli_module._resolved_hybrid_max_semantic(hybrid_defaults) == min(
+        DEFAULT_MAX_SEMANTIC, HYBRID_DEFAULT_MAX_PAPERS - 1
+    )
+
+    explicit_hybrid = build_parser.parse_args(
+        [
+            "seed",
+            "--strategy",
+            "hybrid",
+            "--max-papers",
+            "30",
+            "--max-citations",
+            "6",
+            "--max-references",
+            "7",
+            "--max-semantic",
+            "5",
+        ]
+    )
+    cli_module._validate_build_cli_contract(
+        explicit_hybrid,
+        build_parser,
+        provided={"max_papers", "max_citations", "max_references", "max_semantic"},
+    )
+    assert explicit_hybrid.max_papers == 30
+    assert explicit_hybrid.max_citations == 6
+    assert explicit_hybrid.max_references == 7
+    assert cli_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
+
+
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build path should share seeded layout and skip it for JSON-only export."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     shared_layout = {"seed": (0.0, 0.0)}
     captured: dict[str, object] = {}
@@ -602,14 +774,85 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["layout"] is None
 
 
+def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dashboard export should resolve paths and be included in --export all."""
+    graph = build_seed_graph("seed")
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured,
+            methods=("to_dashboard_html", "to_json"),
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "-o",
+                str(output),
+            ],
+        )
+        dashboard_path = Path(tmpdir) / "graph.dashboard.html"
+        assert dashboard_path.exists()
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+
+    captured.clear()
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured,
+            methods=(
+                "to_dashboard_html",
+                "to_json",
+                "to_graphml",
+                "to_interactive_html",
+                "to_plotly_html",
+            ),
+        ),
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir) / "exports"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "all",
+                "-o",
+                str(output_dir),
+            ],
+        )
+        assert (output_dir / "recommendation.dashboard.html").exists()
+        config_files = sorted(output_dir.glob("*.config.json"))
+        assert len(config_files) == 1
+        config_payload = json.loads(config_files[0].read_text())
+        assert "dashboard" in config_payload["outputs"]
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+
+
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CLI should pass compact PNG metadata and emit one export summary line."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     captured: dict[str, object] = {}
     logged: list[str] = []
@@ -623,7 +866,13 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "GraphExporter",
         build_fake_exporter_factory(
             captured,
-            methods=("to_json", "to_graphml", "to_interactive_html", "to_plotly_html"),
+            methods=(
+                "to_json",
+                "to_graphml",
+                "to_interactive_html",
+                "to_plotly_html",
+                "to_dashboard_html",
+            ),
         ),
     )
 
@@ -703,7 +952,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             cli_module,
             "_build_strategy_graph",
-            lambda args, strategy_name, **_kwargs: (graph, "seed"),
+            lambda args, _strategy_name, **_kwargs: (graph, "seed"),
         )
         monkeypatch.setattr(
             cli_module,
@@ -759,6 +1008,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "binary_prefilter_enabled": False,
         "binary_prefilter_used_for_query": False,
         "binary_rescore_multiplier": 1,
+        "cache_overwrite_reason": None,
     }
 
     runtime_graph = nx.Graph()
@@ -790,10 +1040,7 @@ def test_embedding_build_logs_side_effect_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Embedding build should emit concise runtime config logs."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     info_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
@@ -889,6 +1136,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "truncate_dim": 64,
                 "top_k": 4,
                 "force_rebuild_cache": False,
+                "force_rebuild_reason": None,
                 "use_streaming": True,
                 "storage_precision": "int8",
                 "binary_prefilter": True,
@@ -931,6 +1179,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "truncate_dim": 64,
                 "use_streaming": True,
                 "force_rebuild_cache": False,
+                "force_rebuild_reason": None,
                 "storage_precision": "int8",
                 "binary_prefilter": True,
                 "binary_rescore_multiplier": 9,
@@ -958,6 +1207,53 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         assert captured == expected_kwargs
 
 
+def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic hybrid dispatch should carry normalized implicit defaults."""
+    _, build_parser, _ = cli_module._create_parser()
+    namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "HybridGraphBuilder",
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+
+    graph, seed_id = cli_module._build_strategy_graph(namespace, "hybrid")
+    assert seed_id == "seed"
+    assert graph.number_of_nodes() == 1
+    assert captured["max_papers"] == HYBRID_DEFAULT_MAX_PAPERS
+    assert captured["max_citations"] == HYBRID_DEFAULT_MAX_CITATIONS
+    assert captured["max_references"] == HYBRID_DEFAULT_MAX_REFERENCES
+    assert namespace.max_papers == HYBRID_DEFAULT_MAX_PAPERS
+    assert namespace.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
+    assert namespace.max_references == HYBRID_DEFAULT_MAX_REFERENCES
+
+
+def test_programmatic_embedding_dispatch_normalizes_lzf_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic embedding dispatch should pass normalized lzf level to builder."""
+    _, build_parser, _ = cli_module._create_parser()
+    namespace = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "EmbeddingGraphBuilder",
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+
+    graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
+    assert seed_id == "seed"
+    assert graph.number_of_nodes() == 1
+    assert captured["cache_compression"] == "lzf"
+    assert captured["cache_compression_level"] == 0
+    assert namespace.cache_compression_level == 0
+
+
 def test_programmatic_strategy_dispatch_contracts() -> None:
     """Programmatic dispatch should enforce strategy validation and lazy exports."""
     namespace = _dispatch_namespace()
@@ -970,6 +1266,16 @@ def test_programmatic_strategy_dispatch_contracts() -> None:
     )
     with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
         cli_module._build_strategy_graph(invalid_namespace, "recommendation")
+
+    invalid_embedding_namespace = _dispatch_namespace(
+        storage_precision="float32",
+        calibration_sample_size=512,
+    )
+    with pytest.raises(
+        ValueError,
+        match="--calibration-sample-size requires --storage-precision int8",
+    ):
+        cli_module._build_strategy_graph(invalid_embedding_namespace, "embedding")
 
     import citemesh
 
@@ -988,6 +1294,7 @@ def test_cli_help_contracts() -> None:
             [
                 "default: recommendation",
                 "--seed",
+                "dashboard",
                 "--all-corpus",
                 "--storage-precision",
                 "--binary-prefilter",
@@ -1034,6 +1341,12 @@ def test_output_path_and_slug_contracts() -> None:
             ["plotly"],
             True,
             {"plotly": Path("reports/example.plotly.html")},
+        ),
+        (
+            Path("reports/example.dashboard.html"),
+            ["dashboard"],
+            True,
+            {"dashboard": Path("reports/example.dashboard.html")},
         ),
     ]
     for base_output_path, formats, explicit_output, expected in path_cases:

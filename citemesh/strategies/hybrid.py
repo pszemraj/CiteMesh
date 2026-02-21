@@ -6,6 +6,7 @@ comprehensive paper discovery.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
@@ -15,6 +16,7 @@ from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import SemanticScholarClient, get_client
+from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     deterministic_sort_key,
@@ -28,7 +30,10 @@ from citemesh.strategies.embedding import (
 )
 
 logger = logging.getLogger(__name__)
-DEFAULT_MAX_SEMANTIC = 25
+HYBRID_DEFAULT_MAX_PAPERS = 45
+HYBRID_DEFAULT_MAX_CITATIONS = 45
+HYBRID_DEFAULT_MAX_REFERENCES = 12
+DEFAULT_MAX_SEMANTIC = 20
 HYBRID_SEMANTIC_CANDIDATE_MULTIPLIER = 3
 HYBRID_SEED_RERANK_WEIGHTS = (0.62, 0.16, 0.14, 0.08)
 HYBRID_SOURCE_OVERLAP_BONUS = 0.10
@@ -47,9 +52,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     def __init__(
         self,
-        max_papers: int = 40,
-        max_citations: int = 25,
-        max_references: int = 25,
+        max_papers: int = HYBRID_DEFAULT_MAX_PAPERS,
+        max_citations: int = HYBRID_DEFAULT_MAX_CITATIONS,
+        max_references: int = HYBRID_DEFAULT_MAX_REFERENCES,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
         max_semantic: Optional[int] = None,
@@ -60,6 +65,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         truncate_dim: Optional[int] = None,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
+        force_rebuild_reason: Optional[str] = None,
         storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
         binary_prefilter: Optional[bool] = None,
         binary_rescore_multiplier: Optional[int] = None,
@@ -80,7 +86,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param bool refresh_reference_cache: Whether citation/reference lookups bypass persisted cache reads.
         :param Optional[int] max_semantic: Maximum non-seed semantic papers added during
             enrichment. Values must satisfy ``0 <= max_semantic <= max_papers - 1``.
-            When omitted, defaults to ``min(25, max_papers - 1)``.
+            When omitted, defaults to ``min(20, max_papers - 1)``.
         :param str model_name: Embedding model name
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
@@ -88,6 +94,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
         :param bool use_streaming: Whether to stream the embedding corpus.
         :param bool force_rebuild_cache: Whether to clear embedding cache before semantic enrichment.
+        :param Optional[str] force_rebuild_reason: Optional operator rationale logged
+            when ``force_rebuild_cache`` clears embedding namespace state.
         :param str storage_precision: Persistent cache precision for semantic branch embeddings.
         :param Optional[bool] binary_prefilter: Whether semantic branch uses binary
             prefiltering. When ``None``, defaults are selected by embedding precision.
@@ -140,6 +148,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 truncate_dim=truncate_dim,
                 use_streaming=use_streaming,
                 force_rebuild_cache=force_rebuild_cache,
+                force_rebuild_reason=force_rebuild_reason,
                 storage_precision=storage_precision,
                 binary_prefilter=binary_prefilter,
                 binary_rescore_multiplier=binary_rescore_multiplier,
@@ -170,6 +179,112 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         # Track paper sources for adaptive similarity
         self.paper_sources: Dict[str, str] = {}  # paper_id -> citation|semantic|both
+        self.seed_relations: Dict[str, str] = {}
+
+    @staticmethod
+    def _normalize_identity_text(raw_text: str) -> str:
+        """Normalize free-form text for deterministic paper identity matching.
+
+        :param str raw_text: Raw user/content text.
+        :return str: Lowercased alphanumeric text with compact spacing.
+        """
+        compact = re.sub(r"[^0-9a-z]+", " ", str(raw_text).strip().lower())
+        return " ".join(compact.split())
+
+    @classmethod
+    def _paper_identity_aliases(cls, paper: Paper) -> List[str]:
+        """Return deterministic alias keys used to deduplicate equivalent papers.
+
+        :param Paper paper: Paper candidate to alias.
+        :return List[str]: Stable sorted alias keys.
+        """
+        aliases: Set[str] = set()
+        raw_id = str(paper.paper_id).strip()
+        if raw_id:
+            aliases.add(f"id:{raw_id.lower()}")
+            try:
+                aliases.add(f"id:{normalize_paper_id(raw_id).lower()}")
+            except ValueError:
+                pass
+
+        normalized_title = cls._normalize_identity_text(paper.title or "")
+        if normalized_title:
+            year_token = (
+                str(int(paper.year))
+                if isinstance(paper.year, int) and paper.year > 0
+                else "n.d."
+            )
+            aliases.add(f"meta:{normalized_title}|{year_token}")
+            normalized_abstract = cls._normalize_identity_text(paper.abstract or "")
+            if normalized_abstract:
+                aliases.add(f"meta:{normalized_title}|abs:{normalized_abstract[:256]}")
+            author_tokens = [
+                cls._normalize_identity_text(author.name)
+                for author in paper.authors[:3]
+                if getattr(author, "name", None)
+            ]
+            compact_authors = "|".join(token for token in author_tokens if token)
+            if compact_authors:
+                aliases.add(f"meta:{normalized_title}|{year_token}|{compact_authors}")
+
+        return sorted(aliases)
+
+    def _resolve_alias(self, aliases: Dict[str, str], paper: Paper) -> Optional[str]:
+        """Resolve an existing canonical paper ID from alias map.
+
+        :param Dict[str, str] aliases: Alias-to-canonical map.
+        :param Paper paper: Incoming paper payload.
+        :return Optional[str]: Canonical paper ID when already known.
+        """
+        for alias in self._paper_identity_aliases(paper):
+            canonical_id = aliases.get(alias)
+            if canonical_id is not None:
+                return canonical_id
+        return None
+
+    def _register_aliases(
+        self, aliases: Dict[str, str], canonical_id: str, paper: Paper
+    ) -> None:
+        """Register identity aliases for a canonical paper ID.
+
+        :param Dict[str, str] aliases: Alias-to-canonical map to mutate.
+        :param str canonical_id: Canonical paper identifier.
+        :param Paper paper: Paper payload providing alias candidates.
+        :return None: Alias map is mutated in place.
+        """
+        for alias in self._paper_identity_aliases(paper):
+            aliases.setdefault(alias, canonical_id)
+
+    @staticmethod
+    def _merge_seed_relation(existing: str, incoming: str) -> str:
+        """Merge two seed-relation labels conservatively.
+
+        :param str existing: Existing relation label.
+        :param str incoming: Incoming relation label.
+        :return str: Merged relation label.
+        """
+        normalized_existing = str(existing or "").strip().lower()
+        normalized_incoming = str(incoming or "").strip().lower()
+        if not normalized_existing:
+            return normalized_incoming
+        if (
+            not normalized_incoming
+            or normalized_existing == normalized_incoming
+            or normalized_existing == "seed"
+        ):
+            return normalized_existing
+        if normalized_existing == "overlap" or normalized_incoming == "overlap":
+            return "overlap"
+        if {
+            normalized_existing,
+            normalized_incoming,
+        } == {"referenced_by_seed", "cites_seed"}:
+            return "overlap"
+        if normalized_existing == "semantic_only":
+            return normalized_incoming
+        if normalized_incoming == "semantic_only":
+            return normalized_existing
+        return normalized_existing
 
     def _merge_paper_metadata(self, preferred: Paper, incoming: Paper) -> Paper:
         """Merge supplemental metadata from an alternate source into ``preferred``.
@@ -186,6 +301,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             preferred.authors = incoming.authors
         if preferred.citation_count <= 0 and incoming.citation_count > 0:
             preferred.citation_count = incoming.citation_count
+        if (not preferred.venue) and incoming.venue:
+            preferred.venue = incoming.venue
+        if (not preferred.arxiv_id) and incoming.arxiv_id:
+            preferred.arxiv_id = incoming.arxiv_id
+        if (not preferred.doi) and incoming.doi:
+            preferred.doi = incoming.doi
         if (not preferred.categories) and incoming.categories:
             preferred.categories = incoming.categories
         if (not preferred.references) and incoming.references:
@@ -203,6 +324,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             "abstract": paper.abstract or "",
             "year": paper.year,
             "authors": [author.name for author in paper.authors],
+            "venue": paper.venue or "",
+            "arxiv_id": paper.arxiv_id or "",
+            "doi": paper.doi or "",
             "categories": list(paper.categories or []),
         }
 
@@ -453,6 +577,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         papers: Dict[str, Paper] = {}
         self.paper_sources = {}
+        self.seed_relations = {}
+        alias_map: Dict[str, str] = {}
 
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")
@@ -466,14 +592,43 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             )
         papers[seed_paper.paper_id] = seed_paper
         self.paper_sources[seed_paper.paper_id] = "citation"
+        self.seed_relations[seed_paper.paper_id] = "seed"
+        self._register_aliases(alias_map, seed_paper.paper_id, seed_paper)
+        citation_seed_relations = getattr(self.citation_builder, "seed_relations", {})
 
         candidate_pool: Dict[str, Paper] = {}
         candidate_sources: Dict[str, Set[str]] = {}
-        for paper_id, paper in citation_papers.items():
-            if paper_id == seed_paper.paper_id or paper.is_seed:
+        for paper in citation_papers.values():
+            if paper.paper_id == seed_paper.paper_id or paper.is_seed:
                 continue
-            candidate_pool[paper_id] = paper
-            candidate_sources[paper_id] = {"citation"}
+            resolved = self._resolve_alias(alias_map, paper)
+            if resolved == seed_paper.paper_id:
+                papers[seed_paper.paper_id] = self._merge_paper_metadata(
+                    papers[seed_paper.paper_id], paper
+                )
+                self._register_aliases(alias_map, seed_paper.paper_id, paper)
+                continue
+            if resolved is not None:
+                candidate_pool[resolved] = self._merge_paper_metadata(
+                    candidate_pool[resolved], paper
+                )
+                candidate_sources.setdefault(resolved, set()).add("citation")
+                relation = self._merge_seed_relation(
+                    self.seed_relations.get(resolved, ""),
+                    str(citation_seed_relations.get(paper.paper_id, "citation")),
+                )
+                if relation:
+                    self.seed_relations[resolved] = relation
+                self._register_aliases(alias_map, resolved, paper)
+                continue
+
+            canonical_id = str(paper.paper_id)
+            candidate_pool[canonical_id] = paper
+            candidate_sources[canonical_id] = {"citation"}
+            relation = str(citation_seed_relations.get(paper.paper_id, "citation"))
+            if relation:
+                self.seed_relations[canonical_id] = relation
+            self._register_aliases(alias_map, canonical_id, paper)
 
         if self.embedding_builder is None:
             for paper_id, paper in candidate_pool.items():
@@ -481,6 +636,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     break
                 papers[paper_id] = paper
                 self.paper_sources[paper_id] = "citation"
+                self.seed_relations.setdefault(paper_id, "citation")
             return papers
 
         # Step 2: Enrich with semantic matches
@@ -494,6 +650,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     break
                 papers[paper_id] = candidate_pool[paper_id]
                 self.paper_sources[paper_id] = "citation"
+                self.seed_relations.setdefault(paper_id, "citation")
             return papers
 
         logger.info("Enriching with up to %s semantic matches...", semantic_budget)
@@ -503,17 +660,30 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
-        for paper_id, paper in semantic_papers.items():
+        for paper in semantic_papers.values():
             if paper.is_seed:
                 continue
-            if paper_id in candidate_pool:
-                candidate_pool[paper_id] = self._merge_paper_metadata(
-                    candidate_pool[paper_id], paper
+            resolved = self._resolve_alias(alias_map, paper)
+            if resolved == seed_paper.paper_id:
+                papers[seed_paper.paper_id] = self._merge_paper_metadata(
+                    papers[seed_paper.paper_id], paper
                 )
-                candidate_sources[paper_id].add("semantic")
+                self._register_aliases(alias_map, seed_paper.paper_id, paper)
                 continue
-            candidate_pool[paper_id] = paper
-            candidate_sources[paper_id] = {"semantic"}
+            if resolved is not None:
+                candidate_pool[resolved] = self._merge_paper_metadata(
+                    candidate_pool[resolved], paper
+                )
+                candidate_sources.setdefault(resolved, set()).add("semantic")
+                self.seed_relations.setdefault(resolved, "semantic_only")
+                self._register_aliases(alias_map, resolved, paper)
+                continue
+
+            canonical_id = str(paper.paper_id)
+            candidate_pool[canonical_id] = paper
+            candidate_sources[canonical_id] = {"semantic"}
+            self.seed_relations.setdefault(canonical_id, "semantic_only")
+            self._register_aliases(alias_map, canonical_id, paper)
 
         ranked_ids = self._rank_candidates(
             seed_paper, candidate_pool, candidate_sources
@@ -529,7 +699,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             papers[paper_id] = candidate_pool[paper_id]
             if semantic_only:
                 added_semantic += 1
+                self.seed_relations[paper_id] = self._merge_seed_relation(
+                    self.seed_relations.get(paper_id, ""),
+                    "semantic_only",
+                )
             self.paper_sources[paper_id] = "both" if len(tags) > 1 else next(iter(tags))
+            if "citation" in tags:
+                self.seed_relations.setdefault(paper_id, "citation")
 
         logger.info("Added %s semantic papers", added_semantic)
 
@@ -616,6 +792,18 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             graph.graph["embedding_runtime"] = (
                 self.embedding_builder._embedding_runtime_metadata()
             )
+        graph.graph["paper_sources"] = {
+            str(paper_id): str(source)
+            for paper_id, source in sorted(
+                self.paper_sources.items(), key=lambda item: item[0]
+            )
+        }
+        graph.graph["seed_relations"] = {
+            str(paper_id): str(relation)
+            for paper_id, relation in sorted(
+                self.seed_relations.items(), key=lambda item: item[0]
+            )
+        }
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:

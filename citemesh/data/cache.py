@@ -46,3 +46,22 @@ def get_cache_dir(*parts: str, create: bool = True) -> Path:
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def format_bytes(num_bytes: int) -> str:
+    """Format byte counts into readable binary units.
+
+    :param int num_bytes: Raw byte count.
+    :return str: Human-readable size string.
+    """
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    value = float(max(int(num_bytes), 0))
+    unit = units[0]
+    for candidate in units:
+        unit = candidate
+        if value < 1024.0 or candidate == units[-1]:
+            break
+        value /= 1024.0
+    if unit == "B":
+        return f"{int(value)} {unit}"
+    return f"{value:.1f} {unit}"

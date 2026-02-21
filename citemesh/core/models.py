@@ -45,6 +45,9 @@ class Paper:
     :ivar authors: List of authors
     :ivar citation_count: Number of times cited
     :ivar abstract: Paper abstract text
+    :ivar venue: Publication venue/journal/conference label when available
+    :ivar arxiv_id: Canonical arXiv identifier suffix when available.
+    :ivar doi: DOI suffix when available.
     :ivar categories: List of subject categories (e.g., ArXiv categories)
     :ivar references: List of paper IDs this paper references
     :ivar is_seed: Whether this is the query paper
@@ -56,6 +59,9 @@ class Paper:
     authors: List[Author] = field(default_factory=list)
     citation_count: int = 0
     abstract: str = ""
+    venue: str = ""
+    arxiv_id: str = ""
+    doi: str = ""
     categories: List[str] = field(default_factory=list)
     references: List[str] = field(default_factory=list)
     is_seed: bool = False

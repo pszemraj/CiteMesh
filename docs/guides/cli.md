@@ -26,11 +26,12 @@ citemesh search "<query>" [--limit N|-n N]
 # Cache management commands
 citemesh cache scan
 citemesh cache scan --log-level debug
-citemesh cache clear [--yes]
+citemesh cache clear [--yes] [--reason "<text>"]
 ```
 
 For cache path/layout/hydration details, see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
 In non-interactive shells, `citemesh cache clear` requires `--yes`.
+In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--overwrite-cache`.
 
 ## Accepted Identifiers
 
@@ -48,12 +49,12 @@ In non-interactive shells, `citemesh cache clear` requires `--yes`.
 | Flag | Description | Default |
 | --- | --- | --- |
 | `--strategy`, `-s` | `recommendation`, `citation`, `embedding`, or `hybrid` | `recommendation` |
-| `--max-papers`, `-p` | Maximum nodes in final graph (seed included) | `40` |
+| `--max-papers`, `-p` | Maximum nodes in final graph (seed included) | `40` (`hybrid`: implicit `45` when omitted) |
 | `--spring-iterations`, `-i` | Iterations used only for spring-layout fallback | `100` |
 | `--dpi`, `-d` | PNG output resolution | `150` |
-| `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`) | deterministic built-in seed |
+| `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`) | deterministic built-in seed |
 | `--include-timestamp` | Include generation time in output metadata | disabled |
-| `--export`, `-e` | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all` | `png` |
+| `--export`, `-e` | One of `png`, `html`, `plotly`, `dashboard`, `json`, `graphml`, or `all` | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
@@ -67,7 +68,7 @@ and multi-export runs.
 `--log-level` and `--log-width` are shared command options and are accepted for
 `build`, `search`, and `cache` command trees (including `cache scan` / `cache clear`).
 
-`--seed` controls shared layout generation for `png` and `plotly` exports. Pyvis
+`--seed` controls shared layout generation for `png`, `plotly`, and `dashboard` exports. Pyvis
 `html` exports use vis.js browser physics and do not consume this precomputed layout.
 
 Numeric validation:
@@ -75,7 +76,8 @@ Numeric validation:
 - `build <paper-id>` and `search <query>` require non-empty strings.
 - `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, and `search --limit` must be at least `1`.
 - `--max-citations` and `--max-references` must be at least `0`.
-- `--cache-compression-level` must be at least `0`.
+- `--calibration-sample-size` is valid only with `--storage-precision int8`.
+- `--cache-compression-level` must be at least `0` and is valid only with `--cache-compression gzip`.
 - `--max-semantic` must satisfy `0 <= max-semantic <= max-papers - 1` (hybrid strategy).
 - `--similarity-threshold` must be a finite float between `0.0` and `1.0`.
 
@@ -102,8 +104,8 @@ ignoring it.
 
 ### Citation Strategy
 
-- `--max-citations`, `-c`: limit number of citing papers (default `25`)
-- `--max-references`, `-r`: limit number of referenced papers (default `25`)
+- `--max-citations`, `-c`: limit number of citing papers (default `25`; hybrid implicit default `45`)
+- `--max-references`, `-r`: limit number of referenced papers (default `25`; hybrid implicit default `12`)
 - `--similarity-threshold`, `-t`: minimum edge similarity threshold (`0.0` to `1.0`, default `0.2`)
 - `--no-references`: skip reference-list fetching (faster, no bibliographic coupling)
 - `--refresh-reference-cache`: bypass persisted reference-cache reads and fetch fresh reference IDs
@@ -118,17 +120,19 @@ ignoring it.
 - For the default `librarian-bots/arxiv-metadata-snapshot` source, current ordering places the newest `update_date` rows first, so the default cap targets recent updates.
 - `--all-corpus`: remove corpus-size cap and process the full selected split
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
-- `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `3`)
+- `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
 - `--truncate-dim`: optional embedding output-dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
-- `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running
+- `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)
+- `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows)
+- `--cache-overwrite-reason`: optional rationale string logged when `--force-rebuild-cache` clears embedding cache state
 - `--storage-precision {int8,float16,float32}`: persistent embedding-cache precision (default `int8`)
 - `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). Explicit `--binary-prefilter` requires `--storage-precision int8`.
 - `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.
-- `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
+- `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`; explicit use requires `--storage-precision int8`)
 - `--encode-batch-size`: embedding-model encode batch size used during hydration/search (default `32`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
-- `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
+- `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`; unsupported with `--cache-compression lzf`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled). Compile is deferred on cold-cache hydration runs and applied on warm-cache runs.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md).
@@ -145,9 +149,13 @@ Execution transparency:
 
 - Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
 - Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
+- When omitted, hybrid applies tuned seed-discovery defaults for collection depth:
+  - `--max-papers`: `45`
+  - `--max-citations`: `45`
+  - `--max-references`: `12`
 - `--max-semantic`: maximum non-seed semantic neighbors to add after hybrid reranking.
   Valid values are `0` through `max-papers - 1`.
-  If omitted, hybrid defaults to `min(25, max-papers - 1)`.
+  If omitted, hybrid defaults to `min(20, max-papers - 1)`.
 - Hybrid adjudication policy:
   - fetches full citation candidates up to `max_references + max_citations`
   - fetches semantic candidates (expanded pool) and merges duplicates
@@ -162,6 +170,7 @@ Execution transparency:
 - `png`: Matplotlib static render with theme-aware background and labels
 - `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
 - `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
+- `dashboard`: standalone tri-pane research dashboard (list + graph + detail), written with `.dashboard.html` suffix
 - `json`: structured graph data payload (nodes/edges)
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
 - `*.config.json`: run config + metadata sidecar
@@ -183,6 +192,9 @@ citemesh build "arxiv:1706.03762" --strategy citation -p 20
 
 # Hybrid graph with all export formats
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
+
+# Dashboard-only export
+citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard --theme dark
 
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \

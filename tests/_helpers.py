@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 import networkx as nx
 import numpy as np
+import pytest
 
 from citemesh.core import Paper
 
@@ -210,6 +211,19 @@ def build_fake_exporter_factory(
             if "to_plotly_html" in requested_methods or not requested_methods:
                 path.write_text("<html/>")
 
+        def to_dashboard_html(
+            self, path: Path, *_args: object, **_kwargs: object
+        ) -> None:
+            """Write minimal dashboard HTML payload when enabled.
+
+            :param Path path: Target output path.
+            :param object _args: Ignored positional args.
+            :param object _kwargs: Ignored keyword args.
+            :return None: Writes test artifact conditionally.
+            """
+            if "to_dashboard_html" in requested_methods or not requested_methods:
+                path.write_text("<html/>")
+
         def to_graphml(self, path: Path) -> None:
             """Write minimal GraphML payload when enabled.
 
@@ -237,3 +251,17 @@ def get_paper_id_normalization_cases() -> List[tuple[str, str]]:
         ("https://arxiv.org/pdf/1706.03762v5.pdf", "arxiv:1706.03762"),
         ("https://doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
     ]
+
+
+def disable_embedding_dep_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable embedding optional dependency checks for strategy tests.
+
+    :param pytest.MonkeyPatch monkeypatch: Monkeypatch fixture.
+    :return None: Patches dependency guards in embedding/hybrid strategy modules.
+    """
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
+    )

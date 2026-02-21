@@ -39,6 +39,11 @@ For current usage details, see:
 - Added `CITEMESH_CACHE_DIR` override for custom deployments.
 - Added streaming mode for embedding corpus ingestion as an explicit opt-in.
 - Added model profiles (starting with EmbeddingGemma) for prompts/precision policy.
+- Added reason-tagged embedding namespace clear logs with payload-size/row summaries for cache invalidation transparency.
+- Added incremental full-corpus hydration growth checks so upstream row-count increases append only delta records instead of forcing full namespace rebuilds.
+- Strengthened full-corpus incremental hydration with staged tail/head delta checks plus missing-ID reconciliation fallback, and memoized duplicate-only row-count deltas to avoid repeated full-split rescans.
+- Fixed incremental full-corpus hydration to fetch tail slices (`offset=cached_rows`) so delta refreshes hydrate newly appended records instead of reloading leading rows.
+- Hardened reference-cache reuse against unreadable/non-object JSON entries and improved atomic write durability with parent-directory fsync.
 
 ## Strategy Evolution
 
@@ -52,6 +57,7 @@ For current usage details, see:
 - **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection, preventing stale cross-checkpoint reuse in shared namespaces.
 - **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
 - **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
+- **Hybrid**: updated implicit CLI defaults for omitted hybrid budgets to `max-papers=45`, `max-references=12`, `max-citations=45`, and semantic cap `min(20, max-papers - 1)` after focused fuzzy-match + abstract relevance review.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.
 - Added explicit streaming split validation for embedding mode.
@@ -61,6 +67,8 @@ For current usage details, see:
 - Added `--export all` for multi-format runs.
 - Improved parser validation and test coverage around CLI ergonomics.
 - Added embedding/hybrid cache controls: `--storage-precision`, binary prefilter toggles, binary rescore multiplier, calibration sample size, and cache compression knobs.
+- Added explicit overwrite acknowledgement for embedding cache rebuilds (`--force-rebuild-cache` + `--overwrite-cache`) with default confirmation prompts.
+- Added optional cache-clear rationale flags (`--cache-overwrite-reason`, `cache clear --reason`) and standardized destructive-clear logs with file/size snapshots and large-cache warnings.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
 - Switched multi-export explicit `--output` handling to directory-based exports with strategy-named files.
@@ -88,3 +96,14 @@ For current usage details, see:
 - Improve batching strategies for reference fetching coverage.
 - Add co-citation/shared-neighbor analytics in structured exports.
 - Provide ready-made Plotly/Dash templates for downstream analysis.
+
+### Dashboard Backlog (Tracked TODOs)
+
+- [TODO-dashboard] Add cluster-level labels/hulls in dashboard graph view (topic keyword extraction per cluster).
+- [TODO-dashboard] Add bridge-paper quick lens (betweenness/connector score + dedicated list mode).
+- [TODO-dashboard] Add graph-pane matrix toggle (adjacency heatmap ordered by cluster/relevance).
+- [TODO-dashboard] Add explicit "obscure gems" ranking lens (semantic relevance + citation-age normalization).
+- [TODO-dashboard] Add list-row relevance fingerprint meter (graph relevance + semantic/citation evidence decomposition).
+- [TODO-dashboard] Expand seed-relation facets for recommendation/embedding graphs (directed relation metadata beyond provenance/year heuristics).
+- [TODO-dashboard] Add reading-queue workflow (save/reject/note with `localStorage` export/import).
+- [TODO-dashboard] Add optional local PDF download + inline viewer workflow (`--download-pdfs` style export mode).
