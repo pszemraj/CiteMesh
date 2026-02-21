@@ -76,7 +76,7 @@ Numeric validation:
 - `build <paper-id>` and `search <query>` require non-empty strings.
 - `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, and `search --limit` must be at least `1`.
 - `--max-citations` and `--max-references` must be at least `0`.
-- `--cache-compression-level` must be at least `0`.
+- `--cache-compression-level` must be at least `0` and is valid only with `--cache-compression gzip`.
 - `--max-semantic` must satisfy `0 <= max-semantic <= max-papers - 1` (hybrid strategy).
 - `--similarity-threshold` must be a finite float between `0.0` and `1.0`.
 
@@ -131,7 +131,7 @@ ignoring it.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
 - `--encode-batch-size`: embedding-model encode batch size used during hydration/search (default `32`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
-- `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`)
+- `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`; unsupported with `--cache-compression lzf`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled). Compile is deferred on cold-cache hydration runs and applied on warm-cache runs.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md).

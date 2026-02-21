@@ -15,8 +15,11 @@ import pytest
 
 from citemesh.data.embedding_cache import (
     CALIBRATION_SAMPLE_SIZE_KEY,
+    COMPRESSION_FILTER_KEY,
+    COMPRESSION_LEVEL_KEY,
     EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR,
     EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS,
+    EMBEDDING_DATASET_CHUNK_ROWS,
     HYDRATION_COMPLETE_KEY,
     HYDRATION_CORPUS_SIZE_KEY,
     HYDRATION_DATASET_SOURCE_KEY,
@@ -386,6 +389,22 @@ def test_embedding_cache_search_rejects_non_vector_queries() -> None:
             "metadata key 'text_formatter_fingerprint' mismatch",
             id="text_formatter_fingerprint",
         ),
+        pytest.param(
+            "search-compression-filter-mismatch",
+            {"compression": "gzip"},
+            COMPRESSION_FILTER_KEY,
+            "lzf",
+            "metadata key 'compression_filter' mismatch",
+            id="compression_filter",
+        ),
+        pytest.param(
+            "search-compression-level-mismatch",
+            {"compression": "gzip", "compression_level": 1},
+            COMPRESSION_LEVEL_KEY,
+            "9",
+            "metadata key 'compression_level' mismatch",
+            id="compression_level",
+        ),
     ],
 )
 def test_embedding_cache_search_fails_closed_on_metadata_provenance_mismatch(
@@ -491,6 +510,7 @@ def test_embedding_cache_compression_codec_contracts() -> None:
             compression="lzf",
             compression_level=1,
         )
+        assert cache.compression_level == 0
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
             LookupEncodeModel(
@@ -499,9 +519,17 @@ def test_embedding_cache_compression_codec_contracts() -> None:
             show_progress=False,
         )
 
+        with sqlite3.connect(cache.db_path) as conn:
+            metadata = dict(conn.execute("SELECT key, value FROM cache_metadata"))
+            assert metadata[COMPRESSION_FILTER_KEY] == "lzf"
+            assert metadata[COMPRESSION_LEVEL_KEY] == "0"
+
         with h5py.File(cache.h5_path, "r") as h5:
             assert h5["embeddings"].compression == "lzf"
             assert h5["binary_index"].compression == "lzf"
+            assert h5["embeddings"].compression_opts is None
+            assert str(h5.attrs[COMPRESSION_FILTER_KEY]) == "lzf"
+            assert int(h5.attrs[COMPRESSION_LEVEL_KEY]) == 0
 
     with tempfile.TemporaryDirectory() as tmpdir:
         with pytest.raises(ValueError, match="compression='szip' is unsupported"):
@@ -511,6 +539,40 @@ def test_embedding_cache_compression_codec_contracts() -> None:
                 compression="szip",
                 compression_level=1,
             )
+
+
+def test_float_cache_chunk_layout_ignores_calibration_sample_size() -> None:
+    """Float cache chunk layout should not vary with int8 calibration settings."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        small = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="float-chunks-small",
+            storage_precision="float32",
+            calibration_sample_size=8,
+        )
+        large = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="float-chunks-large",
+            storage_precision="float32",
+            calibration_sample_size=4096,
+        )
+        papers = {"p1": {"title": "Alpha", "abstract": "First"}}
+        lookup = LookupEncodeModel(
+            {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+        )
+        small.get_embeddings(papers, lookup, show_progress=False)
+        large.get_embeddings(papers, lookup, show_progress=False)
+
+        with h5py.File(small.h5_path, "r") as small_h5:
+            small_chunks = small_h5["embeddings"].chunks
+            assert small_chunks[0] == EMBEDDING_DATASET_CHUNK_ROWS
+            assert "binary_index" not in small_h5
+        with h5py.File(large.h5_path, "r") as large_h5:
+            large_chunks = large_h5["embeddings"].chunks
+            assert large_chunks[0] == EMBEDDING_DATASET_CHUNK_ROWS
+            assert "binary_index" not in large_h5
+
+    assert small_chunks == large_chunks
 
 
 def test_embedding_cache_restart_persistence_contracts() -> None:

@@ -54,13 +54,14 @@ Final ranking still uses the cached `int8`/`float16`/`float32` vectors.
 
 Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
 CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected).
+`lzf` does not support configurable levels; CiteMesh normalizes level to `0`.
 Runtime availability still depends on your `h5py` build.
 
 SQLite stores metadata authority fields used for warm-cache retrieval:
 
 - `title`, `abstract`, `year`
 - `authors_json`, `categories_json`
-- runtime cache consistency keys (`storage_precision`, source torch dtype, effective embedding vector dtype, text-formatter fingerprint, binary-prefilter mode, and `int8` calibration sample size)
+- runtime cache consistency keys (`storage_precision`, source torch dtype, effective embedding vector dtype, text-formatter fingerprint, binary-prefilter mode, compression filter/level, and `int8` calibration sample size)
 - hydration metadata keys (`dataset source`, `split`, `corpus cap`, completion flag)
 - `model_fingerprint` (active model identity guard for namespace reuse)
 

@@ -544,6 +544,19 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "--strategy",
                 "embedding",
                 "--cache-compression",
+                "lzf",
+                "--cache-compression-level",
+                "0",
+            ],
+            "--cache-compression-level is unsupported with --cache-compression lzf",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--cache-compression",
                 "brotli",
             ],
             "invalid choice",
@@ -602,6 +615,19 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
     assert (
         "Hybrid semantic branch is disabled with --max-semantic 0" not in result.stderr
     )
+
+
+def test_embedding_lzf_compression_level_normalization_contract() -> None:
+    """Embedding validation should normalize implicit lzf compression level to 0."""
+    _, build_parser, _ = cli_module._create_parser()
+    args = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
+    )
+    cli_module._validate_build_cli_contract(
+        args, build_parser, provided={"cache_compression"}
+    )
+    assert args.cache_compression == "lzf"
+    assert args.cache_compression_level == 0
 
 
 def test_hybrid_implicit_budget_defaults_contract() -> None:
@@ -1190,6 +1216,29 @@ def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
     assert namespace.max_papers == HYBRID_DEFAULT_MAX_PAPERS
     assert namespace.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
     assert namespace.max_references == HYBRID_DEFAULT_MAX_REFERENCES
+
+
+def test_programmatic_embedding_dispatch_normalizes_lzf_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic embedding dispatch should pass normalized lzf level to builder."""
+    _, build_parser, _ = cli_module._create_parser()
+    namespace = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "EmbeddingGraphBuilder",
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+
+    graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
+    assert seed_id == "seed"
+    assert graph.number_of_nodes() == 1
+    assert captured["cache_compression"] == "lzf"
+    assert captured["cache_compression_level"] == 0
+    assert namespace.cache_compression_level == 0
 
 
 def test_programmatic_strategy_dispatch_contracts() -> None:

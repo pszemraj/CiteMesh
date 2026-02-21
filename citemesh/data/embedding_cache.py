@@ -50,6 +50,8 @@ SOURCE_TORCH_DTYPE_KEY = "source_torch_dtype"
 EMBEDDING_VECTOR_DTYPE_KEY = "embedding_vector_dtype"
 CALIBRATION_SAMPLE_SIZE_KEY = "calibration_sample_size"
 BINARY_PREFILTER_ENABLED_KEY = "binary_prefilter_enabled"
+COMPRESSION_FILTER_KEY = "compression_filter"
+COMPRESSION_LEVEL_KEY = "compression_level"
 HYDRATION_DATASET_SOURCE_KEY = "hydration_dataset_source"
 HYDRATION_SPLIT_KEY = "hydration_split"
 HYDRATION_CORPUS_SIZE_KEY = "hydration_corpus_size"
@@ -68,6 +70,7 @@ _COMPRESSION_FILTER_IDS = {
 _POPCOUNT_LUT = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).sum(
     axis=1
 )
+EMBEDDING_DATASET_CHUNK_ROWS = 2048
 
 
 def _resolve_cache_lock_timeout_seconds() -> float:
@@ -299,6 +302,14 @@ class EmbeddingCache:
         self.calibration_sample_size = int(calibration_sample_size)
         self.compression = validate_compression_filter(compression)
         self.compression_level = int(compression_level)
+        if self.compression_level < 0:
+            raise ValueError("compression_level must be non-negative.")
+        if self.compression == "lzf" and self.compression_level != 0:
+            logger.debug(
+                "Ignoring compression_level=%d for compression='lzf'; using 0.",
+                self.compression_level,
+            )
+            self.compression_level = 0
         self.source_torch_dtype = str(source_torch_dtype or "float32")
         self.text_formatter_fingerprint = str(text_formatter_fingerprint).strip()
         if not self.text_formatter_fingerprint:
@@ -1150,6 +1161,10 @@ class EmbeddingCache:
                 BINARY_PREFILTER_ENABLED_KEY,
                 "1" if self.binary_prefilter else "0",
             )
+            self._set_cache_metadata(conn, COMPRESSION_FILTER_KEY, self.compression)
+            self._set_cache_metadata(
+                conn, COMPRESSION_LEVEL_KEY, str(self.compression_level)
+            )
             # Preserve hydration completion across restarts; initialize only once.
             self._set_cache_metadata_default(conn, HYDRATION_COMPLETE_KEY, "0")
             self._set_cache_metadata_default(
@@ -1304,6 +1319,8 @@ class EmbeddingCache:
             EMBEDDING_VECTOR_DTYPE_KEY: self.embedding_vector_dtype,
             TEXT_FORMATTER_FINGERPRINT_KEY: self.text_formatter_fingerprint,
             BINARY_PREFILTER_ENABLED_KEY: "1" if self.binary_prefilter else "0",
+            COMPRESSION_FILTER_KEY: self.compression,
+            COMPRESSION_LEVEL_KEY: str(self.compression_level),
         }
         if self.storage_precision == "int8":
             expected[CALIBRATION_SAMPLE_SIZE_KEY] = str(self.calibration_sample_size)
@@ -1412,6 +1429,24 @@ class EmbeddingCache:
                 f"({h5_binary_prefilter!r} != {expected[BINARY_PREFILTER_ENABLED_KEY]!r})"
             )
 
+        h5_compression_filter = self._metadata_value_from_h5_attr(
+            h5_file.attrs.get(COMPRESSION_FILTER_KEY)
+        )
+        if h5_compression_filter != expected[COMPRESSION_FILTER_KEY]:
+            _fail(
+                f"HDF5 attr {COMPRESSION_FILTER_KEY!r} mismatch "
+                f"({h5_compression_filter!r} != {expected[COMPRESSION_FILTER_KEY]!r})"
+            )
+
+        h5_compression_level = self._metadata_value_from_h5_attr(
+            h5_file.attrs.get(COMPRESSION_LEVEL_KEY)
+        )
+        if h5_compression_level != expected[COMPRESSION_LEVEL_KEY]:
+            _fail(
+                f"HDF5 attr {COMPRESSION_LEVEL_KEY!r} mismatch "
+                f"({h5_compression_level!r} != {expected[COMPRESSION_LEVEL_KEY]!r})"
+            )
+
         if CALIBRATION_SAMPLE_SIZE_KEY in expected:
             h5_calibration_sample_size = self._metadata_value_from_h5_attr(
                 h5_file.attrs.get(CALIBRATION_SAMPLE_SIZE_KEY)
@@ -1429,6 +1464,18 @@ class EmbeddingCache:
                 f"embeddings dataset dtype mismatch "
                 f"({embeddings_dataset.dtype} != {target_dtype})"
             )
+        if str(embeddings_dataset.compression or "") != self.compression:
+            _fail(
+                "embeddings dataset compression mismatch "
+                f"({embeddings_dataset.compression!r} != {self.compression!r})"
+            )
+        if self.compression != "lzf":
+            actual_compression_level = embeddings_dataset.compression_opts
+            if int(actual_compression_level) != int(self.compression_level):
+                _fail(
+                    "embeddings dataset compression level mismatch "
+                    f"({actual_compression_level!r} != {self.compression_level!r})"
+                )
 
         row_count = int(embeddings_dataset.shape[0])
         cursor = conn.cursor()
@@ -1735,6 +1782,8 @@ class EmbeddingCache:
         h5_file.attrs[TEXT_FORMATTER_FINGERPRINT_KEY] = self.text_formatter_fingerprint
         h5_file.attrs[CALIBRATION_SAMPLE_SIZE_KEY] = int(self.calibration_sample_size)
         h5_file.attrs[BINARY_PREFILTER_ENABLED_KEY] = int(self.binary_prefilter)
+        h5_file.attrs[COMPRESSION_FILTER_KEY] = self.compression
+        h5_file.attrs[COMPRESSION_LEVEL_KEY] = int(self.compression_level)
 
     def _load_existing_rows(
         self,
@@ -1815,7 +1864,7 @@ class EmbeddingCache:
         """
         dataset = self._get_embeddings_dataset(h5_file)
         target_dtype = _storage_dtype_for_precision(self.storage_precision)
-        chunk_rows = max(1, min(4096, self.calibration_sample_size))
+        chunk_rows = EMBEDDING_DATASET_CHUNK_ROWS
 
         if dataset is None:
             compression_kwargs = self._dataset_compression_kwargs()
@@ -1855,7 +1904,7 @@ class EmbeddingCache:
             return None
 
         packed_dim = (int(embedding_dim) + 7) // 8
-        chunk_rows = max(1, min(4096, self.calibration_sample_size))
+        chunk_rows = EMBEDDING_DATASET_CHUNK_ROWS
         dataset = h5_file.get(BINARY_INDEX_DATASET_NAME)
         if dataset is None:
             compression_kwargs = self._dataset_compression_kwargs()

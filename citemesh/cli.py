@@ -295,6 +295,8 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
 _VALIDATION_NORMALIZED_FIELDS: Tuple[str, ...] = (
     "binary_prefilter",
     "binary_rescore_multiplier",
+    "cache_compression",
+    "cache_compression_level",
     "max_papers",
     "max_citations",
     "max_references",
@@ -582,9 +584,25 @@ def _validate_build_cli_contract(
                 "--all-corpus cannot be combined with explicit --corpus-size."
             )
         try:
-            validate_compression_filter(str(args.cache_compression))
+            args.cache_compression = validate_compression_filter(
+                str(args.cache_compression)
+            )
         except ValueError as exc:
             build_parser.error(str(exc))
+        try:
+            resolved_compression_level = int(args.cache_compression_level)
+        except (TypeError, ValueError):
+            build_parser.error("--cache-compression-level must be an integer.")
+        if resolved_compression_level < 0:
+            build_parser.error("--cache-compression-level must be at least 0.")
+        if args.cache_compression == "lzf":
+            if "cache_compression_level" in provided:
+                build_parser.error(
+                    "--cache-compression-level is unsupported with "
+                    "--cache-compression lzf."
+                )
+            resolved_compression_level = 0
+        args.cache_compression_level = int(resolved_compression_level)
         if str(args.storage_precision) != "int8":
             if "binary_prefilter" in provided and bool(args.binary_prefilter):
                 build_parser.error(
@@ -1122,7 +1140,8 @@ Examples:
         type=_non_negative_int,
         default=EMBEDDING_STORAGE_CONFIG.compression_level,
         help=(
-            "HDF5 compression level for embedding cache datasets (default: %(default)s)"
+            "HDF5 compression level for embedding cache datasets (default: %(default)s; "
+            "only applies to --cache-compression gzip)"
         ),
     )
 
