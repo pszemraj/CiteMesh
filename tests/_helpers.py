@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable, List, Sequence
 
 import networkx as nx
 import numpy as np
+import pytest
 
 from citemesh.core import Paper
 
@@ -250,3 +251,17 @@ def get_paper_id_normalization_cases() -> List[tuple[str, str]]:
         ("https://arxiv.org/pdf/1706.03762v5.pdf", "arxiv:1706.03762"),
         ("https://doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
     ]
+
+
+def disable_embedding_dep_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable embedding optional dependency checks for strategy tests.
+
+    :param pytest.MonkeyPatch monkeypatch: Monkeypatch fixture.
+    :return None: Patches dependency guards in embedding/hybrid strategy modules.
+    """
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
+    )
+    monkeypatch.setattr(
+        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
+    )

@@ -152,10 +152,7 @@ def test_force_rebuild_cache_confirmation_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Build should require confirmation for force-rebuild unless overwrite is explicit."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     build_graph_mock = MagicMock(return_value=(graph, "seed"))
     monkeypatch.setattr(cli_module, "_build_strategy_graph", build_graph_mock)
@@ -207,10 +204,7 @@ def test_force_rebuild_cache_allows_non_interactive_overwrite_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Non-interactive build should proceed when overwrite is explicitly acknowledged."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
     monkeypatch.setattr(
         cli_module,
         "_build_strategy_graph",
@@ -592,10 +586,7 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid should accept embedding options when default semantic budget is non-zero."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     monkeypatch.setattr(
         cli_module,
@@ -631,10 +622,7 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
 
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build path should share seeded layout and skip it for JSON-only export."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     shared_layout = {"seed": (0.0, 0.0)}
     captured: dict[str, object] = {}
@@ -725,10 +713,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dashboard export should resolve paths and be included in --export all."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
     monkeypatch.setattr(
         cli_module,
         "_build_strategy_graph",
@@ -804,10 +789,7 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """CLI should pass compact PNG metadata and emit one export summary line."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     captured: dict[str, object] = {}
     logged: list[str] = []
@@ -907,7 +889,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             cli_module,
             "_build_strategy_graph",
-            lambda args, strategy_name, **_kwargs: (graph, "seed"),
+            lambda args, _strategy_name, **_kwargs: (graph, "seed"),
         )
         monkeypatch.setattr(
             cli_module,
@@ -995,10 +977,7 @@ def test_embedding_build_logs_side_effect_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Embedding build should emit concise runtime config logs."""
-    graph = nx.Graph()
-    graph.add_node(
-        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
-    )
+    graph = build_seed_graph("seed")
 
     info_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)

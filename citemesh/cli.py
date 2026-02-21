@@ -26,6 +26,7 @@ from rich.table import Table
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
+    format_bytes,
     get_cache_dir,
     validate_compression_filter,
 )
@@ -98,36 +99,31 @@ def _configure_logging(
     _LOGGING_CONFIGURED = True
 
 
-def _positive_int(value: str) -> int:
-    """Parse a positive integer CLI argument.
+def _bounded_int(value: str, *, minimum: int) -> int:
+    """Parse an integer CLI argument constrained by a minimum value.
 
     :param str value: Raw argparse value.
+    :param int minimum: Inclusive lower bound for parsed values.
     :return int: Parsed integer.
-    :raises argparse.ArgumentTypeError: If value is not >= 1.
+    :raises argparse.ArgumentTypeError: If parsing fails or value is below minimum.
     """
     try:
         parsed = int(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be an integer") from exc
-    if parsed < 1:
-        raise argparse.ArgumentTypeError("must be at least 1")
+    if parsed < minimum:
+        raise argparse.ArgumentTypeError(f"must be at least {minimum}")
     return parsed
+
+
+def _positive_int(value: str) -> int:
+    """Parse a positive integer CLI argument."""
+    return _bounded_int(value, minimum=1)
 
 
 def _non_negative_int(value: str) -> int:
-    """Parse a non-negative integer CLI argument.
-
-    :param str value: Raw argparse value.
-    :return int: Parsed integer.
-    :raises argparse.ArgumentTypeError: If value is negative.
-    """
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("must be an integer") from exc
-    if parsed < 0:
-        raise argparse.ArgumentTypeError("must be at least 0")
-    return parsed
+    """Parse a non-negative integer CLI argument."""
+    return _bounded_int(value, minimum=0)
 
 
 def _threshold_float(value: str) -> float:
@@ -472,9 +468,6 @@ def _collect_provided_build_option_dests(
         return set()
 
     provided: Set[str] = set()
-    if not build_parser:
-        return provided
-
     probe_parser = copy.deepcopy(build_parser)
     probe_default = object()
     for action in probe_parser._actions:
@@ -1395,9 +1388,9 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
         return True
 
     embedding_cache_dir, total_files, total_bytes = _embedding_cache_directory_stats()
-    total_size_label = _format_bytes(total_bytes)
+    total_size_label = format_bytes(total_bytes)
     large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
-    large_threshold_label = _format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+    large_threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
     overwrite_reason = _normalized_cache_reason(
         getattr(args, "cache_overwrite_reason", None)
     )
@@ -1468,9 +1461,9 @@ def _confirmed_cache_clear(
     :return bool: ``True`` if cache deletion should proceed.
     """
     total_files, total_bytes = _scan_path_stats(cache_root)
-    total_size_label = _format_bytes(total_bytes)
+    total_size_label = format_bytes(total_bytes)
     large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
-    large_threshold_label = _format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+    large_threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
     normalized_reason = _normalized_cache_reason(clear_reason)
 
     if assume_yes:
@@ -1561,25 +1554,6 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
     return 0
 
 
-def _format_bytes(num_bytes: int) -> str:
-    """Format byte counts into readable binary units.
-
-    :param int num_bytes: Raw byte count.
-    :return str: Human-readable size string.
-    """
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    value = float(max(num_bytes, 0))
-    unit = units[0]
-    for candidate in units:
-        unit = candidate
-        if value < 1024.0 or candidate == units[-1]:
-            break
-        value /= 1024.0
-    if unit == "B":
-        return f"{int(value)} {unit}"
-    return f"{value:.1f} {unit}"
-
-
 def _scan_path_stats(path: Path) -> tuple[int, int]:
     """Return file-count and total size stats for a path.
 
@@ -1636,14 +1610,14 @@ def _scan_cache_directory() -> int:
 
     if section_rows:
         for name, files, size_bytes in section_rows:
-            table.add_row(name, str(files), _format_bytes(size_bytes))
+            table.add_row(name, str(files), format_bytes(size_bytes))
     else:
         table.add_row("(empty)", "0", "0 B")
 
     table.add_row(
         "[bold]TOTAL[/bold]",
         f"[bold]{total_files}[/bold]",
-        f"[bold]{_format_bytes(total_bytes)}[/bold]",
+        f"[bold]{format_bytes(total_bytes)}[/bold]",
     )
     output_console.print(table)
     return 0

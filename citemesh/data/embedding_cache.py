@@ -29,7 +29,7 @@ import numpy as np
 from filelock import FileLock, Timeout
 from tqdm.auto import tqdm
 
-from .cache import get_cache_dir
+from .cache import format_bytes, get_cache_dir
 from .model_profiles import DEFAULT_EMBEDDING_MODEL_NAME, compose_title_abstract_text
 
 logger = logging.getLogger(__name__)
@@ -121,25 +121,6 @@ def _corpus_size_token(corpus_size: Optional[int]) -> str:
     :return str: Tokenized corpus-size value.
     """
     return "all" if corpus_size is None else str(int(corpus_size))
-
-
-def _format_bytes(num_bytes: int) -> str:
-    """Format bytes using binary units for human-readable logs.
-
-    :param int num_bytes: Raw byte count.
-    :return str: Human-readable size string.
-    """
-    units = ("B", "KiB", "MiB", "GiB", "TiB")
-    value = float(max(int(num_bytes), 0))
-    unit = units[0]
-    for candidate in units:
-        unit = candidate
-        if value < 1024.0 or candidate == units[-1]:
-            break
-        value /= 1024.0
-    if unit == "B":
-        return f"{int(value)} {unit}"
-    return f"{value:.1f} {unit}"
 
 
 def _safe_json_list(value: Any) -> str:
@@ -1050,7 +1031,7 @@ class EmbeddingCache:
                     self.model_name,
                     normalized_reason,
                     stats.file_count,
-                    _format_bytes(stats.size_bytes),
+                    format_bytes(stats.size_bytes),
                     stats.sqlite_rows,
                     stats.embedding_rows,
                     "yes" if stats.hydration_complete else "no",

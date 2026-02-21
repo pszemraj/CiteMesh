@@ -21,7 +21,7 @@ from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
-from tests._helpers import build_top_k_papers
+from tests._helpers import build_top_k_papers, disable_embedding_dep_checks
 
 
 class _Tagged:
@@ -61,18 +61,6 @@ def _seed_paper(paper_id: str = "seed") -> Paper:
     )
 
 
-def _disable_embedding_strategy_dep_checks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Disable embedding optional dependency checks for strategy unit tests."""
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
-    monkeypatch.setattr(
-        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
-    )
-
-
 def _make_constant_similarity_builder(
     builder_factory: Callable[[], object], monkeypatch: pytest.MonkeyPatch
 ) -> tuple[object, int]:
@@ -80,10 +68,10 @@ def _make_constant_similarity_builder(
     builder = builder_factory()
     if isinstance(builder, EmbeddingGraphBuilder):
         cap = builder.top_k
-        _disable_embedding_strategy_dep_checks(monkeypatch)
+        disable_embedding_dep_checks(monkeypatch)
     elif isinstance(builder, HybridGraphBuilder):
         cap = 1
-        _disable_embedding_strategy_dep_checks(monkeypatch)
+        disable_embedding_dep_checks(monkeypatch)
         monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", cap)
     else:
         cap = 1
@@ -325,7 +313,7 @@ def test_hybrid_collection_merges_and_tracks_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should merge citation+semantic papers and source labels."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
 
     seed = _paper("seed")
@@ -355,7 +343,7 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should fail when semantic enrichment cannot complete."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
 
     seed = _paper("seed")
@@ -378,7 +366,7 @@ def test_hybrid_rerank_falls_back_when_seed_embedding_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid rerank should continue when seed embedding encode is unavailable."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
     assert builder.embedding_builder is not None
 
@@ -410,7 +398,7 @@ def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid rerank should not persist citation-candidate embeddings into cache."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
     assert builder.embedding_builder is not None
 
@@ -454,7 +442,7 @@ def test_hybrid_thresholds_and_default_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid should enforce seed/non-seed threshold and semantic budget rules."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
 
     builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
     seed = _paper("seed")
@@ -480,7 +468,7 @@ def test_hybrid_semantic_branch_collects_full_citation_candidate_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid semantic mode should fetch full reference+citation candidate pools."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(
         max_papers=40,
         max_semantic=None,
@@ -498,7 +486,7 @@ def test_hybrid_propagates_refresh_reference_cache_to_citation_branch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid should forward refresh-reference policy to citation builder."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(
         max_papers=4,
         max_semantic=0,
@@ -513,7 +501,7 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid rerank should cap semantic-only additions while preserving overlap papers."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=5, max_semantic=1, client=MagicMock())
 
     seed = _paper("seed")
@@ -551,7 +539,7 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should collapse semantic seed aliases into the citation seed."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
 
     seed = Paper(
@@ -601,7 +589,7 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid build should return parent graph unchanged when pruning disabled."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 0)
 
     builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
@@ -626,7 +614,7 @@ def test_hybrid_build_graph_logs_post_cap_edge_count(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Hybrid pruning should log original and filtered edge counts."""
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 1)
 
     builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
@@ -696,7 +684,7 @@ def test_max_papers_is_total_node_cap_including_seed(
         return
 
     if strategy == "embedding":
-        _disable_embedding_strategy_dep_checks(monkeypatch)
+        disable_embedding_dep_checks(monkeypatch)
         builder = EmbeddingGraphBuilder(
             max_papers=3,
             model_name="dummy",
@@ -731,7 +719,7 @@ def test_max_papers_is_total_node_cap_including_seed(
         assert len(papers) == 3
         assert "seed" in papers
         return
-    _disable_embedding_strategy_dep_checks(monkeypatch)
+    disable_embedding_dep_checks(monkeypatch)
 
     class FakeCitationBuilder:
         def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:
