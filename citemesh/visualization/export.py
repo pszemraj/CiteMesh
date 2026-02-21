@@ -319,6 +319,7 @@ class GraphExporter:
             theme_obj=theme_obj,
             title_prefix=None,
             margin_top=12,
+            for_dashboard=True,
         )
         div_id = self._plotly_div_id(prefix="citemesh-dashboard-plotly")
         payload = self._dashboard_payload(theme_obj=theme_obj, node_ids=node_ids)
@@ -347,6 +348,7 @@ class GraphExporter:
         theme_obj: Theme,
         title_prefix: Optional[str] = "CiteMesh",
         margin_top: int = 40,
+        for_dashboard: bool = False,
     ) -> tuple[Any, list[Hashable]]:
         """Build a deterministic Plotly figure and point-order mapping.
 
@@ -355,6 +357,8 @@ class GraphExporter:
         :param Optional[str] title_prefix: Optional title prefix. When ``None``,
             the figure omits a title.
         :param int margin_top: Top plot margin.
+        :param bool for_dashboard: Whether to apply dashboard-specific styling
+            (subtle curved edges, muted colors, and reduced label density).
         :return tuple[Any, list[Hashable]]: Plotly figure and ordered node IDs.
         """
         pos = self._get_layout()
@@ -363,13 +367,55 @@ class GraphExporter:
         for u, v, _ in self._sorted_edges():
             x0, y0 = pos[u]
             x1, y1 = pos[v]
-            edge_x.extend([float(x0), float(x1), None])
-            edge_y.extend([float(y0), float(y1), None])
+            x0f = float(x0)
+            y0f = float(y0)
+            x1f = float(x1)
+            y1f = float(y1)
+            if for_dashboard:
+                dx = x1f - x0f
+                dy = y1f - y0f
+                dist = math.hypot(dx, dy)
+                if dist <= 1e-9:
+                    edge_x.extend([x0f, x1f, None])
+                    edge_y.extend([y0f, y1f, None])
+                    continue
+                ux = -dy / dist
+                uy = dx / dist
+                key_left, key_right = sorted((str(u), str(v)))
+                digest = hashlib.sha1(
+                    f"{key_left}|{key_right}".encode("utf-8")
+                ).hexdigest()
+                direction = -1.0 if int(digest[:2], 16) % 2 else 1.0
+                jitter = 0.55 + (int(digest[2:4], 16) / 255.0) * 0.75
+                curvature = min(0.22, 0.09 * jitter)
+                mid_x = (x0f + x1f) * 0.5 + direction * ux * dist * curvature
+                mid_y = (y0f + y1f) * 0.5 + direction * uy * dist * curvature
+                edge_x.extend([x0f, mid_x, x1f, None])
+                edge_y.extend([y0f, mid_y, y1f, None])
+            else:
+                edge_x.extend([x0f, x1f, None])
+                edge_y.extend([y0f, y1f, None])
+
+        if for_dashboard:
+            edge_color = _rgb_tuple_to_rgba(theme_obj.edge_color, alpha=0.17)
+            edge_width = 0.9
+            edge_shape = "spline"
+            edge_smoothing = 0.95
+        else:
+            edge_color = _rgb_tuple_to_hex(theme_obj.edge_color)
+            edge_width = 0.5
+            edge_shape = "linear"
+            edge_smoothing = 0.0
 
         edge_trace = go.Scatter(
             x=edge_x,
             y=edge_y,
-            line=dict(width=0.5, color=_rgb_tuple_to_hex(theme_obj.edge_color)),
+            line=dict(
+                width=edge_width,
+                color=edge_color,
+                shape=edge_shape,
+                smoothing=edge_smoothing,
+            ),
             hoverinfo="none",
             mode="lines",
         )
@@ -379,12 +425,65 @@ class GraphExporter:
         node_y = [float(pos[node][1]) for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
         node_years, year_min, year_max = self._plotly_year_scale(node_ids)
-        node_labels = [
+        base_labels = [
             self.graph.nodes[node].get("paper").label
             if self.graph.nodes[node].get("paper")
             else self.graph.nodes[node].get("title", node)
             for node in node_ids
         ]
+        if for_dashboard:
+            ranked_label_nodes = sorted(
+                node_ids,
+                key=lambda node_id: (
+                    0 if bool(self.graph.nodes[node_id].get("is_seed", False)) else 1,
+                    -int(self.graph.nodes[node_id].get("citation_count", 0) or 0),
+                    self._coerce_year(self.graph.nodes[node_id].get("year")) * -1,
+                    str(node_id),
+                ),
+            )
+            label_cap = min(14, len(ranked_label_nodes))
+            label_nodes = set(ranked_label_nodes[:label_cap])
+            node_labels = [
+                str(base_labels[idx]) if node_id in label_nodes else ""
+                for idx, node_id in enumerate(node_ids)
+            ]
+            text_position = "top center"
+            text_font = dict(
+                size=10, color=_rgb_tuple_to_rgba(theme_obj.text_color, 0.78)
+            )
+            color_scale: object = [
+                [0.00, "#5a4f71"],
+                [0.20, "#5e6381"],
+                [0.40, "#4b7783"],
+                [0.60, "#5b8b8c"],
+                [0.80, "#7c9f94"],
+                [1.00, "#c8be9f"],
+            ]
+            marker_line_width = [
+                3.0 if self.graph.nodes[node].get("is_seed") else 1.25
+                for node in node_ids
+            ]
+            marker_line_color = [
+                "#d66cbf"
+                if self.graph.nodes[node].get("is_seed")
+                else _rgb_tuple_to_rgba(theme_obj.text_color, 0.35)
+                for node in node_ids
+            ]
+            marker_showscale = False
+            marker_colorbar: Optional[Dict[str, Any]] = None
+        else:
+            node_labels = [str(label) for label in base_labels]
+            text_position = "bottom center"
+            text_font = dict(size=8, color=theme_obj.text_color)
+            color_scale = "Plasma" if theme_obj.name == "dark" else "Viridis"
+            marker_line_width = 2
+            marker_line_color = theme_obj.text_color
+            marker_showscale = True
+            marker_colorbar = dict(
+                thickness=15,
+                xanchor="left",
+                title=dict(text="Year", side="right"),
+            )
 
         hover_texts = []
         for node in node_ids:
@@ -411,21 +510,17 @@ class GraphExporter:
             mode="markers+text",
             hoverinfo="text",
             text=node_labels,
-            textposition="bottom center",
-            textfont=dict(size=8, color=theme_obj.text_color),
+            textposition=text_position,
+            textfont=text_font,
             marker=dict(
                 size=node_sizes,
                 color=node_years,
                 cmin=year_min,
                 cmax=year_max,
-                colorscale="Plasma" if theme_obj.name == "dark" else "Viridis",
-                line=dict(width=2, color=theme_obj.text_color),
-                showscale=True,
-                colorbar=dict(
-                    thickness=15,
-                    xanchor="left",
-                    title=dict(text="Year", side="right"),
-                ),
+                colorscale=color_scale,
+                line=dict(width=marker_line_width, color=marker_line_color),
+                showscale=marker_showscale,
+                colorbar=marker_colorbar,
             ),
             hovertext=hover_texts,
         )
@@ -512,6 +607,18 @@ class GraphExporter:
             serialized["links"] = links
             serialized["bibtex"] = self._node_bibtex(serialized, links=links)
             node_payloads.append(serialized)
+        valid_years = [
+            int(node.get("year", 0))
+            for node in node_payloads
+            if int(node.get("year", 0)) > 0
+        ]
+        if valid_years:
+            year_range = {"min": min(valid_years), "max": max(valid_years)}
+        else:
+            year_range = {
+                "min": MISSING_YEAR_FALLBACK_MIN,
+                "max": MISSING_YEAR_FALLBACK_MAX,
+            }
 
         payload: Dict[str, Any] = {
             "meta": {
@@ -522,6 +629,7 @@ class GraphExporter:
                     "nodes": len(sorted_nodes),
                     "edges": len(sorted_edges),
                 },
+                "year_range": year_range,
                 "plotly_node_order": [str(node_id) for node_id in node_ids],
             },
             "nodes": node_payloads,
@@ -791,27 +899,98 @@ class GraphExporter:
       --accent: __ACCENT__;
       --accent-soft: __ACCENT_SOFT__;
       --graph-bg: __GRAPH_BG__;
+      --shadow-soft: rgba(0, 0, 0, 0.18);
+      --seed-ring: #d66cbf;
     }
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; background: var(--body-bg); color: var(--text-primary); font-family: "IBM Plex Sans", "Source Sans 3", "Segoe UI", sans-serif; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: radial-gradient(1200px 640px at 18% -12%, rgba(74, 163, 255, 0.12), transparent 58%),
+                  radial-gradient(900px 520px at 100% 0%, rgba(214, 108, 191, 0.08), transparent 55%),
+                  var(--body-bg);
+      color: var(--text-primary);
+      font-family: "IBM Plex Sans", "Source Sans 3", "Segoe UI", sans-serif;
+    }
+    input, select, button {
+      border: 1px solid var(--panel-border);
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.01);
+      color: var(--text-primary);
+      font-size: 13px;
+      line-height: 1.2;
+      padding: 9px 11px;
+    }
+    input::placeholder { color: var(--text-muted); }
+    button {
+      cursor: pointer;
+      transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease;
+    }
+    button:hover {
+      border-color: var(--accent);
+      background: rgba(255, 255, 255, 0.03);
+      transform: translateY(-1px);
+    }
+    #dashboard-toolbar {
+      margin: 12px 12px 0;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid var(--panel-border);
+      background: color-mix(in srgb, var(--panel-bg) 90%, transparent);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 8px 24px var(--shadow-soft);
+      display: grid;
+      gap: 8px;
+    }
+    .toolbar-row {
+      display: grid;
+      gap: 8px;
+      align-items: center;
+    }
+    .toolbar-row.primary {
+      grid-template-columns: minmax(220px, 1fr) 180px 160px;
+    }
+    .toolbar-row.secondary {
+      grid-template-columns: 140px 140px 1fr;
+    }
+    #provenance-filters {
+      display: inline-flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+    .chip {
+      width: auto;
+      border-radius: 999px;
+      padding: 6px 11px;
+      font-size: 12px;
+      letter-spacing: 0.01em;
+      color: var(--text-muted);
+    }
+    .chip.active {
+      color: var(--text-primary);
+      border-color: color-mix(in srgb, var(--accent) 70%, var(--panel-border));
+      background: var(--accent-soft);
+    }
     #dashboard-root {
       display: grid;
       gap: 12px;
       padding: 12px;
-      min-height: 100vh;
-      grid-template-columns: minmax(280px, 24vw) minmax(420px, 1fr) minmax(300px, 28vw);
+      min-height: calc(100vh - 86px);
+      grid-template-columns: minmax(260px, 26vw) minmax(520px, 1fr) minmax(320px, 29vw);
     }
     .pane {
-      background: var(--panel-bg);
+      background: color-mix(in srgb, var(--panel-bg) 94%, transparent);
       border: 1px solid var(--panel-border);
       border-radius: 12px;
       overflow: hidden;
       min-height: 0;
       display: flex;
       flex-direction: column;
+      box-shadow: 0 6px 20px var(--shadow-soft);
     }
     .pane-header {
-      padding: 10px 12px;
+      padding: 11px 12px;
       border-bottom: 1px solid var(--panel-border);
       display: flex;
       align-items: center;
@@ -821,55 +1000,10 @@ class GraphExporter:
     .pane-title {
       margin: 0;
       font-size: 15px;
-      font-weight: 700;
+      font-weight: 680;
       letter-spacing: 0.01em;
     }
-    #paper-controls {
-      padding: 10px 12px;
-      display: grid;
-      gap: 8px;
-      border-bottom: 1px solid var(--panel-border);
-    }
-    .control-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-    }
-    .control-row.single {
-      grid-template-columns: 1fr;
-    }
-    input, select, button {
-      width: 100%;
-      border: 1px solid var(--panel-border);
-      border-radius: 8px;
-      background: transparent;
-      color: var(--text-primary);
-      padding: 8px 10px;
-      font-size: 13px;
-    }
-    input::placeholder { color: var(--text-muted); }
-    button {
-      cursor: pointer;
-      transition: border-color 120ms ease, background 120ms ease;
-    }
-    button:hover { border-color: var(--accent); }
-    .chips {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .chip {
-      width: auto;
-      padding: 4px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      color: var(--text-muted);
-    }
-    .chip.active {
-      color: var(--text-primary);
-      border-color: var(--accent);
-      background: var(--accent-soft);
-    }
+    .muted { color: var(--text-muted); }
     #paper-list {
       margin: 0;
       padding: 0;
@@ -878,28 +1012,67 @@ class GraphExporter:
       flex: 1;
     }
     .paper-row {
-      border-bottom: 1px solid var(--panel-border);
-      padding: 10px 12px;
+      border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 75%, transparent);
+      padding: 11px 12px 10px;
       cursor: pointer;
       display: grid;
-      gap: 4px;
+      gap: 6px;
+      transition: background-color 120ms ease, border-left-color 120ms ease;
+      border-left: 2px solid transparent;
     }
-    .paper-row:hover { background: var(--accent-soft); }
-    .paper-row.is-hover { outline: 1px solid var(--accent); outline-offset: -1px; }
-    .paper-row.is-selected { background: var(--accent-soft); border-left: 3px solid var(--accent); }
-    .paper-title { font-size: 13px; font-weight: 600; line-height: 1.32; }
-    .paper-subline, .paper-meta { color: var(--text-muted); font-size: 12px; }
-    .badges { display: flex; gap: 6px; flex-wrap: wrap; }
-    .badge {
-      font-size: 11px;
-      padding: 2px 8px;
-      border-radius: 999px;
-      border: 1px solid var(--panel-border);
+    .paper-row:hover { background: color-mix(in srgb, var(--accent-soft) 65%, transparent); }
+    .paper-row.is-hover { border-left-color: color-mix(in srgb, var(--accent) 70%, transparent); }
+    .paper-row.is-selected {
+      border-left-color: var(--accent);
+      background: color-mix(in srgb, var(--accent-soft) 78%, transparent);
+    }
+    .paper-row-head {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: baseline;
+    }
+    .paper-title {
+      font-size: 20px;
+      font-size: clamp(13.5px, 0.88vw, 15px);
+      font-weight: 640;
+      line-height: 1.28;
+      letter-spacing: 0.003em;
+      overflow-wrap: anywhere;
+    }
+    .paper-year {
+      font-size: 12px;
+      font-weight: 560;
       color: var(--text-muted);
-      width: fit-content;
+      white-space: nowrap;
     }
-    .badge.seed { color: var(--text-primary); border-color: var(--accent); }
-    #graph-pane .pane-header { gap: 12px; }
+    .paper-subline {
+      color: color-mix(in srgb, var(--text-muted) 85%, #c9d8ee);
+      font-size: 12px;
+      line-height: 1.34;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+    }
+    .paper-meta {
+      color: var(--text-muted);
+      font-size: 11.5px;
+      letter-spacing: 0.01em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .meta-dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: color-mix(in srgb, var(--text-muted) 70%, transparent);
+      display: inline-block;
+    }
+    .meta-origin { color: color-mix(in srgb, var(--seed-ring) 82%, #f2d8ea); }
+    #graph-pane .pane-header { gap: 10px; }
     #graph-canvas-wrap {
       position: relative;
       flex: 1;
@@ -909,100 +1082,256 @@ class GraphExporter:
     #__PLOTLY_DIV_ID__ {
       width: 100%;
       height: 100%;
-      min-height: 520px;
+      min-height: 560px;
+    }
+    #graph-footer {
+      position: absolute;
+      right: 12px;
+      bottom: 10px;
+      display: grid;
+      gap: 8px;
+      align-items: end;
+      justify-items: end;
+      pointer-events: none;
     }
     #graph-legend {
-      position: absolute;
-      right: 10px;
-      bottom: 10px;
-      background: rgba(10, 14, 20, 0.78);
-      border: 1px solid var(--panel-border);
-      border-radius: 8px;
+      background: rgba(8, 12, 18, 0.72);
+      border: 1px solid color-mix(in srgb, var(--panel-border) 70%, transparent);
+      border-radius: 10px;
       padding: 8px 10px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
       font-size: 11px;
-      color: #dde8f6;
-      display: grid;
-      gap: 4px;
-      max-width: 240px;
+      color: color-mix(in srgb, var(--text-muted) 90%, #d6e2f1);
+      backdrop-filter: blur(6px);
+    }
+    .legend-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .legend-marker {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      border: 1px solid rgba(255, 255, 255, 0.42);
+    }
+    .legend-marker.seed {
+      border: 2px solid var(--seed-ring);
+      background: rgba(214, 108, 191, 0.28);
+    }
+    .legend-marker.citation { background: #7f8fa3; }
+    .legend-marker.semantic { background: #6d9f9b; }
+    .legend-marker.both { background: #a196b1; }
+    #year-timeline {
+      display: inline-grid;
+      grid-template-columns: auto minmax(190px, 240px) auto;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: color-mix(in srgb, var(--text-muted) 92%, #d8e3f2);
+      background: rgba(8, 12, 18, 0.72);
+      border: 1px solid color-mix(in srgb, var(--panel-border) 70%, transparent);
+      border-radius: 10px;
+      padding: 7px 9px;
+      backdrop-filter: blur(6px);
+    }
+    #timeline-bar {
+      height: 10px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--panel-border) 80%, transparent);
+      background: linear-gradient(90deg, #5a4f71 0%, #5e6381 20%, #4b7783 40%, #5b8b8c 60%, #7c9f94 80%, #c8be9f 100%);
     }
     #detail-content {
-      padding: 12px;
-      overflow: auto;
+      padding: 14px 13px 12px;
       flex: 1;
-      display: grid;
-      gap: 10px;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
     }
-    #detail-title { margin: 0; font-size: 18px; line-height: 1.26; }
-    #detail-subtitle, #detail-metrics { color: var(--text-muted); font-size: 13px; line-height: 1.45; }
+    #detail-title {
+      margin: 0;
+      font-size: 32px;
+      font-size: clamp(22px, 1.3vw, 28px);
+      line-height: 1.24;
+      letter-spacing: 0.006em;
+      font-weight: 700;
+    }
+    #detail-subtitle {
+      color: color-mix(in srgb, var(--text-muted) 86%, #c9d8ea);
+      font-size: 13px;
+      line-height: 1.42;
+    }
+    #detail-metrics {
+      display: flex;
+      gap: 7px;
+      flex-wrap: wrap;
+      min-height: 18px;
+    }
+    .metric-pill {
+      border: 1px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 11.5px;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.01);
+    }
+    #detail-categories {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      min-height: 17px;
+    }
+    .category-chip {
+      font-size: 11px;
+      letter-spacing: 0.01em;
+      color: color-mix(in srgb, var(--text-muted) 88%, #c7d7ec);
+      border: 1px solid color-mix(in srgb, var(--panel-border) 75%, transparent);
+      border-radius: 999px;
+      padding: 2px 8px;
+    }
     #detail-links {
       display: flex;
-      gap: 8px;
+      gap: 7px;
       flex-wrap: wrap;
+      min-height: 36px;
+      align-items: center;
     }
     #detail-links a {
-      color: var(--accent);
-      text-decoration: none;
-      font-size: 13px;
-      border: 1px solid var(--panel-border);
-      border-radius: 999px;
-      padding: 4px 10px;
-    }
-    #detail-links a:hover { border-color: var(--accent); }
-    #detail-abstract {
-      white-space: pre-wrap;
-      line-height: 1.55;
-      font-size: 13px;
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
       color: var(--text-primary);
+      text-decoration: none;
+      font-size: 12px;
+      border: 1px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
+      border-radius: 999px;
+      padding: 5px 10px;
+      background: rgba(255, 255, 255, 0.015);
+      transition: border-color 130ms ease, transform 130ms ease;
+    }
+    #detail-links a:hover {
+      border-color: color-mix(in srgb, var(--accent) 70%, var(--panel-border));
+      transform: translateY(-1px);
+    }
+    .link-icon {
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 1px solid color-mix(in srgb, var(--panel-border) 75%, transparent);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      color: color-mix(in srgb, var(--accent) 75%, #dce9fb);
+      letter-spacing: 0.02em;
+      font-weight: 640;
+      text-transform: uppercase;
     }
     #detail-actions {
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
+      min-height: 36px;
     }
-    .muted { color: var(--text-muted); }
+    #detail-actions button {
+      width: auto;
+      padding: 7px 11px;
+      font-size: 12px;
+      border-radius: 8px;
+    }
+    #detail-abstract-card {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      border: 1px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
+      border-radius: 10px;
+      padding: 10px;
+      min-height: 0;
+      flex: 1;
+      background: rgba(255, 255, 255, 0.012);
+    }
+    #detail-abstract-label {
+      margin: 0;
+      font-size: 12px;
+      color: var(--text-muted);
+      letter-spacing: 0.015em;
+      text-transform: uppercase;
+    }
+    #detail-abstract {
+      white-space: pre-wrap;
+      line-height: 1.56;
+      font-size: 14px;
+      color: var(--text-primary);
+      overflow: auto;
+      min-height: 0;
+      flex: 1;
+      padding-right: 2px;
+    }
+    @media (max-width: 1280px) {
+      #dashboard-root {
+        grid-template-columns: minmax(240px, 30vw) minmax(420px, 1fr) minmax(300px, 34vw);
+      }
+      .toolbar-row.primary { grid-template-columns: 1fr 168px 152px; }
+      .toolbar-row.secondary { grid-template-columns: 128px 128px 1fr; }
+    }
     @media (max-width: 1100px) {
+      #dashboard-toolbar {
+        position: sticky;
+        top: 0;
+        z-index: 3;
+      }
+      .toolbar-row.primary { grid-template-columns: 1fr 1fr; }
+      .toolbar-row.primary #search-input { grid-column: span 2; }
+      .toolbar-row.secondary { grid-template-columns: 1fr 1fr; }
+      #provenance-filters { justify-content: flex-start; grid-column: span 2; }
       #dashboard-root {
         grid-template-columns: 1fr;
         grid-template-areas:
           "graph"
           "detail"
           "list";
+        min-height: auto;
       }
-      #graph-pane { grid-area: graph; min-height: 480px; }
-      #detail-pane { grid-area: detail; min-height: 380px; }
-      #paper-list-pane { grid-area: list; min-height: 380px; }
+      #graph-pane { grid-area: graph; min-height: 520px; }
+      #detail-pane { grid-area: detail; min-height: 430px; }
+      #paper-list-pane { grid-area: list; min-height: 360px; }
+      #__PLOTLY_DIV_ID__ { min-height: 500px; }
     }
   </style>
 </head>
 <body>
+  <header id="dashboard-toolbar">
+    <div class="toolbar-row primary">
+      <input id="search-input" type="search" placeholder="Search title, authors, abstract..." />
+      <select id="sort-select" title="Sort papers">
+        <option value="relevance">Sort: Relevance</option>
+        <option value="year">Sort: Year</option>
+        <option value="citation_count">Sort: Citations</option>
+        <option value="title">Sort: Title</option>
+      </select>
+      <button id="clear-selection" type="button">Clear Selection</button>
+    </div>
+    <div class="toolbar-row secondary">
+      <input id="year-min" type="number" placeholder="Year min" />
+      <input id="year-max" type="number" placeholder="Year max" />
+      <div id="provenance-filters">
+        <button class="chip active" data-filter="citation" type="button">citation</button>
+        <button class="chip active" data-filter="semantic" type="button">semantic</button>
+        <button class="chip active" data-filter="both" type="button">both</button>
+      </div>
+    </div>
+  </header>
+
   <div id="dashboard-root">
     <aside id="paper-list-pane" class="pane">
       <div class="pane-header">
         <h2 class="pane-title">Papers</h2>
         <span id="paper-count" class="muted">0</span>
-      </div>
-      <div id="paper-controls">
-        <div class="control-row single">
-          <input id="search-input" type="search" placeholder="Search title, authors, abstract..." />
-        </div>
-        <div class="control-row">
-          <select id="sort-select">
-            <option value="relevance">Sort: Relevance</option>
-            <option value="year">Sort: Year</option>
-            <option value="citation_count">Sort: Citations</option>
-            <option value="title">Sort: Title</option>
-          </select>
-          <button id="clear-selection" type="button">Clear Selection</button>
-        </div>
-        <div class="control-row">
-          <input id="year-min" type="number" placeholder="Year min" />
-          <input id="year-max" type="number" placeholder="Year max" />
-        </div>
-        <div class="chips" id="provenance-filters">
-          <button class="chip active" data-filter="citation" type="button">citation</button>
-          <button class="chip active" data-filter="semantic" type="button">semantic</button>
-          <button class="chip active" data-filter="both" type="button">both</button>
-        </div>
       </div>
       <ul id="paper-list"></ul>
     </aside>
@@ -1010,15 +1339,22 @@ class GraphExporter:
     <main id="graph-pane" class="pane">
       <div class="pane-header">
         <h2 class="pane-title">Graph</h2>
-        <span class="muted">Hover to preview, click to lock</span>
+        <span id="graph-hint" class="muted">Hover to preview, click to lock</span>
       </div>
       <div id="graph-canvas-wrap">
         <div id="__PLOTLY_DIV_ID__"></div>
-        <div id="graph-legend">
-          <div><strong>Legend</strong></div>
-          <div>Seed paper is pinned and highlighted in list.</div>
-          <div>Year colors follow the graph color scale.</div>
-          <div>Provenance chips filter citation/semantic overlap.</div>
+        <div id="graph-footer">
+          <div id="graph-legend">
+            <span class="legend-item"><span class="legend-marker seed"></span>seed</span>
+            <span class="legend-item"><span class="legend-marker citation"></span>citation</span>
+            <span class="legend-item"><span class="legend-marker semantic"></span>semantic</span>
+            <span class="legend-item"><span class="legend-marker both"></span>both</span>
+          </div>
+          <div id="year-timeline">
+            <span id="timeline-year-min">-</span>
+            <div id="timeline-bar"></div>
+            <span id="timeline-year-max">-</span>
+          </div>
         </div>
       </div>
     </main>
@@ -1030,11 +1366,15 @@ class GraphExporter:
       </div>
       <div id="detail-content">
         <h3 id="detail-title">Select a paper</h3>
-        <div id="detail-subtitle" class="muted"></div>
-        <div id="detail-metrics" class="muted"></div>
+        <div id="detail-subtitle"></div>
+        <div id="detail-metrics"></div>
+        <div id="detail-categories"></div>
         <div id="detail-links"></div>
         <div id="detail-actions"></div>
-        <div id="detail-abstract" class="muted">Hover or click a paper to inspect abstract and metadata.</div>
+        <section id="detail-abstract-card">
+          <h4 id="detail-abstract-label">Abstract</h4>
+          <div id="detail-abstract" class="muted">Hover or click a paper to inspect abstract and metadata.</div>
+        </section>
       </div>
     </aside>
   </div>
@@ -1048,10 +1388,34 @@ class GraphExporter:
     const graphDiv = document.getElementById("__PLOTLY_DIV_ID__");
 
     const nodes = payload.nodes || [];
-    const edges = payload.edges || [];
     const nodeOrder = (payload.meta && payload.meta.plotly_node_order) || [];
     const nodeById = new Map(nodes.map((node) => [node.id, node]));
     const nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
+    const yearRange = (payload.meta && payload.meta.year_range) || {};
+
+    function normalizeArray(rawValue, length, fallbackValue) {
+      if (Array.isArray(rawValue)) {
+        if (rawValue.length >= length) {
+          return rawValue.slice(0, length).map((value) => Number(value));
+        }
+        const expanded = rawValue.map((value) => Number(value));
+        while (expanded.length < length) {
+          expanded.push(fallbackValue);
+        }
+        return expanded;
+      }
+      const scalar = Number(rawValue);
+      const safe = Number.isFinite(scalar) ? scalar : fallbackValue;
+      return Array.from({ length }, () => safe);
+    }
+
+    const markerSource = ((figureSpec.data || [])[1] || {}).marker || {};
+    const defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
+    const defaultLineWidths = normalizeArray(markerSource.line && markerSource.line.width, nodeOrder.length, 1.3);
+    const defaultLineColors = nodeOrder.map((nodeId) => {
+      const node = nodeById.get(nodeId);
+      return node && node.is_seed ? "rgba(214,108,191,0.9)" : "rgba(228,236,246,0.34)";
+    });
 
     const state = {
       selectedId: (payload.meta && payload.meta.seed_id) || null,
@@ -1061,6 +1425,7 @@ class GraphExporter:
       sortKey: "relevance",
       yearMin: null,
       yearMax: null,
+      visibleIds: new Set(nodeOrder),
     };
 
     const controls = {
@@ -1076,9 +1441,13 @@ class GraphExporter:
       detailTitle: document.getElementById("detail-title"),
       detailSubtitle: document.getElementById("detail-subtitle"),
       detailMetrics: document.getElementById("detail-metrics"),
+      detailCategories: document.getElementById("detail-categories"),
       detailLinks: document.getElementById("detail-links"),
       detailActions: document.getElementById("detail-actions"),
       detailAbstract: document.getElementById("detail-abstract"),
+      graphHint: document.getElementById("graph-hint"),
+      timelineYearMin: document.getElementById("timeline-year-min"),
+      timelineYearMax: document.getElementById("timeline-year-max"),
     };
 
     function escapeHtml(value) {
@@ -1091,7 +1460,7 @@ class GraphExporter:
     }
 
     function hasYear(node) {
-      return Number.isFinite(node.year) && Number(node.year) > 0;
+      return Number.isFinite(Number(node.year)) && Number(node.year) > 0;
     }
 
     function nodeFilterClass(node) {
@@ -1174,27 +1543,30 @@ class GraphExporter:
       return selected;
     }
 
-    function detailLinksHtml(links) {
+    function detailLinkEntries(links) {
       const entries = [];
-      if (links && links.arxiv_abs) {
-        entries.push(["arXiv", links.arxiv_abs]);
-      }
       if (links && links.arxiv_pdf) {
-        entries.push(["PDF", links.arxiv_pdf]);
+        entries.push({ label: "PDF", short: "PDF", href: links.arxiv_pdf });
+      }
+      if (links && links.arxiv_abs) {
+        entries.push({ label: "arXiv", short: "arX", href: links.arxiv_abs });
       }
       if (links && links.doi) {
-        entries.push(["DOI", links.doi]);
+        entries.push({ label: "DOI", short: "DOI", href: links.doi });
       }
       if (links && links.semantic_scholar) {
-        entries.push(["Semantic Scholar", links.semantic_scholar]);
+        entries.push({ label: "S2", short: "S2", href: links.semantic_scholar });
       }
+      return entries;
+    }
+
+    function detailLinksHtml(links) {
+      const entries = detailLinkEntries(links);
       if (!entries.length) {
         return "";
       }
       return entries
-        .map(([label, href]) =>
-          `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`
-        )
+        .map((entry) => `<a href="${escapeHtml(entry.href)}" target="_blank" rel="noopener noreferrer"><span class="link-icon">${escapeHtml(entry.short)}</span><span>${escapeHtml(entry.label)}</span></a>`)
         .join("");
     }
 
@@ -1221,33 +1593,41 @@ class GraphExporter:
         controls.detailMode.textContent = "No selection";
         controls.detailTitle.textContent = "Select a paper";
         controls.detailSubtitle.textContent = "";
-        controls.detailMetrics.textContent = "";
+        controls.detailMetrics.innerHTML = "";
+        controls.detailCategories.innerHTML = "";
         controls.detailLinks.innerHTML = "";
         controls.detailActions.innerHTML = "";
         controls.detailAbstract.textContent = "Hover or click a paper to inspect abstract and metadata.";
         controls.detailAbstract.classList.add("muted");
+        controls.graphHint.textContent = "Hover to preview, click to lock";
         return;
       }
 
       controls.detailMode.textContent = previewOnly ? "Preview" : "Selected";
+      controls.graphHint.textContent = previewOnly ? "Previewing node" : "Selection locked";
       controls.detailTitle.textContent = node.title || node.id;
       const authors = Array.isArray(node.authors) && node.authors.length ? node.authors.join(", ") : "Unknown authors";
       const yearText = hasYear(node) ? String(node.year) : "n.d.";
       controls.detailSubtitle.textContent = `${authors} | ${yearText}`;
 
-      const metrics = [];
-      metrics.push(`Citations: ${Number(node.citation_count || 0).toLocaleString()}`);
       const provenance = node.provenance || "unknown";
       const provenanceLabel = provenance === "seed" ? `seed (${node.provenance_base || "citation"})` : provenance;
-      metrics.push(`Source: ${provenanceLabel}`);
-      const categories = Array.isArray(node.categories) ? node.categories.filter(Boolean) : [];
-      if (categories.length) {
-        metrics.push(`Categories: ${categories.slice(0, 5).join(", ")}`);
-      }
-      controls.detailMetrics.textContent = metrics.join(" | ");
+      const metrics = [
+        `Citations: ${Number(node.citation_count || 0).toLocaleString()}`,
+        `Source: ${provenanceLabel}`,
+        `Year: ${yearText}`,
+      ];
+      controls.detailMetrics.innerHTML = metrics
+        .map((metric) => `<span class="metric-pill">${escapeHtml(metric)}</span>`)
+        .join("");
+
+      const categories = Array.isArray(node.categories) ? node.categories.filter(Boolean).slice(0, 8) : [];
+      controls.detailCategories.innerHTML = categories
+        .map((category) => `<span class="category-chip">${escapeHtml(category)}</span>`)
+        .join("");
 
       controls.detailLinks.innerHTML = detailLinksHtml(node.links || {});
-      controls.detailAbstract.textContent = node.abstract || "No abstract available.";
+      controls.detailAbstract.textContent = node.abstract || "No abstract available for this record.";
       controls.detailAbstract.classList.toggle("muted", !node.abstract);
 
       controls.detailActions.innerHTML = "";
@@ -1290,24 +1670,40 @@ class GraphExporter:
       });
     }
 
-    const defaultLineWidths = nodeOrder.map((nodeId) => {
-      const node = nodeById.get(nodeId);
-      return node && node.is_seed ? 4 : 2;
-    });
-
     function syncGraphHighlights() {
+      if (!(window.Plotly && graphDiv && graphDiv.data && graphDiv.data.length > 1)) {
+        return;
+      }
       const lineWidths = defaultLineWidths.slice();
+      const lineColors = defaultLineColors.slice();
+      const nodeSizes = defaultNodeSizes.slice();
+      const markerOpacity = nodeOrder.map((nodeId) => (state.visibleIds.has(nodeId) ? 0.94 : 0.17));
+
       if (state.hoverId && nodeIndexById.has(state.hoverId)) {
         const idx = nodeIndexById.get(state.hoverId);
-        lineWidths[idx] = Math.max(lineWidths[idx], 5);
+        lineWidths[idx] = Math.max(lineWidths[idx], 4.2);
+        lineColors[idx] = "rgba(235,182,255,0.95)";
+        nodeSizes[idx] = nodeSizes[idx] * 1.09;
+        markerOpacity[idx] = 1;
       }
       if (state.selectedId && nodeIndexById.has(state.selectedId)) {
         const idx = nodeIndexById.get(state.selectedId);
         lineWidths[idx] = 6;
+        lineColors[idx] = "rgba(238,129,204,0.98)";
+        nodeSizes[idx] = nodeSizes[idx] * 1.15;
+        markerOpacity[idx] = 1;
       }
-      if (window.Plotly && graphDiv && graphDiv.data && graphDiv.data.length > 1) {
-        Plotly.restyle(graphDiv, { "marker.line.width": [lineWidths] }, [1]);
-      }
+
+      Plotly.restyle(
+        graphDiv,
+        {
+          "marker.line.width": [lineWidths],
+          "marker.line.color": [lineColors],
+          "marker.size": [nodeSizes],
+          "marker.opacity": [markerOpacity],
+        },
+        [1]
+      );
     }
 
     function syncHighlights() {
@@ -1319,12 +1715,17 @@ class GraphExporter:
       const listNodes = filteredNodes();
       controls.count.textContent = `${listNodes.length.toLocaleString()} papers`;
       controls.list.innerHTML = "";
+      state.visibleIds = new Set(listNodes.map((node) => node.id));
+      if (state.selectedId && nodeById.has(state.selectedId)) {
+        state.visibleIds.add(state.selectedId);
+      }
 
       if (!listNodes.length) {
         const empty = document.createElement("li");
         empty.className = "paper-row";
         empty.innerHTML = '<div class="paper-title">No papers match current filters.</div>';
         controls.list.appendChild(empty);
+        syncHighlights();
         return;
       }
 
@@ -1334,19 +1735,24 @@ class GraphExporter:
         row.setAttribute("data-node-id", node.id);
 
         const yearText = hasYear(node) ? String(node.year) : "n.d.";
-        const authors = Array.isArray(node.authors) && node.authors.length ? node.authors.slice(0, 3).join(", ") : "Unknown authors";
-        const provenance = node.provenance || "unknown";
-        const badges = [];
-        if (node.is_seed) {
-          badges.push('<span class="badge seed">seed</span>');
-        }
-        badges.push(`<span class="badge">${escapeHtml(provenance)}</span>`);
+        const authors = Array.isArray(node.authors) && node.authors.length
+          ? node.authors.slice(0, 4).join(", ")
+          : "Unknown authors";
+        const provenance = String(node.provenance_base || node.provenance || "citation");
+        const provenanceClass = node.is_seed ? "meta-origin" : "";
+        const provenanceLabel = node.is_seed ? "origin" : provenance;
 
         row.innerHTML = `
-          <div class="paper-title">${escapeHtml(node.title || node.id)}</div>
+          <div class="paper-row-head">
+            <div class="paper-title">${escapeHtml(node.title || node.id)}</div>
+            <div class="paper-year">${escapeHtml(yearText)}</div>
+          </div>
           <div class="paper-subline">${escapeHtml(authors)}</div>
-          <div class="paper-meta">${escapeHtml(yearText)} | Citations: ${Number(node.citation_count || 0).toLocaleString()}</div>
-          <div class="badges">${badges.join("")}</div>
+          <div class="paper-meta">
+            <span>${Number(node.citation_count || 0).toLocaleString()} citations</span>
+            <span class="meta-dot"></span>
+            <span class="${provenanceClass}">${escapeHtml(provenanceLabel)}</span>
+          </div>
         `;
 
         row.addEventListener("mouseenter", () => {
@@ -1385,13 +1791,15 @@ class GraphExporter:
         renderList();
       });
       controls.yearMin.addEventListener("input", (event) => {
-        const value = event.target.value;
-        state.yearMin = value === "" ? null : Number(value);
+        const value = String(event.target.value || "").trim();
+        const parsed = Number(value);
+        state.yearMin = value === "" || !Number.isFinite(parsed) ? null : parsed;
         renderList();
       });
       controls.yearMax.addEventListener("input", (event) => {
-        const value = event.target.value;
-        state.yearMax = value === "" ? null : Number(value);
+        const value = String(event.target.value || "").trim();
+        const parsed = Number(value);
+        state.yearMax = value === "" || !Number.isFinite(parsed) ? null : parsed;
         renderList();
       });
       controls.clearSelection.addEventListener("click", () => {
@@ -1471,8 +1879,16 @@ class GraphExporter:
       });
     }
 
+    function renderTimeline() {
+      const minYear = Number(yearRange.min || 0);
+      const maxYear = Number(yearRange.max || 0);
+      controls.timelineYearMin.textContent = minYear > 0 ? String(minYear) : "-";
+      controls.timelineYearMax.textContent = maxYear > 0 ? String(maxYear) : "-";
+    }
+
     function initialize() {
       setupControls();
+      renderTimeline();
       Plotly.newPlot(graphDiv, figureSpec.data, figureSpec.layout, {
         displaylogo: false,
         responsive: true,
@@ -1717,3 +2133,55 @@ def _rgb_tuple_to_hex(color: tuple) -> str:
         int(max(0, min(1, g)) * 255),
         int(max(0, min(1, b)) * 255),
     )
+
+
+def _rgb_tuple_to_rgba(color: object, alpha: float) -> str:
+    """Convert theme color payloads to CSS ``rgba()`` string.
+
+    Accepts RGB tuples in ``[0, 1]`` space, RGB tuples in ``[0, 255]`` space,
+    hex strings, and ``rgb()/rgba()`` strings.
+
+    :param object color: Color payload.
+    :param float alpha: Alpha value in ``[0, 1]``.
+    :return str: CSS rgba() color string.
+    """
+    r: int
+    g: int
+    b: int
+    if isinstance(color, str):
+        text = color.strip()
+        hex_match = re.fullmatch(r"#([0-9a-fA-F]{6})", text)
+        if hex_match:
+            hex_value = hex_match.group(1)
+            r = int(hex_value[0:2], 16)
+            g = int(hex_value[2:4], 16)
+            b = int(hex_value[4:6], 16)
+        else:
+            number_parts = re.findall(r"(\d+(?:\.\d+)?)", text)
+            if len(number_parts) >= 3:
+                r = int(float(number_parts[0]))
+                g = int(float(number_parts[1]))
+                b = int(float(number_parts[2]))
+            else:
+                r, g, b = 255, 255, 255
+    else:
+        try:
+            values = list(color)  # type: ignore[arg-type]
+        except TypeError:
+            values = [1.0, 1.0, 1.0]
+        if len(values) < 3:
+            values = [1.0, 1.0, 1.0]
+        raw_r = float(values[0])
+        raw_g = float(values[1])
+        raw_b = float(values[2])
+        if max(abs(raw_r), abs(raw_g), abs(raw_b)) <= 1.0:
+            r = int(max(0.0, min(1.0, raw_r)) * 255.0)
+            g = int(max(0.0, min(1.0, raw_g)) * 255.0)
+            b = int(max(0.0, min(1.0, raw_b)) * 255.0)
+        else:
+            r = int(max(0.0, min(255.0, raw_r)))
+            g = int(max(0.0, min(255.0, raw_g)))
+            b = int(max(0.0, min(255.0, raw_b)))
+
+    clamped_alpha = max(0.0, min(1.0, float(alpha)))
+    return f"rgba({r},{g},{b},{clamped_alpha:.3f})"
