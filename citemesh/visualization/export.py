@@ -420,7 +420,7 @@ class GraphExporter:
         node_y = [float(pos[node][1]) for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
         max_node_size = max(node_sizes) if node_sizes else 1.0
-        marker_sizeref = max(2.0 * max_node_size / (40.0**2), 1e-6)
+        marker_sizeref = max(2.0 * max_node_size / (45.0**2), 1e-6)
         node_years, year_min, year_max = self._plotly_year_scale(node_ids)
         base_labels = [
             self.graph.nodes[node].get("paper").label
@@ -512,7 +512,7 @@ class GraphExporter:
                 size=node_sizes,
                 sizemode="area",
                 sizeref=marker_sizeref,
-                sizemin=4,
+                sizemin=3,
                 color=node_years,
                 cmin=year_min,
                 cmax=year_max,
@@ -557,7 +557,7 @@ class GraphExporter:
                     opacity=0.96,
                     sizemode="area",
                     sizeref=marker_sizeref,
-                    sizemin=4,
+                    sizemin=3,
                 ),
             )
 
@@ -629,6 +629,7 @@ class GraphExporter:
                 for author in serialized.get("authors", [])
                 if str(author).strip()
             ]
+            serialized["venue"] = str(serialized.get("venue") or "").strip()
             serialized["categories"] = [
                 str(category).strip()
                 for category in serialized.get("categories", [])
@@ -984,6 +985,39 @@ class GraphExporter:
       display: grid;
       gap: 8px;
     }
+    #global-nav {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .nav-group {
+      display: inline-flex;
+      gap: 7px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .nav-btn {
+      width: auto;
+      padding: 7px 11px;
+      border-radius: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.01);
+    }
+    .nav-btn.active {
+      color: var(--text-primary);
+      border-color: color-mix(in srgb, var(--accent) 70%, var(--panel-border));
+      background: var(--accent-soft);
+    }
+    #toolbar-controls {
+      display: grid;
+      gap: 8px;
+    }
+    #dashboard-toolbar.collapsed #toolbar-controls {
+      display: none;
+    }
     .toolbar-row {
       display: grid;
       gap: 8px;
@@ -1126,6 +1160,18 @@ class GraphExporter:
       height: 100%;
       min-height: 560px;
     }
+    .js-plotly-plot .scatterlayer path.point {
+      transition: filter 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+    }
+    .js-plotly-plot .scatterlayer path.point.is-glowing {
+      filter: drop-shadow(0 0 10px rgba(220, 80, 150, 0.85)) brightness(1.14);
+    }
+    .js-plotly-plot .scatterlayer path.point.is-dimmed {
+      opacity: 0.24;
+    }
+    .js-plotly-plot .scatterlayer path.point.is-filter-hidden {
+      opacity: 0.16;
+    }
     #graph-footer {
       position: absolute;
       right: 12px;
@@ -1245,34 +1291,31 @@ class GraphExporter:
     }
     #detail-links a {
       display: inline-flex;
-      gap: 6px;
       align-items: center;
+      justify-content: center;
       color: var(--text-primary);
       text-decoration: none;
-      font-size: 12px;
-      border: 1px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
-      border-radius: 999px;
-      padding: 5px 10px;
-      background: rgba(255, 255, 255, 0.015);
-      transition: border-color 130ms ease, transform 130ms ease;
+      border: 1px solid color-mix(in srgb, var(--panel-border) 80%, transparent);
+      border-radius: 8px;
+      width: 31px;
+      height: 31px;
+      padding: 0;
+      background: rgba(255, 255, 255, 0.012);
+      transition: border-color 130ms ease, transform 130ms ease, background-color 130ms ease;
     }
     #detail-links a:hover {
       border-color: color-mix(in srgb, var(--accent) 70%, var(--panel-border));
+      background: color-mix(in srgb, var(--accent-soft) 80%, transparent);
       transform: translateY(-1px);
     }
-    .link-icon {
-      width: 20px;
-      height: 20px;
-      border-radius: 50%;
-      border: 1px solid color-mix(in srgb, var(--panel-border) 75%, transparent);
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 10px;
-      color: color-mix(in srgb, var(--accent) 75%, #dce9fb);
-      letter-spacing: 0.02em;
-      font-weight: 640;
-      text-transform: uppercase;
+    .icon-link svg {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: color-mix(in srgb, var(--accent) 78%, #dce9fb);
+      stroke-width: 1.9;
+      stroke-linecap: round;
+      stroke-linejoin: round;
     }
     #detail-actions {
       display: flex;
@@ -1327,6 +1370,9 @@ class GraphExporter:
         top: 0;
         z-index: 3;
       }
+      #global-nav {
+        justify-content: flex-start;
+      }
       .toolbar-row.primary { grid-template-columns: 1fr 1fr; }
       .toolbar-row.primary #search-input { grid-column: span 2; }
       .toolbar-row.secondary { grid-template-columns: 1fr 1fr; }
@@ -1348,23 +1394,36 @@ class GraphExporter:
 </head>
 <body>
   <header id="dashboard-toolbar">
-    <div class="toolbar-row primary">
-      <input id="search-input" type="search" placeholder="Search title, authors, abstract..." />
-      <select id="sort-select" title="Sort papers">
-        <option value="relevance">Sort: Relevance</option>
-        <option value="year">Sort: Year</option>
-        <option value="citation_count">Sort: Citations</option>
-        <option value="title">Sort: Title</option>
-      </select>
-      <button id="clear-selection" type="button">Clear Selection</button>
+    <div id="global-nav">
+      <div id="scope-nav" class="nav-group">
+        <button class="nav-btn" data-scope="prior" type="button">Prior works</button>
+        <button class="nav-btn" data-scope="derivative" type="button">Derivative works</button>
+      </div>
+      <div class="nav-group">
+        <button id="list-view-btn" class="nav-btn active" type="button">List view</button>
+        <button id="filters-toggle" class="nav-btn active" type="button">Filters</button>
+        <button id="more-btn" class="nav-btn" type="button">More</button>
+      </div>
     </div>
-    <div class="toolbar-row secondary">
-      <input id="year-min" type="number" placeholder="Year min" />
-      <input id="year-max" type="number" placeholder="Year max" />
-      <div id="provenance-filters">
-        <button class="chip active" data-filter="citation" type="button">citation</button>
-        <button class="chip active" data-filter="semantic" type="button">semantic</button>
-        <button class="chip active" data-filter="both" type="button">both</button>
+    <div id="toolbar-controls">
+      <div class="toolbar-row primary">
+        <input id="search-input" type="search" placeholder="Search title, authors, abstract..." />
+        <select id="sort-select" title="Sort papers">
+          <option value="relevance">Sort: Relevance</option>
+          <option value="year">Sort: Year</option>
+          <option value="citation_count">Sort: Citations</option>
+          <option value="title">Sort: Title</option>
+        </select>
+        <button id="clear-selection" type="button">Clear Selection</button>
+      </div>
+      <div class="toolbar-row secondary">
+        <input id="year-min" type="number" placeholder="Year min" />
+        <input id="year-max" type="number" placeholder="Year max" />
+        <div id="provenance-filters">
+          <button class="chip active" data-filter="citation" type="button">citation</button>
+          <button class="chip active" data-filter="semantic" type="button">semantic</button>
+          <button class="chip active" data-filter="both" type="button">both</button>
+        </div>
       </div>
     </div>
   </header>
@@ -1434,6 +1493,10 @@ class GraphExporter:
     const nodeById = new Map(nodes.map((node) => [node.id, node]));
     const nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
     const yearRange = (payload.meta && payload.meta.year_range) || {};
+    const seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "");
+    const seedYear = seedNode && Number.isFinite(Number(seedNode.year)) && Number(seedNode.year) > 0
+      ? Number(seedNode.year)
+      : null;
 
     function normalizeArray(rawValue, length, fallbackValue) {
       if (Array.isArray(rawValue)) {
@@ -1466,16 +1529,8 @@ class GraphExporter:
     const nodeTraceSource = (traceSpecs[nodeTraceIndex] || {});
     const markerSource = nodeTraceSource.marker || {};
     const defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
-    const defaultLineWidths = normalizeArray(markerSource.line && markerSource.line.width, nodeOrder.length, 0);
-    const lineColorSource = markerSource.line && markerSource.line.color;
     const defaultNodeX = normalizeArray(nodeTraceSource.x, nodeOrder.length, 0);
     const defaultNodeY = normalizeArray(nodeTraceSource.y, nodeOrder.length, 0);
-    const defaultLineColors = Array.isArray(lineColorSource)
-      ? lineColorSource.slice(0, nodeOrder.length).map((value) => String(value))
-      : nodeOrder.map((nodeId) => {
-          const node = nodeById.get(nodeId);
-          return node && node.is_seed ? "rgba(214,108,191,0.95)" : "rgba(0,0,0,0)";
-        });
 
     const state = {
       selectedId: (payload.meta && payload.meta.seed_id) || null,
@@ -1483,6 +1538,7 @@ class GraphExporter:
       filters: { citation: true, semantic: true, both: true },
       searchText: "",
       sortKey: "relevance",
+      scopeMode: "all",
       yearMin: null,
       yearMax: null,
       visibleIds: new Set(nodeOrder),
@@ -1497,6 +1553,11 @@ class GraphExporter:
       yearMax: document.getElementById("year-max"),
       clearSelection: document.getElementById("clear-selection"),
       chips: Array.from(document.querySelectorAll("#provenance-filters .chip")),
+      scopeButtons: Array.from(document.querySelectorAll("#scope-nav [data-scope]")),
+      filtersToggle: document.getElementById("filters-toggle"),
+      listViewBtn: document.getElementById("list-view-btn"),
+      moreBtn: document.getElementById("more-btn"),
+      toolbar: document.getElementById("dashboard-toolbar"),
       detailMode: document.getElementById("detail-mode"),
       detailTitle: document.getElementById("detail-title"),
       detailSubtitle: document.getElementById("detail-subtitle"),
@@ -1531,6 +1592,15 @@ class GraphExporter:
     function nodeMatches(node) {
       if (!nodeFilterClass(node)) {
         return false;
+      }
+      if (!node.is_seed && seedYear !== null && hasYear(node)) {
+        const nodeYear = Number(node.year);
+        if (state.scopeMode === "prior" && nodeYear > seedYear) {
+          return false;
+        }
+        if (state.scopeMode === "derivative" && nodeYear < seedYear) {
+          return false;
+        }
       }
       if (state.yearMin !== null && (!hasYear(node) || Number(node.year) < state.yearMin)) {
         return false;
@@ -1606,18 +1676,34 @@ class GraphExporter:
     function detailLinkEntries(links) {
       const entries = [];
       if (links && links.arxiv_pdf) {
-        entries.push({ label: "PDF", short: "PDF", href: links.arxiv_pdf });
+        entries.push({ kind: "pdf", title: "Open PDF", href: links.arxiv_pdf });
       }
       if (links && links.arxiv_abs) {
-        entries.push({ label: "arXiv", short: "arX", href: links.arxiv_abs });
+        entries.push({ kind: "arxiv", title: "Open arXiv page", href: links.arxiv_abs });
       }
       if (links && links.doi) {
-        entries.push({ label: "DOI", short: "DOI", href: links.doi });
+        entries.push({ kind: "doi", title: "Open DOI", href: links.doi });
       }
       if (links && links.semantic_scholar) {
-        entries.push({ label: "S2", short: "S2", href: links.semantic_scholar });
+        entries.push({ kind: "s2", title: "Open Semantic Scholar", href: links.semantic_scholar });
       }
       return entries;
+    }
+
+    function linkIconSvg(kind) {
+      if (kind === "pdf") {
+        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"></path><polyline points="14 2 14 7 19 7"></polyline><line x1="8" y1="12" x2="16" y2="12"></line><line x1="8" y1="16" x2="13" y2="16"></line></svg>';
+      }
+      if (kind === "arxiv") {
+        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 18L10 6l2 6 2-4 6 10"></path><circle cx="10" cy="6" r="1.2"></circle><circle cx="12" cy="12" r="1.2"></circle><circle cx="14" cy="8" r="1.2"></circle></svg>';
+      }
+      if (kind === "doi") {
+        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7h6"></path><path d="M9 12h6"></path><path d="M9 17h6"></path><circle cx="6.5" cy="7" r="1"></circle><circle cx="6.5" cy="12" r="1"></circle><circle cx="6.5" cy="17" r="1"></circle><path d="M17.5 7a2.5 2.5 0 0 1 0 5"></path><path d="M17.5 12a2.5 2.5 0 0 0 0 5"></path></svg>';
+      }
+      if (kind === "s2") {
+        return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h12"></path><path d="M6 12h9"></path><path d="M6 19h12"></path><path d="M17 10l2 2-2 2"></path></svg>';
+      }
+      return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"></path><path d="M8 8h8v8H8z"></path></svg>';
     }
 
     function detailLinksHtml(links) {
@@ -1626,7 +1712,7 @@ class GraphExporter:
         return "";
       }
       return entries
-        .map((entry) => `<a href="${escapeHtml(entry.href)}" target="_blank" rel="noopener noreferrer"><span class="link-icon">${escapeHtml(entry.short)}</span><span>${escapeHtml(entry.label)}</span></a>`)
+        .map((entry) => `<a class="icon-link" href="${escapeHtml(entry.href)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(entry.title)}" aria-label="${escapeHtml(entry.title)}">${linkIconSvg(entry.kind)}</a>`)
         .join("");
     }
 
@@ -1666,9 +1752,17 @@ class GraphExporter:
       controls.detailMode.textContent = previewOnly ? "Preview" : "Selected";
       controls.graphHint.textContent = previewOnly ? "Previewing node" : "Selection locked";
       controls.detailTitle.textContent = node.title || node.id;
-      const authors = Array.isArray(node.authors) && node.authors.length ? node.authors.join(", ") : "Unknown authors";
+      let authorText = "Unknown authors";
+      if (Array.isArray(node.authors) && node.authors.length > 0) {
+        if (node.authors.length > 2) {
+          authorText = `${node.authors[0]} + ${node.authors.length - 1} authors`;
+        } else {
+          authorText = node.authors.join(", ");
+        }
+      }
       const yearText = hasYear(node) ? String(node.year) : "n.d.";
-      controls.detailSubtitle.textContent = `${authors} | ${yearText}`;
+      const venueText = node.venue ? `, ${node.venue}` : "";
+      controls.detailSubtitle.textContent = `${authorText} | ${yearText}${venueText}`;
 
       const provenance = node.provenance || "unknown";
       const provenanceLabel = provenance === "seed" ? `seed (${node.provenance_base || "citation"})` : provenance;
@@ -1730,40 +1824,39 @@ class GraphExporter:
       });
     }
 
+    function getNodePointPaths() {
+      const traceGroups = graphDiv.querySelectorAll(".scatterlayer .trace");
+      if (!traceGroups || !traceGroups.length) {
+        return [];
+      }
+      const traceGroup = traceGroups[nodeTraceIndex] || traceGroups[traceGroups.length - 1];
+      return Array.from(traceGroup.querySelectorAll("path.point"));
+    }
+
     function syncGraphHighlights() {
       if (!(window.Plotly && graphDiv && graphDiv.data && graphDiv.data.length > nodeTraceIndex)) {
         return;
       }
-      const lineWidths = defaultLineWidths.slice();
-      const lineColors = defaultLineColors.slice();
-      const nodeSizes = defaultNodeSizes.slice();
-      const markerOpacity = nodeOrder.map((nodeId) => (state.visibleIds.has(nodeId) ? 0.94 : 0.17));
+      const graphNodePaths = getNodePointPaths();
+      const hoverIndex = state.hoverId && nodeIndexById.has(state.hoverId)
+        ? nodeIndexById.get(state.hoverId)
+        : -1;
+      const selectedIndex = state.selectedId && nodeIndexById.has(state.selectedId)
+        ? nodeIndexById.get(state.selectedId)
+        : -1;
+      const hasActiveFocus = hoverIndex !== -1 || selectedIndex !== -1;
 
-      if (state.hoverId && nodeIndexById.has(state.hoverId)) {
-        const idx = nodeIndexById.get(state.hoverId);
-        lineWidths[idx] = Math.max(lineWidths[idx], 1.4);
-        lineColors[idx] = "rgba(233,172,245,0.82)";
-        nodeSizes[idx] = nodeSizes[idx] * 1.06;
-        markerOpacity[idx] = 1;
-      }
-      if (state.selectedId && nodeIndexById.has(state.selectedId)) {
-        const idx = nodeIndexById.get(state.selectedId);
-        lineWidths[idx] = Math.max(lineWidths[idx], 2.1);
-        lineColors[idx] = "rgba(238,137,208,0.9)";
-        nodeSizes[idx] = nodeSizes[idx] * 1.1;
-        markerOpacity[idx] = 1;
-      }
-
-      Plotly.restyle(
-        graphDiv,
-        {
-          "marker.line.width": [lineWidths],
-          "marker.line.color": [lineColors],
-          "marker.size": [nodeSizes],
-          "marker.opacity": [markerOpacity],
-        },
-        [nodeTraceIndex]
-      );
+      graphNodePaths.forEach((path, idx) => {
+        const nodeId = nodeOrder[idx];
+        const isVisible = !!nodeId && state.visibleIds.has(nodeId);
+        const isTarget = idx === hoverIndex || idx === selectedIndex;
+        path.classList.toggle("is-filter-hidden", !isVisible);
+        path.classList.toggle("is-dimmed", hasActiveFocus && !isTarget);
+        path.classList.toggle("is-glowing", isTarget);
+        if (isTarget && path.parentNode) {
+          path.parentNode.appendChild(path);
+        }
+      });
 
       if (haloTraceIndex >= 0) {
         const focusId = state.selectedId || state.hoverId;
@@ -1775,7 +1868,7 @@ class GraphExporter:
           const idx = nodeIndexById.get(focusId);
           haloX = [defaultNodeX[idx]];
           haloY = [defaultNodeY[idx]];
-          haloSize = [nodeSizes[idx] * (state.selectedId ? 2.15 : 1.85)];
+          haloSize = [defaultNodeSizes[idx] * (state.selectedId ? 2.2 : 1.88)];
           haloColor = [state.selectedId ? "rgba(238,137,208,0.34)" : "rgba(233,172,245,0.26)"];
         }
         Plotly.restyle(
@@ -1866,6 +1959,11 @@ class GraphExporter:
       syncHighlights();
     }
 
+    function setControlsCollapsed(collapsed) {
+      controls.toolbar.classList.toggle("collapsed", collapsed);
+      controls.filtersToggle.classList.toggle("active", !collapsed);
+    }
+
     function setupControls() {
       controls.search.addEventListener("input", (event) => {
         state.searchText = String(event.target.value || "").trim().toLowerCase();
@@ -1905,6 +2003,43 @@ class GraphExporter:
           renderList();
         });
       });
+
+      controls.scopeButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const scope = button.getAttribute("data-scope");
+          if (!scope) {
+            return;
+          }
+          state.scopeMode = state.scopeMode === scope ? "all" : scope;
+          controls.scopeButtons.forEach((entry) => {
+            const entryScope = entry.getAttribute("data-scope");
+            entry.classList.toggle("active", !!entryScope && entryScope === state.scopeMode);
+          });
+          renderList();
+        });
+      });
+
+      controls.filtersToggle.addEventListener("click", () => {
+        const collapsed = !controls.toolbar.classList.contains("collapsed");
+        setControlsCollapsed(collapsed);
+      });
+      controls.listViewBtn.addEventListener("click", () => {
+        const listPane = document.getElementById("paper-list-pane");
+        if (listPane) {
+          listPane.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      });
+      controls.moreBtn.addEventListener("click", () => {
+        const focusId = state.selectedId || ((payload.meta && payload.meta.seed_id) || null);
+        const focusNode = focusId ? nodeById.get(focusId) : null;
+        const target = focusNode && focusNode.links && focusNode.links.semantic_scholar
+          ? focusNode.links.semantic_scholar
+          : null;
+        if (target) {
+          window.open(target, "_blank", "noopener,noreferrer");
+        }
+      });
+      setControlsCollapsed(false);
 
       const validYears = nodes
         .map((node) => (hasYear(node) ? Number(node.year) : null))
@@ -2152,6 +2287,7 @@ class GraphExporter:
             "title": attrs.get("title", ""),
             "year": attrs.get("year"),
             "citation_count": attrs.get("citation_count", 0),
+            "venue": attrs.get("venue", ""),
             "is_seed": bool(attrs.get("is_seed", False)),
         }
 
@@ -2160,6 +2296,7 @@ class GraphExporter:
                 {
                     "authors": [author.name for author in paper.authors],
                     "abstract": paper.abstract,
+                    "venue": getattr(paper, "venue", "") or attrs.get("venue", ""),
                     "categories": paper.categories,
                 }
             )

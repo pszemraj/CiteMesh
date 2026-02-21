@@ -264,6 +264,7 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         "year": None,
         "abstract": "",
         "citationCount": 0,
+        "publicationVenue": {"name": "ICLR"},
         "authors": [{"name": ""}, {}],
         "fieldsOfStudy": ["cs.AI", "cs.LG"],
     }
@@ -274,6 +275,7 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     assert paper.title == "Unknown"
     assert paper.year is None
     assert paper.abstract == ""
+    assert paper.venue == "ICLR"
     assert paper.authors == []
     assert paper.categories == ["cs.AI", "cs.LG"]
 

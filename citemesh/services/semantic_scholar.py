@@ -466,6 +466,46 @@ class SemanticScholarClient:
                 )
         return API_CONFIG.retry_delay
 
+    @staticmethod
+    def _extract_venue_from_api_paper(api_paper: Any) -> str:
+        """Extract publication venue label from Semantic Scholar API objects.
+
+        :param Any api_paper: Raw API object.
+        :return str: Normalized venue name (or empty string when unavailable).
+        """
+        direct_venue = getattr(api_paper, "venue", None)
+        if isinstance(direct_venue, str) and direct_venue.strip():
+            return direct_venue.strip()
+
+        publication_venue = getattr(api_paper, "publicationVenue", None)
+        publication_venue_name = getattr(publication_venue, "name", None)
+        if isinstance(publication_venue_name, str) and publication_venue_name.strip():
+            return publication_venue_name.strip()
+
+        journal = getattr(api_paper, "journal", None)
+        journal_name = getattr(journal, "name", None)
+        if isinstance(journal_name, str) and journal_name.strip():
+            return journal_name.strip()
+
+        return ""
+
+    @staticmethod
+    def _extract_venue_from_record(record: Dict[str, Any]) -> str:
+        """Extract publication venue label from recommendation/search payloads.
+
+        :param Dict[str, Any] record: Recommendation/search payload dict.
+        :return str: Normalized venue string (empty when unknown).
+        """
+        for key in ("venue", "publicationVenue", "journal"):
+            value = record.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            if isinstance(value, dict):
+                name = value.get("name")
+                if isinstance(name, str) and name.strip():
+                    return name.strip()
+        return ""
+
     def _convert_api_paper(self, api_paper: Any) -> Optional[Paper]:
         """
         Convert Semantic Scholar API response to Paper model.
@@ -502,6 +542,7 @@ class SemanticScholarClient:
                 authors=authors,
                 citation_count=api_paper.citationCount or 0,
                 abstract=getattr(api_paper, "abstract", "") or "",
+                venue=self._extract_venue_from_api_paper(api_paper),
                 categories=categories,
                 references=[],  # Will be populated separately if needed
                 is_seed=False,
@@ -546,6 +587,7 @@ class SemanticScholarClient:
                 authors=authors,
                 citation_count=rec.get("citationCount", 0) or 0,
                 abstract=rec.get("abstract") or "",
+                venue=self._extract_venue_from_record(rec),
                 categories=categories,
                 references=references,
                 is_seed=False,

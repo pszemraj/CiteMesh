@@ -215,6 +215,7 @@ class GraphBuilderStrategy(ABC):
                 year=paper.year,
                 authors=[a.name for a in paper.authors[:3]],
                 citation_count=paper.citation_count,
+                venue=paper.venue,
                 is_seed=paper.is_seed,
             )
 

@@ -490,7 +490,8 @@ def compute_layout(
     canonical_graph = canonicalize_graph_for_layout(graph)
     # Keep layout dependency-free and deterministic in offline exports:
     # use modularity communities plus weighted KK/spring refinement rather
-    # than adding a separate ForceAtlas2 runtime dependency.
+    # than relying on optional fa2/ForceAtlas2 wheels with platform-dependent
+    # availability and less stable reproducibility characteristics.
     communities = _detect_communities(canonical_graph)
     community_lookup = _community_index(communities)
     for left, right, attrs in canonical_graph.edges(data=True):

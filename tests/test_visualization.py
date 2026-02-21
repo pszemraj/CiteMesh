@@ -123,6 +123,7 @@ def _build_graph() -> tuple[nx.Graph, str]:
         authors=[Author(name="Alice Smith")],
         citation_count=42,
         abstract="Seed abstract",
+        venue="TestConf",
         categories=["cs.AI"],
         is_seed=True,
     )
@@ -133,6 +134,7 @@ def _build_graph() -> tuple[nx.Graph, str]:
         authors=[Author(name="Bob Jones")],
         citation_count=10,
         abstract="Related abstract",
+        venue="Related Journal",
         categories=["cs.LG"],
     )
 
@@ -148,10 +150,12 @@ def _build_graph() -> tuple[nx.Graph, str]:
     )
     graph.add_node(
         related.paper_id,
+        paper=related,
         title=related.title,
         year=related.year,
         authors=[author.name for author in related.authors],
         citation_count=related.citation_count,
+        venue=related.venue,
         is_seed=False,
     )
     graph.add_edge(seed.paper_id, related.paper_id, weight=0.7)
@@ -338,7 +342,7 @@ def test_exporter_plotly_contracts(
 
     assert out_path.exists()
     node_trace = captured["data"][1]
-    assert list(node_trace["text"]) == ["Related Paper", "Smith, 2020"]
+    assert list(node_trace["text"]) == ["Jones, 2021", "Smith, 2020"]
     layout = captured["layout"]
     assert layout["title"] == "CiteMesh: Seed Paper"
     kwargs = captured["kwargs"]
@@ -403,6 +407,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert out_path.exists()
     rendered = out_path.read_text()
     for token in [
+        'id="global-nav"',
+        'id="filters-toggle"',
         'id="dashboard-root"',
         'id="paper-list-pane"',
         'id="graph-pane"',
@@ -421,7 +427,9 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     related_node = next(node for node in payload["nodes"] if node["id"] == "related")
     assert seed_node["provenance"] == "seed"
     assert seed_node["provenance_base"] == "citation"
+    assert seed_node["venue"] == "TestConf"
     assert related_node["provenance"] == "semantic"
+    assert related_node["venue"] == "Related Journal"
     assert "seed_relevance" in seed_node
     assert isinstance(seed_node["seed_relevance"], float)
     assert seed_node["links"]["semantic_scholar"] is not None

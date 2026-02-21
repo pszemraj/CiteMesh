@@ -266,6 +266,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             preferred.authors = incoming.authors
         if preferred.citation_count <= 0 and incoming.citation_count > 0:
             preferred.citation_count = incoming.citation_count
+        if (not preferred.venue) and incoming.venue:
+            preferred.venue = incoming.venue
         if (not preferred.categories) and incoming.categories:
             preferred.categories = incoming.categories
         if (not preferred.references) and incoming.references:
@@ -283,6 +285,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             "abstract": paper.abstract or "",
             "year": paper.year,
             "authors": [author.name for author in paper.authors],
+            "venue": paper.venue or "",
             "categories": list(paper.categories or []),
         }
 

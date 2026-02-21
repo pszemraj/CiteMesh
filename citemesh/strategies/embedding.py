@@ -245,6 +245,23 @@ def _parse_categories(categories_data: Any) -> List[str]:
     return []
 
 
+def _parse_venue(paper: Dict[str, Any]) -> str:
+    """Normalize venue/journal metadata from dataset records.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :return str: Best-effort venue string (empty when unavailable).
+    """
+    for key in ("venue", "journal_ref", "journal"):
+        value = paper.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            name = value.get("name")
+            if isinstance(name, str) and name.strip():
+                return name.strip()
+    return ""
+
+
 def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) -> Dict:
     """Normalize a raw dataset record to embedding metadata fields.
 
@@ -270,6 +287,7 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
         "paper_id": paper_id,
         "title": title,
         "abstract": abstract,
+        "venue": _parse_venue(paper),
         "year": _parse_year(paper),
         "authors": _parse_authors(paper.get("authors", [])),
         "categories": _parse_categories(paper.get("categories", [])),
@@ -1624,6 +1642,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 year=metadata.get("year"),
                 authors=authors,
                 abstract=metadata.get("abstract", ""),
+                venue=metadata.get("venue", ""),
                 categories=metadata.get("categories", []),
                 citation_count=0,  # ArXiv data lacks citation counts
                 is_seed=False,
