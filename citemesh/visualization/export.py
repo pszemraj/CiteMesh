@@ -1011,11 +1011,17 @@ class GraphExporter:
     html, body {
       margin: 0;
       height: 100%;
+      overflow: hidden;
       background: radial-gradient(1200px 640px at 18% -12%, rgba(74, 163, 255, 0.12), transparent 58%),
                   radial-gradient(900px 520px at 100% 0%, rgba(214, 108, 191, 0.08), transparent 55%),
                   var(--body-bg);
       color: var(--text-primary);
       font-family: "IBM Plex Sans", "Source Sans 3", "Segoe UI", sans-serif;
+    }
+    body {
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
     }
     input, select, button {
       border: 1px solid var(--panel-border);
@@ -1114,7 +1120,10 @@ class GraphExporter:
       display: grid;
       gap: 12px;
       padding: 12px;
-      min-height: calc(100vh - 86px);
+      flex: 1 1 auto;
+      min-height: 0;
+      height: 100%;
+      overflow: hidden;
       grid-template-columns: minmax(260px, 26vw) minmax(520px, 1fr) minmax(320px, 29vw);
     }
     .pane {
@@ -1122,6 +1131,7 @@ class GraphExporter:
       border: 1px solid var(--panel-border);
       border-radius: 12px;
       overflow: hidden;
+      height: 100%;
       min-height: 0;
       display: flex;
       flex-direction: column;
@@ -1146,8 +1156,10 @@ class GraphExporter:
       margin: 0;
       padding: 0;
       list-style: none;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       flex: 1;
+      min-height: 0;
     }
     .paper-row {
       border-bottom: 1px solid color-mix(in srgb, var(--panel-border) 75%, transparent);
@@ -1215,12 +1227,13 @@ class GraphExporter:
       position: relative;
       flex: 1;
       min-height: 0;
+      overflow: hidden;
       background: var(--graph-bg);
     }
     #__PLOTLY_DIV_ID__ {
       width: 100%;
       height: 100%;
-      min-height: 560px;
+      min-height: 0;
     }
     .js-plotly-plot .scatterlayer path.point {
       transition: filter 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
@@ -1302,6 +1315,8 @@ class GraphExporter:
       display: flex;
       flex-direction: column;
       gap: 16px;
+      overflow-y: auto;
+      overflow-x: hidden;
     }
     #detail-title {
       margin: 0;
@@ -1450,6 +1465,9 @@ class GraphExporter:
       .toolbar-row.secondary { grid-template-columns: 128px 128px 1fr; }
     }
     @media (max-width: 1100px) {
+      html, body {
+        overflow: auto;
+      }
       #dashboard-toolbar {
         position: sticky;
         top: 0;
@@ -1469,6 +1487,8 @@ class GraphExporter:
           "detail"
           "list";
         min-height: auto;
+        height: auto;
+        overflow: visible;
       }
       #graph-pane { grid-area: graph; min-height: 520px; }
       #detail-pane { grid-area: detail; min-height: 430px; }

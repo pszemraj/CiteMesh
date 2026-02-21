@@ -418,6 +418,14 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="citemesh-dashboard-figure"',
     ]:
         assert token in rendered
+    for css_token in [
+        "html, body {\n      margin: 0;\n      height: 100%;\n      overflow: hidden;",
+        "#dashboard-root {\n      display: grid;\n      gap: 12px;\n      padding: 12px;\n      flex: 1 1 auto;",
+        "#paper-list {\n      margin: 0;\n      padding: 0;\n      list-style: none;\n      overflow-y: auto;",
+        "#detail-content {\n      padding: 14px 13px 12px;\n      flex: 1;\n      min-height: 0;\n      display: flex;\n      flex-direction: column;\n      gap: 16px;\n      overflow-y: auto;",
+        "width: 100%;\n      height: 100%;\n      min-height: 0;",
+    ]:
+        assert css_token in rendered
     for script_token in ["is-filter-hidden", "neighborhood-edges", "renderWhyLines("]:
         assert script_token in rendered
 
