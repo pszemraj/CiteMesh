@@ -188,6 +188,61 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
     ]
 
 
+def test_citation_collect_preserves_seed_when_relation_reuses_seed_id() -> None:
+    """Duplicate relation payloads should not unset the canonical seed marker."""
+    seed = _paper("seed", refs=["seed-ref"])
+    duplicate_seed_record = _paper("seed", year=2021)
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [duplicate_seed_record]
+    client.get_paper_citations.return_value = []
+
+    builder = CitationGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=0,
+        fetch_references=False,
+        similarity_threshold=0.0,
+        client=client,
+    )
+
+    papers = builder.collect_papers("seed")
+    assert papers["seed"].is_seed is True
+
+    graph, seed_id = builder.build_graph("seed")
+    assert seed_id == "seed"
+    assert graph.nodes["seed"]["is_seed"] is True
+
+
+def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates() -> (
+    None
+):
+    """Overlap duplicates should retain hydrated references on the canonical object."""
+    seed = _paper("seed", refs=["seed-ref"])
+    overlap_from_references = _paper("overlap")
+    overlap_from_citations = _paper("overlap")
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [overlap_from_references]
+    client.get_paper_citations.return_value = [overlap_from_citations]
+    client.get_reference_ids.return_value = ["overlap-ref"]
+
+    builder = CitationGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        fetch_references=True,
+        client=client,
+    )
+    papers = builder.collect_papers("seed")
+
+    assert papers["overlap"].references == ["overlap-ref"]
+    assert builder.seed_relations["overlap"] == "overlap"
+    client.get_reference_ids.assert_called_once_with("overlap", force_refresh=False)
+
+
 def test_citation_build_graph_persists_seed_relation_metadata() -> None:
     """Citation graph export metadata should preserve seed relation classes."""
     seed = _paper("seed", refs=["seed-ref"])

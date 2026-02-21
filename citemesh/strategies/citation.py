@@ -64,6 +64,82 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.seed_relations: Dict[str, str] = {}
         self._abstract_index = AbstractSimilarityIndex()
 
+    @staticmethod
+    def _merge_relation_paper(existing: Paper, incoming: Paper) -> Paper:
+        """Merge supplemental relation payloads without replacing canonical objects.
+
+        :param Paper existing: Existing paper object retained in the collection map.
+        :param Paper incoming: Newly observed payload for the same paper ID.
+        :return Paper: Mutated ``existing`` paper instance.
+        """
+        if (
+            (not existing.title or existing.title == "Unknown")
+            and incoming.title
+            and incoming.title != "Unknown"
+        ):
+            existing.title = incoming.title
+        if (not existing.abstract) and incoming.abstract:
+            existing.abstract = incoming.abstract
+        if existing.year is None and incoming.year is not None:
+            existing.year = incoming.year
+        if (not existing.authors) and incoming.authors:
+            existing.authors = incoming.authors
+        if existing.citation_count <= 0 and incoming.citation_count > 0:
+            existing.citation_count = incoming.citation_count
+        if (not existing.venue) and incoming.venue:
+            existing.venue = incoming.venue
+        if (not existing.arxiv_id) and incoming.arxiv_id:
+            existing.arxiv_id = incoming.arxiv_id
+        if (not existing.doi) and incoming.doi:
+            existing.doi = incoming.doi
+        if (not existing.categories) and incoming.categories:
+            existing.categories = incoming.categories
+
+        if incoming.references:
+            if not existing.references:
+                existing.references = [
+                    str(ref_id).strip()
+                    for ref_id in incoming.references
+                    if str(ref_id).strip()
+                ]
+            else:
+                existing_refs = [ref for ref in existing.references if str(ref).strip()]
+                seen = set(existing_refs)
+                for ref_id in incoming.references:
+                    normalized_ref_id = str(ref_id).strip()
+                    if not normalized_ref_id or normalized_ref_id in seen:
+                        continue
+                    existing_refs.append(normalized_ref_id)
+                    seen.add(normalized_ref_id)
+                existing.references = existing_refs
+
+        existing.is_seed = bool(existing.is_seed or incoming.is_seed)
+        return existing
+
+    def _ensure_paper_references(self, paper: Paper) -> None:
+        """Hydrate reference IDs for a paper without clobbering existing payload.
+
+        :param Paper paper: Paper record to hydrate in-place.
+        :return None: Mutates ``paper.references`` when needed.
+        """
+        if not self.fetch_references:
+            return
+
+        paper_id = str(paper.paper_id).strip()
+        if not paper_id:
+            return
+
+        if paper.references:
+            self.reference_cache.setdefault(paper_id, list(paper.references))
+            return
+
+        cached_refs = self.reference_cache.get(paper_id)
+        if cached_refs is not None:
+            paper.references = list(cached_refs)
+            return
+
+        paper.references = self._get_references(paper_id)
+
     def _ingest_relation_batch(
         self,
         papers: Dict[str, Paper],
@@ -99,13 +175,22 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             relation_iterator = []
 
         for paper in relation_iterator:
-            if len(papers) >= self.max_papers:
-                break
-            papers[paper.paper_id] = paper
-            processed_ids.append(str(paper.paper_id))
+            normalized_paper_id = str(paper.paper_id).strip()
+            if not normalized_paper_id:
+                continue
+            processed_ids.append(normalized_paper_id)
 
-            if self.fetch_references and paper.paper_id not in self.reference_cache:
-                paper.references = self._get_references(paper.paper_id)
+            existing = papers.get(normalized_paper_id)
+            if existing is not None:
+                self._merge_relation_paper(existing, paper)
+                self._ensure_paper_references(existing)
+                continue
+
+            if len(papers) >= self.max_papers:
+                continue
+
+            papers[normalized_paper_id] = paper
+            self._ensure_paper_references(paper)
 
         if progress_bar is not None:
             progress_bar.close()
