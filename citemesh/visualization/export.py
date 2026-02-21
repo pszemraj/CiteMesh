@@ -419,6 +419,8 @@ class GraphExporter:
         node_x = [float(pos[node][0]) for node in node_ids]
         node_y = [float(pos[node][1]) for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
+        max_node_size = max(node_sizes) if node_sizes else 1.0
+        marker_sizeref = max(2.0 * max_node_size / (40.0**2), 1e-6)
         node_years, year_min, year_max = self._plotly_year_scale(node_ids)
         base_labels = [
             self.graph.nodes[node].get("paper").label
@@ -500,6 +502,7 @@ class GraphExporter:
         node_trace = go.Scatter(
             x=node_x,
             y=node_y,
+            name="nodes",
             mode="markers+text",
             hoverinfo="text",
             text=node_labels,
@@ -507,6 +510,9 @@ class GraphExporter:
             textfont=text_font,
             marker=dict(
                 size=node_sizes,
+                sizemode="area",
+                sizeref=marker_sizeref,
+                sizemin=4,
                 color=node_years,
                 cmin=year_min,
                 cmax=year_max,
@@ -517,6 +523,43 @@ class GraphExporter:
             ),
             hovertext=hover_texts,
         )
+
+        halo_trace: Optional[Any] = None
+        if for_dashboard:
+            seed_index = next(
+                (
+                    idx
+                    for idx, node in enumerate(node_ids)
+                    if bool(self.graph.nodes[node].get("is_seed", False))
+                ),
+                None,
+            )
+            halo_x: list[float] = []
+            halo_y: list[float] = []
+            halo_sizes: list[float] = []
+            halo_colors: list[str] = []
+            if seed_index is not None:
+                halo_x = [node_x[seed_index]]
+                halo_y = [node_y[seed_index]]
+                halo_sizes = [node_sizes[seed_index] * 2.05]
+                halo_colors = [_rgb_tuple_to_rgba(theme_obj.seed_color, 0.26)]
+            halo_trace = go.Scatter(
+                x=halo_x,
+                y=halo_y,
+                name="selection-halo",
+                mode="markers",
+                hoverinfo="none",
+                showlegend=False,
+                marker=dict(
+                    size=halo_sizes,
+                    color=halo_colors,
+                    line=dict(width=0),
+                    opacity=0.96,
+                    sizemode="area",
+                    sizeref=marker_sizeref,
+                    sizemin=4,
+                ),
+            )
 
         layout_kwargs: Dict[str, Any] = {
             "showlegend": False,
@@ -533,7 +576,12 @@ class GraphExporter:
         if title_prefix is not None:
             layout_kwargs["title"] = f"{title_prefix}: {self._plotly_title_text()}"
 
-        traces = [node_trace] if for_dashboard else [edge_trace, node_trace]
+        if for_dashboard:
+            traces = (
+                [halo_trace, node_trace] if halo_trace is not None else [node_trace]
+            )
+        else:
+            traces = [edge_trace, node_trace]
         fig = go.Figure(data=traces, layout=go.Layout(**layout_kwargs))
         return fig, node_ids
 
@@ -1403,14 +1451,25 @@ class GraphExporter:
       return Array.from({ length }, () => safe);
     }
 
-    const nodeTraceIndex = Math.max(
-      0,
-      (figureSpec.data || []).findIndex((trace) => String(trace.mode || "").includes("markers"))
+    const traceSpecs = figureSpec.data || [];
+    const nodeTraceIndex = (() => {
+      const namedIdx = traceSpecs.findIndex((trace) => String(trace.name || "") === "nodes");
+      if (namedIdx >= 0) {
+        return namedIdx;
+      }
+      const fallbackIdx = traceSpecs.findIndex((trace) => String(trace.mode || "").includes("markers+text"));
+      return fallbackIdx >= 0 ? fallbackIdx : 0;
+    })();
+    const haloTraceIndex = traceSpecs.findIndex(
+      (trace) => String(trace.name || "") === "selection-halo"
     );
-    const markerSource = ((figureSpec.data || [])[nodeTraceIndex] || {}).marker || {};
+    const nodeTraceSource = (traceSpecs[nodeTraceIndex] || {});
+    const markerSource = nodeTraceSource.marker || {};
     const defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
     const defaultLineWidths = normalizeArray(markerSource.line && markerSource.line.width, nodeOrder.length, 0);
     const lineColorSource = markerSource.line && markerSource.line.color;
+    const defaultNodeX = normalizeArray(nodeTraceSource.x, nodeOrder.length, 0);
+    const defaultNodeY = normalizeArray(nodeTraceSource.y, nodeOrder.length, 0);
     const defaultLineColors = Array.isArray(lineColorSource)
       ? lineColorSource.slice(0, nodeOrder.length).map((value) => String(value))
       : nodeOrder.map((nodeId) => {
@@ -1682,16 +1741,16 @@ class GraphExporter:
 
       if (state.hoverId && nodeIndexById.has(state.hoverId)) {
         const idx = nodeIndexById.get(state.hoverId);
-        lineWidths[idx] = Math.max(lineWidths[idx], 4.2);
-        lineColors[idx] = "rgba(235,182,255,0.95)";
-        nodeSizes[idx] = nodeSizes[idx] * 1.09;
+        lineWidths[idx] = Math.max(lineWidths[idx], 1.4);
+        lineColors[idx] = "rgba(233,172,245,0.82)";
+        nodeSizes[idx] = nodeSizes[idx] * 1.06;
         markerOpacity[idx] = 1;
       }
       if (state.selectedId && nodeIndexById.has(state.selectedId)) {
         const idx = nodeIndexById.get(state.selectedId);
-        lineWidths[idx] = 6;
-        lineColors[idx] = "rgba(238,129,204,0.98)";
-        nodeSizes[idx] = nodeSizes[idx] * 1.15;
+        lineWidths[idx] = Math.max(lineWidths[idx], 2.1);
+        lineColors[idx] = "rgba(238,137,208,0.9)";
+        nodeSizes[idx] = nodeSizes[idx] * 1.1;
         markerOpacity[idx] = 1;
       }
 
@@ -1705,6 +1764,31 @@ class GraphExporter:
         },
         [nodeTraceIndex]
       );
+
+      if (haloTraceIndex >= 0) {
+        const focusId = state.selectedId || state.hoverId;
+        let haloX = [];
+        let haloY = [];
+        let haloSize = [];
+        let haloColor = [];
+        if (focusId && nodeIndexById.has(focusId)) {
+          const idx = nodeIndexById.get(focusId);
+          haloX = [defaultNodeX[idx]];
+          haloY = [defaultNodeY[idx]];
+          haloSize = [nodeSizes[idx] * (state.selectedId ? 2.15 : 1.85)];
+          haloColor = [state.selectedId ? "rgba(238,137,208,0.34)" : "rgba(233,172,245,0.26)"];
+        }
+        Plotly.restyle(
+          graphDiv,
+          {
+            x: [haloX],
+            y: [haloY],
+            "marker.size": [haloSize],
+            "marker.color": [haloColor],
+          },
+          [haloTraceIndex]
+        );
+      }
     }
 
     function syncHighlights() {

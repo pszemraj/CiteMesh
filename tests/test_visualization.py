@@ -428,13 +428,23 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert isinstance(seed_node["bibtex"], str)
 
     figure = _extract_dashboard_figure(rendered)
-    assert len(figure["data"]) == 1
+    assert len(figure["data"]) == 2
     assert len(figure["layout"].get("shapes", [])) == 1
     edge_shape = figure["layout"]["shapes"][0]
     assert edge_shape["type"] == "path"
     assert " Q " in edge_shape["path"]
-    marker = figure["data"][0]["marker"]
+    halo_trace = next(
+        trace for trace in figure["data"] if trace.get("name") == "selection-halo"
+    )
+    node_trace = next(trace for trace in figure["data"] if trace.get("name") == "nodes")
+    halo_marker = halo_trace["marker"]
+    assert halo_trace["mode"] == "markers"
+    assert halo_trace["hoverinfo"] == "none"
+    assert halo_marker["line"]["width"] == 0
+    marker = node_trace["marker"]
     assert marker["showscale"] is False
+    assert marker["sizemode"] == "area"
+    assert marker["sizeref"] > 0
     assert max(marker["line"]["width"]) >= 4
     assert min(marker["line"]["width"]) == 0
 
@@ -805,6 +815,50 @@ def test_layout_positioning_contracts(
     distances = captured["distances"]
     assert isinstance(distances, dict)
     assert distances[("high", "seed")] < distances[("low", "seed")]
+
+
+def test_layout_applies_community_separation_offsets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Community-aware layout should separate detected clusters before normalization."""
+    graph = nx.Graph()
+    graph.add_edge("a1", "a2", weight=0.9)
+    graph.add_edge("b1", "b2", weight=0.9)
+    graph.add_edge("a1", "b1", weight=0.01)
+
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.algorithms.community.greedy_modularity_communities",
+        lambda *_args, **_kwargs: [set(["a1", "a2"]), set(["b1", "b2"])],
+    )
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.kamada_kawai_layout",
+        lambda layout_graph, **_kwargs: {
+            node: np.array([0.0, 0.0], dtype=np.float64)
+            for node in layout_graph.nodes()
+        },
+    )
+
+    def fake_spring_layout(
+        layout_graph: nx.Graph, **_kwargs: Any
+    ) -> dict[int, np.ndarray]:
+        if all(isinstance(node, int) for node in layout_graph.nodes()):
+            return {
+                0: np.array([-1.0, 0.0], dtype=np.float64),
+                1: np.array([1.0, 0.0], dtype=np.float64),
+            }
+        return {
+            node: np.array([0.0, 0.0], dtype=np.float64)
+            for node in layout_graph.nodes()
+        }
+
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.spring_layout", fake_spring_layout
+    )
+
+    pos = compute_layout(graph, iterations=20, layout_seed=99)
+    left_center = np.mean([pos["a1"], pos["a2"]], axis=0)
+    right_center = np.mean([pos["b1"], pos["b2"]], axis=0)
+    assert left_center[0] < right_center[0]
 
 
 def test_get_theme_auto_detection_and_unknown_default(

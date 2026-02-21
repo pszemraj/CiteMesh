@@ -36,6 +36,12 @@ LAYOUT_PADDING_RATIO = 0.1
 LABEL_COLLISION_MIN_DISTANCE = 0.075
 LABEL_COLLISION_MAX_DISTANCE = 0.14
 METADATA_VALUE_MAX_CHARS = 64
+INTRA_COMMUNITY_DISTANCE_FACTOR = 0.82
+INTER_COMMUNITY_DISTANCE_FACTOR = 2.45
+COMMUNITY_ANCHOR_PADDING = 0.22
+COMMUNITY_SEPARATION_BASE = 1.45
+COMMUNITY_SEPARATION_STEP = 0.08
+COMMUNITY_SEPARATION_MAX_EXTRA = 0.55
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -106,6 +112,130 @@ def _similarity_to_layout_distance(raw_similarity: object) -> float:
 
     similarity = max(similarity, 0.0)
     return 1.0 / (KK_LAYOUT_DISTANCE_EPSILON + similarity)
+
+
+def _detect_communities(graph: nx.Graph) -> List[List[Hashable]]:
+    """Detect deterministic communities for layout clustering.
+
+    :param nx.Graph graph: Canonicalized graph used for layout.
+    :return List[List[Hashable]]: Community memberships sorted deterministically.
+    """
+    if graph.number_of_nodes() == 0:
+        return []
+    if graph.number_of_edges() == 0:
+        return [[node] for node in ordered_nodes(graph)]
+
+    try:
+        raw = nx.algorithms.community.greedy_modularity_communities(
+            graph, weight="weight"
+        )
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        logger.debug("Community detection failed, using single community (%s)", exc)
+        return [ordered_nodes(graph)]
+
+    communities = [sorted(list(group), key=str) for group in raw if group]
+    if not communities:
+        return [ordered_nodes(graph)]
+    communities.sort(
+        key=lambda members: (-len(members), tuple(str(node) for node in members))
+    )
+    return communities
+
+
+def _community_index(communities: List[List[Hashable]]) -> Dict[Hashable, int]:
+    """Build node to community-index mapping.
+
+    :param List[List[Hashable]] communities: Ordered community memberships.
+    :return Dict[Hashable, int]: Node-to-community index map.
+    """
+    community_index: Dict[Hashable, int] = {}
+    for idx, members in enumerate(communities):
+        for node in members:
+            community_index[node] = idx
+    return community_index
+
+
+def _spread_layout_by_communities(
+    pos: Dict[Hashable, np.ndarray],
+    graph: nx.Graph,
+    communities: List[List[Hashable]],
+    layout_seed: Optional[int],
+) -> Dict[Hashable, np.ndarray]:
+    """Shift community centers toward deterministic anchor positions.
+
+    :param Dict[Hashable, np.ndarray] pos: Base node positions.
+    :param nx.Graph graph: Canonicalized graph.
+    :param List[List[Hashable]] communities: Ordered communities.
+    :param Optional[int] layout_seed: Optional deterministic seed.
+    :return Dict[Hashable, np.ndarray]: Updated node positions.
+    """
+    if len(communities) < 2:
+        return pos
+
+    community_graph = nx.Graph()
+    for idx in range(len(communities)):
+        community_graph.add_node(idx)
+
+    by_node = _community_index(communities)
+    for left, right, attrs in ordered_edges_with_data(graph):
+        left_idx = by_node[left]
+        right_idx = by_node[right]
+        if left_idx == right_idx:
+            continue
+        weight = max(float(attrs.get("weight", 0.0)), KK_LAYOUT_DISTANCE_EPSILON)
+        if community_graph.has_edge(left_idx, right_idx):
+            community_graph[left_idx][right_idx]["weight"] += weight
+        else:
+            community_graph.add_edge(left_idx, right_idx, weight=weight)
+
+    if community_graph.number_of_edges() == 0:
+        ordered_cluster_ids = sorted(community_graph.nodes())
+        for idx, cluster_id in enumerate(ordered_cluster_ids):
+            next_cluster = ordered_cluster_ids[(idx + 1) % len(ordered_cluster_ids)]
+            if cluster_id != next_cluster and not community_graph.has_edge(
+                cluster_id, next_cluster
+            ):
+                community_graph.add_edge(cluster_id, next_cluster, weight=1.0)
+
+    anchor_positions = nx.spring_layout(
+        community_graph,
+        seed=17 if layout_seed is None else layout_seed,
+        weight="weight",
+        iterations=max(80, min(220, 60 * len(communities))),
+        scale=1.0,
+        center=(0.0, 0.0),
+    )
+    normalized_anchors = _normalize_layout_positions(
+        {
+            cluster_id: np.asarray(anchor, dtype=float)
+            for cluster_id, anchor in anchor_positions.items()
+        },
+        padding_ratio=COMMUNITY_ANCHOR_PADDING,
+    )
+    separation_scale = COMMUNITY_SEPARATION_BASE + min(
+        COMMUNITY_SEPARATION_MAX_EXTRA,
+        COMMUNITY_SEPARATION_STEP * float(max(0, len(communities) - 1)),
+    )
+
+    shifted = {
+        node: np.asarray(coords, dtype=float).copy() for node, coords in pos.items()
+    }
+    for cluster_id, members in enumerate(communities):
+        if not members:
+            continue
+        current_center = np.mean(
+            [shifted[node] for node in members if node in shifted], axis=0
+        )
+        target_center = (
+            np.asarray(normalized_anchors.get(cluster_id, np.zeros(2)), dtype=float)
+            * separation_scale
+        )
+        offset = target_center - current_center
+        for node in members:
+            if node in shifted:
+                shifted[node] = shifted[node] + offset
+
+    return shifted
 
 
 def _choose_metadata_anchor(
@@ -358,12 +488,22 @@ def compute_layout(
     :return Dict[Hashable, np.ndarray]: Dictionary mapping node IDs to (x, y) positions.
     """
     canonical_graph = canonicalize_graph_for_layout(graph)
-    for _, _, attrs in canonical_graph.edges(data=True):
+    # Keep layout dependency-free and deterministic in offline exports:
+    # use modularity communities plus weighted KK/spring refinement rather
+    # than adding a separate ForceAtlas2 runtime dependency.
+    communities = _detect_communities(canonical_graph)
+    community_lookup = _community_index(communities)
+    for left, right, attrs in canonical_graph.edges(data=True):
         # Kamada-Kawai interprets weights as path lengths (distances), not
         # affinities; convert similarity weights so stronger links are shorter.
-        attrs[KK_LAYOUT_DISTANCE_ATTR] = _similarity_to_layout_distance(
-            attrs.get("weight", 0.0)
-        )
+        # When communities are detected, increase inter-community path length
+        # and slightly contract intra-community path length to reduce hairballs.
+        distance = _similarity_to_layout_distance(attrs.get("weight", 0.0))
+        if community_lookup.get(left) != community_lookup.get(right):
+            distance *= INTER_COMMUNITY_DISTANCE_FACTOR
+        else:
+            distance *= INTRA_COMMUNITY_DISTANCE_FACTOR
+        attrs[KK_LAYOUT_DISTANCE_ATTR] = distance
 
     try:
         pos = nx.kamada_kawai_layout(
@@ -386,6 +526,13 @@ def compute_layout(
             scale=VIZ_CONFIG.layout_scale,
             center=VIZ_CONFIG.layout_center,
         )
+
+    pos = _spread_layout_by_communities(
+        {node: np.asarray(coords, dtype=float) for node, coords in pos.items()},
+        canonical_graph,
+        communities,
+        layout_seed,
+    )
 
     # Add small deterministic perturbations for visual separation
     rng = np.random.default_rng(0 if layout_seed is None else layout_seed)
