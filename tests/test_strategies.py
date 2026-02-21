@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from types import MethodType
-from typing import Callable
+from typing import Callable, Optional
 from unittest.mock import MagicMock, call, patch
 
 import networkx as nx
@@ -788,31 +788,45 @@ def test_degree_capping_preserves_per_node_limit(
     assert {(min(u, v), max(u, v)) for u, v in graph.edges()} == expected_edges
 
 
-def test_select_capped_undirected_edges_tie_break_and_dedupe() -> None:
-    """Equal-weight and duplicated undirected edges should stay deterministic."""
-    edges = [
-        ("b", "a", {"weight": 1.0}),
-        ("a", "b", {"weight": 0.6}),
-        ("c", "a", {"weight": 1.0}),
-        ("c", "a", {"weight": 0.9}),
-        ("b", "c", {"weight": 0.9}),
-    ]
-    selected = select_capped_undirected_edges(edges, max_edges_per_node=1)
-    assert selected == [("a", "b", 1.0)]
-
-
-def test_select_capped_undirected_edges_is_deterministic_with_mixed_id_types() -> None:
-    """Mixed node-id types should still sort using total-order key tuples."""
-    edges = [
-        (1, 2, {"weight": 0.2}),
-        (_Tagged("alpha"), _Tagged("beta"), {"weight": 0.2}),
-        ("2", 1, {"weight": 0.2}),
-        (_Tagged("01"), "01", {"weight": 0.2}),
-    ]
-
-    first = select_capped_undirected_edges(edges, max_edges_per_node=10)
-    second = select_capped_undirected_edges(edges, max_edges_per_node=10)
+@pytest.mark.parametrize(
+    ("edges", "max_edges_per_node", "expected"),
+    [
+        (
+            [
+                ("b", "a", {"weight": 1.0}),
+                ("a", "b", {"weight": 0.6}),
+                ("c", "a", {"weight": 1.0}),
+                ("c", "a", {"weight": 0.9}),
+                ("b", "c", {"weight": 0.9}),
+            ],
+            1,
+            [("a", "b", 1.0)],
+        ),
+        (
+            [
+                (1, 2, {"weight": 0.2}),
+                (_Tagged("alpha"), _Tagged("beta"), {"weight": 0.2}),
+                ("2", 1, {"weight": 0.2}),
+                (_Tagged("01"), "01", {"weight": 0.2}),
+            ],
+            10,
+            None,
+        ),
+    ],
+)
+def test_select_capped_undirected_edges_is_deterministic_and_dedupes(
+    edges: list[tuple[object, object, dict[str, float]]],
+    max_edges_per_node: int,
+    expected: Optional[list[tuple[object, object, float]]],
+) -> None:
+    """Edge capping should be deterministic across duplicate and mixed-id inputs."""
+    first = select_capped_undirected_edges(edges, max_edges_per_node=max_edges_per_node)
+    second = select_capped_undirected_edges(
+        edges, max_edges_per_node=max_edges_per_node
+    )
     assert first == second
+    if expected is not None:
+        assert first == expected
 
 
 def test_deterministic_sort_key_is_total_for_secondary_and_stable_fields() -> None:

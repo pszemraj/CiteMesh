@@ -151,7 +151,7 @@ def test_cache_commands_contracts(
 def test_force_rebuild_cache_confirmation_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Build should require confirmation for force-rebuild unless overwrite is explicit."""
+    """Force-rebuild should require explicit confirmation or overwrite acknowledgement."""
     graph = build_seed_graph("seed")
 
     build_graph_mock = MagicMock(return_value=(graph, "seed"))
@@ -199,27 +199,9 @@ def test_force_rebuild_cache_confirmation_contracts(
     assert non_interactive.returncode != 0
     assert any("--overwrite-cache" in str(call) for call in error_mock.call_args_list)
 
-
-def test_force_rebuild_cache_allows_non_interactive_overwrite_flag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Non-interactive build should proceed when overwrite is explicitly acknowledged."""
-    graph = build_seed_graph("seed")
-    monkeypatch.setattr(
-        cli_module,
-        "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "GraphExporter",
-        build_fake_exporter_factory({}, methods=("to_json",)),
-    )
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
-
     with tempfile.TemporaryDirectory() as tmpdir:
         output = Path(tmpdir) / "graph.json"
-        result = run_cli_command(
+        acknowledged = run_cli_command(
             [
                 "build",
                 "arxiv:1706.03762",
@@ -235,7 +217,9 @@ def test_force_rebuild_cache_allows_non_interactive_overwrite_flag(
         )
         assert output.exists()
 
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert acknowledged.returncode == 0, (
+        f"STDOUT: {acknowledged.stdout}\nSTDERR: {acknowledged.stderr}"
+    )
 
 
 def test_cli_logging_flags_are_position_agnostic() -> None:
@@ -361,7 +345,7 @@ def test_cli_argument_validation_contracts() -> None:
 
 
 def test_cli_rejects_strategy_incompatible_options() -> None:
-    """Build should reject options that are unsupported for the selected strategy."""
+    """Build should reject unsupported options for each strategy and argv shape."""
     cases = [
         (
             [
@@ -427,31 +411,25 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
             ],
             "--top-k",
         ),
+        (
+            [
+                "--log-level",
+                "debug",
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "--top-k",
+                "4",
+            ],
+            "--top-k",
+        ),
     ]
     for args, token in cases:
         result = run_cli_command(args)
         assert result.returncode != 0
         assert "Unsupported option(s)" in result.stderr
         assert token in result.stderr
-
-
-def test_cli_rejects_strategy_incompatible_options_with_global_prefix() -> None:
-    """Unsupported build options should still fail when global flags precede build."""
-    result = run_cli_command(
-        [
-            "--log-level",
-            "debug",
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "citation",
-            "--top-k",
-            "4",
-        ]
-    )
-    assert result.returncode != 0
-    assert "Unsupported option(s)" in result.stderr
-    assert "--top-k" in result.stderr
 
 
 def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:

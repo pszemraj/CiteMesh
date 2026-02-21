@@ -767,44 +767,32 @@ def test_missing_year_visual_contracts(
     assert size_map_1["a"] >= size_map_1["b"]
 
 
-def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) -> None:
-    """Real Plotly exports should be byte-stable for identical graph/layout inputs."""
-    pytest.importorskip("plotly")
-
-    graph, seed_id = _build_graph()
-    exporter = GraphExporter(
-        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
-    )
-    out_a = tmp_path / "first.plotly.html"
-    out_b = tmp_path / "second.plotly.html"
-
-    exporter.to_plotly_html(out_a)
-    exporter.to_plotly_html(out_b)
-
-    assert out_a.read_text() == out_b.read_text()
-
-
-def test_exporter_dashboard_html_is_byte_stable_with_real_plotly(
+def test_exporter_html_exports_are_byte_stable_with_real_plotly(
     tmp_path: Path,
 ) -> None:
-    """Dashboard exports should be byte-stable for identical graph/layout inputs."""
+    """Plotly and dashboard HTML exports should be byte-stable for identical inputs."""
     pytest.importorskip("plotly")
+    layout = {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    scenarios = [
+        ("plotly", "to_plotly_html", None, None),
+        (
+            "dashboard",
+            "to_dashboard_html",
+            {"strategy": "hybrid"},
+            {"related": "semantic", "seed": "citation"},
+        ),
+    ]
 
-    graph, seed_id = _build_graph()
-    graph.graph["paper_sources"] = {"related": "semantic", "seed": "citation"}
-    exporter = GraphExporter(
-        graph,
-        seed_id,
-        metadata={"strategy": "hybrid"},
-        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
-    )
-    out_a = tmp_path / "first.dashboard.html"
-    out_b = tmp_path / "second.dashboard.html"
-
-    exporter.to_dashboard_html(out_a)
-    exporter.to_dashboard_html(out_b)
-
-    assert out_a.read_text() == out_b.read_text()
+    for name, method_name, metadata, paper_sources in scenarios:
+        graph, seed_id = _build_graph()
+        if paper_sources is not None:
+            graph.graph["paper_sources"] = paper_sources
+        exporter = GraphExporter(graph, seed_id, metadata=metadata, layout=layout)
+        out_a = tmp_path / f"first.{name}.html"
+        out_b = tmp_path / f"second.{name}.html"
+        getattr(exporter, method_name)(out_a)
+        getattr(exporter, method_name)(out_b)
+        assert out_a.read_text() == out_b.read_text()
 
 
 def test_layout_positioning_contracts(
