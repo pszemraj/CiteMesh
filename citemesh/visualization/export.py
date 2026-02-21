@@ -585,6 +585,23 @@ class GraphExporter:
             "paper_bgcolor": theme_obj.background,
             "font": dict(color=theme_obj.text_color),
         }
+        if for_dashboard and node_x and node_y:
+            x_min = min(node_x)
+            x_max = max(node_x)
+            y_min = min(node_y)
+            y_max = max(node_y)
+            x_span = max(x_max - x_min, 1e-6)
+            y_span = max(y_max - y_min, 1e-6)
+            x_pad = max(0.28, x_span * 0.08)
+            y_pad = max(0.28, y_span * 0.08)
+            layout_kwargs["xaxis"].update(
+                {"autorange": False, "range": [x_min - x_pad, x_max + x_pad]}
+            )
+            layout_kwargs["yaxis"].update(
+                {"autorange": False, "range": [y_min - y_pad, y_max + y_pad]}
+            )
+            # Keep Plotly restyle updates from re-autoscaling and shifting node positions.
+            layout_kwargs["uirevision"] = "citemesh-dashboard-static-layout-v1"
         if for_dashboard and layout_shapes:
             layout_kwargs["shapes"] = layout_shapes
         if title_prefix is not None:
@@ -1236,7 +1253,7 @@ class GraphExporter:
       min-height: 0;
     }
     .js-plotly-plot .scatterlayer path.point {
-      transition: filter 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
+      transition: filter 0.2s ease, opacity 0.2s ease;
     }
     .js-plotly-plot .scatterlayer path.point.is-glowing {
       filter: drop-shadow(0 0 10px rgba(220, 80, 150, 0.85)) brightness(1.14);
@@ -2084,15 +2101,15 @@ class GraphExporter:
       const focusId = state.selectedId || state.hoverId;
 
       graphNodePaths.forEach((path, idx) => {
-        const nodeId = nodeOrder[idx];
+        const rawPointIndex = path.getAttribute("data-point-number");
+        const pointIndex = Number(rawPointIndex);
+        const stableIdx = Number.isInteger(pointIndex) && pointIndex >= 0 ? pointIndex : idx;
+        const nodeId = nodeOrder[stableIdx];
         const isVisible = !!nodeId && state.visibleIds.has(nodeId);
-        const isTarget = idx === hoverIndex || idx === selectedIndex;
+        const isTarget = stableIdx === hoverIndex || stableIdx === selectedIndex;
         path.classList.toggle("is-filter-hidden", !isVisible);
         path.classList.toggle("is-dimmed", hasActiveFocus && !isTarget);
         path.classList.toggle("is-glowing", isTarget);
-        if (isTarget && path.parentNode) {
-          path.parentNode.appendChild(path);
-        }
       });
 
       if (neighborhoodTraceIndex >= 0) {

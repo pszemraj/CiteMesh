@@ -428,6 +428,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         assert css_token in rendered
     for script_token in ["is-filter-hidden", "neighborhood-edges", "renderWhyLines("]:
         assert script_token in rendered
+    assert "data-point-number" in rendered
+    assert "path.parentNode.appendChild(path)" not in rendered
 
     payload = _extract_dashboard_payload(rendered)
     assert payload["meta"]["seed_id"] == "seed"
@@ -452,6 +454,11 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     figure = _extract_dashboard_figure(rendered)
     assert len(figure["data"]) == 3
     assert len(figure["layout"].get("shapes", [])) == 1
+    assert figure["layout"]["uirevision"] == "citemesh-dashboard-static-layout-v1"
+    assert figure["layout"]["xaxis"]["autorange"] is False
+    assert figure["layout"]["yaxis"]["autorange"] is False
+    assert len(figure["layout"]["xaxis"]["range"]) == 2
+    assert len(figure["layout"]["yaxis"]["range"]) == 2
     edge_shape = figure["layout"]["shapes"][0]
     assert edge_shape["type"] == "path"
     assert " Q " in edge_shape["path"]
