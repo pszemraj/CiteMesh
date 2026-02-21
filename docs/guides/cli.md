@@ -49,7 +49,7 @@ In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--ov
 | Flag | Description | Default |
 | --- | --- | --- |
 | `--strategy`, `-s` | `recommendation`, `citation`, `embedding`, or `hybrid` | `recommendation` |
-| `--max-papers`, `-p` | Maximum nodes in final graph (seed included) | `40` |
+| `--max-papers`, `-p` | Maximum nodes in final graph (seed included) | `40` (`hybrid`: implicit `45` when omitted) |
 | `--spring-iterations`, `-i` | Iterations used only for spring-layout fallback | `100` |
 | `--dpi`, `-d` | PNG output resolution | `150` |
 | `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`) | deterministic built-in seed |
@@ -103,8 +103,8 @@ ignoring it.
 
 ### Citation Strategy
 
-- `--max-citations`, `-c`: limit number of citing papers (default `25`)
-- `--max-references`, `-r`: limit number of referenced papers (default `25`)
+- `--max-citations`, `-c`: limit number of citing papers (default `25`; hybrid implicit default `45`)
+- `--max-references`, `-r`: limit number of referenced papers (default `25`; hybrid implicit default `12`)
 - `--similarity-threshold`, `-t`: minimum edge similarity threshold (`0.0` to `1.0`, default `0.2`)
 - `--no-references`: skip reference-list fetching (faster, no bibliographic coupling)
 - `--refresh-reference-cache`: bypass persisted reference-cache reads and fetch fresh reference IDs
@@ -148,9 +148,13 @@ Execution transparency:
 
 - Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
 - Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
+- When omitted, hybrid applies tuned seed-discovery defaults for collection depth:
+  - `--max-papers`: `45`
+  - `--max-citations`: `45`
+  - `--max-references`: `12`
 - `--max-semantic`: maximum non-seed semantic neighbors to add after hybrid reranking.
   Valid values are `0` through `max-papers - 1`.
-  If omitted, hybrid defaults to `min(25, max-papers - 1)`.
+  If omitted, hybrid defaults to `min(20, max-papers - 1)`.
 - Hybrid adjudication policy:
   - fetches full citation candidates up to `max_references + max_citations`
   - fetches semantic candidates (expanded pool) and merges duplicates

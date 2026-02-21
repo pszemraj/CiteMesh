@@ -57,6 +57,7 @@ For current usage details, see:
 - **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection, preventing stale cross-checkpoint reuse in shared namespaces.
 - **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
 - **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
+- **Hybrid**: updated implicit CLI defaults for omitted hybrid budgets to `max-papers=45`, `max-references=12`, `max-citations=45`, and semantic cap `min(20, max-papers - 1)` after focused fuzzy-match + abstract relevance review.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.
 - Added explicit streaming split validation for embedding mode.

@@ -28,6 +28,12 @@ from citemesh.cli import (
 from citemesh.core import Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE
+from citemesh.strategies.hybrid import (
+    DEFAULT_MAX_SEMANTIC,
+    HYBRID_DEFAULT_MAX_CITATIONS,
+    HYBRID_DEFAULT_MAX_PAPERS,
+    HYBRID_DEFAULT_MAX_REFERENCES,
+)
 from citemesh.visualization import generate_output_path
 from tests._helpers import (
     build_fake_exporter_factory,
@@ -598,6 +604,46 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
     )
 
 
+def test_hybrid_implicit_budget_defaults_contract() -> None:
+    """Hybrid should apply tuned defaults only when budget knobs are omitted."""
+    _, build_parser, _ = cli_module._create_parser()
+    hybrid_defaults = build_parser.parse_args(["seed", "--strategy", "hybrid"])
+    cli_module._validate_build_cli_contract(
+        hybrid_defaults, build_parser, provided=set()
+    )
+    assert hybrid_defaults.max_papers == HYBRID_DEFAULT_MAX_PAPERS
+    assert hybrid_defaults.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
+    assert hybrid_defaults.max_references == HYBRID_DEFAULT_MAX_REFERENCES
+    assert cli_module._resolved_hybrid_max_semantic(hybrid_defaults) == min(
+        DEFAULT_MAX_SEMANTIC, HYBRID_DEFAULT_MAX_PAPERS - 1
+    )
+
+    explicit_hybrid = build_parser.parse_args(
+        [
+            "seed",
+            "--strategy",
+            "hybrid",
+            "--max-papers",
+            "30",
+            "--max-citations",
+            "6",
+            "--max-references",
+            "7",
+            "--max-semantic",
+            "5",
+        ]
+    )
+    cli_module._validate_build_cli_contract(
+        explicit_hybrid,
+        build_parser,
+        provided={"max_papers", "max_citations", "max_references", "max_semantic"},
+    )
+    assert explicit_hybrid.max_papers == 30
+    assert explicit_hybrid.max_citations == 6
+    assert explicit_hybrid.max_references == 7
+    assert cli_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
+
+
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Build path should share seeded layout and skip it for JSON-only export."""
     graph = build_seed_graph("seed")
@@ -1120,6 +1166,30 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         assert seed_id == "seed"
         assert graph.number_of_nodes() == 1
         assert captured == expected_kwargs
+
+
+def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic hybrid dispatch should carry normalized implicit defaults."""
+    _, build_parser, _ = cli_module._create_parser()
+    namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "HybridGraphBuilder",
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+
+    graph, seed_id = cli_module._build_strategy_graph(namespace, "hybrid")
+    assert seed_id == "seed"
+    assert graph.number_of_nodes() == 1
+    assert captured["max_papers"] == HYBRID_DEFAULT_MAX_PAPERS
+    assert captured["max_citations"] == HYBRID_DEFAULT_MAX_CITATIONS
+    assert captured["max_references"] == HYBRID_DEFAULT_MAX_REFERENCES
+    assert namespace.max_papers == HYBRID_DEFAULT_MAX_PAPERS
+    assert namespace.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
+    assert namespace.max_references == HYBRID_DEFAULT_MAX_REFERENCES
 
 
 def test_programmatic_strategy_dispatch_contracts() -> None:

@@ -34,7 +34,13 @@ from citemesh.services import get_client
 from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE, EmbeddingGraphBuilder
-from citemesh.strategies.hybrid import DEFAULT_MAX_SEMANTIC, HybridGraphBuilder
+from citemesh.strategies.hybrid import (
+    DEFAULT_MAX_SEMANTIC,
+    HYBRID_DEFAULT_MAX_CITATIONS,
+    HYBRID_DEFAULT_MAX_PAPERS,
+    HYBRID_DEFAULT_MAX_REFERENCES,
+    HybridGraphBuilder,
+)
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from citemesh.visualization import (
     GraphExporter,
@@ -117,12 +123,20 @@ def _bounded_int(value: str, *, minimum: int) -> int:
 
 
 def _positive_int(value: str) -> int:
-    """Parse a positive integer CLI argument."""
+    """Parse a positive integer CLI argument.
+
+    :param str value: Raw argparse value.
+    :return int: Parsed integer constrained to be >= 1.
+    """
     return _bounded_int(value, minimum=1)
 
 
 def _non_negative_int(value: str) -> int:
-    """Parse a non-negative integer CLI argument."""
+    """Parse a non-negative integer CLI argument.
+
+    :param str value: Raw argparse value.
+    :return int: Parsed integer constrained to be >= 0.
+    """
     return _bounded_int(value, minimum=0)
 
 
@@ -273,6 +287,18 @@ _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
     dest: flags[0] for dest, flags in _BUILD_OPTION_FLAGS.items()
 }
 _CACHE_COMPRESSION_CHOICES = ("gzip", "lzf")
+_HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
+    "max_papers": HYBRID_DEFAULT_MAX_PAPERS,
+    "max_citations": HYBRID_DEFAULT_MAX_CITATIONS,
+    "max_references": HYBRID_DEFAULT_MAX_REFERENCES,
+}
+_VALIDATION_NORMALIZED_FIELDS: Tuple[str, ...] = (
+    "binary_prefilter",
+    "binary_rescore_multiplier",
+    "max_papers",
+    "max_citations",
+    "max_references",
+)
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
     "model_revision",
@@ -399,6 +425,24 @@ def _resolved_hybrid_max_semantic(cli_args: argparse.Namespace) -> int:
     return int(cli_args.max_semantic)
 
 
+def _apply_hybrid_default_overrides(
+    args: argparse.Namespace, provided: Set[str]
+) -> None:
+    """Apply tuned hybrid defaults when budget knobs are omitted.
+
+    :param argparse.Namespace args: Parsed build arguments.
+    :param Set[str] provided: Explicit option destinations found in argv.
+    :return None: Mutates ``args`` in place for omitted hybrid budget fields.
+    """
+    if str(args.strategy) != "hybrid":
+        return
+
+    for dest, value in _HYBRID_BEST_PRACTICE_DEFAULTS.items():
+        if dest in provided:
+            continue
+        setattr(args, dest, int(value))
+
+
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
     """Return whether hybrid semantic branch is effectively enabled.
 
@@ -503,6 +547,7 @@ def _validate_build_cli_contract(
     :return None: Mutates normalized args for effective no-op elimination.
     """
     strategy = str(args.strategy)
+    _apply_hybrid_default_overrides(args, provided)
     unsupported: List[str] = []
     for dest in sorted(provided):
         allowed = _BUILD_STRATEGY_OPTION_SUPPORT.get(dest)
@@ -713,8 +758,8 @@ def _build_strategy_graph(
             _ProgrammaticBuildParser(),  # type: ignore[arg-type]
             inferred_provided,
         )
-        # Preserve validation-time no-op normalization for downstream builder parity.
-        for field in ("binary_prefilter", "binary_rescore_multiplier"):
+        # Preserve validation-time normalization for downstream builder parity.
+        for field in _VALIDATION_NORMALIZED_FIELDS:
             if hasattr(args_for_validation, field):
                 setattr(args, field, getattr(args_for_validation, field))
 
@@ -736,7 +781,10 @@ def _infer_provided_build_option_dests(
     :return Set[str]: Option destinations inferred as explicitly set.
     """
     provided: Set[str] = set()
-    for dest in _BUILD_STRATEGY_OPTION_SUPPORT:
+    for action in build_parser._actions:
+        if not action.option_strings:
+            continue
+        dest = action.dest
         if not hasattr(args, dest):
             continue
         current_value = getattr(args, dest)
@@ -843,7 +891,10 @@ Examples:
         "-p",
         type=_positive_int,
         default=40,
-        help=("Maximum papers in final graph (seed included; default: 40)"),
+        help=(
+            "Maximum papers in final graph (seed included; default: 40; "
+            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_PAPERS})"
+        ),
     )
 
     build_parser.add_argument(
@@ -884,7 +935,10 @@ Examples:
         "-c",
         type=_non_negative_int,
         default=25,
-        help="Maximum citing papers to fetch (default: 25)",
+        help=(
+            "Maximum citing papers to fetch (default: 25; "
+            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_CITATIONS})"
+        ),
     )
 
     citation_group.add_argument(
@@ -892,7 +946,10 @@ Examples:
         "-r",
         type=_non_negative_int,
         default=25,
-        help="Maximum referenced papers to fetch (default: 25)",
+        help=(
+            "Maximum referenced papers to fetch (default: 25; "
+            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_REFERENCES})"
+        ),
     )
 
     citation_group.add_argument(
@@ -1106,7 +1163,8 @@ Examples:
         help=(
             "Maximum non-seed semantic papers to add (must be <= max-papers - 1). "
             "When omitted, hybrid uses implicit citation-depth reservation before "
-            "semantic expansion (default cap: min(25, max-papers - 1))."
+            "semantic expansion (default cap: "
+            f"min({DEFAULT_MAX_SEMANTIC}, max-papers - 1))."
         ),
     )
 

@@ -30,7 +30,10 @@ from citemesh.strategies.embedding import (
 )
 
 logger = logging.getLogger(__name__)
-DEFAULT_MAX_SEMANTIC = 25
+HYBRID_DEFAULT_MAX_PAPERS = 45
+HYBRID_DEFAULT_MAX_CITATIONS = 45
+HYBRID_DEFAULT_MAX_REFERENCES = 12
+DEFAULT_MAX_SEMANTIC = 20
 HYBRID_SEMANTIC_CANDIDATE_MULTIPLIER = 3
 HYBRID_SEED_RERANK_WEIGHTS = (0.62, 0.16, 0.14, 0.08)
 HYBRID_SOURCE_OVERLAP_BONUS = 0.10
@@ -49,9 +52,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     def __init__(
         self,
-        max_papers: int = 40,
-        max_citations: int = 25,
-        max_references: int = 25,
+        max_papers: int = HYBRID_DEFAULT_MAX_PAPERS,
+        max_citations: int = HYBRID_DEFAULT_MAX_CITATIONS,
+        max_references: int = HYBRID_DEFAULT_MAX_REFERENCES,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
         max_semantic: Optional[int] = None,
@@ -83,7 +86,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param bool refresh_reference_cache: Whether citation/reference lookups bypass persisted cache reads.
         :param Optional[int] max_semantic: Maximum non-seed semantic papers added during
             enrichment. Values must satisfy ``0 <= max_semantic <= max_papers - 1``.
-            When omitted, defaults to ``min(25, max_papers - 1)``.
+            When omitted, defaults to ``min(20, max_papers - 1)``.
         :param str model_name: Embedding model name
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
