@@ -620,6 +620,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             graph.graph["embedding_runtime"] = (
                 self.embedding_builder._embedding_runtime_metadata()
             )
+        graph.graph["paper_sources"] = {
+            str(paper_id): str(source)
+            for paper_id, source in sorted(
+                self.paper_sources.items(), key=lambda item: item[0]
+            )
+        }
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:

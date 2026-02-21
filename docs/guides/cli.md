@@ -52,9 +52,9 @@ In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--ov
 | `--max-papers`, `-p` | Maximum nodes in final graph (seed included) | `40` |
 | `--spring-iterations`, `-i` | Iterations used only for spring-layout fallback | `100` |
 | `--dpi`, `-d` | PNG output resolution | `150` |
-| `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`) | deterministic built-in seed |
+| `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`) | deterministic built-in seed |
 | `--include-timestamp` | Include generation time in output metadata | disabled |
-| `--export`, `-e` | One of `png`, `html`, `plotly`, `json`, `graphml`, or `all` | `png` |
+| `--export`, `-e` | One of `png`, `html`, `plotly`, `dashboard`, `json`, `graphml`, or `all` | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
@@ -68,7 +68,7 @@ and multi-export runs.
 `--log-level` and `--log-width` are shared command options and are accepted for
 `build`, `search`, and `cache` command trees (including `cache scan` / `cache clear`).
 
-`--seed` controls shared layout generation for `png` and `plotly` exports. Pyvis
+`--seed` controls shared layout generation for `png`, `plotly`, and `dashboard` exports. Pyvis
 `html` exports use vis.js browser physics and do not consume this precomputed layout.
 
 Numeric validation:
@@ -165,6 +165,7 @@ Execution transparency:
 - `png`: Matplotlib static render with theme-aware background and labels
 - `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
 - `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
+- `dashboard`: standalone tri-pane research dashboard (list + graph + detail), written with `.dashboard.html` suffix
 - `json`: structured graph data payload (nodes/edges)
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
 - `*.config.json`: run config + metadata sidecar
@@ -186,6 +187,9 @@ citemesh build "arxiv:1706.03762" --strategy citation -p 20
 
 # Hybrid graph with all export formats
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
+
+# Dashboard-only export
+citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard --theme dark
 
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \

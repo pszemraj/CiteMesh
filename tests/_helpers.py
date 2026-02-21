@@ -210,6 +210,19 @@ def build_fake_exporter_factory(
             if "to_plotly_html" in requested_methods or not requested_methods:
                 path.write_text("<html/>")
 
+        def to_dashboard_html(
+            self, path: Path, *_args: object, **_kwargs: object
+        ) -> None:
+            """Write minimal dashboard HTML payload when enabled.
+
+            :param Path path: Target output path.
+            :param object _args: Ignored positional args.
+            :param object _kwargs: Ignored keyword args.
+            :return None: Writes test artifact conditionally.
+            """
+            if "to_dashboard_html" in requested_methods or not requested_methods:
+                path.write_text("<html/>")
+
         def to_graphml(self, path: Path) -> None:
             """Write minimal GraphML payload when enabled.
 

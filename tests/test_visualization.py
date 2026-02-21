@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import types
 import xml.etree.ElementTree as ET
@@ -362,6 +363,139 @@ def test_exporter_plotly_contracts(
         exporter.to_plotly_html(tmp_path / "nodivid.plotly.html")
 
 
+def _extract_dashboard_payload(html_text: str) -> dict[str, Any]:
+    """Extract dashboard JSON payload from exported HTML."""
+    match = re.search(
+        r'<script id="citemesh-dashboard-data" type="application/json">(.*?)</script>',
+        html_text,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
+def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
+    """Dashboard export should render tri-pane shell and derived payload fields."""
+    pytest.importorskip("plotly")
+
+    graph, seed_id = _build_graph()
+    graph.graph["paper_sources"] = {"related": "semantic", "seed": "citation"}
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "hybrid"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "graph.dashboard.html"
+    exporter.to_dashboard_html(out_path, theme="dark")
+
+    assert out_path.exists()
+    rendered = out_path.read_text()
+    for token in [
+        'id="dashboard-root"',
+        'id="paper-list-pane"',
+        'id="graph-pane"',
+        'id="detail-pane"',
+        'id="citemesh-dashboard-data"',
+        'id="citemesh-dashboard-figure"',
+    ]:
+        assert token in rendered
+
+    payload = _extract_dashboard_payload(rendered)
+    assert payload["meta"]["seed_id"] == "seed"
+    assert payload["meta"]["strategy"] == "hybrid"
+    assert payload["meta"]["summary"] == {"nodes": 2, "edges": 1}
+    assert payload["meta"]["plotly_node_order"] == ["related", "seed"]
+    seed_node = next(node for node in payload["nodes"] if node["id"] == "seed")
+    related_node = next(node for node in payload["nodes"] if node["id"] == "related")
+    assert seed_node["provenance"] == "seed"
+    assert seed_node["provenance_base"] == "citation"
+    assert related_node["provenance"] == "semantic"
+    assert "seed_relevance" in seed_node
+    assert isinstance(seed_node["seed_relevance"], float)
+    assert seed_node["links"]["semantic_scholar"] is not None
+    assert isinstance(seed_node["bibtex"], str)
+
+
+def test_exporter_dashboard_missing_plotly_dependency(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dashboard export should fail clearly when plotly dependency is missing."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id)
+
+    monkeypatch.setitem(sys.modules, "plotly", None)
+    monkeypatch.setitem(sys.modules, "plotly.offline", None)
+    with pytest.raises(RuntimeError, match="plotly is required for Dashboard export"):
+        exporter.to_dashboard_html(tmp_path / "missing.dashboard.html")
+
+
+def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
+    """Dashboard payload should derive arXiv/DOI/S2 links from node IDs."""
+    pytest.importorskip("plotly")
+
+    graph = nx.Graph()
+    graph.add_node(
+        "arxiv:2411.03884",
+        title="Seed",
+        year=2024,
+        authors=["A"],
+        citation_count=10,
+        is_seed=True,
+    )
+    graph.add_node(
+        "10.1145/3133956.3134029",
+        title="DOI Paper",
+        year=2017,
+        authors=["B"],
+        citation_count=5,
+        is_seed=False,
+    )
+    graph.add_node(
+        "abcdef123456",
+        title="S2 Paper",
+        year=2018,
+        authors=["C"],
+        citation_count=1,
+        is_seed=False,
+    )
+    graph.add_edge("arxiv:2411.03884", "10.1145/3133956.3134029", weight=0.9)
+    graph.add_edge("arxiv:2411.03884", "abcdef123456", weight=0.7)
+
+    exporter = GraphExporter(
+        graph,
+        "arxiv:2411.03884",
+        metadata={"strategy": "citation"},
+        layout={
+            "arxiv:2411.03884": (0.0, 0.0),
+            "10.1145/3133956.3134029": (1.0, 0.0),
+            "abcdef123456": (0.0, 1.0),
+        },
+    )
+    out_path = tmp_path / "links.dashboard.html"
+    exporter.to_dashboard_html(out_path, theme="light")
+
+    payload = _extract_dashboard_payload(out_path.read_text())
+    nodes = {node["id"]: node for node in payload["nodes"]}
+
+    arxiv_links = nodes["arxiv:2411.03884"]["links"]
+    assert arxiv_links["arxiv_abs"] == "https://arxiv.org/abs/2411.03884"
+    assert arxiv_links["arxiv_pdf"] == "https://arxiv.org/pdf/2411.03884.pdf"
+    assert arxiv_links["doi"] is None
+    assert "semanticscholar.org" in arxiv_links["semantic_scholar"]
+
+    doi_links = nodes["10.1145/3133956.3134029"]["links"]
+    assert doi_links["doi"] == "https://doi.org/10.1145/3133956.3134029"
+    assert doi_links["arxiv_abs"] is None
+
+    s2_links = nodes["abcdef123456"]["links"]
+    assert s2_links["arxiv_abs"] is None
+    assert s2_links["doi"] is None
+    assert s2_links["semantic_scholar"] == (
+        "https://www.semanticscholar.org/paper/abcdef123456"
+    )
+
+
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -563,6 +697,29 @@ def test_exporter_plotly_html_is_byte_stable_with_real_plotly(tmp_path: Path) ->
 
     exporter.to_plotly_html(out_a)
     exporter.to_plotly_html(out_b)
+
+    assert out_a.read_text() == out_b.read_text()
+
+
+def test_exporter_dashboard_html_is_byte_stable_with_real_plotly(
+    tmp_path: Path,
+) -> None:
+    """Dashboard exports should be byte-stable for identical graph/layout inputs."""
+    pytest.importorskip("plotly")
+
+    graph, seed_id = _build_graph()
+    graph.graph["paper_sources"] = {"related": "semantic", "seed": "citation"}
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "hybrid"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_a = tmp_path / "first.dashboard.html"
+    out_b = tmp_path / "second.dashboard.html"
+
+    exporter.to_dashboard_html(out_a)
+    exporter.to_dashboard_html(out_b)
 
     assert out_a.read_text() == out_b.read_text()
 

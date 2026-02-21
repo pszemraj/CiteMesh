@@ -25,7 +25,7 @@ GraphBuilderStrategy (base class)
             ↓
 Visualization + Export
     ├── visualization.visualize_graph -> PNG
-    ├── export.GraphExporter -> HTML / Plotly / JSON / GraphML
+    ├── export.GraphExporter -> HTML / Plotly / Dashboard / JSON / GraphML
     └── cli sidecar writer -> *.config.json (rebuild params + run metadata)
 ```
 
@@ -79,7 +79,7 @@ Strategy behavior and selection guidance are documented in [Guides: Strategies](
 
 ### Exporter (`citemesh/visualization/export.py`)
 
-- `GraphExporter` writes JSON, GraphML, Pyvis HTML, and Plotly HTML.
+- `GraphExporter` writes JSON, GraphML, Pyvis HTML, Plotly HTML, and dashboard HTML.
 - Reuses computed layout and style values for cross-format consistency.
 - Normalizes node attributes for serializer compatibility (for example GraphML-safe fields).
 

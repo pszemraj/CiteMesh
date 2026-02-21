@@ -11,10 +11,12 @@ import hashlib
 import html
 import json
 import logging
+import math
 import re
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
+from urllib.parse import quote
 
 import networkx as nx
 
@@ -286,14 +288,83 @@ class GraphExporter:
             ) from exc
 
         theme_obj = get_theme(theme) if theme else self.theme
-        pos = self._get_layout()
+        fig, _ = self._build_plotly_figure(go=go, theme_obj=theme_obj)
 
-        edge_x, edge_y = [], []
+        div_id = self._plotly_div_id()
+        try:
+            fig.write_html(str(path), div_id=div_id)
+        except TypeError as exc:
+            raise RuntimeError(
+                "Deterministic Plotly export requires write_html(div_id=...). "
+                "Upgrade plotly to a version that supports div_id."
+            ) from exc
+
+    def to_dashboard_html(self, path: Path, theme: Optional[str] = None) -> None:
+        """Create a standalone Plotly-backed research dashboard HTML export.
+
+        :param Path path: Output HTML path.
+        :param Optional[str] theme: Optional theme override.
+        """
+        try:
+            from plotly import graph_objects as go
+            from plotly.offline import get_plotlyjs
+        except ImportError as exc:
+            raise RuntimeError(
+                "plotly is required for Dashboard export. Install with: pip install citemesh[viz]."
+            ) from exc
+
+        theme_obj = get_theme(theme) if theme else self.theme
+        fig, node_ids = self._build_plotly_figure(
+            go=go,
+            theme_obj=theme_obj,
+            title_prefix=None,
+            margin_top=12,
+        )
+        div_id = self._plotly_div_id(prefix="citemesh-dashboard-plotly")
+        payload = self._dashboard_payload(theme_obj=theme_obj, node_ids=node_ids)
+        payload_json = self._safe_script_content(
+            json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        )
+        figure_json = self._safe_script_content(
+            json.dumps(fig.to_plotly_json(), sort_keys=True, separators=(",", ":"))
+        )
+        html_output = self._dashboard_template(
+            theme_obj=theme_obj,
+            div_id=div_id,
+            plotly_js=self._safe_script_content(get_plotlyjs()),
+            payload_json=payload_json,
+            figure_json=figure_json,
+        )
+        Path(path).write_text(html_output, encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+
+    def _build_plotly_figure(
+        self,
+        *,
+        go: Any,
+        theme_obj: Theme,
+        title_prefix: Optional[str] = "CiteMesh",
+        margin_top: int = 40,
+    ) -> tuple[Any, list[Hashable]]:
+        """Build a deterministic Plotly figure and point-order mapping.
+
+        :param Any go: Plotly graph_objects module.
+        :param Theme theme_obj: Active visualization theme.
+        :param Optional[str] title_prefix: Optional title prefix. When ``None``,
+            the figure omits a title.
+        :param int margin_top: Top plot margin.
+        :return tuple[Any, list[Hashable]]: Plotly figure and ordered node IDs.
+        """
+        pos = self._get_layout()
+        edge_x: list[float | None] = []
+        edge_y: list[float | None] = []
         for u, v, _ in self._sorted_edges():
             x0, y0 = pos[u]
             x1, y1 = pos[v]
-            edge_x.extend([x0, x1, None])
-            edge_y.extend([y0, y1, None])
+            edge_x.extend([float(x0), float(x1), None])
+            edge_y.extend([float(y0), float(y1), None])
 
         edge_trace = go.Scatter(
             x=edge_x,
@@ -304,8 +375,8 @@ class GraphExporter:
         )
 
         node_ids = [node_id for node_id, _ in self._sorted_nodes()]
-        node_x = [pos[node][0] for node in node_ids]
-        node_y = [pos[node][1] for node in node_ids]
+        node_x = [float(pos[node][0]) for node in node_ids]
+        node_y = [float(pos[node][1]) for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
         node_years, year_min, year_max = self._plotly_year_scale(node_ids)
         node_labels = [
@@ -359,6 +430,29 @@ class GraphExporter:
             hovertext=hover_texts,
         )
 
+        layout_kwargs: Dict[str, Any] = {
+            "showlegend": False,
+            "hovermode": "closest",
+            "margin": dict(b=20, l=5, r=5, t=max(0, int(margin_top))),
+            "xaxis": dict(showgrid=False, zeroline=False, showticklabels=False),
+            "yaxis": dict(showgrid=False, zeroline=False, showticklabels=False),
+            "plot_bgcolor": theme_obj.background,
+            "paper_bgcolor": theme_obj.background,
+            "font": dict(color=theme_obj.text_color),
+        }
+        if title_prefix is not None:
+            layout_kwargs["title"] = f"{title_prefix}: {self._plotly_title_text()}"
+
+        fig = go.Figure(
+            data=[edge_trace, node_trace], layout=go.Layout(**layout_kwargs)
+        )
+        return fig, node_ids
+
+    def _plotly_title_text(self) -> str:
+        """Build wrapped seed title text used by Plotly figure titles.
+
+        :return str: Wrapped title string.
+        """
         raw_title = " ".join(
             str(self.graph.nodes[self.seed_id].get("title", "CiteMesh")).split()
         )
@@ -366,34 +460,1042 @@ class GraphExporter:
             textwrap.wrap(raw_title, width=72, break_long_words=False)
         )
         if not title_text:
-            title_text = "CiteMesh"
+            return "CiteMesh"
+        return title_text
 
-        fig = go.Figure(
-            data=[edge_trace, node_trace],
-            layout=go.Layout(
-                title=f"CiteMesh: {title_text}",
-                showlegend=False,
-                hovermode="closest",
-                margin=dict(b=20, l=5, r=5, t=40),
-                xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-                plot_bgcolor=theme_obj.background,
-                paper_bgcolor=theme_obj.background,
-                font=dict(color=theme_obj.text_color),
-            ),
-        )
+    def _dashboard_payload(
+        self, *, theme_obj: Theme, node_ids: list[Hashable]
+    ) -> Dict[str, Any]:
+        """Build deterministic dashboard payload from graph metadata.
 
-        div_id = self._plotly_div_id()
+        :param Theme theme_obj: Active visualization theme.
+        :param list[Hashable] node_ids: Node order used by Plotly points.
+        :return Dict[str, Any]: JSON payload consumed by dashboard JS.
+        """
+        provenance = self._provenance_map()
+        relevance = self._seed_relevance_scores()
+        sorted_nodes = self._sorted_nodes()
+        sorted_edges = self._sorted_edges()
+        strategy = str(self.metadata.get("strategy") or "").strip().lower()
+
+        node_payloads: list[Dict[str, Any]] = []
+        for node_id, attrs in sorted_nodes:
+            node_str = str(node_id)
+            serialized = self._serialize_node(node_id, attrs)
+            serialized["id"] = node_str
+            serialized["year"] = self._coerce_year(serialized.get("year"))
+            serialized["citation_count"] = max(
+                int(serialized.get("citation_count") or 0), 0
+            )
+            serialized["authors"] = [
+                str(author).strip()
+                for author in serialized.get("authors", [])
+                if str(author).strip()
+            ]
+            serialized["categories"] = [
+                str(category).strip()
+                for category in serialized.get("categories", [])
+                if str(category).strip()
+            ]
+            serialized["abstract"] = str(serialized.get("abstract") or "").strip()
+            serialized["is_seed"] = bool(serialized.get("is_seed", False))
+
+            provenance_base = provenance.get(
+                node_str, self._default_provenance(strategy=strategy)
+            )
+            serialized["provenance"] = (
+                "seed" if serialized["is_seed"] else provenance_base
+            )
+            serialized["provenance_base"] = provenance_base
+            serialized["seed_relevance"] = float(relevance.get(node_str, 0.0))
+            links = self._derive_links(node_str)
+            serialized["links"] = links
+            serialized["bibtex"] = self._node_bibtex(serialized, links=links)
+            node_payloads.append(serialized)
+
+        payload: Dict[str, Any] = {
+            "meta": {
+                "seed_id": str(self.seed_id),
+                "strategy": strategy,
+                "theme": theme_obj.name,
+                "summary": {
+                    "nodes": len(sorted_nodes),
+                    "edges": len(sorted_edges),
+                },
+                "plotly_node_order": [str(node_id) for node_id in node_ids],
+            },
+            "nodes": node_payloads,
+            "edges": [
+                {
+                    "source": str(left),
+                    "target": str(right),
+                    "weight": float(data.get("weight", 0.0)),
+                }
+                for left, right, data in sorted_edges
+            ],
+        }
+        return payload
+
+    def _default_provenance(self, *, strategy: str) -> str:
+        """Resolve default provenance class for non-hybrid strategies.
+
+        :param str strategy: Strategy metadata token.
+        :return str: One of ``citation`` or ``semantic``.
+        """
+        if strategy == "embedding":
+            return "semantic"
+        return "citation"
+
+    def _provenance_map(self) -> Dict[str, str]:
+        """Resolve normalized per-node provenance map.
+
+        :return Dict[str, str]: Mapping from node ID to provenance class.
+        """
+        raw_map = self.graph.graph.get("paper_sources")
+        if not isinstance(raw_map, dict):
+            return {}
+
+        resolved: Dict[str, str] = {}
+        for raw_id, raw_value in raw_map.items():
+            value = str(raw_value).strip().lower()
+            if value not in {"citation", "semantic", "both"}:
+                continue
+            resolved[str(raw_id)] = value
+        return resolved
+
+    def _seed_relevance_scores(self) -> Dict[str, float]:
+        """Compute seed-centric personalized PageRank scores.
+
+        :return Dict[str, float]: Node-ID keyed relevance scores.
+        """
+        relevance_graph = nx.Graph()
+        for node_id, _ in self._sorted_nodes():
+            relevance_graph.add_node(str(node_id))
+
+        for left, right, attrs in self._sorted_edges():
+            relevance_graph.add_edge(
+                str(left),
+                str(right),
+                weight=self._normalized_edge_weight(attrs.get("weight", 0.0)),
+            )
+
+        if not relevance_graph.nodes:
+            return {}
+
+        personalization = {node_id: 0.0 for node_id in relevance_graph.nodes}
+        seed_id = str(self.seed_id)
+        if seed_id in personalization:
+            personalization[seed_id] = 1.0
+        else:
+            seed_id = next(iter(personalization))
+            personalization[seed_id] = 1.0
+
         try:
-            fig.write_html(str(path), div_id=div_id)
-        except TypeError as exc:
-            raise RuntimeError(
-                "Deterministic Plotly export requires write_html(div_id=...). "
-                "Upgrade plotly to a version that supports div_id."
-            ) from exc
+            scores = nx.pagerank(
+                relevance_graph,
+                alpha=0.85,
+                personalization=personalization,
+                weight="weight",
+            )
+        except Exception as exc:  # pragma: no cover - highly unlikely fallback
+            logger.warning(
+                "Failed to compute personalized PageRank relevance; falling back to "
+                "uniform relevance scores (%s)",
+                exc,
+            )
+            uniform = 1.0 / float(len(personalization))
+            return {node_id: uniform for node_id in personalization}
 
-    # ------------------------------------------------------------------
-    # Internal helpers
+        return {str(node_id): float(score) for node_id, score in scores.items()}
+
+    @staticmethod
+    def _normalized_edge_weight(raw_weight: object) -> float:
+        """Normalize edge weights for relevance computation.
+
+        :param object raw_weight: Raw edge weight candidate.
+        :return float: Positive finite weight.
+        """
+        try:
+            parsed = float(raw_weight)
+        except (TypeError, ValueError):
+            parsed = 0.0
+        if not math.isfinite(parsed) or parsed <= 0.0:
+            return 1e-6
+        return parsed
+
+    @staticmethod
+    def _safe_script_content(raw: str) -> str:
+        """Escape script-closing tokens in inline script payloads.
+
+        :param str raw: Raw script body content.
+        :return str: Script-safe content.
+        """
+        return raw.replace("</", "<\\/")
+
+    def _derive_links(self, node_id: str) -> Dict[str, Optional[str]]:
+        """Derive external links from canonical node IDs.
+
+        :param str node_id: Canonical graph node identifier.
+        :return Dict[str, Optional[str]]: External links dictionary.
+        """
+        links: Dict[str, Optional[str]] = {
+            "arxiv_abs": None,
+            "arxiv_pdf": None,
+            "doi": None,
+            "semantic_scholar": (
+                f"https://www.semanticscholar.org/paper/{quote(node_id, safe='')}"
+            ),
+        }
+
+        arxiv_match = re.match(r"^arxiv:(.+)$", node_id, flags=re.IGNORECASE)
+        if arxiv_match:
+            arxiv_id = arxiv_match.group(1).strip()
+            if arxiv_id:
+                links["arxiv_abs"] = f"https://arxiv.org/abs/{quote(arxiv_id, safe='')}"
+                links["arxiv_pdf"] = (
+                    f"https://arxiv.org/pdf/{quote(arxiv_id, safe='')}.pdf"
+                )
+
+        doi_value: Optional[str] = None
+        if node_id.lower().startswith("doi:"):
+            suffix = node_id.split(":", 1)[1].strip()
+            doi_value = suffix or None
+        elif re.match(r"^10\.\d{4,9}/\S+$", node_id):
+            doi_value = node_id
+        if doi_value:
+            links["doi"] = f"https://doi.org/{quote(doi_value, safe='/()[]:._;-')}"
+        return links
+
+    @staticmethod
+    def _bibtex_entry_key(node_id: str) -> str:
+        """Build deterministic BibTeX entry keys from node IDs.
+
+        :param str node_id: Graph node ID.
+        :return str: BibTeX entry key.
+        """
+        normalized = re.sub(r"[^0-9a-zA-Z]+", "_", node_id).strip("_").lower()
+        if not normalized:
+            normalized = "paper"
+        return f"citemesh_{normalized}"
+
+    @staticmethod
+    def _bibtex_escape(raw_value: str) -> str:
+        """Escape text for conservative BibTeX field rendering.
+
+        :param str raw_value: Raw field value.
+        :return str: Escaped value safe for brace-delimited fields.
+        """
+        collapsed = " ".join(str(raw_value).split())
+        collapsed = collapsed.replace("\\", "\\\\")
+        collapsed = collapsed.replace("{", "\\{")
+        collapsed = collapsed.replace("}", "\\}")
+        return collapsed
+
+    def _node_bibtex(
+        self, node_payload: Dict[str, Any], *, links: Dict[str, Optional[str]]
+    ) -> str:
+        """Render a deterministic BibTeX entry for dashboard actions.
+
+        :param Dict[str, Any] node_payload: Node payload.
+        :param Dict[str, Optional[str]] links: Derived external links.
+        :return str: BibTeX entry string.
+        """
+        key = self._bibtex_entry_key(str(node_payload.get("id", "")))
+        fields: list[tuple[str, str]] = []
+        title = str(node_payload.get("title") or "").strip()
+        if title:
+            fields.append(("title", title))
+
+        authors = node_payload.get("authors", [])
+        if isinstance(authors, list):
+            author_names = [
+                str(author).strip() for author in authors if str(author).strip()
+            ]
+            if author_names:
+                fields.append(("author", " and ".join(author_names)))
+
+        year = self._coerce_year(node_payload.get("year"))
+        if year > 0:
+            fields.append(("year", str(year)))
+
+        doi_url = links.get("doi")
+        if doi_url:
+            doi_value = doi_url.replace("https://doi.org/", "", 1)
+            fields.append(("doi", doi_value))
+
+        primary_url = (
+            links.get("arxiv_abs") or links.get("doi") or links.get("semantic_scholar")
+        )
+        if primary_url:
+            fields.append(("url", primary_url))
+
+        abstract = str(node_payload.get("abstract") or "").strip()
+        if abstract:
+            fields.append(("abstract", abstract))
+
+        lines = [f"@article{{{key},"]
+        for field, value in fields:
+            lines.append(f"  {field} = {{{self._bibtex_escape(value)}}},")
+        lines.append("}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _dashboard_template(
+        cls,
+        *,
+        theme_obj: Theme,
+        div_id: str,
+        plotly_js: str,
+        payload_json: str,
+        figure_json: str,
+    ) -> str:
+        """Render standalone dashboard HTML template.
+
+        :param Theme theme_obj: Active theme.
+        :param str div_id: Plotly mount div ID.
+        :param str plotly_js: Inline Plotly runtime JS.
+        :param str payload_json: Serialized dashboard payload JSON.
+        :param str figure_json: Serialized Plotly figure JSON.
+        :return str: Dashboard HTML content.
+        """
+        is_dark = theme_obj.name in {"dark", "solarized"}
+        vars_map = {
+            "__BODY_BG__": "#0f1318" if is_dark else "#eef2f7",
+            "__PANEL_BG__": "#171d25" if is_dark else "#ffffff",
+            "__PANEL_BORDER__": "#2e3948" if is_dark else "#d5dce8",
+            "__TEXT_PRIMARY__": "#ecf1f8" if is_dark else "#1b2738",
+            "__TEXT_MUTED__": "#9ab0cb" if is_dark else "#5a6a80",
+            "__ACCENT__": "#4aa3ff" if is_dark else "#0f67d8",
+            "__ACCENT_SOFT__": "rgba(74, 163, 255, 0.2)"
+            if is_dark
+            else "rgba(15, 103, 216, 0.14)",
+            "__GRAPH_BG__": theme_obj.background,
+            "__PLOTLY_JS__": plotly_js,
+            "__PAYLOAD_JSON__": payload_json,
+            "__FIGURE_JSON__": figure_json,
+            "__PLOTLY_DIV_ID__": div_id,
+        }
+        template = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CiteMesh Dashboard</title>
+  <style>
+    :root {
+      --body-bg: __BODY_BG__;
+      --panel-bg: __PANEL_BG__;
+      --panel-border: __PANEL_BORDER__;
+      --text-primary: __TEXT_PRIMARY__;
+      --text-muted: __TEXT_MUTED__;
+      --accent: __ACCENT__;
+      --accent-soft: __ACCENT_SOFT__;
+      --graph-bg: __GRAPH_BG__;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--body-bg); color: var(--text-primary); font-family: "IBM Plex Sans", "Source Sans 3", "Segoe UI", sans-serif; }
+    #dashboard-root {
+      display: grid;
+      gap: 12px;
+      padding: 12px;
+      min-height: 100vh;
+      grid-template-columns: minmax(280px, 24vw) minmax(420px, 1fr) minmax(300px, 28vw);
+    }
+    .pane {
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      border-radius: 12px;
+      overflow: hidden;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .pane-header {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--panel-border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .pane-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    #paper-controls {
+      padding: 10px 12px;
+      display: grid;
+      gap: 8px;
+      border-bottom: 1px solid var(--panel-border);
+    }
+    .control-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .control-row.single {
+      grid-template-columns: 1fr;
+    }
+    input, select, button {
+      width: 100%;
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-primary);
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    input::placeholder { color: var(--text-muted); }
+    button {
+      cursor: pointer;
+      transition: border-color 120ms ease, background 120ms ease;
+    }
+    button:hover { border-color: var(--accent); }
+    .chips {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .chip {
+      width: auto;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .chip.active {
+      color: var(--text-primary);
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+    #paper-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      overflow: auto;
+      flex: 1;
+    }
+    .paper-row {
+      border-bottom: 1px solid var(--panel-border);
+      padding: 10px 12px;
+      cursor: pointer;
+      display: grid;
+      gap: 4px;
+    }
+    .paper-row:hover { background: var(--accent-soft); }
+    .paper-row.is-hover { outline: 1px solid var(--accent); outline-offset: -1px; }
+    .paper-row.is-selected { background: var(--accent-soft); border-left: 3px solid var(--accent); }
+    .paper-title { font-size: 13px; font-weight: 600; line-height: 1.32; }
+    .paper-subline, .paper-meta { color: var(--text-muted); font-size: 12px; }
+    .badges { display: flex; gap: 6px; flex-wrap: wrap; }
+    .badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--panel-border);
+      color: var(--text-muted);
+      width: fit-content;
+    }
+    .badge.seed { color: var(--text-primary); border-color: var(--accent); }
+    #graph-pane .pane-header { gap: 12px; }
+    #graph-canvas-wrap {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      background: var(--graph-bg);
+    }
+    #__PLOTLY_DIV_ID__ {
+      width: 100%;
+      height: 100%;
+      min-height: 520px;
+    }
+    #graph-legend {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      background: rgba(10, 14, 20, 0.78);
+      border: 1px solid var(--panel-border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 11px;
+      color: #dde8f6;
+      display: grid;
+      gap: 4px;
+      max-width: 240px;
+    }
+    #detail-content {
+      padding: 12px;
+      overflow: auto;
+      flex: 1;
+      display: grid;
+      gap: 10px;
+    }
+    #detail-title { margin: 0; font-size: 18px; line-height: 1.26; }
+    #detail-subtitle, #detail-metrics { color: var(--text-muted); font-size: 13px; line-height: 1.45; }
+    #detail-links {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    #detail-links a {
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 13px;
+      border: 1px solid var(--panel-border);
+      border-radius: 999px;
+      padding: 4px 10px;
+    }
+    #detail-links a:hover { border-color: var(--accent); }
+    #detail-abstract {
+      white-space: pre-wrap;
+      line-height: 1.55;
+      font-size: 13px;
+      color: var(--text-primary);
+    }
+    #detail-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .muted { color: var(--text-muted); }
+    @media (max-width: 1100px) {
+      #dashboard-root {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "graph"
+          "detail"
+          "list";
+      }
+      #graph-pane { grid-area: graph; min-height: 480px; }
+      #detail-pane { grid-area: detail; min-height: 380px; }
+      #paper-list-pane { grid-area: list; min-height: 380px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="dashboard-root">
+    <aside id="paper-list-pane" class="pane">
+      <div class="pane-header">
+        <h2 class="pane-title">Papers</h2>
+        <span id="paper-count" class="muted">0</span>
+      </div>
+      <div id="paper-controls">
+        <div class="control-row single">
+          <input id="search-input" type="search" placeholder="Search title, authors, abstract..." />
+        </div>
+        <div class="control-row">
+          <select id="sort-select">
+            <option value="relevance">Sort: Relevance</option>
+            <option value="year">Sort: Year</option>
+            <option value="citation_count">Sort: Citations</option>
+            <option value="title">Sort: Title</option>
+          </select>
+          <button id="clear-selection" type="button">Clear Selection</button>
+        </div>
+        <div class="control-row">
+          <input id="year-min" type="number" placeholder="Year min" />
+          <input id="year-max" type="number" placeholder="Year max" />
+        </div>
+        <div class="chips" id="provenance-filters">
+          <button class="chip active" data-filter="citation" type="button">citation</button>
+          <button class="chip active" data-filter="semantic" type="button">semantic</button>
+          <button class="chip active" data-filter="both" type="button">both</button>
+        </div>
+      </div>
+      <ul id="paper-list"></ul>
+    </aside>
+
+    <main id="graph-pane" class="pane">
+      <div class="pane-header">
+        <h2 class="pane-title">Graph</h2>
+        <span class="muted">Hover to preview, click to lock</span>
+      </div>
+      <div id="graph-canvas-wrap">
+        <div id="__PLOTLY_DIV_ID__"></div>
+        <div id="graph-legend">
+          <div><strong>Legend</strong></div>
+          <div>Seed paper is pinned and highlighted in list.</div>
+          <div>Year colors follow the graph color scale.</div>
+          <div>Provenance chips filter citation/semantic overlap.</div>
+        </div>
+      </div>
+    </main>
+
+    <aside id="detail-pane" class="pane">
+      <div class="pane-header">
+        <h2 class="pane-title">Details</h2>
+        <span id="detail-mode" class="muted">No selection</span>
+      </div>
+      <div id="detail-content">
+        <h3 id="detail-title">Select a paper</h3>
+        <div id="detail-subtitle" class="muted"></div>
+        <div id="detail-metrics" class="muted"></div>
+        <div id="detail-links"></div>
+        <div id="detail-actions"></div>
+        <div id="detail-abstract" class="muted">Hover or click a paper to inspect abstract and metadata.</div>
+      </div>
+    </aside>
+  </div>
+
+  <script>__PLOTLY_JS__</script>
+  <script id="citemesh-dashboard-data" type="application/json">__PAYLOAD_JSON__</script>
+  <script id="citemesh-dashboard-figure" type="application/json">__FIGURE_JSON__</script>
+  <script>
+    const payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
+    const figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
+    const graphDiv = document.getElementById("__PLOTLY_DIV_ID__");
+
+    const nodes = payload.nodes || [];
+    const edges = payload.edges || [];
+    const nodeOrder = (payload.meta && payload.meta.plotly_node_order) || [];
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    const nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
+
+    const state = {
+      selectedId: (payload.meta && payload.meta.seed_id) || null,
+      hoverId: null,
+      filters: { citation: true, semantic: true, both: true },
+      searchText: "",
+      sortKey: "relevance",
+      yearMin: null,
+      yearMax: null,
+    };
+
+    const controls = {
+      list: document.getElementById("paper-list"),
+      count: document.getElementById("paper-count"),
+      search: document.getElementById("search-input"),
+      sort: document.getElementById("sort-select"),
+      yearMin: document.getElementById("year-min"),
+      yearMax: document.getElementById("year-max"),
+      clearSelection: document.getElementById("clear-selection"),
+      chips: Array.from(document.querySelectorAll("#provenance-filters .chip")),
+      detailMode: document.getElementById("detail-mode"),
+      detailTitle: document.getElementById("detail-title"),
+      detailSubtitle: document.getElementById("detail-subtitle"),
+      detailMetrics: document.getElementById("detail-metrics"),
+      detailLinks: document.getElementById("detail-links"),
+      detailActions: document.getElementById("detail-actions"),
+      detailAbstract: document.getElementById("detail-abstract"),
+    };
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function hasYear(node) {
+      return Number.isFinite(node.year) && Number(node.year) > 0;
+    }
+
+    function nodeFilterClass(node) {
+      const base = node.provenance_base || node.provenance || "citation";
+      return state.filters[base] === true;
+    }
+
+    function nodeMatches(node) {
+      if (!nodeFilterClass(node)) {
+        return false;
+      }
+      if (state.yearMin !== null && (!hasYear(node) || Number(node.year) < state.yearMin)) {
+        return false;
+      }
+      if (state.yearMax !== null && (!hasYear(node) || Number(node.year) > state.yearMax)) {
+        return false;
+      }
+      if (!state.searchText) {
+        return true;
+      }
+      const haystack = [
+        node.title || "",
+        Array.isArray(node.authors) ? node.authors.join(" ") : "",
+        node.abstract || "",
+      ].join(" ").toLowerCase();
+      return haystack.includes(state.searchText);
+    }
+
+    function tieBreak(nodeA, nodeB) {
+      const citationsA = Number(nodeA.citation_count || 0);
+      const citationsB = Number(nodeB.citation_count || 0);
+      if (citationsA !== citationsB) {
+        return citationsB - citationsA;
+      }
+      const yearA = hasYear(nodeA) ? Number(nodeA.year) : -1;
+      const yearB = hasYear(nodeB) ? Number(nodeB.year) : -1;
+      if (yearA !== yearB) {
+        return yearB - yearA;
+      }
+      return String(nodeA.id).localeCompare(String(nodeB.id));
+    }
+
+    function compareNodes(nodeA, nodeB) {
+      if (!!nodeA.is_seed !== !!nodeB.is_seed) {
+        return nodeA.is_seed ? -1 : 1;
+      }
+
+      if (state.sortKey === "title") {
+        const titleCmp = String(nodeA.title || "").localeCompare(String(nodeB.title || ""));
+        return titleCmp || tieBreak(nodeA, nodeB);
+      }
+      if (state.sortKey === "year") {
+        const yearA = hasYear(nodeA) ? Number(nodeA.year) : -1;
+        const yearB = hasYear(nodeB) ? Number(nodeB.year) : -1;
+        if (yearA !== yearB) {
+          return yearB - yearA;
+        }
+        return tieBreak(nodeA, nodeB);
+      }
+      if (state.sortKey === "citation_count") {
+        const citationsA = Number(nodeA.citation_count || 0);
+        const citationsB = Number(nodeB.citation_count || 0);
+        if (citationsA !== citationsB) {
+          return citationsB - citationsA;
+        }
+        return tieBreak(nodeA, nodeB);
+      }
+
+      const relevanceA = Number(nodeA.seed_relevance || 0);
+      const relevanceB = Number(nodeB.seed_relevance || 0);
+      if (relevanceA !== relevanceB) {
+        return relevanceB - relevanceA;
+      }
+      return tieBreak(nodeA, nodeB);
+    }
+
+    function filteredNodes() {
+      const selected = nodes.filter(nodeMatches);
+      selected.sort(compareNodes);
+      return selected;
+    }
+
+    function detailLinksHtml(links) {
+      const entries = [];
+      if (links && links.arxiv_abs) {
+        entries.push(["arXiv", links.arxiv_abs]);
+      }
+      if (links && links.arxiv_pdf) {
+        entries.push(["PDF", links.arxiv_pdf]);
+      }
+      if (links && links.doi) {
+        entries.push(["DOI", links.doi]);
+      }
+      if (links && links.semantic_scholar) {
+        entries.push(["Semantic Scholar", links.semantic_scholar]);
+      }
+      if (!entries.length) {
+        return "";
+      }
+      return entries
+        .map(([label, href]) =>
+          `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`
+        )
+        .join("");
+    }
+
+    function copyText(value) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(value);
+      }
+      const fallback = document.createElement("textarea");
+      fallback.value = value;
+      document.body.appendChild(fallback);
+      fallback.focus();
+      fallback.select();
+      try {
+        document.execCommand("copy");
+      } finally {
+        fallback.remove();
+      }
+      return Promise.resolve();
+    }
+
+    function renderDetail(nodeId, previewOnly) {
+      const node = nodeId ? nodeById.get(nodeId) : null;
+      if (!node) {
+        controls.detailMode.textContent = "No selection";
+        controls.detailTitle.textContent = "Select a paper";
+        controls.detailSubtitle.textContent = "";
+        controls.detailMetrics.textContent = "";
+        controls.detailLinks.innerHTML = "";
+        controls.detailActions.innerHTML = "";
+        controls.detailAbstract.textContent = "Hover or click a paper to inspect abstract and metadata.";
+        controls.detailAbstract.classList.add("muted");
+        return;
+      }
+
+      controls.detailMode.textContent = previewOnly ? "Preview" : "Selected";
+      controls.detailTitle.textContent = node.title || node.id;
+      const authors = Array.isArray(node.authors) && node.authors.length ? node.authors.join(", ") : "Unknown authors";
+      const yearText = hasYear(node) ? String(node.year) : "n.d.";
+      controls.detailSubtitle.textContent = `${authors} | ${yearText}`;
+
+      const metrics = [];
+      metrics.push(`Citations: ${Number(node.citation_count || 0).toLocaleString()}`);
+      const provenance = node.provenance || "unknown";
+      const provenanceLabel = provenance === "seed" ? `seed (${node.provenance_base || "citation"})` : provenance;
+      metrics.push(`Source: ${provenanceLabel}`);
+      const categories = Array.isArray(node.categories) ? node.categories.filter(Boolean) : [];
+      if (categories.length) {
+        metrics.push(`Categories: ${categories.slice(0, 5).join(", ")}`);
+      }
+      controls.detailMetrics.textContent = metrics.join(" | ");
+
+      controls.detailLinks.innerHTML = detailLinksHtml(node.links || {});
+      controls.detailAbstract.textContent = node.abstract || "No abstract available.";
+      controls.detailAbstract.classList.toggle("muted", !node.abstract);
+
+      controls.detailActions.innerHTML = "";
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.textContent = "Copy BibTeX";
+      copyBtn.addEventListener("click", () => {
+        copyText(node.bibtex || "").then(() => {
+          copyBtn.textContent = "Copied";
+          window.setTimeout(() => {
+            copyBtn.textContent = "Copy BibTeX";
+          }, 1000);
+        });
+      });
+
+      const downloadBtn = document.createElement("button");
+      downloadBtn.type = "button";
+      downloadBtn.textContent = "Download BibTeX";
+      downloadBtn.addEventListener("click", () => {
+        const blob = new Blob([node.bibtex || ""], { type: "text/plain;charset=utf-8" });
+        const anchor = document.createElement("a");
+        anchor.href = URL.createObjectURL(blob);
+        anchor.download = `${String(node.id || "paper").replace(/[^a-zA-Z0-9._-]+/g, "_")}.bib`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(anchor.href);
+      });
+
+      controls.detailActions.appendChild(copyBtn);
+      controls.detailActions.appendChild(downloadBtn);
+    }
+
+    function syncRowHighlights() {
+      const rows = Array.from(document.querySelectorAll(".paper-row"));
+      rows.forEach((row) => {
+        const rowId = row.getAttribute("data-node-id");
+        row.classList.toggle("is-hover", !!state.hoverId && rowId === state.hoverId);
+        row.classList.toggle("is-selected", !!state.selectedId && rowId === state.selectedId);
+      });
+    }
+
+    const defaultLineWidths = nodeOrder.map((nodeId) => {
+      const node = nodeById.get(nodeId);
+      return node && node.is_seed ? 4 : 2;
+    });
+
+    function syncGraphHighlights() {
+      const lineWidths = defaultLineWidths.slice();
+      if (state.hoverId && nodeIndexById.has(state.hoverId)) {
+        const idx = nodeIndexById.get(state.hoverId);
+        lineWidths[idx] = Math.max(lineWidths[idx], 5);
+      }
+      if (state.selectedId && nodeIndexById.has(state.selectedId)) {
+        const idx = nodeIndexById.get(state.selectedId);
+        lineWidths[idx] = 6;
+      }
+      if (window.Plotly && graphDiv && graphDiv.data && graphDiv.data.length > 1) {
+        Plotly.restyle(graphDiv, { "marker.line.width": [lineWidths] }, [1]);
+      }
+    }
+
+    function syncHighlights() {
+      syncRowHighlights();
+      syncGraphHighlights();
+    }
+
+    function renderList() {
+      const listNodes = filteredNodes();
+      controls.count.textContent = `${listNodes.length.toLocaleString()} papers`;
+      controls.list.innerHTML = "";
+
+      if (!listNodes.length) {
+        const empty = document.createElement("li");
+        empty.className = "paper-row";
+        empty.innerHTML = '<div class="paper-title">No papers match current filters.</div>';
+        controls.list.appendChild(empty);
+        return;
+      }
+
+      listNodes.forEach((node) => {
+        const row = document.createElement("li");
+        row.className = "paper-row";
+        row.setAttribute("data-node-id", node.id);
+
+        const yearText = hasYear(node) ? String(node.year) : "n.d.";
+        const authors = Array.isArray(node.authors) && node.authors.length ? node.authors.slice(0, 3).join(", ") : "Unknown authors";
+        const provenance = node.provenance || "unknown";
+        const badges = [];
+        if (node.is_seed) {
+          badges.push('<span class="badge seed">seed</span>');
+        }
+        badges.push(`<span class="badge">${escapeHtml(provenance)}</span>`);
+
+        row.innerHTML = `
+          <div class="paper-title">${escapeHtml(node.title || node.id)}</div>
+          <div class="paper-subline">${escapeHtml(authors)}</div>
+          <div class="paper-meta">${escapeHtml(yearText)} | Citations: ${Number(node.citation_count || 0).toLocaleString()}</div>
+          <div class="badges">${badges.join("")}</div>
+        `;
+
+        row.addEventListener("mouseenter", () => {
+          state.hoverId = node.id;
+          if (!state.selectedId) {
+            renderDetail(node.id, true);
+          }
+          syncHighlights();
+        });
+        row.addEventListener("mouseleave", () => {
+          state.hoverId = null;
+          if (!state.selectedId) {
+            renderDetail(null, false);
+          }
+          syncHighlights();
+        });
+        row.addEventListener("click", () => {
+          state.selectedId = node.id;
+          renderDetail(node.id, false);
+          syncHighlights();
+          renderList();
+        });
+        controls.list.appendChild(row);
+      });
+
+      syncHighlights();
+    }
+
+    function setupControls() {
+      controls.search.addEventListener("input", (event) => {
+        state.searchText = String(event.target.value || "").trim().toLowerCase();
+        renderList();
+      });
+      controls.sort.addEventListener("change", (event) => {
+        state.sortKey = String(event.target.value || "relevance");
+        renderList();
+      });
+      controls.yearMin.addEventListener("input", (event) => {
+        const value = event.target.value;
+        state.yearMin = value === "" ? null : Number(value);
+        renderList();
+      });
+      controls.yearMax.addEventListener("input", (event) => {
+        const value = event.target.value;
+        state.yearMax = value === "" ? null : Number(value);
+        renderList();
+      });
+      controls.clearSelection.addEventListener("click", () => {
+        state.selectedId = null;
+        renderDetail(null, false);
+        syncHighlights();
+        renderList();
+      });
+
+      controls.chips.forEach((chip) => {
+        chip.addEventListener("click", () => {
+          const filterKey = chip.getAttribute("data-filter");
+          if (!filterKey) {
+            return;
+          }
+          state.filters[filterKey] = !state.filters[filterKey];
+          chip.classList.toggle("active", state.filters[filterKey]);
+          renderList();
+        });
+      });
+
+      const validYears = nodes
+        .map((node) => (hasYear(node) ? Number(node.year) : null))
+        .filter((year) => year !== null);
+      if (validYears.length) {
+        const minYear = Math.min(...validYears);
+        const maxYear = Math.max(...validYears);
+        controls.yearMin.placeholder = `Year min (${minYear})`;
+        controls.yearMax.placeholder = `Year max (${maxYear})`;
+      }
+    }
+
+    function setupGraphInteractions() {
+      graphDiv.on("plotly_hover", (event) => {
+        if (!event || !Array.isArray(event.points)) {
+          return;
+        }
+        const nodePoint = event.points.find((point) => point.curveNumber === 1);
+        if (!nodePoint) {
+          return;
+        }
+        const nodeId = nodeOrder[nodePoint.pointIndex];
+        if (!nodeId) {
+          return;
+        }
+        state.hoverId = nodeId;
+        if (!state.selectedId) {
+          renderDetail(nodeId, true);
+        }
+        syncHighlights();
+      });
+
+      graphDiv.on("plotly_unhover", () => {
+        state.hoverId = null;
+        if (!state.selectedId) {
+          renderDetail(null, false);
+        }
+        syncHighlights();
+      });
+
+      graphDiv.on("plotly_click", (event) => {
+        if (!event || !Array.isArray(event.points)) {
+          return;
+        }
+        const nodePoint = event.points.find((point) => point.curveNumber === 1);
+        if (!nodePoint) {
+          return;
+        }
+        const nodeId = nodeOrder[nodePoint.pointIndex];
+        if (!nodeId) {
+          return;
+        }
+        state.selectedId = nodeId;
+        renderDetail(nodeId, false);
+        syncHighlights();
+        renderList();
+      });
+    }
+
+    function initialize() {
+      setupControls();
+      Plotly.newPlot(graphDiv, figureSpec.data, figureSpec.layout, {
+        displaylogo: false,
+        responsive: true,
+      }).then(() => {
+        setupGraphInteractions();
+        if (state.selectedId && nodeById.has(state.selectedId)) {
+          renderDetail(state.selectedId, false);
+        } else {
+          renderDetail(null, false);
+        }
+        renderList();
+      });
+    }
+
+    initialize();
+  </script>
+</body>
+</html>
+"""
+        rendered = template
+        for token, value in vars_map.items():
+            rendered = rendered.replace(token, value)
+        return rendered
 
     def _sorted_nodes(self) -> list[tuple[Hashable, Dict[str, Any]]]:
         """Return nodes sorted by ID for deterministic serialization.
@@ -455,9 +1557,10 @@ class GraphExporter:
         color = self._color_map_cache[cache_key].get(node, theme.node_color_new)
         return _rgb_tuple_to_hex(color)
 
-    def _plotly_div_id(self) -> str:
+    def _plotly_div_id(self, prefix: str = "citemesh-plotly") -> str:
         """Build a deterministic Plotly HTML container id.
 
+        :param str prefix: Prefix for resulting ``div_id``.
         :return str: Stable ``div_id`` derived from seed id and sorted graph structure.
         """
         nodes = [str(node_id) for node_id, _ in self._sorted_nodes()]
@@ -475,7 +1578,7 @@ class GraphExporter:
             separators=(",", ":"),
         )
         digest = hashlib.sha1(digest_payload.encode("utf-8")).hexdigest()[:16]
-        return f"citemesh-plotly-{digest}"
+        return f"{prefix}-{digest}"
 
     def _plotly_year_scale(
         self, node_ids: list[Hashable]

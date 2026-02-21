@@ -723,6 +723,83 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["layout"] is None
 
 
+def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dashboard export should resolve paths and be included in --export all."""
+    graph = nx.Graph()
+    graph.add_node(
+        "seed", title="Seed", year=2020, authors=[], citation_count=0, is_seed=True
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured,
+            methods=("to_dashboard_html", "to_json"),
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "-o",
+                str(output),
+            ],
+        )
+        dashboard_path = Path(tmpdir) / "graph.dashboard.html"
+        assert dashboard_path.exists()
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+
+    captured.clear()
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured,
+            methods=(
+                "to_dashboard_html",
+                "to_json",
+                "to_graphml",
+                "to_interactive_html",
+                "to_plotly_html",
+            ),
+        ),
+    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir) / "exports"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "all",
+                "-o",
+                str(output_dir),
+            ],
+        )
+        assert (output_dir / "recommendation.dashboard.html").exists()
+        config_files = sorted(output_dir.glob("*.config.json"))
+        assert len(config_files) == 1
+        config_payload = json.loads(config_files[0].read_text())
+        assert "dashboard" in config_payload["outputs"]
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+
+
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -744,7 +821,13 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "GraphExporter",
         build_fake_exporter_factory(
             captured,
-            methods=("to_json", "to_graphml", "to_interactive_html", "to_plotly_html"),
+            methods=(
+                "to_json",
+                "to_graphml",
+                "to_interactive_html",
+                "to_plotly_html",
+                "to_dashboard_html",
+            ),
         ),
     )
 
@@ -1112,6 +1195,7 @@ def test_cli_help_contracts() -> None:
             [
                 "default: recommendation",
                 "--seed",
+                "dashboard",
                 "--all-corpus",
                 "--storage-precision",
                 "--binary-prefilter",
@@ -1158,6 +1242,12 @@ def test_output_path_and_slug_contracts() -> None:
             ["plotly"],
             True,
             {"plotly": Path("reports/example.plotly.html")},
+        ),
+        (
+            Path("reports/example.dashboard.html"),
+            ["dashboard"],
+            True,
+            {"dashboard": Path("reports/example.dashboard.html")},
         ),
     ]
     for base_output_path, formats, explicit_output, expected in path_cases:

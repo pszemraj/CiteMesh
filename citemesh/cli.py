@@ -190,11 +190,12 @@ def _add_logging_arguments(
     )
 
 
-EXPORT_FORMATS = ("png", "html", "plotly", "json", "graphml")
+EXPORT_FORMATS = ("png", "html", "plotly", "dashboard", "json", "graphml")
 EXPORT_EXTENSIONS: Dict[str, str] = {
     "png": ".png",
     "html": ".html",
     "plotly": ".plotly.html",
+    "dashboard": ".dashboard.html",
     "json": ".json",
     "graphml": ".graphml",
 }
@@ -832,7 +833,7 @@ Examples:
     build_parser.add_argument(
         "--export",
         "-e",
-        choices=["png", "html", "plotly", "json", "graphml", "all"],
+        choices=["png", "html", "plotly", "dashboard", "json", "graphml", "all"],
         default="png",
         help="Export format (default: png)",
     )
@@ -1720,7 +1721,9 @@ def main() -> None:
             if args.include_timestamp:
                 metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             plot_metadata = _plot_overlay_metadata(metadata)
-            layout_required = any(fmt in output_paths for fmt in ("png", "plotly"))
+            layout_required = any(
+                fmt in output_paths for fmt in ("png", "plotly", "dashboard")
+            )
             shared_layout = (
                 compute_layout(
                     graph,
@@ -1756,6 +1759,9 @@ def main() -> None:
 
             if "plotly" in output_paths:
                 exporter.to_plotly_html(output_paths["plotly"], theme=args.theme)
+
+            if "dashboard" in output_paths:
+                exporter.to_dashboard_html(output_paths["dashboard"], theme=args.theme)
 
             if "json" in output_paths:
                 exporter.to_json(output_paths["json"])

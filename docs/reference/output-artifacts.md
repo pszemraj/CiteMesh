@@ -15,6 +15,7 @@ When `--export all` is used, CiteMesh writes:
 - `<strategy>.png` (static Matplotlib render)
 - `<strategy>.html` (Pyvis interactive network)
 - `<strategy>.plotly.html` (Plotly interactive graph)
+- `<strategy>.dashboard.html` (standalone tri-pane research dashboard)
 - `<strategy>.json` (graph data payload)
 - `<strategy>.graphml` (exchange format for Gephi/Cytoscape)
 - `<strategy>.config.json` (run config + metadata sidecar)
@@ -47,7 +48,8 @@ Examples:
 
 - `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
   writes `out/hybrid.png`, `out/hybrid.html`, `out/hybrid.plotly.html`,
-  `out/hybrid.json`, `out/hybrid.graphml`, `out/hybrid.config.json`
+  `out/hybrid.dashboard.html`, `out/hybrid.json`, `out/hybrid.graphml`,
+  `out/hybrid.config.json`
 - `citemesh build "<paper-id>" --strategy citation --export json -o report.graphml`
   writes `report.json`
 
