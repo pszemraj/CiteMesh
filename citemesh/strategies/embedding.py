@@ -1816,14 +1816,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     cached_dataset_source or "unknown",
                     exc,
                 )
-            logger.debug(
-                "Embedding cache already hydrated for split=%s corpus_size=%s source=%s; "
-                "skipping dataset load.",
+            cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
+            if self.embedding_cache.is_hydrated(
+                self.dataset_split,
+                self.corpus_size,
+                dataset_source=cached_dataset_source,
+            ):
+                logger.debug(
+                    "Embedding cache already hydrated for split=%s corpus_size=%s source=%s; "
+                    "skipping dataset load.",
+                    self.dataset_split,
+                    "all" if self.corpus_size is None else self.corpus_size,
+                    cached_dataset_source or "unknown",
+                )
+                return
+            logger.warning(
+                "Hydrated cache revalidation invalidated source=%s for split=%s corpus_size=%s; "
+                "performing full source revalidation.",
+                cached_dataset_source or "unknown",
                 self.dataset_split,
                 "all" if self.corpus_size is None else self.corpus_size,
-                cached_dataset_source or "unknown",
             )
-            return
 
         dataset_source: Optional[str]
         dataset: Iterable[Dict[str, Any]]
@@ -2077,11 +2090,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if upstream_rows < cached_rows:
                 logger.warning(
                     "Cached embedding payload rows (%d) exceed upstream split rows (%d) "
-                    "for %s/%s; retaining existing cache.",
+                    "for %s/%s; marking hydration incomplete for full source revalidation.",
                     cached_rows,
                     upstream_rows,
                     source,
                     self.dataset_split,
+                )
+                self.embedding_cache.mark_hydrated(
+                    dataset_source=source,
+                    dataset_split=self.dataset_split,
+                    corpus_size=self.corpus_size,
+                    complete=False,
                 )
             self.embedding_cache.clear_hydration_rowcount_reconciliation()
             return

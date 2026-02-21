@@ -116,6 +116,9 @@ staged reconciliation flow:
 - full-split missing-ID reconciliation only when needed
 
 All reconciliation steps are ID-aware and append only uncached paper IDs.
+If upstream split row counts shrink below cached payload size, CiteMesh marks
+the namespace hydration state incomplete and forces full source revalidation
+instead of serving stale over-cap rows from the prior cache snapshot.
 If full reconciliation confirms no uncached IDs while row-count delta remains,
 CiteMesh treats that as duplicate-ID upstream growth (not a cache failure), records
 the reconciled row-count state, and skips repeated full-split scans until row counts

@@ -1341,6 +1341,62 @@ def test_full_corpus_hydrated_cache_skips_incremental_refresh_without_growth(
     builder._load_dataset_for_hydration.assert_not_called()
 
 
+def test_full_corpus_hydrated_cache_revalidates_when_upstream_rows_shrink(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hydrated full-corpus cache should revalidate when upstream row count shrinks."""
+    disable_embedding_dep_checks(monkeypatch)
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    builder.embedding_cache.is_hydrated = MagicMock(side_effect=[True, False, False])
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    builder.embedding_cache.payload_stats = MagicMock(
+        return_value=CacheNamespacePayloadStats(
+            file_count=2,
+            size_bytes=1024,
+            sqlite_rows=120,
+            embedding_rows=120,
+            hydration_complete=True,
+            hydration_split="train",
+            hydration_corpus_size="all",
+            hydration_dataset_source=source,
+        )
+    )
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 100)
+    load_mock = MagicMock(
+        return_value=(
+            source,
+            [{"id": "replacement-1", "title": "Replacement", "abstract": "A"}],
+        )
+    )
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
+    clear_cache_mock = MagicMock()
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    monkeypatch.setattr(builder, "_hydrate_dataset_records", MagicMock(return_value=1))
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    load_mock.assert_called_once_with(
+        use_streaming=False,
+        preferred_dataset_source=source,
+    )
+    clear_cache_mock.assert_called_once()
+    complete_flags = [
+        call.kwargs["complete"]
+        for call in builder.embedding_cache.mark_hydrated.call_args_list
+    ]
+    assert complete_flags == [False, False, True]
+
+
 def test_full_corpus_incremental_refresh_reconciles_missing_ids_when_tail_scan_underfills(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
