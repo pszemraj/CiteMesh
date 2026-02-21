@@ -11,7 +11,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from citemesh.core import HYBRID_CONFIG, Paper
+from citemesh.core import HYBRID_CONFIG, Author, Paper
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     deterministic_sort_key,
@@ -511,6 +511,56 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     assert "s2" not in papers
 
 
+def test_hybrid_collection_dedupes_semantic_seed_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid collection should collapse semantic seed aliases into the citation seed."""
+    _disable_embedding_strategy_dep_checks(monkeypatch)
+    builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
+
+    seed = Paper(
+        paper_id="ca997f1a733e53ad0fa29041246ff655243e8c1b",
+        title="Polynomial Composition Activations: Unleashing the Dynamics of Large Language Models",
+        year=2024,
+        abstract=(
+            "Transformers have found extensive applications across various domains due "
+            "to the powerful fitting capabilities."
+        ),
+        authors=[Author(name="Zhijian Zhou"), Author(name="Ya Wang")],
+        is_seed=True,
+    )
+    citation_papers = {"seed": seed, "c1": _paper("c1")}
+    semantic_seed_alias = Paper(
+        paper_id="arXiv:2411.03884v2",
+        title=(
+            "Polynomial Composition Activations: Unleashing the Dynamics of Large\n"
+            "  Language Models"
+        ),
+        year=2025,
+        abstract=seed.abstract,
+        authors=[Author(name="Zhijian Zhou"), Author(name="Yitao Zeng")],
+    )
+    semantic_papers = {
+        semantic_seed_alias.paper_id: semantic_seed_alias,
+        "s1": _paper("s1"),
+    }
+    builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda *_args, **_kwargs: ["c1", "s1"],
+    )
+
+    papers = builder.collect_papers("arXiv:2411.03884")
+
+    assert set(papers) == {seed.paper_id, "c1", "s1"}
+    assert "arXiv:2411.03884v2" not in papers
+    assert papers[seed.paper_id].year == 2024
+    assert builder.paper_sources[seed.paper_id] == "citation"
+
+
 def test_hybrid_build_graph_skips_pruning_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -519,7 +569,8 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 0)
 
     builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
-    graph = np.random.default_rng(0)
+    graph = nx.Graph()
+    graph.add_node("seed", is_seed=True)
     monkeypatch.setattr(
         "citemesh.strategies.hybrid.GraphBuilderStrategy.build_graph",
         lambda self, seed_id, **kwargs: (graph, "seed"),

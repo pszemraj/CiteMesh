@@ -6,6 +6,7 @@ comprehensive paper discovery.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
@@ -15,6 +16,7 @@ from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import SemanticScholarClient, get_client
+from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     deterministic_sort_key,
@@ -174,6 +176,80 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         # Track paper sources for adaptive similarity
         self.paper_sources: Dict[str, str] = {}  # paper_id -> citation|semantic|both
+
+    @staticmethod
+    def _normalize_identity_text(raw_text: str) -> str:
+        """Normalize free-form text for deterministic paper identity matching.
+
+        :param str raw_text: Raw user/content text.
+        :return str: Lowercased alphanumeric text with compact spacing.
+        """
+        compact = re.sub(r"[^0-9a-z]+", " ", str(raw_text).strip().lower())
+        return " ".join(compact.split())
+
+    @classmethod
+    def _paper_identity_aliases(cls, paper: Paper) -> List[str]:
+        """Return deterministic alias keys used to deduplicate equivalent papers.
+
+        :param Paper paper: Paper candidate to alias.
+        :return List[str]: Stable sorted alias keys.
+        """
+        aliases: Set[str] = set()
+        raw_id = str(paper.paper_id).strip()
+        if raw_id:
+            aliases.add(f"id:{raw_id.lower()}")
+            try:
+                aliases.add(f"id:{normalize_paper_id(raw_id).lower()}")
+            except ValueError:
+                pass
+
+        normalized_title = cls._normalize_identity_text(paper.title or "")
+        if normalized_title:
+            year_token = (
+                str(int(paper.year))
+                if isinstance(paper.year, int) and paper.year > 0
+                else "n.d."
+            )
+            aliases.add(f"meta:{normalized_title}|{year_token}")
+            normalized_abstract = cls._normalize_identity_text(paper.abstract or "")
+            if normalized_abstract:
+                aliases.add(f"meta:{normalized_title}|abs:{normalized_abstract[:256]}")
+            author_tokens = [
+                cls._normalize_identity_text(author.name)
+                for author in paper.authors[:3]
+                if getattr(author, "name", None)
+            ]
+            compact_authors = "|".join(token for token in author_tokens if token)
+            if compact_authors:
+                aliases.add(f"meta:{normalized_title}|{year_token}|{compact_authors}")
+
+        return sorted(aliases)
+
+    def _resolve_alias(self, aliases: Dict[str, str], paper: Paper) -> Optional[str]:
+        """Resolve an existing canonical paper ID from alias map.
+
+        :param Dict[str, str] aliases: Alias-to-canonical map.
+        :param Paper paper: Incoming paper payload.
+        :return Optional[str]: Canonical paper ID when already known.
+        """
+        for alias in self._paper_identity_aliases(paper):
+            canonical_id = aliases.get(alias)
+            if canonical_id is not None:
+                return canonical_id
+        return None
+
+    def _register_aliases(
+        self, aliases: Dict[str, str], canonical_id: str, paper: Paper
+    ) -> None:
+        """Register identity aliases for a canonical paper ID.
+
+        :param Dict[str, str] aliases: Alias-to-canonical map to mutate.
+        :param str canonical_id: Canonical paper identifier.
+        :param Paper paper: Paper payload providing alias candidates.
+        :return None: Alias map is mutated in place.
+        """
+        for alias in self._paper_identity_aliases(paper):
+            aliases.setdefault(alias, canonical_id)
 
     def _merge_paper_metadata(self, preferred: Paper, incoming: Paper) -> Paper:
         """Merge supplemental metadata from an alternate source into ``preferred``.
@@ -457,6 +533,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         papers: Dict[str, Paper] = {}
         self.paper_sources = {}
+        alias_map: Dict[str, str] = {}
 
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")
@@ -470,14 +547,32 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             )
         papers[seed_paper.paper_id] = seed_paper
         self.paper_sources[seed_paper.paper_id] = "citation"
+        self._register_aliases(alias_map, seed_paper.paper_id, seed_paper)
 
         candidate_pool: Dict[str, Paper] = {}
         candidate_sources: Dict[str, Set[str]] = {}
-        for paper_id, paper in citation_papers.items():
-            if paper_id == seed_paper.paper_id or paper.is_seed:
+        for paper in citation_papers.values():
+            if paper.paper_id == seed_paper.paper_id or paper.is_seed:
                 continue
-            candidate_pool[paper_id] = paper
-            candidate_sources[paper_id] = {"citation"}
+            resolved = self._resolve_alias(alias_map, paper)
+            if resolved == seed_paper.paper_id:
+                papers[seed_paper.paper_id] = self._merge_paper_metadata(
+                    papers[seed_paper.paper_id], paper
+                )
+                self._register_aliases(alias_map, seed_paper.paper_id, paper)
+                continue
+            if resolved is not None:
+                candidate_pool[resolved] = self._merge_paper_metadata(
+                    candidate_pool[resolved], paper
+                )
+                candidate_sources.setdefault(resolved, set()).add("citation")
+                self._register_aliases(alias_map, resolved, paper)
+                continue
+
+            canonical_id = str(paper.paper_id)
+            candidate_pool[canonical_id] = paper
+            candidate_sources[canonical_id] = {"citation"}
+            self._register_aliases(alias_map, canonical_id, paper)
 
         if self.embedding_builder is None:
             for paper_id, paper in candidate_pool.items():
@@ -507,17 +602,28 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
-        for paper_id, paper in semantic_papers.items():
+        for paper in semantic_papers.values():
             if paper.is_seed:
                 continue
-            if paper_id in candidate_pool:
-                candidate_pool[paper_id] = self._merge_paper_metadata(
-                    candidate_pool[paper_id], paper
+            resolved = self._resolve_alias(alias_map, paper)
+            if resolved == seed_paper.paper_id:
+                papers[seed_paper.paper_id] = self._merge_paper_metadata(
+                    papers[seed_paper.paper_id], paper
                 )
-                candidate_sources[paper_id].add("semantic")
+                self._register_aliases(alias_map, seed_paper.paper_id, paper)
                 continue
-            candidate_pool[paper_id] = paper
-            candidate_sources[paper_id] = {"semantic"}
+            if resolved is not None:
+                candidate_pool[resolved] = self._merge_paper_metadata(
+                    candidate_pool[resolved], paper
+                )
+                candidate_sources.setdefault(resolved, set()).add("semantic")
+                self._register_aliases(alias_map, resolved, paper)
+                continue
+
+            canonical_id = str(paper.paper_id)
+            candidate_pool[canonical_id] = paper
+            candidate_sources[canonical_id] = {"semantic"}
+            self._register_aliases(alias_map, canonical_id, paper)
 
         ranked_ids = self._rank_candidates(
             seed_paper, candidate_pool, candidate_sources
