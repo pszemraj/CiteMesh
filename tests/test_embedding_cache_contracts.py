@@ -142,6 +142,9 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
                 "year": 2020,
                 "authors": ["Alice", "Bob"],
                 "categories": ["cs.AI"],
+                "venue": "NeurIPS",
+                "arxiv_id": "2411.03884",
+                "doi": "10.1145/3133956.3134029",
             },
             "p2": {
                 "title": "Beta",
@@ -149,6 +152,9 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
                 "year": 2021,
                 "authors": ["Carol"],
                 "categories": ["cs.LG"],
+                "venue": "ICML",
+                "arxiv_id": "2501.00001",
+                "doi": "",
             },
         }
         first_model = LookupEncodeModel(
@@ -185,6 +191,9 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
     assert results[0].metadata["authors"] == ["Alice", "Bob"]
     assert results[0].metadata["categories"] == ["cs.AI"]
     assert results[0].metadata["year"] == 2020
+    assert results[0].metadata["venue"] == "NeurIPS"
+    assert results[0].metadata["arxiv_id"] == "2411.03884"
+    assert results[0].metadata["doi"] == "10.1145/3133956.3134029"
     assert results[0].embedding.dtype == np.float32
     assert results[0].embedding_dtype == "float32"
     assert results[0].storage_precision == "int8"
@@ -213,7 +222,14 @@ def test_embedding_cache_metadata_refresh_survives_mixed_batch_encode_failure() 
         with pytest.raises(RuntimeError, match="encode failure"):
             cache.get_embeddings(
                 {
-                    "p1": {"title": "Alpha", "abstract": "First", "year": 2025},
+                    "p1": {
+                        "title": "Alpha",
+                        "abstract": "First",
+                        "year": 2025,
+                        "venue": "ICLR",
+                        "arxiv_id": "2411.03884",
+                        "doi": "10.1145/3133956.3134029",
+                    },
                     "p2": {"title": "Beta", "abstract": "Second"},
                 },
                 _FailingEncodeModel(),
@@ -221,11 +237,20 @@ def test_embedding_cache_metadata_refresh_survives_mixed_batch_encode_failure() 
             )
 
         with sqlite3.connect(cache.db_path) as conn:
-            refreshed_year = conn.execute(
-                "SELECT year FROM papers WHERE paper_id = 'p1'"
-            ).fetchone()[0]
+            refreshed_row = conn.execute(
+                """
+                SELECT year, venue, arxiv_id, doi
+                FROM papers
+                WHERE paper_id = 'p1'
+                """
+            ).fetchone()
 
-    assert refreshed_year == 2025
+    assert refreshed_row == (
+        2025,
+        "ICLR",
+        "2411.03884",
+        "10.1145/3133956.3134029",
+    )
 
 
 def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:

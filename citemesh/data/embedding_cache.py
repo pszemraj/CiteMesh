@@ -410,7 +410,8 @@ class EmbeddingCache:
                 cursor.executemany(
                     """
                     UPDATE papers
-                    SET title = ?, abstract = ?, year = ?, authors_json = ?, categories_json = ?
+                    SET title = ?, abstract = ?, year = ?, authors_json = ?, categories_json = ?,
+                        venue = ?, arxiv_id = ?, doi = ?
                     WHERE paper_id = ?
                     """,
                     metadata_updates_on_hit,
@@ -517,8 +518,9 @@ class EmbeddingCache:
                 cursor.executemany(
                     """
                     INSERT OR REPLACE INTO papers
-                    (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx, authors_json, categories_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx,
+                     authors_json, categories_json, venue, arxiv_id, doi)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     rows_to_upsert,
                 )
@@ -662,6 +664,9 @@ class EmbeddingCache:
                     "year": payload.get("year"),
                     "authors": payload.get("authors", []),
                     "categories": payload.get("categories", []),
+                    "venue": payload.get("venue", ""),
+                    "arxiv_id": payload.get("arxiv_id", ""),
+                    "doi": payload.get("doi", ""),
                 }
                 results.append(
                     CacheSearchResult(
@@ -1087,6 +1092,9 @@ class EmbeddingCache:
                     row_idx INTEGER,
                     authors_json TEXT,
                     categories_json TEXT,
+                    venue TEXT,
+                    arxiv_id TEXT,
+                    doi TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 """
@@ -1101,6 +1109,12 @@ class EmbeddingCache:
                 conn.execute("ALTER TABLE papers ADD COLUMN authors_json TEXT")
             if "categories_json" not in columns:
                 conn.execute("ALTER TABLE papers ADD COLUMN categories_json TEXT")
+            if "venue" not in columns:
+                conn.execute("ALTER TABLE papers ADD COLUMN venue TEXT")
+            if "arxiv_id" not in columns:
+                conn.execute("ALTER TABLE papers ADD COLUMN arxiv_id TEXT")
+            if "doi" not in columns:
+                conn.execute("ALTER TABLE papers ADD COLUMN doi TEXT")
 
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_papers_text_hash ON papers(text_hash)"
@@ -1586,9 +1600,16 @@ class EmbeddingCache:
         :param int row_idx: Row index inside matrix dataset.
         :return Tuple[Any, ...]: SQLite upsert tuple matching ``papers`` columns.
         """
-        title, abstract, year, authors_json, categories_json = (
-            EmbeddingCache._normalized_metadata_fields(metadata)
-        )
+        (
+            title,
+            abstract,
+            year,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
+        ) = EmbeddingCache._normalized_metadata_fields(metadata)
 
         return (
             paper_id,
@@ -1600,17 +1621,20 @@ class EmbeddingCache:
             row_idx,
             authors_json,
             categories_json,
+            venue,
+            arxiv_id,
+            doi,
         )
 
     @staticmethod
     def _normalized_metadata_fields(
         metadata: Dict[str, object],
-    ) -> Tuple[str, str, Optional[int], str, str]:
+    ) -> Tuple[str, str, Optional[int], str, str, str, str, str]:
         """Normalize metadata fields to stable cache representations.
 
         :param Dict[str, object] metadata: Paper metadata payload.
-        :return Tuple[str, str, Optional[int], str, str]: Normalized title, abstract, year,
-            authors JSON, and categories JSON fields.
+        :return Tuple[str, str, Optional[int], str, str, str, str, str]:
+            Normalized title/abstract/year/authors/categories and venue/arXiv/DOI fields.
         """
         title = str(metadata.get("title", "") or "")
         abstract = str(metadata.get("abstract", "") or "")
@@ -1624,7 +1648,19 @@ class EmbeddingCache:
 
         authors_json = _safe_json_list(metadata.get("authors", []))
         categories_json = _safe_json_list(metadata.get("categories", []))
-        return title, abstract, year, authors_json, categories_json
+        venue = str(metadata.get("venue", "") or "").strip()
+        arxiv_id = str(metadata.get("arxiv_id", "") or "").strip()
+        doi = str(metadata.get("doi", "") or "").strip()
+        return (
+            title,
+            abstract,
+            year,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
+        )
 
     @staticmethod
     def _metadata_fields_changed(
@@ -1646,6 +1682,9 @@ class EmbeddingCache:
             ),
             _safe_json_list(_parse_json_list(existing_row.get("authors_json"))),
             _safe_json_list(_parse_json_list(existing_row.get("categories_json"))),
+            str(existing_row.get("venue", "") or "").strip(),
+            str(existing_row.get("arxiv_id", "") or "").strip(),
+            str(existing_row.get("doi", "") or "").strip(),
         )
         expected = EmbeddingCache._normalized_metadata_fields(metadata)
         return current != expected
@@ -1660,10 +1699,27 @@ class EmbeddingCache:
         :param Dict[str, object] metadata: Incoming metadata payload.
         :return Tuple[Any, ...]: Tuple for metadata UPDATE query.
         """
-        title, abstract, year, authors_json, categories_json = (
-            EmbeddingCache._normalized_metadata_fields(metadata)
+        (
+            title,
+            abstract,
+            year,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
+        ) = EmbeddingCache._normalized_metadata_fields(metadata)
+        return (
+            title,
+            abstract,
+            year,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
+            paper_id,
         )
-        return (title, abstract, year, authors_json, categories_json, paper_id)
 
     def _set_h5_attrs(self, h5_file: h5py.File) -> None:
         """Write schema/layout metadata attrs to an open HDF5 file.
@@ -1698,7 +1754,8 @@ class EmbeddingCache:
         for id_chunk in _chunked(paper_ids, SQLITE_QUERY_BATCH_SIZE):
             placeholders = ",".join("?" for _ in id_chunk)
             query = (
-                "SELECT paper_id, text_hash, row_idx, title, abstract, year, authors_json, categories_json "
+                "SELECT paper_id, text_hash, row_idx, title, abstract, year, "
+                "authors_json, categories_json, venue, arxiv_id, doi "
                 f"FROM papers WHERE paper_id IN ({placeholders})"
             )
 
@@ -1712,6 +1769,9 @@ class EmbeddingCache:
                     year,
                     authors_json,
                     categories_json,
+                    venue,
+                    arxiv_id,
+                    doi,
                 ) = row
                 existing_rows[str(paper_id)] = {
                     "text_hash": str(text_hash),
@@ -1721,6 +1781,9 @@ class EmbeddingCache:
                     "year": int(year) if year is not None else None,
                     "authors_json": str(authors_json or ""),
                     "categories_json": str(categories_json or ""),
+                    "venue": str(venue or ""),
+                    "arxiv_id": str(arxiv_id or ""),
+                    "doi": str(doi or ""),
                 }
 
         return existing_rows
@@ -2270,7 +2333,8 @@ class EmbeddingCache:
             numeric_chunk = [int(value) for value in chunk]
             placeholders = ",".join("?" for _ in numeric_chunk)
             query = (
-                "SELECT paper_id, title, abstract, year, row_idx, authors_json, categories_json "
+                "SELECT paper_id, title, abstract, year, row_idx, "
+                "authors_json, categories_json, venue, arxiv_id, doi "
                 f"FROM papers WHERE row_idx IN ({placeholders})"
             )
             for row in conn.execute(query, numeric_chunk):
@@ -2282,6 +2346,9 @@ class EmbeddingCache:
                     row_idx,
                     authors_json,
                     categories_json,
+                    venue,
+                    arxiv_id,
+                    doi,
                 ) = row
                 output[int(row_idx)] = {
                     "paper_id": str(paper_id),
@@ -2290,6 +2357,9 @@ class EmbeddingCache:
                     "year": int(year) if year is not None else None,
                     "authors": _parse_json_list(authors_json),
                     "categories": _parse_json_list(categories_json),
+                    "venue": str(venue or ""),
+                    "arxiv_id": str(arxiv_id or ""),
+                    "doi": str(doi or ""),
                 }
 
         return output
