@@ -95,3 +95,13 @@ For current usage details, see:
 - Improve batching strategies for reference fetching coverage.
 - Add co-citation/shared-neighbor analytics in structured exports.
 - Provide ready-made Plotly/Dash templates for downstream analysis.
+
+### Dashboard Backlog (Tracked TODOs)
+
+- [TODO-dashboard] Add cluster-level labels/hulls in dashboard graph view (topic keyword extraction per cluster).
+- [TODO-dashboard] Add bridge-paper quick lens (betweenness/connector score + dedicated list mode).
+- [TODO-dashboard] Add graph-pane matrix toggle (adjacency heatmap ordered by cluster/relevance).
+- [TODO-dashboard] Add explicit "obscure gems" ranking lens (semantic relevance + citation-age normalization).
+- [TODO-dashboard] Expand seed-relation facets for recommendation/embedding graphs (directed relation metadata beyond provenance/year heuristics).
+- [TODO-dashboard] Add reading-queue workflow (save/reject/note with `localStorage` export/import).
+- [TODO-dashboard] Add optional local PDF download + inline viewer workflow (`--download-pdfs` style export mode).

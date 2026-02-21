@@ -525,6 +525,7 @@ class GraphExporter:
         )
 
         halo_trace: Optional[Any] = None
+        neighborhood_trace: Optional[Any] = None
         if for_dashboard:
             seed_index = next(
                 (
@@ -560,6 +561,19 @@ class GraphExporter:
                     sizemin=3,
                 ),
             )
+            neighborhood_trace = go.Scatter(
+                x=[],
+                y=[],
+                name="neighborhood-edges",
+                mode="lines",
+                hoverinfo="none",
+                showlegend=False,
+                line=dict(
+                    width=1.4,
+                    color=_rgb_tuple_to_rgba(theme_obj.seed_color, 0.54),
+                ),
+                opacity=0.98,
+            )
 
         layout_kwargs: Dict[str, Any] = {
             "showlegend": False,
@@ -577,9 +591,12 @@ class GraphExporter:
             layout_kwargs["title"] = f"{title_prefix}: {self._plotly_title_text()}"
 
         if for_dashboard:
-            traces = (
-                [halo_trace, node_trace] if halo_trace is not None else [node_trace]
-            )
+            traces = []
+            if halo_trace is not None:
+                traces.append(halo_trace)
+            if neighborhood_trace is not None:
+                traces.append(neighborhood_trace)
+            traces.append(node_trace)
         else:
             traces = [edge_trace, node_trace]
         fig = go.Figure(data=traces, layout=go.Layout(**layout_kwargs))
@@ -610,6 +627,7 @@ class GraphExporter:
         :return Dict[str, Any]: JSON payload consumed by dashboard JS.
         """
         provenance = self._provenance_map()
+        seed_relations = self._seed_relation_map()
         relevance = self._seed_relevance_scores()
         sorted_nodes = self._sorted_nodes()
         sorted_edges = self._sorted_edges()
@@ -630,6 +648,8 @@ class GraphExporter:
                 if str(author).strip()
             ]
             serialized["venue"] = str(serialized.get("venue") or "").strip()
+            serialized["arxiv_id"] = str(serialized.get("arxiv_id") or "").strip()
+            serialized["doi"] = str(serialized.get("doi") or "").strip()
             serialized["categories"] = [
                 str(category).strip()
                 for category in serialized.get("categories", [])
@@ -645,8 +665,14 @@ class GraphExporter:
                 "seed" if serialized["is_seed"] else provenance_base
             )
             serialized["provenance_base"] = provenance_base
+            seed_relation = seed_relations.get(node_str, "")
+            if serialized["is_seed"]:
+                seed_relation = "seed"
+            if not seed_relation and serialized["provenance"] == "semantic":
+                seed_relation = "semantic_only"
+            serialized["seed_relation"] = seed_relation
             serialized["seed_relevance"] = float(relevance.get(node_str, 0.0))
-            links = self._derive_links(node_str)
+            links = self._derive_links(node_str, node_payload=serialized)
             serialized["links"] = links
             serialized["bibtex"] = self._node_bibtex(serialized, links=links)
             node_payloads.append(serialized)
@@ -712,6 +738,30 @@ class GraphExporter:
             if value not in {"citation", "semantic", "both"}:
                 continue
             resolved[str(raw_id)] = value
+        return resolved
+
+    def _seed_relation_map(self) -> Dict[str, str]:
+        """Resolve normalized relation-to-seed mapping when available.
+
+        :return Dict[str, str]: Node-ID to relation class mapping.
+        """
+        raw_map = self.graph.graph.get("seed_relations")
+        if not isinstance(raw_map, dict):
+            return {}
+
+        allowed = {
+            "seed",
+            "referenced_by_seed",
+            "cites_seed",
+            "overlap",
+            "semantic_only",
+            "citation",
+        }
+        resolved: Dict[str, str] = {}
+        for raw_id, raw_value in raw_map.items():
+            value = str(raw_value).strip().lower()
+            if value in allowed:
+                resolved[str(raw_id)] = value
         return resolved
 
     def _seed_relevance_scores(self) -> Dict[str, float]:
@@ -783,10 +833,17 @@ class GraphExporter:
         """
         return raw.replace("</", "<\\/")
 
-    def _derive_links(self, node_id: str) -> Dict[str, Optional[str]]:
+    def _derive_links(
+        self,
+        node_id: str,
+        *,
+        node_payload: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Optional[str]]:
         """Derive external links from canonical node IDs.
 
         :param str node_id: Canonical graph node identifier.
+        :param Optional[Dict[str, Any]] node_payload: Optional node payload carrying
+            explicit ``arxiv_id``/``doi`` values.
         :return Dict[str, Optional[str]]: External links dictionary.
         """
         links: Dict[str, Optional[str]] = {
@@ -798,21 +855,26 @@ class GraphExporter:
             ),
         }
 
-        arxiv_match = re.match(r"^arxiv:(.+)$", node_id, flags=re.IGNORECASE)
-        if arxiv_match:
-            arxiv_id = arxiv_match.group(1).strip()
-            if arxiv_id:
-                links["arxiv_abs"] = f"https://arxiv.org/abs/{quote(arxiv_id, safe='')}"
-                links["arxiv_pdf"] = (
-                    f"https://arxiv.org/pdf/{quote(arxiv_id, safe='')}.pdf"
-                )
+        arxiv_value = ""
+        if isinstance(node_payload, dict):
+            arxiv_value = str(node_payload.get("arxiv_id") or "").strip()
+        if not arxiv_value:
+            arxiv_match = re.match(r"^arxiv:(.+)$", node_id, flags=re.IGNORECASE)
+            if arxiv_match:
+                arxiv_value = arxiv_match.group(1).strip()
+        if arxiv_value:
+            arxiv_id = re.sub(r"v\d+$", "", arxiv_value, flags=re.IGNORECASE)
+            links["arxiv_abs"] = f"https://arxiv.org/abs/{quote(arxiv_id, safe='')}"
+            links["arxiv_pdf"] = f"https://arxiv.org/pdf/{quote(arxiv_id, safe='')}.pdf"
 
-        doi_value: Optional[str] = None
-        if node_id.lower().startswith("doi:"):
-            suffix = node_id.split(":", 1)[1].strip()
-            doi_value = suffix or None
-        elif re.match(r"^10\.\d{4,9}/\S+$", node_id):
-            doi_value = node_id
+        doi_value = ""
+        if isinstance(node_payload, dict):
+            doi_value = str(node_payload.get("doi") or "").strip()
+        if not doi_value:
+            if node_id.lower().startswith("doi:"):
+                doi_value = node_id.split(":", 1)[1].strip()
+            elif re.match(r"^10\.\d{4,9}/\S+$", node_id):
+                doi_value = node_id
         if doi_value:
             links["doi"] = f"https://doi.org/{quote(doi_value, safe='/()[]:._;-')}"
         return links
@@ -1357,6 +1419,29 @@ class GraphExporter:
       flex: 1;
       padding-right: 2px;
     }
+    #detail-why {
+      border: 1px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
+      border-radius: 10px;
+      padding: 10px;
+      display: grid;
+      gap: 6px;
+      background: rgba(255, 255, 255, 0.01);
+      min-height: 84px;
+    }
+    #detail-why-label {
+      margin: 0;
+      font-size: 12px;
+      color: var(--text-muted);
+      letter-spacing: 0.015em;
+      text-transform: uppercase;
+    }
+    #detail-why-lines {
+      display: grid;
+      gap: 4px;
+      font-size: 12px;
+      line-height: 1.45;
+      color: color-mix(in srgb, var(--text-primary) 90%, #dbe8f8);
+    }
     @media (max-width: 1280px) {
       #dashboard-root {
         grid-template-columns: minmax(240px, 30vw) minmax(420px, 1fr) minmax(300px, 34vw);
@@ -1475,6 +1560,10 @@ class GraphExporter:
         <div id="detail-metrics"></div>
         <div id="detail-categories"></div>
         <div id="detail-links"></div>
+        <section id="detail-why">
+          <h4 id="detail-why-label">Why This Paper</h4>
+          <div id="detail-why-lines" class="muted">Select a paper to inspect neighborhood evidence.</div>
+        </section>
         <div id="detail-actions"></div>
       </div>
     </aside>
@@ -1526,6 +1615,9 @@ class GraphExporter:
     const haloTraceIndex = traceSpecs.findIndex(
       (trace) => String(trace.name || "") === "selection-halo"
     );
+    const neighborhoodTraceIndex = traceSpecs.findIndex(
+      (trace) => String(trace.name || "") === "neighborhood-edges"
+    );
     const nodeTraceSource = (traceSpecs[nodeTraceIndex] || {});
     const markerSource = nodeTraceSource.marker || {};
     const defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
@@ -1543,6 +1635,24 @@ class GraphExporter:
       yearMax: null,
       visibleIds: new Set(nodeOrder),
     };
+
+    const adjacency = new Map();
+    (payload.edges || []).forEach((edge) => {
+      const left = String(edge.source || "");
+      const right = String(edge.target || "");
+      const weight = Number(edge.weight || 0);
+      if (!left || !right) {
+        return;
+      }
+      if (!adjacency.has(left)) {
+        adjacency.set(left, []);
+      }
+      if (!adjacency.has(right)) {
+        adjacency.set(right, []);
+      }
+      adjacency.get(left).push({ id: right, weight });
+      adjacency.get(right).push({ id: left, weight });
+    });
 
     const controls = {
       list: document.getElementById("paper-list"),
@@ -1564,6 +1674,7 @@ class GraphExporter:
       detailMetrics: document.getElementById("detail-metrics"),
       detailCategories: document.getElementById("detail-categories"),
       detailLinks: document.getElementById("detail-links"),
+      detailWhy: document.getElementById("detail-why-lines"),
       detailActions: document.getElementById("detail-actions"),
       detailAbstract: document.getElementById("detail-abstract"),
       graphHint: document.getElementById("graph-hint"),
@@ -1667,6 +1778,26 @@ class GraphExporter:
       return tieBreak(nodeA, nodeB);
     }
 
+    function relationBadgeLabel(node) {
+      const relation = String(node.seed_relation || "").trim();
+      if (relation === "referenced_by_seed") {
+        return "referenced by seed";
+      }
+      if (relation === "cites_seed") {
+        return "cites seed";
+      }
+      if (relation === "semantic_only") {
+        return "semantic-only";
+      }
+      if (relation === "overlap") {
+        return "prior+derivative";
+      }
+      if (relation === "seed") {
+        return "origin";
+      }
+      return String(node.provenance_base || node.provenance || "citation");
+    }
+
     function filteredNodes() {
       const selected = nodes.filter(nodeMatches);
       selected.sort(compareNodes);
@@ -1733,6 +1864,88 @@ class GraphExporter:
       return Promise.resolve();
     }
 
+    function compactNodeLabel(nodeId) {
+      const node = nodeById.get(nodeId);
+      if (!node) {
+        return String(nodeId);
+      }
+      if (Array.isArray(node.authors) && node.authors.length) {
+        const surname = String(node.authors[0]).split(" ").filter(Boolean).slice(-1)[0] || "Unknown";
+        const year = hasYear(node) ? String(node.year) : "n.d.";
+        return `${surname}, ${year}`;
+      }
+      return String(node.title || node.id || nodeId);
+    }
+
+    function shortestPathIds(sourceId, targetId) {
+      if (!sourceId || !targetId || sourceId === targetId) {
+        return sourceId && targetId ? [sourceId] : [];
+      }
+      const queue = [sourceId];
+      const visited = new Set([sourceId]);
+      const previous = new Map();
+
+      while (queue.length) {
+        const current = queue.shift();
+        const neighbors = adjacency.get(current) || [];
+        for (const entry of neighbors) {
+          const nextId = entry.id;
+          if (visited.has(nextId)) {
+            continue;
+          }
+          visited.add(nextId);
+          previous.set(nextId, current);
+          if (nextId === targetId) {
+            const path = [targetId];
+            let cursor = targetId;
+            while (previous.has(cursor)) {
+              cursor = previous.get(cursor);
+              path.push(cursor);
+              if (cursor === sourceId) {
+                break;
+              }
+            }
+            path.reverse();
+            return path;
+          }
+          queue.push(nextId);
+        }
+      }
+      return [];
+    }
+
+    function renderWhyLines(nodeId) {
+      const node = nodeId ? nodeById.get(nodeId) : null;
+      if (!node) {
+        controls.detailWhy.textContent = "Select a paper to inspect neighborhood evidence.";
+        controls.detailWhy.classList.add("muted");
+        return;
+      }
+
+      const relationTag = String(node.seed_relation || "");
+      const relationLabel = relationTag || (node.provenance || "unknown");
+      const neighbors = (adjacency.get(node.id) || [])
+        .slice()
+        .sort((left, right) => Number(right.weight || 0) - Number(left.weight || 0))
+        .slice(0, 3);
+      const neighborLine = neighbors.length
+        ? `Top links: ${neighbors.map((entry) => `${compactNodeLabel(entry.id)} (w=${Number(entry.weight || 0).toFixed(2)})`).join("; ")}`
+        : "Top links: none";
+      const seedId = (payload.meta && payload.meta.seed_id) || null;
+      const path = seedId ? shortestPathIds(seedId, node.id) : [];
+      const pathLine = path.length
+        ? `Shortest path to seed: ${path.map((pid) => compactNodeLabel(pid)).join(" -> ")}`
+        : "Shortest path to seed: unavailable";
+      const relevanceLine = `Seed relevance: ${Number(node.seed_relevance || 0).toFixed(4)} | Relation: ${relationLabel}`;
+
+      controls.detailWhy.classList.remove("muted");
+      controls.detailWhy.innerHTML = [
+        `<div>${escapeHtml(relevanceLine)}</div>`,
+        `<div>${escapeHtml(neighborLine)}</div>`,
+        `<div>${escapeHtml(pathLine)}</div>`,
+      ].join("");
+    }
+
     function renderDetail(nodeId, previewOnly) {
       const node = nodeId ? nodeById.get(nodeId) : null;
       if (!node) {
@@ -1742,6 +1955,8 @@ class GraphExporter:
         controls.detailMetrics.innerHTML = "";
         controls.detailCategories.innerHTML = "";
         controls.detailLinks.innerHTML = "";
+        controls.detailWhy.textContent = "Select a paper to inspect neighborhood evidence.";
+        controls.detailWhy.classList.add("muted");
         controls.detailActions.innerHTML = "";
         controls.detailAbstract.textContent = "Hover or click a paper to inspect abstract and metadata.";
         controls.detailAbstract.classList.add("muted");
@@ -1781,6 +1996,7 @@ class GraphExporter:
         .join("");
 
       controls.detailLinks.innerHTML = detailLinksHtml(node.links || {});
+      renderWhyLines(node.id);
       controls.detailAbstract.textContent = node.abstract || "No abstract available for this record.";
       controls.detailAbstract.classList.toggle("muted", !node.abstract);
 
@@ -1845,6 +2061,7 @@ class GraphExporter:
         ? nodeIndexById.get(state.selectedId)
         : -1;
       const hasActiveFocus = hoverIndex !== -1 || selectedIndex !== -1;
+      const focusId = state.selectedId || state.hoverId;
 
       graphNodePaths.forEach((path, idx) => {
         const nodeId = nodeOrder[idx];
@@ -1858,8 +2075,31 @@ class GraphExporter:
         }
       });
 
+      if (neighborhoodTraceIndex >= 0) {
+        let neighborhoodX = [];
+        let neighborhoodY = [];
+        if (focusId && adjacency.has(focusId)) {
+          for (const entry of adjacency.get(focusId)) {
+            if (!nodeIndexById.has(entry.id) || !nodeIndexById.has(focusId)) {
+              continue;
+            }
+            const leftIdx = nodeIndexById.get(focusId);
+            const rightIdx = nodeIndexById.get(entry.id);
+            neighborhoodX.push(defaultNodeX[leftIdx], defaultNodeX[rightIdx], null);
+            neighborhoodY.push(defaultNodeY[leftIdx], defaultNodeY[rightIdx], null);
+          }
+        }
+        Plotly.restyle(
+          graphDiv,
+          {
+            x: [neighborhoodX],
+            y: [neighborhoodY],
+          },
+          [neighborhoodTraceIndex]
+        );
+      }
+
       if (haloTraceIndex >= 0) {
-        const focusId = state.selectedId || state.hoverId;
         let haloX = [];
         let haloY = [];
         let haloSize = [];
@@ -1916,9 +2156,9 @@ class GraphExporter:
         const authors = Array.isArray(node.authors) && node.authors.length
           ? node.authors.slice(0, 4).join(", ")
           : "Unknown authors";
-        const provenance = String(node.provenance_base || node.provenance || "citation");
+        const provenance = relationBadgeLabel(node);
         const provenanceClass = node.is_seed ? "meta-origin" : "";
-        const provenanceLabel = node.is_seed ? "origin" : provenance;
+        const provenanceLabel = provenance;
 
         row.innerHTML = `
           <div class="paper-row-head">
@@ -2288,6 +2528,8 @@ class GraphExporter:
             "year": attrs.get("year"),
             "citation_count": attrs.get("citation_count", 0),
             "venue": attrs.get("venue", ""),
+            "arxiv_id": attrs.get("arxiv_id", ""),
+            "doi": attrs.get("doi", ""),
             "is_seed": bool(attrs.get("is_seed", False)),
         }
 
@@ -2297,6 +2539,10 @@ class GraphExporter:
                     "authors": [author.name for author in paper.authors],
                     "abstract": paper.abstract,
                     "venue": getattr(paper, "venue", "") or attrs.get("venue", ""),
+                    "arxiv_id": (
+                        getattr(paper, "arxiv_id", "") or attrs.get("arxiv_id", "")
+                    ),
+                    "doi": getattr(paper, "doi", "") or attrs.get("doi", ""),
                     "categories": paper.categories,
                 }
             )

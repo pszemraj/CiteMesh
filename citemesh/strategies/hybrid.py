@@ -176,6 +176,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         # Track paper sources for adaptive similarity
         self.paper_sources: Dict[str, str] = {}  # paper_id -> citation|semantic|both
+        self.seed_relations: Dict[str, str] = {}
 
     @staticmethod
     def _normalize_identity_text(raw_text: str) -> str:
@@ -251,6 +252,37 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         for alias in self._paper_identity_aliases(paper):
             aliases.setdefault(alias, canonical_id)
 
+    @staticmethod
+    def _merge_seed_relation(existing: str, incoming: str) -> str:
+        """Merge two seed-relation labels conservatively.
+
+        :param str existing: Existing relation label.
+        :param str incoming: Incoming relation label.
+        :return str: Merged relation label.
+        """
+        normalized_existing = str(existing or "").strip().lower()
+        normalized_incoming = str(incoming or "").strip().lower()
+        if not normalized_existing:
+            return normalized_incoming
+        if (
+            not normalized_incoming
+            or normalized_existing == normalized_incoming
+            or normalized_existing == "seed"
+        ):
+            return normalized_existing
+        if normalized_existing == "overlap" or normalized_incoming == "overlap":
+            return "overlap"
+        if {
+            normalized_existing,
+            normalized_incoming,
+        } == {"referenced_by_seed", "cites_seed"}:
+            return "overlap"
+        if normalized_existing == "semantic_only":
+            return normalized_incoming
+        if normalized_incoming == "semantic_only":
+            return normalized_existing
+        return normalized_existing
+
     def _merge_paper_metadata(self, preferred: Paper, incoming: Paper) -> Paper:
         """Merge supplemental metadata from an alternate source into ``preferred``.
 
@@ -268,6 +300,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             preferred.citation_count = incoming.citation_count
         if (not preferred.venue) and incoming.venue:
             preferred.venue = incoming.venue
+        if (not preferred.arxiv_id) and incoming.arxiv_id:
+            preferred.arxiv_id = incoming.arxiv_id
+        if (not preferred.doi) and incoming.doi:
+            preferred.doi = incoming.doi
         if (not preferred.categories) and incoming.categories:
             preferred.categories = incoming.categories
         if (not preferred.references) and incoming.references:
@@ -286,6 +322,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             "year": paper.year,
             "authors": [author.name for author in paper.authors],
             "venue": paper.venue or "",
+            "arxiv_id": paper.arxiv_id or "",
+            "doi": paper.doi or "",
             "categories": list(paper.categories or []),
         }
 
@@ -536,6 +574,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         papers: Dict[str, Paper] = {}
         self.paper_sources = {}
+        self.seed_relations = {}
         alias_map: Dict[str, str] = {}
 
         # Step 1: Collect from citations
@@ -550,7 +589,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             )
         papers[seed_paper.paper_id] = seed_paper
         self.paper_sources[seed_paper.paper_id] = "citation"
+        self.seed_relations[seed_paper.paper_id] = "seed"
         self._register_aliases(alias_map, seed_paper.paper_id, seed_paper)
+        citation_seed_relations = getattr(self.citation_builder, "seed_relations", {})
 
         candidate_pool: Dict[str, Paper] = {}
         candidate_sources: Dict[str, Set[str]] = {}
@@ -569,12 +610,21 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     candidate_pool[resolved], paper
                 )
                 candidate_sources.setdefault(resolved, set()).add("citation")
+                relation = self._merge_seed_relation(
+                    self.seed_relations.get(resolved, ""),
+                    str(citation_seed_relations.get(paper.paper_id, "citation")),
+                )
+                if relation:
+                    self.seed_relations[resolved] = relation
                 self._register_aliases(alias_map, resolved, paper)
                 continue
 
             canonical_id = str(paper.paper_id)
             candidate_pool[canonical_id] = paper
             candidate_sources[canonical_id] = {"citation"}
+            relation = str(citation_seed_relations.get(paper.paper_id, "citation"))
+            if relation:
+                self.seed_relations[canonical_id] = relation
             self._register_aliases(alias_map, canonical_id, paper)
 
         if self.embedding_builder is None:
@@ -583,6 +633,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     break
                 papers[paper_id] = paper
                 self.paper_sources[paper_id] = "citation"
+                self.seed_relations.setdefault(paper_id, "citation")
             return papers
 
         # Step 2: Enrich with semantic matches
@@ -596,6 +647,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     break
                 papers[paper_id] = candidate_pool[paper_id]
                 self.paper_sources[paper_id] = "citation"
+                self.seed_relations.setdefault(paper_id, "citation")
             return papers
 
         logger.info("Enriching with up to %s semantic matches...", semantic_budget)
@@ -620,12 +672,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     candidate_pool[resolved], paper
                 )
                 candidate_sources.setdefault(resolved, set()).add("semantic")
+                self.seed_relations.setdefault(resolved, "semantic_only")
                 self._register_aliases(alias_map, resolved, paper)
                 continue
 
             canonical_id = str(paper.paper_id)
             candidate_pool[canonical_id] = paper
             candidate_sources[canonical_id] = {"semantic"}
+            self.seed_relations.setdefault(canonical_id, "semantic_only")
             self._register_aliases(alias_map, canonical_id, paper)
 
         ranked_ids = self._rank_candidates(
@@ -642,7 +696,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             papers[paper_id] = candidate_pool[paper_id]
             if semantic_only:
                 added_semantic += 1
+                self.seed_relations[paper_id] = self._merge_seed_relation(
+                    self.seed_relations.get(paper_id, ""),
+                    "semantic_only",
+                )
             self.paper_sources[paper_id] = "both" if len(tags) > 1 else next(iter(tags))
+            if "citation" in tags:
+                self.seed_relations.setdefault(paper_id, "citation")
 
         logger.info("Added %s semantic papers", added_semantic)
 
@@ -733,6 +793,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             str(paper_id): str(source)
             for paper_id, source in sorted(
                 self.paper_sources.items(), key=lambda item: item[0]
+            )
+        }
+        graph.graph["seed_relations"] = {
+            str(paper_id): str(relation)
+            for paper_id, relation in sorted(
+                self.seed_relations.items(), key=lambda item: item[0]
             )
         }
 

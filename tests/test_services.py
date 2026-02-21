@@ -265,6 +265,7 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         "abstract": "",
         "citationCount": 0,
         "publicationVenue": {"name": "ICLR"},
+        "externalIds": {"ArXiv": "2411.03884v2", "DOI": "10.1145/3133956.3134029"},
         "authors": [{"name": ""}, {}],
         "fieldsOfStudy": ["cs.AI", "cs.LG"],
     }
@@ -276,6 +277,8 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     assert paper.year is None
     assert paper.abstract == ""
     assert paper.venue == "ICLR"
+    assert paper.arxiv_id == "2411.03884v2"
+    assert paper.doi == "10.1145/3133956.3134029"
     assert paper.authors == []
     assert paper.categories == ["cs.AI", "cs.LG"]
 
@@ -357,6 +360,40 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         client.get_recommended_papers(raw_id, limit=1)
         url = client._request_json.call_args.args[0]
         assert url.endswith(expected_suffix)
+
+
+def test_external_id_fallback_from_paper_id_contracts() -> None:
+    """Paper-ID fallback should populate arXiv/DOI fields when external IDs are absent."""
+    client = SemanticScholarClient(timeout=1)
+
+    arxiv_payload = {
+        "paperId": "arxiv:2411.03884v2",
+        "title": "ArXiv Paper",
+        "year": 2024,
+        "abstract": "A",
+        "citationCount": 1,
+        "authors": [],
+        "fieldsOfStudy": [],
+    }
+    doi_payload = {
+        "paperId": "10.1145/3133956.3134029",
+        "title": "DOI Paper",
+        "year": 2017,
+        "abstract": "B",
+        "citationCount": 2,
+        "authors": [],
+        "fieldsOfStudy": [],
+    }
+
+    arxiv = client._convert_recommendation(arxiv_payload)
+    doi = client._convert_recommendation(doi_payload)
+
+    assert arxiv is not None
+    assert arxiv.arxiv_id == "2411.03884"
+    assert arxiv.doi == ""
+    assert doi is not None
+    assert doi.arxiv_id == ""
+    assert doi.doi == "10.1145/3133956.3134029"
 
 
 def test_reference_cache_hit_corrupt_and_type_error_paths(

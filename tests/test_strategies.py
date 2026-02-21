@@ -200,6 +200,35 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
     ]
 
 
+def test_citation_build_graph_persists_seed_relation_metadata() -> None:
+    """Citation graph export metadata should preserve seed relation classes."""
+    seed = _paper("seed", refs=["seed-ref"])
+    ref = _paper("ref1")
+    cit = _paper("cit1")
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [ref]
+    client.get_paper_citations.return_value = [cit]
+
+    builder = CitationGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        fetch_references=False,
+        similarity_threshold=0.0,
+        client=client,
+    )
+    graph, seed_id = builder.build_graph("seed")
+
+    assert seed_id == "seed"
+    assert graph.graph["seed_relations"] == {
+        "cit1": "cites_seed",
+        "ref1": "referenced_by_seed",
+        "seed": "seed",
+    }
+
+
 def test_refresh_reference_cache_force_lookup_contracts() -> None:
     """Refresh mode should bypass stale memory entries and force service lookups."""
     citation_client = MagicMock()
@@ -305,6 +334,10 @@ def test_hybrid_collection_merges_and_tracks_sources(
     semantic_papers = {"c1": _paper("c1"), "s1": _paper("s1"), "s2": _paper("s2")}
 
     builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
+    builder.citation_builder.seed_relations = {
+        "seed": "seed",
+        "c1": "referenced_by_seed",
+    }
     assert builder.embedding_builder is not None
     builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
 
@@ -313,6 +346,9 @@ def test_hybrid_collection_merges_and_tracks_sources(
     assert set(papers) == {"seed", "c1", "s1", "s2"}
     assert builder.paper_sources["seed"] == "citation"
     assert builder.paper_sources["s1"] == "semantic"
+    assert builder.seed_relations["seed"] == "seed"
+    assert builder.seed_relations["c1"] == "referenced_by_seed"
+    assert builder.seed_relations["s1"] == "semantic_only"
 
 
 def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
@@ -569,8 +605,11 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", 0)
 
     builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
+    builder.paper_sources = {"seed": "citation", "a": "semantic"}
+    builder.seed_relations = {"seed": "seed", "a": "semantic_only"}
     graph = nx.Graph()
     graph.add_node("seed", is_seed=True)
+    graph.add_node("a", is_seed=False)
     monkeypatch.setattr(
         "citemesh.strategies.hybrid.GraphBuilderStrategy.build_graph",
         lambda self, seed_id, **kwargs: (graph, "seed"),
@@ -579,6 +618,8 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     out_graph, out_seed = builder.build_graph("seed")
     assert out_graph is graph
     assert out_seed == "seed"
+    assert out_graph.graph["paper_sources"] == {"a": "semantic", "seed": "citation"}
+    assert out_graph.graph["seed_relations"] == {"a": "semantic_only", "seed": "seed"}
 
 
 def test_hybrid_build_graph_logs_post_cap_edge_count(

@@ -29,7 +29,7 @@ Visualization + Export
     └── cli sidecar writer -> *.config.json (rebuild params + run metadata)
 ```
 
-Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `is_seed`) so visualization and export layers remain strategy-agnostic.
+Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `venue`, `arxiv_id`, `doi`, `is_seed`) so visualization and export layers remain strategy-agnostic.
 
 ## Module Overview
 

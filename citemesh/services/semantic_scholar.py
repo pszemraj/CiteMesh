@@ -41,6 +41,10 @@ DEFAULT_PAPER_FIELDS = (
     "citationCount",
     "abstract",
     "fieldsOfStudy",
+    "externalIds",
+    "venue",
+    "publicationVenue",
+    "journal",
 )
 
 
@@ -506,6 +510,82 @@ class SemanticScholarClient:
                     return name.strip()
         return ""
 
+    @staticmethod
+    def _normalize_external_id(raw_value: object) -> str:
+        """Normalize optional external-id strings.
+
+        :param object raw_value: Raw external ID payload.
+        :return str: Normalized external ID string (empty when unavailable).
+        """
+        if not isinstance(raw_value, str):
+            return ""
+        return raw_value.strip()
+
+    @classmethod
+    def _extract_external_ids_from_mapping(
+        cls, mapping: Dict[str, Any]
+    ) -> tuple[str, str]:
+        """Extract arXiv and DOI IDs from external-id style mappings.
+
+        :param Dict[str, Any] mapping: External IDs map.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
+        """
+        normalized = {str(key).lower(): value for key, value in mapping.items()}
+        arxiv_id = cls._normalize_external_id(normalized.get("arxiv"))
+        doi = cls._normalize_external_id(normalized.get("doi"))
+        return arxiv_id, doi
+
+    @classmethod
+    def _extract_external_ids_from_api_paper(cls, api_paper: Any) -> tuple[str, str]:
+        """Extract arXiv and DOI values from API paper payloads.
+
+        :param Any api_paper: Raw Semantic Scholar API object.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
+        """
+        external_ids = getattr(api_paper, "externalIds", None)
+        if isinstance(external_ids, dict):
+            return cls._extract_external_ids_from_mapping(external_ids)
+
+        return "", ""
+
+    @classmethod
+    def _extract_external_ids_from_record(
+        cls, record: Dict[str, Any]
+    ) -> tuple[str, str]:
+        """Extract arXiv and DOI values from recommendation/search dict records.
+
+        :param Dict[str, Any] record: Recommendation/search record.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
+        """
+        external_ids = record.get("externalIds")
+        if isinstance(external_ids, dict):
+            return cls._extract_external_ids_from_mapping(external_ids)
+        return "", ""
+
+    @staticmethod
+    def _external_ids_from_paper_id(paper_id: str) -> tuple[str, str]:
+        """Infer arXiv/DOI identifiers from canonical paper IDs when possible.
+
+        :param str paper_id: Canonical paper ID.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` inference tuple.
+        """
+        normalized = str(paper_id or "").strip()
+        if not normalized:
+            return "", ""
+
+        lowered = normalized.lower()
+        if lowered.startswith("arxiv:"):
+            return _strip_arxiv_version(normalized.split(":", 1)[1]), ""
+
+        if lowered.startswith("doi:"):
+            suffix = normalized.split(":", 1)[1].strip()
+            return "", suffix
+
+        if re.match(r"^10\.\d{4,9}/\S+$", normalized):
+            return "", normalized
+
+        return "", ""
+
     def _convert_api_paper(self, api_paper: Any) -> Optional[Paper]:
         """
         Convert Semantic Scholar API response to Paper model.
@@ -534,6 +614,12 @@ class SemanticScholarClient:
                 categories = [f for f in api_paper.fields if f]
             elif hasattr(api_paper, "fieldsOfStudy") and api_paper.fieldsOfStudy:
                 categories = [f for f in api_paper.fieldsOfStudy if f]
+            arxiv_id, doi = self._extract_external_ids_from_api_paper(api_paper)
+            fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
+                str(api_paper.paperId)
+            )
+            arxiv_id = arxiv_id or fallback_arxiv_id
+            doi = doi or fallback_doi
 
             return Paper(
                 paper_id=api_paper.paperId,
@@ -543,6 +629,8 @@ class SemanticScholarClient:
                 citation_count=api_paper.citationCount or 0,
                 abstract=getattr(api_paper, "abstract", "") or "",
                 venue=self._extract_venue_from_api_paper(api_paper),
+                arxiv_id=arxiv_id,
+                doi=doi,
                 categories=categories,
                 references=[],  # Will be populated separately if needed
                 is_seed=False,
@@ -579,6 +667,12 @@ class SemanticScholarClient:
             if isinstance(categories, str):
                 categories = [categories]
             references = self._extract_reference_ids(rec.get("references"))
+            arxiv_id, doi = self._extract_external_ids_from_record(rec)
+            fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
+                str(paper_id)
+            )
+            arxiv_id = arxiv_id or fallback_arxiv_id
+            doi = doi or fallback_doi
 
             return Paper(
                 paper_id=paper_id,
@@ -588,6 +682,8 @@ class SemanticScholarClient:
                 citation_count=rec.get("citationCount", 0) or 0,
                 abstract=rec.get("abstract") or "",
                 venue=self._extract_venue_from_record(rec),
+                arxiv_id=arxiv_id,
+                doi=doi,
                 categories=categories,
                 references=references,
                 is_seed=False,

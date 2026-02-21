@@ -409,6 +409,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     for token in [
         'id="global-nav"',
         'id="filters-toggle"',
+        'id="detail-why-lines"',
         'id="dashboard-root"',
         'id="paper-list-pane"',
         'id="graph-pane"',
@@ -417,6 +418,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="citemesh-dashboard-figure"',
     ]:
         assert token in rendered
+    for script_token in ["is-filter-hidden", "neighborhood-edges", "renderWhyLines("]:
+        assert script_token in rendered
 
     payload = _extract_dashboard_payload(rendered)
     assert payload["meta"]["seed_id"] == "seed"
@@ -427,16 +430,19 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     related_node = next(node for node in payload["nodes"] if node["id"] == "related")
     assert seed_node["provenance"] == "seed"
     assert seed_node["provenance_base"] == "citation"
+    assert "arxiv_id" in seed_node
+    assert "doi" in seed_node
     assert seed_node["venue"] == "TestConf"
     assert related_node["provenance"] == "semantic"
     assert related_node["venue"] == "Related Journal"
+    assert related_node["seed_relation"] == "semantic_only"
     assert "seed_relevance" in seed_node
     assert isinstance(seed_node["seed_relevance"], float)
     assert seed_node["links"]["semantic_scholar"] is not None
     assert isinstance(seed_node["bibtex"], str)
 
     figure = _extract_dashboard_figure(rendered)
-    assert len(figure["data"]) == 2
+    assert len(figure["data"]) == 3
     assert len(figure["layout"].get("shapes", [])) == 1
     edge_shape = figure["layout"]["shapes"][0]
     assert edge_shape["type"] == "path"
@@ -444,11 +450,17 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     halo_trace = next(
         trace for trace in figure["data"] if trace.get("name") == "selection-halo"
     )
+    neighborhood_trace = next(
+        trace for trace in figure["data"] if trace.get("name") == "neighborhood-edges"
+    )
     node_trace = next(trace for trace in figure["data"] if trace.get("name") == "nodes")
     halo_marker = halo_trace["marker"]
     assert halo_trace["mode"] == "markers"
     assert halo_trace["hoverinfo"] == "none"
     assert halo_marker["line"]["width"] == 0
+    assert neighborhood_trace["mode"] == "lines"
+    assert neighborhood_trace["x"] == []
+    assert neighborhood_trace["y"] == []
     marker = node_trace["marker"]
     assert marker["showscale"] is False
     assert marker["sizemode"] == "area"
@@ -471,7 +483,7 @@ def test_exporter_dashboard_missing_plotly_dependency(
 
 
 def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
-    """Dashboard payload should derive arXiv/DOI/S2 links from node IDs."""
+    """Dashboard payload should derive arXiv/DOI/S2 links from IDs and metadata."""
     pytest.importorskip("plotly")
 
     graph = nx.Graph()
@@ -499,8 +511,28 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
         citation_count=1,
         is_seed=False,
     )
+    graph.add_node(
+        "s2-candidate-arxiv",
+        title="S2 with arXiv external ID",
+        year=2024,
+        authors=["D"],
+        citation_count=2,
+        arxiv_id="2501.00001v3",
+        is_seed=False,
+    )
+    graph.add_node(
+        "s2-candidate-doi",
+        title="S2 with DOI external ID",
+        year=2022,
+        authors=["E"],
+        citation_count=3,
+        doi="10.1109/5.771073",
+        is_seed=False,
+    )
     graph.add_edge("arxiv:2411.03884", "10.1145/3133956.3134029", weight=0.9)
     graph.add_edge("arxiv:2411.03884", "abcdef123456", weight=0.7)
+    graph.add_edge("arxiv:2411.03884", "s2-candidate-arxiv", weight=0.8)
+    graph.add_edge("arxiv:2411.03884", "s2-candidate-doi", weight=0.75)
 
     exporter = GraphExporter(
         graph,
@@ -510,6 +542,8 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
             "arxiv:2411.03884": (0.0, 0.0),
             "10.1145/3133956.3134029": (1.0, 0.0),
             "abcdef123456": (0.0, 1.0),
+            "s2-candidate-arxiv": (-1.0, 0.0),
+            "s2-candidate-doi": (0.0, -1.0),
         },
     )
     out_path = tmp_path / "links.dashboard.html"
@@ -534,6 +568,15 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     assert s2_links["semantic_scholar"] == (
         "https://www.semanticscholar.org/paper/abcdef123456"
     )
+
+    s2_arxiv_links = nodes["s2-candidate-arxiv"]["links"]
+    assert s2_arxiv_links["arxiv_abs"] == "https://arxiv.org/abs/2501.00001"
+    assert s2_arxiv_links["arxiv_pdf"] == "https://arxiv.org/pdf/2501.00001.pdf"
+    assert s2_arxiv_links["doi"] is None
+
+    s2_doi_links = nodes["s2-candidate-doi"]["links"]
+    assert s2_doi_links["doi"] == "https://doi.org/10.1109/5.771073"
+    assert s2_doi_links["arxiv_abs"] is None
 
 
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(
