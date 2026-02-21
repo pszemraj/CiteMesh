@@ -254,7 +254,14 @@ def test_exporter_serialization_contracts_and_determinism(
     assert edge_pairs == [("a", "z"), ("seed", "z")]
 
     edge_trace = captured["data"][0]
-    assert list(edge_trace["x"]) == [0.0, 2.0, None, 1.0, 2.0, None]
+    normalized_layout = ordered_exporter._get_layout()
+    edge_x = list(edge_trace["x"])
+    assert edge_x[2] is None
+    assert edge_x[5] is None
+    assert edge_x[0] == pytest.approx(float(normalized_layout["a"][0]))
+    assert edge_x[1] == pytest.approx(float(normalized_layout["z"][0]))
+    assert edge_x[3] == pytest.approx(float(normalized_layout["seed"][0]))
+    assert edge_x[4] == pytest.approx(float(normalized_layout["z"][0]))
 
 
 def test_exporter_interactive_html_contracts(
@@ -426,7 +433,13 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "width: 100%;\n      height: 100%;\n      min-height: 0;",
     ]:
         assert css_token in rendered
-    for script_token in ["is-filter-hidden", "neighborhood-edges", "renderWhyLines("]:
+    for script_token in [
+        "is-filter-hidden",
+        "is-neighbor",
+        "neighborhood-edges",
+        "renderWhyLines(",
+        "state.hoverId || state.selectedId",
+    ]:
         assert script_token in rendered
     assert "data-point-number" in rendered
     assert "path.parentNode.appendChild(path)" not in rendered

@@ -19,6 +19,7 @@ from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
 from urllib.parse import quote
 
 import networkx as nx
+import numpy as np
 
 from citemesh.core import Paper
 
@@ -39,6 +40,7 @@ GRAPHML_DETERMINISM_POLICY_BEST_EFFORT = "best_effort_sorted_nodes_edges"
 _GRAPHML_BEST_EFFORT_MIN_VERSION = (2, 8)
 GRAPHML_LAYOUT_METADATA_KEY = "citemesh_graphml_determinism"
 GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
+EXPORT_LAYOUT_PADDING_RATIO = 0.1
 
 
 def _graphml_determinism_policy() -> str:
@@ -1258,11 +1260,14 @@ class GraphExporter:
     .js-plotly-plot .scatterlayer path.point.is-glowing {
       filter: drop-shadow(0 0 10px rgba(220, 80, 150, 0.85)) brightness(1.14);
     }
+    .js-plotly-plot .scatterlayer path.point.is-neighbor {
+      opacity: 0.74;
+    }
     .js-plotly-plot .scatterlayer path.point.is-dimmed {
-      opacity: 0.24;
+      opacity: 0.18;
     }
     .js-plotly-plot .scatterlayer path.point.is-filter-hidden {
-      opacity: 0.16;
+      opacity: 0.12;
     }
     #graph-footer {
       position: absolute;
@@ -2002,7 +2007,13 @@ class GraphExporter:
       }
 
       controls.detailMode.textContent = previewOnly ? "Preview" : "Selected";
-      controls.graphHint.textContent = previewOnly ? "Previewing node" : "Selection locked";
+      if (previewOnly && state.selectedId && state.selectedId !== node.id) {
+        controls.graphHint.textContent = "Previewing node (selection locked)";
+      } else if (previewOnly) {
+        controls.graphHint.textContent = "Previewing node";
+      } else {
+        controls.graphHint.textContent = "Selection locked • highlighted links are direct neighbors";
+      }
       controls.detailTitle.textContent = node.title || node.id;
       let authorText = "Unknown authors";
       if (Array.isArray(node.authors) && node.authors.length > 0) {
@@ -2098,7 +2109,12 @@ class GraphExporter:
         ? nodeIndexById.get(state.selectedId)
         : -1;
       const hasActiveFocus = hoverIndex !== -1 || selectedIndex !== -1;
-      const focusId = state.selectedId || state.hoverId;
+      const focusId = state.hoverId || state.selectedId;
+      const neighborIds = new Set(
+        focusId && adjacency.has(focusId)
+          ? (adjacency.get(focusId) || []).map((entry) => entry.id)
+          : []
+      );
 
       graphNodePaths.forEach((path, idx) => {
         const rawPointIndex = path.getAttribute("data-point-number");
@@ -2107,8 +2123,10 @@ class GraphExporter:
         const nodeId = nodeOrder[stableIdx];
         const isVisible = !!nodeId && state.visibleIds.has(nodeId);
         const isTarget = stableIdx === hoverIndex || stableIdx === selectedIndex;
+        const isNeighbor = !!nodeId && neighborIds.has(nodeId) && !isTarget;
         path.classList.toggle("is-filter-hidden", !isVisible);
-        path.classList.toggle("is-dimmed", hasActiveFocus && !isTarget);
+        path.classList.toggle("is-neighbor", hasActiveFocus && isNeighbor);
+        path.classList.toggle("is-dimmed", hasActiveFocus && !isTarget && !isNeighbor);
         path.classList.toggle("is-glowing", isTarget);
       });
 
@@ -2116,7 +2134,11 @@ class GraphExporter:
         let neighborhoodX = [];
         let neighborhoodY = [];
         if (focusId && adjacency.has(focusId)) {
-          for (const entry of adjacency.get(focusId)) {
+          const topNeighbors = (adjacency.get(focusId) || [])
+            .filter((entry) => state.visibleIds.has(entry.id))
+            .sort((left, right) => Number(right.weight || 0) - Number(left.weight || 0))
+            .slice(0, 10);
+          for (const entry of topNeighbors) {
             if (!nodeIndexById.has(entry.id) || !nodeIndexById.has(focusId)) {
               continue;
             }
@@ -2212,14 +2234,14 @@ class GraphExporter:
 
         row.addEventListener("mouseenter", () => {
           state.hoverId = node.id;
-          if (!state.selectedId) {
-            renderDetail(node.id, true);
-          }
+          renderDetail(node.id, true);
           syncHighlights();
         });
         row.addEventListener("mouseleave", () => {
           state.hoverId = null;
-          if (!state.selectedId) {
+          if (state.selectedId && nodeById.has(state.selectedId)) {
+            renderDetail(state.selectedId, false);
+          } else {
             renderDetail(null, false);
           }
           syncHighlights();
@@ -2264,7 +2286,11 @@ class GraphExporter:
       });
       controls.clearSelection.addEventListener("click", () => {
         state.selectedId = null;
-        renderDetail(null, false);
+        if (state.hoverId && nodeById.has(state.hoverId)) {
+          renderDetail(state.hoverId, true);
+        } else {
+          renderDetail(null, false);
+        }
         syncHighlights();
         renderList();
       });
@@ -2343,15 +2369,15 @@ class GraphExporter:
           return;
         }
         state.hoverId = nodeId;
-        if (!state.selectedId) {
-          renderDetail(nodeId, true);
-        }
+        renderDetail(nodeId, true);
         syncHighlights();
       });
 
       graphDiv.on("plotly_unhover", () => {
         state.hoverId = null;
-        if (!state.selectedId) {
+        if (state.selectedId && nodeById.has(state.selectedId)) {
+          renderDetail(state.selectedId, false);
+        } else {
           renderDetail(null, false);
         }
         syncHighlights();
@@ -2436,7 +2462,56 @@ class GraphExporter:
         """
         if self._layout is None:
             self._layout = compute_layout(self.graph)
+        self._layout = self._normalize_layout_positions(self._layout)
         return self._layout
+
+    @staticmethod
+    def _normalize_layout_positions(
+        pos: Dict[Hashable, Iterable[float]],
+        *,
+        padding_ratio: float = EXPORT_LAYOUT_PADDING_RATIO,
+    ) -> Dict[Hashable, np.ndarray]:
+        """Normalize layout positions to a centered square viewport.
+
+        Exporters consume shared layouts directly; normalizing here keeps Plotly and
+        dashboard geometry comparable to static PNG rendering and prevents over-squeezed
+        micro-clusters when raw layout coordinates have uneven spans.
+
+        :param Dict[Hashable, Iterable[float]] pos: Raw or precomputed layout map.
+        :param float padding_ratio: Fractional interior padding around graph extents.
+        :return Dict[Hashable, np.ndarray]: Normalized coordinates in approximately
+            ``[-1, 1]``.
+        """
+        if not pos:
+            return {}
+
+        keys = list(pos.keys())
+        coords = np.array(
+            [np.asarray(pos[key], dtype=float) for key in keys],
+            dtype=float,
+        )
+        if coords.ndim != 2 or coords.shape[1] != 2:
+            return {
+                key: np.asarray(value, dtype=float).copy() for key, value in pos.items()
+            }
+
+        min_xy = coords.min(axis=0)
+        max_xy = coords.max(axis=0)
+        center_xy = (min_xy + max_xy) * 0.5
+        span_xy = max_xy - min_xy
+        max_span = float(np.max(span_xy))
+        target_half_extent = max(1e-6, 1.0 - float(padding_ratio))
+
+        if max_span <= 1e-9:
+            normalized = np.zeros_like(coords)
+        else:
+            normalized = (coords - center_xy) / (max_span * 0.5)
+            normalized *= target_half_extent
+
+        return {
+            key: np.array([float(normalized[idx, 0]), float(normalized[idx, 1])])
+            for idx, key in enumerate(keys)
+        }
 
     def _node_size(self, node: Hashable) -> float:
         """Compute cached node size for a node ID.
