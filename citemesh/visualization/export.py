@@ -362,63 +362,58 @@ class GraphExporter:
         :return tuple[Any, list[Hashable]]: Plotly figure and ordered node IDs.
         """
         pos = self._get_layout()
-        edge_x: list[float | None] = []
-        edge_y: list[float | None] = []
-        for u, v, _ in self._sorted_edges():
-            x0, y0 = pos[u]
-            x1, y1 = pos[v]
-            x0f = float(x0)
-            y0f = float(y0)
-            x1f = float(x1)
-            y1f = float(y1)
-            if for_dashboard:
+        layout_shapes: list[Dict[str, Any]] = []
+        edge_trace: Optional[Any] = None
+
+        if for_dashboard:
+            curvature = 0.15
+            for u, v, attrs in self._sorted_edges():
+                x0f = float(pos[u][0])
+                y0f = float(pos[u][1])
+                x1f = float(pos[v][0])
+                y1f = float(pos[v][1])
+                mid_x = (x0f + x1f) / 2.0
+                mid_y = (y0f + y1f) / 2.0
                 dx = x1f - x0f
                 dy = y1f - y0f
-                dist = math.hypot(dx, dy)
-                if dist <= 1e-9:
-                    edge_x.extend([x0f, x1f, None])
-                    edge_y.extend([y0f, y1f, None])
-                    continue
-                ux = -dy / dist
-                uy = dx / dist
                 key_left, key_right = sorted((str(u), str(v)))
-                digest = hashlib.sha1(
+                direction_digest = hashlib.sha1(
                     f"{key_left}|{key_right}".encode("utf-8")
                 ).hexdigest()
-                direction = -1.0 if int(digest[:2], 16) % 2 else 1.0
-                jitter = 0.55 + (int(digest[2:4], 16) / 255.0) * 0.75
-                curvature = min(0.22, 0.09 * jitter)
-                mid_x = (x0f + x1f) * 0.5 + direction * ux * dist * curvature
-                mid_y = (y0f + y1f) * 0.5 + direction * uy * dist * curvature
-                edge_x.extend([x0f, mid_x, x1f, None])
-                edge_y.extend([y0f, mid_y, y1f, None])
-            else:
+                direction = -1.0 if int(direction_digest[:2], 16) % 2 else 1.0
+                cx = mid_x - dy * curvature * direction
+                cy = mid_y + dx * curvature * direction
+                weight = max(float(attrs.get("weight", 0.0)), 0.0)
+                alpha = min(0.6, max(0.05, weight))
+                layout_shapes.append(
+                    {
+                        "type": "path",
+                        "path": f"M {x0f},{y0f} Q {cx},{cy} {x1f},{y1f}",
+                        "line": {
+                            "color": _rgb_tuple_to_rgba(theme_obj.edge_color, alpha),
+                            "width": max(0.5, weight * 2.0),
+                        },
+                        "layer": "below",
+                    }
+                )
+        else:
+            edge_x: list[float | None] = []
+            edge_y: list[float | None] = []
+            for u, v, _ in self._sorted_edges():
+                x0f = float(pos[u][0])
+                y0f = float(pos[u][1])
+                x1f = float(pos[v][0])
+                y1f = float(pos[v][1])
                 edge_x.extend([x0f, x1f, None])
                 edge_y.extend([y0f, y1f, None])
 
-        if for_dashboard:
-            edge_color = _rgb_tuple_to_rgba(theme_obj.edge_color, alpha=0.17)
-            edge_width = 0.9
-            edge_shape = "spline"
-            edge_smoothing = 0.95
-        else:
-            edge_color = _rgb_tuple_to_hex(theme_obj.edge_color)
-            edge_width = 0.5
-            edge_shape = "linear"
-            edge_smoothing = 0.0
-
-        edge_trace = go.Scatter(
-            x=edge_x,
-            y=edge_y,
-            line=dict(
-                width=edge_width,
-                color=edge_color,
-                shape=edge_shape,
-                smoothing=edge_smoothing,
-            ),
-            hoverinfo="none",
-            mode="lines",
-        )
+            edge_trace = go.Scatter(
+                x=edge_x,
+                y=edge_y,
+                line=dict(width=0.5, color=_rgb_tuple_to_hex(theme_obj.edge_color)),
+                hoverinfo="none",
+                mode="lines",
+            )
 
         node_ids = [node_id for node_id, _ in self._sorted_nodes()]
         node_x = [float(pos[node][0]) for node in node_ids]
@@ -449,24 +444,20 @@ class GraphExporter:
             ]
             text_position = "top center"
             text_font = dict(
-                size=10, color=_rgb_tuple_to_rgba(theme_obj.text_color, 0.78)
+                size=10, color=_rgb_tuple_to_rgba(theme_obj.text_color, 0.62)
             )
             color_scale: object = [
-                [0.00, "#5a4f71"],
-                [0.20, "#5e6381"],
-                [0.40, "#4b7783"],
-                [0.60, "#5b8b8c"],
-                [0.80, "#7c9f94"],
-                [1.00, "#c8be9f"],
+                [0.0, _rgb_tuple_to_hex(theme_obj.node_color_old)],
+                [1.0, _rgb_tuple_to_hex(theme_obj.node_color_new)],
             ]
             marker_line_width = [
-                3.0 if self.graph.nodes[node].get("is_seed") else 1.25
+                4.0 if self.graph.nodes[node].get("is_seed") else 0.0
                 for node in node_ids
             ]
             marker_line_color = [
-                "#d66cbf"
+                _rgb_tuple_to_hex(theme_obj.seed_color)
                 if self.graph.nodes[node].get("is_seed")
-                else _rgb_tuple_to_rgba(theme_obj.text_color, 0.35)
+                else _rgb_tuple_to_rgba(theme_obj.background, 0.0)
                 for node in node_ids
             ]
             marker_showscale = False
@@ -535,12 +526,13 @@ class GraphExporter:
             "paper_bgcolor": theme_obj.background,
             "font": dict(color=theme_obj.text_color),
         }
+        if for_dashboard and layout_shapes:
+            layout_kwargs["shapes"] = layout_shapes
         if title_prefix is not None:
             layout_kwargs["title"] = f"{title_prefix}: {self._plotly_title_text()}"
 
-        fig = go.Figure(
-            data=[edge_trace, node_trace], layout=go.Layout(**layout_kwargs)
-        )
+        traces = [node_trace] if for_dashboard else [edge_trace, node_trace]
+        fig = go.Figure(data=traces, layout=go.Layout(**layout_kwargs))
         return fig, node_ids
 
     def _plotly_title_text(self) -> str:
@@ -1151,7 +1143,7 @@ class GraphExporter:
       min-height: 0;
       display: flex;
       flex-direction: column;
-      gap: 11px;
+      gap: 16px;
     }
     #detail-title {
       margin: 0;
@@ -1367,14 +1359,14 @@ class GraphExporter:
       <div id="detail-content">
         <h3 id="detail-title">Select a paper</h3>
         <div id="detail-subtitle"></div>
-        <div id="detail-metrics"></div>
-        <div id="detail-categories"></div>
-        <div id="detail-links"></div>
-        <div id="detail-actions"></div>
         <section id="detail-abstract-card">
           <h4 id="detail-abstract-label">Abstract</h4>
           <div id="detail-abstract" class="muted">Hover or click a paper to inspect abstract and metadata.</div>
         </section>
+        <div id="detail-metrics"></div>
+        <div id="detail-categories"></div>
+        <div id="detail-links"></div>
+        <div id="detail-actions"></div>
       </div>
     </aside>
   </div>
@@ -1409,13 +1401,20 @@ class GraphExporter:
       return Array.from({ length }, () => safe);
     }
 
-    const markerSource = ((figureSpec.data || [])[1] || {}).marker || {};
+    const nodeTraceIndex = Math.max(
+      0,
+      (figureSpec.data || []).findIndex((trace) => String(trace.mode || "").includes("markers"))
+    );
+    const markerSource = ((figureSpec.data || [])[nodeTraceIndex] || {}).marker || {};
     const defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
-    const defaultLineWidths = normalizeArray(markerSource.line && markerSource.line.width, nodeOrder.length, 1.3);
-    const defaultLineColors = nodeOrder.map((nodeId) => {
-      const node = nodeById.get(nodeId);
-      return node && node.is_seed ? "rgba(214,108,191,0.9)" : "rgba(228,236,246,0.34)";
-    });
+    const defaultLineWidths = normalizeArray(markerSource.line && markerSource.line.width, nodeOrder.length, 0);
+    const lineColorSource = markerSource.line && markerSource.line.color;
+    const defaultLineColors = Array.isArray(lineColorSource)
+      ? lineColorSource.slice(0, nodeOrder.length).map((value) => String(value))
+      : nodeOrder.map((nodeId) => {
+          const node = nodeById.get(nodeId);
+          return node && node.is_seed ? "rgba(214,108,191,0.95)" : "rgba(0,0,0,0)";
+        });
 
     const state = {
       selectedId: (payload.meta && payload.meta.seed_id) || null,
@@ -1671,7 +1670,7 @@ class GraphExporter:
     }
 
     function syncGraphHighlights() {
-      if (!(window.Plotly && graphDiv && graphDiv.data && graphDiv.data.length > 1)) {
+      if (!(window.Plotly && graphDiv && graphDiv.data && graphDiv.data.length > nodeTraceIndex)) {
         return;
       }
       const lineWidths = defaultLineWidths.slice();
@@ -1702,7 +1701,7 @@ class GraphExporter:
           "marker.size": [nodeSizes],
           "marker.opacity": [markerOpacity],
         },
-        [1]
+        [nodeTraceIndex]
       );
     }
 
@@ -1837,7 +1836,7 @@ class GraphExporter:
         if (!event || !Array.isArray(event.points)) {
           return;
         }
-        const nodePoint = event.points.find((point) => point.curveNumber === 1);
+        const nodePoint = event.points.find((point) => point.curveNumber === nodeTraceIndex);
         if (!nodePoint) {
           return;
         }
@@ -1864,7 +1863,7 @@ class GraphExporter:
         if (!event || !Array.isArray(event.points)) {
           return;
         }
-        const nodePoint = event.points.find((point) => point.curveNumber === 1);
+        const nodePoint = event.points.find((point) => point.curveNumber === nodeTraceIndex);
         if (!nodePoint) {
           return;
         }

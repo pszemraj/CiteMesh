@@ -374,6 +374,17 @@ def _extract_dashboard_payload(html_text: str) -> dict[str, Any]:
     return json.loads(match.group(1))
 
 
+def _extract_dashboard_figure(html_text: str) -> dict[str, Any]:
+    """Extract embedded Plotly figure JSON from exported dashboard HTML."""
+    match = re.search(
+        r'<script id="citemesh-dashboard-figure" type="application/json">(.*?)</script>',
+        html_text,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
 def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     """Dashboard export should render tri-pane shell and derived payload fields."""
     pytest.importorskip("plotly")
@@ -415,6 +426,17 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert isinstance(seed_node["seed_relevance"], float)
     assert seed_node["links"]["semantic_scholar"] is not None
     assert isinstance(seed_node["bibtex"], str)
+
+    figure = _extract_dashboard_figure(rendered)
+    assert len(figure["data"]) == 1
+    assert len(figure["layout"].get("shapes", [])) == 1
+    edge_shape = figure["layout"]["shapes"][0]
+    assert edge_shape["type"] == "path"
+    assert " Q " in edge_shape["path"]
+    marker = figure["data"][0]["marker"]
+    assert marker["showscale"] is False
+    assert max(marker["line"]["width"]) >= 4
+    assert min(marker["line"]["width"]) == 0
 
 
 def test_exporter_dashboard_missing_plotly_dependency(

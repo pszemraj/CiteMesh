@@ -12,6 +12,7 @@ import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
 
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
@@ -406,7 +407,7 @@ def draw_edges(
     :param Theme theme: Theme palette for edge colors.
     :return None: Draws all edges onto the axes.
     """
-    for n1, n2, data in ordered_edges_with_data(graph):
+    for edge_index, (n1, n2, data) in enumerate(ordered_edges_with_data(graph)):
         weight = data.get("weight", 0.1)
         p1 = pos[n1]
         p2 = pos[n2]
@@ -416,14 +417,18 @@ def draw_edges(
         alpha = max(VIZ_CONFIG.edge_alpha_min, alpha)
         width = max(VIZ_CONFIG.edge_width_min, weight * VIZ_CONFIG.edge_width_max)
 
-        ax.plot(
-            [p1[0], p2[0]],
-            [p1[1], p2[1]],
+        direction = -1.0 if edge_index % 2 else 1.0
+        curve = mpatches.FancyArrowPatch(
+            (float(p1[0]), float(p1[1])),
+            (float(p2[0]), float(p2[1])),
+            connectionstyle=f"arc3,rad={0.2 * direction}",
             color=theme.edge_color,
             alpha=alpha,
             linewidth=width,
             zorder=1,
+            arrowstyle="-",
         )
+        ax.add_patch(curve)
 
 
 def draw_nodes(
