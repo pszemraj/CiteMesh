@@ -36,12 +36,13 @@ LAYOUT_PADDING_RATIO = 0.1
 LABEL_COLLISION_MIN_DISTANCE = 0.075
 LABEL_COLLISION_MAX_DISTANCE = 0.14
 METADATA_VALUE_MAX_CHARS = 64
-INTRA_COMMUNITY_DISTANCE_FACTOR = 0.96
-INTER_COMMUNITY_DISTANCE_FACTOR = 1.95
+INTRA_COMMUNITY_DISTANCE_FACTOR = 1.08
+INTER_COMMUNITY_DISTANCE_FACTOR = 1.55
 COMMUNITY_ANCHOR_PADDING = 0.22
-COMMUNITY_SEPARATION_BASE = 1.25
-COMMUNITY_SEPARATION_STEP = 0.08
-COMMUNITY_SEPARATION_MAX_EXTRA = 0.55
+COMMUNITY_SEPARATION_BASE = 1.08
+COMMUNITY_SEPARATION_STEP = 0.05
+COMMUNITY_SEPARATION_MAX_EXTRA = 0.35
+COMMUNITY_ANCHOR_MAX_RADIUS = 0.84
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -212,6 +213,12 @@ def _spread_layout_by_communities(
         },
         padding_ratio=COMMUNITY_ANCHOR_PADDING,
     )
+    for cluster_id, anchor in list(normalized_anchors.items()):
+        radius = float(np.linalg.norm(anchor))
+        if radius > COMMUNITY_ANCHOR_MAX_RADIUS:
+            normalized_anchors[cluster_id] = anchor * (
+                COMMUNITY_ANCHOR_MAX_RADIUS / radius
+            )
     separation_scale = COMMUNITY_SEPARATION_BASE + min(
         COMMUNITY_SEPARATION_MAX_EXTRA,
         COMMUNITY_SEPARATION_STEP * float(max(0, len(communities) - 1)),

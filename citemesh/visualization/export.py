@@ -1677,6 +1677,10 @@ class GraphExporter:
       yearMax: null,
       visibleIds: new Set(nodeOrder),
     };
+    const overlayState = {
+      neighborhoodKey: "",
+      haloKey: "",
+    };
 
     const adjacency = new Map();
     (payload.edges || []).forEach((edge) => {
@@ -2010,9 +2014,9 @@ class GraphExporter:
       if (previewOnly && state.selectedId && state.selectedId !== node.id) {
         controls.graphHint.textContent = "Previewing node (selection locked)";
       } else if (previewOnly) {
-        controls.graphHint.textContent = "Previewing node";
+        controls.graphHint.textContent = "Previewing node • arcs show strongest direct links";
       } else {
-        controls.graphHint.textContent = "Selection locked • highlighted links are direct neighbors";
+        controls.graphHint.textContent = "Selection locked • red arcs are strongest direct links";
       }
       controls.detailTitle.textContent = node.title || node.id;
       let authorText = "Unknown authors";
@@ -2133,11 +2137,12 @@ class GraphExporter:
       if (neighborhoodTraceIndex >= 0) {
         let neighborhoodX = [];
         let neighborhoodY = [];
+        let topNeighbors = [];
         if (focusId && adjacency.has(focusId)) {
-          const topNeighbors = (adjacency.get(focusId) || [])
+          topNeighbors = (adjacency.get(focusId) || [])
             .filter((entry) => state.visibleIds.has(entry.id))
             .sort((left, right) => Number(right.weight || 0) - Number(left.weight || 0))
-            .slice(0, 10);
+            .slice(0, 6);
           for (const entry of topNeighbors) {
             if (!nodeIndexById.has(entry.id) || !nodeIndexById.has(focusId)) {
               continue;
@@ -2148,14 +2153,18 @@ class GraphExporter:
             neighborhoodY.push(defaultNodeY[leftIdx], defaultNodeY[rightIdx], null);
           }
         }
-        Plotly.restyle(
-          graphDiv,
-          {
-            x: [neighborhoodX],
-            y: [neighborhoodY],
-          },
-          [neighborhoodTraceIndex]
-        );
+        const neighborhoodKey = `${focusId || ""}|${topNeighbors.map((entry) => entry.id).join(",")}`;
+        if (overlayState.neighborhoodKey !== neighborhoodKey) {
+          overlayState.neighborhoodKey = neighborhoodKey;
+          Plotly.restyle(
+            graphDiv,
+            {
+              x: [neighborhoodX],
+              y: [neighborhoodY],
+            },
+            [neighborhoodTraceIndex]
+          );
+        }
       }
 
       if (haloTraceIndex >= 0) {
@@ -2170,16 +2179,20 @@ class GraphExporter:
           haloSize = [defaultNodeSizes[idx] * (state.selectedId ? 2.2 : 1.88)];
           haloColor = [state.selectedId ? "rgba(238,137,208,0.34)" : "rgba(233,172,245,0.26)"];
         }
-        Plotly.restyle(
-          graphDiv,
-          {
-            x: [haloX],
-            y: [haloY],
-            "marker.size": [haloSize],
-            "marker.color": [haloColor],
-          },
-          [haloTraceIndex]
-        );
+        const haloKey = `${focusId || ""}|${state.selectedId ? "selected" : "hover"}`;
+        if (overlayState.haloKey !== haloKey) {
+          overlayState.haloKey = haloKey;
+          Plotly.restyle(
+            graphDiv,
+            {
+              x: [haloX],
+              y: [haloY],
+              "marker.size": [haloSize],
+              "marker.color": [haloColor],
+            },
+            [haloTraceIndex]
+          );
+        }
       }
     }
 

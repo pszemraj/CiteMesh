@@ -439,6 +439,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "neighborhood-edges",
         "renderWhyLines(",
         "state.hoverId || state.selectedId",
+        "overlayState",
+        "neighborhoodKey",
     ]:
         assert script_token in rendered
     assert "data-point-number" in rendered
