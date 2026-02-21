@@ -102,6 +102,7 @@ For current usage details, see:
 - [TODO-dashboard] Add bridge-paper quick lens (betweenness/connector score + dedicated list mode).
 - [TODO-dashboard] Add graph-pane matrix toggle (adjacency heatmap ordered by cluster/relevance).
 - [TODO-dashboard] Add explicit "obscure gems" ranking lens (semantic relevance + citation-age normalization).
+- [TODO-dashboard] Add list-row relevance fingerprint meter (graph relevance + semantic/citation evidence decomposition).
 - [TODO-dashboard] Expand seed-relation facets for recommendation/embedding graphs (directed relation metadata beyond provenance/year heuristics).
 - [TODO-dashboard] Add reading-queue workflow (save/reject/note with `localStorage` export/import).
 - [TODO-dashboard] Add optional local PDF download + inline viewer workflow (`--download-pdfs` style export mode).
