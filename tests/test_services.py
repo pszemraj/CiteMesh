@@ -327,6 +327,13 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     assert [paper.paper_id for paper in search_results] == ["search1"]
 
     client = SemanticScholarClient(timeout=1)
+    client._request_json = MagicMock(return_value={"recommendedPapers": []})
+    client.get_recommended_papers("seed", limit=1, include_references=True)
+    request_params = client._request_json.call_args.args[1]
+    assert isinstance(request_params, dict)
+    assert "references" not in str(request_params.get("fields", ""))
+
+    client = SemanticScholarClient(timeout=1)
     validation_cases = [
         ("get_recommended_papers", ("seed",), "limit must be at least 1"),
         ("search_papers", ("attention",), "limit must be at least 1"),

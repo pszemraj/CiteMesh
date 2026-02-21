@@ -1115,8 +1115,13 @@ class SemanticScholarClient:
         """
         if fields is None:
             fields = _default_paper_fields()
-        if include_references and "references" not in fields:
-            fields = [*fields, "references"]
+        # Semantic Scholar's recommendations endpoint does not currently support
+        # requesting ``references`` in field lists (returns HTTP 400 with
+        # unsupported nested-reference field tokens). Keep the request field set
+        # endpoint-compatible and let callers hydrate references via dedicated
+        # reference-ID methods when needed.
+        if include_references and "references" in fields:
+            fields = [field for field in fields if field != "references"]
         parsed_limit = _validate_integer_limit(limit, "limit")
 
         normalized_paper_id = normalize_paper_id(paper_id)
