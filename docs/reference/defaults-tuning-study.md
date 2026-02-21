@@ -98,7 +98,7 @@ Why:
 
 These remain in effect from earlier study stages:
 
-- embedding `--top-k` default `3`
+- embedding `--top-k` default `4`
 - hydration flush window `256`
 - log width default `140`
 

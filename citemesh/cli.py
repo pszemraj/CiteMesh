@@ -1020,8 +1020,8 @@ Examples:
         "--top-k",
         "-k",
         type=_positive_int,
-        default=3,
-        help="Top-k neighbors per node (default: 3)",
+        default=4,
+        help="Top-k neighbors per node (default: 4)",
     )
 
     embedding_group.add_argument(

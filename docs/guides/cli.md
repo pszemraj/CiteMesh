@@ -119,7 +119,7 @@ ignoring it.
 - For the default `librarian-bots/arxiv-metadata-snapshot` source, current ordering places the newest `update_date` rows first, so the default cap targets recent updates.
 - `--all-corpus`: remove corpus-size cap and process the full selected split
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
-- `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `3`)
+- `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
 - `--truncate-dim`: optional embedding output-dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
 - `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)

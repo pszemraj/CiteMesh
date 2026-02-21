@@ -347,7 +347,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
         corpus_size: Optional[int] = 50000,
         truncate_dim: Optional[int] = None,
-        top_k: int = 2,
+        top_k: int = 4,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
         force_rebuild_reason: Optional[str] = None,
