@@ -443,6 +443,8 @@ class GraphExporter:
                 for idx, node_id in enumerate(node_ids)
             ]
             text_position = "top center"
+            # Keep one marker trace so point indices stay stable for hover/click sync;
+            # use a muted shared text alpha instead of per-point text styling.
             text_font = dict(
                 size=10, color=_rgb_tuple_to_rgba(theme_obj.text_color, 0.62)
             )
