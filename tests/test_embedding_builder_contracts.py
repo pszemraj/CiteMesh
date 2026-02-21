@@ -569,22 +569,14 @@ def test_embedding_cache_namespace_partition_contracts(
         calibration_sample_size=128,
         client=MagicMock(),
     )
-    f32_small = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="float32",
-        calibration_sample_size=32,
-        client=MagicMock(),
-    )
-    f32_large = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="float32",
-        calibration_sample_size=128,
-        client=MagicMock(),
+    f32_builder = EmbeddingGraphBuilder(
+        max_papers=1, storage_precision="float32", client=MagicMock()
     )
     assert (
         int8_small.embedding_cache.model_name != int8_large.embedding_cache.model_name
     )
-    assert f32_small.embedding_cache.model_name == f32_large.embedding_cache.model_name
+    assert "calibration_sample_size=" in int8_small.embedding_cache.model_name
+    assert "calibration_sample_size=" not in f32_builder.embedding_cache.model_name
 
 
 def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
@@ -611,6 +603,17 @@ def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
             max_papers=1,
             storage_precision="float32",
             binary_rescore_multiplier=8,
+            client=MagicMock(),
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="--calibration-sample-size requires storage_precision='int8'",
+    ):
+        EmbeddingGraphBuilder(
+            max_papers=1,
+            storage_precision="float32",
+            calibration_sample_size=128,
             client=MagicMock(),
         )
 

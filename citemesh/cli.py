@@ -612,6 +612,10 @@ def _validate_build_cli_contract(
                 build_parser.error(
                     "--binary-rescore-multiplier requires --storage-precision int8."
                 )
+            if "calibration_sample_size" in provided:
+                build_parser.error(
+                    "--calibration-sample-size requires --storage-precision int8."
+                )
             # Normalize implicit non-int8 defaults to effective values to avoid
             # strategy-level runtime warnings about ignored options.
             args.binary_prefilter = False

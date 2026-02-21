@@ -76,6 +76,7 @@ Numeric validation:
 - `build <paper-id>` and `search <query>` require non-empty strings.
 - `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, and `search --limit` must be at least `1`.
 - `--max-citations` and `--max-references` must be at least `0`.
+- `--calibration-sample-size` is valid only with `--storage-precision int8`.
 - `--cache-compression-level` must be at least `0` and is valid only with `--cache-compression gzip`.
 - `--max-semantic` must satisfy `0 <= max-semantic <= max-papers - 1` (hybrid strategy).
 - `--similarity-threshold` must be a finite float between `0.0` and `1.0`.
@@ -128,7 +129,7 @@ ignoring it.
 - `--storage-precision {int8,float16,float32}`: persistent embedding-cache precision (default `int8`)
 - `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). Explicit `--binary-prefilter` requires `--storage-precision int8`.
 - `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.
-- `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`)
+- `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`; explicit use requires `--storage-precision int8`)
 - `--encode-batch-size`: embedding-model encode batch size used during hydration/search (default `32`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`; unsupported with `--cache-compression lzf`)

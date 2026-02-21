@@ -451,6 +451,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError(
                 "--binary-rescore-multiplier requires storage_precision='int8'"
             )
+        if storage_precision != "int8" and int(calibration_sample_size) != int(
+            EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+        ):
+            raise ValueError(
+                "--calibration-sample-size requires storage_precision='int8'"
+            )
         self.binary_prefilter = bool(resolved_prefilter)
         self.binary_rescore_multiplier = int(requested_multiplier)
         self.calibration_sample_size = int(calibration_sample_size)

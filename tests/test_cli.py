@@ -529,6 +529,19 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "build",
                 "arxiv:1706.03762",
                 "--strategy",
+                "embedding",
+                "--storage-precision",
+                "float32",
+                "--calibration-sample-size",
+                "512",
+            ],
+            "--calibration-sample-size requires --storage-precision int8",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
                 "hybrid",
                 "--max-semantic",
                 "0",
@@ -1253,6 +1266,16 @@ def test_programmatic_strategy_dispatch_contracts() -> None:
     )
     with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
         cli_module._build_strategy_graph(invalid_namespace, "recommendation")
+
+    invalid_embedding_namespace = _dispatch_namespace(
+        storage_precision="float32",
+        calibration_sample_size=512,
+    )
+    with pytest.raises(
+        ValueError,
+        match="--calibration-sample-size requires --storage-precision int8",
+    ):
+        cli_module._build_strategy_graph(invalid_embedding_namespace, "embedding")
 
     import citemesh
 
