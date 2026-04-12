@@ -7,8 +7,10 @@ including interactive visualizations.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import html
+import io
 import json
 import logging
 import math
@@ -122,18 +124,35 @@ class GraphExporter:
     # Public export methods
 
     def to_json(self, path: Path) -> None:
-        """Export graph data JSON focused on nodes/edges and readable edge context."""
-        sorted_nodes = self._sorted_nodes()
+        """Export enriched graph data JSON with analysis fields.
+
+        Includes provenance, seed relevance scores, external links, and
+        BibTeX entries — the same rich fields available in the dashboard.
+        """
+        enriched = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
+        strategy = str(self.metadata.get("strategy") or "").strip().lower()
+        valid_years = [
+            int(n.get("year", 0)) for n in enriched if int(n.get("year", 0)) > 0
+        ]
         data = {
             "seed_id": str(self.seed_id),
+            "meta": {
+                "strategy": strategy,
+                "year_range": (
+                    {"min": min(valid_years), "max": max(valid_years)}
+                    if valid_years
+                    else {
+                        "min": MISSING_YEAR_FALLBACK_MIN,
+                        "max": MISSING_YEAR_FALLBACK_MAX,
+                    }
+                ),
+            },
             "summary": {
-                "nodes": len(sorted_nodes),
+                "nodes": len(enriched),
                 "edges": len(sorted_edges),
             },
-            "nodes": [
-                self._serialize_node(node, attrs) for node, attrs in sorted_nodes
-            ],
+            "nodes": enriched,
             "edges": [
                 {
                     "source": str(u),
@@ -142,12 +161,79 @@ class GraphExporter:
                     "target_title": self._node_title(self.graph.nodes[v], v),
                     "source_label": self._node_short_label(self.graph.nodes[u], u),
                     "target_label": self._node_short_label(self.graph.nodes[v], v),
-                    "weight": float(data.get("weight", 0.0)),
+                    "weight": float(edge_data.get("weight", 0.0)),
                 }
-                for u, v, data in sorted_edges
+                for u, v, edge_data in sorted_edges
             ],
         }
         Path(path).write_text(json.dumps(data, sort_keys=True, indent=2))
+
+    def to_csv(self, path: Path) -> None:
+        """Export flat CSV table with one row per paper.
+
+        Includes all enriched fields for direct import into pandas or
+        spreadsheets.
+        """
+        enriched = self._enriched_nodes()
+        if not enriched:
+            Path(path).write_text("")
+            return
+
+        columns = [
+            "id",
+            "title",
+            "year",
+            "authors",
+            "citation_count",
+            "venue",
+            "arxiv_id",
+            "doi",
+            "categories",
+            "is_seed",
+            "provenance",
+            "seed_relation",
+            "seed_relevance",
+            "arxiv_url",
+            "doi_url",
+            "semantic_scholar_url",
+            "abstract",
+        ]
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for node in enriched:
+            links = node.get("links") or {}
+            row = {
+                "id": node.get("id", ""),
+                "title": node.get("title", ""),
+                "year": node.get("year", ""),
+                "authors": "; ".join(node.get("authors", [])),
+                "citation_count": node.get("citation_count", 0),
+                "venue": node.get("venue", ""),
+                "arxiv_id": node.get("arxiv_id", ""),
+                "doi": node.get("doi", ""),
+                "categories": "; ".join(node.get("categories", [])),
+                "is_seed": node.get("is_seed", False),
+                "provenance": node.get("provenance", ""),
+                "seed_relation": node.get("seed_relation", ""),
+                "seed_relevance": f"{node.get('seed_relevance', 0.0):.6f}",
+                "arxiv_url": links.get("arxiv_abs", ""),
+                "doi_url": links.get("doi", ""),
+                "semantic_scholar_url": links.get("semantic_scholar", ""),
+                "abstract": node.get("abstract", ""),
+            }
+            writer.writerow(row)
+        Path(path).write_text(buf.getvalue(), encoding="utf-8")
+
+    def to_bibtex(self, path: Path) -> None:
+        """Export all papers as a single BibTeX file."""
+        enriched = self._enriched_nodes()
+        entries = [
+            str(node.get("bibtex", "")).strip()
+            for node in enriched
+            if node.get("bibtex", "").strip()
+        ]
+        Path(path).write_text("\n\n".join(entries) + "\n", encoding="utf-8")
 
     def to_graphml(self, path: Path) -> None:
         """Export to GraphML for external tools such as Gephi or Cytoscape."""
@@ -636,20 +722,18 @@ class GraphExporter:
             return "CiteMesh"
         return title_text
 
-    def _dashboard_payload(
-        self, *, theme_obj: Theme, node_ids: list[Hashable]
-    ) -> Dict[str, Any]:
-        """Build deterministic dashboard payload from graph metadata.
+    def _enriched_nodes(self) -> list[Dict[str, Any]]:
+        """Build enriched node payloads with provenance, relevance, links, and BibTeX.
 
-        :param Theme theme_obj: Active visualization theme.
-        :param list[Hashable] node_ids: Node order used by Plotly points.
-        :return Dict[str, Any]: JSON payload consumed by dashboard JS.
+        This is the canonical node enrichment used by JSON export, CSV export,
+        BibTeX export, and the dashboard payload.
+
+        :return list[Dict[str, Any]]: Enriched node payloads.
         """
         provenance = self._provenance_map()
         seed_relations = self._seed_relation_map()
         relevance = self._seed_relevance_scores()
         sorted_nodes = self._sorted_nodes()
-        sorted_edges = self._sorted_edges()
         strategy = str(self.metadata.get("strategy") or "").strip().lower()
 
         node_payloads: list[Dict[str, Any]] = []
@@ -695,6 +779,21 @@ class GraphExporter:
             serialized["links"] = links
             serialized["bibtex"] = self._node_bibtex(serialized, links=links)
             node_payloads.append(serialized)
+        return node_payloads
+
+    def _dashboard_payload(
+        self, *, theme_obj: Theme, node_ids: list[Hashable]
+    ) -> Dict[str, Any]:
+        """Build deterministic dashboard payload from graph metadata.
+
+        :param Theme theme_obj: Active visualization theme.
+        :param list[Hashable] node_ids: Node order used by Plotly points.
+        :return Dict[str, Any]: JSON payload consumed by dashboard JS.
+        """
+        node_payloads = self._enriched_nodes()
+        sorted_edges = self._sorted_edges()
+        strategy = str(self.metadata.get("strategy") or "").strip().lower()
+
         valid_years = [
             int(node.get("year", 0))
             for node in node_payloads
@@ -714,7 +813,7 @@ class GraphExporter:
                 "strategy": strategy,
                 "theme": theme_obj.name,
                 "summary": {
-                    "nodes": len(sorted_nodes),
+                    "nodes": len(node_payloads),
                     "edges": len(sorted_edges),
                 },
                 "year_range": year_range,
@@ -1530,6 +1629,13 @@ class GraphExporter:
         <button id="list-view-btn" class="nav-btn active" type="button">List view</button>
         <button id="filters-toggle" class="nav-btn active" type="button">Filters</button>
         <button id="more-btn" class="nav-btn" type="button">More</button>
+      </div>
+      <div class="nav-group">
+        <button id="export-json-btn" class="nav-btn" type="button">Export JSON</button>
+        <button id="export-csv-btn" class="nav-btn" type="button">Export CSV</button>
+        <button id="export-bib-btn" class="nav-btn" type="button">All BibTeX</button>
+        <button id="load-json-btn" class="nav-btn" type="button">Load Results</button>
+        <input id="load-json-input" type="file" accept=".json" style="display:none" />
       </div>
     </div>
     <div id="toolbar-controls">
@@ -2355,6 +2461,105 @@ class GraphExporter:
           window.open(target, "_blank", "noopener,noreferrer");
         }
       });
+
+      function downloadBlob(content, filename, mime) {
+        const blob = new Blob([content], { type: mime });
+        const anchor = document.createElement("a");
+        anchor.href = URL.createObjectURL(blob);
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(anchor.href);
+      }
+
+      function seedSlug() {
+        const seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "");
+        if (seedNode && seedNode.title) {
+          return seedNode.title.replace(/[^a-zA-Z0-9]+/g, "_").substring(0, 40).replace(/_+$/, "").toLowerCase();
+        }
+        return "citemesh";
+      }
+
+      document.getElementById("export-json-btn").addEventListener("click", () => {
+        const exportPayload = {
+          seed_id: (payload.meta && payload.meta.seed_id) || "",
+          meta: { strategy: (payload.meta && payload.meta.strategy) || "", year_range: (payload.meta && payload.meta.year_range) || {} },
+          summary: (payload.meta && payload.meta.summary) || {},
+          nodes: payload.nodes || [],
+          edges: payload.edges || [],
+        };
+        downloadBlob(JSON.stringify(exportPayload, null, 2), seedSlug() + ".json", "application/json");
+      });
+
+      document.getElementById("export-csv-btn").addEventListener("click", () => {
+        const cols = ["id","title","year","authors","citation_count","venue","arxiv_id","doi","categories","is_seed","provenance","seed_relation","seed_relevance","arxiv_url","doi_url","semantic_scholar_url","abstract"];
+        function csvEscape(v) { const s = String(v == null ? "" : v); return s.includes(",") || s.includes('"') || s.includes("\\n") ? '"' + s.replace(/"/g, '""') + '"' : s; }
+        const rows = [cols.join(",")];
+        for (const n of (payload.nodes || [])) {
+          const links = n.links || {};
+          rows.push([
+            n.id, n.title, n.year, (n.authors||[]).join("; "), n.citation_count, n.venue||"", n.arxiv_id||"", n.doi||"",
+            (n.categories||[]).join("; "), n.is_seed, n.provenance||"", n.seed_relation||"",
+            Number(n.seed_relevance||0).toFixed(6), links.arxiv_abs||"", links.doi||"", links.semantic_scholar||"", n.abstract||""
+          ].map(csvEscape).join(","));
+        }
+        downloadBlob(rows.join("\\n"), seedSlug() + ".csv", "text/csv;charset=utf-8");
+      });
+
+      document.getElementById("export-bib-btn").addEventListener("click", () => {
+        const entries = (payload.nodes || []).map((n) => (n.bibtex || "").trim()).filter(Boolean);
+        downloadBlob(entries.join("\\n\\n") + "\\n", seedSlug() + ".bib", "text/plain;charset=utf-8");
+      });
+
+      const loadInput = document.getElementById("load-json-input");
+      document.getElementById("load-json-btn").addEventListener("click", () => { loadInput.click(); });
+      loadInput.addEventListener("change", (event) => {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const imported = JSON.parse(e.target.result);
+            const importedNodes = imported.nodes || [];
+            if (!importedNodes.length) { alert("No nodes found in JSON file."); return; }
+            nodes.length = 0;
+            importedNodes.forEach((n) => nodes.push(n));
+            nodeById.clear();
+            nodes.forEach((n) => nodeById.set(n.id, n));
+            adjacency.clear();
+            (imported.edges || []).forEach((edge) => {
+              const left = String(edge.source || ""); const right = String(edge.target || "");
+              const weight = Number(edge.weight || 0);
+              if (!left || !right) return;
+              if (!adjacency.has(left)) adjacency.set(left, []);
+              if (!adjacency.has(right)) adjacency.set(right, []);
+              adjacency.get(left).push({ id: right, weight });
+              adjacency.get(right).push({ id: left, weight });
+            });
+            if (imported.meta) {
+              payload.meta = Object.assign(payload.meta || {}, imported.meta);
+              if (imported.meta.seed_id) payload.meta.seed_id = imported.meta.seed_id;
+            }
+            payload.edges = imported.edges || [];
+            state.selectedId = (payload.meta && payload.meta.seed_id) || null;
+            state.hoverId = null;
+            state.searchText = ""; controls.search.value = "";
+            renderTimeline();
+            renderList();
+            if (state.selectedId && nodeById.has(state.selectedId)) {
+              renderDetail(state.selectedId, false);
+            } else {
+              renderDetail(null, false);
+            }
+            const loadedTitle = nodeById.get(state.selectedId || "");
+            controls.graphHint.textContent = "Loaded: " + (loadedTitle ? loadedTitle.title : file.name);
+          } catch (err) { alert("Failed to parse JSON: " + err.message); }
+        };
+        reader.readAsText(file);
+        loadInput.value = "";
+      });
+
       setControlsCollapsed(false);
 
       const validYears = nodes

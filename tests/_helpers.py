@@ -2,14 +2,37 @@
 
 from __future__ import annotations
 
+import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Sequence
 
 import networkx as nx
 import numpy as np
 import pytest
 
 from citemesh.core import Paper
+
+
+@contextmanager
+def connect_db(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """Open a SQLite connection that is closed on context exit.
+
+    Mirrors ``EmbeddingCache._connect_db`` for test code — prevents
+    ``[WinError 32]`` when temp-dir cleanup runs while a handle is open.
+
+    :param Path db_path: Path to the SQLite database file.
+    :return Iterator[sqlite3.Connection]: Context manager yielding an open connection.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def build_seed_graph(seed_id: str = "seed") -> nx.Graph:
@@ -232,6 +255,24 @@ def build_fake_exporter_factory(
             """
             if "to_graphml" in requested_methods or not requested_methods:
                 path.write_text("<graphml/>")
+
+        def to_csv(self, path: Path) -> None:
+            """Write minimal CSV payload when enabled.
+
+            :param Path path: Target output path.
+            :return None: Writes test artifact conditionally.
+            """
+            if "to_csv" in requested_methods or not requested_methods:
+                path.write_text("id,title\n")
+
+        def to_bibtex(self, path: Path) -> None:
+            """Write minimal BibTeX payload when enabled.
+
+            :param Path path: Target output path.
+            :return None: Writes test artifact conditionally.
+            """
+            if "to_bibtex" in requested_methods or not requested_methods:
+                path.write_text("@article{test,}\n")
 
     return _FakeExporter
 

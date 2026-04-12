@@ -981,3 +981,52 @@ def test_model_profiles_match_expected_formatters() -> None:
     assert default.recommended_truncate_dim is None
     assert default.format_query("plain") == "plain"
     assert default.format_document({"title": "T", "abstract": ""}) == "T"
+
+
+def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
+    """JSON export should include enriched fields; CSV and BibTeX should work."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "hybrid"})
+
+    json_path = tmp_path / "enriched.json"
+    csv_path = tmp_path / "enriched.csv"
+    bib_path = tmp_path / "enriched.bib"
+
+    exporter.to_json(json_path)
+    exporter.to_csv(csv_path)
+    exporter.to_bibtex(bib_path)
+
+    # --- JSON enrichment ---
+    payload = json.loads(json_path.read_text())
+    assert "meta" in payload
+    assert payload["meta"]["strategy"] == "hybrid"
+    assert "year_range" in payload["meta"]
+    nodes = payload["nodes"]
+    assert len(nodes) == 2
+    seed_node = next(n for n in nodes if n["is_seed"])
+    assert "provenance" in seed_node
+    assert "seed_relevance" in seed_node
+    assert isinstance(seed_node["seed_relevance"], float)
+    assert "links" in seed_node
+    assert "bibtex" in seed_node
+    assert seed_node["provenance"] == "seed"
+    assert seed_node["seed_relation"] == "seed"
+
+    related_node = next(n for n in nodes if not n["is_seed"])
+    assert related_node["provenance"] in {"citation", "semantic", "both"}
+    assert "links" in related_node
+    assert "semantic_scholar" in related_node["links"]
+
+    # --- CSV ---
+    csv_text = csv_path.read_text()
+    lines = csv_text.strip().split("\n")
+    assert len(lines) == 3  # header + 2 papers
+    header = lines[0]
+    assert "provenance" in header
+    assert "seed_relevance" in header
+    assert "arxiv_url" in header
+
+    # --- BibTeX ---
+    bib_text = bib_path.read_text()
+    assert "@article{" in bib_text
+    assert "Seed Paper" in bib_text or "Related Paper" in bib_text

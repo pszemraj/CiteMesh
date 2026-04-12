@@ -362,7 +362,7 @@ class EmbeddingCache:
 
         with (
             self._cache_lock(),
-            sqlite3.connect(self.db_path) as conn,
+            self._connect_db() as conn,
             h5py.File(self.h5_path, "a") as h5,
         ):
             cursor = conn.cursor()
@@ -536,8 +536,6 @@ class EmbeddingCache:
                     rows_to_upsert,
                 )
 
-            conn.commit()
-
         return {**cached_embeddings, **new_embeddings}
 
     def search(
@@ -570,7 +568,7 @@ class EmbeddingCache:
 
         with (
             self._cache_lock(),
-            sqlite3.connect(self.db_path) as conn,
+            self._connect_db() as conn,
             h5py.File(self.h5_path, "r") as h5,
         ):
             embeddings_dataset = self._get_embeddings_dataset(h5)
@@ -702,7 +700,7 @@ class EmbeddingCache:
             return False
 
         try:
-            with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+            with self._cache_lock(), self._connect_db() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM papers")
                 paper_rows = int(cursor.fetchone()[0])
@@ -728,7 +726,7 @@ class EmbeddingCache:
             return set()
 
         paper_ids: Set[str] = set()
-        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), self._connect_db() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT paper_id FROM papers")
             while True:
@@ -814,7 +812,7 @@ class EmbeddingCache:
         try:
             with (
                 self._cache_lock(),
-                sqlite3.connect(self.db_path) as conn,
+                self._connect_db() as conn,
                 h5py.File(self.h5_path, "r") as h5,
             ):
                 metadata = self._load_cache_metadata(conn)
@@ -894,7 +892,7 @@ class EmbeddingCache:
 
         :return Optional[str]: Hydrated dataset source token when set.
         """
-        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), self._connect_db() as conn:
             metadata = self._load_cache_metadata(conn)
         cached_source = metadata.get(HYDRATION_DATASET_SOURCE_KEY)
         return cached_source if cached_source else None
@@ -904,7 +902,7 @@ class EmbeddingCache:
 
         :return Optional[str]: Active model fingerprint or ``None`` when unset.
         """
-        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), self._connect_db() as conn:
             metadata = self._load_cache_metadata(conn)
         fingerprint = str(metadata.get(MODEL_FINGERPRINT_KEY, "")).strip()
         return fingerprint or None
@@ -916,7 +914,7 @@ class EmbeddingCache:
             a prior full-split reconciliation confirmed no uncached paper IDs for
             that row-count state; ``None`` when unset/invalid.
         """
-        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), self._connect_db() as conn:
             metadata = self._load_cache_metadata(conn)
         raw_upstream = str(
             metadata.get(HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, "")
@@ -948,24 +946,22 @@ class EmbeddingCache:
             raise ValueError("upstream_rows must be at least 1")
         if resolved_cached < 0:
             raise ValueError("cached_rows must be non-negative")
-        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), self._connect_db() as conn:
             self._set_cache_metadata(
                 conn, HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, str(resolved_upstream)
             )
             self._set_cache_metadata(
                 conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, str(resolved_cached)
             )
-            conn.commit()
 
     def clear_hydration_rowcount_reconciliation(self) -> None:
         """Clear persisted row-count reconciliation marker metadata.
 
         :return None: Mutates SQLite metadata in-place.
         """
-        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), self._connect_db() as conn:
             self._set_cache_metadata(conn, HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, "")
             self._set_cache_metadata(conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, "")
-            conn.commit()
 
     def payload_stats(self) -> CacheNamespacePayloadStats:
         """Return a summary of cache payload currently stored for this namespace.
@@ -984,9 +980,8 @@ class EmbeddingCache:
         normalized = str(fingerprint).strip()
         if not normalized:
             raise ValueError("fingerprint must be a non-empty string.")
-        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), self._connect_db() as conn:
             self._set_cache_metadata(conn, MODEL_FINGERPRINT_KEY, normalized)
-            conn.commit()
 
     def mark_hydrated(
         self,
@@ -1009,7 +1004,7 @@ class EmbeddingCache:
             raise ValueError(
                 "dataset_source must be non-empty when complete=True for hydration."
             )
-        with self._cache_lock(), sqlite3.connect(self.db_path) as conn:
+        with self._cache_lock(), self._connect_db() as conn:
             self._set_cache_metadata(
                 conn, HYDRATION_DATASET_SOURCE_KEY, normalized_source
             )
@@ -1024,7 +1019,6 @@ class EmbeddingCache:
             )
             self._set_cache_metadata(conn, HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY, "")
             self._set_cache_metadata(conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, "")
-            conn.commit()
 
     def clear(self, reason: Optional[str] = None) -> None:
         """Purge cache artifacts for this cache namespace.
@@ -1088,9 +1082,29 @@ class EmbeddingCache:
                 "CITEMESH_CACHE_DIR to an isolated per-run cache root."
             ) from exc
 
+    @contextmanager
+    def _connect_db(self) -> Iterator[sqlite3.Connection]:
+        """Open a SQLite connection that is closed on context exit.
+
+        ``sqlite3.connect()`` as a context manager only commits/rollbacks —
+        it does not close the connection.  On Windows the unclosed handle
+        prevents file deletion or replacement, causing ``[WinError 32]``.
+
+        :return Iterator[sqlite3.Connection]: Context manager yielding an open connection.
+        """
+        conn = sqlite3.connect(self.db_path)
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
         """Create and initialize the metadata cache schema when needed."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect_db() as conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS papers (
@@ -1174,7 +1188,6 @@ class EmbeddingCache:
                 conn, HYDRATION_RECONCILED_CACHE_ROWS_KEY, ""
             )
             self._set_cache_metadata_default(conn, MODEL_FINGERPRINT_KEY, "")
-            conn.commit()
 
     def _collect_namespace_payload_stats_locked(self) -> CacheNamespacePayloadStats:
         """Collect namespace payload stats while cache lock is held.
@@ -1199,7 +1212,7 @@ class EmbeddingCache:
         hydration_dataset_source: Optional[str] = None
         if self.db_path.exists():
             try:
-                with sqlite3.connect(self.db_path) as conn:
+                with self._connect_db() as conn:
                     cursor = conn.cursor()
                     cursor.execute("SELECT COUNT(*) FROM papers")
                     sqlite_rows = int(cursor.fetchone()[0])
@@ -1515,7 +1528,7 @@ class EmbeddingCache:
     def _ensure_h5_layout(self) -> None:
         """Ensure cache file uses matrix-based HDF5 layout."""
         if not self.h5_path.exists():
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect_db() as conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM papers")
                 paper_rows = int(cursor.fetchone()[0])
@@ -1535,12 +1548,11 @@ class EmbeddingCache:
                     conn.execute("DELETE FROM papers")
                     self._reset_hydration_metadata(conn)
                 self._reconcile_layout_metadata(conn)
-                conn.commit()
                 return
 
         try:
             with (
-                sqlite3.connect(self.db_path) as conn,
+                self._connect_db() as conn,
                 h5py.File(self.h5_path, "a") as h5,
             ):
                 dataset = h5.get(EMBEDDINGS_DATASET_NAME)
@@ -1601,16 +1613,14 @@ class EmbeddingCache:
                 self.h5_path,
             )
             self.h5_path.unlink(missing_ok=True)
-            with sqlite3.connect(self.db_path) as conn:
+            with self._connect_db() as conn:
                 conn.execute("DELETE FROM papers")
                 self._reset_hydration_metadata(conn)
                 self._reconcile_layout_metadata(conn)
-                conn.commit()
             return
 
-        with sqlite3.connect(self.db_path) as conn:
+        with self._connect_db() as conn:
             self._reconcile_layout_metadata(conn)
-            conn.commit()
 
     @staticmethod
     def _reset_hydration_metadata(conn: sqlite3.Connection) -> None:

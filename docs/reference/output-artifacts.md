@@ -16,7 +16,9 @@ When `--export all` is used, CiteMesh writes:
 - `<strategy>.html` (Pyvis interactive network)
 - `<strategy>.plotly.html` (Plotly interactive graph)
 - `<strategy>.dashboard.html` (standalone tri-pane research dashboard)
-- `<strategy>.json` (graph data payload)
+- `<strategy>.json` (enriched graph data payload)
+- `<strategy>.csv` (flat paper table for pandas/spreadsheets)
+- `<strategy>.bib` (combined BibTeX entries for all papers)
 - `<strategy>.graphml` (exchange format for Gephi/Cytoscape)
 - `<strategy>.config.json` (run config + metadata sidecar)
 
@@ -71,24 +73,50 @@ Sidecar path contract:
 Top-level fields:
 
 - `seed_id`
+- `meta` (`strategy`, `year_range`)
 - `summary` (`nodes`, `edges`)
-- `nodes` (id/title/year/authors/abstract/categories/is_seed/citation_count)
-- `nodes` (id/title/year/authors/abstract/venue/arxiv_id/doi/categories/is_seed/citation_count)
+- `nodes` — enriched per-paper objects (see below)
 - `edges` (`source`, `target`, `weight`, plus readable source/target title/label fields)
 
 `source`/`target` are canonical node IDs for unambiguous graph processing.
 The extra `*_title` and `*_label` fields are provided for readable inspection.
 
-### Dashboard HTML Payload Notes
+Each node includes:
 
-The embedded dashboard payload (inside `<strategy>.dashboard.html`) includes
-derived interactive fields used by the static client UI, including:
+- core fields: `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`
+- analysis fields: `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), `seed_relevance` (personalized PageRank score)
+- external: `links` (arXiv abs/pdf URLs, DOI URL, Semantic Scholar URL)
+- `bibtex` (deterministic BibTeX entry)
 
-- `seed_relevance` (seed-centric personalized PageRank score)
-- `provenance` / `provenance_base`
-- `seed_relation` (when strategy metadata is available)
-- `links` (arXiv/DOI/S2 URLs derived from node IDs and external IDs)
-- `bibtex` (deterministic inline entry for copy/download actions)
+The JSON and dashboard formats share the same enriched node schema, so JSON
+files can be loaded into the dashboard via the **Load Results** button.
+
+### CSV (`<strategy>.csv`)
+
+Flat table with one row per paper. Columns: `id`, `title`, `year`, `authors`
+(semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`,
+`categories` (semicolon-separated), `is_seed`, `provenance`, `seed_relation`,
+`seed_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
+
+### BibTeX (`<strategy>.bib`)
+
+Combined BibTeX entries for all papers in the graph, one `@article` per paper.
+Ready for direct import into reference managers or LaTeX projects.
+
+### Dashboard HTML
+
+The dashboard (`<strategy>.dashboard.html`) is a standalone tri-pane research
+interface with embedded Plotly graph, paper list, and detail panel.
+
+**Toolbar data actions:**
+
+- **Export JSON** — downloads the embedded enriched payload as a standalone `.json` file
+- **Export CSV** — generates a CSV table client-side from the current dataset
+- **All BibTeX** — downloads all papers' BibTeX entries as a single `.bib` file
+- **Load Results** — file picker that accepts a CiteMesh JSON file and swaps the dashboard dataset in-place (no page reload required)
+
+This means you can open one dashboard and load results from different papers
+into it, rather than opening a separate dashboard for each run.
 
 ### Sidecar (`<strategy>.config.json`)
 
@@ -117,6 +145,8 @@ See embedding metadata term definitions in
 ## Determinism Notes
 
 - `json`: deterministic key order + indentation.
+- `csv`: deterministic column order and row order (same as JSON node order).
+- `bibtex`: deterministic entry order (same as JSON node order).
 - `graphml`: deterministic ordering on supported NetworkX versions.
 - `png`: deterministic for same input graph and `--seed`.
 - `plotly`: deterministic for same input graph and `--seed` when Plotly supports `write_html(div_id=...)`.
