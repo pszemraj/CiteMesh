@@ -5,6 +5,8 @@ This strategy uses semantic similarity from sentence transformers
 to find conceptually similar papers without relying on citations.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import re
@@ -14,7 +16,17 @@ from contextlib import nullcontext
 from hashlib import sha1, sha256
 from itertools import islice
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 import networkx as nx
 import numpy as np
@@ -29,12 +41,15 @@ from citemesh.data import (
     validate_compression_filter,
 )
 from citemesh.data.model_profiles import compose_title_abstract_text
-from citemesh.services import SemanticScholarClient, get_client
+from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     deterministic_sort_key,
     select_capped_undirected_edges,
 )
+
+if TYPE_CHECKING:
+    from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)
 _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
@@ -134,6 +149,17 @@ def _query_seed_id(query_text: str) -> str:
     """
     digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
     return f"query:{digest}"
+
+
+def _normalize_embedding_vector(embedding: np.ndarray) -> np.ndarray:
+    """Return a unit-length float32 embedding vector.
+
+    :param np.ndarray embedding: Input embedding vector.
+    :return np.ndarray: L2-normalized float32 vector.
+    """
+    vector = np.asarray(embedding, dtype=np.float32)
+    norm = float(np.linalg.norm(vector))
+    return vector / max(norm, 1e-12)
 
 
 class _AutocastEncodeProxy:
@@ -1651,7 +1677,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         # Compute normalized seed embedding
         logger.debug("Computing seed embedding...")
-        formatted_seed_text = self.model_profile.format_query(seed_text, seed_metadata)
+        formatted_seed_text = self._format_seed_for_embedding(
+            seed_text=seed_text,
+            seed_metadata=seed_metadata,
+            seed_is_free_text_query=seed_paper.paper_id.startswith("query:"),
+        )
         seed_embedding = self._encode_texts(
             [formatted_seed_text], show_progress_bar=False
         )[0]
@@ -1718,6 +1748,34 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
         """
         return self._select_candidates(seed_embedding, use_streaming=True)
+
+    def _format_seed_for_embedding(
+        self,
+        seed_text: str,
+        seed_metadata: Dict[str, str],
+        *,
+        seed_is_free_text_query: bool,
+    ) -> str:
+        """Format a seed input into the correct embedding prompt space.
+
+        Paper-to-paper retrieval stays in document space. Only free-text user
+        queries should cross from query space into the hydrated document corpus.
+
+        :param str seed_text: Raw seed text or fallback identifier.
+        :param Dict[str, str] seed_metadata: Seed metadata payload.
+        :param bool seed_is_free_text_query: Whether the seed came from user query text.
+        :return str: Prompt-formatted seed text for embedding encode.
+        """
+        if seed_is_free_text_query:
+            return self.model_profile.format_query(seed_text, seed_metadata)
+
+        document_text = self.model_profile.format_document(
+            {
+                "title": seed_metadata.get("title", ""),
+                "abstract": seed_metadata.get("abstract", ""),
+            }
+        )
+        return document_text or seed_text
 
     def _select_candidates(
         self, seed_embedding: np.ndarray, use_streaming: bool
@@ -2506,8 +2564,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         # Semantic similarity from embeddings
         if paper1.paper_id in self.embeddings and paper2.paper_id in self.embeddings:
-            emb1 = self.embeddings[paper1.paper_id]
-            emb2 = self.embeddings[paper2.paper_id]
+            emb1 = _normalize_embedding_vector(self.embeddings[paper1.paper_id])
+            emb2 = _normalize_embedding_vector(self.embeddings[paper2.paper_id])
             semantic_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
         else:
             semantic_sim = 0.0

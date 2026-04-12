@@ -19,15 +19,21 @@ The following items were intentionally deferred during the easy-win + breaking A
 - Test overlap trims `#2` and `#4`
   - Goal: reduce duplicated normalization assertions and overlapping deterministic-ordering checks.
   - Deferred to avoid accidental loss of edge-case coverage before targeted replacement tests are added.
-- `#10` Embedding cache two-phase lock refactor (`check -> unlock -> encode -> relock -> commit`)
-  - Goal: reduce lock hold duration during long model encode calls by moving compute outside the namespace lock with safe re-check/commit semantics.
-  - Deferred because this touches cache coherence across SQLite/HDF5 writes and needs dedicated race characterization tests.
 - `#12` Cross-strategy score taxonomy harmonization
   - Goal: define optional calibrated score bands/labels that can be consumed uniformly across citation/recommendation/embedding/hybrid outputs.
   - Deferred because current workflows intentionally use strategy-specific scoring math and need a calibration design pass before claiming comparability.
 - `#13` Hydration dataset identity hardening beyond source-name checks
   - Goal: persist and verify immutable dataset revision/fingerprint metadata so warm-cache fast paths can prove equivalence to a fresh hydration when upstream dataset aliases change.
   - Deferred because current behavior relies on source-name/split/corpus boundaries plus formatter/model provenance; robust revision checks need stable identity contracts across streaming and non-streaming loaders.
+- `#14` ANN retrieval backend for hydrated embedding corpora
+  - Goal: keep SQLite/HDF5 for metadata/cold storage, but move hot retrieval onto a real vector index (FAISS or USEARCH) instead of refining the current HDF5 scan path indefinitely.
+  - Deferred because this needs an index lifecycle design (build/update/rebuild semantics, row-id mapping, and cache invalidation boundaries) plus benchmark-driven acceptance criteria.
+- `#15` Embedding runtime backend/attention policy expansion
+  - Goal: broaden runtime selection beyond the current BF16-or-float32 torch policy to include explicit attention-kernel selection plus CPU-focused ONNX/OpenVINO backends where they materially help.
+  - Deferred because it needs a tested runtime matrix and feature-detection policy, not just more branches in `_resolve_model_kwargs()`.
+- `#16` Representative int8 calibration sampling prepass
+  - Goal: replace the current first-sample hydration calibration with an explicit representative sample pass (for example randomized or reservoir-based) so stored ranges are not biased by dataset order.
+  - Deferred because this requires a second hydration/source-loading path and characterization of the calibration-vs-startup tradeoff before changing corpus bootstrap semantics.
 
 ## Follow-up Conditions
 

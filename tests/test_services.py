@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -23,6 +24,33 @@ from citemesh.services.semantic_scholar import (
     reset_client,
 )
 from tests._helpers import get_paper_id_normalization_cases
+
+
+def test_lazy_service_and_strategy_exports_do_not_pull_semantic_scholar_on_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding imports should not require Semantic Scholar client deps eagerly."""
+    for module_name in (
+        "citemesh.services",
+        "citemesh.services.semantic_scholar",
+        "citemesh.strategies",
+        "citemesh.strategies.embedding",
+    ):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    monkeypatch.setitem(sys.modules, "semanticscholar", None)
+    monkeypatch.setitem(sys.modules, "semanticscholar.SemanticScholarException", None)
+
+    services_module = importlib.import_module("citemesh.services")
+    assert "citemesh.services.semantic_scholar" not in sys.modules
+    assert callable(services_module.get_client)
+
+    strategies_module = importlib.import_module("citemesh.strategies")
+    assert "citemesh.strategies.embedding" not in sys.modules
+
+    embedding_builder = getattr(strategies_module, "EmbeddingGraphBuilder")
+    assert embedding_builder.__name__ == "EmbeddingGraphBuilder"
+    assert "citemesh.services.semantic_scholar" not in sys.modules
 
 
 class _MockResponse:

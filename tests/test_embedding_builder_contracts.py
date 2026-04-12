@@ -1147,6 +1147,83 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     fake_load_dataset_for_hydration.assert_not_called()
 
 
+def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seed embedding should use query prompts only for free-text query seeds."""
+    disable_embedding_dep_checks(monkeypatch)
+
+    def _build_builder() -> tuple[
+        EmbeddingGraphBuilder, list[str], list[dict[str, str]]
+    ]:
+        builder = EmbeddingGraphBuilder(
+            max_papers=1, use_streaming=False, client=MagicMock()
+        )
+        query_calls: list[str] = []
+        document_calls: list[dict[str, str]] = []
+        builder.model_profile = types.SimpleNamespace(
+            format_query=lambda text, _metadata: (
+                query_calls.append(text) or f"Q::{text}"
+            ),
+            format_document=lambda metadata: (
+                document_calls.append(dict(metadata))
+                or f"D::{metadata.get('title', '')}::{metadata.get('abstract', '')}"
+            ),
+        )
+        monkeypatch.setattr(builder, "_load_model", lambda: None)
+        monkeypatch.setattr(
+            builder,
+            "_select_candidates_from_loaded",
+            lambda _seed_embedding: [],
+        )
+        monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+        return builder, query_calls, document_calls
+
+    query_builder, query_calls, query_documents = _build_builder()
+    query_texts: list[str] = []
+    monkeypatch.setattr(
+        query_builder,
+        "_encode_texts",
+        lambda texts, show_progress_bar=False: (
+            query_texts.extend(texts),
+            np.asarray([[1.0, 0.0]], dtype=np.float32),
+        )[1],
+    )
+    query_builder.client.get_paper = MagicMock(return_value=None)
+
+    query_builder.collect_papers("attention routing")
+
+    assert query_calls == ["attention routing"]
+    assert query_documents == []
+    assert query_texts == ["Q::attention routing"]
+
+    paper_builder, paper_queries, paper_documents = _build_builder()
+    paper_texts: list[str] = []
+    monkeypatch.setattr(
+        paper_builder,
+        "_encode_texts",
+        lambda texts, show_progress_bar=False: (
+            paper_texts.extend(texts),
+            np.asarray([[1.0, 0.0]], dtype=np.float32),
+        )[1],
+    )
+    paper_builder.client.get_paper = MagicMock(
+        return_value=Paper(
+            paper_id="paper-1",
+            title="Seed Title",
+            abstract="Seed Abstract",
+            year=2024,
+            is_seed=True,
+        )
+    )
+
+    paper_builder.collect_papers("paper-1")
+
+    assert paper_queries == []
+    assert paper_documents == [{"title": "Seed Title", "abstract": "Seed Abstract"}]
+    assert paper_texts == ["D::Seed Title::Seed Abstract"]
+
+
 def test_collect_papers_dataset_source_revalidation_contracts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,

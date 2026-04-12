@@ -5,18 +5,23 @@ This strategy builds similarity graphs using citation relationships,
 bibliographic coupling (shared references), and co-citation analysis.
 """
 
+from __future__ import annotations
+
 import logging
 import sys
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 import networkx as nx
 from tqdm.auto import tqdm
 
 from citemesh.core import Paper
-from citemesh.services import SemanticScholarClient, get_client
+from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.similarity import compute_indexed_similarity_score
+
+if TYPE_CHECKING:
+    from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)
 

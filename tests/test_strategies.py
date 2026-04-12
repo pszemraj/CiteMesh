@@ -11,7 +11,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from citemesh.core import HYBRID_CONFIG, Author, Paper
+from citemesh.core import EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     deterministic_sort_key,
@@ -392,6 +392,51 @@ def test_hybrid_collection_merges_and_tracks_sources(
     assert builder.seed_relations["seed"] == "seed"
     assert builder.seed_relations["c1"] == "referenced_by_seed"
     assert builder.seed_relations["s1"] == "semantic_only"
+
+
+def test_embedding_and_hybrid_similarity_normalize_scaled_embeddings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Semantic branches should score by angle, not by vector magnitude."""
+    disable_embedding_dep_checks(monkeypatch)
+    paper_a = _paper("a", year=2020, refs=["r1"])
+    paper_b = _paper("b", year=2020, refs=["r1"])
+
+    embedding_builder = EmbeddingGraphBuilder(max_papers=2, client=MagicMock())
+    embedding_builder.embeddings = {
+        "a": np.asarray([3.0, 0.0], dtype=np.float32),
+        "b": np.asarray([9.0, 0.0], dtype=np.float32),
+    }
+    expected_embedding_similarity = (
+        EMBEDDING_CONFIG.semantic_weight * 1.0
+        + EMBEDDING_CONFIG.temporal_weight
+        * embedding_builder.temporal_similarity(paper_a, paper_b)
+        + EMBEDDING_CONFIG.category_weight * paper_a.category_overlap(paper_b)
+    )
+    assert embedding_builder.compute_similarity(paper_a, paper_b) == pytest.approx(
+        expected_embedding_similarity
+    )
+
+    hybrid_builder = HybridGraphBuilder(max_papers=2, client=MagicMock())
+    assert hybrid_builder.embedding_builder is not None
+    hybrid_builder.paper_sources = {"a": "semantic", "b": "semantic"}
+    hybrid_builder.embedding_builder.embeddings = {
+        "a": np.asarray([2.0, 0.0], dtype=np.float32),
+        "b": np.asarray([6.0, 0.0], dtype=np.float32),
+    }
+    expected_hybrid_similarity = (
+        HYBRID_CONFIG.semantic_semantic_weights[0] * 1.0
+        + HYBRID_CONFIG.semantic_semantic_weights[1]
+        * hybrid_builder.temporal_similarity(paper_a, paper_b)
+        + HYBRID_CONFIG.semantic_semantic_weights[2]
+        * hybrid_builder.citation_similarity(paper_a, paper_b)
+        + HYBRID_CONFIG.semantic_semantic_weights[3]
+        * hybrid_builder.bibliographic_coupling(paper_a, paper_b)
+        + HYBRID_CONFIG.co_citation_boost
+    )
+    assert hybrid_builder.compute_similarity(paper_a, paper_b) == pytest.approx(
+        min(expected_hybrid_similarity, 1.0)
+    )
 
 
 def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
