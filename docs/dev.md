@@ -31,9 +31,6 @@ The following items were intentionally deferred during the easy-win + breaking A
 - `#15` Embedding runtime backend/attention policy expansion
   - Goal: broaden runtime selection beyond the current BF16-or-float32 torch policy to include explicit attention-kernel selection plus CPU-focused ONNX/OpenVINO backends where they materially help.
   - Deferred because it needs a tested runtime matrix and feature-detection policy, not just more branches in `_resolve_model_kwargs()`.
-- `#16` Representative int8 calibration sampling prepass
-  - Goal: replace the current first-sample hydration calibration with an explicit representative sample pass (for example randomized or reservoir-based) so stored ranges are not biased by dataset order.
-  - Deferred because this requires a second hydration/source-loading path and characterization of the calibration-vs-startup tradeoff before changing corpus bootstrap semantics.
 - `#17` Separate cache upsert API from embedding retrieval return path
   - Goal: let hydration/write-heavy callers persist embeddings without paying the extra dict/materialization path used by `EmbeddingCache.get_embeddings(...)` return values.
   - Deferred because the new two-phase cache flow should settle first; then the write-only API can be introduced with cleaner call sites and without duplicating persistence logic.

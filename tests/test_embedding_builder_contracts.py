@@ -1235,7 +1235,10 @@ def test_collect_papers_dataset_source_revalidation_contracts(
     def _build_hydrated_builder(cache_root: str) -> EmbeddingGraphBuilder:
         monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / cache_root))
         local_builder = EmbeddingGraphBuilder(
-            max_papers=2, use_streaming=False, client=MagicMock()
+            max_papers=2,
+            storage_precision="float32",
+            use_streaming=False,
+            client=MagicMock(),
         )
         _pin_model_fingerprint(monkeypatch, local_builder)
         local_builder.embedding_cache.mark_hydrated(
@@ -1753,6 +1756,79 @@ def test_hydration_reset_restores_model_fingerprint(
     assert builder.embedding_cache.get_model_fingerprint() == "fp-before-clear"
 
 
+def test_int8_hydration_calibration_uses_representative_prepass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Int8 hydration should calibrate from a separate representative sample pass."""
+    disable_embedding_dep_checks(monkeypatch)
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="int8",
+        calibration_sample_size=2,
+        use_streaming=False,
+        corpus_size=5,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+
+    source = "mini-dataset"
+    records = [
+        {"id": f"p{idx}", "title": f"Title {idx}", "abstract": f"Abstract {idx}"}
+        for idx in range(5)
+    ]
+    load_mock = MagicMock(
+        side_effect=[
+            (source, list(records)),
+            (source, list(records)),
+        ]
+    )
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
+
+    captured_texts: list[list[str]] = []
+
+    def _fake_encode_texts(
+        texts: list[str],
+        batch_size: int | None = None,
+        show_progress_bar: bool = False,
+    ) -> np.ndarray:
+        del batch_size, show_progress_bar
+        captured_texts.append(list(texts))
+        return np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.float32)
+
+    monkeypatch.setattr(builder, "_encode_texts", _fake_encode_texts)
+
+    def _cache_batch(batch: list[dict[str, Any]]) -> int:
+        assert builder.embedding_cache.has_calibration_ranges()
+        return len(batch)
+
+    monkeypatch.setattr(builder, "_cache_metadata_batch", _cache_batch)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    expected_calibration_texts = [
+        builder.model_profile.format_document(
+            {"title": "Title 4", "abstract": "Abstract 4"}
+        ),
+        builder.model_profile.format_document(
+            {"title": "Title 2", "abstract": "Abstract 2"}
+        ),
+    ]
+    assert load_mock.call_count == 2
+    assert captured_texts == [expected_calibration_texts]
+    assert captured_texts[0] != [
+        builder.model_profile.format_document(
+            {"title": "Title 0", "abstract": "Abstract 0"}
+        ),
+        builder.model_profile.format_document(
+            {"title": "Title 1", "abstract": "Abstract 1"}
+        ),
+    ]
+    assert builder.embedding_cache.has_calibration_ranges() is True
+
+
 def test_hydration_flush_size_controls_cache_write_bursting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
@@ -1864,7 +1940,10 @@ def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
-        lambda use_streaming, preferred_dataset_source=None: ("empty-snapshot", []),
+        lambda use_streaming, preferred_dataset_source=None, **_kwargs: (
+            "empty-snapshot",
+            [],
+        ),
     )
     monkeypatch.setattr(
         builder,

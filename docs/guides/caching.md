@@ -55,6 +55,9 @@ For `int8`, calibration ranges must already exist before cache writes begin.
 Hydration-managed embedding workflows create and persist those ranges before the
 first int8 cache write; raw `EmbeddingCache` int8 writes now fail closed instead of
 bootstrapping ranges from an arbitrary request batch.
+Hydration no longer takes the first-N records for calibration. Instead, it runs a
+separate representative reservoir-sampling prepass over the active hydration slice
+and persists ranges before the main cache-write pass begins.
 
 Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
 CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected).

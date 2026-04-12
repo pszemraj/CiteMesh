@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import sys
 import warnings
@@ -108,6 +109,7 @@ ENCODE_BATCH_SIZE = 32
 HYDRATION_FLUSH_SIZE = 256
 CANDIDATE_MULTIPLIER = 4
 CITATION_COUNT_ENRICHMENT_LIMIT = 20
+CALIBRATION_RESERVOIR_SEED = 0
 ARXIV_DATASET_CANDIDATES = (
     "librarian-bots/arxiv-metadata-snapshot",
     "CShorten/ML-ArXiv-Papers",
@@ -1956,12 +1958,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             complete=False,
         )
 
-        progress_total = self.corpus_size if self.corpus_size else None
-        if not use_streaming and self.corpus_size is None:
-            try:
-                progress_total = len(dataset)
-            except TypeError:  # pragma: no cover - defensive for dataset APIs
-                progress_total = None
+        progress_total = self._resolve_hydration_progress_total(
+            dataset,
+            use_streaming=use_streaming,
+        )
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=dataset_source,
+        )
 
         hydrated_records = self._hydrate_dataset_records(
             dataset=dataset,
@@ -1984,6 +1988,127 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             corpus_size=self.corpus_size,
             complete=True,
         )
+
+    def _resolve_hydration_progress_total(
+        self, dataset: Iterable[Dict[str, Any]], *, use_streaming: bool
+    ) -> Optional[int]:
+        """Resolve best-effort progress totals for hydration-related passes.
+
+        :param Iterable[Dict[str, Any]] dataset: Dataset iterable used by the pass.
+        :param bool use_streaming: Whether the iterable came from streaming mode.
+        :return Optional[int]: Progress-bar total when it can be inferred.
+        """
+        progress_total = self.corpus_size if self.corpus_size else None
+        if not use_streaming and self.corpus_size is None:
+            try:
+                progress_total = len(dataset)
+            except TypeError:  # pragma: no cover - defensive for dataset APIs
+                progress_total = None
+        return progress_total
+
+    def _needs_explicit_int8_calibration(self) -> bool:
+        """Return whether int8 hydration must initialize persisted ranges first.
+
+        :return bool: ``True`` when int8 cache writes would otherwise fail closed.
+        """
+        return (
+            self.storage_precision == "int8"
+            and not self.embedding_cache.has_calibration_ranges()
+        )
+
+    def _sample_calibration_records(
+        self,
+        dataset: Iterable[Dict[str, Any]],
+        *,
+        progress_total: Optional[int],
+        progress_label: str,
+    ) -> List[Dict]:
+        """Reservoir-sample representative metadata records for int8 calibration.
+
+        The sample is deterministic so cache bootstrap remains reproducible under
+        tests and across repeated local runs given the same corpus slice/order.
+
+        :param Iterable[Dict[str, Any]] dataset: Dataset records to sample.
+        :param Optional[int] progress_total: Optional progress-bar total.
+        :param str progress_label: Progress-bar description label.
+        :return List[Dict]: Reservoir-sampled metadata records.
+        """
+        rng = random.Random(CALIBRATION_RESERVOIR_SEED)
+        sampled_records: List[Dict] = []
+
+        with tqdm(
+            total=progress_total,
+            desc=progress_label,
+            unit="papers",
+            dynamic_ncols=True,
+            disable=not sys.stderr.isatty(),
+        ) as progress:
+            for idx, raw_record in enumerate(dataset):
+                if self.corpus_size is not None and idx >= self.corpus_size:
+                    break
+
+                metadata = self._extract_paper_metadata(raw_record, idx)
+                if len(sampled_records) < self.calibration_sample_size:
+                    sampled_records.append(metadata)
+                else:
+                    replace_idx = rng.randint(0, idx)
+                    if replace_idx < self.calibration_sample_size:
+                        sampled_records[replace_idx] = metadata
+                progress.update(1)
+
+            if progress_total is None:
+                progress.set_postfix_str(f"processed {progress.n}")
+
+        return sampled_records
+
+    def _ensure_int8_calibration_ranges(
+        self,
+        *,
+        use_streaming: bool,
+        dataset_source: str,
+    ) -> None:
+        """Initialize representative int8 calibration ranges before hydration writes.
+
+        :param bool use_streaming: Whether the hydration source streams records.
+        :param str dataset_source: Resolved dataset source token for hydration.
+        :return None: Persists calibration ranges in cache when required.
+        :raises RuntimeError: If calibration source resolution or sampling fails.
+        """
+        if not self._needs_explicit_int8_calibration():
+            return
+
+        logger.info(
+            "Initializing representative int8 calibration ranges from %s (sample_size=%d).",
+            dataset_source,
+            self.calibration_sample_size,
+        )
+        calibration_source, calibration_dataset = self._load_dataset_for_hydration(
+            use_streaming=use_streaming,
+            preferred_dataset_source=dataset_source,
+            allow_source_fallback=False,
+        )
+        if calibration_source != dataset_source:
+            raise RuntimeError(
+                "Calibration prepass resolved unexpected dataset source "
+                f"{calibration_source!r} (expected {dataset_source!r})."
+            )
+
+        calibration_records = self._sample_calibration_records(
+            calibration_dataset,
+            progress_total=self._resolve_hydration_progress_total(
+                calibration_dataset,
+                use_streaming=use_streaming,
+            ),
+            progress_label=f"Calibrating {dataset_source}",
+        )
+        if not calibration_records:
+            logger.warning(
+                "Representative int8 calibration prepass produced zero records for %s; "
+                "hydration will remain incomplete until a non-empty source is available.",
+                dataset_source,
+            )
+            return
+        self._initialize_calibration_ranges(calibration_records)
 
     def _hydrate_dataset_records(
         self,
@@ -2009,11 +2134,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         hydrated_records = 0
         selected_records = 0
-        calibration_records: List[Dict] = []
-        calibration_ready = (
-            self.storage_precision != "int8"
-            or self.embedding_cache.has_calibration_ranges()
-        )
 
         with tqdm(
             total=progress_total,
@@ -2036,23 +2156,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     existing_paper_ids.add(paper_id)
 
                 selected_records += 1
-                if (
-                    not calibration_ready
-                    and len(calibration_records) < self.calibration_sample_size
-                ):
-                    calibration_records.append(metadata)
-                    if len(calibration_records) == self.calibration_sample_size:
-                        self._initialize_calibration_ranges(calibration_records)
-                        calibration_ready = True
-                        batch.extend(calibration_records)
-                        calibration_records = []
-                    progress.update(1)
-                    if max_new_records is not None and selected_records >= int(
-                        max_new_records
-                    ):
-                        break
-                    continue
-
                 batch.append(metadata)
                 if len(batch) >= HYDRATION_FLUSH_SIZE:
                     hydrated_records += self._cache_metadata_batch(batch)
@@ -2062,12 +2165,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     max_new_records
                 ):
                     break
-
-            if calibration_records and not calibration_ready:
-                self._initialize_calibration_ranges(calibration_records)
-                calibration_ready = True
-                batch.extend(calibration_records)
-                calibration_records = []
 
             if batch:
                 hydrated_records += self._cache_metadata_batch(batch)
@@ -2168,6 +2265,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 )
             self.embedding_cache.clear_hydration_rowcount_reconciliation()
             return
+
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=source,
+        )
 
         previous_reconciliation = (
             self.embedding_cache.get_hydration_rowcount_reconciliation()
