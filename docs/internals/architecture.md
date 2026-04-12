@@ -1,6 +1,6 @@
 # CiteMesh Architecture
 
-The CLI orchestrates a consistent pipeline regardless of strategy (`recommendation`, `citation`, `embedding`, `hybrid`). This document describes major components, data flow, and extension points.
+The CLI orchestrates the same high-level pipeline for `recommendation`, `citation`, `embedding`, and `hybrid`, then hands strategy-agnostic graph data to the visualization and export layers.
 
 Related docs:
 

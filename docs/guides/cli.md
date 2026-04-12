@@ -1,6 +1,6 @@
 # CLI Usage Guide
 
-The `citemesh` command builds paper graphs with one of four strategies: `recommendation`, `citation`, `embedding`, or `hybrid`.
+Build paper graphs with `recommendation`, `citation`, `embedding`, or `hybrid`.
 
 Related docs:
 
@@ -117,7 +117,6 @@ ignoring it.
 - `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
 - With non-streaming unsliced splits, CiteMesh loads `split[:corpus_size]` directly (it does not download/process the full split just to stop after `corpus_size` rows).
-- For the default `librarian-bots/arxiv-metadata-snapshot` source, current ordering places the newest `update_date` rows first, so the default cap targets recent updates.
 - `--all-corpus`: remove corpus-size cap and process the full selected split
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
@@ -170,7 +169,7 @@ Execution transparency:
 - `png`: Matplotlib static render with theme-aware background and labels
 - `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
 - `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
-- `dashboard`: tri-pane research dashboard shell (list + graph + detail). In normal collection flows it is written as `dashboard.html` at the output root, embeds the saved-result collection so you can switch runs from one UI, and keeps an explicit single-file `*.dashboard.html` mode for one-off exports.
+- `dashboard`: tri-pane research dashboard shell (list + graph + detail). Collection-mode and standalone path rules are defined in [Output Artifacts](../reference/output-artifacts.md).
 - `json`: structured graph data payload (nodes/edges)
 - `csv`: flat paper table (one row per paper) for pandas/spreadsheet import
 - `bibtex`: combined BibTeX entries for all papers, ready for reference managers or LaTeX
@@ -200,10 +199,6 @@ citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json -o rese
 
 # Explicit standalone dashboard file for a one-off result
 citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o report.dashboard.html --theme dark
-
-In collection mode, each build refreshes the shared `dashboard.html` so the
-saved-result selector stays in sync with `dashboard.manifest.json` and the
-embedded JSON payloads available under that output root.
 
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \

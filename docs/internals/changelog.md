@@ -1,6 +1,6 @@
 # Changelog & Key Improvements
 
-This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
+Notable changes from the early script-based prototypes to the current package layout.
 For current usage details, see:
 
 - [CLI Usage](../guides/cli.md)

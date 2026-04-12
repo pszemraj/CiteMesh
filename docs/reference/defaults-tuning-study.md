@@ -1,6 +1,6 @@
 # Defaults Tuning Study (February 2026)
 
-This document records the sweep work used to choose current graph-building defaults for hybrid discovery workflows.
+Hybrid-default sweep results used to choose the current discovery-oriented defaults.
 
 Related docs:
 

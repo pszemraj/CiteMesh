@@ -13,13 +13,7 @@ The default hybrid workflow is tuned around this discovery pattern rather than m
 
 ## Documentation
 
-- Documentation index: [docs/README.md](docs/README.md)
-- CLI guide: [docs/guides/cli.md](docs/guides/cli.md)
-- Strategy guide: [docs/guides/strategies.md](docs/guides/strategies.md)
-- Caching and data: [docs/guides/caching.md](docs/guides/caching.md)
-- Environment variables: [docs/reference/environment.md](docs/reference/environment.md)
-- Output files and sidecar schema: [docs/reference/output-artifacts.md](docs/reference/output-artifacts.md)
-- Embedding runtime behavior: [docs/reference/embedding-runtime.md](docs/reference/embedding-runtime.md)
+- [Documentation index](docs/README.md)
 
 ## Quick Start
 

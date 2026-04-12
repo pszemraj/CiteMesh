@@ -1,6 +1,6 @@
 # Strategy Guide
 
-The `citemesh` CLI can build graphs with four strategies: `recommendation`, `citation`, `embedding`, and `hybrid`. This guide explains how they differ and when to use each.
+Use this guide to choose between `recommendation`, `citation`, `embedding`, and `hybrid`.
 
 Related docs:
 
