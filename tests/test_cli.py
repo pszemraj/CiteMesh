@@ -820,6 +820,8 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
             methods=(
                 "to_dashboard_html",
                 "to_json",
+                "to_csv",
+                "to_bibtex",
                 "to_graphml",
                 "to_interactive_html",
                 "to_plotly_html",
@@ -841,10 +843,14 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
             ],
         )
         assert (output_dir / "recommendation.dashboard.html").exists()
+        assert (output_dir / "recommendation.csv").exists()
+        assert (output_dir / "recommendation.bib").exists()
         config_files = sorted(output_dir.glob("*.config.json"))
         assert len(config_files) == 1
         config_payload = json.loads(config_files[0].read_text())
         assert "dashboard" in config_payload["outputs"]
+        assert "csv" in config_payload["outputs"]
+        assert "bibtex" in config_payload["outputs"]
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
@@ -868,6 +874,8 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
             captured,
             methods=(
                 "to_json",
+                "to_csv",
+                "to_bibtex",
                 "to_graphml",
                 "to_interactive_html",
                 "to_plotly_html",
@@ -1288,7 +1296,17 @@ def test_programmatic_strategy_dispatch_contracts() -> None:
 def test_cli_help_contracts() -> None:
     """CLI help output should expose stable semantic contracts."""
     cases = [
-        (["--help"], ["CiteMesh", "build", "cache", "search"]),
+        (
+            ["--help"],
+            [
+                "CiteMesh",
+                "build",
+                "cache",
+                "search",
+                "S2_API_KEY",
+                "CITEMESH_CACHE_DIR",
+            ],
+        ),
         (
             ["build", "--help"],
             [
@@ -1304,6 +1322,7 @@ def test_cli_help_contracts() -> None:
                 "--no-torch-compile",
                 "--spring-iterations",
                 "citation/recommendation",
+                "repeat for multiple",
             ],
         ),
         (["search", "--help"], ["search", "--limit"]),
@@ -1460,3 +1479,152 @@ def test_documented_cli_examples_are_parseable() -> None:
         if any(token.startswith("[") or token.endswith("]") for token in argv):
             continue
         parser.parse_args(argv)
+
+
+def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Repeating --export should produce exactly the requested formats."""
+    graph = build_seed_graph("seed")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured, methods=("to_json", "to_csv", "to_bibtex")
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "multi"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "-e",
+                "json",
+                "-e",
+                "csv",
+                "-o",
+                str(output),
+            ]
+        )
+        json_path = output / "recommendation.json"
+        csv_path = output / "recommendation.csv"
+        assert json_path.exists()
+        assert csv_path.exists()
+        # bibtex NOT requested — should not exist
+        bib_path = output / "recommendation.bib"
+        assert not bib_path.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+
+
+def test_multi_export_deduplicates_repeated_formats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Repeating the same --export value should not produce duplicate work."""
+    graph = build_seed_graph("seed")
+    call_counts: dict[str, int] = {}
+
+    class _CountingExporter:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def to_json(self, path: Any) -> None:
+            call_counts["json"] = call_counts.get("json", 0) + 1
+            Path(path).write_text("{}")
+
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(cli_module, "GraphExporter", _CountingExporter)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "dedup.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "-e",
+                "json",
+                "-e",
+                "json",
+                "-o",
+                str(output),
+            ]
+        )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert call_counts.get("json", 0) == 1
+
+
+def test_export_dispatch_table_covers_all_declared_formats() -> None:
+    """Every EXPORT_FORMATS entry must have a dispatch mapping or be 'png'."""
+    covered = set(cli_module._EXPORTER_METHOD) | {"png"}
+    assert covered == set(cli_module.EXPORT_FORMATS), (
+        f"Dispatch gap: covered={sorted(covered)}, "
+        f"declared={sorted(cli_module.EXPORT_FORMATS)}"
+    )
+
+
+def test_programmatic_dispatch_respects_explicit_provided_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_build_strategy_graph with explicit provided set should bypass inference."""
+    _, build_parser, _ = cli_module._create_parser()
+    namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "HybridGraphBuilder",
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+
+    # Explicitly mark max_papers as provided → hybrid override should NOT apply
+    graph, seed_id = cli_module._build_strategy_graph(
+        namespace, "hybrid", provided={"max_papers"}
+    )
+    assert seed_id == "seed"
+    # max_papers should remain the parser default (40), not the hybrid override (45)
+    assert captured["max_papers"] == 40
+
+
+def test_builder_defaults_match_cli_defaults() -> None:
+    """Strategy builder constructor defaults should match CLI parser defaults."""
+    from citemesh.strategies.citation import CitationGraphBuilder
+    from citemesh.strategies.recommendation import RecommendationGraphBuilder
+
+    _, build_parser, _ = cli_module._create_parser()
+    defaults = build_parser.parse_args(["seed", "--strategy", "citation"])
+
+    assert CitationGraphBuilder.__init__.__defaults__ is not None
+    import inspect
+
+    cit_sig = inspect.signature(CitationGraphBuilder.__init__)
+    assert cit_sig.parameters["max_citations"].default == defaults.max_citations
+    assert cit_sig.parameters["max_references"].default == defaults.max_references
+    assert (
+        cit_sig.parameters["similarity_threshold"].default
+        == defaults.similarity_threshold
+    )
+
+    rec_sig = inspect.signature(RecommendationGraphBuilder.__init__)
+    assert (
+        rec_sig.parameters["similarity_threshold"].default
+        == defaults.similarity_threshold
+    )
+    # CLI dispatches fetch_references=not(no_references); default no_references=False → True
+    assert rec_sig.parameters["fetch_references"].default is (
+        not defaults.no_references
+    )

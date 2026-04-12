@@ -54,7 +54,7 @@ In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--ov
 | `--dpi`, `-d` | PNG output resolution | `150` |
 | `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`) | deterministic built-in seed |
 | `--include-timestamp` | Include generation time in output metadata | disabled |
-| `--export`, `-e` | One of `png`, `html`, `plotly`, `dashboard`, `json`, `graphml`, or `all` | `png` |
+| `--export`, `-e` | `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, or `all`; repeat flag for multiple (e.g. `-e json -e dashboard`) | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
@@ -193,8 +193,8 @@ citemesh build "arxiv:1706.03762" --strategy citation -p 20
 # Hybrid graph with all export formats
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 
-# Dashboard-only export
-citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard --theme dark
+# Dashboard + JSON export (repeat -e for selective multi-export)
+citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json --theme dark
 
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \

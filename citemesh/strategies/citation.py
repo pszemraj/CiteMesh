@@ -35,8 +35,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
     def __init__(
         self,
         max_papers: int = 40,
-        max_citations: int = 20,
-        max_references: int = 20,
+        max_citations: int = 25,
+        max_references: int = 25,
         similarity_threshold: float = 0.2,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
@@ -46,8 +46,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         Initialize citation graph builder.
 
         :param int max_papers: Maximum total papers in graph
-        :param int max_citations: Maximum citing papers to fetch
-        :param int max_references: Maximum referenced papers to fetch
+        :param int max_citations: Maximum citing papers to fetch (default matches CLI)
+        :param int max_references: Maximum referenced papers to fetch (default matches CLI)
         :param float similarity_threshold: Minimum similarity for edges
         :param bool fetch_references: Whether to fetch reference lists (enables real bibliographic coupling)
         :param bool refresh_reference_cache: Whether to bypass persisted reference-cache reads.

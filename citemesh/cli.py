@@ -200,17 +200,46 @@ def _add_logging_arguments(
     )
 
 
-EXPORT_FORMATS = ("png", "html", "plotly", "dashboard", "json", "graphml")
+EXPORT_FORMATS = (
+    "png",
+    "html",
+    "plotly",
+    "dashboard",
+    "json",
+    "csv",
+    "bibtex",
+    "graphml",
+)
 EXPORT_EXTENSIONS: Dict[str, str] = {
     "png": ".png",
     "html": ".html",
     "plotly": ".plotly.html",
     "dashboard": ".dashboard.html",
     "json": ".json",
+    "csv": ".csv",
+    "bibtex": ".bib",
     "graphml": ".graphml",
 }
 KNOWN_EXPORT_SUFFIXES: List[str] = sorted(
     EXPORT_EXTENSIONS.values(), key=len, reverse=True
+)
+# Table-driven export dispatch: format → GraphExporter method name.
+# ``png`` is handled separately (uses ``visualize_graph``, not the exporter).
+_EXPORTER_METHOD: Dict[str, str] = {
+    "html": "to_interactive_html",
+    "plotly": "to_plotly_html",
+    "dashboard": "to_dashboard_html",
+    "json": "to_json",
+    "csv": "to_csv",
+    "bibtex": "to_bibtex",
+    "graphml": "to_graphml",
+}
+_THEME_AWARE_FORMATS: frozenset = frozenset({"html", "plotly", "dashboard"})
+# Verify dispatch coverage at import time — a new EXPORT_FORMATS entry without
+# a dispatch mapping will fail fast here rather than silently skip at runtime.
+assert set(_EXPORTER_METHOD) | {"png"} == set(EXPORT_FORMATS), (
+    f"Export dispatch gap: covered={sorted(set(_EXPORTER_METHOD) | {'png'})}, "
+    f"declared={sorted(EXPORT_FORMATS)}"
 )
 
 
@@ -516,10 +545,20 @@ def _collect_provided_build_option_dests(
     provided: Set[str] = set()
     probe_parser = copy.deepcopy(build_parser)
     probe_default = object()
+    append_dests: Set[str] = set()
     for action in probe_parser._actions:
-        if action.option_strings:
+        if not action.option_strings:
+            continue
+        if isinstance(action, argparse._AppendAction):
+            # append actions need a list-compatible default; use None so argparse
+            # creates a fresh list on first append and we detect "was it used?".
+            action.default = None
+            append_dests.add(action.dest)
+        else:
             action.default = probe_default
-    probe_parser.set_defaults(**{key: probe_default for key in probe_parser._defaults})
+    for key in probe_parser._defaults:
+        if key not in append_dests:
+            probe_parser._defaults[key] = probe_default
 
     try:
         parsed, _ = probe_parser.parse_known_args(argv[build_idx + 1 :])
@@ -527,13 +566,14 @@ def _collect_provided_build_option_dests(
         return provided
 
     for action in probe_parser._actions:
-        if (
-            not action.option_strings
-            or not hasattr(parsed, action.dest)
-            or getattr(parsed, action.dest) is probe_default
-        ):
+        if not action.option_strings or not hasattr(parsed, action.dest):
             continue
-        provided.add(action.dest)
+        value = getattr(parsed, action.dest)
+        if action.dest in append_dests:
+            if value is not None:
+                provided.add(action.dest)
+        elif value is not probe_default:
+            provided.add(action.dest)
 
     return provided
 
@@ -660,6 +700,14 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     if args.strategy not in {"embedding", "hybrid"}:
         return
 
+    _, cache_files, _ = _embedding_cache_directory_stats()
+    if cache_files == 0:
+        logger.warning(
+            "No embedding cache found; model and corpus downloads may be "
+            "required (network access needed, may take several minutes on "
+            "first use)."
+        )
+
     corpus_label = "all" if args.all_corpus else str(args.corpus_size)
     cache_root = get_cache_dir("embeddings")
     revision_label = args.model_revision or "default"
@@ -734,13 +782,21 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
 
 
 def _build_strategy_graph(
-    args: argparse.Namespace, strategy: str, *, validate_contract: bool = True
+    args: argparse.Namespace,
+    strategy: str,
+    *,
+    validate_contract: bool = True,
+    provided: Optional[Set[str]] = None,
 ) -> tuple[nx.Graph, str]:
     """Build a graph for a strategy selected from CLI arguments.
 
     :param argparse.Namespace args: Parsed arguments.
     :param str strategy: Strategy name.
     :param bool validate_contract: Whether to run strategy-option contract checks.
+    :param Optional[Set[str]] provided: Explicit set of option destinations that were
+        provided by the caller.  When ``None``, provided fields are inferred by
+        comparing namespace values against parser defaults (note: re-specifying a
+        default value is invisible to the heuristic).
     :return tuple[nx.Graph, str]: Graph and normalized seed paper ID.
     :raises ValueError: If strategy is unsupported.
     """
@@ -758,9 +814,13 @@ def _build_strategy_graph(
         merged_values.update(vars(args_for_validation))
         args_for_validation = argparse.Namespace(**merged_values)
         setattr(args_for_validation, "strategy", strategy)
-        inferred_provided = _infer_provided_build_option_dests(
-            args=args_for_validation,
-            build_parser=build_parser_snapshot,
+        inferred_provided = (
+            provided
+            if provided is not None
+            else _infer_provided_build_option_dests(
+                args=args_for_validation,
+                build_parser=build_parser_snapshot,
+            )
         )
 
         class _ProgrammaticBuildParser:
@@ -798,6 +858,9 @@ def _infer_provided_build_option_dests(
     explicit re-specification of the same default, but it prevents most silent
     programmatic bypasses for strategy-scoped option contracts.
 
+    For precise control, programmatic callers should pass the ``provided`` parameter
+    to :func:`_build_strategy_graph` directly, bypassing this heuristic entirely.
+
     :param argparse.Namespace args: Candidate parsed namespace.
     :param argparse.ArgumentParser build_parser: Build subcommand parser.
     :return Set[str]: Option destinations inferred as explicitly set.
@@ -810,9 +873,13 @@ def _infer_provided_build_option_dests(
         if not hasattr(args, dest):
             continue
         current_value = getattr(args, dest)
-        default_value = build_parser.get_default(dest)
-        if current_value != default_value:
-            provided.add(dest)
+        if isinstance(action, argparse._AppendAction):
+            if current_value is not None:
+                provided.add(dest)
+        else:
+            default_value = build_parser.get_default(dest)
+            if current_value != default_value:
+                provided.add(dest)
     return provided
 
 
@@ -852,6 +919,11 @@ Examples:
 
   # Quick test with fewer papers
   citemesh build "arxiv:1810.04805" -p 20 --strategy citation
+
+Environment variables:
+  S2_API_KEY                                      Semantic Scholar API key (higher rate limits)
+  CITEMESH_CACHE_DIR                              Override cache directory location
+  CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS   Embedding cache lock timeout (default: 900s)
         """,
     )
 
@@ -896,9 +968,10 @@ Examples:
     build_parser.add_argument(
         "--export",
         "-e",
-        choices=["png", "html", "plotly", "dashboard", "json", "graphml", "all"],
-        default="png",
-        help="Export format (default: png)",
+        choices=[*EXPORT_FORMATS, "all"],
+        action="append",
+        default=None,
+        help="Export format; repeat for multiple (default: png)",
     )
 
     build_parser.add_argument(
@@ -1739,9 +1812,11 @@ def main() -> None:
                     graph, seed_id, strategy=args.strategy
                 )
 
-            selected_formats = (
-                list(EXPORT_FORMATS) if args.export == "all" else [args.export]
-            )
+            raw_exports = args.export or ["png"]
+            if "all" in raw_exports:
+                selected_formats = list(EXPORT_FORMATS)
+            else:
+                selected_formats = list(dict.fromkeys(raw_exports))
             output_paths = resolve_output_paths(
                 base_output_path=base_output_path,
                 selected_formats=selected_formats,
@@ -1809,20 +1884,14 @@ def main() -> None:
                     layout=shared_layout,
                 )
 
-            if "html" in output_paths:
-                exporter.to_interactive_html(output_paths["html"], theme=args.theme)
-
-            if "plotly" in output_paths:
-                exporter.to_plotly_html(output_paths["plotly"], theme=args.theme)
-
-            if "dashboard" in output_paths:
-                exporter.to_dashboard_html(output_paths["dashboard"], theme=args.theme)
-
-            if "json" in output_paths:
-                exporter.to_json(output_paths["json"])
-
-            if "graphml" in output_paths:
-                exporter.to_graphml(output_paths["graphml"])
+            for fmt, method_name in _EXPORTER_METHOD.items():
+                if fmt not in output_paths:
+                    continue
+                method = getattr(exporter, method_name)
+                if fmt in _THEME_AWARE_FORMATS:
+                    method(output_paths[fmt], theme=args.theme)
+                else:
+                    method(output_paths[fmt])
 
             graph_config_path = resolve_graph_config_path(
                 output_paths=output_paths,

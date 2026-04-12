@@ -22,9 +22,9 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
     def __init__(
         self,
         max_papers: int = 40,
-        fetch_references: bool = False,
+        fetch_references: bool = True,
         refresh_reference_cache: bool = False,
-        similarity_threshold: float = 0.15,
+        similarity_threshold: float = 0.2,
         client: Optional[SemanticScholarClient] = None,
     ):
         """Initialize recommendation graph builder.
@@ -32,7 +32,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param int max_papers: Maximum papers to include in graph.
         :param bool fetch_references: Whether to fetch references for seed and recommended papers.
         :param bool refresh_reference_cache: Whether to bypass persisted reference-cache reads.
-        :param float similarity_threshold: Threshold for edge creation.
+        :param float similarity_threshold: Threshold for edge creation (default matches CLI).
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         super().__init__(max_papers=max_papers)
