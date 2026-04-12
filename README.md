@@ -13,13 +13,13 @@ The default hybrid workflow is tuned around this discovery pattern rather than m
 
 ## Documentation
 
-- Documentation index: [docs/README.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
-- CLI guide: [docs/guides/cli.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Strategy guide: [docs/guides/strategies.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
-- Caching and data: [docs/guides/caching.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- Environment variables: [docs/reference/environment.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- Output files and sidecar schema: [docs/reference/output-artifacts.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
-- Embedding runtime behavior: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- Documentation index: [docs/README.md](docs/README.md)
+- CLI guide: [docs/guides/cli.md](docs/guides/cli.md)
+- Strategy guide: [docs/guides/strategies.md](docs/guides/strategies.md)
+- Caching and data: [docs/guides/caching.md](docs/guides/caching.md)
+- Environment variables: [docs/reference/environment.md](docs/reference/environment.md)
+- Output files and sidecar schema: [docs/reference/output-artifacts.md](docs/reference/output-artifacts.md)
+- Embedding runtime behavior: [docs/reference/embedding-runtime.md](docs/reference/embedding-runtime.md)
 
 ## Quick Start
 
@@ -57,17 +57,17 @@ pip install -e ".[all]"
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
-For complete command behavior and examples, use [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md).
+For complete command behavior and examples, use [CLI Usage](docs/guides/cli.md).
 
 ## Why CiteMesh
 
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
 - Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
-- Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, JSON, GraphML, plus a per-run config sidecar.
+- Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, Dashboard HTML, JSON, CSV, BibTeX, GraphML, plus a per-run config sidecar.
 - Theme-aware visuals shared across exporters.
 - Persistent user-level caching for embeddings and corpus data.
 - Typed, modular architecture that is straightforward to extend.
 
 ## License
 
-MIT License. See [LICENSE](https://github.com/pszemraj/CiteMesh/blob/main/LICENSE).
+MIT License. See [LICENSE](LICENSE).

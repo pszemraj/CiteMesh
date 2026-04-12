@@ -3,10 +3,10 @@
 This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
 For current usage details, see:
 
-- [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- [CLI Usage](../guides/cli.md)
+- [Caching & Data](../guides/caching.md)
+- [Environment Variables](../reference/environment.md)
+- [Embedding Runtime](../reference/embedding-runtime.md)
 
 ## Breaking Changes
 
@@ -16,7 +16,7 @@ For current usage details, see:
 
 ## Export & Visualization
 
-- Added `GraphExporter` to emit PNG, Pyvis HTML, Plotly HTML, JSON, and GraphML from one graph object.
+- Added `GraphExporter` to emit PNG, Pyvis HTML, Plotly HTML, Dashboard HTML, JSON, CSV, BibTeX, and GraphML from one graph object.
 - Centralized theming (light, dark, solarized, auto) for static and interactive exporters.
 - Added adaptive metadata callout contrast based on active theme.
 - Switched node coloring to continuous gradients for consistent year-based styling.
@@ -64,7 +64,7 @@ For current usage details, see:
 
 ## CLI & Developer Experience
 
-- Added `--export all` for multi-format runs.
+- Added `--export all` and multi-export (`-e json -e dashboard`) for selective format combinations.
 - Improved parser validation and test coverage around CLI ergonomics.
 - Added embedding/hybrid cache controls: `--storage-precision`, binary prefilter toggles, binary rescore multiplier, calibration sample size, and cache compression knobs.
 - Added explicit overwrite acknowledgement for embedding cache rebuilds (`--force-rebuild-cache` + `--overwrite-cache`) with default confirmation prompts.

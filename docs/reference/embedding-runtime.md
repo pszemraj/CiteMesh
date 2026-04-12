@@ -4,11 +4,11 @@ Embedding behavior that affects model selection, fallback, precision, and compil
 
 Related docs:
 
-- CLI flags: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Cache layout and hydration: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- Output metadata fields in exports: [Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
-- Defaults parameter study: [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
-- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- CLI flags: [CLI Usage](../guides/cli.md)
+- Cache layout and hydration: [Caching & Data](../guides/caching.md)
+- Output metadata fields in exports: [Output Artifacts](output-artifacts.md)
+- Defaults parameter study: [Defaults Tuning Study](defaults-tuning-study.md)
+- Docs index: [Documentation](../README.md)
 
 ## Default Model Selection
 
@@ -78,7 +78,7 @@ This is an observational equivalence check, not a permanent guarantee. If either
 
 ## Implementation References
 
-- Model defaults, aliases, and fallback chain: [citemesh/data/model_profiles.py](https://github.com/pszemraj/CiteMesh/blob/main/citemesh/data/model_profiles.py)
-- Embedding model load and fallback execution: [citemesh/strategies/embedding.py](https://github.com/pszemraj/CiteMesh/blob/main/citemesh/strategies/embedding.py)
-- TF32 and compile guard behavior: [citemesh/strategies/embedding.py](https://github.com/pszemraj/CiteMesh/blob/main/citemesh/strategies/embedding.py)
-- CLI default model wiring: [citemesh/cli.py](https://github.com/pszemraj/CiteMesh/blob/main/citemesh/cli.py)
+- Model defaults, aliases, and fallback chain: [citemesh/data/model_profiles.py](../../citemesh/data/model_profiles.py)
+- Embedding model load and fallback execution: [citemesh/strategies/embedding.py](../../citemesh/strategies/embedding.py)
+- TF32 and compile guard behavior: [citemesh/strategies/embedding.py](../../citemesh/strategies/embedding.py)
+- CLI default model wiring: [citemesh/cli.py](../../citemesh/cli.py)

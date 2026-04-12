@@ -4,9 +4,9 @@ CiteMesh writes graph outputs by format plus a run-configuration sidecar.
 
 Related docs:
 
-- CLI flags and output-path behavior: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Strategy behavior and score semantics: [Strategy Guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
-- Embedding runtime metadata terms: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- CLI flags and output-path behavior: [CLI Usage](../guides/cli.md)
+- Strategy behavior and score semantics: [Strategy Guide](../guides/strategies.md)
+- Embedding runtime metadata terms: [Embedding Runtime](embedding-runtime.md)
 
 ## Artifact Set
 
@@ -140,7 +140,7 @@ Top-level fields:
 - embedding/hybrid runtime retrieval metadata when available
 
 See embedding metadata term definitions in
-[Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
+[Embedding Runtime](embedding-runtime.md).
 
 ## Determinism Notes
 

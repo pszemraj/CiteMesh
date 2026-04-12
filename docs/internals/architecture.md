@@ -4,11 +4,11 @@ The CLI orchestrates a consistent pipeline regardless of strategy (`recommendati
 
 Related docs:
 
-- CLI flags and command examples: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Cache layout and hydration details: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- Export/sidecar file contracts: [Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
-- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- CLI flags and command examples: [CLI Usage](../guides/cli.md)
+- Cache layout and hydration details: [Caching & Data](../guides/caching.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
+- Export/sidecar file contracts: [Output Artifacts](../reference/output-artifacts.md)
+- Docs index: [Documentation](../README.md)
 
 ## Execution Flow
 
@@ -25,7 +25,7 @@ GraphBuilderStrategy (base class)
             ↓
 Visualization + Export
     ├── visualization.visualize_graph -> PNG
-    ├── export.GraphExporter -> HTML / Plotly / Dashboard / JSON / GraphML
+    ├── export.GraphExporter -> HTML / Plotly / Dashboard / JSON / CSV / BibTeX / GraphML
     └── cli sidecar writer -> *.config.json (rebuild params + run metadata)
 ```
 
@@ -40,7 +40,7 @@ Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `a
 - Selects strategy implementations and triggers graph construction.
 - Coordinates render/export steps, writes sidecar config artifacts, and passes run metadata downstream.
 
-Command-line behavior is documented in [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md).
+Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 ### `citemesh/strategies/base.py`
 
@@ -58,7 +58,7 @@ Command-line behavior is documented in [CLI Usage](https://github.com/pszemraj/C
 | `hybrid` | Merge citation and semantic candidates, then rerank | Seed-relevance rerank with semantic-only cap enforcement |
 
 Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
-Strategy behavior and selection guidance are documented in [Guides: Strategies](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md).
+Strategy behavior and selection guidance are documented in [Guides: Strategies](../guides/strategies.md).
 
 ### `citemesh/core/models.py`
 
@@ -79,12 +79,12 @@ Strategy behavior and selection guidance are documented in [Guides: Strategies](
 
 ### Exporter (`citemesh/visualization/export.py`)
 
-- `GraphExporter` writes JSON, GraphML, Pyvis HTML, Plotly HTML, and dashboard HTML.
+- `GraphExporter` writes Pyvis HTML, Plotly HTML, Dashboard HTML, JSON, CSV, BibTeX, and GraphML.
 - Reuses computed layout and style values for cross-format consistency.
 - Normalizes node attributes for serializer compatibility (for example GraphML-safe fields).
 
 Artifact-level format details and sidecar schema are documented in
-[Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md).
+[Output Artifacts](../reference/output-artifacts.md).
 
 ### Caching Support
 
@@ -92,7 +92,7 @@ Artifact-level format details and sidecar schema are documented in
 - `citemesh/data/embedding_cache.py` manages quantized SQLite/HDF5 embedding cache state (`int8` matrix, calibration ranges, optional binary index, hydration metadata).
 - `citemesh/data/model_profiles.py` stores model-specific runtime profile metadata.
 
-On-disk layout and invalidation behavior are documented in [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
+On-disk layout and invalidation behavior are documented in [Caching & Data](../guides/caching.md).
 
 ### Service Client (`citemesh/services/semantic_scholar.py`)
 

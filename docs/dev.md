@@ -1,7 +1,7 @@
 # Developer Notes
 
 This document captures implementation notes and deferred refactor work for future passes.
-For user-facing behavior and runtime details, use the guides/reference docs in [docs/README.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md).
+For user-facing behavior and runtime details, use the guides/reference docs in [docs/README.md](README.md).
 
 ## Deferred Riskier Consolidations
 

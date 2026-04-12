@@ -4,9 +4,9 @@ This document records the sweep work used to choose current graph-building defau
 
 Related docs:
 
-- CLI defaults and flags: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Strategy behavior overview: [Strategy Guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
-- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- CLI defaults and flags: [CLI Usage](../guides/cli.md)
+- Strategy behavior overview: [Strategy Guide](../guides/strategies.md)
+- Embedding runtime policy: [Embedding Runtime](embedding-runtime.md)
 
 ## Scope
 

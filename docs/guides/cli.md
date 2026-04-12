@@ -4,12 +4,12 @@ The `citemesh` command builds paper graphs with one of four strategies: `recomme
 
 Related docs:
 
-- Cache layout and hydration: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- Output files and sidecar schema: [Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
-- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
-- Defaults parameter study: [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
-- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- Cache layout and hydration: [Caching & Data](caching.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
+- Output files and sidecar schema: [Output Artifacts](../reference/output-artifacts.md)
+- Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
+- Defaults parameter study: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
+- Docs index: [Documentation](../README.md)
 
 ## Basic Invocation
 
@@ -29,7 +29,7 @@ citemesh cache scan --log-level debug
 citemesh cache clear [--yes] [--reason "<text>"]
 ```
 
-For cache path/layout/hydration details, see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
+For cache path/layout/hydration details, see [Caching & Data](caching.md).
 In non-interactive shells, `citemesh cache clear` requires `--yes`.
 In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--overwrite-cache`.
 
@@ -61,7 +61,7 @@ In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--ov
 | `--log-width` | Rich console wrap width in columns (`0` uses terminal width) | `140` |
 
 Output-path normalization, file naming, and sidecar placement are defined in
-[Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md).
+[Output Artifacts](../reference/output-artifacts.md).
 Use that reference as the canonical source for `--output` behavior in single-export
 and multi-export runs.
 
@@ -83,7 +83,7 @@ Numeric validation:
 
 ## Strategy-Specific Flags
 
-Strategy behavior and tradeoffs are described in [Strategies Guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md). Flag contracts are listed here.
+Strategy behavior and tradeoffs are described in [Strategies Guide](strategies.md). Flag contracts are listed here.
 
 Build command options are strategy-scoped. If you pass a flag that is not supported
 for the selected `--strategy`, CiteMesh exits with a CLI error instead of silently
@@ -134,15 +134,15 @@ ignoring it.
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`; unsupported with `--cache-compression lzf`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default enabled). Compile is deferred on cold-cache hydration runs and applied on warm-cache runs.
-- Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
-- Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md).
+- Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
+- Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 
 Execution transparency:
 
 - Embedding/hybrid runs print a compact config summary (model, split, corpus cap, streaming mode, storage precision).
 - Retrieval/caching internals (prefilter semantics, compared/rescored counts, compile guard behavior, hydration/lock policy) are defined in:
-  - [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
-  - [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
+  - [Embedding Runtime](../reference/embedding-runtime.md)
+  - [Caching & Data](caching.md)
 - Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
 
 ### Hybrid Strategy
@@ -172,11 +172,13 @@ Execution transparency:
 - `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
 - `dashboard`: standalone tri-pane research dashboard (list + graph + detail), written with `.dashboard.html` suffix
 - `json`: structured graph data payload (nodes/edges)
+- `csv`: flat paper table (one row per paper) for pandas/spreadsheet import
+- `bibtex`: combined BibTeX entries for all papers, ready for reference managers or LaTeX
 - `graphml`: exchange format for Gephi, Cytoscape, and similar tools
 - `*.config.json`: run config + metadata sidecar
 
 For field-level JSON/sidecar schema and determinism details, see
-[Output Artifacts](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md).
+[Output Artifacts](../reference/output-artifacts.md).
 
 Interactive exports require optional viz dependencies:
 
@@ -214,6 +216,6 @@ citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --ex
 ## Troubleshooting
 
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
-- **Slow first embedding run**: see [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md) for hydration behavior, cache reuse, and tuning guidance.
+- **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
-- **API limits**: configure `S2_API_KEY`; see [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md).
+- **API limits**: configure `S2_API_KEY`; see [Environment Variables](../reference/environment.md).

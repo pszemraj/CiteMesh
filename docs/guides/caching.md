@@ -4,10 +4,10 @@ CiteMesh uses persistent caches to avoid recomputing expensive datasets and embe
 
 Related docs:
 
-- CLI command usage: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
-- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- CLI command usage: [CLI Usage](cli.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
+- Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
+- Docs index: [Documentation](../README.md)
 
 ## Cache Root
 
@@ -23,7 +23,7 @@ Override the root with:
 export CITEMESH_CACHE_DIR=/path/to/custom/cache
 ```
 
-Variable details are documented in [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md).
+Variable details are documented in [Environment Variables](../reference/environment.md).
 
 ## Directory Layout
 
@@ -75,14 +75,14 @@ not alter embedding input text) refresh SQLite metadata rows without re-encoding
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
 Lock acquisition timeout defaults to `900` seconds and can be overridden with
-`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)).
+`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
 Hydration write policy:
 
 - Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--encode-batch-size`.
 - Cache persistence flushes metadata/embedding appends in larger bursts (`256` records) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
 
-Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)).
+Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)).
 By default, CiteMesh asks for confirmation before applying this destructive rebuild.
 Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts).
 Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata.
@@ -102,7 +102,7 @@ When requested revision is `main` and only a legacy cached SHA is available, reu
 is still allowed with a warning because `main` cannot be proven offline.
 Set `CITEMESH_STRICT_OFFLINE_FINGERPRINT=1` to disable that legacy `main` reuse
 assumption and force namespace clear/rebuild when identity cannot be verified
-(details: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)).
+(details: [Environment Variables](../reference/environment.md)).
 If compatibility checks fail (for example unresolved revision mismatch), CiteMesh clears
 and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
@@ -176,7 +176,7 @@ citemesh cache clear --yes --reason "manual local reset"
 
 Omit `--yes` for interactive confirmation.
 
-For command syntax and defaults, see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md); this section focuses on cache maintenance workflows.
+For command syntax and defaults, see [CLI Usage](cli.md); this section focuses on cache maintenance workflows.
 
 To remove artifacts for one namespace, delete matching `.db` and `.h5` files in `embeddings/`.
 
