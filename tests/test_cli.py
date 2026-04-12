@@ -21,7 +21,10 @@ import pytest
 
 from citemesh import cli as cli_module
 from citemesh.cli import (
+    _is_standalone_dashboard_output,
+    build_dashboard_collection_bundle,
     canonicalize_paper_id_for_metadata,
+    resolve_dashboard_collection_outputs,
     resolve_graph_config_path,
     resolve_output_paths,
 )
@@ -958,6 +961,144 @@ def test_dashboard_collection_manifest_tracks_multiple_runs(
 
     assert first_result.returncode == 0
     assert second_result.returncode == 0
+
+
+def test_dashboard_standalone_export_preserves_explicit_single_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit ``*.dashboard.html`` targets should bypass collection mode."""
+    graph = build_seed_graph("seed")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured,
+            methods=("to_dashboard_html",),
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_file = Path(tmpdir) / "report.dashboard.html"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "-o",
+                str(output_file),
+            ]
+        )
+        assert output_file.exists()
+        assert not (output_file.parent / "dashboard.manifest.json").exists()
+        assert not (output_file.parent / "recommendation.json").exists()
+        assert (output_file.parent / "report.config.json").exists()
+        assert "dashboard_collection" not in captured["metadata"]
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+
+
+def test_dashboard_collection_helpers_cover_resolver_and_bundle_loading() -> None:
+    """Collection helpers should imply JSON and skip invalid embedded payloads."""
+    graph = nx.Graph()
+    graph.add_node("seed", title="Seed Title")
+    assert _is_standalone_dashboard_output(
+        Path("reports/example.dashboard.html"),
+        ["dashboard"],
+        True,
+    )
+    assert not _is_standalone_dashboard_output(
+        Path("reports/session"),
+        ["dashboard"],
+        True,
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        output_paths, manifest_path = resolve_dashboard_collection_outputs(
+            base_output_path=root / "session",
+            selected_formats=["dashboard"],
+            explicit_output=True,
+            strategy="recommendation",
+            graph=graph,
+            seed_id="seed",
+        )
+        assert output_paths["dashboard"] == root / "session" / "dashboard.html"
+        assert output_paths["json"].parent.parent == root / "session"
+        assert output_paths["json"].parent.name.startswith("seed-title-")
+        assert output_paths["json"].name == "recommendation.json"
+        assert manifest_path == root / "session" / "dashboard.manifest.json"
+
+        valid_path = root / "seed-a" / "recommendation.json"
+        valid_path.parent.mkdir(parents=True, exist_ok=True)
+        valid_path.write_text(
+            json.dumps(
+                {
+                    "seed_id": "seed-a",
+                    "meta": {"strategy": "recommendation"},
+                    "summary": {"nodes": 1, "edges": 0},
+                    "nodes": [],
+                    "edges": [],
+                    "dashboard": {"meta": {}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        broken_path = root / "seed-b" / "recommendation.json"
+        broken_path.parent.mkdir(parents=True, exist_ok=True)
+        broken_path.write_text("{not-json", encoding="utf-8")
+        manifest_path = root / "dashboard.manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "results": [
+                        {
+                            "result_id": "recommendation:seed-a",
+                            "seed_id": "seed-a",
+                            "title": "Seed A",
+                            "strategy": "recommendation",
+                            "summary": {"nodes": 1, "edges": 0},
+                            "json_path": "seed-a/recommendation.json",
+                        },
+                        {
+                            "result_id": "recommendation:seed-b",
+                            "seed_id": "seed-b",
+                            "title": "Seed B",
+                            "strategy": "recommendation",
+                            "summary": {"nodes": 1, "edges": 0},
+                            "json_path": "seed-b/recommendation.json",
+                        },
+                        {
+                            "result_id": "recommendation:seed-c",
+                            "seed_id": "seed-c",
+                            "title": "Seed C",
+                            "strategy": "recommendation",
+                            "summary": {"nodes": 1, "edges": 0},
+                            "json_path": "seed-c/recommendation.json",
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        bundle = build_dashboard_collection_bundle(
+            manifest_path,
+            current_result_id="recommendation:seed-c",
+        )
+
+    assert bundle["current_result_id"] == "recommendation:seed-c"
+    assert len(bundle["results"]) == 3
+    assert set(bundle["payloads"]) == {"recommendation:seed-a"}
 
 
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
