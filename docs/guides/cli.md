@@ -170,7 +170,7 @@ Execution transparency:
 - `png`: Matplotlib static render with theme-aware background and labels
 - `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
 - `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
-- `dashboard`: standalone tri-pane research dashboard (list + graph + detail), written with `.dashboard.html` suffix
+- `dashboard`: tri-pane research dashboard shell (list + graph + detail). In normal collection flows it is written as `dashboard.html` at the output root, embeds the saved-result collection so you can switch runs from one UI, and keeps an explicit single-file `*.dashboard.html` mode for one-off exports.
 - `json`: structured graph data payload (nodes/edges)
 - `csv`: flat paper table (one row per paper) for pandas/spreadsheet import
 - `bibtex`: combined BibTeX entries for all papers, ready for reference managers or LaTeX
@@ -195,8 +195,15 @@ citemesh build "arxiv:1706.03762" --strategy citation -p 20
 # Hybrid graph with all export formats
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 
-# Dashboard + JSON export (repeat -e for selective multi-export)
-citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json --theme dark
+# Shared dashboard shell + per-run JSON payloads under ./research
+citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json -o research --theme dark
+
+# Explicit standalone dashboard file for a one-off result
+citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o report.dashboard.html --theme dark
+
+In collection mode, each build refreshes the shared `dashboard.html` so the
+saved-result selector stays in sync with `dashboard.manifest.json` and the
+embedded JSON payloads available under that output root.
 
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \

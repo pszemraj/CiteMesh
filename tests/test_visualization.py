@@ -401,6 +401,17 @@ def _extract_dashboard_figure(html_text: str) -> dict[str, Any]:
     return json.loads(match.group(1))
 
 
+def _extract_dashboard_collection(html_text: str) -> dict[str, Any]:
+    """Extract embedded dashboard collection bundle from exported HTML."""
+    match = re.search(
+        r'<script id="citemesh-dashboard-collection" type="application/json">(.*?)</script>',
+        html_text,
+        flags=re.DOTALL,
+    )
+    assert match is not None
+    return json.loads(match.group(1))
+
+
 def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     """Dashboard export should render tri-pane shell and derived payload fields."""
     pytest.importorskip("plotly")
@@ -410,7 +421,31 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     exporter = GraphExporter(
         graph,
         seed_id,
-        metadata={"strategy": "hybrid"},
+        metadata={
+            "strategy": "hybrid",
+            "dashboard_collection": {
+                "current_result_id": "hybrid:seed",
+                "results": [
+                    {
+                        "result_id": "hybrid:seed",
+                        "seed_id": "seed",
+                        "title": "Seed Paper",
+                        "strategy": "hybrid",
+                        "summary": {"nodes": 2, "edges": 1},
+                    }
+                ],
+                "payloads": {
+                    "hybrid:seed": {
+                        "seed_id": "seed",
+                        "meta": {"strategy": "hybrid"},
+                        "summary": {"nodes": 2, "edges": 1},
+                        "nodes": [],
+                        "edges": [],
+                        "dashboard": {"meta": {}},
+                    }
+                },
+            },
+        },
         layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "graph.dashboard.html"
@@ -428,6 +463,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="detail-pane"',
         'id="citemesh-dashboard-data"',
         'id="citemesh-dashboard-figure"',
+        'id="citemesh-dashboard-collection"',
+        'id="result-select"',
     ]:
         assert token in rendered
     for css_token in [
@@ -444,12 +481,15 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "neighborhood-edges",
         "buildFigureSpecFromPayload(",
         "applyImportedPayload(",
+        "populateCollectionSelector(",
+        "loadCollectionResult(",
         "renderWhyLines(",
         "state.hoverId || state.selectedId",
         "overlayState",
         "neighborhoodKey",
     ]:
         assert script_token in rendered
+    assert rendered.count("let adjacency = new Map();") == 1
     assert "data-point-number" in rendered
     assert "path.parentNode.appendChild(path)" not in rendered
 
@@ -474,6 +514,11 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert isinstance(seed_node["seed_relevance"], float)
     assert seed_node["links"]["semantic_scholar"] is not None
     assert isinstance(seed_node["bibtex"], str)
+
+    collection = _extract_dashboard_collection(rendered)
+    assert collection["current_result_id"] == "hybrid:seed"
+    assert collection["results"][0]["title"] == "Seed Paper"
+    assert "hybrid:seed" in collection["payloads"]
 
     figure = _extract_dashboard_figure(rendered)
     assert len(figure["data"]) == 3

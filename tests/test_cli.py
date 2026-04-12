@@ -775,7 +775,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dashboard export should resolve paths and be included in --export all."""
+    """Dashboard exports should use shared shell + per-run collection artifacts."""
     graph = build_seed_graph("seed")
     monkeypatch.setattr(
         cli_module,
@@ -807,8 +807,22 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
                 str(output),
             ],
         )
-        dashboard_path = Path(tmpdir) / "graph.dashboard.html"
-        assert dashboard_path.exists()
+        run_dir = generate_output_path(
+            graph,
+            seed_id="seed",
+            output_dir=output,
+            strategy="recommendation",
+        ).parent
+        assert (output / "dashboard.html").exists()
+        assert (output / "dashboard.manifest.json").exists()
+        assert (run_dir / "recommendation.json").exists()
+        assert (run_dir / "recommendation.config.json").exists()
+        collection_bundle = captured["metadata"]["dashboard_collection"]
+        assert collection_bundle["current_result_id"] == "recommendation:seed"
+        assert collection_bundle["results"][0]["json_path"].endswith(
+            "recommendation.json"
+        )
+        assert "recommendation:seed" in collection_bundle["payloads"]
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
     captured.clear()
@@ -842,16 +856,108 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
                 str(output_dir),
             ],
         )
-        assert (output_dir / "recommendation.dashboard.html").exists()
-        assert (output_dir / "recommendation.csv").exists()
-        assert (output_dir / "recommendation.bib").exists()
-        config_files = sorted(output_dir.glob("*.config.json"))
+        run_dir = generate_output_path(
+            graph,
+            seed_id="seed",
+            output_dir=output_dir,
+            strategy="recommendation",
+        ).parent
+        assert (output_dir / "dashboard.html").exists()
+        assert (output_dir / "dashboard.manifest.json").exists()
+        assert not (run_dir / "recommendation.dashboard.html").exists()
+        assert (run_dir / "recommendation.csv").exists()
+        assert (run_dir / "recommendation.bib").exists()
+        config_files = sorted(output_dir.rglob("*.config.json"))
         assert len(config_files) == 1
         config_payload = json.loads(config_files[0].read_text())
         assert "dashboard" in config_payload["outputs"]
         assert "csv" in config_payload["outputs"]
         assert "bibtex" in config_payload["outputs"]
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+
+
+def test_dashboard_collection_manifest_tracks_multiple_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shared dashboard collections should retain multiple run payload entries."""
+    first_graph = build_seed_graph("seed-a")
+    first_graph.nodes["seed-a"]["title"] = "First Seed"
+    second_graph = build_seed_graph("seed-b")
+    second_graph.nodes["seed-b"]["title"] = "Second Seed"
+    captured: dict[str, object] = {}
+    build_results = iter([(first_graph, "seed-a"), (second_graph, "seed-b")])
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: next(build_results),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured,
+            methods=("to_dashboard_html", "to_json"),
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir) / "collection"
+        first_result = run_cli_command(
+            [
+                "build",
+                "arxiv:1111.1111",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "-o",
+                str(output_dir),
+            ],
+        )
+        second_result = run_cli_command(
+            [
+                "build",
+                "arxiv:2222.2222",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "-o",
+                str(output_dir),
+            ],
+        )
+
+        manifest_payload = json.loads(
+            (output_dir / "dashboard.manifest.json").read_text()
+        )
+        assert len(manifest_payload["results"]) == 2
+        json_paths = {entry["json_path"] for entry in manifest_payload["results"]}
+        assert len(json_paths) == 2
+        first_run_dir = generate_output_path(
+            first_graph,
+            seed_id="seed-a",
+            output_dir=output_dir,
+            strategy="recommendation",
+        ).parent
+        second_run_dir = generate_output_path(
+            second_graph,
+            seed_id="seed-b",
+            output_dir=output_dir,
+            strategy="recommendation",
+        ).parent
+        assert (output_dir / "dashboard.html").exists()
+        assert (first_run_dir / "recommendation.json").exists()
+        assert (second_run_dir / "recommendation.json").exists()
+        collection_bundle = captured["metadata"]["dashboard_collection"]
+        assert collection_bundle["current_result_id"] == "recommendation:seed-b"
+        assert len(collection_bundle["results"]) == 2
+        assert set(collection_bundle["payloads"]) == {
+            "recommendation:seed-a",
+            "recommendation:seed-b",
+        }
+
+    assert first_result.returncode == 0
+    assert second_result.returncode == 0
 
 
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
@@ -923,7 +1029,7 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "edges": 0,
         "theme": "light",
     }
-    assert any("export artifacts saved to:" in message for message in logged)
+    assert any("export artifacts saved" in message for message in logged)
     assert all("PNG saved to" not in message for message in logged)
     assert all("Graph JSON saved to" not in message for message in logged)
     assert all("Creating visualization..." not in message for message in logged)

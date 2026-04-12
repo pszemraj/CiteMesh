@@ -235,6 +235,8 @@ _EXPORTER_METHOD: Dict[str, str] = {
     "graphml": "to_graphml",
 }
 _THEME_AWARE_FORMATS: frozenset = frozenset({"html", "plotly", "dashboard"})
+DASHBOARD_COLLECTION_FILENAME = "dashboard.html"
+DASHBOARD_MANIFEST_FILENAME = "dashboard.manifest.json"
 # Verify dispatch coverage at import time — a new EXPORT_FORMATS entry without
 # a dispatch mapping will fail fast here rather than silently skip at runtime.
 assert set(_EXPORTER_METHOD) | {"png"} == set(EXPORT_FORMATS), (
@@ -1370,6 +1372,99 @@ def resolve_output_paths(
     return output_paths
 
 
+def _is_standalone_dashboard_output(
+    base_output_path: Path,
+    selected_formats: List[str],
+    explicit_output: bool,
+) -> bool:
+    """Return whether dashboard export should remain a standalone HTML artifact.
+
+    :param Path base_output_path: User-provided or generated base output path.
+    :param List[str] selected_formats: Requested export formats.
+    :param bool explicit_output: Whether ``--output`` was provided.
+    :return bool: ``True`` when an explicit single-file dashboard path was requested.
+    """
+    return (
+        explicit_output
+        and selected_formats == ["dashboard"]
+        and str(base_output_path).lower().endswith(EXPORT_EXTENSIONS["dashboard"])
+    )
+
+
+def _resolve_dashboard_collection_root(
+    base_output_path: Path,
+    *,
+    explicit_output: bool,
+) -> Path:
+    """Resolve root directory for shared dashboard collection artifacts.
+
+    :param Path base_output_path: User-provided or generated base output path.
+    :param bool explicit_output: Whether ``--output`` was provided.
+    :return Path: Collection root directory containing shared dashboard shell.
+    """
+    if explicit_output:
+        base_str = str(base_output_path)
+        matched_suffix = next(
+            (ext for ext in KNOWN_EXPORT_SUFFIXES if base_str.lower().endswith(ext)),
+            None,
+        )
+        if matched_suffix:
+            return Path(base_str[: -len(matched_suffix)])
+        return base_output_path
+
+    parent = base_output_path.parent
+    grandparent = parent.parent
+    if str(grandparent) and grandparent != Path("."):
+        return grandparent
+    return parent
+
+
+def resolve_dashboard_collection_outputs(
+    *,
+    base_output_path: Path,
+    selected_formats: List[str],
+    explicit_output: bool,
+    strategy: str,
+    graph: nx.Graph,
+    seed_id: str,
+) -> tuple[Dict[str, Path], Path]:
+    """Resolve shared-dashboard output paths plus per-run result artifact paths.
+
+    The dashboard shell lives at the collection root, while each build run writes
+    its JSON/config and any other requested artifacts into a unique seed-specific
+    result directory beneath that root.
+
+    :param Path base_output_path: User-provided or generated base output path.
+    :param List[str] selected_formats: Requested export formats.
+    :param bool explicit_output: Whether ``--output`` was provided.
+    :param str strategy: Active strategy name.
+    :param nx.Graph graph: Built graph used for run-specific output naming.
+    :param str seed_id: Seed node identifier.
+    :return tuple[Dict[str, Path], Path]: Resolved output paths and manifest path.
+    """
+    collection_root = _resolve_dashboard_collection_root(
+        base_output_path,
+        explicit_output=explicit_output,
+    )
+    run_base_output_path = generate_output_path(
+        graph,
+        seed_id,
+        output_dir=collection_root,
+        strategy=strategy,
+    )
+    run_formats = [fmt for fmt in selected_formats if fmt != "dashboard"]
+    if "json" not in run_formats:
+        run_formats.append("json")
+    output_paths = resolve_output_paths(
+        base_output_path=run_base_output_path,
+        selected_formats=run_formats,
+        explicit_output=False,
+        strategy=strategy,
+    )
+    output_paths["dashboard"] = collection_root / DASHBOARD_COLLECTION_FILENAME
+    return output_paths, collection_root / DASHBOARD_MANIFEST_FILENAME
+
+
 def _strip_known_export_suffix(filename: str) -> str:
     """Strip a known export suffix from a filename-like token.
 
@@ -1398,6 +1493,121 @@ def resolve_graph_config_path(output_paths: Dict[str, Path], strategy: str) -> P
     if not stem:
         stem = strategy or "graph"
     return anchor_path.parent / f"{stem}.config.json"
+
+
+def _relative_output_path(path: Path, root: Path) -> str:
+    """Resolve a stable manifest path relative to a collection root when possible.
+
+    :param Path path: Absolute or relative artifact path.
+    :param Path root: Collection root directory.
+    :return str: Relative path when possible, else normalized string form.
+    """
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def update_dashboard_manifest(
+    manifest_path: Path,
+    *,
+    collection_root: Path,
+    graph: nx.Graph,
+    seed_id: str,
+    strategy: str,
+    json_path: Path,
+    config_path: Path,
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Create or update shared dashboard manifest for collection-style outputs.
+
+    :param Path manifest_path: Manifest JSON path to write.
+    :param Path collection_root: Shared dashboard collection root directory.
+    :param nx.Graph graph: Built graph used for seed metadata.
+    :param str seed_id: Seed node identifier.
+    :param str strategy: Active strategy name.
+    :param Path json_path: Per-run JSON payload path.
+    :param Path config_path: Per-run config sidecar path.
+    :param Dict[str, Any] metadata: Export metadata payload for summary fields.
+    :return Dict[str, Any]: Manifest payload written to disk.
+    """
+    results: list[Dict[str, Any]] = []
+    if manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if isinstance(existing, dict) and isinstance(existing.get("results"), list):
+            results = [item for item in existing["results"] if isinstance(item, dict)]
+
+    seed_title = str(graph.nodes[seed_id].get("title", seed_id))
+    result_id = f"{strategy}:{seed_id}"
+    entry = {
+        "result_id": result_id,
+        "seed_id": seed_id,
+        "title": seed_title,
+        "strategy": strategy,
+        "summary": {
+            "nodes": int(metadata.get("nodes", 0) or 0),
+            "edges": int(metadata.get("edges", 0) or 0),
+        },
+        "json_path": _relative_output_path(json_path, collection_root),
+        "config_path": _relative_output_path(config_path, collection_root),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    filtered = [item for item in results if item.get("result_id") != result_id]
+    manifest_payload = {
+        "schema_version": 1,
+        "results": [entry, *filtered],
+    }
+    manifest_path.write_text(
+        json.dumps(manifest_payload, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return manifest_payload
+
+
+def build_dashboard_collection_bundle(
+    manifest_path: Path,
+    *,
+    current_result_id: str,
+) -> Dict[str, Any]:
+    """Load manifest entries plus embedded JSON payloads for shared dashboard UX.
+
+    :param Path manifest_path: Manifest JSON path for the collection.
+    :param str current_result_id: Result identifier for the graph just built.
+    :return Dict[str, Any]: Embedded dashboard collection bundle.
+    """
+    collection_root = manifest_path.parent
+    try:
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        manifest_payload = {}
+
+    raw_results = (
+        manifest_payload.get("results") if isinstance(manifest_payload, dict) else []
+    )
+    results = [entry for entry in raw_results if isinstance(entry, dict)]
+    payloads: Dict[str, Any] = {}
+    for entry in results:
+        result_id = str(entry.get("result_id") or "").strip()
+        json_rel_path = str(entry.get("json_path") or "").strip()
+        if not result_id or not json_rel_path:
+            continue
+        payload_path = collection_root / Path(json_rel_path)
+        try:
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payloads[result_id] = payload
+
+    return {
+        "current_result_id": current_result_id,
+        "results": results,
+        "payloads": payloads,
+    }
 
 
 def _drop_none_values(value: Any) -> Any:
@@ -1817,12 +2027,29 @@ def main() -> None:
                 selected_formats = list(EXPORT_FORMATS)
             else:
                 selected_formats = list(dict.fromkeys(raw_exports))
-            output_paths = resolve_output_paths(
+            dashboard_manifest_path: Optional[Path] = None
+            if "dashboard" in selected_formats and not _is_standalone_dashboard_output(
                 base_output_path=base_output_path,
                 selected_formats=selected_formats,
                 explicit_output=bool(args.output),
-                strategy=args.strategy,
-            )
+            ):
+                output_paths, dashboard_manifest_path = (
+                    resolve_dashboard_collection_outputs(
+                        base_output_path=base_output_path,
+                        selected_formats=selected_formats,
+                        explicit_output=bool(args.output),
+                        strategy=args.strategy,
+                        graph=graph,
+                        seed_id=seed_id,
+                    )
+                )
+            else:
+                output_paths = resolve_output_paths(
+                    base_output_path=base_output_path,
+                    selected_formats=selected_formats,
+                    explicit_output=bool(args.output),
+                    strategy=args.strategy,
+                )
             for parent in {path.parent for path in output_paths.values()}:
                 if parent and not parent.exists():
                     parent.mkdir(parents=True, exist_ok=True)
@@ -1887,6 +2114,10 @@ def main() -> None:
             for fmt, method_name in _EXPORTER_METHOD.items():
                 if fmt not in output_paths:
                     continue
+                if fmt == "dashboard" and dashboard_manifest_path is not None:
+                    # Shared dashboards are rendered after the manifest update so the
+                    # shell can embed the current collection bundle for offline reuse.
+                    continue
                 method = getattr(exporter, method_name)
                 if fmt in _THEME_AWARE_FORMATS:
                     method(output_paths[fmt], theme=args.theme)
@@ -1908,9 +2139,35 @@ def main() -> None:
                 json.dumps(graph_config_payload, indent=2, sort_keys=True),
                 encoding="utf-8",
             )
+            if (
+                dashboard_manifest_path is not None
+                and "json" in output_paths
+                and output_paths["json"].exists()
+            ):
+                manifest_payload = update_dashboard_manifest(
+                    dashboard_manifest_path,
+                    collection_root=dashboard_manifest_path.parent,
+                    graph=graph,
+                    seed_id=seed_id,
+                    strategy=args.strategy,
+                    json_path=output_paths["json"],
+                    config_path=graph_config_path,
+                    metadata=metadata,
+                )
+                metadata["dashboard_collection"] = build_dashboard_collection_bundle(
+                    dashboard_manifest_path,
+                    current_result_id=str(
+                        manifest_payload["results"][0].get(
+                            "result_id", f"{args.strategy}:{seed_id}"
+                        )
+                    ),
+                )
+                exporter.to_dashboard_html(output_paths["dashboard"], theme=args.theme)
 
             artifact_paths = dict(output_paths)
             artifact_paths["config"] = graph_config_path
+            if dashboard_manifest_path is not None:
+                artifact_paths["dashboard_manifest"] = dashboard_manifest_path
             saved_artifact_count = len(artifact_paths)
             output_dirs = sorted({str(path.parent) for path in artifact_paths.values()})
             if saved_artifact_count:

@@ -15,7 +15,8 @@ When `--export all` is used, CiteMesh writes:
 - `<strategy>.png` (static Matplotlib render)
 - `<strategy>.html` (Pyvis interactive network)
 - `<strategy>.plotly.html` (Plotly interactive graph)
-- `<strategy>.dashboard.html` (standalone tri-pane research dashboard)
+- `dashboard.html` (shared tri-pane research dashboard shell when dashboard export is part of a normal collection flow)
+- `dashboard.manifest.json` (shared collection index for dashboard result payloads)
 - `<strategy>.json` (enriched graph data payload)
 - `<strategy>.csv` (flat paper table for pandas/spreadsheets)
 - `<strategy>.bib` (combined BibTeX entries for all papers)
@@ -35,8 +36,10 @@ Path components:
 Canonical path-normalization rules:
 
 - `--output` omitted:
-  - artifacts are written under `out/<slug>-<hash>/` as `<strategy>.<ext>`
+  - non-dashboard artifacts are written under `out/<slug>-<hash>/` as `<strategy>.<ext>`
+  - when `dashboard` export is selected, the shared shell is written to `out/dashboard.html`, the collection index to `out/dashboard.manifest.json`, and the shared shell is refreshed with the current saved-result bundle
 - single-export run (`--export <one-format>`) with explicit `--output`:
+  - `--export dashboard -o report.dashboard.html` keeps the legacy standalone one-file behavior and writes exactly `report.dashboard.html`
   - if `--output` ends with the target format suffix, it is used as-is
   - if `--output` ends with a different known export suffix, that suffix is replaced
   - if `--output` has no known export suffix, the target suffix is appended
@@ -45,15 +48,19 @@ Canonical path-normalization rules:
     is stripped and the remainder is treated as directory base
   - if `--output` has no known suffix, it is treated directly as directory base
   - each format is written as `<directory-base>/<strategy>.<ext>`
+  - if `dashboard` is among the selected formats, the shared shell is written as `<directory-base>/dashboard.html`, the collection index as `<directory-base>/dashboard.manifest.json`, the shell embeds the currently available saved-result payloads from that collection, and the run-specific data/config artifacts are written under `<directory-base>/<slug>-<hash>/`
 
 Examples:
 
 - `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
-  writes `out/hybrid.png`, `out/hybrid.html`, `out/hybrid.plotly.html`,
-  `out/hybrid.dashboard.html`, `out/hybrid.json`, `out/hybrid.graphml`,
-  `out/hybrid.config.json`
+  writes `out/dashboard.html`, `out/dashboard.manifest.json`,
+  `out/<slug>-<hash>/hybrid.png`, `out/<slug>-<hash>/hybrid.html`,
+  `out/<slug>-<hash>/hybrid.plotly.html`, `out/<slug>-<hash>/hybrid.json`,
+  `out/<slug>-<hash>/hybrid.graphml`, `out/<slug>-<hash>/hybrid.config.json`
 - `citemesh build "<paper-id>" --strategy citation --export json -o report.graphml`
   writes `report.json`
+- `citemesh build "<paper-id>" --strategy recommendation --export dashboard -o report.dashboard.html`
+  writes the standalone dashboard file `report.dashboard.html`
 
 ## JSON vs Sidecar
 
@@ -88,8 +95,10 @@ Each node includes:
 - external: `links` (arXiv abs/pdf URLs, DOI URL, Semantic Scholar URL)
 - `bibtex` (deterministic BibTeX entry)
 
-The JSON and dashboard formats share the same enriched node schema, so JSON
-files can be loaded into the dashboard via the **Load Results** button.
+The JSON and dashboard formats share the same enriched node schema, and the JSON
+payload also carries dashboard render metadata (`dashboard.meta.plotly_*`) so
+current-version CiteMesh JSON files can be loaded back into the dashboard via
+the **Load Results** button without losing graph geometry.
 
 ### CSV (`<strategy>.csv`)
 
@@ -105,7 +114,8 @@ Ready for direct import into reference managers or LaTeX projects.
 
 ### Dashboard HTML
 
-The dashboard (`<strategy>.dashboard.html`) is a standalone tri-pane research
+The dashboard shell (`dashboard.html` in collection mode, or
+`<name>.dashboard.html` for explicit standalone output) is a tri-pane research
 interface with embedded Plotly graph, paper list, and detail panel.
 
 **Toolbar data actions:**
@@ -113,10 +123,13 @@ interface with embedded Plotly graph, paper list, and detail panel.
 - **Export JSON** — downloads the embedded enriched payload as a standalone `.json` file
 - **Export CSV** — generates a CSV table client-side from the current dataset
 - **All BibTeX** — downloads all papers' BibTeX entries as a single `.bib` file
-- **Load Results** — file picker that accepts a CiteMesh JSON file and swaps the dashboard dataset in-place (no page reload required)
+- **Saved Results selector** — switches between JSON payloads already tracked in the collection shell, with no extra file picking
+- **Load Results** — file picker that accepts any CiteMesh JSON file and swaps the dashboard dataset in-place, including graph geometry (no page reload required)
 
-This means you can open one dashboard and load results from different papers
-into it, rather than opening a separate dashboard for each run.
+In collection mode, this means you can keep one `dashboard.html` open and move
+between saved runs from the built-in selector, or load any other compatible JSON
+payload manually, rather than opening a separate dashboard HTML file for each
+paper.
 
 ### Sidecar (`<strategy>.config.json`)
 

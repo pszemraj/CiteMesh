@@ -425,12 +425,20 @@ class GraphExporter:
         figure_json = self._safe_script_content(
             json.dumps(fig.to_plotly_json(), sort_keys=True, separators=(",", ":"))
         )
+        collection_json = self._safe_script_content(
+            json.dumps(
+                self._dashboard_collection_bundle(),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         html_output = self._dashboard_template(
             theme_obj=theme_obj,
             div_id=div_id,
             plotly_js=self._safe_script_content(get_plotlyjs()),
             payload_json=payload_json,
             figure_json=figure_json,
+            collection_json=collection_json,
         )
         Path(path).write_text(html_output, encoding="utf-8")
 
@@ -846,6 +854,42 @@ class GraphExporter:
         }
         return payload
 
+    def _dashboard_collection_bundle(self) -> Dict[str, Any]:
+        """Normalize optional collection metadata for shared dashboard shells.
+
+        :return Dict[str, Any]: Collection result descriptors and embedded payloads.
+        """
+        raw_bundle = self.metadata.get("dashboard_collection")
+        if not isinstance(raw_bundle, dict):
+            return {"current_result_id": None, "results": [], "payloads": {}}
+
+        raw_results = raw_bundle.get("results")
+        raw_payloads = raw_bundle.get("payloads")
+        results = (
+            [entry for entry in raw_results if isinstance(entry, dict)]
+            if isinstance(raw_results, list)
+            else []
+        )
+        payloads = (
+            {
+                str(result_id): payload
+                for result_id, payload in raw_payloads.items()
+                if isinstance(result_id, str) and isinstance(payload, dict)
+            }
+            if isinstance(raw_payloads, dict)
+            else {}
+        )
+        current_result_id = raw_bundle.get("current_result_id")
+        return {
+            "current_result_id": (
+                str(current_result_id).strip()
+                if current_result_id is not None
+                else None
+            ),
+            "results": results,
+            "payloads": payloads,
+        }
+
     def _default_provenance(self, *, strategy: str) -> str:
         """Resolve default provenance class for non-hybrid strategies.
 
@@ -1094,6 +1138,7 @@ class GraphExporter:
         plotly_js: str,
         payload_json: str,
         figure_json: str,
+        collection_json: str,
     ) -> str:
         """Render standalone dashboard HTML template.
 
@@ -1102,6 +1147,7 @@ class GraphExporter:
         :param str plotly_js: Inline Plotly runtime JS.
         :param str payload_json: Serialized dashboard payload JSON.
         :param str figure_json: Serialized Plotly figure JSON.
+        :param str collection_json: Serialized collection bundle JSON.
         :return str: Dashboard HTML content.
         """
         is_dark = theme_obj.name in {"dark", "solarized"}
@@ -1119,6 +1165,7 @@ class GraphExporter:
             "__PLOTLY_JS__": plotly_js,
             "__PAYLOAD_JSON__": payload_json,
             "__FIGURE_JSON__": figure_json,
+            "__COLLECTION_JSON__": collection_json,
             "__PLOTLY_DIV_ID__": div_id,
         }
         template = """<!doctype html>
@@ -1166,6 +1213,17 @@ class GraphExporter:
       padding: 9px 11px;
     }
     input::placeholder { color: var(--text-muted); }
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
     button {
       cursor: pointer;
       transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease;
@@ -1211,6 +1269,10 @@ class GraphExporter:
       color: var(--text-primary);
       border-color: color-mix(in srgb, var(--accent) 70%, var(--panel-border));
       background: var(--accent-soft);
+    }
+    #result-select {
+      min-width: 240px;
+      max-width: min(46vw, 360px);
     }
     #toolbar-controls {
       display: grid;
@@ -1652,6 +1714,12 @@ class GraphExporter:
         <button id="load-json-btn" class="nav-btn" type="button">Load Results</button>
         <input id="load-json-input" type="file" accept=".json" style="display:none" />
       </div>
+      <div class="nav-group">
+        <label class="visually-hidden" for="result-select">Saved result</label>
+        <select id="result-select" title="Switch saved result">
+          <option value="">Current result</option>
+        </select>
+      </div>
     </div>
     <div id="toolbar-controls">
       <div class="toolbar-row primary">
@@ -1735,10 +1803,14 @@ class GraphExporter:
   <script>__PLOTLY_JS__</script>
   <script id="citemesh-dashboard-data" type="application/json">__PAYLOAD_JSON__</script>
   <script id="citemesh-dashboard-figure" type="application/json">__FIGURE_JSON__</script>
+  <script id="citemesh-dashboard-collection" type="application/json">__COLLECTION_JSON__</script>
   <script>
     let payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
     const baseFigureTemplate = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
     let figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
+    // Embed the collection bundle directly in the shell so saved-result browsing
+    // still works when the dashboard is opened from the local filesystem.
+    const collectionBundle = JSON.parse(document.getElementById("citemesh-dashboard-collection").textContent);
     const graphDiv = document.getElementById("__PLOTLY_DIV_ID__");
     const plotConfig = {
       displaylogo: false,
@@ -1760,6 +1832,7 @@ class GraphExporter:
     let defaultNodeX = [];
     let defaultNodeY = [];
     let adjacency = new Map();
+    let collectionResultId = String(collectionBundle.current_result_id || "") || null;
 
     function normalizeArray(rawValue, length, fallbackValue) {
       if (Array.isArray(rawValue)) {
@@ -2075,24 +2148,6 @@ class GraphExporter:
       haloKey: "",
     };
 
-    const adjacency = new Map();
-    (payload.edges || []).forEach((edge) => {
-      const left = String(edge.source || "");
-      const right = String(edge.target || "");
-      const weight = Number(edge.weight || 0);
-      if (!left || !right) {
-        return;
-      }
-      if (!adjacency.has(left)) {
-        adjacency.set(left, []);
-      }
-      if (!adjacency.has(right)) {
-        adjacency.set(right, []);
-      }
-      adjacency.get(left).push({ id: right, weight });
-      adjacency.get(right).push({ id: left, weight });
-    });
-
     const controls = {
       list: document.getElementById("paper-list"),
       count: document.getElementById("paper-count"),
@@ -2119,6 +2174,7 @@ class GraphExporter:
       graphHint: document.getElementById("graph-hint"),
       timelineYearMin: document.getElementById("timeline-year-min"),
       timelineYearMax: document.getElementById("timeline-year-max"),
+      resultSelect: document.getElementById("result-select"),
     };
 
     function escapeHtml(value) {
@@ -2354,6 +2410,58 @@ class GraphExporter:
       };
     }
 
+    function currentResultIdForPayload(nextPayload) {
+      const meta = (nextPayload && nextPayload.meta) || {};
+      const seedId = String(meta.seed_id || "");
+      const strategy = String(meta.strategy || "");
+      if (!seedId || !strategy) {
+        return null;
+      }
+      return `${strategy}:${seedId}`;
+    }
+
+    function collectionEntryLabel(entry) {
+      const title = String(entry.title || entry.seed_id || entry.result_id || "Saved result");
+      const strategy = String(entry.strategy || "");
+      const summary = entry.summary || {};
+      const nodeCount = Number(summary.nodes || 0);
+      const edgeCount = Number(summary.edges || 0);
+      const strategyLabel = strategy ? ` [${strategy}]` : "";
+      return `${title}${strategyLabel} • ${nodeCount} papers / ${edgeCount} links`;
+    }
+
+    function collectionEntries() {
+      return Array.isArray(collectionBundle.results) ? collectionBundle.results : [];
+    }
+
+    function populateCollectionSelector() {
+      const select = controls.resultSelect;
+      if (!select) {
+        return;
+      }
+      const results = collectionEntries();
+      const currentId = collectionResultId || currentResultIdForPayload(payload);
+      select.innerHTML = "";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = results.length ? "Saved results" : "Current result only";
+      select.appendChild(placeholder);
+
+      results.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = String(entry.result_id || "");
+        option.textContent = collectionEntryLabel(entry);
+        select.appendChild(option);
+      });
+
+      if (currentId && results.some((entry) => String(entry.result_id || "") === currentId)) {
+        select.value = currentId;
+      } else {
+        select.value = "";
+      }
+      select.disabled = results.length <= 1;
+    }
+
     function updateYearPlaceholders() {
       const validYears = nodes
         .map((node) => (hasYear(node) ? Number(node.year) : null))
@@ -2407,6 +2515,7 @@ class GraphExporter:
       const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
       payload = nextPayload;
       figureSpec = nextFigureSpec;
+      collectionResultId = currentResultIdForPayload(nextPayload);
       rebuildDerivedData();
       overlayState.neighborhoodKey = "";
       overlayState.haloKey = "";
@@ -2431,6 +2540,7 @@ class GraphExporter:
         state.filters[filterKey] = true;
         chip.classList.add("active");
       });
+      populateCollectionSelector();
       updateYearPlaceholders();
       renderTimeline();
       return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
@@ -2444,6 +2554,27 @@ class GraphExporter:
         const loadedTitle = nodeById.get(state.selectedId || "");
         controls.graphHint.textContent = "Loaded: " + (loadedTitle ? loadedTitle.title : label);
       });
+    }
+
+    function loadCollectionResult(resultId) {
+      const normalizedId = String(resultId || "").trim();
+      if (!normalizedId) {
+        return Promise.resolve();
+      }
+      const payloads = collectionBundle && collectionBundle.payloads ? collectionBundle.payloads : {};
+      const nextPayload = payloads[normalizedId];
+      if (!nextPayload) {
+        alert("Saved result payload is not embedded in this dashboard shell. Rebuild the collection or use Load Results.");
+        return Promise.resolve();
+      }
+      const entry = collectionEntries().find(
+        (candidate) => String(candidate.result_id || "") === normalizedId
+      );
+      collectionResultId = normalizedId;
+      return applyImportedPayload(
+        nextPayload,
+        entry ? collectionEntryLabel(entry) : normalizedId
+      );
     }
 
     function shortestPathIds(sourceId, targetId) {
@@ -2940,8 +3071,18 @@ class GraphExporter:
         reader.readAsText(file);
         loadInput.value = "";
       });
+      controls.resultSelect.addEventListener("change", (event) => {
+        const resultId = String(event.target.value || "").trim();
+        if (!resultId) {
+          return;
+        }
+        loadCollectionResult(resultId).catch((err) => {
+          alert("Failed to load saved results: " + err.message);
+        });
+      });
 
       setControlsCollapsed(false);
+      populateCollectionSelector();
       updateYearPlaceholders();
     }
 

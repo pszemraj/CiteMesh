@@ -12,7 +12,12 @@ __all__ = ["get_client", "SemanticScholarClient", "reset_client"]
 
 
 def get_client(*args: Any, **kwargs: Any) -> Any:
-    """Lazily resolve and call the Semantic Scholar client factory."""
+    """Lazily resolve and call the Semantic Scholar client factory.
+
+    :param Any args: Positional arguments forwarded to ``semantic_scholar.get_client``.
+    :param Any kwargs: Keyword arguments forwarded to ``semantic_scholar.get_client``.
+    :return Any: Resolved Semantic Scholar client instance.
+    """
     module = import_module("citemesh.services.semantic_scholar")
     return module.get_client(*args, **kwargs)
 
