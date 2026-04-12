@@ -34,6 +34,9 @@ The following items were intentionally deferred during the easy-win + breaking A
 - `#16` Representative int8 calibration sampling prepass
   - Goal: replace the current first-sample hydration calibration with an explicit representative sample pass (for example randomized or reservoir-based) so stored ranges are not biased by dataset order.
   - Deferred because this requires a second hydration/source-loading path and characterization of the calibration-vs-startup tradeoff before changing corpus bootstrap semantics.
+- `#17` Separate cache upsert API from embedding retrieval return path
+  - Goal: let hydration/write-heavy callers persist embeddings without paying the extra dict/materialization path used by `EmbeddingCache.get_embeddings(...)` return values.
+  - Deferred because the new two-phase cache flow should settle first; then the write-only API can be introduced with cleaner call sites and without duplicating persistence logic.
 
 ## Follow-up Conditions
 
