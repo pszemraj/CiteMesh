@@ -471,43 +471,33 @@ class SemanticScholarClient:
         return API_CONFIG.retry_delay
 
     @staticmethod
-    def _extract_venue_from_api_paper(api_paper: Any) -> str:
-        """Extract publication venue label from Semantic Scholar API objects.
+    def _extract_venue_name(value: object) -> str:
+        """Normalize venue-like payload values into a display string.
 
-        :param Any api_paper: Raw API object.
-        :return str: Normalized venue name (or empty string when unavailable).
+        :param object value: Raw venue payload value.
+        :return str: Normalized venue string (empty when unavailable).
         """
-        direct_venue = getattr(api_paper, "venue", None)
-        if isinstance(direct_venue, str) and direct_venue.strip():
-            return direct_venue.strip()
-
-        publication_venue = getattr(api_paper, "publicationVenue", None)
-        publication_venue_name = getattr(publication_venue, "name", None)
-        if isinstance(publication_venue_name, str) and publication_venue_name.strip():
-            return publication_venue_name.strip()
-
-        journal = getattr(api_paper, "journal", None)
-        journal_name = getattr(journal, "name", None)
-        if isinstance(journal_name, str) and journal_name.strip():
-            return journal_name.strip()
-
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            value = value.get("name")
+        else:
+            value = getattr(value, "name", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
         return ""
 
-    @staticmethod
-    def _extract_venue_from_record(record: Dict[str, Any]) -> str:
-        """Extract publication venue label from recommendation/search payloads.
+    @classmethod
+    def _extract_venue(cls, *candidates: object) -> str:
+        """Extract the first non-empty venue label from candidate payloads.
 
-        :param Dict[str, Any] record: Recommendation/search payload dict.
-        :return str: Normalized venue string (empty when unknown).
+        :param object candidates: Venue candidate payloads.
+        :return str: Normalized venue string (empty when unavailable).
         """
-        for key in ("venue", "publicationVenue", "journal"):
-            value = record.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            if isinstance(value, dict):
-                name = value.get("name")
-                if isinstance(name, str) and name.strip():
-                    return name.strip()
+        for candidate in candidates:
+            venue = cls._extract_venue_name(candidate)
+            if venue:
+                return venue
         return ""
 
     @staticmethod
@@ -536,28 +526,12 @@ class SemanticScholarClient:
         return arxiv_id, doi
 
     @classmethod
-    def _extract_external_ids_from_api_paper(cls, api_paper: Any) -> tuple[str, str]:
-        """Extract arXiv and DOI values from API paper payloads.
+    def _extract_external_ids(cls, external_ids: object) -> tuple[str, str]:
+        """Extract arXiv and DOI values from raw external-id payloads.
 
-        :param Any api_paper: Raw Semantic Scholar API object.
+        :param object external_ids: Raw external ID payload.
         :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
         """
-        external_ids = getattr(api_paper, "externalIds", None)
-        if isinstance(external_ids, dict):
-            return cls._extract_external_ids_from_mapping(external_ids)
-
-        return "", ""
-
-    @classmethod
-    def _extract_external_ids_from_record(
-        cls, record: Dict[str, Any]
-    ) -> tuple[str, str]:
-        """Extract arXiv and DOI values from recommendation/search dict records.
-
-        :param Dict[str, Any] record: Recommendation/search record.
-        :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
-        """
-        external_ids = record.get("externalIds")
         if isinstance(external_ids, dict):
             return cls._extract_external_ids_from_mapping(external_ids)
         return "", ""
@@ -614,7 +588,9 @@ class SemanticScholarClient:
                 categories = [f for f in api_paper.fields if f]
             elif hasattr(api_paper, "fieldsOfStudy") and api_paper.fieldsOfStudy:
                 categories = [f for f in api_paper.fieldsOfStudy if f]
-            arxiv_id, doi = self._extract_external_ids_from_api_paper(api_paper)
+            arxiv_id, doi = self._extract_external_ids(
+                getattr(api_paper, "externalIds", None)
+            )
             fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
                 str(api_paper.paperId)
             )
@@ -628,7 +604,11 @@ class SemanticScholarClient:
                 authors=authors,
                 citation_count=api_paper.citationCount or 0,
                 abstract=getattr(api_paper, "abstract", "") or "",
-                venue=self._extract_venue_from_api_paper(api_paper),
+                venue=self._extract_venue(
+                    getattr(api_paper, "venue", None),
+                    getattr(api_paper, "publicationVenue", None),
+                    getattr(api_paper, "journal", None),
+                ),
                 arxiv_id=arxiv_id,
                 doi=doi,
                 categories=categories,
@@ -667,7 +647,7 @@ class SemanticScholarClient:
             if isinstance(categories, str):
                 categories = [categories]
             references = self._extract_reference_ids(rec.get("references"))
-            arxiv_id, doi = self._extract_external_ids_from_record(rec)
+            arxiv_id, doi = self._extract_external_ids(rec.get("externalIds"))
             fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
                 str(paper_id)
             )
@@ -681,7 +661,11 @@ class SemanticScholarClient:
                 authors=authors,
                 citation_count=rec.get("citationCount", 0) or 0,
                 abstract=rec.get("abstract") or "",
-                venue=self._extract_venue_from_record(rec),
+                venue=self._extract_venue(
+                    rec.get("venue"),
+                    rec.get("publicationVenue"),
+                    rec.get("journal"),
+                ),
                 arxiv_id=arxiv_id,
                 doi=doi,
                 categories=categories,

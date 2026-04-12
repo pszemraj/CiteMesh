@@ -379,32 +379,11 @@ def test_exporter_plotly_contracts(
         exporter.to_plotly_html(tmp_path / "nodivid.plotly.html")
 
 
-def _extract_dashboard_payload(html_text: str) -> dict[str, Any]:
-    """Extract dashboard JSON payload from exported HTML."""
+def _extract_dashboard_script_json(html_text: str, script_id: str) -> dict[str, Any]:
+    """Extract embedded JSON payload from a dashboard script tag."""
+
     match = re.search(
-        r'<script id="citemesh-dashboard-data" type="application/json">(.*?)</script>',
-        html_text,
-        flags=re.DOTALL,
-    )
-    assert match is not None
-    return json.loads(match.group(1))
-
-
-def _extract_dashboard_figure(html_text: str) -> dict[str, Any]:
-    """Extract embedded Plotly figure JSON from exported dashboard HTML."""
-    match = re.search(
-        r'<script id="citemesh-dashboard-figure" type="application/json">(.*?)</script>',
-        html_text,
-        flags=re.DOTALL,
-    )
-    assert match is not None
-    return json.loads(match.group(1))
-
-
-def _extract_dashboard_collection(html_text: str) -> dict[str, Any]:
-    """Extract embedded dashboard collection bundle from exported HTML."""
-    match = re.search(
-        r'<script id="citemesh-dashboard-collection" type="application/json">(.*?)</script>',
+        rf'<script id="{re.escape(script_id)}" type="application/json">(.*?)</script>',
         html_text,
         flags=re.DOTALL,
     )
@@ -493,7 +472,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert "data-point-number" in rendered
     assert "path.parentNode.appendChild(path)" not in rendered
 
-    payload = _extract_dashboard_payload(rendered)
+    payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
     assert payload["meta"]["seed_id"] == "seed"
     assert payload["meta"]["strategy"] == "hybrid"
     assert payload["meta"]["summary"] == {"nodes": 2, "edges": 1}
@@ -515,12 +494,14 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert seed_node["links"]["semantic_scholar"] is not None
     assert isinstance(seed_node["bibtex"], str)
 
-    collection = _extract_dashboard_collection(rendered)
+    collection = _extract_dashboard_script_json(
+        rendered, "citemesh-dashboard-collection"
+    )
     assert collection["current_result_id"] == "hybrid:seed"
     assert collection["results"][0]["title"] == "Seed Paper"
     assert "hybrid:seed" in collection["payloads"]
 
-    figure = _extract_dashboard_figure(rendered)
+    figure = _extract_dashboard_script_json(rendered, "citemesh-dashboard-figure")
     assert len(figure["data"]) == 3
     assert len(figure["layout"].get("shapes", [])) == 1
     assert figure["layout"]["uirevision"] == "citemesh-dashboard-static-layout-v1"
@@ -633,7 +614,9 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     out_path = tmp_path / "links.dashboard.html"
     exporter.to_dashboard_html(out_path, theme="light")
 
-    payload = _extract_dashboard_payload(out_path.read_text())
+    payload = _extract_dashboard_script_json(
+        out_path.read_text(), "citemesh-dashboard-data"
+    )
     nodes = {node["id"]: node for node in payload["nodes"]}
 
     arxiv_links = nodes["arxiv:2411.03884"]["links"]
