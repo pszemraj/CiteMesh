@@ -7,6 +7,7 @@ to find conceptually similar papers without relying on citations.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import os
 import random
@@ -103,6 +104,20 @@ def _check_embedding_deps() -> None:
             "Embedding strategy requires torch>=2.9.0 (runtime precision policy). "
             f"Detected torch=={raw_torch_version or 'unknown'}."
         )
+
+
+def _module_available(module_name: str) -> bool:
+    """Return whether a Python module can be imported in the current runtime.
+
+    :param str module_name: Absolute module name to probe.
+    :return bool: ``True`` when the module exists and is importable.
+    """
+    if module_name in sys.modules:
+        return sys.modules[module_name] is not None
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 ENCODE_BATCH_SIZE = 32
@@ -497,6 +512,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._resolve_document_formatter_fingerprint()
         )
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
+        self._runtime_backend_hint = self._resolve_runtime_backend_hint()
+        self._attention_implementation_hint = (
+            self._resolve_attention_implementation_hint()
+        )
         self._source_dtype_hint = self._resolve_source_dtype_hint()
         self.top_k = top_k
         self.model = None
@@ -614,6 +633,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         parts.append(f"binary_prefilter={int(self._cache_binary_prefilter_enabled())}")
         if self.storage_precision == "int8":
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
+        parts.append(f"source_backend={self._runtime_backend_hint}")
         parts.append(f"source_dtype={self._source_dtype_hint}")
         parts.append(f"doc_formatter={self._document_formatter_fingerprint}")
         return "::".join(parts)
@@ -662,13 +682,55 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         return self.binary_prefilter
 
+    def _resolve_runtime_backend_hint(self) -> str:
+        """Resolve preferred SentenceTransformer backend for the current runtime.
+
+        :return str: Backend token forwarded to ``SentenceTransformer``.
+        """
+        try:
+            import torch
+        except ImportError:
+            return "torch"
+
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        if callable(cuda_available) and bool(cuda_available()):
+            return "torch"
+
+        if _module_available("optimum.intel") and _module_available("openvino"):
+            return "openvino"
+        if _module_available("onnxruntime"):
+            return "onnx"
+        return "torch"
+
+    def _resolve_attention_implementation_hint(self) -> Optional[str]:
+        """Resolve preferred CUDA attention implementation when torch backend is used.
+
+        :return Optional[str]: Attention implementation token or ``None``.
+        """
+        if self._runtime_backend_hint != "torch":
+            return None
+
+        try:
+            import torch
+        except ImportError:
+            return None
+
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        if not callable(cuda_available) or not bool(cuda_available()):
+            return None
+
+        if _module_available("flash_attn"):
+            return "flash_attention_2"
+        return "sdpa"
+
     def _resolve_source_dtype_hint(self) -> str:
         """Resolve source dtype token used for cache provenance metadata.
 
         :return str: Source dtype token.
         """
-        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
-        if preferred_dtype != "bfloat16":
+        if self._runtime_backend_hint != "torch":
             return "float32"
 
         try:
@@ -676,11 +738,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         except ImportError:
             return "float32"
 
-        if not torch.cuda.is_available():
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        if not callable(cuda_available) or not bool(cuda_available()):
             return "float32"
-        if not bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)()):
-            return "float32"
-        return "bfloat16"
+
+        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
+        if preferred_dtype == "bfloat16" and bool(
+            getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+        ):
+            return "bfloat16"
+        if bool(self.model_profile.float16_supported):
+            return "float16"
+        return "float32"
 
     def _resolve_model_fingerprint(self) -> str:
         """Resolve deterministic model fingerprint for cache validity checks.
@@ -1154,52 +1224,62 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return Dict[str, Any]: ``SentenceTransformer`` constructor kwargs.
         """
         self._reset_precision_runtime()
-        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
-        if preferred_dtype != "bfloat16":
+        model_kwargs: Dict[str, Any] = {}
+        if self._attention_implementation_hint is not None:
+            model_kwargs["attn_implementation"] = self._attention_implementation_hint
+
+        if self._runtime_backend_hint != "torch":
             self._source_dtype_hint = "float32"
-            return {}
+            return model_kwargs
 
         try:
             import torch
         except ImportError:
-            logger.warning(
-                "%s prefers bfloat16, but torch is unavailable; using float32.",
-                self.model_name,
-            )
             self._source_dtype_hint = "float32"
-            return {}
+            return model_kwargs
 
-        if not torch.cuda.is_available():
-            logger.debug(
-                "%s prefers bfloat16, but CUDA is unavailable; using float32.",
-                self.model_name,
-            )
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        if not callable(cuda_available) or not bool(cuda_available()):
             self._source_dtype_hint = "float32"
-            return {}
+            return model_kwargs
 
-        bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
-        if not bf16_supported:
-            logger.debug(
-                "%s prefers bfloat16, but CUDA bfloat16 is unsupported; using float32.",
-                self.model_name,
-            )
-            self._source_dtype_hint = "float32"
-            return {}
+        if self._source_dtype_hint == "bfloat16":
+            self._autocast_dtype = torch.bfloat16
+            model_kwargs["dtype"] = torch.bfloat16
+        elif self._source_dtype_hint == "float16":
+            float16_dtype = getattr(torch, "float16", None)
+            if (
+                float16_dtype is None
+            ):  # pragma: no cover - defensive for torch API drift
+                logger.warning(
+                    "%s selected float16 runtime, but torch.float16 is unavailable; using float32.",
+                    self.model_name,
+                )
+                self._source_dtype_hint = "float32"
+                return model_kwargs
+            self._autocast_dtype = float16_dtype
+            model_kwargs["dtype"] = float16_dtype
+        else:
+            return model_kwargs
 
-        self._autocast_dtype = torch.bfloat16
         self._autocast_device_type = "cuda"
         self._autocast_enabled = bool(self.model_profile.use_cuda_autocast)
-        self._source_dtype_hint = "bfloat16"
 
         if self._autocast_enabled:
             logger.debug(
-                "%s will run with dtype=bfloat16 and CUDA autocast.",
+                "%s will run with dtype=%s and CUDA autocast.",
                 self.model_name,
+                self._source_dtype_hint,
             )
         else:
-            logger.debug("%s will run with dtype=bfloat16.", self.model_name)
+            logger.debug(
+                "%s will run with dtype=%s.",
+                self.model_name,
+                self._source_dtype_hint,
+            )
 
-        return {"dtype": torch.bfloat16}
+        return model_kwargs
 
     def _autocast_context(self) -> Any:
         """Return autocast context for model encoding.
@@ -1335,7 +1415,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             logger.info(f"Loading embedding model: {self.model_name}")
             model_kwargs = self._resolve_model_kwargs()
-            st_kwargs: Dict[str, Any] = {}
+            st_kwargs: Dict[str, Any] = {"backend": self._runtime_backend_hint}
             if model_kwargs:
                 st_kwargs["model_kwargs"] = model_kwargs
             if self.truncate_dim is not None:
@@ -1526,11 +1606,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         compute_dtype_label = self._source_dtype_hint
         if self._autocast_enabled:
             compute_dtype_label = f"{compute_dtype_label}+autocast"
+        attention_label = self._attention_implementation_hint or "auto"
         logger.info(
-            "%s runtime: dim=%s, compute=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
+            "%s runtime: dim=%s, backend=%s, compute=%s, attn=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
             self.model_name,
             dim_label,
+            self._runtime_backend_hint,
             compute_dtype_label,
+            attention_label,
             self.storage_precision,
             "on" if self._inner_model_compiled else "off",
             self._tf32_mode,

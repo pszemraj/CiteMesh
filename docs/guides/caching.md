@@ -37,7 +37,7 @@ citemesh cache root
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
-Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + resolved truncate dim + storage precision + effective binary prefilter mode + resolved source torch dtype + document-formatter fingerprint, and adds calibration sample size in `int8` mode.
+Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + resolved truncate dim + storage precision + effective binary prefilter mode + resolved runtime backend + resolved source torch dtype + document-formatter fingerprint, and adds calibration sample size in `int8` mode.
 
 ## Embedding Cache Behavior
 

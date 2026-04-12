@@ -33,7 +33,12 @@ Fallback behavior:
 Runtime precision policy:
 
 - EmbeddingGemma prefers `dtype=bfloat16` with CUDA autocast when supported.
-- If CUDA or CUDA bfloat16 is unavailable, CiteMesh falls back to float32.
+- Other torch-backed profiles use `dtype=float16` on CUDA when the profile marks float16 as safe.
+- If CUDA or the preferred reduced-precision path is unavailable, CiteMesh falls back to float32.
+- When torch runs on CUDA, CiteMesh now sets an explicit attention implementation:
+  - `flash_attention_2` when `flash_attn` is installed
+  - otherwise `sdpa`
+- On CPU-only hosts, CiteMesh prefers `openvino` when both `openvino` and `optimum.intel` are available, then `onnx` when `onnxruntime` is available, and otherwise falls back to `torch`.
 - On Ampere+ CUDA devices in eager mode, TF32 is enabled with the new API: `torch.backends.fp32_precision = "tf32"`.
 - On Ampere+ CUDA devices with `torch.compile` enabled on torch `2.9`/`2.10`, CiteMesh uses `torch.set_float32_matmul_precision("high")` and does not touch `torch.backends.*.fp32_precision` to avoid the release-branch Inductor mixed-API conflict.
 
