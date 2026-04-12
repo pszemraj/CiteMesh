@@ -117,28 +117,40 @@ def _module_available(module_name: str) -> bool:
 
 
 def _import_torch() -> Any:
-    """Import and return the ``torch`` module."""
+    """Import and return the ``torch`` module.
+
+    :return Any: Imported ``torch`` module object.
+    """
     import torch
 
     return torch
 
 
 def _import_sentence_transformer_class() -> Any:
-    """Import and return ``SentenceTransformer``."""
+    """Import and return ``SentenceTransformer``.
+
+    :return Any: Imported ``SentenceTransformer`` class.
+    """
     from sentence_transformers import SentenceTransformer
 
     return SentenceTransformer
 
 
 def _import_datasets_module() -> Any:
-    """Import and return the ``datasets`` module."""
+    """Import and return the ``datasets`` module.
+
+    :return Any: Imported ``datasets`` module object.
+    """
     import datasets
 
     return datasets
 
 
 def _import_huggingface_hub_module() -> Any:
-    """Import and return the ``huggingface_hub`` module."""
+    """Import and return the ``huggingface_hub`` module.
+
+    :return Any: Imported ``huggingface_hub`` module object.
+    """
     import huggingface_hub
 
     return huggingface_hub

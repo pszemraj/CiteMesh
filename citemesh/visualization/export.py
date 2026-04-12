@@ -45,21 +45,30 @@ GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
 
 
 def _load_pyvis_network_class() -> Any:
-    """Import and return the PyVis ``Network`` class."""
+    """Import and return the PyVis ``Network`` class.
+
+    :return Any: Imported ``pyvis.network.Network`` class.
+    """
     from pyvis.network import Network
 
     return Network
 
 
 def _load_plotly_graph_objects() -> Any:
-    """Import and return Plotly graph objects."""
+    """Import and return Plotly graph objects.
+
+    :return Any: Imported ``plotly.graph_objects`` module proxy.
+    """
     from plotly import graph_objects as go
 
     return go
 
 
 def _load_plotly_dashboard_runtime() -> tuple[Any, Any]:
-    """Import and return Plotly graph objects plus inline JS provider."""
+    """Import and return Plotly graph objects plus inline JS provider.
+
+    :return tuple[Any, Any]: Plotly graph objects and ``get_plotlyjs`` callable.
+    """
     from plotly.offline import get_plotlyjs
 
     return _load_plotly_graph_objects(), get_plotlyjs

@@ -93,6 +93,15 @@ class _TrackingArgumentParser(argparse.ArgumentParser):
                 values: object,
                 option_string: str | None = None,
             ) -> None:
+                """Record explicit option use before delegating to argparse action.
+
+                :param argparse.Action action_self: Bound argparse action instance.
+                :param argparse.ArgumentParser parser: Active parser.
+                :param argparse.Namespace namespace: Parse namespace under mutation.
+                :param object values: Parsed action value payload.
+                :param str | None option_string: Option token used on the command line.
+                :return None: Mutates namespace tracking state, then delegates.
+                """
                 _record_provided_option(namespace, action_self.dest)
                 original_call(parser, namespace, values, option_string)
 
