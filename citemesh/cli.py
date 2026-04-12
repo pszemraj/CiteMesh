@@ -29,8 +29,8 @@ from citemesh.data import (
     get_cache_dir,
     validate_compression_filter,
 )
+from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
-from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE, EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import (
@@ -1349,7 +1349,7 @@ Environment variables:
         action="store_true",
         help=(
             "Enable best-effort torch.compile for supported embedding profiles "
-            "(default: enabled)."
+            "(default: disabled)."
         ),
     )
     torch_compile_group.add_argument(
@@ -1358,7 +1358,7 @@ Environment variables:
         action="store_false",
         help="Disable torch.compile and keep eager runtime for embedding models.",
     )
-    build_parser.set_defaults(torch_compile=True)
+    build_parser.set_defaults(torch_compile=False)
 
     # Hybrid strategy arguments
     hybrid_group = build_parser.add_argument_group("hybrid strategy options")

@@ -49,6 +49,11 @@ from citemesh.strategies.base import (
     deterministic_sort_key,
     select_capped_undirected_edges,
 )
+from citemesh.text_batching import (
+    encode_texts_in_length_buckets,
+    estimate_text_length_bucket,
+    length_bucketed_index_batches,
+)
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -161,6 +166,8 @@ HYDRATION_FLUSH_SIZE = 256
 CANDIDATE_MULTIPLIER = 4
 CITATION_COUNT_ENRICHMENT_LIMIT = 20
 CALIBRATION_RESERVOIR_SEED = 0
+CALIBRATION_LOWER_PERCENTILE = 0.1
+CALIBRATION_UPPER_PERCENTILE = 99.9
 ARXIV_DATASET_CANDIDATES = (
     "librarian-bots/arxiv-metadata-snapshot",
     "CShorten/ML-ArXiv-Papers",
@@ -437,7 +444,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         encode_batch_size: int = ENCODE_BATCH_SIZE,
-        enable_torch_compile: bool = True,
+        enable_torch_compile: bool = False,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -1356,6 +1363,32 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         return self._encode_model
 
+    @staticmethod
+    def _estimate_text_length_bucket(text: str) -> int:
+        """Estimate relative token length for length-bucketed encode batching.
+
+        This stays tokenizer-free on purpose so cache hydration can keep the
+        pre-encode CPU path cheap while still grouping similarly sized payloads
+        together to reduce padding waste.
+
+        :param str text: Text payload to estimate.
+        :return int: Best-effort length estimate.
+        """
+        return estimate_text_length_bucket(text)
+
+    def _length_bucketed_text_batches(
+        self,
+        texts: List[str],
+        batch_size: int,
+    ) -> List[List[int]]:
+        """Return input indices grouped into length-similar encode batches.
+
+        :param List[str] texts: Text payloads to encode.
+        :param int batch_size: Maximum rows per batch.
+        :return List[List[int]]: Original-text indices grouped by similar length.
+        """
+        return length_bucketed_index_batches(texts, batch_size)
+
     def _encode_texts(
         self,
         texts: List[str],
@@ -1370,17 +1403,25 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return np.ndarray: Embeddings with shape ``(len(texts), dim)``.
         """
         encode_model = self._get_model_for_encoding()
+        effective_batch_size = len(texts) if batch_size is None else int(batch_size)
+        if effective_batch_size < 1:
+            raise ValueError("batch_size must be at least 1 when provided")
 
-        encode_kwargs: Dict[str, Any] = {
-            "convert_to_tensor": False,
-            "normalize_embeddings": True,
-            "show_progress_bar": show_progress_bar,
-        }
-        if batch_size is not None:
-            encode_kwargs["batch_size"] = batch_size
-
-        embeddings = encode_model.encode(texts, **encode_kwargs)
-        return np.asarray(embeddings, dtype=np.float32)
+        return encode_texts_in_length_buckets(
+            texts,
+            batch_size=min(effective_batch_size, len(texts)),
+            show_progress_bar=show_progress_bar,
+            encode_batch=lambda batch_texts, batch_progress: np.asarray(
+                encode_model.encode(
+                    batch_texts,
+                    batch_size=min(effective_batch_size, len(batch_texts)),
+                    convert_to_tensor=False,
+                    normalize_embeddings=True,
+                    show_progress_bar=batch_progress,
+                ),
+                dtype=np.float32,
+            ),
+        )
 
     def _model_load_candidates(self) -> Tuple[str, ...]:
         """Return ordered candidate model IDs used for lazy model loading.
@@ -2678,12 +2719,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             batch_size=self.encode_batch_size,
             show_progress_bar=False,
         )
-        ranges = np.vstack(
-            (
-                np.min(sample_embeddings, axis=0),
-                np.max(sample_embeddings, axis=0),
-            )
-        )
+        ranges = np.percentile(
+            sample_embeddings,
+            [CALIBRATION_LOWER_PERCENTILE, CALIBRATION_UPPER_PERCENTILE],
+            axis=0,
+        ).astype(np.float32)
         self.embedding_cache.set_calibration_ranges(
             ranges=ranges,
             embedding_dim=int(sample_embeddings.shape[1]),
@@ -2710,7 +2750,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not metadata_map:
             return 0
 
-        self.embedding_cache.get_embeddings(
+        self.embedding_cache.upsert_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=min(self.encode_batch_size, len(metadata_map)),

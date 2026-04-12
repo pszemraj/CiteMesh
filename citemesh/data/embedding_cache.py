@@ -29,6 +29,7 @@ from filelock import FileLock, Timeout
 from tqdm.auto import tqdm
 
 from citemesh._runtime import stderr_isatty
+from citemesh.text_batching import encode_texts_in_length_buckets
 
 from .cache import format_bytes, get_cache_dir
 from .model_profiles import DEFAULT_EMBEDDING_MODEL_NAME, compose_title_abstract_text
@@ -61,6 +62,8 @@ HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY = "hydration_reconciled_upstream_rows"
 HYDRATION_RECONCILED_CACHE_ROWS_KEY = "hydration_reconciled_cache_rows"
 MODEL_FINGERPRINT_KEY = "model_fingerprint"
 TEXT_FORMATTER_FINGERPRINT_KEY = "text_formatter_fingerprint"
+INT8_CLIPPED_VALUE_COUNT_KEY = "int8_clipped_value_count"
+INT8_TOTAL_VALUE_COUNT_KEY = "int8_total_value_count"
 
 _STORAGE_PRECISIONS = {"float32", "float16", "int8"}
 _COMPRESSION_FILTERS = {"gzip", "lzf"}
@@ -72,6 +75,7 @@ _POPCOUNT_LUT = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).s
     axis=1
 )
 EMBEDDING_DATASET_CHUNK_ROWS = 2048
+INT8_SATURATION_WARN_RATIO = 0.005
 
 
 def _resolve_cache_lock_timeout_seconds() -> float:
@@ -242,6 +246,24 @@ def _l2_normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
     return normalized / np.clip(norms, 1e-12, None)
 
 
+def _count_int8_saturated_values(
+    embeddings_array: np.ndarray,
+    ranges: np.ndarray,
+) -> tuple[int, int]:
+    """Count values that fall outside persisted int8 calibration ranges.
+
+    :param np.ndarray embeddings_array: Float32 embedding matrix being quantized.
+    :param np.ndarray ranges: Persisted ``(2, dim)`` calibration ranges.
+    :return tuple[int, int]: ``(clipped_values, total_values)``.
+    """
+    normalized = np.asarray(embeddings_array, dtype=np.float32)
+    sanitized_ranges = _sanitize_ranges(ranges)
+    mins = sanitized_ranges[0][None, :]
+    maxs = sanitized_ranges[1][None, :]
+    clipped = np.logical_or(normalized < mins, normalized > maxs)
+    return int(np.count_nonzero(clipped)), int(normalized.size)
+
+
 @dataclass(frozen=True)
 class CacheSearchResult:
     """Search result returned by ``EmbeddingCache.search``."""
@@ -277,6 +299,16 @@ class PendingEmbeddingRecord:
     text_hash: str
     text: str
     row_idx: Optional[int]
+
+
+@dataclass(frozen=True)
+class EmbeddingCacheUpsertStats:
+    """Summary of cache-write activity for hydration-only embedding upserts."""
+
+    requested: int
+    cache_hits: int
+    encoded: int
+    race_reused: int
 
 
 class EmbeddingCache:
@@ -374,12 +406,79 @@ class EmbeddingCache:
         :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
         :return Dict[str, np.ndarray]: Mapping of paper IDs to float32 embeddings.
         """
+        result = self._process_embeddings(
+            papers,
+            model,
+            batch_size=batch_size,
+            show_progress=show_progress,
+            text_builder=text_builder,
+            return_embeddings=True,
+        )
+        assert isinstance(result, dict)
+        return result
+
+    def upsert_embeddings(
+        self,
+        papers: Dict[str, Dict],
+        model: Any,
+        batch_size: int = 32,
+        show_progress: bool = False,
+        text_builder: Optional[Callable[[Dict[str, object]], str]] = None,
+    ) -> EmbeddingCacheUpsertStats:
+        """Persist embeddings for papers without materializing float32 return payloads.
+
+        :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
+        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param int batch_size: Batch size for model encoding.
+        :param bool show_progress: Whether to display progress bars.
+        :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
+        :return EmbeddingCacheUpsertStats: Summary of hit/miss/write activity.
+        """
+        result = self._process_embeddings(
+            papers,
+            model,
+            batch_size=batch_size,
+            show_progress=show_progress,
+            text_builder=text_builder,
+            return_embeddings=False,
+        )
+        assert isinstance(result, EmbeddingCacheUpsertStats)
+        return result
+
+    def _process_embeddings(
+        self,
+        papers: Dict[str, Dict],
+        model: Any,
+        *,
+        batch_size: int,
+        show_progress: bool,
+        text_builder: Optional[Callable[[Dict[str, object]], str]],
+        return_embeddings: bool,
+    ) -> Dict[str, np.ndarray] | EmbeddingCacheUpsertStats:
+        """Hydrate cache entries and optionally materialize float32 embeddings.
+
+        :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
+        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param int batch_size: Batch size for model encoding.
+        :param bool show_progress: Whether to display progress bars.
+        :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
+        :param bool return_embeddings: Whether to return float32 embedding payloads.
+        :return Dict[str, np.ndarray] | EmbeddingCacheUpsertStats: Embedding map or write summary.
+        """
         if not papers:
-            return {}
+            if return_embeddings:
+                return {}
+            return EmbeddingCacheUpsertStats(
+                requested=0,
+                cache_hits=0,
+                encoded=0,
+                race_reused=0,
+            )
 
         cached_embeddings: Dict[str, np.ndarray] = {}
         papers_to_embed: List[PendingEmbeddingRecord] = []
         cached_rows: List[Tuple[str, int]] = []
+        cache_hit_count = 0
         builder = text_builder or compose_title_abstract_text
 
         items = list(papers.items())
@@ -430,7 +529,9 @@ class EmbeddingCache:
                     and embeddings_dataset is not None
                     and 0 <= row_idx < cached_limit
                 ):
-                    cached_rows.append((paper_id, row_idx))
+                    cache_hit_count += 1
+                    if return_embeddings:
+                        cached_rows.append((paper_id, row_idx))
                     if self._metadata_fields_changed(existing_row, metadata):
                         metadata_updates_on_hit.append(
                             self._metadata_refresh_tuple(paper_id, metadata)
@@ -449,7 +550,7 @@ class EmbeddingCache:
             if progress_enabled:
                 iterator.close()
 
-            if cached_rows and embeddings_dataset is not None:
+            if return_embeddings and cached_rows and embeddings_dataset is not None:
                 cached_embeddings = self._load_cached_embeddings(
                     h5,
                     embeddings_dataset,
@@ -465,26 +566,36 @@ class EmbeddingCache:
                     """,
                     metadata_updates_on_hit,
                 )
-                # Persist metadata-only refreshes before encode to keep them durable
-                # even if mixed hit/miss batches later fail during embedding compute.
                 conn.commit()
 
             if not papers_to_embed:
-                return cached_embeddings
+                if return_embeddings:
+                    return cached_embeddings
+                return EmbeddingCacheUpsertStats(
+                    requested=len(items),
+                    cache_hits=cache_hit_count,
+                    encoded=0,
+                    race_reused=0,
+                )
 
             if self.storage_precision == "int8":
                 calibration_ranges = self._require_calibration_ranges(h5_file=h5)
 
         texts = [record.text for record in papers_to_embed]
-        embeddings_array = np.asarray(
-            model.encode(
-                texts,
-                batch_size=batch_size,
-                convert_to_tensor=False,
-                normalize_embeddings=True,
-                show_progress_bar=show_progress,
+        embeddings_array = encode_texts_in_length_buckets(
+            texts,
+            batch_size=min(int(batch_size), len(texts)),
+            show_progress_bar=show_progress,
+            encode_batch=lambda batch_texts, batch_progress: np.asarray(
+                model.encode(
+                    batch_texts,
+                    batch_size=min(int(batch_size), len(batch_texts)),
+                    convert_to_tensor=False,
+                    normalize_embeddings=True,
+                    show_progress_bar=batch_progress,
+                ),
+                dtype=np.float32,
             ),
-            dtype=np.float32,
         )
         if embeddings_array.ndim == 1:
             embeddings_array = embeddings_array.reshape(1, -1)
@@ -495,6 +606,8 @@ class EmbeddingCache:
             )
 
         embedding_dim = int(embeddings_array.shape[1])
+        clipped_value_count = 0
+        clipped_total_value_count = 0
         if self.storage_precision == "int8":
             if calibration_ranges is None:
                 raise RuntimeError(
@@ -505,6 +618,9 @@ class EmbeddingCache:
                     "Calibration range dimension mismatch in cache: "
                     f"{int(calibration_ranges.shape[1])} != {embedding_dim}"
                 )
+            clipped_value_count, clipped_total_value_count = (
+                _count_int8_saturated_values(embeddings_array, calibration_ranges)
+            )
             storage_embeddings = self._to_int8_embeddings(
                 embeddings_array=embeddings_array,
                 ranges=calibration_ranges,
@@ -516,6 +632,7 @@ class EmbeddingCache:
             )
         binary_embeddings = self._to_binary_embeddings(embeddings_array)
 
+        race_reused_count = 0
         with (
             self._cache_lock(),
             self._connect_db() as conn,
@@ -535,6 +652,12 @@ class EmbeddingCache:
                     raise RuntimeError(
                         "Int8 calibration ranges changed during encode; retry cache write."
                     )
+                if clipped_total_value_count > 0:
+                    self._record_int8_saturation(
+                        h5_file=h5,
+                        clipped_value_count=clipped_value_count,
+                        total_value_count=clipped_total_value_count,
+                    )
 
             existing_row_count = int(embeddings_dataset.shape[0])
             latest_rows = self._load_existing_rows(
@@ -552,7 +675,8 @@ class EmbeddingCache:
                 binary_embedding = (
                     None if binary_embeddings is None else binary_embeddings[idx]
                 )
-                new_embeddings[record.paper_id] = embedding
+                if return_embeddings:
+                    new_embeddings[record.paper_id] = embedding
                 existing_row = latest_rows.get(record.paper_id)
                 latest_row_idx = (
                     existing_row["row_idx"] if existing_row is not None else None
@@ -564,6 +688,7 @@ class EmbeddingCache:
                     and latest_row_idx is not None
                     and 0 <= latest_row_idx < existing_row_count
                 ):
+                    race_reused_count += 1
                     rows_to_upsert.append(
                         self._metadata_tuple(
                             paper_id=record.paper_id,
@@ -640,7 +765,15 @@ class EmbeddingCache:
                     rows_to_upsert,
                 )
 
-        return {**cached_embeddings, **new_embeddings}
+        if return_embeddings:
+            return {**cached_embeddings, **new_embeddings}
+
+        return EmbeddingCacheUpsertStats(
+            requested=len(items),
+            cache_hits=cache_hit_count,
+            encoded=len(papers_to_embed),
+            race_reused=race_reused_count,
+        )
 
     def search(
         self,
@@ -892,6 +1025,40 @@ class EmbeddingCache:
                         f"{dataset.shape} != {sanitized.shape}."
                     )
                 dataset[...] = sanitized
+
+    def _record_int8_saturation(
+        self,
+        h5_file: h5py.File,
+        *,
+        clipped_value_count: int,
+        total_value_count: int,
+    ) -> None:
+        """Persist cumulative int8 clipping stats and warn on notable saturation.
+
+        :param h5py.File h5_file: Open HDF5 cache handle.
+        :param int clipped_value_count: Number of values clipped for the current write.
+        :param int total_value_count: Total quantized values for the current write.
+        :return None: Updates HDF5 attributes and emits best-effort warnings.
+        """
+        if total_value_count < 1:
+            return
+
+        previous_clipped = int(h5_file.attrs.get(INT8_CLIPPED_VALUE_COUNT_KEY, 0))
+        previous_total = int(h5_file.attrs.get(INT8_TOTAL_VALUE_COUNT_KEY, 0))
+        h5_file.attrs[INT8_CLIPPED_VALUE_COUNT_KEY] = previous_clipped + int(
+            clipped_value_count
+        )
+        h5_file.attrs[INT8_TOTAL_VALUE_COUNT_KEY] = previous_total + int(
+            total_value_count
+        )
+
+        saturation_ratio = float(clipped_value_count) / float(total_value_count)
+        if saturation_ratio >= INT8_SATURATION_WARN_RATIO:
+            logger.warning(
+                "Int8 calibration saturation detected for %s: %.2f%% of values were clipped in this write. Rebuild calibration ranges if recall degrades.",
+                self.model_name,
+                saturation_ratio * 100.0,
+            )
 
     def is_hydrated(
         self,

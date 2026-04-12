@@ -8,6 +8,7 @@ from hashlib import sha256
 from typing import Any
 from unittest.mock import MagicMock
 
+import h5py
 import numpy as np
 import pytest
 
@@ -311,7 +312,10 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         )
 
         builder = EmbeddingGraphBuilder(
-            max_papers=1, model_name=model_name, client=MagicMock()
+            max_papers=1,
+            model_name=model_name,
+            enable_torch_compile=True,
+            client=MagicMock(),
         )
         monkeypatch.setattr(
             builder,
@@ -417,7 +421,11 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         torch_version="2.10.0",
     )
 
-    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        enable_torch_compile=True,
+        client=MagicMock(),
+    )
     monkeypatch.setattr(
         builder,
         "_should_defer_compile_for_cache_hydration",
@@ -530,6 +538,54 @@ def test_embedding_runtime_policy_selects_fp16_flash_and_cpu_backends(
     assert onnx_builder._runtime_backend_hint == "onnx"
 
 
+def test_encode_texts_uses_length_bucketed_batches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encode batching should group similarly sized texts while preserving order."""
+    disable_embedding_dep_checks(monkeypatch)
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        client=MagicMock(),
+    )
+
+    captured_batches: list[list[str]] = []
+
+    class _CaptureEncodeModel:
+        def encode(self, texts: list[str], **kwargs: Any) -> np.ndarray:
+            del kwargs
+            captured_batches.append(list(texts))
+            return np.asarray(
+                [[float(len(text)), float(idx)] for idx, text in enumerate(texts)],
+                dtype=np.float32,
+            )
+
+    monkeypatch.setattr(
+        builder, "_get_model_for_encoding", lambda: _CaptureEncodeModel()
+    )
+
+    texts = [
+        "x " * 120,
+        "tiny",
+        "y " * 110,
+        "small words",
+        "z " * 80,
+    ]
+    embeddings = builder._encode_texts(texts, batch_size=2, show_progress_bar=False)
+
+    assert [len(batch) for batch in captured_batches] == [2, 2, 1]
+    batch_estimates = [
+        [builder._estimate_text_length_bucket(text) for text in batch]
+        for batch in captured_batches
+    ]
+    assert batch_estimates == sorted(
+        batch_estimates, key=lambda item: (max(item), item)
+    )
+    assert embeddings.shape == (len(texts), 2)
+    assert embeddings[:, 0].tolist() == [float(len(text)) for text in texts]
+
+
 def test_embedding_compile_is_deferred_when_cache_not_hydrated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -544,7 +600,11 @@ def test_embedding_compile_is_deferred_when_cache_not_hydrated(
         torch_version="2.10.0",
     )
 
-    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        enable_torch_compile=True,
+        client=MagicMock(),
+    )
     monkeypatch.setattr(builder, "_cache_hydrated_for_active_spec", lambda: False)
     builder._load_model()
 
@@ -1977,6 +2037,48 @@ def test_int8_hydration_calibration_uses_representative_prepass(
     assert builder.embedding_cache.has_calibration_ranges() is True
 
 
+def test_int8_calibration_uses_percentile_clipping(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """Calibration ranges should not be dominated by a single extreme outlier."""
+    disable_embedding_dep_checks(monkeypatch)
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="int8",
+        calibration_sample_size=101,
+        use_streaming=False,
+        corpus_size=101,
+        client=MagicMock(),
+    )
+    sample_records = [
+        {"paper_id": f"p{idx}", "title": f"Title {idx}", "abstract": f"Abstract {idx}"}
+        for idx in range(101)
+    ]
+
+    def _fake_encode_texts(
+        texts: list[str],
+        batch_size: int | None = None,
+        show_progress_bar: bool = False,
+    ) -> np.ndarray:
+        del texts, batch_size, show_progress_bar
+        base = np.zeros((100, 2), dtype=np.float32)
+        outlier = np.full((1, 2), 100.0, dtype=np.float32)
+        return np.vstack((base, outlier))
+
+    monkeypatch.setattr(builder, "_encode_texts", _fake_encode_texts)
+    builder._initialize_calibration_ranges(sample_records)
+
+    with h5py.File(builder.embedding_cache.h5_path, "r") as h5:
+        ranges = np.asarray(h5["calibration_ranges"], dtype=np.float32)
+
+    np.testing.assert_allclose(ranges[0], np.zeros(2, dtype=np.float32))
+    assert np.all(ranges[1] < 100.0)
+    assert np.all(ranges[1] > 0.0)
+
+
 def test_hydration_flush_size_controls_cache_write_bursting(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
@@ -2035,20 +2137,20 @@ def test_cache_metadata_batch_caps_model_encode_batch_size(
 
     captured: dict[str, int] = {}
 
-    def _capture_get_embeddings(
+    def _capture_upsert_embeddings(
         papers: dict[str, dict[str, Any]],
         model: object,
         batch_size: int = 32,
         show_progress: bool = True,
         text_builder: Any = None,
-    ) -> dict[str, np.ndarray]:
+    ) -> object:
         del model, show_progress, text_builder
         captured["batch_size"] = int(batch_size)
         captured["paper_count"] = int(len(papers))
-        return {}
+        return object()
 
     monkeypatch.setattr(
-        builder.embedding_cache, "get_embeddings", _capture_get_embeddings
+        builder.embedding_cache, "upsert_embeddings", _capture_upsert_embeddings
     )
 
     batch = [

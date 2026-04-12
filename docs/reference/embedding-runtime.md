@@ -44,10 +44,10 @@ Runtime precision policy:
 
 Compile policy:
 
-- `torch.compile` is best-effort and profile-gated.
-- `torch.compile` remains enabled on torch `2.9`/`2.10` CUDA when available; the runtime switches TF32 control to the compile-safe matmul precision bridge above.
+- `torch.compile` is best-effort, profile-gated, and disabled by default.
+- Enable it explicitly when you want to pay the warm-up cost for a warm-cache or longer-lived run.
 - On cold-cache runs that must hydrate embeddings, compile is deferred for that run to avoid Inductor compile/recompile overhead during long corpus hydration.
-- On warm-cache runs (matching hydrated cache already present), compile is attempted normally.
+- When compile is enabled on torch `2.9`/`2.10` CUDA, the runtime switches TF32 control to the compile-safe matmul precision bridge above.
 
 ## Int8 Retrieval Pipeline
 

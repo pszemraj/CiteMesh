@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import json
 import logging
@@ -34,6 +35,65 @@ def test_service_and_strategy_package_exports() -> None:
     assert services_module.reset_client is reset_client
     assert services_module.SemanticScholarClient is SemanticScholarClient
     assert EmbeddingGraphBuilder.__module__ == "citemesh.strategies.embedding"
+
+
+def test_services_package_init_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Importing ``citemesh.services`` should not eagerly import service clients."""
+    original_import = builtins.__import__
+    blocked_prefixes = ("citemesh.services.semantic_scholar", "semanticscholar")
+
+    def _guarded_import(
+        name: str,
+        globals: Any = None,
+        locals: Any = None,
+        fromlist: object = (),
+        level: int = 0,
+    ) -> Any:
+        if any(
+            name == prefix or name.startswith(f"{prefix}.")
+            for prefix in blocked_prefixes
+        ):
+            raise AssertionError(f"unexpected eager import: {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _guarded_import)
+    reloaded = importlib.reload(services_module)
+    assert set(reloaded.__all__) == {
+        "SemanticScholarClient",
+        "get_client",
+        "reset_client",
+    }
+
+
+def test_strategies_package_init_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Importing ``citemesh.strategies`` should not eagerly import strategy modules."""
+    import citemesh.strategies as strategies_module
+
+    original_import = builtins.__import__
+    blocked_prefixes = (
+        "citemesh.strategies.citation",
+        "citemesh.strategies.embedding",
+        "citemesh.strategies.hybrid",
+        "citemesh.strategies.recommendation",
+    )
+
+    def _guarded_import(
+        name: str,
+        globals: Any = None,
+        locals: Any = None,
+        fromlist: object = (),
+        level: int = 0,
+    ) -> Any:
+        if any(
+            name == prefix or name.startswith(f"{prefix}.")
+            for prefix in blocked_prefixes
+        ):
+            raise AssertionError(f"unexpected eager import: {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _guarded_import)
+    reloaded = importlib.reload(strategies_module)
+    assert "EmbeddingGraphBuilder" in reloaded.__all__
 
 
 class _MockResponse:

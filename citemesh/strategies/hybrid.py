@@ -17,8 +17,8 @@ import numpy as np
 from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.model_profiles import compose_title_abstract_text
+from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
-from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     deterministic_sort_key,
@@ -79,7 +79,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         encode_batch_size: int = ENCODE_BATCH_SIZE,
-        enable_torch_compile: bool = True,
+        enable_torch_compile: bool = False,
         client: Optional[SemanticScholarClient] = None,
     ):
         """

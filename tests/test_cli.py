@@ -103,7 +103,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "cache_compression": "gzip",
         "cache_compression_level": 1,
         "encode_batch_size": ENCODE_BATCH_SIZE,
-        "torch_compile": True,
+        "torch_compile": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -1503,7 +1503,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "cache_compression": "gzip",
                 "cache_compression_level": 1,
                 "encode_batch_size": 48,
-                "enable_torch_compile": True,
+                "enable_torch_compile": False,
             },
         ),
         (
@@ -1545,7 +1545,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "cache_compression": "gzip",
                 "cache_compression_level": 1,
                 "encode_batch_size": 48,
-                "enable_torch_compile": True,
+                "enable_torch_compile": False,
             },
         ),
     ]

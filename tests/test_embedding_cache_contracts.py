@@ -23,10 +23,13 @@ from citemesh.data.embedding_cache import (
     HYDRATION_CORPUS_SIZE_KEY,
     HYDRATION_DATASET_SOURCE_KEY,
     HYDRATION_SPLIT_KEY,
+    INT8_CLIPPED_VALUE_COUNT_KEY,
+    INT8_TOTAL_VALUE_COUNT_KEY,
     MODEL_FINGERPRINT_KEY,
     SOURCE_TORCH_DTYPE_KEY,
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
+    EmbeddingCacheUpsertStats,
     _resolve_cache_lock_timeout_seconds,
 )
 from citemesh.data.model_profiles import get_embedding_model_profile
@@ -222,6 +225,91 @@ def test_embedding_cache_rechecks_misses_after_encode_race(
     assert embedding_rows == 1
     assert row_idx == 0
     np.testing.assert_allclose(embeddings["p1"], np.asarray([1.0, 0.0], np.float32))
+
+
+def test_embedding_cache_uses_length_bucketed_encode_batches() -> None:
+    """Cache encode work should batch similarly sized texts together."""
+
+    class _CaptureEncodeModel:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            del kwargs
+            self.calls.append(list(texts))
+            return np.asarray(
+                [[float(len(text)), float(idx)] for idx, text in enumerate(texts)],
+                dtype=np.float32,
+            )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="length-bucketed-cache",
+            storage_precision="float32",
+        )
+        model = _CaptureEncodeModel()
+        papers = {
+            "p1": {"title": "Long", "abstract": "x " * 120},
+            "p2": {"title": "Tiny", "abstract": "short"},
+            "p3": {"title": "Medium", "abstract": "x " * 80},
+            "p4": {"title": "Small", "abstract": "tiny words"},
+        }
+
+        embeddings = cache.get_embeddings(
+            papers, model, batch_size=2, show_progress=False
+        )
+
+    assert [len(batch) for batch in model.calls] == [2, 2]
+    call_lengths = [[len(text) for text in batch] for batch in model.calls]
+    assert call_lengths == sorted(call_lengths, key=lambda item: (max(item), item))
+    assert list(embeddings) == ["p1", "p2", "p3", "p4"]
+
+
+def test_embedding_cache_upsert_tracks_int8_saturation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Int8 cache writes should persist saturation stats when values clip."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="int8-saturation-stats",
+            storage_precision="int8",
+        )
+        cache.set_calibration_ranges(
+            ranges=np.vstack(
+                (
+                    np.zeros(2, dtype=np.float32),
+                    np.ones(2, dtype=np.float32),
+                )
+            ),
+            embedding_dim=2,
+        )
+
+        out_of_range_model = LookupEncodeModel(
+            {"Alpha. First": np.asarray([2.0, -1.0], dtype=np.float32)}
+        )
+        with caplog.at_level("WARNING"):
+            stats = cache.upsert_embeddings(
+                {"p1": {"title": "Alpha", "abstract": "First"}},
+                out_of_range_model,
+                show_progress=False,
+            )
+
+        assert stats == EmbeddingCacheUpsertStats(
+            requested=1,
+            cache_hits=0,
+            encoded=1,
+            race_reused=0,
+        )
+        assert any(
+            "Int8 calibration saturation detected" in record.message
+            for record in caplog.records
+        )
+
+        with h5py.File(cache.h5_path, "r") as h5:
+            assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 2
+            assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 2
 
 
 def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
