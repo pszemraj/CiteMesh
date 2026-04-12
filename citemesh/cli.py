@@ -7,15 +7,14 @@ providing a single interface to all graph building strategies.
 """
 
 import argparse
-import copy
 import json
 import logging
 import math
 import shutil
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 
 import networkx as nx
@@ -58,6 +57,47 @@ log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
 output_console = Console(width=DEFAULT_LOG_WIDTH)
 _LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
+_PROVIDED_OPTION_DESTS_ATTR = "_provided_option_dests"
+
+
+def _record_provided_option(namespace: argparse.Namespace, dest: str) -> None:
+    """Record an explicitly provided optional-argument destination.
+
+    :param argparse.Namespace namespace: Active argparse namespace.
+    :param str dest: Action destination to record.
+    :return None: Mutates namespace tracking state.
+    """
+    provided = getattr(namespace, _PROVIDED_OPTION_DESTS_ATTR, None)
+    if provided is None:
+        provided = set()
+        setattr(namespace, _PROVIDED_OPTION_DESTS_ATTR, provided)
+    provided.add(dest)
+
+
+class _TrackingArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser variant that tracks explicitly provided optional arguments."""
+
+    def _add_action(self, action: argparse.Action) -> argparse.Action:
+        """Wrap optional actions so parser results retain explicit option usage.
+
+        :param argparse.Action action: Action being registered.
+        :return argparse.Action: Registered action.
+        """
+        if action.option_strings and action.dest != "help":
+            original_call = action.__call__
+
+            def _tracked_call(
+                action_self: argparse.Action,
+                parser: argparse.ArgumentParser,
+                namespace: argparse.Namespace,
+                values: object,
+                option_string: str | None = None,
+            ) -> None:
+                _record_provided_option(namespace, action_self.dest)
+                original_call(parser, namespace, values, option_string)
+
+            action.__call__ = MethodType(_tracked_call, action)
+        return super()._add_action(action)
 
 
 def _configure_logging(
@@ -528,59 +568,6 @@ def _strategy_score_contract(strategy: str) -> Dict[str, object]:
     }
 
 
-def _collect_provided_build_option_dests(
-    build_parser: argparse.ArgumentParser, argv: List[str]
-) -> Set[str]:
-    """Return build-option destinations explicitly present in CLI argv.
-
-    :param argparse.ArgumentParser build_parser: Build-subcommand parser.
-    :param List[str] argv: Raw argv list without executable name.
-    :return Set[str]: Explicitly provided build option destinations.
-    """
-    if not argv:
-        return set()
-
-    try:
-        build_idx = argv.index("build")
-    except ValueError:
-        return set()
-
-    provided: Set[str] = set()
-    probe_parser = copy.deepcopy(build_parser)
-    probe_default = object()
-    append_dests: Set[str] = set()
-    for action in probe_parser._actions:
-        if not action.option_strings:
-            continue
-        if isinstance(action, argparse._AppendAction):
-            # append actions need a list-compatible default; use None so argparse
-            # creates a fresh list on first append and we detect "was it used?".
-            action.default = None
-            append_dests.add(action.dest)
-        else:
-            action.default = probe_default
-    for key in probe_parser._defaults:
-        if key not in append_dests:
-            probe_parser._defaults[key] = probe_default
-
-    try:
-        parsed, _ = probe_parser.parse_known_args(argv[build_idx + 1 :])
-    except SystemExit:
-        return provided
-
-    for action in probe_parser._actions:
-        if not action.option_strings or not hasattr(parsed, action.dest):
-            continue
-        value = getattr(parsed, action.dest)
-        if action.dest in append_dests:
-            if value is not None:
-                provided.add(action.dest)
-        elif value is not probe_default:
-            provided.add(action.dest)
-
-    return provided
-
-
 def _validate_build_cli_contract(
     args: argparse.Namespace, build_parser: argparse.ArgumentParser, provided: Set[str]
 ) -> None:
@@ -886,6 +873,18 @@ def _infer_provided_build_option_dests(
     return provided
 
 
+def _namespace_provided_option_dests(args: argparse.Namespace) -> Set[str]:
+    """Return explicitly provided option destinations tracked during argparse parsing.
+
+    :param argparse.Namespace args: Parsed argparse namespace.
+    :return Set[str]: Explicitly provided option destinations.
+    """
+    provided = getattr(args, _PROVIDED_OPTION_DESTS_ATTR, None)
+    if not isinstance(provided, set):
+        return set()
+    return set(provided)
+
+
 def _create_parser() -> Tuple[
     argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser
 ]:
@@ -894,12 +893,12 @@ def _create_parser() -> Tuple[
     :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
         Root parser, build subcommand parser, cache subcommand parser.
     """
-    root_logging_parent = argparse.ArgumentParser(add_help=False)
+    root_logging_parent = _TrackingArgumentParser(add_help=False)
     _add_logging_arguments(root_logging_parent)
-    command_logging_parent = argparse.ArgumentParser(add_help=False)
+    command_logging_parent = _TrackingArgumentParser(add_help=False)
     _add_logging_arguments(command_logging_parent, suppress_defaults=True)
 
-    parser = argparse.ArgumentParser(
+    parser = _TrackingArgumentParser(
         description="CiteMesh: Create citation graph visualizations",
         parents=[root_logging_parent],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -930,7 +929,11 @@ Environment variables:
         """,
     )
 
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    subparsers = parser.add_subparsers(
+        dest="command",
+        help="Commands",
+        parser_class=_TrackingArgumentParser,
+    )
 
     # Build command
     build_parser = subparsers.add_parser(
@@ -1287,7 +1290,9 @@ Environment variables:
         parents=[command_logging_parent],
     )
     cache_subparsers = cache_parser.add_subparsers(
-        dest="cache_command", help="Cache operations"
+        dest="cache_command",
+        help="Cache operations",
+        parser_class=_TrackingArgumentParser,
     )
     cache_clear_parser = cache_subparsers.add_parser(
         "clear",
@@ -1995,12 +2000,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     :return int: Process-style exit code.
     """
     parser, build_parser, cache_parser = _create_parser()
-    raw_argv = list(argv) if argv is not None else list(sys.argv[1:])
-    args = parser.parse_args(raw_argv)
+    args = parser.parse_args(list(argv) if argv is not None else None)
     _configure_logging(log_level=args.log_level, log_width=args.log_width)
-    provided_build_options = _collect_provided_build_option_dests(
-        build_parser, raw_argv
-    )
+    provided_build_options = _namespace_provided_option_dests(args)
 
     if not args.command:
         parser.print_help()
