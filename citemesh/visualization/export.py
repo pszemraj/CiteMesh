@@ -21,7 +21,6 @@ from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
 from urllib.parse import quote
 
 import networkx as nx
-import numpy as np
 
 from citemesh.core import Paper
 
@@ -29,6 +28,7 @@ from .ordering import ordered_edges_with_data, ordered_nodes
 from .render import (
     MISSING_YEAR_FALLBACK_MAX,
     MISSING_YEAR_FALLBACK_MIN,
+    _normalize_layout_positions,
     compute_layout,
     compute_node_colors,
     compute_node_sizes,
@@ -42,7 +42,6 @@ GRAPHML_DETERMINISM_POLICY_BEST_EFFORT = "best_effort_sorted_nodes_edges"
 _GRAPHML_BEST_EFFORT_MIN_VERSION = (2, 8)
 GRAPHML_LAYOUT_METADATA_KEY = "citemesh_graphml_determinism"
 GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
-EXPORT_LAYOUT_PADDING_RATIO = 0.1
 
 
 def _graphml_determinism_policy() -> str:
@@ -3196,56 +3195,8 @@ class GraphExporter:
         """
         if self._layout is None:
             self._layout = compute_layout(self.graph)
-        self._layout = self._normalize_layout_positions(self._layout)
+        self._layout = _normalize_layout_positions(self._layout)
         return self._layout
-
-    @staticmethod
-    def _normalize_layout_positions(
-        pos: Dict[Hashable, Iterable[float]],
-        *,
-        padding_ratio: float = EXPORT_LAYOUT_PADDING_RATIO,
-    ) -> Dict[Hashable, np.ndarray]:
-        """Normalize layout positions to a centered square viewport.
-
-        Exporters consume shared layouts directly; normalizing here keeps Plotly and
-        dashboard geometry comparable to static PNG rendering and prevents over-squeezed
-        micro-clusters when raw layout coordinates have uneven spans.
-
-        :param Dict[Hashable, Iterable[float]] pos: Raw or precomputed layout map.
-        :param float padding_ratio: Fractional interior padding around graph extents.
-        :return Dict[Hashable, np.ndarray]: Normalized coordinates in approximately
-            ``[-1, 1]``.
-        """
-        if not pos:
-            return {}
-
-        keys = list(pos.keys())
-        coords = np.array(
-            [np.asarray(pos[key], dtype=float) for key in keys],
-            dtype=float,
-        )
-        if coords.ndim != 2 or coords.shape[1] != 2:
-            return {
-                key: np.asarray(value, dtype=float).copy() for key, value in pos.items()
-            }
-
-        min_xy = coords.min(axis=0)
-        max_xy = coords.max(axis=0)
-        center_xy = (min_xy + max_xy) * 0.5
-        span_xy = max_xy - min_xy
-        max_span = float(np.max(span_xy))
-        target_half_extent = max(1e-6, 1.0 - float(padding_ratio))
-
-        if max_span <= 1e-9:
-            normalized = np.zeros_like(coords)
-        else:
-            normalized = (coords - center_xy) / (max_span * 0.5)
-            normalized *= target_half_extent
-
-        return {
-            key: np.array([float(normalized[idx, 0]), float(normalized[idx, 1])])
-            for idx, key in enumerate(keys)
-        }
 
     def _node_size(self, node: Hashable) -> float:
         """Compute cached node size for a node ID.

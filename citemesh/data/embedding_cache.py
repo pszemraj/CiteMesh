@@ -2137,30 +2137,6 @@ class EmbeddingCache:
         )
         return np.asarray(int8_embeddings, dtype=np.int8)
 
-    def _to_storage_embeddings(
-        self,
-        h5_file: h5py.File,
-        embeddings_array: np.ndarray,
-    ) -> np.ndarray:
-        """Convert float32 embeddings to configured storage precision.
-
-        :param h5py.File h5_file: Open HDF5 cache handle.
-        :param np.ndarray embeddings_array: Float32 embeddings.
-        :return np.ndarray: Storage-ready embeddings.
-        """
-        if self.storage_precision == "float32":
-            return np.asarray(embeddings_array, dtype=np.float32)
-        if self.storage_precision == "float16":
-            return np.asarray(embeddings_array, dtype=np.float16)
-
-        ranges = self._require_calibration_ranges(
-            h5_file,
-            embedding_dim=int(embeddings_array.shape[1]),
-        )
-        return self._to_int8_embeddings(
-            embeddings_array=embeddings_array, ranges=ranges
-        )
-
     def _to_binary_embeddings(
         self, embeddings_array: np.ndarray
     ) -> Optional[np.ndarray]:
