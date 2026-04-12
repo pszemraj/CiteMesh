@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from citemesh.core import EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
+from citemesh.strategies import hybrid as hybrid_strategy
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     deterministic_sort_key,
@@ -699,7 +700,8 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     graph.add_node("seed", is_seed=True)
     graph.add_node("a", is_seed=False)
     monkeypatch.setattr(
-        "citemesh.strategies.hybrid.GraphBuilderStrategy.build_graph",
+        hybrid_strategy.GraphBuilderStrategy,
+        "build_graph",
         lambda self, seed_id, **kwargs: (graph, "seed"),
     )
 
@@ -728,7 +730,8 @@ def test_hybrid_build_graph_logs_post_cap_edge_count(
     graph.add_edge("a", "c", weight=0.85)
     graph.add_edge("b", "c", weight=0.75)
     monkeypatch.setattr(
-        "citemesh.strategies.hybrid.GraphBuilderStrategy.build_graph",
+        hybrid_strategy.GraphBuilderStrategy,
+        "build_graph",
         lambda self, seed_id, **kwargs: (graph, "seed"),
     )
 
@@ -838,12 +841,8 @@ def test_max_papers_is_total_node_cap_including_seed(
             del seed_id
             return {"seed": _seed_paper(), "s1": _paper("s1"), "s2": _paper("s2")}
 
-    monkeypatch.setattr(
-        "citemesh.strategies.hybrid.CitationGraphBuilder", FakeCitationBuilder
-    )
-    monkeypatch.setattr(
-        "citemesh.strategies.hybrid.EmbeddingGraphBuilder", FakeEmbeddingBuilder
-    )
+    monkeypatch.setattr(hybrid_strategy, "CitationGraphBuilder", FakeCitationBuilder)
+    monkeypatch.setattr(hybrid_strategy, "EmbeddingGraphBuilder", FakeEmbeddingBuilder)
 
     papers = HybridGraphBuilder(
         max_papers=4, max_semantic=1, client=MagicMock()
