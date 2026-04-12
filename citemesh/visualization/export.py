@@ -132,6 +132,11 @@ class GraphExporter:
         enriched = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
         strategy = str(self.metadata.get("strategy") or "").strip().lower()
+        dashboard_node_ids = [node_id for node_id, _ in self._sorted_nodes()]
+        dashboard_payload = self._dashboard_payload(
+            theme_obj=self.theme,
+            node_ids=dashboard_node_ids,
+        )
         valid_years = [
             int(n.get("year", 0)) for n in enriched if int(n.get("year", 0)) > 0
         ]
@@ -153,6 +158,9 @@ class GraphExporter:
                 "edges": len(sorted_edges),
             },
             "nodes": enriched,
+            "dashboard": {
+                "meta": dashboard_payload["meta"],
+            },
             "edges": [
                 {
                     "source": str(u),
@@ -793,6 +801,8 @@ class GraphExporter:
         node_payloads = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
         strategy = str(self.metadata.get("strategy") or "").strip().lower()
+        positions = self._get_layout()
+        node_sizes = [max(6.0, self._node_size(node_id) / 50.0) for node_id in node_ids]
 
         valid_years = [
             int(node.get("year", 0))
@@ -818,6 +828,11 @@ class GraphExporter:
                 },
                 "year_range": year_range,
                 "plotly_node_order": [str(node_id) for node_id in node_ids],
+                "plotly_positions": [
+                    [float(positions[node_id][0]), float(positions[node_id][1])]
+                    for node_id in node_ids
+                ],
+                "plotly_node_sizes": node_sizes,
             },
             "nodes": node_payloads,
             "edges": [
@@ -1721,19 +1736,30 @@ class GraphExporter:
   <script id="citemesh-dashboard-data" type="application/json">__PAYLOAD_JSON__</script>
   <script id="citemesh-dashboard-figure" type="application/json">__FIGURE_JSON__</script>
   <script>
-    const payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
-    const figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
+    let payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
+    const baseFigureTemplate = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
+    let figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
     const graphDiv = document.getElementById("__PLOTLY_DIV_ID__");
+    const plotConfig = {
+      displaylogo: false,
+      responsive: true,
+    };
 
-    const nodes = payload.nodes || [];
-    const nodeOrder = (payload.meta && payload.meta.plotly_node_order) || [];
-    const nodeById = new Map(nodes.map((node) => [node.id, node]));
-    const nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
-    const yearRange = (payload.meta && payload.meta.year_range) || {};
-    const seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "");
-    const seedYear = seedNode && Number.isFinite(Number(seedNode.year)) && Number(seedNode.year) > 0
-      ? Number(seedNode.year)
-      : null;
+    let nodes = [];
+    let nodeOrder = [];
+    let nodeById = new Map();
+    let nodeIndexById = new Map();
+    let yearRange = {};
+    let seedNode = null;
+    let seedYear = null;
+    let traceSpecs = [];
+    let nodeTraceIndex = 0;
+    let haloTraceIndex = -1;
+    let neighborhoodTraceIndex = -1;
+    let defaultNodeSizes = [];
+    let defaultNodeX = [];
+    let defaultNodeY = [];
+    let adjacency = new Map();
 
     function normalizeArray(rawValue, length, fallbackValue) {
       if (Array.isArray(rawValue)) {
@@ -1751,26 +1777,287 @@ class GraphExporter:
       return Array.from({ length }, () => safe);
     }
 
-    const traceSpecs = figureSpec.data || [];
-    const nodeTraceIndex = (() => {
-      const namedIdx = traceSpecs.findIndex((trace) => String(trace.name || "") === "nodes");
-      if (namedIdx >= 0) {
-        return namedIdx;
+    function deepClone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function stableCurveDirection(leftId, rightId) {
+      const joined = `${String(leftId || "")}|${String(rightId || "")}`;
+      let digest = 0;
+      for (const char of joined) {
+        digest = ((digest * 33) + char.charCodeAt(0)) >>> 0;
       }
-      const fallbackIdx = traceSpecs.findIndex((trace) => String(trace.mode || "").includes("markers+text"));
-      return fallbackIdx >= 0 ? fallbackIdx : 0;
-    })();
-    const haloTraceIndex = traceSpecs.findIndex(
-      (trace) => String(trace.name || "") === "selection-halo"
-    );
-    const neighborhoodTraceIndex = traceSpecs.findIndex(
-      (trace) => String(trace.name || "") === "neighborhood-edges"
-    );
-    const nodeTraceSource = (traceSpecs[nodeTraceIndex] || {});
-    const markerSource = nodeTraceSource.marker || {};
-    const defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
-    const defaultNodeX = normalizeArray(nodeTraceSource.x, nodeOrder.length, 0);
-    const defaultNodeY = normalizeArray(nodeTraceSource.y, nodeOrder.length, 0);
+      return digest % 2 === 0 ? 1 : -1;
+    }
+
+    function currentSeedRingColor() {
+      const styles = getComputedStyle(document.documentElement);
+      const color = String(styles.getPropertyValue("--seed-ring") || "").trim();
+      return color || "#d66cbf";
+    }
+
+    function buildFigureSpecFromPayload(nextPayload) {
+      const meta = (nextPayload && nextPayload.meta) || {};
+      const order = Array.isArray(meta.plotly_node_order)
+        ? meta.plotly_node_order.map((nodeId) => String(nodeId || ""))
+        : [];
+      const positions = Array.isArray(meta.plotly_positions) ? meta.plotly_positions : [];
+      const alignedNodeSizes = normalizeArray(meta.plotly_node_sizes, order.length, 8);
+      if (!order.length || positions.length !== order.length) {
+        throw new Error(
+          "JSON is missing dashboard layout positions. Re-export results with a newer CiteMesh build."
+        );
+      }
+
+      const template = deepClone(baseFigureTemplate);
+      const nextNodes = Array.isArray(nextPayload.nodes) ? nextPayload.nodes : [];
+      const nextNodeById = new Map(
+        nextNodes.map((node) => [String(node.id || ""), node])
+      );
+      const nextEdges = Array.isArray(nextPayload.edges) ? nextPayload.edges : [];
+      const nextYearRange = meta.year_range || {};
+      const nextTraceSpecs = Array.isArray(template.data) ? template.data : [];
+      const nextNodeTraceIndex = (() => {
+        const namedIdx = nextTraceSpecs.findIndex(
+          (trace) => String(trace.name || "") === "nodes"
+        );
+        if (namedIdx >= 0) {
+          return namedIdx;
+        }
+        const fallbackIdx = nextTraceSpecs.findIndex((trace) =>
+          String(trace.mode || "").includes("markers+text")
+        );
+        return fallbackIdx >= 0 ? fallbackIdx : 0;
+      })();
+      const nextHaloTraceIndex = nextTraceSpecs.findIndex(
+        (trace) => String(trace.name || "") === "selection-halo"
+      );
+      const nextNeighborhoodTraceIndex = nextTraceSpecs.findIndex(
+        (trace) => String(trace.name || "") === "neighborhood-edges"
+      );
+      const templateNodeTrace = nextTraceSpecs[nextNodeTraceIndex] || {};
+      const templateMarker = templateNodeTrace.marker || {};
+      const templateLayout = template.layout || {};
+      const xPairs = normalizeArray(
+        positions.map((position) => Array.isArray(position) ? position[0] : 0),
+        order.length,
+        0
+      );
+      const yPairs = normalizeArray(
+        positions.map((position) => Array.isArray(position) ? position[1] : 0),
+        order.length,
+        0
+      );
+      const yearMin = Number(nextYearRange.min || 0);
+      const yearMax = Number(nextYearRange.max || 0);
+      const safeYearMin = Number.isFinite(yearMin) ? yearMin : 0;
+      const safeYearMax = Number.isFinite(yearMax) ? yearMax : safeYearMin;
+      const labelRanking = order
+        .map((nodeId) => nextNodeById.get(nodeId))
+        .filter(Boolean)
+        .sort((leftNode, rightNode) => {
+          const left = leftNode || {};
+          const right = rightNode || {};
+          if (!!left.is_seed !== !!right.is_seed) {
+            return left.is_seed ? -1 : 1;
+          }
+          const citationDelta =
+            Number(right.citation_count || 0) - Number(left.citation_count || 0);
+          if (citationDelta !== 0) {
+            return citationDelta;
+          }
+          const leftYear = Number.isFinite(Number(left.year)) ? Number(left.year) : -1;
+          const rightYear = Number.isFinite(Number(right.year)) ? Number(right.year) : -1;
+          if (leftYear !== rightYear) {
+            return rightYear - leftYear;
+          }
+          return String(left.id || "").localeCompare(String(right.id || ""));
+        })
+        .slice(0, Math.min(14, order.length));
+      const labelIds = new Set(labelRanking.map((node) => String(node.id || "")));
+      const seedId = String(meta.seed_id || "");
+      const seedRingColor = currentSeedRingColor();
+
+      const nodeTexts = [];
+      const hoverTexts = [];
+      const nodeYears = [];
+      const lineWidths = [];
+      const lineColors = [];
+      for (let idx = 0; idx < order.length; idx += 1) {
+        const nodeId = order[idx];
+        const node = nextNodeById.get(nodeId) || {};
+        const label = labelIds.has(nodeId) ? String(node.title || nodeId) : "";
+        nodeTexts.push(label);
+        const authors = Array.isArray(node.authors) && node.authors.length
+          ? node.authors.slice(0, 3).join(", ")
+          : "Unknown";
+        const nodeYear = Number.isFinite(Number(node.year)) && Number(node.year) > 0
+          ? Number(node.year)
+          : safeYearMin;
+        nodeYears.push(nodeYear);
+        hoverTexts.push([
+          `<b>${escapeHtml(node.title || nodeId)}</b>`,
+          escapeHtml(authors),
+          `Year: ${node.year || "n.d."} | Citations: ${Number(node.citation_count || 0)}`,
+        ].join("<br>"));
+        if (node.is_seed) {
+          lineWidths.push(4.0);
+          lineColors.push(seedRingColor);
+        } else {
+          lineWidths.push(0.0);
+          lineColors.push("rgba(0,0,0,0)");
+        }
+      }
+
+      const xMin = Math.min(...xPairs);
+      const xMax = Math.max(...xPairs);
+      const yMin = Math.min(...yPairs);
+      const yMax = Math.max(...yPairs);
+      const xSpan = Math.max(xMax - xMin, 1e-6);
+      const ySpan = Math.max(yMax - yMin, 1e-6);
+      const xPad = Math.max(0.28, xSpan * 0.08);
+      const yPad = Math.max(0.28, ySpan * 0.08);
+      const baseShapeColor =
+        (((templateLayout.shapes || [])[0] || {}).line || {}).color
+        || "rgba(127, 143, 163, 0.24)";
+      const edgeShapes = [];
+      nextEdges.forEach((edge) => {
+        const leftId = String(edge.source || "");
+        const rightId = String(edge.target || "");
+        const leftIdx = order.indexOf(leftId);
+        const rightIdx = order.indexOf(rightId);
+        if (leftIdx < 0 || rightIdx < 0) {
+          return;
+        }
+        const x0 = xPairs[leftIdx];
+        const y0 = yPairs[leftIdx];
+        const x1 = xPairs[rightIdx];
+        const y1 = yPairs[rightIdx];
+        const midX = (x0 + x1) / 2.0;
+        const midY = (y0 + y1) / 2.0;
+        const dx = x1 - x0;
+        const dy = y1 - y0;
+        const direction = stableCurveDirection(leftId, rightId);
+        const cx = midX - (dy * 0.15 * direction);
+        const cy = midY + (dx * 0.15 * direction);
+        edgeShapes.push({
+          type: "path",
+          path: `M ${x0},${y0} Q ${cx},${cy} ${x1},${y1}`,
+          line: {
+            color: baseShapeColor,
+            width: Math.max(0.5, Number(edge.weight || 0) * 2.0),
+          },
+          layer: "below",
+        });
+      });
+
+      const nodeTrace = templateNodeTrace;
+      nodeTrace.x = xPairs;
+      nodeTrace.y = yPairs;
+      nodeTrace.text = nodeTexts;
+      nodeTrace.hovertext = hoverTexts;
+      nodeTrace.marker = Object.assign({}, templateMarker, {
+        size: alignedNodeSizes,
+        color: nodeYears,
+        cmin: safeYearMin,
+        cmax: safeYearMax,
+        line: {
+          width: lineWidths,
+          color: lineColors,
+        },
+      });
+      nextTraceSpecs[nextNodeTraceIndex] = nodeTrace;
+
+      if (nextHaloTraceIndex >= 0) {
+        const seedIdx = order.indexOf(seedId);
+        const haloTrace = nextTraceSpecs[nextHaloTraceIndex] || {};
+        haloTrace.x = seedIdx >= 0 ? [xPairs[seedIdx]] : [];
+        haloTrace.y = seedIdx >= 0 ? [yPairs[seedIdx]] : [];
+        haloTrace.marker = Object.assign({}, haloTrace.marker || {}, {
+          size: seedIdx >= 0 ? [alignedNodeSizes[seedIdx] * 2.05] : [],
+          color: seedIdx >= 0 ? ["rgba(214, 108, 191, 0.26)"] : [],
+        });
+        nextTraceSpecs[nextHaloTraceIndex] = haloTrace;
+      }
+
+      if (nextNeighborhoodTraceIndex >= 0) {
+        const neighborhoodTrace = nextTraceSpecs[nextNeighborhoodTraceIndex] || {};
+        neighborhoodTrace.x = [];
+        neighborhoodTrace.y = [];
+        nextTraceSpecs[nextNeighborhoodTraceIndex] = neighborhoodTrace;
+      }
+
+      const layout = Object.assign({}, templateLayout);
+      layout.xaxis = Object.assign({}, layout.xaxis || {}, {
+        autorange: false,
+        range: [xMin - xPad, xMax + xPad],
+      });
+      layout.yaxis = Object.assign({}, layout.yaxis || {}, {
+        autorange: false,
+        range: [yMin - yPad, yMax + yPad],
+      });
+      layout.shapes = edgeShapes;
+      layout.uirevision = "citemesh-dashboard-static-layout-v1";
+
+      template.data = nextTraceSpecs;
+      template.layout = layout;
+      return template;
+    }
+
+    function rebuildDerivedData() {
+      nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+      nodeOrder = Array.isArray(payload.meta && payload.meta.plotly_node_order)
+        ? payload.meta.plotly_node_order.map((nodeId) => String(nodeId || ""))
+        : [];
+      nodeById = new Map(nodes.map((node) => [String(node.id || ""), node]));
+      nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
+      yearRange = (payload.meta && payload.meta.year_range) || {};
+      seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "") || null;
+      seedYear = seedNode && Number.isFinite(Number(seedNode.year)) && Number(seedNode.year) > 0
+        ? Number(seedNode.year)
+        : null;
+
+      traceSpecs = figureSpec.data || [];
+      nodeTraceIndex = (() => {
+        const namedIdx = traceSpecs.findIndex((trace) => String(trace.name || "") === "nodes");
+        if (namedIdx >= 0) {
+          return namedIdx;
+        }
+        const fallbackIdx = traceSpecs.findIndex((trace) => String(trace.mode || "").includes("markers+text"));
+        return fallbackIdx >= 0 ? fallbackIdx : 0;
+      })();
+      haloTraceIndex = traceSpecs.findIndex(
+        (trace) => String(trace.name || "") === "selection-halo"
+      );
+      neighborhoodTraceIndex = traceSpecs.findIndex(
+        (trace) => String(trace.name || "") === "neighborhood-edges"
+      );
+      const nodeTraceSource = (traceSpecs[nodeTraceIndex] || {});
+      const markerSource = nodeTraceSource.marker || {};
+      defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
+      defaultNodeX = normalizeArray(nodeTraceSource.x, nodeOrder.length, 0);
+      defaultNodeY = normalizeArray(nodeTraceSource.y, nodeOrder.length, 0);
+
+      adjacency = new Map();
+      (payload.edges || []).forEach((edge) => {
+        const left = String(edge.source || "");
+        const right = String(edge.target || "");
+        const weight = Number(edge.weight || 0);
+        if (!left || !right) {
+          return;
+        }
+        if (!adjacency.has(left)) {
+          adjacency.set(left, []);
+        }
+        if (!adjacency.has(right)) {
+          adjacency.set(right, []);
+        }
+        adjacency.get(left).push({ id: right, weight });
+        adjacency.get(right).push({ id: left, weight });
+      });
+    }
+
+    rebuildDerivedData();
 
     const state = {
       selectedId: (payload.meta && payload.meta.seed_id) || null,
@@ -2027,6 +2314,136 @@ class GraphExporter:
         return `${surname}, ${year}`;
       }
       return String(node.title || node.id || nodeId);
+    }
+
+    function buildPortableJsonPayload() {
+      const summary = (payload.meta && payload.meta.summary) || {
+        nodes: Array.isArray(payload.nodes) ? payload.nodes.length : 0,
+        edges: Array.isArray(payload.edges) ? payload.edges.length : 0,
+      };
+      const dashboardMeta = Object.assign({}, (payload.meta || {}), {
+        summary,
+      });
+      const edges = (payload.edges || []).map((edge) => {
+        const sourceId = String(edge.source || "");
+        const targetId = String(edge.target || "");
+        const sourceNode = nodeById.get(sourceId);
+        const targetNode = nodeById.get(targetId);
+        return {
+          source: sourceId,
+          target: targetId,
+          source_title: sourceNode ? String(sourceNode.title || sourceId) : sourceId,
+          target_title: targetNode ? String(targetNode.title || targetId) : targetId,
+          source_label: compactNodeLabel(sourceId),
+          target_label: compactNodeLabel(targetId),
+          weight: Number(edge.weight || 0),
+        };
+      });
+      return {
+        seed_id: (payload.meta && payload.meta.seed_id) || "",
+        meta: {
+          strategy: (payload.meta && payload.meta.strategy) || "",
+          year_range: (payload.meta && payload.meta.year_range) || {},
+        },
+        summary,
+        dashboard: {
+          meta: dashboardMeta,
+        },
+        nodes: payload.nodes || [],
+        edges,
+      };
+    }
+
+    function updateYearPlaceholders() {
+      const validYears = nodes
+        .map((node) => (hasYear(node) ? Number(node.year) : null))
+        .filter((year) => year !== null);
+      if (!validYears.length) {
+        controls.yearMin.placeholder = "Year min";
+        controls.yearMax.placeholder = "Year max";
+        return;
+      }
+      const minYear = Math.min(...validYears);
+      const maxYear = Math.max(...validYears);
+      controls.yearMin.placeholder = `Year min (${minYear})`;
+      controls.yearMax.placeholder = `Year max (${maxYear})`;
+    }
+
+    function normalizeImportedDashboardPayload(imported) {
+      const importedNodes = Array.isArray(imported.nodes) ? imported.nodes : [];
+      if (!importedNodes.length) {
+        throw new Error("No nodes found in JSON file.");
+      }
+      const importedDashboardMeta =
+        imported && imported.dashboard && imported.dashboard.meta
+          ? imported.dashboard.meta
+          : {};
+      const importedMeta =
+        imported && imported.meta && typeof imported.meta === "object"
+          ? imported.meta
+          : {};
+      const nextMeta = {
+        seed_id: String(imported.seed_id || importedDashboardMeta.seed_id || ""),
+        strategy: String(importedDashboardMeta.strategy || importedMeta.strategy || ""),
+        theme: String((payload.meta && payload.meta.theme) || importedDashboardMeta.theme || "light"),
+        summary: imported.summary || importedDashboardMeta.summary || {
+          nodes: importedNodes.length,
+          edges: Array.isArray(imported.edges) ? imported.edges.length : 0,
+        },
+        year_range: importedDashboardMeta.year_range || importedMeta.year_range || {},
+        plotly_node_order: importedDashboardMeta.plotly_node_order || [],
+        plotly_positions: importedDashboardMeta.plotly_positions || [],
+        plotly_node_sizes: importedDashboardMeta.plotly_node_sizes || [],
+      };
+      return {
+        meta: nextMeta,
+        nodes: importedNodes,
+        edges: Array.isArray(imported.edges) ? imported.edges : [],
+      };
+    }
+
+    function applyImportedPayload(imported, label) {
+      const nextPayload = normalizeImportedDashboardPayload(imported);
+      const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
+      payload = nextPayload;
+      figureSpec = nextFigureSpec;
+      rebuildDerivedData();
+      overlayState.neighborhoodKey = "";
+      overlayState.haloKey = "";
+      state.selectedId = (payload.meta && payload.meta.seed_id) || null;
+      state.hoverId = null;
+      state.searchText = "";
+      state.sortKey = "relevance";
+      state.scopeMode = "all";
+      state.yearMin = null;
+      state.yearMax = null;
+      state.visibleIds = new Set(nodeOrder);
+      controls.search.value = "";
+      controls.sort.value = "relevance";
+      controls.yearMin.value = "";
+      controls.yearMax.value = "";
+      controls.scopeButtons.forEach((entry) => entry.classList.remove("active"));
+      controls.chips.forEach((chip) => {
+        const filterKey = chip.getAttribute("data-filter");
+        if (!filterKey) {
+          return;
+        }
+        state.filters[filterKey] = true;
+        chip.classList.add("active");
+      });
+      updateYearPlaceholders();
+      renderTimeline();
+      return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
+        setupGraphInteractions();
+        if (state.selectedId && nodeById.has(state.selectedId)) {
+          renderDetail(state.selectedId, false);
+        } else {
+          renderDetail(null, false);
+        }
+        renderList();
+        const loadedTitle = nodeById.get(state.selectedId || "");
+        controls.graphHint.textContent = "Loaded: " + (loadedTitle ? loadedTitle.title : label);
+      });
     }
 
     function shortestPathIds(sourceId, targetId) {
@@ -2482,13 +2899,7 @@ class GraphExporter:
       }
 
       document.getElementById("export-json-btn").addEventListener("click", () => {
-        const exportPayload = {
-          seed_id: (payload.meta && payload.meta.seed_id) || "",
-          meta: { strategy: (payload.meta && payload.meta.strategy) || "", year_range: (payload.meta && payload.meta.year_range) || {} },
-          summary: (payload.meta && payload.meta.summary) || {},
-          nodes: payload.nodes || [],
-          edges: payload.edges || [],
-        };
+        const exportPayload = buildPortableJsonPayload();
         downloadBlob(JSON.stringify(exportPayload, null, 2), seedSlug() + ".json", "application/json");
       });
 
@@ -2521,39 +2932,9 @@ class GraphExporter:
         reader.onload = (e) => {
           try {
             const imported = JSON.parse(e.target.result);
-            const importedNodes = imported.nodes || [];
-            if (!importedNodes.length) { alert("No nodes found in JSON file."); return; }
-            nodes.length = 0;
-            importedNodes.forEach((n) => nodes.push(n));
-            nodeById.clear();
-            nodes.forEach((n) => nodeById.set(n.id, n));
-            adjacency.clear();
-            (imported.edges || []).forEach((edge) => {
-              const left = String(edge.source || ""); const right = String(edge.target || "");
-              const weight = Number(edge.weight || 0);
-              if (!left || !right) return;
-              if (!adjacency.has(left)) adjacency.set(left, []);
-              if (!adjacency.has(right)) adjacency.set(right, []);
-              adjacency.get(left).push({ id: right, weight });
-              adjacency.get(right).push({ id: left, weight });
+            applyImportedPayload(imported, file.name).catch((err) => {
+              alert("Failed to load graph view from JSON: " + err.message);
             });
-            if (imported.meta) {
-              payload.meta = Object.assign(payload.meta || {}, imported.meta);
-              if (imported.meta.seed_id) payload.meta.seed_id = imported.meta.seed_id;
-            }
-            payload.edges = imported.edges || [];
-            state.selectedId = (payload.meta && payload.meta.seed_id) || null;
-            state.hoverId = null;
-            state.searchText = ""; controls.search.value = "";
-            renderTimeline();
-            renderList();
-            if (state.selectedId && nodeById.has(state.selectedId)) {
-              renderDetail(state.selectedId, false);
-            } else {
-              renderDetail(null, false);
-            }
-            const loadedTitle = nodeById.get(state.selectedId || "");
-            controls.graphHint.textContent = "Loaded: " + (loadedTitle ? loadedTitle.title : file.name);
           } catch (err) { alert("Failed to parse JSON: " + err.message); }
         };
         reader.readAsText(file);
@@ -2561,19 +2942,16 @@ class GraphExporter:
       });
 
       setControlsCollapsed(false);
-
-      const validYears = nodes
-        .map((node) => (hasYear(node) ? Number(node.year) : null))
-        .filter((year) => year !== null);
-      if (validYears.length) {
-        const minYear = Math.min(...validYears);
-        const maxYear = Math.max(...validYears);
-        controls.yearMin.placeholder = `Year min (${minYear})`;
-        controls.yearMax.placeholder = `Year max (${maxYear})`;
-      }
+      updateYearPlaceholders();
     }
 
     function setupGraphInteractions() {
+      if (typeof graphDiv.removeAllListeners === "function") {
+        graphDiv.removeAllListeners("plotly_hover");
+        graphDiv.removeAllListeners("plotly_unhover");
+        graphDiv.removeAllListeners("plotly_click");
+      }
+
       graphDiv.on("plotly_hover", (event) => {
         if (!event || !Array.isArray(event.points)) {
           return;
@@ -2630,10 +3008,7 @@ class GraphExporter:
     function initialize() {
       setupControls();
       renderTimeline();
-      Plotly.newPlot(graphDiv, figureSpec.data, figureSpec.layout, {
-        displaylogo: false,
-        responsive: true,
-      }).then(() => {
+      Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
         setupGraphInteractions();
         if (state.selectedId && nodeById.has(state.selectedId)) {
           renderDetail(state.selectedId, false);

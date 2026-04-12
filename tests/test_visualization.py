@@ -181,6 +181,11 @@ def test_exporter_serialization_contracts_and_determinism(
     assert payload["seed_id"] == seed_id
     assert "metadata" not in payload
     assert payload["summary"] == {"nodes": 2, "edges": 1}
+    assert "dashboard" in payload
+    assert payload["dashboard"]["meta"]["seed_id"] == seed_id
+    assert len(payload["dashboard"]["meta"]["plotly_node_order"]) == 2
+    assert len(payload["dashboard"]["meta"]["plotly_positions"]) == 2
+    assert len(payload["dashboard"]["meta"]["plotly_node_sizes"]) == 2
     assert len(payload["nodes"]) == 2
     assert payload["edges"][0]["weight"] == pytest.approx(0.7)
     assert payload["edges"][0]["source_title"] == "Related Paper"
@@ -437,6 +442,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "is-filter-hidden",
         "is-neighbor",
         "neighborhood-edges",
+        "buildFigureSpecFromPayload(",
+        "applyImportedPayload(",
         "renderWhyLines(",
         "state.hoverId || state.selectedId",
         "overlayState",
@@ -451,6 +458,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert payload["meta"]["strategy"] == "hybrid"
     assert payload["meta"]["summary"] == {"nodes": 2, "edges": 1}
     assert payload["meta"]["plotly_node_order"] == ["related", "seed"]
+    assert len(payload["meta"]["plotly_positions"]) == 2
+    assert len(payload["meta"]["plotly_node_sizes"]) == 2
     seed_node = next(node for node in payload["nodes"] if node["id"] == "seed")
     related_node = next(node for node in payload["nodes"] if node["id"] == "related")
     assert seed_node["provenance"] == "seed"
