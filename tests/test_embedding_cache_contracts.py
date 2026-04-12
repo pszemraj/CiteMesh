@@ -33,12 +33,32 @@ from citemesh.data.model_profiles import get_embedding_model_profile
 from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel, connect_db
 
 
+def _set_test_int8_calibration(cache: EmbeddingCache, embedding_dim: int = 2) -> None:
+    """Seed deterministic calibration ranges for direct int8 cache tests.
+
+    :param EmbeddingCache cache: Cache instance under test.
+    :param int embedding_dim: Embedding width covered by the ranges.
+    :return None: Persists calibration ranges when cache uses int8 storage.
+    """
+    if cache.storage_precision != "int8":
+        return
+
+    ranges = np.vstack(
+        (
+            np.full(embedding_dim, -1.0, dtype=np.float32),
+            np.full(embedding_dim, 1.0, dtype=np.float32),
+        )
+    )
+    cache.set_calibration_ranges(ranges=ranges, embedding_dim=embedding_dim)
+
+
 def _multiprocess_cache_worker(
     cache_dir: str, worker_idx: int, queue: mp.Queue
 ) -> None:
     """Write embeddings in subprocess and report success/failure via queue."""
     try:
         cache = EmbeddingCache(cache_dir=cache_dir, model_name="process-lock-test")
+        _set_test_int8_calibration(cache)
         model = SeededRandomEncodeModel()
         papers = {
             f"p{worker_idx}_{offset}": {
@@ -67,6 +87,7 @@ def test_embedding_cache_lifecycle_contract() -> None:
     model = SeededRandomEncodeModel()
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="test-model")
+        _set_test_int8_calibration(cache)
         papers_v1 = {
             "p1": {"title": "Paper One", "abstract": "Abstract one"},
             "p2": {"title": "Paper Two", "abstract": "Abstract two"},
@@ -133,10 +154,81 @@ def test_embedding_cache_lock_timeout_env_override_contract(
     assert _resolve_cache_lock_timeout_seconds() == EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
 
 
+def test_embedding_cache_int8_requires_explicit_calibration_ranges() -> None:
+    """Fresh int8 namespaces should fail closed until calibration is persisted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="int8-needs-calibration")
+
+        with pytest.raises(
+            RuntimeError, match="Missing persisted int8 calibration ranges"
+        ):
+            cache.get_embeddings(
+                {"p1": {"title": "Alpha", "abstract": "First"}},
+                LookupEncodeModel(
+                    {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+                ),
+                show_progress=False,
+            )
+
+
+def test_embedding_cache_rechecks_misses_after_encode_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Encode phase should run outside the lock and reuse rows inserted mid-flight."""
+    monkeypatch.setenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR, "0.05")
+
+    class _RaceEncodeModel:
+        """Encode model that inserts the same row through a nested cache write."""
+
+        def __init__(self, cache: EmbeddingCache) -> None:
+            self.cache = cache
+            self.encode_calls = 0
+
+        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            del texts, kwargs
+            self.encode_calls += 1
+            self.cache.get_embeddings(
+                {"p1": {"title": "Alpha", "abstract": "First"}},
+                LookupEncodeModel(
+                    {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+                ),
+                show_progress=False,
+            )
+            return np.asarray([[1.0, 0.0]], dtype=np.float32)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="two-phase-lock-race",
+            storage_precision="float32",
+        )
+        model = _RaceEncodeModel(cache)
+        embeddings = cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            model,
+            show_progress=False,
+        )
+
+        with connect_db(cache.db_path) as conn:
+            paper_rows = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+            row_idx = conn.execute(
+                "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
+            ).fetchone()[0]
+        with h5py.File(cache.h5_path, "r") as h5:
+            embedding_rows = int(h5["embeddings"].shape[0])
+
+    assert model.encode_calls == 1
+    assert paper_rows == 1
+    assert embedding_rows == 1
+    assert row_idx == 0
+    np.testing.assert_allclose(embeddings["p1"], np.asarray([1.0, 0.0], np.float32))
+
+
 def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
     """Search should return metadata and reuse calibration ranges in one namespace."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="search-metadata")
+        _set_test_int8_calibration(cache)
         papers = {
             "p1": {
                 "title": "Alpha",
@@ -190,6 +282,7 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
 
     np.testing.assert_allclose(ranges_before, ranges_after)
     assert [result.paper_id for result in results[:2]] == ["p1", "p2"]
+    assert np.linalg.norm(results[0].embedding) == pytest.approx(1.0)
     assert results[0].metadata["authors"] == ["Alice", "Bob"]
     assert results[0].metadata["categories"] == ["cs.AI"]
     assert results[0].metadata["year"] == 2020
@@ -213,6 +306,7 @@ def test_embedding_cache_metadata_refresh_survives_mixed_batch_encode_failure() 
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="metadata-refresh-durable")
+        _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
             LookupEncodeModel(
@@ -297,6 +391,7 @@ def test_embedding_cache_default_text_builder_matches_profile_formatter() -> Non
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="text-builder-parity")
+        _set_test_int8_calibration(cache)
         model = _CaptureEncodeModel()
         embeddings = cache.get_embeddings(papers, model, show_progress=False)
 
@@ -309,6 +404,7 @@ def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:
     """Search should fail closed when scored rows have no metadata payload."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-search-metadata")
+        _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
             LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
@@ -338,6 +434,7 @@ def test_embedding_cache_search_rejects_non_vector_queries() -> None:
     """Search should reject non-1D query embeddings instead of flattening them."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="invalid-query-shape")
+        _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
             LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
@@ -416,6 +513,7 @@ def test_embedding_cache_search_fails_closed_on_metadata_provenance_mismatch(
     """Search should fail closed when persisted provenance metadata drifts."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name=model_name, **cache_kwargs)
+        _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
             LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
@@ -442,6 +540,7 @@ def test_embedding_cache_search_handles_unsorted_prefilter_candidates() -> None:
     """Search should normalize unsorted prefilter rows before HDF5 fancy indexing."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="unsorted-prefilter-cands")
+        _set_test_int8_calibration(cache)
         papers = {
             f"p{idx}": {"title": f"Title {idx}", "abstract": "Abstract"}
             for idx in range(6)
@@ -474,6 +573,7 @@ def test_embedding_cache_binary_prefilter_rows_are_monotonic_subset() -> None:
     """Binary prefilter should return monotonic candidate rows for HDF5 locality/safety."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="prefilter-monotonic")
+        _set_test_int8_calibration(cache)
         papers = {
             f"p{idx}": {"title": f"Title {idx}", "abstract": "Abstract"}
             for idx in range(6)
@@ -509,6 +609,7 @@ def test_embedding_cache_compression_codec_contracts() -> None:
             compression="lzf",
             compression_level=1,
         )
+        _set_test_int8_calibration(cache)
         assert cache.compression_level == 0
         cache.get_embeddings(
             {"p1": {"title": "Alpha", "abstract": "First"}},
@@ -580,6 +681,7 @@ def test_embedding_cache_restart_persistence_contracts() -> None:
         hydration_cache = EmbeddingCache(
             cache_dir=tmpdir, model_name="hydration-persistence"
         )
+        _set_test_int8_calibration(hydration_cache)
         hydration_cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
             SeededRandomEncodeModel(),
@@ -624,6 +726,7 @@ def test_embedding_cache_restart_persistence_contracts() -> None:
 
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="payload-presence")
         assert not cache.has_cached_payload()
+        _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
             SeededRandomEncodeModel(),
@@ -637,6 +740,7 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="paper-id-listing")
         assert cache.get_cached_paper_ids() == set()
+        _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {
                 "p1": {"title": "Seed 1", "abstract": "A"},
@@ -718,6 +822,7 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
     for case in cases:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache = EmbeddingCache(cache_dir=tmpdir, model_name=case["model_name"])
+            _set_test_int8_calibration(cache)
             cache.get_embeddings(
                 {"p1": {"title": "Seed", "abstract": "Abstract"}},
                 SeededRandomEncodeModel(),
@@ -800,6 +905,7 @@ def test_embedding_cache_recovery_when_h5_missing_clears_stale_sqlite_rows() -> 
     """Missing HDF5 payload should clear stale SQLite rows and hydration metadata."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-h5-stale-db")
+        _set_test_int8_calibration(cache)
         cache.get_embeddings(
             {"p1": {"title": "Seed", "abstract": "Abstract"}},
             SeededRandomEncodeModel(),
@@ -837,6 +943,7 @@ def test_embedding_cache_search_falls_back_when_binary_index_rows_mismatch(
         cache = EmbeddingCache(
             cache_dir=tmpdir, model_name=f"binary-row-mismatch-{binary_rows}"
         )
+        _set_test_int8_calibration(cache)
         lookup = LookupEncodeModel(
             {
                 "Alpha. First": np.array([1.0, 0.0], dtype=np.float32),
@@ -944,6 +1051,7 @@ def test_embedding_cache_serializes_multiprocess_initialization_recovery(
 def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
     """Legacy schema recovery and clear() should restore a healthy namespace."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
+    _set_test_int8_calibration(cache)
     model = SeededRandomEncodeModel()
 
     cache.h5_path.unlink(missing_ok=True)
@@ -963,6 +1071,7 @@ def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
     with connect_db(reloaded.db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
+    _set_test_int8_calibration(reloaded)
     reloaded.get_embeddings(
         {"seed": {"title": "Seed", "abstract": "x", "year": None}}, model
     )
@@ -978,6 +1087,7 @@ def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
 def test_embedding_cache_recovery_clears_orphan_h5_rows(tmp_path: Path) -> None:
     """Reload should clear namespace when HDF5 has rows missing SQLite metadata mappings."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="orphan-h5-row-recovery")
+    _set_test_int8_calibration(cache)
     cache.get_embeddings(
         {"seed": {"title": "Seed", "abstract": "x"}},
         LookupEncodeModel({"Seed. x": np.asarray([1.0, 0.0], dtype=np.float32)}),
@@ -1008,6 +1118,7 @@ def test_embedding_cache_clear_releases_file_handles(tmp_path: Path) -> None:
     handles on any platform.
     """
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="clear-handle-test")
+    _set_test_int8_calibration(cache)
     cache.get_embeddings(
         {"p1": {"title": "Test", "abstract": "Abstract"}},
         SeededRandomEncodeModel(),

@@ -222,6 +222,25 @@ def _sanitize_ranges(ranges: np.ndarray) -> np.ndarray:
     return np.vstack((mins, maxs)).astype(np.float32)
 
 
+def _l2_normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
+    """Return row-wise/unit-vector normalized embeddings in float32.
+
+    Int8 cache rows are normalized before quantization, but affine dequantization
+    does not preserve unit norm. Re-normalizing restored float32 rows keeps
+    cache-native rescoring aligned with cosine-style semantics used elsewhere.
+
+    :param np.ndarray embeddings: Vector or matrix payload to normalize.
+    :return np.ndarray: Float32 array with L2-normalized rows.
+    """
+    normalized = np.asarray(embeddings, dtype=np.float32)
+    if normalized.ndim == 1:
+        norm = float(np.linalg.norm(normalized))
+        return normalized / max(norm, 1e-12)
+
+    norms = np.linalg.norm(normalized, axis=1, keepdims=True)
+    return normalized / np.clip(norms, 1e-12, None)
+
+
 @dataclass(frozen=True)
 class CacheSearchResult:
     """Search result returned by ``EmbeddingCache.search``."""
@@ -246,6 +265,17 @@ class CacheNamespacePayloadStats:
     hydration_split: Optional[str]
     hydration_corpus_size: Optional[str]
     hydration_dataset_source: Optional[str]
+
+
+@dataclass(frozen=True)
+class PendingEmbeddingRecord:
+    """Cache-miss record staged across lookup/encode/commit phases."""
+
+    paper_id: str
+    metadata: Dict[str, object]
+    text_hash: str
+    text: str
+    row_idx: Optional[int]
 
 
 class EmbeddingCache:
@@ -347,7 +377,7 @@ class EmbeddingCache:
             return {}
 
         cached_embeddings: Dict[str, np.ndarray] = {}
-        papers_to_embed: List[Tuple[str, Dict, str, str, Optional[int]]] = []
+        papers_to_embed: List[PendingEmbeddingRecord] = []
         cached_rows: List[Tuple[str, int]] = []
         builder = text_builder or compose_title_abstract_text
 
@@ -360,6 +390,7 @@ class EmbeddingCache:
             disable=not progress_enabled,
         )
 
+        calibration_ranges: Optional[np.ndarray] = None
         with (
             self._cache_lock(),
             self._connect_db() as conn,
@@ -405,7 +436,13 @@ class EmbeddingCache:
                         )
                 else:
                     papers_to_embed.append(
-                        (paper_id, metadata, text_hash, text, row_idx)
+                        PendingEmbeddingRecord(
+                            paper_id=paper_id,
+                            metadata=dict(metadata),
+                            text_hash=text_hash,
+                            text=text,
+                            row_idx=row_idx,
+                        )
                     )
 
             if progress_enabled:
@@ -434,67 +471,133 @@ class EmbeddingCache:
             if not papers_to_embed:
                 return cached_embeddings
 
-            texts = [text for _, _, _, text, _ in papers_to_embed]
-            embeddings_array = np.asarray(
-                model.encode(
-                    texts,
-                    batch_size=batch_size,
-                    convert_to_tensor=False,
-                    normalize_embeddings=True,
-                    show_progress_bar=show_progress,
-                ),
-                dtype=np.float32,
-            )
-            if embeddings_array.ndim == 1:
-                embeddings_array = embeddings_array.reshape(1, -1)
-            if embeddings_array.shape[0] != len(papers_to_embed):
-                raise ValueError(
-                    "Embedding model returned unexpected row count: "
-                    f"{embeddings_array.shape[0]} for {len(papers_to_embed)} papers."
-                )
+            if self.storage_precision == "int8":
+                calibration_ranges = self._require_calibration_ranges(h5_file=h5)
 
-            embedding_dim = int(embeddings_array.shape[1])
+        texts = [record.text for record in papers_to_embed]
+        embeddings_array = np.asarray(
+            model.encode(
+                texts,
+                batch_size=batch_size,
+                convert_to_tensor=False,
+                normalize_embeddings=True,
+                show_progress_bar=show_progress,
+            ),
+            dtype=np.float32,
+        )
+        if embeddings_array.ndim == 1:
+            embeddings_array = embeddings_array.reshape(1, -1)
+        if embeddings_array.shape[0] != len(papers_to_embed):
+            raise ValueError(
+                "Embedding model returned unexpected row count: "
+                f"{embeddings_array.shape[0]} for {len(papers_to_embed)} papers."
+            )
+
+        embedding_dim = int(embeddings_array.shape[1])
+        if self.storage_precision == "int8":
+            if calibration_ranges is None:
+                raise RuntimeError(
+                    "Missing persisted int8 calibration ranges for cache writes."
+                )
+            if int(calibration_ranges.shape[1]) != embedding_dim:
+                raise ValueError(
+                    "Calibration range dimension mismatch in cache: "
+                    f"{int(calibration_ranges.shape[1])} != {embedding_dim}"
+                )
+            storage_embeddings = self._to_int8_embeddings(
+                embeddings_array=embeddings_array,
+                ranges=calibration_ranges,
+            )
+        else:
+            storage_embeddings = np.asarray(
+                embeddings_array,
+                dtype=_storage_dtype_for_precision(self.storage_precision),
+            )
+        binary_embeddings = self._to_binary_embeddings(embeddings_array)
+
+        with (
+            self._cache_lock(),
+            self._connect_db() as conn,
+            h5py.File(self.h5_path, "a") as h5,
+        ):
+            cursor = conn.cursor()
             self._set_h5_attrs(h5)
             embeddings_dataset = self._ensure_embeddings_dataset(h5, embedding_dim)
             binary_dataset = self._ensure_binary_dataset(h5, embedding_dim)
-            storage_embeddings = self._to_storage_embeddings(h5, embeddings_array)
-            binary_embeddings = self._to_binary_embeddings(embeddings_array)
+            if self.storage_precision == "int8":
+                current_ranges = self._require_calibration_ranges(
+                    h5_file=h5, embedding_dim=embedding_dim
+                )
+                if calibration_ranges is None or not np.array_equal(
+                    current_ranges, calibration_ranges
+                ):
+                    raise RuntimeError(
+                        "Int8 calibration ranges changed during encode; retry cache write."
+                    )
 
             existing_row_count = int(embeddings_dataset.shape[0])
+            latest_rows = self._load_existing_rows(
+                conn, [record.paper_id for record in papers_to_embed]
+            )
             new_embeddings: Dict[str, np.ndarray] = {}
             rows_to_upsert: List[Tuple[Any, ...]] = []
             append_embeddings: List[np.ndarray] = []
             append_binary_embeddings: List[np.ndarray] = []
-            append_records: List[Tuple[str, Dict, str]] = []
+            append_records: List[Tuple[str, Dict[str, object], str]] = []
 
-            for idx, (paper_id, metadata, text_hash, _, existing_row_idx) in enumerate(
-                papers_to_embed
-            ):
+            for idx, record in enumerate(papers_to_embed):
                 embedding = embeddings_array[idx]
                 storage_embedding = storage_embeddings[idx]
-                new_embeddings[paper_id] = embedding
+                binary_embedding = (
+                    None if binary_embeddings is None else binary_embeddings[idx]
+                )
+                new_embeddings[record.paper_id] = embedding
+                existing_row = latest_rows.get(record.paper_id)
+                latest_row_idx = (
+                    existing_row["row_idx"] if existing_row is not None else None
+                )
 
                 if (
-                    existing_row_idx is not None
-                    and 0 <= existing_row_idx < existing_row_count
+                    existing_row is not None
+                    and existing_row["text_hash"] == record.text_hash
+                    and latest_row_idx is not None
+                    and 0 <= latest_row_idx < existing_row_count
                 ):
-                    embeddings_dataset[existing_row_idx] = storage_embedding
-                    if binary_dataset is not None and binary_embeddings is not None:
-                        binary_dataset[existing_row_idx] = binary_embeddings[idx]
                     rows_to_upsert.append(
                         self._metadata_tuple(
-                            paper_id=paper_id,
-                            metadata=metadata,
-                            text_hash=text_hash,
+                            paper_id=record.paper_id,
+                            metadata=record.metadata,
+                            text_hash=record.text_hash,
                             embedding_dim=embedding_dim,
-                            row_idx=existing_row_idx,
+                            row_idx=latest_row_idx,
                         )
                     )
-                else:
-                    append_embeddings.append(storage_embedding)
-                    if binary_dataset is not None and binary_embeddings is not None:
-                        append_binary_embeddings.append(binary_embeddings[idx])
-                    append_records.append((paper_id, metadata, text_hash))
+                    continue
+
+                if (
+                    latest_row_idx is not None
+                    and 0 <= latest_row_idx < existing_row_count
+                ):
+                    embeddings_dataset[latest_row_idx] = storage_embedding
+                    if binary_dataset is not None and binary_embedding is not None:
+                        binary_dataset[latest_row_idx] = binary_embedding
+                    rows_to_upsert.append(
+                        self._metadata_tuple(
+                            paper_id=record.paper_id,
+                            metadata=record.metadata,
+                            text_hash=record.text_hash,
+                            embedding_dim=embedding_dim,
+                            row_idx=latest_row_idx,
+                        )
+                    )
+                    continue
+
+                append_embeddings.append(storage_embedding)
+                if binary_dataset is not None and binary_embedding is not None:
+                    append_binary_embeddings.append(binary_embedding)
+                append_records.append(
+                    (record.paper_id, record.metadata, record.text_hash)
+                )
 
             if append_embeddings:
                 append_array = np.vstack(append_embeddings).astype(
@@ -1979,17 +2082,19 @@ class EmbeddingCache:
             kwargs["compression_opts"] = int(self.compression_level)
         return kwargs
 
-    def _ensure_calibration_ranges(
+    def _require_calibration_ranges(
         self,
         h5_file: h5py.File,
-        embedding_dim: int,
-        embeddings_array: np.ndarray,
+        embedding_dim: Optional[int] = None,
     ) -> np.ndarray:
-        """Create or validate int8 calibration ranges.
+        """Load persisted int8 calibration ranges or fail closed.
+
+        Calibration is intentionally explicit at the strategy layer. Bootstrapping
+        ranges from whichever request batch happens to arrive first makes the
+        namespace path-dependent and can silently skew later quantization quality.
 
         :param h5py.File h5_file: Open HDF5 cache handle.
-        :param int embedding_dim: Expected embedding dimension.
-        :param np.ndarray embeddings_array: Current float32 batch.
+        :param Optional[int] embedding_dim: Expected embedding dimension, when known.
         :return np.ndarray: Calibration ranges with shape ``(2, dim)``.
         """
         if self.storage_precision != "int8":
@@ -1997,38 +2102,40 @@ class EmbeddingCache:
 
         existing = h5_file.get(CALIBRATION_RANGES_DATASET_NAME)
         if existing is None:
-            if embeddings_array.shape[0] < self.calibration_sample_size:
-                logger.warning(
-                    "Initializing int8 calibration ranges from %s embeddings; "
-                    "consider hydrating with at least %s for better stability.",
-                    embeddings_array.shape[0],
-                    self.calibration_sample_size,
-                )
-            ranges = np.vstack(
-                (
-                    np.min(embeddings_array, axis=0),
-                    np.max(embeddings_array, axis=0),
-                )
+            raise RuntimeError(
+                "Missing persisted int8 calibration ranges. "
+                "Hydrate through EmbeddingGraphBuilder or call "
+                "EmbeddingCache.set_calibration_ranges(...) before int8 writes."
             )
-            sanitized = _sanitize_ranges(ranges)
-            h5_file.create_dataset(
-                CALIBRATION_RANGES_DATASET_NAME,
-                data=sanitized,
-                dtype=np.float32,
-            )
-            return sanitized
 
         if existing.ndim != 2 or existing.shape[0] != 2:
             raise ValueError(
                 f"Calibration ranges dataset must have shape (2, dim), got {existing.shape}."
             )
-        if int(existing.shape[1]) != embedding_dim:
+        if embedding_dim is not None and int(existing.shape[1]) != int(embedding_dim):
             raise ValueError(
                 "Calibration range dimension mismatch in cache: "
-                f"{int(existing.shape[1])} != {embedding_dim}"
+                f"{int(existing.shape[1])} != {int(embedding_dim)}"
             )
 
         return _sanitize_ranges(np.asarray(existing, dtype=np.float32))
+
+    def _to_int8_embeddings(
+        self, embeddings_array: np.ndarray, ranges: np.ndarray
+    ) -> np.ndarray:
+        """Quantize float32 embeddings into int8 storage rows.
+
+        :param np.ndarray embeddings_array: Float32 embeddings.
+        :param np.ndarray ranges: Persisted calibration ranges.
+        :return np.ndarray: Int8 storage matrix.
+        """
+        quantize_embeddings = self._get_quantize_embeddings()
+        int8_embeddings = quantize_embeddings(
+            embeddings_array,
+            precision="int8",
+            ranges=_sanitize_ranges(ranges),
+        )
+        return np.asarray(int8_embeddings, dtype=np.int8)
 
     def _to_storage_embeddings(
         self,
@@ -2046,18 +2153,13 @@ class EmbeddingCache:
         if self.storage_precision == "float16":
             return np.asarray(embeddings_array, dtype=np.float16)
 
-        ranges = self._ensure_calibration_ranges(
+        ranges = self._require_calibration_ranges(
             h5_file,
             embedding_dim=int(embeddings_array.shape[1]),
-            embeddings_array=embeddings_array,
         )
-        quantize_embeddings = self._get_quantize_embeddings()
-        int8_embeddings = quantize_embeddings(
-            embeddings_array,
-            precision="int8",
-            ranges=ranges,
+        return self._to_int8_embeddings(
+            embeddings_array=embeddings_array, ranges=ranges
         )
-        return np.asarray(int8_embeddings, dtype=np.int8)
 
     def _to_binary_embeddings(
         self, embeddings_array: np.ndarray
@@ -2154,6 +2256,7 @@ class EmbeddingCache:
                 h5_file,
                 matrix.astype(np.int8, copy=False),
             )
+            matrix_f32 = _l2_normalize_embeddings(matrix_f32)
         elif self.storage_precision == "float16":
             matrix_f32 = matrix.astype(np.float32, copy=False)
         else:
@@ -2234,6 +2337,7 @@ class EmbeddingCache:
         :param Optional[np.ndarray] row_indices: Optional candidate subset.
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
         """
+        query = _l2_normalize_embeddings(query_embedding)
         if row_indices is not None:
             rows = np.unique(np.asarray(row_indices, dtype=np.int64))
             if rows.size == 0:
@@ -2244,21 +2348,25 @@ class EmbeddingCache:
                 )
 
             int8_matrix = np.asarray(embeddings_dataset[rows], dtype=np.int8)
-            matrix = self._dequantize_int8(h5_file, int8_matrix)
-            scores = matrix @ query_embedding
+            matrix = _l2_normalize_embeddings(
+                self._dequantize_int8(h5_file, int8_matrix)
+            )
+            scores = matrix @ query
             return self._select_top_k(rows, scores, matrix, top_k)
 
         row_count = int(embeddings_dataset.shape[0])
         chunk_size = 65536
         best_rows = np.asarray([], dtype=np.int64)
         best_scores = np.asarray([], dtype=np.float32)
-        best_embeddings = np.empty((0, int(query_embedding.shape[0])), dtype=np.float32)
+        best_embeddings = np.empty((0, int(query.shape[0])), dtype=np.float32)
 
         for start in range(0, row_count, chunk_size):
             end = min(start + chunk_size, row_count)
             int8_chunk = np.asarray(embeddings_dataset[start:end], dtype=np.int8)
-            chunk_matrix = self._dequantize_int8(h5_file, int8_chunk)
-            chunk_scores = chunk_matrix @ query_embedding
+            chunk_matrix = _l2_normalize_embeddings(
+                self._dequantize_int8(h5_file, int8_chunk)
+            )
+            chunk_scores = chunk_matrix @ query
             chunk_rows = np.arange(start, end, dtype=np.int64)
 
             rows, scores, embeddings = self._select_top_k(

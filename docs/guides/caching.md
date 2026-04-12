@@ -51,6 +51,10 @@ Default storage mode is quantized:
 
 The `binary_index` is an auxiliary retrieval index, not the primary embedding store.
 Final ranking still uses the cached `int8`/`float16`/`float32` vectors.
+For `int8`, calibration ranges must already exist before cache writes begin.
+Hydration-managed embedding workflows create and persist those ranges before the
+first int8 cache write; raw `EmbeddingCache` int8 writes now fail closed instead of
+bootstrapping ranges from an arbitrary request batch.
 
 Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
 CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected).
@@ -74,6 +78,8 @@ Metadata-only changes (`year`, `authors`, `categories`, or other stored fields t
 not alter embedding input text) refresh SQLite metadata rows without re-encoding vectors.
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
+The expensive encode step runs outside that lock; the lock only wraps short lookup and
+commit phases, and the commit phase re-checks cache misses before assigning final rows.
 Lock acquisition timeout defaults to `900` seconds and can be overridden with
 `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
