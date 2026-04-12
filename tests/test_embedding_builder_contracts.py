@@ -21,6 +21,7 @@ from citemesh.data.embedding_cache import CacheNamespacePayloadStats, CacheSearc
 from citemesh.strategies.embedding import (
     ENCODE_BATCH_SIZE,
     EmbeddingGraphBuilder,
+    _extract_dataset_paper_metadata,
     _query_seed_id,
 )
 from tests._helpers import ConstantEncodeModel, disable_embedding_dep_checks
@@ -1056,8 +1057,7 @@ def test_metadata_and_streaming_loader_contracts(
     """Metadata parsing and streaming hydration fallback should stay deterministic."""
     disable_embedding_dep_checks(monkeypatch)
 
-    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    snapshot = builder._extract_paper_metadata(
+    snapshot = _extract_dataset_paper_metadata(
         {
             "id": "2301.07041",
             "title": "A snapshot paper",
@@ -1068,7 +1068,7 @@ def test_metadata_and_streaming_loader_contracts(
         },
         fallback_index=0,
     )
-    versioned = builder._extract_paper_metadata(
+    versioned = _extract_dataset_paper_metadata(
         {
             "id": "arXiv:1706.03762v5",
             "title": "Versioned",

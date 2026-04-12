@@ -5,7 +5,6 @@ A unified package for creating academic paper similarity graphs using
 multiple strategies: citation networks, semantic embeddings, or hybrid approaches.
 """
 
-from importlib import import_module
 from typing import Any
 
 try:
@@ -17,37 +16,20 @@ __author__ = "CiteMesh Contributors"
 
 from citemesh.core import Author, Paper
 
-_LAZY_STRATEGY_EXPORTS = {
-    "GraphBuilderStrategy": ("citemesh.strategies.base", "GraphBuilderStrategy"),
-    "CitationGraphBuilder": ("citemesh.strategies.citation", "CitationGraphBuilder"),
-    "RecommendationGraphBuilder": (
-        "citemesh.strategies.recommendation",
-        "RecommendationGraphBuilder",
-    ),
-    "EmbeddingGraphBuilder": (
-        "citemesh.strategies.embedding",
-        "EmbeddingGraphBuilder",
-    ),
-    "HybridGraphBuilder": ("citemesh.strategies.hybrid", "HybridGraphBuilder"),
-}
+from . import strategies as _strategies
 
 __all__ = [
     "__version__",
     "Paper",
     "Author",
-    "GraphBuilderStrategy",
-    "CitationGraphBuilder",
-    "RecommendationGraphBuilder",
-    "EmbeddingGraphBuilder",
-    "HybridGraphBuilder",
+    *_strategies.__all__,
 ]
 
 
 def __getattr__(name: str) -> Any:
     """Lazily resolve strategy exports to keep optional boundaries lightweight."""
-    if name in _LAZY_STRATEGY_EXPORTS:
-        module_name, attr_name = _LAZY_STRATEGY_EXPORTS[name]
-        value = getattr(import_module(module_name), attr_name)
+    if name in _strategies.__all__:
+        value = getattr(_strategies, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module 'citemesh' has no attribute '{name}'")

@@ -2130,7 +2130,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 if self.corpus_size is not None and idx >= self.corpus_size:
                     break
 
-                metadata = self._extract_paper_metadata(raw_record, idx)
+                metadata = _extract_dataset_paper_metadata(raw_record, idx)
                 if len(sampled_records) < self.calibration_sample_size:
                     sampled_records.append(metadata)
                 else:
@@ -2230,7 +2230,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 if self.corpus_size is not None and idx >= self.corpus_size:
                     break
 
-                metadata = self._extract_paper_metadata(raw_record, idx)
+                metadata = _extract_dataset_paper_metadata(raw_record, idx)
                 if existing_paper_ids is not None:
                     paper_id = str(metadata.get("paper_id", "")).strip()
                     if not paper_id or paper_id in existing_paper_ids:
@@ -2681,16 +2681,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             text_builder=self.model_profile.format_document,
         )
         return len(metadata_map)
-
-    def _extract_paper_metadata(self, paper: Dict, fallback_index: int) -> Dict:
-        """
-        Normalize dataset record into metadata dictionary.
-
-        :param Dict paper: Raw dataset record
-        :param int fallback_index: Index used to generate ID if missing
-        :return Dict: Dictionary with normalized fields
-        """
-        return _extract_dataset_paper_metadata(paper, fallback_index)
 
     def _update_citation_counts(self, papers: Dict[str, Paper]) -> None:
         """

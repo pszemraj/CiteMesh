@@ -300,9 +300,8 @@ def disable_embedding_dep_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     :param pytest.MonkeyPatch monkeypatch: Monkeypatch fixture.
     :return None: Patches dependency guards in embedding/hybrid strategy modules.
     """
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._check_embedding_deps", lambda: None
-    )
-    monkeypatch.setattr(
-        "citemesh.strategies.hybrid._check_embedding_deps", lambda: None
-    )
+    from citemesh.strategies import embedding as embedding_strategy
+    from citemesh.strategies import hybrid as hybrid_strategy
+
+    monkeypatch.setattr(embedding_strategy, "_check_embedding_deps", lambda: None)
+    monkeypatch.setattr(hybrid_strategy, "_check_embedding_deps", lambda: None)
