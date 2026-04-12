@@ -550,6 +550,19 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "build",
                 "arxiv:1706.03762",
                 "--strategy",
+                "hybrid",
+                "--max-semantic",
+                "0",
+                "--model",
+                DEFAULT_EMBEDDING_MODEL_NAME,
+            ],
+            "Hybrid semantic branch is disabled with --max-semantic 0",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
                 "embedding",
                 "--cache-compression",
                 "lzf",
@@ -1093,6 +1106,49 @@ def test_dashboard_collection_helpers_cover_resolver_and_bundle_loading() -> Non
     assert set(bundle["payloads"]) == {"recommendation:seed-a"}
 
 
+def test_dashboard_collection_mode_logs_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Collection-mode dashboard exports should log their extra saved-artifact flow."""
+    graph = build_seed_graph("seed")
+    info_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            {},
+            methods=("to_dashboard_html", "to_json"),
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir) / "collection"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "-o",
+                str(output_dir),
+            ],
+        )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    info_messages = [
+        str(call.args[0]) for call in info_mock.call_args_list if call.args
+    ]
+    assert any("Dashboard collection mode:" in msg for msg in info_messages)
+
+
 def test_build_uses_compact_plot_metadata_and_summary_export_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1323,6 +1379,61 @@ def test_embedding_build_logs_side_effect_contract(
     assert any("Embedding config:" in msg for msg in messages)
 
 
+def test_hybrid_disabled_semantic_branch_skips_embedding_side_effect_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid runs without semantic enrichment should not advertise embedding work."""
+    graph = build_seed_graph("seed")
+
+    info_mock = MagicMock()
+    warning_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    monkeypatch.setattr(cli_module.logger, "warning", warning_mock)
+    monkeypatch.setattr(
+        cli_module,
+        "_embedding_cache_directory_stats",
+        lambda: (Path("/tmp/cache"), 0, 0),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory({}, methods=("to_json",)),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "graph.json"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--max-semantic",
+                "0",
+                "--export",
+                "json",
+                "-o",
+                str(output),
+            ],
+        )
+        assert output.exists()
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    info_messages = [
+        str(call.args[0]) for call in info_mock.call_args_list if call.args
+    ]
+    warning_messages = [
+        str(call.args[0]) for call in warning_mock.call_args_list if call.args
+    ]
+    assert not any("Embedding config:" in msg for msg in info_messages)
+    assert not any("No embedding cache found" in msg for msg in warning_messages)
+
+
 def test_strategy_dispatches_to_matching_builder_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1525,6 +1636,36 @@ def test_programmatic_strategy_dispatch_contracts() -> None:
         cli_module._build_strategy_graph(invalid_embedding_namespace, "embedding")
 
 
+def test_programmatic_strategy_dispatch_validates_scalar_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic dispatch should enforce parser-equivalent scalar validation."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "CitationGraphBuilder",
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+
+    with pytest.raises(ValueError, match="must be at least 1"):
+        cli_module._build_strategy_graph(_dispatch_namespace(max_papers=0), "citation")
+    assert captured == {}
+
+    with pytest.raises(ValueError, match="must be a float"):
+        cli_module._build_strategy_graph(
+            _dispatch_namespace(similarity_threshold="banana"),
+            "citation",
+        )
+    assert captured == {}
+
+    with pytest.raises(ValueError, match="must be a non-empty string"):
+        cli_module._build_strategy_graph(
+            _dispatch_namespace(paper_id="   "),
+            "citation",
+        )
+    assert captured == {}
+
+
 def test_cli_help_contracts() -> None:
     """CLI help output should expose stable semantic contracts."""
     cases = [
@@ -1566,6 +1707,15 @@ def test_cli_help_contracts() -> None:
         lowered = result.stdout.lower()
         for token in expected_tokens:
             assert token.lower() in lowered
+
+
+def test_build_help_discloses_dashboard_collection_mode_contracts() -> None:
+    """Build help should disclose dashboard collection-vs-standalone behavior."""
+    result = run_cli_command(["build", "--help"])
+    assert result.returncode == 0
+    lowered = result.stdout.lower()
+    for token in ["dashboard.html", "dashboard.manifest.json", ".dashboard.html"]:
+        assert token in lowered
 
 
 def test_output_path_and_slug_contracts() -> None:
@@ -1653,17 +1803,20 @@ def test_output_path_and_slug_contracts() -> None:
 
 def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
     """Running ``citemesh.__main__`` should invoke ``citemesh.cli.main``."""
-    called = {"main": False}
+    called: dict[str, object] = {}
 
-    def fake_main() -> int:
-        called["main"] = True
+    def fake_main(argv: list[str] | None = None) -> int:
+        called["argv"] = argv
         return 0
 
     monkeypatch.setattr("citemesh.cli.main", fake_main)
+    monkeypatch.setattr(
+        "sys.argv", ["python", "build", "seed", "--strategy", "citation"]
+    )
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_module("citemesh.__main__", run_name="__main__")
     assert exc_info.value.code == 0
-    assert called["main"] is True
+    assert called["argv"] == ["build", "seed", "--strategy", "citation"]
 
 
 def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:

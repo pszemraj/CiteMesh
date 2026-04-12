@@ -9,7 +9,8 @@ Start from one paper you already know, then quickly discover:
 - newer papers that are genuinely related to that paper's core topic
 - older, high-quality foundational papers that matter for understanding the same area
 
-The default hybrid workflow is tuned around this discovery pattern rather than maximizing raw graph size.
+The CLI defaults to the `recommendation` strategy for the fastest topical pass.
+Use `--strategy hybrid` when you want the tuned citation-plus-semantic workflow for this discovery pattern.
 
 ## Documentation
 

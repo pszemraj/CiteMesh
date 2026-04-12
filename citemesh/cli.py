@@ -14,7 +14,6 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 
 import networkx as nx
@@ -57,56 +56,6 @@ log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
 output_console = Console(width=DEFAULT_LOG_WIDTH)
 _LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
-_PROVIDED_OPTION_DESTS_ATTR = "_provided_option_dests"
-
-
-def _record_provided_option(namespace: argparse.Namespace, dest: str) -> None:
-    """Record an explicitly provided optional-argument destination.
-
-    :param argparse.Namespace namespace: Active argparse namespace.
-    :param str dest: Action destination to record.
-    :return None: Mutates namespace tracking state.
-    """
-    provided = getattr(namespace, _PROVIDED_OPTION_DESTS_ATTR, None)
-    if provided is None:
-        provided = set()
-        setattr(namespace, _PROVIDED_OPTION_DESTS_ATTR, provided)
-    provided.add(dest)
-
-
-class _TrackingArgumentParser(argparse.ArgumentParser):
-    """ArgumentParser variant that tracks explicitly provided optional arguments."""
-
-    def _add_action(self, action: argparse.Action) -> argparse.Action:
-        """Wrap optional actions so parser results retain explicit option usage.
-
-        :param argparse.Action action: Action being registered.
-        :return argparse.Action: Registered action.
-        """
-        if action.option_strings and action.dest != "help":
-            original_call = action.__call__
-
-            def _tracked_call(
-                action_self: argparse.Action,
-                parser: argparse.ArgumentParser,
-                namespace: argparse.Namespace,
-                values: object,
-                option_string: str | None = None,
-            ) -> None:
-                """Record explicit option use before delegating to argparse action.
-
-                :param argparse.Action action_self: Bound argparse action instance.
-                :param argparse.ArgumentParser parser: Active parser.
-                :param argparse.Namespace namespace: Parse namespace under mutation.
-                :param object values: Parsed action value payload.
-                :param str | None option_string: Option token used on the command line.
-                :return None: Mutates namespace tracking state, then delegates.
-                """
-                _record_provided_option(namespace, action_self.dest)
-                original_call(parser, namespace, values, option_string)
-
-            action.__call__ = MethodType(_tracked_call, action)
-        return super()._add_action(action)
 
 
 def _configure_logging(
@@ -163,6 +112,8 @@ def _bounded_int(value: str, *, minimum: int) -> int:
     :return int: Parsed integer.
     :raises argparse.ArgumentTypeError: If parsing fails or value is below minimum.
     """
+    if isinstance(value, bool):
+        raise argparse.ArgumentTypeError("must be an integer")
     try:
         parsed = int(value)
     except ValueError as exc:
@@ -197,6 +148,8 @@ def _threshold_float(value: str) -> float:
     :return float: Parsed threshold value.
     :raises argparse.ArgumentTypeError: If value is outside [0, 1].
     """
+    if isinstance(value, bool):
+        raise argparse.ArgumentTypeError("must be a float")
     try:
         parsed = float(value)
     except ValueError as exc:
@@ -382,6 +335,10 @@ _VALIDATION_NORMALIZED_FIELDS: Tuple[str, ...] = (
     "max_citations",
     "max_references",
 )
+_PROGRAMMATIC_BUILD_VALUE_DESTS: Set[str] = set(_BUILD_STRATEGY_OPTION_SUPPORT) | {
+    "paper_id",
+    "max_papers",
+}
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
     "model_revision",
@@ -533,6 +490,20 @@ def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
     :return bool: ``True`` when hybrid semantic branch can run.
     """
     return _resolved_hybrid_max_semantic(cli_args) > 0
+
+
+def _embedding_branch_enabled(cli_args: argparse.Namespace) -> bool:
+    """Return whether the active build will execute an embedding-backed workflow.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :return bool: ``True`` when embedding runtime, cache, and corpus work may run.
+    """
+    strategy = str(getattr(cli_args, "strategy", "")).strip().lower()
+    if strategy == "embedding":
+        return True
+    if strategy == "hybrid":
+        return _hybrid_semantic_branch_enabled(cli_args)
+    return False
 
 
 def _strategy_score_contract(strategy: str) -> Dict[str, object]:
@@ -696,7 +667,7 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     :param argparse.Namespace args: Parsed build arguments.
     :return None: Emits info-level contract summary logs.
     """
-    if args.strategy not in {"embedding", "hybrid"}:
+    if not _embedding_branch_enabled(args):
         return
 
     _, cache_files, _ = _embedding_cache_directory_stats()
@@ -738,6 +709,66 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
                 "Cache overwrite rationale: %s",
                 overwrite_reason,
             )
+
+
+def _normalize_programmatic_build_value(
+    action: argparse.Action,
+    value: object,
+    parser_error_sink: argparse.ArgumentParser,
+) -> object:
+    """Normalize a programmatic build value using the parser action contract.
+
+    :param argparse.Action action: Parser action defining the value contract.
+    :param object value: Programmatic value to validate.
+    :param argparse.ArgumentParser parser_error_sink: Parser-like error sink.
+    :return object: Normalized value compatible with CLI parsing rules.
+    """
+    if value is None:
+        return None
+
+    primary_label = action.option_strings[0] if action.option_strings else action.dest
+    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+        if not isinstance(value, bool):
+            parser_error_sink.error(f"{primary_label} must be a boolean.")
+        return value
+
+    normalized = value
+    if action.type is not None:
+        try:
+            normalized = action.type(value)
+        except argparse.ArgumentTypeError as exc:
+            parser_error_sink.error(str(exc))
+        except (TypeError, ValueError) as exc:
+            parser_error_sink.error(str(exc))
+
+    if action.choices is not None and normalized not in action.choices:
+        choices_text = ", ".join(str(choice) for choice in action.choices)
+        parser_error_sink.error(f"{primary_label} must be one of: {choices_text}.")
+    return normalized
+
+
+def _validate_programmatic_build_values(
+    args: argparse.Namespace,
+    build_parser: argparse.ArgumentParser,
+    parser_error_sink: argparse.ArgumentParser,
+) -> None:
+    """Validate programmatic build namespaces against CLI scalar contracts.
+
+    :param argparse.Namespace args: Candidate build namespace.
+    :param argparse.ArgumentParser build_parser: Build parser used for action metadata.
+    :param argparse.ArgumentParser parser_error_sink: Parser-like error sink.
+    :return None: Mutates ``args`` with normalized CLI-equivalent values.
+    """
+    for action in build_parser._actions:
+        dest = str(getattr(action, "dest", "") or "")
+        if dest not in _PROGRAMMATIC_BUILD_VALUE_DESTS or not hasattr(args, dest):
+            continue
+        normalized = _normalize_programmatic_build_value(
+            action,
+            getattr(args, dest),
+            parser_error_sink,
+        )
+        setattr(args, dest, normalized)
 
 
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
@@ -834,6 +865,11 @@ def _build_strategy_graph(
                 """
                 raise ValueError(message)
 
+        _validate_programmatic_build_values(
+            args_for_validation,
+            build_parser_snapshot,
+            _ProgrammaticBuildParser(),  # type: ignore[arg-type]
+        )
         _validate_build_cli_contract(
             args_for_validation,
             _ProgrammaticBuildParser(),  # type: ignore[arg-type]
@@ -882,16 +918,69 @@ def _infer_provided_build_option_dests(
     return provided
 
 
-def _namespace_provided_option_dests(args: argparse.Namespace) -> Set[str]:
-    """Return explicitly provided option destinations tracked during argparse parsing.
+def _action_consumes_cli_value(action: argparse.Action) -> bool:
+    """Return whether an argparse action consumes a following CLI value token.
 
-    :param argparse.Namespace args: Parsed argparse namespace.
-    :return Set[str]: Explicitly provided option destinations.
+    :param argparse.Action action: Parser action to inspect.
+    :return bool: ``True`` when the action consumes a separate value token.
     """
-    provided = getattr(args, _PROVIDED_OPTION_DESTS_ATTR, None)
-    if not isinstance(provided, set):
+    return not isinstance(
+        action,
+        (
+            argparse._HelpAction,
+            argparse._StoreConstAction,
+            argparse._StoreTrueAction,
+            argparse._StoreFalseAction,
+            argparse._CountAction,
+        ),
+    )
+
+
+def _provided_build_option_dests_from_argv(
+    argv: Sequence[str], build_parser: argparse.ArgumentParser
+) -> Set[str]:
+    """Return explicitly provided build-option destinations from CLI argv tokens.
+
+    :param Sequence[str] argv: Raw CLI argv without executable name.
+    :param argparse.ArgumentParser build_parser: Build subcommand parser.
+    :return Set[str]: Explicitly provided build-option destinations.
+    """
+    if "build" not in argv:
         return set()
-    return set(provided)
+
+    build_tokens = list(argv[argv.index("build") + 1 :])
+    provided: Set[str] = set()
+    token_index = 0
+    while token_index < len(build_tokens):
+        token = build_tokens[token_index]
+        parsed_optional = build_parser._parse_optional(token)
+        if parsed_optional is None:
+            token_index += 1
+            continue
+
+        action = parsed_optional[0]
+        option_string = parsed_optional[1]
+        explicit_arg = parsed_optional[3] if len(parsed_optional) > 3 else None
+        if action is None or option_string is None or not action.option_strings:
+            token_index += 1
+            continue
+
+        provided.add(action.dest)
+        token_index += 1
+        if explicit_arg is not None or not _action_consumes_cli_value(action):
+            continue
+
+        nargs = action.nargs
+        if nargs in (None, 1):
+            token_index += 1
+            continue
+        if isinstance(nargs, int):
+            token_index += max(nargs, 0)
+            continue
+
+        token_index += 1
+
+    return provided
 
 
 def _create_parser() -> Tuple[
@@ -902,12 +991,12 @@ def _create_parser() -> Tuple[
     :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
         Root parser, build subcommand parser, cache subcommand parser.
     """
-    root_logging_parent = _TrackingArgumentParser(add_help=False)
+    root_logging_parent = argparse.ArgumentParser(add_help=False)
     _add_logging_arguments(root_logging_parent)
-    command_logging_parent = _TrackingArgumentParser(add_help=False)
+    command_logging_parent = argparse.ArgumentParser(add_help=False)
     _add_logging_arguments(command_logging_parent, suppress_defaults=True)
 
-    parser = _TrackingArgumentParser(
+    parser = argparse.ArgumentParser(
         description="CiteMesh: Create citation graph visualizations",
         parents=[root_logging_parent],
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -941,7 +1030,6 @@ Environment variables:
     subparsers = parser.add_subparsers(
         dest="command",
         help="Commands",
-        parser_class=_TrackingArgumentParser,
     )
 
     # Build command
@@ -975,8 +1063,10 @@ Environment variables:
         type=str,
         default=None,
         help=(
-            "Output file path for single export, or output directory base for "
-            "multi-export runs (auto-named if not specified)"
+            "Output file path for single export, or output/collection root for "
+            "multi-export runs. With dashboard export, an explicit "
+            "*.dashboard.html path keeps standalone mode; otherwise CiteMesh "
+            "writes dashboard.html + dashboard.manifest.json under the output root."
         ),
     )
 
@@ -986,7 +1076,12 @@ Environment variables:
         choices=[*EXPORT_FORMATS, "all"],
         action="append",
         default=None,
-        help="Export format; repeat for multiple (default: png)",
+        help=(
+            "Export format; repeat for multiple (default: png). Dashboard export "
+            "normally uses collection mode (shared dashboard.html + manifest + "
+            "per-run JSON/config artifacts). Use -o <name>.dashboard.html for a "
+            "standalone one-file dashboard."
+        ),
     )
 
     build_parser.add_argument(
@@ -1301,7 +1396,6 @@ Environment variables:
     cache_subparsers = cache_parser.add_subparsers(
         dest="cache_command",
         help="Cache operations",
-        parser_class=_TrackingArgumentParser,
     )
     cache_clear_parser = cache_subparsers.add_parser(
         "clear",
@@ -2009,9 +2103,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     :return int: Process-style exit code.
     """
     parser, build_parser, cache_parser = _create_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    argv_list = list(argv) if argv is not None else None
+    args = parser.parse_args(argv_list if argv_list is not None else None)
     _configure_logging(log_level=args.log_level, log_width=args.log_width)
-    provided_build_options = _namespace_provided_option_dests(args)
+    if argv_list is not None:
+        provided_build_options = _provided_build_option_dests_from_argv(
+            argv_list, build_parser
+        )
+    else:
+        provided_build_options = _infer_provided_build_option_dests(args, build_parser)
 
     if not args.command:
         parser.print_help()
@@ -2066,6 +2166,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                     explicit_output=bool(args.output),
                     strategy=args.strategy,
                 )
+            if dashboard_manifest_path is not None:
+                run_artifact_root = (
+                    output_paths["json"].parent
+                    if "json" in output_paths
+                    else next(iter(output_paths.values())).parent
+                )
+                logger.info(
+                    "Dashboard collection mode: shell=%s manifest=%s run_artifacts=%s.",
+                    output_paths["dashboard"],
+                    dashboard_manifest_path,
+                    run_artifact_root,
+                )
             for parent in {path.parent for path in output_paths.values()}:
                 if parent and not parent.exists():
                     parent.mkdir(parents=True, exist_ok=True)
@@ -2080,9 +2192,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "theme": args.theme,
                 "score_contract": _strategy_score_contract(args.strategy),
             }
-            include_embedding_metadata = args.strategy == "embedding" or (
-                args.strategy == "hybrid" and _hybrid_semantic_branch_enabled(args)
-            )
+            include_embedding_metadata = _embedding_branch_enabled(args)
             if include_embedding_metadata:
                 runtime_embedding_metadata: Optional[Dict[str, Any]] = None
                 raw_runtime_metadata = graph.graph.get("embedding_runtime")
