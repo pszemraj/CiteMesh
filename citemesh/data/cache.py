@@ -5,7 +5,7 @@ Helpers for determining cache directories in a cross-platform way.
 from __future__ import annotations
 
 import os
-import sys
+import platform
 from pathlib import Path
 
 
@@ -18,13 +18,15 @@ def _default_cache_root() -> Path:
     if override:
         return Path(override)
 
-    if sys.platform.startswith("win"):
+    system = platform.system()
+
+    if system == "Windows":
         base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
         if base:
             return Path(base) / "CiteMesh"
         return Path.home() / "AppData" / "Local" / "CiteMesh"
 
-    if sys.platform == "darwin":
+    if system == "Darwin":
         return Path.home() / "Library" / "Caches" / "citemesh"
 
     xdg_cache = os.getenv("XDG_CACHE_HOME")

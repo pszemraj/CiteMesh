@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -14,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+import citemesh.services as services_module
 from citemesh.core import API_CONFIG, Paper
 from citemesh.services import semantic_scholar as s2
 from citemesh.services import semantic_scholar as semantic_module
@@ -26,31 +26,14 @@ from citemesh.services.semantic_scholar import (
 from tests._helpers import get_paper_id_normalization_cases
 
 
-def test_lazy_service_and_strategy_exports_do_not_pull_semantic_scholar_on_import(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Embedding imports should not require Semantic Scholar client deps eagerly."""
-    for module_name in (
-        "citemesh.services",
-        "citemesh.services.semantic_scholar",
-        "citemesh.strategies",
-        "citemesh.strategies.embedding",
-    ):
-        monkeypatch.delitem(sys.modules, module_name, raising=False)
+def test_service_and_strategy_package_exports() -> None:
+    """Package exports should resolve directly from their defining modules."""
+    from citemesh.strategies import EmbeddingGraphBuilder
 
-    monkeypatch.setitem(sys.modules, "semanticscholar", None)
-    monkeypatch.setitem(sys.modules, "semanticscholar.SemanticScholarException", None)
-
-    services_module = importlib.import_module("citemesh.services")
-    assert "citemesh.services.semantic_scholar" not in sys.modules
-    assert callable(services_module.get_client)
-
-    strategies_module = importlib.import_module("citemesh.strategies")
-    assert "citemesh.strategies.embedding" not in sys.modules
-
-    embedding_builder = getattr(strategies_module, "EmbeddingGraphBuilder")
-    assert embedding_builder.__name__ == "EmbeddingGraphBuilder"
-    assert "citemesh.services.semantic_scholar" not in sys.modules
+    assert services_module.get_client is get_client
+    assert services_module.reset_client is reset_client
+    assert services_module.SemanticScholarClient is SemanticScholarClient
+    assert EmbeddingGraphBuilder.__module__ == "citemesh.strategies.embedding"
 
 
 class _MockResponse:

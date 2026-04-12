@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import sqlite3
-import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +27,8 @@ import h5py
 import numpy as np
 from filelock import FileLock, Timeout
 from tqdm.auto import tqdm
+
+from citemesh._runtime import stderr_isatty
 
 from .cache import format_bytes, get_cache_dir
 from .model_profiles import DEFAULT_EMBEDDING_MODEL_NAME, compose_title_abstract_text
@@ -382,7 +383,7 @@ class EmbeddingCache:
         builder = text_builder or compose_title_abstract_text
 
         items = list(papers.items())
-        progress_enabled = show_progress and sys.stderr.isatty() and len(items) > 50
+        progress_enabled = show_progress and stderr_isatty() and len(items) > 50
         iterator: Iterable[Tuple[str, Dict]] = tqdm(
             items,
             desc="Checking cache",

@@ -8,12 +8,12 @@ bibliographic coupling (shared references), and co-citation analysis.
 from __future__ import annotations
 
 import logging
-import sys
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 import networkx as nx
 from tqdm.auto import tqdm
 
+from citemesh._runtime import stderr_isatty
 from citemesh.core import Paper
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
@@ -276,7 +276,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         references = self.client.get_paper_references(
             seed.paper_id, limit=self.max_references
         )
-        progress_enabled = sys.stderr.isatty()
+        progress_enabled = stderr_isatty()
         reference_ids = self._ingest_relation_batch(
             papers,
             references,

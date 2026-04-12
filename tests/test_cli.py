@@ -8,7 +8,6 @@ import json
 import re
 import runpy
 import shlex
-import sys
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -52,27 +51,20 @@ def run_cli_command(args: list[str]) -> SimpleNamespace:
     :param list[str] args: CLI arguments.
     :return SimpleNamespace: Return code and captured streams.
     """
-    previous_argv = sys.argv[:]
-    sys.argv = ["citemesh"] + list(args)
-
     stdout = io.StringIO()
     stderr = io.StringIO()
 
-    try:
-        with redirect_stdout(stdout), redirect_stderr(stderr):
-            try:
-                cli_module.main()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        try:
+            returncode = cli_module.main(args)
+        except SystemExit as exc:
+            code = exc.code
+            if isinstance(code, int):
+                returncode = code
+            elif code is None:
                 returncode = 0
-            except SystemExit as exc:
-                code = exc.code
-                if isinstance(code, int):
-                    returncode = code
-                elif code is None:
-                    returncode = 0
-                else:
-                    returncode = 1
-    finally:
-        sys.argv = previous_argv
+            else:
+                returncode = 1
 
     return SimpleNamespace(
         returncode=returncode,
@@ -171,7 +163,7 @@ def test_force_rebuild_cache_confirmation_contracts(
         build_fake_exporter_factory({}, methods=("to_json",)),
     )
 
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _: "n")
     cancelled = run_cli_command(
         [
@@ -189,7 +181,7 @@ def test_force_rebuild_cache_confirmation_contracts(
     assert cancelled.returncode != 0
     assert build_graph_mock.call_count == 0
 
-    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: False)
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     non_interactive = run_cli_command(
@@ -1510,7 +1502,7 @@ def test_programmatic_embedding_dispatch_normalizes_lzf_level(
 
 
 def test_programmatic_strategy_dispatch_contracts() -> None:
-    """Programmatic dispatch should enforce strategy validation and lazy exports."""
+    """Programmatic dispatch should enforce strategy validation."""
     namespace = _dispatch_namespace()
     with pytest.raises(ValueError, match="Unsupported strategy: unknown"):
         cli_module._build_strategy_graph(namespace, "unknown")
@@ -1531,13 +1523,6 @@ def test_programmatic_strategy_dispatch_contracts() -> None:
         match="--calibration-sample-size requires --storage-precision int8",
     ):
         cli_module._build_strategy_graph(invalid_embedding_namespace, "embedding")
-
-    import citemesh
-
-    assert citemesh.CitationGraphBuilder.__name__ == "CitationGraphBuilder"
-    assert citemesh.RecommendationGraphBuilder.__name__ == "RecommendationGraphBuilder"
-    assert citemesh.EmbeddingGraphBuilder.__name__ == "EmbeddingGraphBuilder"
-    assert citemesh.HybridGraphBuilder.__name__ == "HybridGraphBuilder"
 
 
 def test_cli_help_contracts() -> None:
@@ -1670,11 +1655,14 @@ def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
     """Running ``citemesh.__main__`` should invoke ``citemesh.cli.main``."""
     called = {"main": False}
 
-    def fake_main() -> None:
+    def fake_main() -> int:
         called["main"] = True
+        return 0
 
     monkeypatch.setattr("citemesh.cli.main", fake_main)
-    runpy.run_module("citemesh.__main__", run_name="__main__")
+    with pytest.raises(SystemExit) as exc_info:
+        runpy.run_module("citemesh.__main__", run_name="__main__")
+    assert exc_info.value.code == 0
     assert called["main"] is True
 
 

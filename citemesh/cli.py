@@ -16,13 +16,14 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 
 import networkx as nx
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+from citemesh._runtime import stdin_isatty
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
@@ -1777,7 +1778,7 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
             logger.warning("Cache overwrite rationale: %s", overwrite_reason)
         return True
 
-    if not sys.stdin.isatty():
+    if not stdin_isatty():
         logger.error(
             "Refusing --force-rebuild-cache in non-interactive mode without "
             "--overwrite-cache. Re-run with --overwrite-cache to proceed."
@@ -1847,7 +1848,7 @@ def _confirmed_cache_clear(
             logger.warning("Cache clear rationale: %s", normalized_reason)
         return True
 
-    if not sys.stdin.isatty():
+    if not stdin_isatty():
         logger.error(
             "Refusing to clear cache in non-interactive mode without --yes. "
             "Re-run with: citemesh cache clear --yes"
@@ -1987,26 +1988,30 @@ def _scan_cache_directory() -> int:
     return 0
 
 
-def main() -> None:
-    """Main CLI entry point."""
-    parser, build_parser, cache_parser = _create_parser()
+def main(argv: Sequence[str] | None = None) -> int:
+    """Main CLI entry point.
 
-    args = parser.parse_args()
+    :param Sequence[str] | None argv: Optional CLI argument list without executable.
+    :return int: Process-style exit code.
+    """
+    parser, build_parser, cache_parser = _create_parser()
+    raw_argv = list(argv) if argv is not None else list(sys.argv[1:])
+    args = parser.parse_args(raw_argv)
     _configure_logging(log_level=args.log_level, log_width=args.log_width)
     provided_build_options = _collect_provided_build_option_dests(
-        build_parser, sys.argv[1:]
+        build_parser, raw_argv
     )
 
     if not args.command:
         parser.print_help()
-        sys.exit(1)
+        return 1
 
     if args.command == "build":
         _validate_build_cli_contract(args, build_parser, provided_build_options)
         try:
             if not _confirm_force_rebuild_cache(args):
                 logger.info("Build aborted.")
-                sys.exit(1)
+                return 1
             _log_build_side_effect_contract(args)
             # Build graph based on strategy
             logger.info(f"Building graph using {args.strategy} strategy...")
@@ -2197,7 +2202,7 @@ def main() -> None:
                 e,
                 exc_info=logging.getLogger().level == logging.DEBUG,
             )
-            sys.exit(1)
+            return 1
     elif args.command == "search":
         try:
             client = get_client()
@@ -2206,7 +2211,7 @@ def main() -> None:
 
             if not results:
                 logger.error("No results found.")
-                sys.exit(1)
+                return 1
 
             table = Table(title=f"Search results for '{args.query}'")
             table.add_column("#", style="dim", width=3)
@@ -2242,23 +2247,25 @@ def main() -> None:
 
         except Exception as e:
             logger.error(f"Search failed: {e}")
-            sys.exit(1)
+            return 1
     elif args.command == "cache":
         if args.cache_command == "scan":
             exit_code = _scan_cache_directory()
             if exit_code != 0:
-                sys.exit(exit_code)
+                return exit_code
         elif args.cache_command == "clear":
             exit_code = _clear_cache_directory(
                 assume_yes=bool(args.yes),
                 clear_reason=getattr(args, "reason", None),
             )
             if exit_code != 0:
-                sys.exit(exit_code)
+                return exit_code
         else:
             cache_parser.print_help()
-            sys.exit(1)
+            return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -12,7 +12,6 @@ import logging
 import os
 import random
 import re
-import sys
 import warnings
 from contextlib import nullcontext
 from hashlib import sha1, sha256
@@ -34,6 +33,7 @@ import networkx as nx
 import numpy as np
 from tqdm.auto import tqdm
 
+from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
@@ -112,11 +112,9 @@ def _module_available(module_name: str) -> bool:
     :param str module_name: Absolute module name to probe.
     :return bool: ``True`` when the module exists and is importable.
     """
-    if module_name in sys.modules:
-        return sys.modules[module_name] is not None
     try:
         return importlib.util.find_spec(module_name) is not None
-    except (ImportError, ValueError):
+    except (ImportError, ValueError, ModuleNotFoundError):
         return False
 
 
@@ -2124,7 +2122,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             desc=progress_label,
             unit="papers",
             dynamic_ncols=True,
-            disable=not sys.stderr.isatty(),
+            disable=not stderr_isatty(),
         ) as progress:
             for idx, raw_record in enumerate(dataset):
                 if self.corpus_size is not None and idx >= self.corpus_size:
@@ -2223,7 +2221,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             desc=progress_label,
             unit="papers",
             dynamic_ncols=True,
-            disable=not sys.stderr.isatty(),
+            disable=not stderr_isatty(),
         ) as progress:
             batch: List[Dict] = []
             for idx, raw_record in enumerate(dataset):
@@ -2704,7 +2702,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             len(targets),
         )
 
-        progress_enabled = sys.stderr.isatty() and len(targets) > 1
+        progress_enabled = stderr_isatty() and len(targets) > 1
         progress_bar = (
             tqdm(
                 targets,

@@ -1,10 +1,6 @@
-"""
-Entry point for python -m citemesh execution.
+"""Module entry point for ``python -m citemesh``."""
 
-This is just a thin wrapper - all CLI logic lives in citemesh.cli
-"""
-
-from citemesh.cli import main
+from .cli import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
