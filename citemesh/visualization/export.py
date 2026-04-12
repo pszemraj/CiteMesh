@@ -44,6 +44,27 @@ GRAPHML_LAYOUT_METADATA_KEY = "citemesh_graphml_determinism"
 GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
 
 
+def _load_pyvis_network_class() -> Any:
+    """Import and return the PyVis ``Network`` class."""
+    from pyvis.network import Network
+
+    return Network
+
+
+def _load_plotly_graph_objects() -> Any:
+    """Import and return Plotly graph objects."""
+    from plotly import graph_objects as go
+
+    return go
+
+
+def _load_plotly_dashboard_runtime() -> tuple[Any, Any]:
+    """Import and return Plotly graph objects plus inline JS provider."""
+    from plotly.offline import get_plotlyjs
+
+    return _load_plotly_graph_objects(), get_plotlyjs
+
+
 def _graphml_determinism_policy() -> str:
     """Return determinism policy name for active NetworkX writer runtime.
 
@@ -298,7 +319,7 @@ class GraphExporter:
         :param bool physics: Whether to enable force-directed physics.
         """
         try:
-            from pyvis.network import Network
+            network_cls = _load_pyvis_network_class()
         except ImportError as exc:
             raise RuntimeError(
                 "pyvis is required for HTML export. Install with: pip install citemesh[viz]."
@@ -306,7 +327,7 @@ class GraphExporter:
 
         theme_obj = get_theme(theme) if theme else self.theme
 
-        net = Network(
+        net = network_cls(
             height="900px",
             width="100%",
             bgcolor=theme_obj.background,
@@ -376,7 +397,7 @@ class GraphExporter:
         :param Optional[str] theme: Optional theme override.
         """
         try:
-            from plotly import graph_objects as go
+            go = _load_plotly_graph_objects()
         except ImportError as exc:
             raise RuntimeError(
                 "plotly is required for Plotly export. Install with: pip install citemesh[viz]."
@@ -401,8 +422,7 @@ class GraphExporter:
         :param Optional[str] theme: Optional theme override.
         """
         try:
-            from plotly import graph_objects as go
-            from plotly.offline import get_plotlyjs
+            go, get_plotlyjs = _load_plotly_dashboard_runtime()
         except ImportError as exc:
             raise RuntimeError(
                 "plotly is required for Dashboard export. Install with: pip install citemesh[viz]."

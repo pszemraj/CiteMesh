@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,6 +15,7 @@ import pytest
 
 from citemesh.core import Author, Paper
 from citemesh.data.model_profiles import get_embedding_model_profile
+from citemesh.visualization import export as export_module
 from citemesh.visualization.export import (
     GRAPHML_DETERMINISM_POLICY_STRICT,
     GRAPHML_LAYOUT_METADATA_KEY,
@@ -39,6 +39,7 @@ def _install_fake_plotly(
     *,
     figure_cls: type,
     scatter_factory: Callable[..., dict[str, object]] | None = None,
+    plotly_js: str = "window.Plotly={};",
 ) -> None:
     """Install a minimal ``plotly`` module with configurable graph_objects types."""
     fake_go = types.SimpleNamespace(
@@ -46,9 +47,17 @@ def _install_fake_plotly(
         Layout=lambda **kwargs: {"type": "layout", **kwargs},
         Figure=figure_cls,
     )
-    fake_plotly = types.ModuleType("plotly")
-    fake_plotly.graph_objects = fake_go
-    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+    monkeypatch.setattr(export_module, "_load_plotly_graph_objects", lambda: fake_go)
+    monkeypatch.setattr(
+        export_module,
+        "_load_plotly_dashboard_runtime",
+        lambda: (fake_go, lambda: plotly_js),
+    )
+
+
+def _raise_import_error(*_args: object, **_kwargs: object) -> Any:
+    """Raise ``ImportError`` for optional dependency contract tests."""
+    raise ImportError("optional dependency unavailable")
 
 
 class _BaseFakeFigure:
@@ -276,8 +285,7 @@ def test_exporter_interactive_html_contracts(
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setitem(sys.modules, "pyvis", None)
-    monkeypatch.setitem(sys.modules, "pyvis.network", None)
+    monkeypatch.setattr(export_module, "_load_pyvis_network_class", _raise_import_error)
     with pytest.raises(RuntimeError, match="pyvis is required"):
         exporter.to_interactive_html(tmp_path / "missing.html")
 
@@ -303,12 +311,7 @@ def test_exporter_interactive_html_contracts(
         def save_graph(self, path: str) -> None:
             Path(path).write_text("<html>fake</html>")
 
-    fake_pyvis = types.ModuleType("pyvis")
-    fake_pyvis_network = types.ModuleType("pyvis.network")
-    fake_pyvis_network.Network = FakeNetwork
-    fake_pyvis.network = fake_pyvis_network
-    monkeypatch.setitem(sys.modules, "pyvis", fake_pyvis)
-    monkeypatch.setitem(sys.modules, "pyvis.network", fake_pyvis_network)
+    monkeypatch.setattr(export_module, "_load_pyvis_network_class", lambda: FakeNetwork)
 
     out_path = tmp_path / "graph.html"
     exporter = GraphExporter(graph, seed_id, theme_name="dark")
@@ -329,7 +332,9 @@ def test_exporter_plotly_contracts(
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setitem(sys.modules, "plotly", None)
+    monkeypatch.setattr(
+        export_module, "_load_plotly_graph_objects", _raise_import_error
+    )
     with pytest.raises(RuntimeError, match="plotly is required"):
         exporter.to_plotly_html(tmp_path / "missing.plotly.html")
 
@@ -541,8 +546,9 @@ def test_exporter_dashboard_missing_plotly_dependency(
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setitem(sys.modules, "plotly", None)
-    monkeypatch.setitem(sys.modules, "plotly.offline", None)
+    monkeypatch.setattr(
+        export_module, "_load_plotly_dashboard_runtime", _raise_import_error
+    )
     with pytest.raises(RuntimeError, match="plotly is required for Dashboard export"):
         exporter.to_dashboard_html(tmp_path / "missing.dashboard.html")
 

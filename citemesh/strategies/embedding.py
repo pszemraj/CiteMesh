@@ -75,19 +75,17 @@ def _check_embedding_deps() -> None:
     torch_module: Any | None = None
 
     try:
-        import torch
-
-        torch_module = torch
+        torch_module = _import_torch()
     except ImportError:
         missing.append("torch")
 
     try:
-        import sentence_transformers  # noqa: F401
+        _import_sentence_transformer_class()
     except ImportError:
         missing.append("sentence-transformers")
 
     try:
-        import datasets  # noqa: F401
+        _import_datasets_module()
     except ImportError:
         missing.append("datasets")
 
@@ -116,6 +114,34 @@ def _module_available(module_name: str) -> bool:
         return importlib.util.find_spec(module_name) is not None
     except (ImportError, ValueError, ModuleNotFoundError):
         return False
+
+
+def _import_torch() -> Any:
+    """Import and return the ``torch`` module."""
+    import torch
+
+    return torch
+
+
+def _import_sentence_transformer_class() -> Any:
+    """Import and return ``SentenceTransformer``."""
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer
+
+
+def _import_datasets_module() -> Any:
+    """Import and return the ``datasets`` module."""
+    import datasets
+
+    return datasets
+
+
+def _import_huggingface_hub_module() -> Any:
+    """Import and return the ``huggingface_hub`` module."""
+    import huggingface_hub
+
+    return huggingface_hub
 
 
 ENCODE_BATCH_SIZE = 32
@@ -686,7 +712,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return str: Backend token forwarded to ``SentenceTransformer``.
         """
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             return "torch"
 
@@ -710,7 +736,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return None
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             return None
 
@@ -732,7 +758,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return "float32"
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             return "float32"
 
@@ -778,9 +804,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         resolution_error: Optional[Exception] = None
 
         try:
-            from huggingface_hub import HfApi
-
-            model_info = HfApi().model_info(
+            huggingface_hub = _import_huggingface_hub_module()
+            model_info = huggingface_hub.HfApi().model_info(
                 repo_id=model_id,
                 revision=requested_revision,
             )
@@ -840,7 +865,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return Optional[str]: Locally resolved snapshot SHA, if available.
         """
         try:
-            from huggingface_hub import snapshot_download
+            snapshot_download = _import_huggingface_hub_module().snapshot_download
         except Exception:
             return None
 
@@ -897,7 +922,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return Optional[str]: Deterministic local artifact fingerprint if available.
         """
         try:
-            from huggingface_hub import snapshot_download
+            snapshot_download = _import_huggingface_hub_module().snapshot_download
         except Exception:
             return None
 
@@ -1231,7 +1256,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return model_kwargs
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             self._source_dtype_hint = "float32"
             return model_kwargs
@@ -1292,7 +1317,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return nullcontext()
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             return nullcontext()
 
@@ -1409,7 +1434,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return None: Model is initialized in-place on first access.
         """
         if self.model is None:
-            from sentence_transformers import SentenceTransformer
+            sentence_transformer_cls = _import_sentence_transformer_class()
 
             logger.info(f"Loading embedding model: {self.model_name}")
             model_kwargs = self._resolve_model_kwargs()
@@ -1426,9 +1451,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             for idx, candidate_model in enumerate(load_candidates):
                 try:
                     if st_kwargs:
-                        self.model = SentenceTransformer(candidate_model, **st_kwargs)
+                        self.model = sentence_transformer_cls(
+                            candidate_model, **st_kwargs
+                        )
                     else:
-                        self.model = SentenceTransformer(candidate_model)
+                        self.model = sentence_transformer_cls(candidate_model)
                 except Exception as exc:
                     model_errors.append((candidate_model, exc))
                     has_more_candidates = idx + 1 < len(load_candidates)
@@ -1497,7 +1524,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._tf32_mode = "off"
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             logger.debug(
                 "Skipping TF32 config for %s: torch unavailable.", self.model_name
@@ -1647,7 +1674,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             self._compile_status_reason = "torch unavailable"
             logger.debug(
@@ -2272,7 +2299,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if ":" in str(self.dataset_split):
             return None
 
-        from datasets import load_dataset_builder
+        load_dataset_builder = _import_datasets_module().load_dataset_builder
 
         try:
             builder = load_dataset_builder(dataset_source)
@@ -2513,7 +2540,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool allow_source_fallback: Whether alternate sources may be tried.
         :return Tuple[str, Iterable[Dict[str, Any]]]: Dataset source name and iterable.
         """
-        from datasets import load_dataset
+        load_dataset = _import_datasets_module().load_dataset
 
         parsed_row_limit: Optional[int] = None
         if row_limit is not None:

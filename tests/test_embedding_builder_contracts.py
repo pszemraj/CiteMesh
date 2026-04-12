@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import sys
 import types
 from hashlib import sha256
 from typing import Any
@@ -18,6 +17,7 @@ from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
 )
 from citemesh.data.embedding_cache import CacheNamespacePayloadStats, CacheSearchResult
+from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
     ENCODE_BATCH_SIZE,
     EmbeddingGraphBuilder,
@@ -25,6 +25,11 @@ from citemesh.strategies.embedding import (
     _query_seed_id,
 )
 from tests._helpers import ConstantEncodeModel, disable_embedding_dep_checks
+
+
+def _raise_import_error(*_args: object, **_kwargs: object) -> Any:
+    """Raise ``ImportError`` for optional dependency contract tests."""
+    raise ImportError("optional dependency unavailable")
 
 
 def _install_fake_sentence_transformers(
@@ -60,7 +65,11 @@ def _install_fake_sentence_transformers(
 
     fake_module = types.ModuleType("sentence_transformers")
     fake_module.SentenceTransformer = _FakeSentenceTransformer
-    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_sentence_transformer_class",
+        lambda: fake_module.SentenceTransformer,
+    )
     return init_log, encode_log
 
 
@@ -168,7 +177,7 @@ def _install_fake_torch(
     fake_torch._compile_calls = compile_calls
     fake_torch.cuda = cuda_module
     fake_torch.backends = fake_backends
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setattr(embedding_module, "_import_torch", lambda: fake_torch)
 
     return bf16_token, autocast_log, fake_torch
 
@@ -177,9 +186,17 @@ def test_embedding_builder_requires_optional_deps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Embedding builder should fail with guidance when deps are missing."""
-    monkeypatch.setitem(sys.modules, "torch", None)
-    monkeypatch.setitem(sys.modules, "sentence_transformers", None)
-    monkeypatch.setitem(sys.modules, "datasets", None)
+    monkeypatch.setattr(embedding_module, "_import_torch", _raise_import_error)
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_sentence_transformer_class",
+        _raise_import_error,
+    )
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_datasets_module",
+        _raise_import_error,
+    )
 
     with pytest.raises(
         ImportError,
@@ -195,9 +212,17 @@ def test_embedding_builder_requires_modern_torch(
     """Embedding builder should require torch>=2.9 for runtime precision policy."""
     fake_torch = types.ModuleType("torch")
     fake_torch.__version__ = "2.8.1"
-    monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.setitem(sys.modules, "sentence_transformers", types.ModuleType("st"))
-    monkeypatch.setitem(sys.modules, "datasets", types.ModuleType("datasets"))
+    monkeypatch.setattr(embedding_module, "_import_torch", lambda: fake_torch)
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_sentence_transformer_class",
+        lambda: object,
+    )
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_datasets_module",
+        lambda: types.ModuleType("datasets"),
+    )
 
     with pytest.raises(
         ImportError,
@@ -588,7 +613,11 @@ def test_embedding_fingerprint_uses_active_fallback_model_identity(
 
     fake_hf_module = types.ModuleType("huggingface_hub")
     fake_hf_module.HfApi = _FakeHfApi
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_huggingface_hub_module",
+        lambda: fake_hf_module,
+    )
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
     builder._load_model()
@@ -990,7 +1019,11 @@ def test_embedding_fingerprint_resolution_contracts(
 
     fake_hf_module = types.ModuleType("huggingface_hub")
     fake_hf_module.HfApi = _FailingHfApi
-    monkeypatch.setitem(sys.modules, "huggingface_hub", fake_hf_module)
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_huggingface_hub_module",
+        lambda: fake_hf_module,
+    )
 
     fail_closed_builder = EmbeddingGraphBuilder(
         max_papers=1,
@@ -1102,7 +1135,11 @@ def test_metadata_and_streaming_loader_contracts(
 
     fake_datasets = types.ModuleType("datasets")
     fake_datasets.load_dataset = fake_load_dataset
-    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_datasets_module",
+        lambda: fake_datasets,
+    )
 
     builder = EmbeddingGraphBuilder(
         max_papers=1, use_streaming=True, client=MagicMock()
