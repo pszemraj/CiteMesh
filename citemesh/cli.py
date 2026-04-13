@@ -11,7 +11,6 @@ import json
 import logging
 import math
 import shutil
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +56,83 @@ log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
 output_console = Console(width=DEFAULT_LOG_WIDTH)
 _LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
+_TRACKED_OPTION_DESTS_ATTR = "_citemesh_provided_option_dests"
+_TRACKED_ACTION_CACHE: Dict[type[argparse.Action], type[argparse.Action]] = {}
+
+
+def _tracking_action_class(
+    action_cls: type[argparse.Action],
+) -> type[argparse.Action]:
+    """Wrap an argparse action so explicit CLI usage records its destination.
+
+    :param type[argparse.Action] action_cls: Action class to wrap.
+    :return type[argparse.Action]: Wrapper class recording explicit option use.
+    """
+    cached = _TRACKED_ACTION_CACHE.get(action_cls)
+    if cached is not None:
+        return cached
+
+    class _TrackedAction(action_cls):
+        """Action wrapper that records explicit option usage on the namespace."""
+
+        _citemesh_tracks_presence = True
+
+        def __call__(
+            self,
+            parser: argparse.ArgumentParser,
+            namespace: argparse.Namespace,
+            values: object,
+            option_string: str | None = None,
+        ) -> None:
+            if self.option_strings:
+                provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, None)
+                if not isinstance(provided, set):
+                    provided = set()
+                    setattr(namespace, _TRACKED_OPTION_DESTS_ATTR, provided)
+                provided.add(self.dest)
+            super().__call__(parser, namespace, values, option_string)
+
+    _TrackedAction.__name__ = f"CiteMeshTracked{action_cls.__name__}"
+    _TRACKED_ACTION_CACHE[action_cls] = _TrackedAction
+    return _TrackedAction
+
+
+def _instrument_parser_actions(parser: argparse.ArgumentParser) -> None:
+    """Wrap parser actions so explicit CLI option usage is recorded at parse time.
+
+    The instrumentation walks the parser tree after construction, including all
+    subparsers, which keeps presence tracking correct for arguments added via
+    argument groups and mutually exclusive groups.
+
+    :param argparse.ArgumentParser parser: Root or subparser to instrument.
+    :return None: Mutates parser action classes in place.
+    """
+    for action in parser._actions:
+        if action.option_strings and not getattr(
+            action.__class__, "_citemesh_tracks_presence", False
+        ):
+            tracked_cls = _tracking_action_class(action.__class__)
+            try:
+                action.__class__ = tracked_cls
+            except TypeError:
+                pass
+        if isinstance(action, argparse._SubParsersAction):
+            for subparser in action.choices.values():
+                _instrument_parser_actions(subparser)
+
+
+def _pop_tracked_option_dests(args: argparse.Namespace) -> Set[str]:
+    """Return and remove parser-tracked explicit option destinations.
+
+    :param argparse.Namespace args: Parsed CLI namespace.
+    :return Set[str]: Destinations explicitly supplied by the caller.
+    """
+    raw_provided = getattr(args, _TRACKED_OPTION_DESTS_ATTR, None)
+    if hasattr(args, _TRACKED_OPTION_DESTS_ATTR):
+        delattr(args, _TRACKED_OPTION_DESTS_ATTR)
+    if not isinstance(raw_provided, set):
+        return set()
+    return {str(dest).strip() for dest in raw_provided if str(dest).strip()}
 
 
 def _configure_logging(
@@ -920,71 +996,6 @@ def _infer_provided_build_option_dests(
     return provided
 
 
-def _action_consumes_cli_value(action: argparse.Action) -> bool:
-    """Return whether an argparse action consumes a following CLI value token.
-
-    :param argparse.Action action: Parser action to inspect.
-    :return bool: ``True`` when the action consumes a separate value token.
-    """
-    return not isinstance(
-        action,
-        (
-            argparse._HelpAction,
-            argparse._StoreConstAction,
-            argparse._StoreTrueAction,
-            argparse._StoreFalseAction,
-            argparse._CountAction,
-        ),
-    )
-
-
-def _provided_build_option_dests_from_argv(
-    argv: Sequence[str], build_parser: argparse.ArgumentParser
-) -> Set[str]:
-    """Return explicitly provided build-option destinations from CLI argv tokens.
-
-    :param Sequence[str] argv: Raw CLI argv without executable name.
-    :param argparse.ArgumentParser build_parser: Build subcommand parser.
-    :return Set[str]: Explicitly provided build-option destinations.
-    """
-    if "build" not in argv:
-        return set()
-
-    build_tokens = list(argv[argv.index("build") + 1 :])
-    provided: Set[str] = set()
-    token_index = 0
-    while token_index < len(build_tokens):
-        token = build_tokens[token_index]
-        parsed_optional = build_parser._parse_optional(token)
-        if parsed_optional is None:
-            token_index += 1
-            continue
-
-        action = parsed_optional[0]
-        option_string = parsed_optional[1]
-        explicit_arg = parsed_optional[3] if len(parsed_optional) > 3 else None
-        if action is None or option_string is None or not action.option_strings:
-            token_index += 1
-            continue
-
-        provided.add(action.dest)
-        token_index += 1
-        if explicit_arg is not None or not _action_consumes_cli_value(action):
-            continue
-
-        nargs = action.nargs
-        if nargs in (None, 1):
-            token_index += 1
-            continue
-        if isinstance(nargs, int):
-            token_index += max(nargs, 0)
-            continue
-
-        token_index += 1
-
-    return provided
-
-
 def _create_parser() -> Tuple[
     argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser
 ]:
@@ -1421,6 +1432,7 @@ Environment variables:
         help="Scan cache usage (sections, file counts, and total size)",
         parents=[command_logging_parent],
     )
+    _instrument_parser_actions(parser)
     return parser, build_parser, cache_parser
 
 
@@ -2128,12 +2140,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     :return int: Process-style exit code.
     """
     parser, build_parser, cache_parser = _create_parser()
-    argv_list = list(argv) if argv is not None else list(sys.argv[1:])
+    argv_list = list(argv) if argv is not None else None
     args = parser.parse_args(argv_list)
     _configure_logging(log_level=args.log_level, log_width=args.log_width)
-    provided_build_options = _provided_build_option_dests_from_argv(
-        argv_list, build_parser
-    )
+    provided_build_options = _pop_tracked_option_dests(args)
 
     if not args.command:
         parser.print_help()

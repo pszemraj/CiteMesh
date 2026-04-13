@@ -2017,7 +2017,7 @@ def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_module("citemesh.__main__", run_name="__main__")
     assert exc_info.value.code == 0
-    assert called["argv"] == ["build", "seed", "--strategy", "citation"]
+    assert called["argv"] is None
 
 
 def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
