@@ -82,8 +82,51 @@ def _reference_cache_path(paper_id: str) -> Path:
     return _reference_cache_dir() / f"{digest}.json"
 
 
+def _reference_id_candidate(raw_value: Any) -> Optional[str]:
+    """Extract a paper ID from accepted reference payload shapes.
+
+    Supports current cache entries, legacy mixed-format cache entries, and
+    Semantic Scholar relation objects returned by the SDK.
+
+    :param Any raw_value: Raw reference-like entry.
+    :return Optional[str]: Candidate paper ID string, or ``None`` when absent.
+    """
+    if isinstance(raw_value, str):
+        return raw_value
+
+    if isinstance(raw_value, dict):
+        for key in ("paperId", "paper_id"):
+            candidate = raw_value.get(key)
+            if isinstance(candidate, str):
+                return candidate
+
+        nested_paper = raw_value.get("paper")
+        if isinstance(nested_paper, dict):
+            for key in ("paperId", "paper_id"):
+                candidate = nested_paper.get(key)
+                if isinstance(candidate, str):
+                    return candidate
+        return None
+
+    for attr in ("paperId", "paper_id"):
+        candidate = getattr(raw_value, attr, None)
+        if isinstance(candidate, str):
+            return candidate
+
+    nested_paper = getattr(raw_value, "paper", None)
+    for attr in ("paperId", "paper_id"):
+        candidate = getattr(nested_paper, attr, None)
+        if isinstance(candidate, str):
+            return candidate
+
+    return None
+
+
 def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
     """Validate and normalize cached reference ID payloads.
+
+    Supports current payloads (list of strings) and legacy/mixed list entries
+    that store paper IDs in relation-shaped dictionaries.
 
     :param Any payload: Cached ``references`` field from JSON payload.
     :return Optional[List[str]]: Normalized ID list, or ``None`` when invalid.
@@ -95,9 +138,10 @@ def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
     seen: set[str] = set()
 
     for raw_value in payload:
-        if not isinstance(raw_value, str):
-            return None
-        paper_id = raw_value.strip()
+        candidate = _reference_id_candidate(raw_value)
+        if candidate is None:
+            continue
+        paper_id = candidate.strip()
         if not paper_id or paper_id in seen:
             continue
         seen.add(paper_id)
@@ -618,32 +662,7 @@ class SemanticScholarClient:
             parsed.append(normalized)
 
         for ref in raw_references:
-            if isinstance(ref, str):
-                _add_candidate(ref)
-                continue
-
-            if isinstance(ref, dict):
-                ref_id = ref.get("paperId") or ref.get("paper_id")
-                if isinstance(ref_id, str):
-                    _add_candidate(ref_id)
-                    continue
-
-                nested_paper = ref.get("paper")
-                if isinstance(nested_paper, dict):
-                    nested_id = nested_paper.get("paperId")
-                    if isinstance(nested_id, str):
-                        _add_candidate(nested_id)
-                continue
-
-            ref_id = getattr(ref, "paperId", None)
-            if isinstance(ref_id, str):
-                _add_candidate(ref_id)
-                continue
-
-            nested_paper = getattr(ref, "paper", None)
-            nested_id = getattr(nested_paper, "paperId", None)
-            if isinstance(nested_id, str):
-                _add_candidate(nested_id)
+            _add_candidate(_reference_id_candidate(ref))
 
         return parsed
 

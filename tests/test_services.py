@@ -511,7 +511,7 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reference cache should reuse valid string lists and rebuild invalid payloads."""
+    """Reference cache should reuse valid/legacy hits and rebuild invalid payloads."""
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
@@ -531,6 +531,47 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
         side_effect=AssertionError("API should not be called on cache hit")
     )
     assert client.get_reference_ids("arxiv:1234.5678") == ["r1", "r2"]
+
+    legacy_mixed_paper_id = s2.normalize_paper_id("seed-mixed")
+    legacy_mixed_cache_path = s2._reference_cache_path(legacy_mixed_paper_id)
+    legacy_mixed_cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": legacy_mixed_paper_id,
+                "references": [
+                    "ok-1",
+                    None,
+                    {"paperId": "ok-2"},
+                    {"paper_id": "ok-3"},
+                    {"paper": {"paperId": "ok-4"}},
+                    {"paper": {"paper_id": "ok-5"}},
+                    {"paperId": "   "},
+                    123,
+                    "ok-1",
+                ],
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        side_effect=AssertionError(
+            "API should not be called on compatible legacy cache"
+        )
+    )
+    assert client.get_reference_ids("seed-mixed") == [
+        "ok-1",
+        "ok-2",
+        "ok-3",
+        "ok-4",
+        "ok-5",
+    ]
+    assert json.loads(legacy_mixed_cache_path.read_text())["references"] == [
+        "ok-1",
+        "ok-2",
+        "ok-3",
+        "ok-4",
+        "ok-5",
+    ]
 
     client.client.get_paper_references = MagicMock(
         return_value=[
@@ -565,27 +606,6 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
             ),
             "text",
             ["fixed-1", "fixed-2"],
-        ),
-        (
-            "seed-mixed",
-            json.dumps(
-                {
-                    "paper_id": s2.normalize_paper_id("seed-mixed"),
-                    "references": [
-                        "ok-1",
-                        None,
-                        {"paperId": "ok-2"},
-                        {"paper_id": "ok-3"},
-                        {"paper": {"paperId": "ok-4"}},
-                        {"paperId": "   "},
-                        123,
-                        "ok-1",
-                    ],
-                    "version": s2.REFERENCE_CACHE_VERSION,
-                }
-            ),
-            "text",
-            ["rebuilt-1", "rebuilt-2"],
         ),
     ]
     for paper_id, cached_payload, write_mode, rebuilt_ids in rebuild_cases:
