@@ -275,7 +275,6 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         embeddings = builder._encode_texts(["seed"], show_progress_bar=False)
 
         assert init_log["model_name"] == DEFAULT_EMBEDDING_MODEL_NAME
-        assert init_log["kwargs"]["backend"] == "torch"
         assert init_log["kwargs"]["truncate_dim"] == 256
         assert embeddings.shape == (1, 2)
         assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
@@ -464,17 +463,11 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     )
 
 
-def test_embedding_runtime_policy_selects_safe_cuda_and_verified_cpu_backends(
+def test_embedding_runtime_policy_keeps_torch_cpu_fallback_unmodified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Runtime policy should prefer safe CUDA attention and verified CPU accelerators."""
+    """Runtime policy should keep CPU execution on the default torch path."""
     disable_embedding_dep_checks(monkeypatch)
-
-    available_modules: set[str] = set()
-    monkeypatch.setattr(
-        "citemesh.strategies.embedding._module_available",
-        lambda module_name: module_name in available_modules,
-    )
 
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
@@ -482,7 +475,10 @@ def test_embedding_runtime_policy_selects_safe_cuda_and_verified_cpu_backends(
         cuda_available=True,
         bf16_supported=False,
     )
-    available_modules.add("flash_attn")
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._module_available",
+        lambda module_name: module_name == "flash_attn",
+    )
     fp16_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="sentence-transformers/all-MiniLM-L6-v2",
@@ -490,7 +486,6 @@ def test_embedding_runtime_policy_selects_safe_cuda_and_verified_cpu_backends(
     )
     fp16_builder._load_model()
 
-    assert init_log["kwargs"]["backend"] == "torch"
     assert init_log["kwargs"]["model_kwargs"]["dtype"] is fake_torch.float16
     assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
     assert fp16_builder._source_dtype_hint == "float16"
@@ -502,58 +497,20 @@ def test_embedding_runtime_policy_selects_safe_cuda_and_verified_cpu_backends(
         cuda_available=False,
         bf16_supported=False,
     )
-    available_modules.clear()
-    available_modules.update({"openvino", "optimum.intel"})
-    openvino_builder = EmbeddingGraphBuilder(
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._module_available",
+        lambda _module_name: True,
+    )
+    cpu_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="sentence-transformers/all-MiniLM-L6-v2",
         client=MagicMock(),
     )
-    openvino_builder._load_model()
+    cpu_builder._load_model()
 
-    assert init_log["kwargs"]["backend"] == "openvino"
-    assert "model_kwargs" not in init_log["kwargs"]
-    assert openvino_builder._runtime_backend_hint == "openvino"
-    assert openvino_builder._source_dtype_hint == "float32"
-
-    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    _install_fake_torch(
-        monkeypatch,
-        cuda_available=False,
-        bf16_supported=False,
-    )
-    available_modules.clear()
-    available_modules.add("onnxruntime")
-    onnx_builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        client=MagicMock(),
-    )
-    onnx_builder._load_model()
-
-    assert init_log["kwargs"]["backend"] == "torch"
-    assert "model_kwargs" not in init_log["kwargs"]
-    assert onnx_builder._runtime_backend_hint == "torch"
-    assert onnx_builder._source_dtype_hint == "float32"
-
-    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    _install_fake_torch(
-        monkeypatch,
-        cuda_available=False,
-        bf16_supported=False,
-    )
-    available_modules.clear()
-    available_modules.update({"onnxruntime", "optimum.onnxruntime"})
-    verified_onnx_builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
-        client=MagicMock(),
-    )
-    verified_onnx_builder._load_model()
-
-    assert init_log["kwargs"]["backend"] == "onnx"
-    assert "model_kwargs" not in init_log["kwargs"]
-    assert verified_onnx_builder._runtime_backend_hint == "onnx"
+    assert init_log["kwargs"] == {}
+    assert cpu_builder._source_dtype_hint == "float32"
+    assert cpu_builder._attention_implementation_hint is None
 
 
 def test_encode_texts_uses_length_bucketed_batches(
@@ -710,7 +667,7 @@ def test_embedding_fingerprint_uses_active_fallback_model_identity(
 def test_embedding_cache_namespace_partition_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Namespace identity should partition precision, runtime backend, dtype, and calibration."""
+    """Namespace identity should partition precision, source dtype, and calibration."""
     disable_embedding_dep_checks(monkeypatch)
 
     int8_builder = EmbeddingGraphBuilder(
@@ -744,34 +701,6 @@ def test_embedding_cache_namespace_partition_contracts(
 
     monkeypatch.setattr(
         EmbeddingGraphBuilder,
-        "_resolve_runtime_backend_hint",
-        lambda self: "torch",
-    )
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_source_dtype_hint",
-        lambda self: "float32",
-    )
-    torch_backend_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_runtime_backend_hint",
-        lambda self: "onnx",
-    )
-    onnx_backend_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    assert (
-        torch_backend_builder.embedding_cache.model_name
-        != onnx_backend_builder.embedding_cache.model_name
-    )
-
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
-        "_resolve_runtime_backend_hint",
-        lambda self: "torch",
-    )
-    monkeypatch.setattr(
-        EmbeddingGraphBuilder,
         "_resolve_source_dtype_hint",
         lambda self: "float32",
     )
@@ -794,7 +723,6 @@ def test_embedding_cache_namespace_partition_contracts(
         int8_small.embedding_cache.model_name != int8_large.embedding_cache.model_name
     )
     assert "calibration_sample_size=" in int8_small.embedding_cache.model_name
-    assert "source_backend=" in int8_small.embedding_cache.model_name
     assert "calibration_sample_size=" not in f32_builder.embedding_cache.model_name
 
 

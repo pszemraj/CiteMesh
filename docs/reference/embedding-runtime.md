@@ -38,7 +38,8 @@ Runtime precision policy:
 - When torch runs on CUDA, CiteMesh now sets an explicit attention implementation:
   - `sdpa` by default for broad encoder compatibility
   - `flash_attention_2` only via explicit model-profile opt-in plus `flash_attn`
-- On CPU-only hosts, CiteMesh prefers `openvino` when both `openvino` and `optimum.intel` are available, then `onnx` only when both `onnxruntime` and `optimum.onnxruntime` are available, and otherwise falls back to `torch`.
+- On CPU-only hosts, embedding execution stays on the default torch CPU runtime. CiteMesh does not select OpenVINO or ONNX backends on top of torch.
+- CPU execution is fallback-only. Large embedding and hybrid hydration runs are intended for CUDA-capable hosts and can be impractically slow on CPU.
 - On Ampere+ CUDA devices in eager mode, TF32 is enabled with the new API: `torch.backends.fp32_precision = "tf32"`.
 - On Ampere+ CUDA devices with `torch.compile` enabled on torch `2.9`/`2.10`, CiteMesh uses `torch.set_float32_matmul_precision("high")` and does not touch `torch.backends.*.fp32_precision` to avoid the release-branch Inductor mixed-API conflict.
 

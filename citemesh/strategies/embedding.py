@@ -522,7 +522,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._resolve_document_formatter_fingerprint()
         )
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
-        self._runtime_backend_hint = self._resolve_runtime_backend_hint()
         self._attention_implementation_hint = (
             self._resolve_attention_implementation_hint()
         )
@@ -643,7 +642,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         parts.append(f"binary_prefilter={int(self._cache_binary_prefilter_enabled())}")
         if self.storage_precision == "int8":
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
-        parts.append(f"source_backend={self._runtime_backend_hint}")
         parts.append(f"source_dtype={self._source_dtype_hint}")
         parts.append(f"doc_formatter={self._document_formatter_fingerprint}")
         return "::".join(parts)
@@ -692,37 +690,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         return self.binary_prefilter
 
-    def _resolve_runtime_backend_hint(self) -> str:
-        """Resolve preferred SentenceTransformer backend for the current runtime.
-
-        :return str: Backend token forwarded to ``SentenceTransformer``.
-        """
-        try:
-            torch = _import_torch()
-        except ImportError:
-            return "torch"
-
-        cuda_module = getattr(torch, "cuda", None)
-        cuda_available = getattr(cuda_module, "is_available", None)
-        if callable(cuda_available) and bool(cuda_available()):
-            return "torch"
-
-        if _module_available("optimum.intel") and _module_available("openvino"):
-            return "openvino"
-        if _module_available("onnxruntime") and _module_available(
-            "optimum.onnxruntime"
-        ):
-            return "onnx"
-        return "torch"
-
     def _resolve_attention_implementation_hint(self) -> Optional[str]:
-        """Resolve preferred CUDA attention implementation when torch backend is used.
+        """Resolve preferred CUDA attention implementation for torch CUDA runs.
 
         :return Optional[str]: Attention implementation token or ``None``.
         """
-        if self._runtime_backend_hint != "torch":
-            return None
-
         try:
             torch = _import_torch()
         except ImportError:
@@ -747,9 +719,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         :return str: Source dtype token.
         """
-        if self._runtime_backend_hint != "torch":
-            return "float32"
-
         try:
             torch = _import_torch()
         except ImportError:
@@ -1244,10 +1213,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self._attention_implementation_hint is not None:
             model_kwargs["attn_implementation"] = self._attention_implementation_hint
 
-        if self._runtime_backend_hint != "torch":
-            self._source_dtype_hint = "float32"
-            return model_kwargs
-
         try:
             torch = _import_torch()
         except ImportError:
@@ -1439,7 +1404,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             logger.info(f"Loading embedding model: {self.model_name}")
             model_kwargs = self._resolve_model_kwargs()
-            st_kwargs: Dict[str, Any] = {"backend": self._runtime_backend_hint}
+            st_kwargs: Dict[str, Any] = {}
             if model_kwargs:
                 st_kwargs["model_kwargs"] = model_kwargs
             if self.truncate_dim is not None:
@@ -1634,10 +1599,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             compute_dtype_label = f"{compute_dtype_label}+autocast"
         attention_label = self._attention_implementation_hint or "auto"
         logger.info(
-            "%s runtime: dim=%s, backend=%s, compute=%s, attn=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
+            "%s runtime: dim=%s, compute=%s, attn=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
             self.model_name,
             dim_label,
-            self._runtime_backend_hint,
             compute_dtype_label,
             attention_label,
             self.storage_precision,
