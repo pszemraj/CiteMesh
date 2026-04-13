@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from citemesh.core import EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
+from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.strategies import hybrid as hybrid_strategy
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -535,9 +536,7 @@ def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
     builder.embedding_builder.embeddings = {}
     builder.embedding_builder.model_profile = MagicMock(
         format_query=lambda text, _metadata: text,
-        format_document=lambda metadata: (
-            f"{metadata.get('title', '')}. {metadata.get('abstract', '')}"
-        ),
+        format_document=compose_title_abstract_text,
     )
     builder.embedding_builder._encode_texts = MagicMock(
         side_effect=[

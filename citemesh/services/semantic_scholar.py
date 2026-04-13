@@ -339,6 +339,36 @@ class SemanticScholarClient:
                 )
         return API_CONFIG.retry_delay
 
+    def _call_with_retries(
+        self,
+        operation: Callable[[], Any],
+        *,
+        on_retry: Callable[[int, float, Exception], None],
+        on_final_failure: Callable[[Exception], Any],
+        handled_exceptions: tuple[
+            tuple[type[Exception], Callable[[Exception], Any]], ...
+        ] = (),
+    ) -> Any:
+        """Run an API operation with shared retry/backoff behavior."""
+        for attempt in range(API_CONFIG.max_retries):
+            try:
+                self._rate_limit()
+                return operation()
+            except Exception as exc:
+                for error_type, handler in handled_exceptions:
+                    if isinstance(exc, error_type):
+                        return handler(exc)
+
+                if attempt < API_CONFIG.max_retries - 1:
+                    wait_time = self._retry_wait_time(exc, attempt)
+                    on_retry(attempt + 1, wait_time, exc)
+                    time.sleep(wait_time)
+                    continue
+
+                return on_final_failure(exc)
+
+        raise AssertionError("retry loop exhausted without returning")
+
     @staticmethod
     def _extract_venue_name(value: object) -> str:
         """Normalize venue-like payload values into a display string.
@@ -648,49 +678,50 @@ class SemanticScholarClient:
             raise ValueError(f"Invalid paper ID: {paper_id}")
 
         paper_id = normalize_paper_id(paper_id)
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                fields = _default_paper_fields()
-                if fetch_references:
-                    fields.append("references")
+        fields = _default_paper_fields()
+        if fetch_references:
+            fields.append("references")
 
-                api_paper = self.client.get_paper(paper_id, fields=fields)
-                if not api_paper:
-                    logger.warning("Paper not found: %s", paper_id)
-                    return None
-
-                paper = self._convert_api_paper(api_paper)
-                if fetch_references and paper:
-                    paper.references = self._extract_reference_ids(
-                        getattr(api_paper, "references", None)
-                    )
-                return paper
-
-            except ObjectNotFoundException:
+        def _operation() -> Optional[Paper]:
+            api_paper = self.client.get_paper(paper_id, fields=fields)
+            if not api_paper:
                 logger.warning("Paper not found: %s", paper_id)
                 return None
-            except Exception as exc:
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    logger.warning(
-                        "Attempt %s failed for %s: %s. Retrying in %ss",
-                        attempt + 1,
-                        paper_id,
-                        exc,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                else:
-                    logger.error(
-                        "Failed to fetch paper %s after %s attempts: %s",
-                        paper_id,
-                        API_CONFIG.max_retries,
-                        exc,
-                    )
-                    return None
 
-        return None
+            paper = self._convert_api_paper(api_paper)
+            if fetch_references and paper:
+                paper.references = self._extract_reference_ids(
+                    getattr(api_paper, "references", None)
+                )
+            return paper
+
+        return self._call_with_retries(
+            _operation,
+            on_retry=lambda attempt, wait_time, exc: logger.warning(
+                "Attempt %s failed for %s: %s. Retrying in %ss",
+                attempt,
+                paper_id,
+                exc,
+                wait_time,
+            ),
+            on_final_failure=lambda exc: (
+                logger.error(
+                    "Failed to fetch paper %s after %s attempts: %s",
+                    paper_id,
+                    API_CONFIG.max_retries,
+                    exc,
+                )
+                or None
+            ),
+            handled_exceptions=(
+                (
+                    ObjectNotFoundException,
+                    lambda _exc: (
+                        logger.warning("Paper not found: %s", paper_id) or None
+                    ),
+                ),
+            ),
+        )
 
     def get_paper_citations(self, paper_id: str, limit: int = 20) -> List[Paper]:
         """
@@ -748,49 +779,54 @@ class SemanticScholarClient:
         papers: List[Paper] = []
         normalized_paper_id = normalize_paper_id(paper_id)
 
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                relation_records = fetch_method(normalized_paper_id, limit=limit)
-                if not relation_records:
-                    return papers
-
-                for record in relation_records:
-                    paper = self._convert_api_paper(getattr(record, "paper", None))
-                    if paper:
-                        papers.append(paper)
-
-                    if len(papers) >= limit:
-                        break
-
+        def _operation() -> List[Paper]:
+            relation_records = fetch_method(normalized_paper_id, limit=limit)
+            if not relation_records:
                 return papers
 
-            except ObjectNotFoundException:
+            for record in relation_records:
+                paper = self._convert_api_paper(getattr(record, "paper", None))
+                if paper:
+                    papers.append(paper)
+
+                if len(papers) >= limit:
+                    break
+
+            return papers
+
+        return self._call_with_retries(
+            _operation,
+            on_retry=lambda attempt, wait_time, exc: logger.warning(
+                "Failed to fetch %s for %s (attempt %s). Retrying in %ss",
+                relation_label,
+                normalized_paper_id,
+                attempt,
+                wait_time,
+            ),
+            on_final_failure=lambda exc: (
                 logger.warning(
-                    "Paper not found for %s: %s", relation_label, normalized_paper_id
+                    "Failed to fetch %s for %s after %s attempts: %s",
+                    relation_label,
+                    normalized_paper_id,
+                    API_CONFIG.max_retries,
+                    exc,
                 )
-                return papers
-            except Exception as exc:
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    logger.warning(
-                        "Failed to fetch %s for %s (attempt %s). Retrying in %ss",
-                        relation_label,
-                        normalized_paper_id,
-                        attempt + 1,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                else:
-                    logger.warning(
-                        "Failed to fetch %s for %s after %s attempts: %s",
-                        relation_label,
-                        normalized_paper_id,
-                        API_CONFIG.max_retries,
-                        exc,
-                    )
-
-        return papers
+                or papers
+            ),
+            handled_exceptions=(
+                (
+                    ObjectNotFoundException,
+                    lambda _exc: (
+                        logger.warning(
+                            "Paper not found for %s: %s",
+                            relation_label,
+                            normalized_paper_id,
+                        )
+                        or papers
+                    ),
+                ),
+            ),
+        )
 
     def get_reference_ids(
         self, paper_id: str, *, force_refresh: bool = False
@@ -841,74 +877,71 @@ class SemanticScholarClient:
                 with contextlib.suppress(OSError):
                     cache_path.unlink(missing_ok=True)
 
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                references = self.client.get_paper_references(
-                    normalized_paper_id, fields=["paperId"]
-                )
-                if not references:
-                    self._persist_reference_cache_entry(
-                        cache_path,
-                        normalized_paper_id,
-                        [],
-                    )
-                    return []
+        def _persist_empty() -> List[str]:
+            self._persist_reference_cache_entry(
+                cache_path,
+                normalized_paper_id,
+                [],
+            )
+            return []
 
-                normalized_ref_ids = self._extract_reference_ids(references)
-                self._persist_reference_cache_entry(
-                    cache_path,
-                    normalized_paper_id,
-                    normalized_ref_ids,
-                )
-                return normalized_ref_ids
+        def _operation() -> List[str]:
+            references = self.client.get_paper_references(
+                normalized_paper_id, fields=["paperId"]
+            )
+            if not references:
+                return _persist_empty()
 
-            except TypeError:
-                logger.debug(
-                    "Reference payload missing for %s (treating as empty)",
-                    normalized_paper_id,
-                )
-                self._persist_reference_cache_entry(
-                    cache_path,
-                    normalized_paper_id,
-                    [],
-                )
-                return []
-            except ObjectNotFoundException:
-                logger.warning(
-                    "Paper not found for reference IDs: %s", normalized_paper_id
-                )
-                self._persist_reference_cache_entry(
-                    cache_path,
-                    normalized_paper_id,
-                    [],
-                )
-                return []
-            except Exception as exc:
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    logger.warning(
-                        "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
-                        normalized_paper_id,
-                        attempt + 1,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                    continue
+            normalized_ref_ids = self._extract_reference_ids(references)
+            self._persist_reference_cache_entry(
+                cache_path,
+                normalized_paper_id,
+                normalized_ref_ids,
+            )
+            return normalized_ref_ids
 
-                logger.warning(
-                    "Failed to fetch reference IDs for %s after %s attempts: %s",
-                    normalized_paper_id,
-                    API_CONFIG.max_retries,
-                    exc,
-                )
-                raise RuntimeError(
-                    "Failed to fetch reference IDs after retries for "
-                    f"{normalized_paper_id}."
-                ) from exc
+        def _raise_failure(exc: Exception) -> List[str]:
+            logger.warning(
+                "Failed to fetch reference IDs for %s after %s attempts: %s",
+                normalized_paper_id,
+                API_CONFIG.max_retries,
+                exc,
+            )
+            raise RuntimeError(
+                f"Failed to fetch reference IDs after retries for {normalized_paper_id}."
+            ) from exc
 
-        raise RuntimeError(
-            f"Failed to fetch reference IDs after retries for {normalized_paper_id}."
+        return self._call_with_retries(
+            _operation,
+            on_retry=lambda attempt, wait_time, exc: logger.warning(
+                "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
+                normalized_paper_id,
+                attempt,
+                wait_time,
+            ),
+            on_final_failure=_raise_failure,
+            handled_exceptions=(
+                (
+                    TypeError,
+                    lambda _exc: (
+                        logger.debug(
+                            "Reference payload missing for %s (treating as empty)",
+                            normalized_paper_id,
+                        )
+                        or _persist_empty()
+                    ),
+                ),
+                (
+                    ObjectNotFoundException,
+                    lambda _exc: (
+                        logger.warning(
+                            "Paper not found for reference IDs: %s",
+                            normalized_paper_id,
+                        )
+                        or _persist_empty()
+                    ),
+                ),
+            ),
         )
 
     def get_recommended_papers(

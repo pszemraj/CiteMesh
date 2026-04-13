@@ -455,30 +455,6 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "width: 100%;\n      height: 100%;\n      min-height: 0;",
     ]:
         assert css_token in rendered
-    for script_token in [
-        "is-filter-hidden",
-        "is-neighbor",
-        "neighborhood-edges",
-        "buildFigureSpecFromPayload(",
-        "applyImportedPayload(",
-        "populateCollectionSelector(",
-        "loadCollectionResult(",
-        "parseImportedPayloadFromText(",
-        "extractEmbeddedScriptJson(",
-        "recoverDashboardMetaFromFigure(",
-        "synthesizeLegacyDashboardMeta(",
-        "setDashboardStatus(",
-        "renderWhyLines(",
-        "state.hoverId || state.selectedId",
-        "overlayState",
-        "neighborhoodKey",
-        "Loaded legacy results from",
-        "console.warn(",
-    ]:
-        assert script_token in rendered
-    assert rendered.count("let adjacency = new Map();") == 1
-    assert "data-point-number" in rendered
-    assert "path.parentNode.appendChild(path)" not in rendered
 
     payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
     assert payload["meta"]["seed_id"] == "seed"

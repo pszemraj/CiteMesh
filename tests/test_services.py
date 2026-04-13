@@ -545,102 +545,62 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     ]
     assert json.loads(cache_path.read_text())["references"] == ["fresh-1", "fresh-2"]
 
-    normalized_seed = s2.normalize_paper_id("seed")
-    seed_cache_path = s2._reference_cache_path(normalized_seed)
-    seed_cache_path.write_text("{bad-json")
-    client.client.get_paper_references = MagicMock(
-        return_value=[_make_reference_record("a"), _make_reference_record("b")]
-    )
-    refs = client.get_reference_ids("seed")
-    assert refs == ["a", "b"]
-    assert json.loads(seed_cache_path.read_text())["references"] == ["a", "b"]
-
-    unicode_seed = s2.normalize_paper_id("seed-unicode")
-    unicode_cache_path = s2._reference_cache_path(unicode_seed)
-    unicode_cache_path.write_bytes(b"\xff\xfe")
-    client.client.get_paper_references = MagicMock(
-        return_value=[_make_reference_record("unicode-fixed")]
-    )
-    unicode_refs = client.get_reference_ids("seed-unicode")
-    assert unicode_refs == ["unicode-fixed"]
-    assert json.loads(unicode_cache_path.read_text())["references"] == ["unicode-fixed"]
-
-    non_object_seed = s2.normalize_paper_id("seed-non-object")
-    non_object_cache_path = s2._reference_cache_path(non_object_seed)
-    non_object_cache_path.write_text(
-        json.dumps(
-            [
-                "not",
-                "a",
-                "dict",
-            ]
-        )
-    )
-    client.client.get_paper_references = MagicMock(
-        return_value=[_make_reference_record("non-object-fixed")]
-    )
-    rebuilt_non_object_refs = client.get_reference_ids("seed-non-object")
-    assert rebuilt_non_object_refs == ["non-object-fixed"]
-    assert json.loads(non_object_cache_path.read_text())["references"] == [
-        "non-object-fixed"
+    rebuild_cases = [
+        ("seed", "{bad-json", "text", ["a", "b"]),
+        ("seed-unicode", b"\xff\xfe", "bytes", ["unicode-fixed"]),
+        (
+            "seed-non-object",
+            json.dumps(["not", "a", "dict"]),
+            "text",
+            ["non-object-fixed"],
+        ),
+        (
+            "seed-malformed",
+            json.dumps(
+                {
+                    "paper_id": s2.normalize_paper_id("seed-malformed"),
+                    "references": {"unexpected": "mapping"},
+                    "version": s2.REFERENCE_CACHE_VERSION,
+                }
+            ),
+            "text",
+            ["fixed-1", "fixed-2"],
+        ),
+        (
+            "seed-mixed",
+            json.dumps(
+                {
+                    "paper_id": s2.normalize_paper_id("seed-mixed"),
+                    "references": [
+                        "ok-1",
+                        None,
+                        {"paperId": "ok-2"},
+                        {"paper_id": "ok-3"},
+                        {"paper": {"paperId": "ok-4"}},
+                        {"paperId": "   "},
+                        123,
+                        "ok-1",
+                    ],
+                    "version": s2.REFERENCE_CACHE_VERSION,
+                }
+            ),
+            "text",
+            ["rebuilt-1", "rebuilt-2"],
+        ),
     ]
-
-    malformed_seed = s2.normalize_paper_id("seed-malformed")
-    malformed_cache_path = s2._reference_cache_path(malformed_seed)
-    malformed_cache_path.write_text(
-        json.dumps(
-            {
-                "paper_id": malformed_seed,
-                "references": {"unexpected": "mapping"},
-                "version": s2.REFERENCE_CACHE_VERSION,
-            }
+    for paper_id, cached_payload, write_mode, rebuilt_ids in rebuild_cases:
+        normalized_paper_id = s2.normalize_paper_id(paper_id)
+        rebuilt_cache_path = s2._reference_cache_path(normalized_paper_id)
+        if write_mode == "bytes":
+            rebuilt_cache_path.write_bytes(cached_payload)
+        else:
+            rebuilt_cache_path.write_text(cached_payload)
+        client.client.get_paper_references = MagicMock(
+            return_value=[_make_reference_record(ref_id) for ref_id in rebuilt_ids]
         )
-    )
-    client.client.get_paper_references = MagicMock(
-        return_value=[
-            _make_reference_record("fixed-1"),
-            _make_reference_record("fixed-2"),
-        ]
-    )
-    rebuilt_refs = client.get_reference_ids("seed-malformed")
-    assert rebuilt_refs == ["fixed-1", "fixed-2"]
-    assert json.loads(malformed_cache_path.read_text())["references"] == [
-        "fixed-1",
-        "fixed-2",
-    ]
-
-    mixed_seed = s2.normalize_paper_id("seed-mixed")
-    mixed_cache_path = s2._reference_cache_path(mixed_seed)
-    mixed_cache_path.write_text(
-        json.dumps(
-            {
-                "paper_id": mixed_seed,
-                "references": [
-                    "ok-1",
-                    None,
-                    {"paperId": "ok-2"},
-                    {"paper_id": "ok-3"},
-                    {"paper": {"paperId": "ok-4"}},
-                    {"paperId": "   "},
-                    123,
-                    "ok-1",
-                ],
-                "version": s2.REFERENCE_CACHE_VERSION,
-            }
-        )
-    )
-    client.client.get_paper_references = MagicMock(
-        return_value=[
-            _make_reference_record("rebuilt-1"),
-            _make_reference_record("rebuilt-2"),
-        ]
-    )
-    mixed_refs = client.get_reference_ids("seed-mixed")
-    assert mixed_refs == ["rebuilt-1", "rebuilt-2"]
-    assert json.loads(mixed_cache_path.read_text())["references"] == [
-        "rebuilt-1",
-        "rebuilt-2",
-    ]
+        rebuilt_refs = client.get_reference_ids(paper_id)
+        assert rebuilt_refs == rebuilt_ids
+        assert json.loads(rebuilt_cache_path.read_text())["references"] == rebuilt_ids
 
     client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
     assert client.get_reference_ids("seed-type-error") == []
