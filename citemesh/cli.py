@@ -1631,6 +1631,11 @@ def update_dashboard_manifest(
 ) -> Dict[str, Any]:
     """Create or update shared dashboard manifest for collection-style outputs.
 
+    Dashboard collections intentionally keep one manifest slot per
+    ``(strategy, seed_id)`` pair. Re-running the same seed/strategy refreshes
+    that slot because the per-run JSON/config artifact paths are also stable for
+    a given seed title and identifier.
+
     :param Path manifest_path: Manifest JSON path to write.
     :param Path collection_root: Shared dashboard collection root directory.
     :param nx.Graph graph: Built graph used for seed metadata.

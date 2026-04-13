@@ -58,11 +58,13 @@ def _assert_module_reload_is_lazy(
 
 def test_service_and_strategy_package_exports() -> None:
     """Package exports should resolve directly from their defining modules."""
+    from citemesh import EmbeddingGraphBuilder as TopLevelEmbeddingGraphBuilder
     from citemesh.strategies import EmbeddingGraphBuilder
 
     assert services_module.get_client is get_client
     assert services_module.reset_client is reset_client
     assert services_module.SemanticScholarClient is SemanticScholarClient
+    assert TopLevelEmbeddingGraphBuilder is EmbeddingGraphBuilder
     assert EmbeddingGraphBuilder.__module__ == "citemesh.strategies.embedding"
 
 
@@ -90,6 +92,34 @@ def test_strategies_package_init_is_lazy(monkeypatch: pytest.MonkeyPatch) -> Non
             "citemesh.strategies.recommendation",
         ),
         expected_exports={
+            "GraphBuilderStrategy",
+            "CitationGraphBuilder",
+            "RecommendationGraphBuilder",
+            "EmbeddingGraphBuilder",
+            "HybridGraphBuilder",
+        },
+    )
+
+
+def test_citemesh_package_init_preserves_lazy_top_level_strategy_exports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Importing ``citemesh`` should keep top-level strategy exports available lazily."""
+    import citemesh as citemesh_module
+
+    _assert_module_reload_is_lazy(
+        monkeypatch,
+        module=citemesh_module,
+        blocked_prefixes=(
+            "citemesh.strategies.citation",
+            "citemesh.strategies.embedding",
+            "citemesh.strategies.hybrid",
+            "citemesh.strategies.recommendation",
+        ),
+        expected_exports={
+            "__version__",
+            "Paper",
+            "Author",
             "GraphBuilderStrategy",
             "CitationGraphBuilder",
             "RecommendationGraphBuilder",

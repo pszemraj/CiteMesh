@@ -968,6 +968,79 @@ def test_dashboard_collection_manifest_tracks_multiple_runs(
     assert second_result.returncode == 0
 
 
+def test_dashboard_collection_manifest_refreshes_same_seed_strategy_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-running the same seed/strategy should refresh the existing selector slot."""
+    seed_graph = build_seed_graph("seed")
+    updated_graph = build_seed_graph("seed")
+    updated_graph.add_node(
+        "extra",
+        title="Extra Paper",
+        year=2025,
+        authors=["Author B"],
+        citation_count=1,
+    )
+    updated_graph.add_edge("seed", "extra", weight=0.4)
+
+    captured: dict[str, object] = {}
+    build_results = iter([(seed_graph, "seed"), (updated_graph, "seed")])
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: next(build_results),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        build_fake_exporter_factory(
+            captured,
+            methods=("to_dashboard_html", "to_json"),
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir) / "collection"
+        first_result = run_cli_command(
+            [
+                "build",
+                "arxiv:1111.1111",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "-o",
+                str(output_dir),
+            ],
+        )
+        second_result = run_cli_command(
+            [
+                "build",
+                "arxiv:1111.1111",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "-o",
+                str(output_dir),
+            ],
+        )
+
+        manifest_payload = json.loads(
+            (output_dir / "dashboard.manifest.json").read_text()
+        )
+        assert len(manifest_payload["results"]) == 1
+        entry = manifest_payload["results"][0]
+        assert entry["result_id"] == "recommendation:seed"
+        assert entry["summary"] == {"nodes": 2, "edges": 1}
+        collection_bundle = captured["metadata"]["dashboard_collection"]
+        assert collection_bundle["current_result_id"] == "recommendation:seed"
+        assert len(collection_bundle["results"]) == 1
+
+    assert first_result.returncode == 0
+    assert second_result.returncode == 0
+
+
 def test_dashboard_standalone_export_preserves_explicit_single_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -49,6 +49,7 @@ Canonical path-normalization rules:
   - if `--output` has no known suffix, it is treated directly as directory base
   - each format is written as `<directory-base>/<strategy>.<ext>`
   - if `dashboard` is among the selected formats, the shared shell is written as `<directory-base>/dashboard.html`, the collection index as `<directory-base>/dashboard.manifest.json`, the shell embeds the currently available saved-result payloads from that collection, and the run-specific data/config artifacts are written under `<directory-base>/<slug>-<hash>/`
+  - re-running the same `seed_id` with the same `strategy` refreshes that collection slot instead of creating a second entry, because the JSON/config artifact path for that seed is stable
 
 Examples:
 
@@ -123,13 +124,14 @@ interface with embedded Plotly graph, paper list, and detail panel.
 - **Export JSON** — downloads the embedded enriched payload as a standalone `.json` file
 - **Export CSV** — generates a CSV table client-side from the current dataset
 - **All BibTeX** — downloads all papers' BibTeX entries as a single `.bib` file
-- **Saved Results selector** — switches between JSON payloads already tracked in the collection shell, with no extra file picking
+- **Saved Results selector** — switches between JSON payload slots already tracked in the collection shell, with no extra file picking
 - **Load Results** — file picker that accepts any CiteMesh JSON file and swaps the dashboard dataset in-place, including graph geometry (no page reload required)
 
 In collection mode, this means you can keep one `dashboard.html` open and move
-between saved runs from the built-in selector, or load any other compatible JSON
-payload manually, rather than opening a separate dashboard HTML file for each
-paper.
+between saved result slots from the built-in selector, or load any other
+compatible JSON payload manually, rather than opening a separate dashboard HTML
+file for each paper. Re-running the same seed with the same strategy refreshes
+that slot instead of adding another selector entry.
 
 ### Sidecar (`<strategy>.config.json`)
 
