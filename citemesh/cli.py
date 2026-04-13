@@ -10,13 +10,16 @@ import argparse
 import json
 import logging
 import math
+import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 
 import networkx as nx
+from filelock import FileLock, Timeout
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
@@ -51,6 +54,7 @@ from citemesh.visualization import (
 DEFAULT_LOG_WIDTH = 140
 LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
+DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS = 60.0
 
 log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
 output_console = Console(width=DEFAULT_LOG_WIDTH)
@@ -1656,15 +1660,6 @@ def update_dashboard_manifest(
     :param Dict[str, Any] metadata: Export metadata payload for summary fields.
     :return Dict[str, Any]: Manifest payload written to disk.
     """
-    results: list[Dict[str, Any]] = []
-    if manifest_path.exists():
-        try:
-            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            existing = {}
-        if isinstance(existing, dict) and isinstance(existing.get("results"), list):
-            results = [item for item in existing["results"] if isinstance(item, dict)]
-
     seed_title = str(graph.nodes[seed_id].get("title", seed_id))
     result_id = f"{strategy}:{seed_id}"
     entry = {
@@ -1680,16 +1675,75 @@ def update_dashboard_manifest(
         "config_path": _relative_output_path(config_path, collection_root),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
-    filtered = [item for item in results if item.get("result_id") != result_id]
-    manifest_payload = {
-        "schema_version": 1,
-        "results": [entry, *filtered],
-    }
-    manifest_path.write_text(
-        json.dumps(manifest_payload, indent=2, sort_keys=True),
-        encoding="utf-8",
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = manifest_path.with_name(f".{manifest_path.name}.lock")
+    lock = FileLock(str(lock_path), timeout=DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS)
+    try:
+        with lock:
+            results: list[Dict[str, Any]] = []
+            if manifest_path.exists():
+                try:
+                    existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    existing = {}
+                if isinstance(existing, dict) and isinstance(
+                    existing.get("results"), list
+                ):
+                    results = [
+                        item for item in existing["results"] if isinstance(item, dict)
+                    ]
+
+            filtered = [item for item in results if item.get("result_id") != result_id]
+            manifest_payload = {
+                "schema_version": 1,
+                "results": [entry, *filtered],
+            }
+            _atomic_write_json_payload(manifest_path, manifest_payload)
+            return manifest_payload
+    except Timeout as exc:
+        raise RuntimeError(
+            "Timed out waiting for dashboard manifest lock "
+            f"at {lock_path} after {DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS:.1f}s."
+        ) from exc
+
+
+def _atomic_write_json_payload(path: Path, payload: Dict[str, Any]) -> None:
+    """Persist a JSON payload with an atomic rename.
+
+    :param Path path: Target JSON file path.
+    :param Dict[str, Any] payload: JSON-compatible object to serialize.
+    :return None: Writes the file in place.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Optional[Path] = None
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
     )
-    return manifest_payload
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            json.dump(payload, tmp_file, indent=2, sort_keys=True)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+
+        os.replace(tmp_name, path)
+        with path.open("r+b") as final_file:
+            os.fsync(final_file.fileno())
+        directory_fd: Optional[int] = None
+        try:
+            directory_fd = os.open(str(path.parent), os.O_RDONLY)
+            os.fsync(directory_fd)
+        except OSError:
+            pass
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
 
 
 def build_dashboard_collection_bundle(

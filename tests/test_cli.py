@@ -9,6 +9,7 @@ import re
 import runpy
 import shlex
 import tempfile
+import threading
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -1157,6 +1158,83 @@ def test_dashboard_collection_manifest_refreshes_same_seed_strategy_slot(
 
     assert first_result.returncode == 0
     assert second_result.returncode == 0
+
+
+def test_dashboard_collection_manifest_serializes_concurrent_updates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Manifest updates should hold a shared lock across read/merge/write."""
+    manifest_path = tmp_path / "dashboard.manifest.json"
+    collection_root = tmp_path
+    first_graph = build_seed_graph("seed-a")
+    second_graph = build_seed_graph("seed-b")
+    first_graph.nodes["seed-a"]["title"] = "First Seed"
+    second_graph.nodes["seed-b"]["title"] = "Second Seed"
+
+    first_write_started = threading.Event()
+    allow_first_write = threading.Event()
+    second_write_started = threading.Event()
+    write_counter = 0
+    write_counter_lock = threading.Lock()
+    original_atomic_write = cli_module._atomic_write_json_payload
+
+    def delayed_atomic_write(path: Path, payload: dict[str, object]) -> None:
+        nonlocal write_counter
+        with write_counter_lock:
+            write_counter += 1
+            call_number = write_counter
+        if call_number == 1:
+            first_write_started.set()
+            assert allow_first_write.wait(timeout=5), "first write never released"
+        else:
+            second_write_started.set()
+        original_atomic_write(path, payload)
+
+    monkeypatch.setattr(cli_module, "_atomic_write_json_payload", delayed_atomic_write)
+
+    errors: list[BaseException] = []
+
+    def worker(graph: nx.Graph, seed_id: str) -> None:
+        try:
+            cli_module.update_dashboard_manifest(
+                manifest_path,
+                collection_root=collection_root,
+                graph=graph,
+                seed_id=seed_id,
+                strategy="recommendation",
+                json_path=collection_root / seed_id / "recommendation.json",
+                config_path=collection_root / seed_id / "recommendation.config.json",
+                metadata={
+                    "nodes": graph.number_of_nodes(),
+                    "edges": graph.number_of_edges(),
+                },
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=worker, args=(first_graph, "seed-a"))
+    second_thread = threading.Thread(target=worker, args=(second_graph, "seed-b"))
+
+    first_thread.start()
+    assert first_write_started.wait(timeout=5), "first write never started"
+    second_thread.start()
+    assert not second_write_started.wait(timeout=0.25), (
+        "second update reached write path before first released manifest lock"
+    )
+
+    allow_first_write.set()
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not errors
+
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert {entry["result_id"] for entry in manifest_payload["results"]} == {
+        "recommendation:seed-a",
+        "recommendation:seed-b",
+    }
 
 
 def test_dashboard_standalone_export_preserves_explicit_single_file(
