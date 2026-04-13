@@ -12,6 +12,13 @@ Start from one paper you already know, then quickly discover:
 The CLI defaults to the `recommendation` strategy for the fastest topical pass.
 Use `--strategy hybrid` when you want the tuned citation-plus-semantic workflow for this discovery pattern.
 
+## Project Status
+
+CiteMesh is currently a private, fast-moving pre-release tool. The project
+optimizes for discovery quality, correctness, and simpler internals over
+backward compatibility. Older exports, checkpoints, or intermediate artifacts
+may stop working between revisions unless explicitly documented otherwise.
+
 ## Documentation
 
 - [Documentation index](docs/README.md)

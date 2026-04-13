@@ -134,7 +134,7 @@ interface with embedded Plotly graph, paper list, and detail panel.
 - **Export CSV** — generates a CSV table client-side from the current dataset
 - **All BibTeX** — downloads all papers' BibTeX entries as a single `.bib` file
 - **Saved Results selector** — switches between JSON payload slots already tracked in the collection shell, with no extra file picking
-- **Load Results** — file picker that accepts current-version CiteMesh JSON files plus dashboard HTML exports. Current-version JSON keeps stored graph geometry when that geometry was exported. Legacy dashboard HTML can recover embedded geometry from the exported Plotly figure. If you need JSON round-tripping through the dashboard, export JSON alongside a layout-based format such as `dashboard` or `plotly`.
+- **Load Results** — file picker that accepts current-version CiteMesh JSON files plus current-version dashboard HTML exports. Current-version JSON keeps stored graph geometry when that geometry was exported. Older dashboard HTML exports are not supported; re-export them from the current code if you still need dashboard import. If you need JSON round-tripping through the dashboard, export JSON alongside a layout-based format such as `dashboard` or `plotly`.
 
 In collection mode, this means you can keep one `dashboard.html` open and move
 between saved result slots from the built-in selector, or load any other

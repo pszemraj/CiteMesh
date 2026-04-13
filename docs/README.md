@@ -1,5 +1,10 @@
 # Documentation
 
+> [!IMPORTANT]
+> CiteMesh is a private pre-release codebase. These docs describe current
+> behavior; backward compatibility with older exports, checkpoints, or
+> intermediate artifacts is not a project goal unless explicitly stated.
+
 ## Overview
 
 - Project overview and installation: [README](../README.md)
