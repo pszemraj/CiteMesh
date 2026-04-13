@@ -38,8 +38,6 @@ from citemesh.strategies.hybrid import (
 )
 from citemesh.visualization import generate_output_path
 from tests._helpers import (
-    build_fake_exporter_factory,
-    build_fake_strategy_builder_factory,
     build_seed_graph,
     get_paper_id_normalization_cases,
 )
@@ -84,6 +82,69 @@ def _run_captured_cli(entrypoint: Any) -> SimpleNamespace:
         stdout=stdout.getvalue(),
         stderr=stderr.getvalue(),
     )
+
+
+def _make_builder_stub(
+    captured_kwargs: dict[str, object],
+    *,
+    graph: nx.Graph | None = None,
+    seed_id: str = "seed",
+) -> Any:
+    """Create a lightweight strategy-builder stub for CLI dispatch tests."""
+    base_graph = graph if graph is not None else build_seed_graph(seed_id)
+
+    def _factory(**kwargs: object) -> SimpleNamespace:
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(build_graph=lambda _paper_id: (base_graph, seed_id))
+
+    return _factory
+
+
+def _make_exporter_stub(
+    captured_data: dict[str, object], *, methods: tuple[str, ...] | None = None
+) -> Any:
+    """Create a lightweight exporter stub for CLI artifact tests."""
+    requested_methods = set(methods or tuple(cli_module._EXPORTER_METHOD.values()))
+    payloads = {
+        "to_json": "{}",
+        "to_interactive_html": "<html/>",
+        "to_plotly_html": "<html/>",
+        "to_dashboard_html": "<html/>",
+        "to_graphml": "<graphml/>",
+        "to_csv": "id,title\n",
+        "to_bibtex": "@article{test,}\n",
+    }
+
+    def _factory(*_args: object, **kwargs: object) -> SimpleNamespace:
+        captured_data["kwargs"] = kwargs
+        captured_data["metadata"] = kwargs.get("metadata")
+        captured_data["layout"] = kwargs.get("layout")
+
+        def _write_payload(
+            path: Path,
+            method_name: str,
+            *_method_args: object,
+            **_method_kwargs: object,
+        ) -> None:
+            del _method_args, _method_kwargs
+            if method_name in requested_methods:
+                path.write_text(payloads[method_name], encoding="utf-8")
+
+        return SimpleNamespace(
+            **{
+                method_name: (
+                    lambda path, *args, _method=method_name, **kwargs: _write_payload(
+                        path,
+                        _method,
+                        *args,
+                        **kwargs,
+                    )
+                )
+                for method_name in payloads
+            }
+        )
+
+    return _factory
 
 
 def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
@@ -173,7 +234,7 @@ def test_force_rebuild_cache_confirmation_contracts(
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory({}, methods=("to_json",)),
+        _make_exporter_stub({}, methods=("to_json",)),
     )
 
     monkeypatch.setattr(cli_module, "stdin_isatty", lambda: True)
@@ -773,7 +834,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(captured, methods=("to_json",)),
+        _make_exporter_stub(captured, methods=("to_json",)),
     )
 
     def _fake_visualize(*args: Any, **kwargs: Any) -> None:
@@ -816,7 +877,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(captured, methods=("to_json",)),
+        _make_exporter_stub(captured, methods=("to_json",)),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -852,7 +913,7 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(
+        _make_exporter_stub(
             captured,
             methods=("to_dashboard_html", "to_json"),
         ),
@@ -894,7 +955,7 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(
+        _make_exporter_stub(
             captured,
             methods=(
                 "to_dashboard_html",
@@ -959,7 +1020,7 @@ def test_dashboard_collection_manifest_tracks_multiple_runs(
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(
+        _make_exporter_stub(
             captured,
             methods=("to_dashboard_html", "to_json"),
         ),
@@ -1050,7 +1111,7 @@ def test_dashboard_collection_manifest_refreshes_same_seed_strategy_slot(
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(
+        _make_exporter_stub(
             captured,
             methods=("to_dashboard_html", "to_json"),
         ),
@@ -1112,7 +1173,7 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(
+        _make_exporter_stub(
             captured,
             methods=("to_dashboard_html",),
         ),
@@ -1251,7 +1312,7 @@ def test_dashboard_collection_mode_logs_side_effects(
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(
+        _make_exporter_stub(
             {},
             methods=("to_dashboard_html", "to_json"),
         ),
@@ -1295,7 +1356,7 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(
+        _make_exporter_stub(
             captured,
             methods=(
                 "to_json",
@@ -1390,7 +1451,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(
             cli_module,
             "GraphExporter",
-            build_fake_exporter_factory(captured, methods=("to_json",)),
+            _make_exporter_stub(captured, methods=("to_json",)),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1515,7 +1576,7 @@ def test_embedding_build_logs_side_effect_contract(
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory({}, methods=("to_json",)),
+        _make_exporter_stub({}, methods=("to_json",)),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1562,7 +1623,7 @@ def test_hybrid_disabled_semantic_branch_skips_embedding_side_effect_logs(
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory({}, methods=("to_json",)),
+        _make_exporter_stub({}, methods=("to_json",)),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1715,9 +1776,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         monkeypatch.setattr(
             cli_module,
             builder_name,
-            build_fake_strategy_builder_factory(
-                captured, graph=build_seed_graph("seed")
-            ),
+            _make_builder_stub(captured, graph=build_seed_graph("seed")),
         )
         graph, seed_id = cli_module._build_strategy_graph(namespace, strategy)
         assert seed_id == "seed"
@@ -1735,7 +1794,7 @@ def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
     monkeypatch.setattr(
         cli_module,
         "HybridGraphBuilder",
-        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+        _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
 
     graph, seed_id = cli_module._build_strategy_graph(namespace, "hybrid")
@@ -1761,7 +1820,7 @@ def test_programmatic_embedding_dispatch_normalizes_lzf_level(
     monkeypatch.setattr(
         cli_module,
         "EmbeddingGraphBuilder",
-        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+        _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
 
     graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
@@ -1785,7 +1844,7 @@ def test_programmatic_embedding_dispatch_propagates_normalized_scalars(
     monkeypatch.setattr(
         cli_module,
         "EmbeddingGraphBuilder",
-        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+        _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
 
     graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
@@ -1831,7 +1890,7 @@ def test_programmatic_strategy_dispatch_validates_scalar_contracts(
     monkeypatch.setattr(
         cli_module,
         "CitationGraphBuilder",
-        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+        _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
 
     with pytest.raises(ValueError, match="must be at least 1"):
@@ -2069,9 +2128,7 @@ def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         cli_module,
         "GraphExporter",
-        build_fake_exporter_factory(
-            captured, methods=("to_json", "to_csv", "to_bibtex")
-        ),
+        _make_exporter_stub(captured, methods=("to_json", "to_csv", "to_bibtex")),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -2163,7 +2220,7 @@ def test_programmatic_dispatch_respects_explicit_provided_set(
     monkeypatch.setattr(
         cli_module,
         "HybridGraphBuilder",
-        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+        _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
 
     # Explicitly mark max_papers as provided → hybrid override should NOT apply

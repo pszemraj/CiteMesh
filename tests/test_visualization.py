@@ -144,6 +144,7 @@ def _build_graph() -> tuple[nx.Graph, str]:
     )
 
     graph = nx.Graph()
+    graph.graph["strategy"] = "citation"
     graph.add_node(
         seed.paper_id,
         paper=seed,

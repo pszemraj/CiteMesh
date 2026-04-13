@@ -107,12 +107,8 @@ deterministic offline identity token (`...::offline-unverified`) and emits warni
 that cache reuse is based on assumptions rather than full verification.
 In that mode, CiteMesh records the assumed fingerprint in cache metadata so future
 offline checks are explicit and traceable.
-When requested revision is `main` and only a legacy cached SHA is available, reuse
-is still allowed with a warning because `main` cannot be proven offline.
-Set `CITEMESH_STRICT_OFFLINE_FINGERPRINT=1` to disable that legacy `main` reuse
-assumption and force namespace clear/rebuild when identity cannot be verified
-(details: [Environment Variables](../reference/environment.md)).
-If compatibility checks fail (for example unresolved revision mismatch), CiteMesh clears
+If compatibility checks fail (for example unresolved revision mismatch or an old cache
+entry that stored only a bare SHA without the requested revision identity), CiteMesh clears
 and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.

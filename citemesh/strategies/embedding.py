@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import os
 import random
 import re
 import warnings
@@ -173,7 +172,6 @@ ARXIV_DATASET_CANDIDATES = (
     "CShorten/ML-ArXiv-Papers",
     "gfissore/arxiv-abstracts-2021",
 )
-STRICT_OFFLINE_FINGERPRINT_ENV_VAR = "CITEMESH_STRICT_OFFLINE_FINGERPRINT"
 ARXIV_IDENTIFIER_PATTERN = re.compile(
     r"^(?:arxiv:)?((?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z\-]+)?/\d{7})(?:v\d+)?)$",
     re.IGNORECASE,
@@ -976,42 +974,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         if re.fullmatch(r"[0-9a-f]{40}", requested_revision, flags=re.IGNORECASE):
             return suffix.lower() == requested_revision.lower()
-
-        # Legacy sha-only fingerprints do not encode non-default revision tokens.
-        return requested_revision == "main" and not self._strict_offline_mode_enabled()
-
-    @staticmethod
-    def _strict_offline_mode_enabled() -> bool:
-        """Return whether strict offline fingerprint checks are enabled.
-
-        :return bool: ``True`` when legacy offline identity assumptions are disabled.
-        """
-        raw_value = (
-            str(os.getenv(STRICT_OFFLINE_FINGERPRINT_ENV_VAR, "")).strip().lower()
-        )
-        return raw_value in {"1", "true", "yes", "on"}
-
-    def _is_legacy_main_sha_assumption(self, cached_fingerprint: Optional[str]) -> bool:
-        """Return whether compatibility relies on legacy ``main`` SHA assumption.
-
-        :param Optional[str] cached_fingerprint: Existing cached fingerprint token.
-        :return bool: ``True`` when reuse assumes ``main`` still maps to cached SHA.
-        """
-        if cached_fingerprint is None:
-            return False
-        fingerprint = str(cached_fingerprint).strip()
-        if not fingerprint:
-            return False
-        model_id = self._cache_model_identity()
-        if "/" not in model_id:
-            return False
-        if self._requested_hf_revision_token() != "main":
-            return False
-        expected_prefix = f"hf::{model_id}::"
-        if not fingerprint.startswith(expected_prefix):
-            return False
-        suffix = fingerprint[len(expected_prefix) :]
-        return bool(re.fullmatch(r"[0-9a-f]{40}", suffix, flags=re.IGNORECASE))
+        return False
 
     def _ensure_cache_model_fingerprint(self) -> None:
         """Verify cache payload is bound to the active model fingerprint."""
@@ -1027,14 +990,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     cached_fingerprint
                 ):
                     self._resolved_model_fingerprint = str(cached_fingerprint)
-                    if self._is_legacy_main_sha_assumption(cached_fingerprint):
-                        logger.warning(
-                            "Could not verify whether requested revision 'main' still "
-                            "matches cached SHA fingerprint %s for %s. Reusing cache "
-                            "under assumption of unchanged local model artifacts.",
-                            cached_fingerprint,
-                            self.model_name,
-                        )
                     logger.warning(
                         "Could not resolve Hugging Face model fingerprint for %s while "
                         "reuse checks are active. Reusing compatible cached fingerprint %s.",

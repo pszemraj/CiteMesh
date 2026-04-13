@@ -233,7 +233,7 @@ class GraphBuilderStrategy(ABC):
             graph.add_node(
                 paper.paper_id,
                 paper=paper,  # Store full paper object
-                # Also store individual attributes for backward compatibility
+                # Mirror commonly-read scalar fields for render/export paths.
                 title=paper.title,
                 year=paper.year,
                 authors=[a.name for a in paper.authors[:3]],
@@ -274,21 +274,11 @@ class GraphBuilderStrategy(ABC):
     def _resolved_strategy_name(self) -> str:
         """Resolve canonical strategy token for graph metadata.
 
-        Subclasses should set ``strategy_name`` explicitly. The class-name fallback
-        keeps builder-produced graphs self-describing if a strategy omits that field.
+        Current strategy builders define ``strategy_name`` explicitly.
 
         :return str: Normalized strategy token or an empty string.
         """
-        explicit_strategy = (
-            str(getattr(self, "strategy_name", "") or "").strip().lower()
-        )
-        if explicit_strategy:
-            return explicit_strategy
-
-        class_name = self.__class__.__name__
-        if class_name.endswith("GraphBuilder"):
-            class_name = class_name[: -len("GraphBuilder")]
-        return class_name.strip().lower()
+        return str(getattr(self, "strategy_name", "") or "").strip().lower()
 
     def _compute_indexed_similarity(
         self,

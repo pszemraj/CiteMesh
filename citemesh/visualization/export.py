@@ -933,8 +933,7 @@ class GraphExporter:
         """Resolve effective strategy token for export metadata and enrichment.
 
         Explicit exporter metadata wins. When omitted, exporter falls back to graph
-        metadata persisted by builders, then to lightweight structural heuristics for
-        older graphs that predate explicit strategy tagging.
+        metadata persisted by current builders.
 
         :return str: Normalized strategy token when available.
         """
@@ -949,13 +948,6 @@ class GraphExporter:
         )
         if graph_strategy:
             return graph_strategy
-
-        if isinstance(self.graph.graph.get("paper_sources"), dict):
-            return "hybrid"
-        if isinstance(self.graph.graph.get("embedding_runtime"), dict):
-            return "embedding"
-        if isinstance(self.graph.graph.get("seed_relations"), dict):
-            return "citation"
         return ""
 
     def _provenance_map(self) -> Dict[str, str]:
@@ -1966,251 +1958,6 @@ class GraphExporter:
       return color || "#d66cbf";
     }
 
-    function computeImportedYearRange(importedNodes, fallbackRange) {
-      const validYears = importedNodes
-        .map((node) => Number(node && node.year))
-        .filter((year) => Number.isFinite(year) && year > 0);
-      if (validYears.length) {
-        return {
-          min: Math.min(...validYears),
-          max: Math.max(...validYears),
-        };
-      }
-      if (fallbackRange && typeof fallbackRange === "object") {
-        const minYear = safeFiniteNumber(fallbackRange.min, 2000);
-        const maxYear = safeFiniteNumber(fallbackRange.max, minYear);
-        return { min: minYear, max: maxYear };
-      }
-      return { min: 2000, max: 2001 };
-    }
-
-    function compareLegacyNodes(leftNode, rightNode) {
-      const left = leftNode || {};
-      const right = rightNode || {};
-      if (!!left.is_seed !== !!right.is_seed) {
-        return left.is_seed ? -1 : 1;
-      }
-      const citationDelta =
-        safeFiniteNumber(right.citation_count, 0) - safeFiniteNumber(left.citation_count, 0);
-      if (citationDelta !== 0) {
-        return citationDelta;
-      }
-      const leftYear = safeFiniteNumber(left.year, -1);
-      const rightYear = safeFiniteNumber(right.year, -1);
-      if (leftYear !== rightYear) {
-        return rightYear - leftYear;
-      }
-      return String(left.id || "").localeCompare(String(right.id || ""));
-    }
-
-    function computeImportedNodeSizes(importedNodes) {
-      const orderedNodes = Array.isArray(importedNodes) ? importedNodes.slice() : [];
-      const rankedNodes = orderedNodes.slice().sort(compareLegacyNodes);
-      const rankOf = new Map(
-        rankedNodes.map((node, index) => [String((node && node.id) || ""), index])
-      );
-      return orderedNodes.map((node) => {
-        const nodeId = String((node && node.id) || "");
-        const rank = rankOf.has(nodeId) ? rankOf.get(nodeId) : orderedNodes.length;
-        const citationCount = Math.max(0, safeFiniteNumber(node && node.citation_count, 0));
-        let size = 100;
-        if (node && node.is_seed) {
-          size = rank < 3 ? 2500 : 1000;
-        } else if (rank === 0) {
-          size = 2200;
-        } else if (rank < 3) {
-          size = 1200 + (3 - rank) * 200;
-        } else if (rank < 8) {
-          size = 500 + (8 - rank) * 80;
-        } else if (rank < 15) {
-          size = 250 + (15 - rank) * 30;
-        }
-        size += Math.log10(citationCount + 1) * 100;
-        return Math.max(6.0, size / 50.0);
-      });
-    }
-
-    function normalizePositionPairs(positionPairs, paddingRatio) {
-      const pairs = Array.isArray(positionPairs) ? positionPairs : [];
-      if (!pairs.length) {
-        return [];
-      }
-      const safePairs = pairs.map((pair) => {
-        const x = Array.isArray(pair) ? safeFiniteNumber(pair[0], 0) : 0;
-        const y = Array.isArray(pair) ? safeFiniteNumber(pair[1], 0) : 0;
-        return [x, y];
-      });
-      const xs = safePairs.map((pair) => pair[0]);
-      const ys = safePairs.map((pair) => pair[1]);
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-      const centerX = (minX + maxX) * 0.5;
-      const centerY = (minY + maxY) * 0.5;
-      const spanX = maxX - minX;
-      const spanY = maxY - minY;
-      const maxSpan = Math.max(spanX, spanY);
-      const targetHalfExtent = Math.max(1e-6, 1.0 - safeFiniteNumber(paddingRatio, 0.1));
-      if (maxSpan <= 1e-9) {
-        return safePairs.map(() => [0, 0]);
-      }
-      const scale = targetHalfExtent / (maxSpan * 0.5);
-      return safePairs.map((pair) => [
-        (pair[0] - centerX) * scale,
-        (pair[1] - centerY) * scale,
-      ]);
-    }
-
-    function synthesizeLegacyDashboardMeta(importedNodes, importedEdges, baseMeta) {
-      const nodes = Array.isArray(importedNodes) ? importedNodes.slice() : [];
-      const edges = Array.isArray(importedEdges) ? importedEdges : [];
-      const nodeIds = nodes.map((node, index) => {
-        const nodeId = String((node && node.id) || "").trim();
-        return nodeId || `node-${index}`;
-      });
-      const seedNode = nodes.find((node) => !!(node && node.is_seed));
-      const resolvedSeedId = String(
-        (baseMeta && baseMeta.seed_id) || (seedNode && seedNode.id) || nodeIds[0] || ""
-      );
-      const adjacencyMap = new Map(nodeIds.map((nodeId) => [nodeId, new Set()]));
-      edges.forEach((edge) => {
-        const leftId = String((edge && edge.source) || "");
-        const rightId = String((edge && edge.target) || "");
-        if (!leftId || !rightId || leftId === rightId) {
-          return;
-        }
-        if (!adjacencyMap.has(leftId)) {
-          adjacencyMap.set(leftId, new Set());
-        }
-        if (!adjacencyMap.has(rightId)) {
-          adjacencyMap.set(rightId, new Set());
-        }
-        adjacencyMap.get(leftId).add(rightId);
-        adjacencyMap.get(rightId).add(leftId);
-      });
-
-      const distanceByNode = new Map();
-      if (resolvedSeedId && adjacencyMap.has(resolvedSeedId)) {
-        const queue = [resolvedSeedId];
-        distanceByNode.set(resolvedSeedId, 0);
-        while (queue.length) {
-          const currentId = queue.shift();
-          const currentDistance = distanceByNode.get(currentId) || 0;
-          (adjacencyMap.get(currentId) || new Set()).forEach((neighborId) => {
-            if (distanceByNode.has(neighborId)) {
-              return;
-            }
-            distanceByNode.set(neighborId, currentDistance + 1);
-            queue.push(neighborId);
-          });
-        }
-      }
-
-      let maxDistance = 0;
-      distanceByNode.forEach((distance) => {
-        maxDistance = Math.max(maxDistance, safeFiniteNumber(distance, 0));
-      });
-
-      const legacyNodes = nodes.map((node, index) =>
-        Object.assign({ id: nodeIds[index] }, node || {})
-      );
-      const byLevel = new Map();
-      let disconnectedOffset = maxDistance + 1;
-      legacyNodes.forEach((node) => {
-        const nodeId = String(node.id || "");
-        let level = distanceByNode.has(nodeId) ? distanceByNode.get(nodeId) : null;
-        if (level === null || level === undefined) {
-          level = disconnectedOffset;
-          disconnectedOffset += 1;
-        }
-        if (!byLevel.has(level)) {
-          byLevel.set(level, []);
-        }
-        byLevel.get(level).push(node);
-      });
-
-      const positionsById = new Map();
-      Array.from(byLevel.keys()).sort((left, right) => left - right).forEach((level) => {
-        const levelNodes = byLevel.get(level).slice().sort(compareLegacyNodes);
-        if (level === 0 && levelNodes.length) {
-          positionsById.set(String(levelNodes[0].id || resolvedSeedId), [0, 0]);
-          levelNodes.slice(1).forEach((node, index) => {
-            const angle = (2 * Math.PI * index) / Math.max(levelNodes.length - 1, 1);
-            positionsById.set(String(node.id || ""), [0.2 * Math.cos(angle), 0.2 * Math.sin(angle)]);
-          });
-          return;
-        }
-        const radius = 0.62 + Math.max(0, level - 1) * 0.48;
-        const offset = ((stableHash(`${resolvedSeedId}|${level}`) % 360) * Math.PI) / 180;
-        levelNodes.forEach((node, index) => {
-          const angle = offset + (2 * Math.PI * index) / Math.max(levelNodes.length, 1);
-          positionsById.set(String(node.id || ""), [
-            radius * Math.cos(angle),
-            radius * Math.sin(angle),
-          ]);
-        });
-      });
-
-      const normalizedPositions = normalizePositionPairs(
-        nodeIds.map((nodeId) => positionsById.get(nodeId) || [0, 0]),
-        0.1
-      );
-      return {
-        seed_id: resolvedSeedId,
-        theme: String((baseMeta && baseMeta.theme) || (payload.meta && payload.meta.theme) || "light"),
-        summary: (baseMeta && baseMeta.summary) || {
-          nodes: nodes.length,
-          edges: edges.length,
-        },
-        year_range: computeImportedYearRange(nodes, baseMeta && baseMeta.year_range),
-        plotly_node_order: nodeIds,
-        plotly_positions: normalizedPositions,
-        plotly_node_sizes: computeImportedNodeSizes(legacyNodes),
-      };
-    }
-
-    function recoverDashboardMetaFromFigure(importedNodes, baseMeta, figureSpec) {
-      if (!figureSpec || !Array.isArray(figureSpec.data)) {
-        return null;
-      }
-      const nodeTrace = figureSpec.data.find(
-        (trace) =>
-          String((trace && trace.name) || "") === "nodes"
-          || String((trace && trace.mode) || "").includes("markers+text")
-      );
-      if (!nodeTrace) {
-        return null;
-      }
-      const x = Array.isArray(nodeTrace.x) ? nodeTrace.x.map((value) => safeFiniteNumber(value, 0)) : [];
-      const y = Array.isArray(nodeTrace.y) ? nodeTrace.y.map((value) => safeFiniteNumber(value, 0)) : [];
-      if (!x.length || x.length !== y.length) {
-        return null;
-      }
-      let order = Array.isArray(baseMeta && baseMeta.plotly_node_order)
-        ? baseMeta.plotly_node_order.map((nodeId) => String(nodeId || ""))
-        : [];
-      if (!order.length || order.length !== x.length) {
-        const importedOrder = Array.isArray(importedNodes) ? importedNodes : [];
-        order = importedOrder.map((node, index) => {
-          const nodeId = String((node && node.id) || "").trim();
-          return nodeId || `node-${index}`;
-        });
-      }
-      if (!order.length || order.length !== x.length) {
-        return null;
-      }
-      return {
-        plotly_node_order: order,
-        plotly_positions: x.map((xValue, index) => [xValue, y[index]]),
-        plotly_node_sizes: normalizeArray(
-          nodeTrace && nodeTrace.marker ? nodeTrace.marker.size : [],
-          order.length,
-          8
-        ),
-      };
-    }
-
     function extractEmbeddedScriptJson(text, scriptId) {
       const pattern = new RegExp(
         `<script id="${escapeRegExp(scriptId)}" type="application/json">([\\\\s\\\\S]*?)</script>`
@@ -2230,11 +1977,7 @@ class GraphExporter:
       if (!looksLikeDashboardHtml) {
         return JSON.parse(text);
       }
-      const importedPayload = extractEmbeddedScriptJson(text, "citemesh-dashboard-data");
-      const importedFigure = extractEmbeddedScriptJson(text, "citemesh-dashboard-figure");
-      return Object.assign({}, importedPayload, {
-        __citemesh_dashboard_figure: importedFigure,
-      });
+      return extractEmbeddedScriptJson(text, "citemesh-dashboard-data");
     }
 
     function hasCompleteDashboardGeometry(meta) {
@@ -2927,43 +2670,19 @@ class GraphExporter:
         plotly_node_sizes:
           importedDashboardMeta.plotly_node_sizes || importedMeta.plotly_node_sizes || [],
       };
-      let nextMeta = Object.assign({}, baseMeta);
-      let warningMessage = "";
-
-      if (
-        !hasCompleteDashboardGeometry(nextMeta)
-        && imported.__citemesh_dashboard_figure
-      ) {
-        const recoveredMeta = recoverDashboardMetaFromFigure(
-          importedNodes,
-          nextMeta,
-          imported.__citemesh_dashboard_figure
+      if (!hasCompleteDashboardGeometry(baseMeta)) {
+        throw new Error(
+          `Imported results from ${String(label || "the selected file")} are missing stored dashboard geometry. Only current CiteMesh dashboard exports are supported.`
         );
-        if (recoveredMeta) {
-          nextMeta = Object.assign({}, nextMeta, recoveredMeta);
-        }
-      }
-
-      if (!hasCompleteDashboardGeometry(nextMeta)) {
-        nextMeta = Object.assign(
-          {},
-          nextMeta,
-          synthesizeLegacyDashboardMeta(
-            importedNodes,
-            Array.isArray(imported.edges) ? imported.edges : [],
-            nextMeta
-          )
-        );
-        warningMessage = `Loaded legacy results from ${String(label || "the selected file")} without stored dashboard geometry. CiteMesh reconstructed a deterministic layout, so positions may differ from the original export. Export JSON to save the upgraded payload.`;
       }
 
       return {
         payload: {
-          meta: nextMeta,
+          meta: baseMeta,
           nodes: importedNodes,
           edges: Array.isArray(imported.edges) ? imported.edges : [],
         },
-        warningMessage,
+        warningMessage: "",
         warningTone: "warning",
       };
     }

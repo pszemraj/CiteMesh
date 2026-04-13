@@ -876,8 +876,7 @@ def test_embedding_cache_offline_fingerprint_lookup_contracts(
         {
             "label": "compatible cached fingerprint is reused",
             "model_name": "org/offline-test",
-            "model_revision": None,
-            "strict_mode": False,
+            "model_revision": "0123456789abcdef0123456789abcdef01234567",
             "has_cached_payload": True,
             "cached_fingerprint": compatible_fp,
             "expected_resolved": compatible_fp,
@@ -886,10 +885,9 @@ def test_embedding_cache_offline_fingerprint_lookup_contracts(
             "expected_log_fragment": "Reusing compatible cached fingerprint",
         },
         {
-            "label": "strict mode rejects legacy main sha assumption",
+            "label": "sha-only cached fingerprint clears payload",
             "model_name": "org/offline-strict",
             "model_revision": None,
-            "strict_mode": True,
             "has_cached_payload": True,
             "cached_fingerprint": (
                 "hf::org/offline-strict::0123456789abcdef0123456789abcdef01234567"
@@ -903,7 +901,6 @@ def test_embedding_cache_offline_fingerprint_lookup_contracts(
             "label": "incompatible cached fingerprint clears payload",
             "model_name": "org/offline-test",
             "model_revision": "refs/pr/12",
-            "strict_mode": False,
             "has_cached_payload": True,
             "cached_fingerprint": compatible_fp,
             "expected_resolved": "hf::org/offline-test::revision=refs/pr/12::offline-unverified",
@@ -915,7 +912,6 @@ def test_embedding_cache_offline_fingerprint_lookup_contracts(
             "label": "missing cached fingerprint reuses payload with fallback identity",
             "model_name": "org/offline-no-fingerprint",
             "model_revision": "refs/pr/12",
-            "strict_mode": False,
             "has_cached_payload": True,
             "cached_fingerprint": None,
             "expected_resolved": (
@@ -931,7 +927,6 @@ def test_embedding_cache_offline_fingerprint_lookup_contracts(
             "label": "offline initialization sets fallback for empty namespace",
             "model_name": "org/offline-init",
             "model_revision": "refs/pr/34",
-            "strict_mode": False,
             "has_cached_payload": False,
             "cached_fingerprint": None,
             "expected_resolved": "hf::org/offline-init::revision=refs/pr/34::offline-unverified",
@@ -945,11 +940,6 @@ def test_embedding_cache_offline_fingerprint_lookup_contracts(
 
     for case in cases:
         caplog.clear()
-        if case["strict_mode"]:
-            monkeypatch.setenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", "1")
-        else:
-            monkeypatch.delenv("CITEMESH_STRICT_OFFLINE_FINGERPRINT", raising=False)
-
         builder = EmbeddingGraphBuilder(
             max_papers=1,
             model_name=case["model_name"],

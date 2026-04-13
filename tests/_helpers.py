@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence
+from typing import Any, Dict, List, Sequence
 
 import networkx as nx
 import numpy as np
@@ -94,106 +93,6 @@ class LookupEncodeModel:
         """
         del kwargs
         return np.asarray([self.lookup[text] for text in texts], dtype=np.float32)
-
-
-def build_fake_strategy_builder_factory(
-    captured_kwargs: Dict[str, Any],
-    *,
-    graph: nx.Graph | None = None,
-    seed_id: str = "seed",
-) -> type:
-    """Build fake strategy class that captures constructor kwargs.
-
-    :param Dict[str, Any] captured_kwargs: Sink for constructor kwargs.
-    :param nx.Graph | None graph: Optional graph returned by fake builder.
-    :param str seed_id: Seed ID returned alongside graph.
-    :return type: Fake strategy builder class.
-    """
-
-    base_graph = graph if graph is not None else build_seed_graph(seed_id)
-
-    class _FakeStrategyBuilder:
-        """Fake strategy builder used by CLI tests."""
-
-        def __init__(self, **kwargs: Any) -> None:
-            """Capture provided constructor kwargs.
-
-            :param Any kwargs: Strategy constructor keyword arguments.
-            :return None: This initializer stores kwargs for assertions.
-            """
-            captured_kwargs.update(kwargs)
-
-        def build_graph(self, _: str) -> tuple[nx.Graph, str]:
-            """Return configured graph and seed ID.
-
-            :param str _: Ignored input seed identifier.
-            :return tuple[nx.Graph, str]: Graph and normalized seed ID.
-            """
-            return base_graph, seed_id
-
-    return _FakeStrategyBuilder
-
-
-def build_fake_exporter_factory(
-    captured_data: Dict[str, Any], *, methods: Iterable[str] | None = None
-) -> type:
-    """Build fake exporter class that captures metadata/layout for assertions.
-
-    :param Dict[str, Any] captured_data: Sink for exporter constructor payload.
-    :param Iterable[str] | None methods: Method names to enable on fake exporter.
-    :return type: Fake exporter class.
-    """
-
-    from citemesh.cli import _EXPORTER_METHOD
-
-    requested_methods = set(methods or _EXPORTER_METHOD.values())
-    payloads = {
-        "to_json": "{}",
-        "to_interactive_html": "<html/>",
-        "to_plotly_html": "<html/>",
-        "to_dashboard_html": "<html/>",
-        "to_graphml": "<graphml/>",
-        "to_csv": "id,title\n",
-        "to_bibtex": "@article{test,}\n",
-    }
-
-    class _FakeExporter:
-        """Fake graph exporter used by CLI tests."""
-
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            """Capture exporter constructor metadata for assertions.
-
-            :param Any args: Positional constructor arguments.
-            :param Any kwargs: Keyword constructor arguments.
-            :return None: This initializer stores metadata only.
-            """
-            del args
-            captured_data["kwargs"] = kwargs
-            captured_data["metadata"] = kwargs.get("metadata")
-            captured_data["layout"] = kwargs.get("layout")
-
-    def _write_payload(
-        self: object, path: Path, method_name: str, *_args: object, **_kwargs: object
-    ) -> None:
-        """Write the minimal artifact body for the requested fake exporter method."""
-        del self, _args, _kwargs
-        if method_name in requested_methods:
-            path.write_text(payloads[method_name])
-
-    for method_name in payloads:
-        setattr(
-            _FakeExporter,
-            method_name,
-            lambda self, path, *args, _method=method_name, **kwargs: _write_payload(
-                self,
-                path,
-                _method,
-                *args,
-                **kwargs,
-            ),
-        )
-
-    return _FakeExporter
 
 
 def get_paper_id_normalization_cases() -> List[tuple[str, str]]:
