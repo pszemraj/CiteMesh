@@ -62,8 +62,6 @@ In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--ov
 
 Output-path normalization, file naming, and sidecar placement are defined in
 [Output Artifacts](../reference/output-artifacts.md).
-Use that reference as the canonical source for `--output` behavior in single-export
-and multi-export runs.
 
 `--log-level` and `--log-width` are shared command options and are accepted for
 `build`, `search`, and `cache` command trees (including `cache scan` / `cache clear`).
@@ -166,17 +164,11 @@ Execution transparency:
 
 ## Export Formats
 
-- `png`: Matplotlib static render with theme-aware background and labels
-- `html` (Pyvis): vis.js network with hover tooltips and in-browser physics
-- `plotly`: interactive Plotly graph (HTML), written with `.plotly.html` suffix
-- `dashboard`: tri-pane research dashboard shell (list + graph + detail). Collection-mode and standalone path rules are defined in [Output Artifacts](../reference/output-artifacts.md).
-- `json`: structured graph data payload (nodes/edges)
-- `csv`: flat paper table (one row per paper) for pandas/spreadsheet import
-- `bibtex`: combined BibTeX entries for all papers, ready for reference managers or LaTeX
-- `graphml`: exchange format for Gephi, Cytoscape, and similar tools
-- `*.config.json`: run config + metadata sidecar
+Accepted `--export` values are `png`, `html`, `plotly`, `dashboard`, `json`,
+`csv`, `bibtex`, `graphml`, and `all`.
 
-For field-level JSON/sidecar schema and determinism details, see
+Format-specific files, dashboard collection behavior, `*.config.json` sidecars,
+and determinism notes are covered in
 [Output Artifacts](../reference/output-artifacts.md).
 
 Interactive exports require optional viz dependencies:

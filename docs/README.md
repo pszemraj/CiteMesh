@@ -18,4 +18,3 @@
 
 - Package structure and execution flow: [internals/architecture.md](internals/architecture.md)
 - Change history and notable shifts: [internals/changelog.md](internals/changelog.md)
-- Deferred refactors and backlog notes: [dev.md](dev.md)

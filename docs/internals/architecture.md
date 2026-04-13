@@ -50,15 +50,12 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 ### Strategy Implementations
 
-| Strategy | Responsibilities | Highlights |
-| --- | --- | --- |
-| `citation` | Pull seed, references, and citations from Semantic Scholar | Similarity from bibliographic and metadata features |
-| `embedding` | Hydrate/query quantized cache and compute semantic neighbors | Int8/binary cache-native retrieval, metadata-authoritative warm runs, capped edge pruning |
-| `recommendation` | Use Semantic Scholar recommendations as primary neighborhood signal | Fast topical discovery path |
-| `hybrid` | Merge citation and semantic candidates, then rerank | Seed-relevance rerank with semantic-only cap enforcement |
-
-Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
-Strategy behavior and selection guidance are documented in [Guides: Strategies](../guides/strategies.md).
+- `citation.py`, `recommendation.py`, `embedding.py`, and `hybrid.py` implement
+  `GraphBuilderStrategy`.
+- Strategies may emit collection summaries through `_set_collection_summary` for
+  consistent logging.
+- Selection guidance, tradeoffs, and user-facing strategy behavior are covered in
+  [Guides: Strategies](../guides/strategies.md).
 
 ### `citemesh/core/models.py`
 
@@ -79,12 +76,11 @@ Strategy behavior and selection guidance are documented in [Guides: Strategies](
 
 ### Exporter (`citemesh/visualization/export.py`)
 
-- `GraphExporter` writes Pyvis HTML, Plotly HTML, Dashboard HTML, JSON, CSV, BibTeX, and GraphML.
+- `GraphExporter` writes interactive and structured output formats from one graph object.
 - Reuses computed layout and style values for cross-format consistency.
 - Normalizes node attributes for serializer compatibility (for example GraphML-safe fields).
-
-Artifact-level format details and sidecar schema are documented in
-[Output Artifacts](../reference/output-artifacts.md).
+- Artifact-level format details and sidecar schema are documented in
+  [Output Artifacts](../reference/output-artifacts.md).
 
 ### Caching Support
 
@@ -114,4 +110,5 @@ On-disk layout and invalidation behavior are documented in [Caching & Data](../g
 - **Add themes**: extend `THEMES` definitions and renderer/export color lookups.
 - **Add corpus source**: adapt embedding-corpus loading while preserving shared cache/graph contracts.
 
-This structure keeps the user-facing workflow stable while allowing iteration on ranking, similarity, visualization, and data-source internals.
+The user-facing workflow stays stable while ranking, similarity, visualization,
+and data-source internals evolve behind the strategy/export interfaces.

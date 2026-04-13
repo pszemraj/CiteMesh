@@ -57,7 +57,7 @@ For current usage details, see:
 - **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection, preventing stale cross-checkpoint reuse in shared namespaces.
 - **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
 - **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
-- **Hybrid**: updated implicit CLI defaults for omitted hybrid budgets to `max-papers=45`, `max-references=12`, `max-citations=45`, and semantic cap `min(20, max-papers - 1)` after focused fuzzy-match + abstract relevance review.
+- **Hybrid**: updated omitted-budget defaults again after the February 2026 follow-up review; see [Defaults Tuning Study](../reference/defaults-tuning-study.md) for the current values and rationale.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.
 - Added explicit streaming split validation for embedding mode.
@@ -90,20 +90,3 @@ For current usage details, see:
 - Removed dead configuration/helpers that were no longer referenced.
 - Deduplicated Semantic Scholar citation/reference fetch loop logic.
 - Tightened slow-test policy to keep one explicit smoke path.
-
-## Future Opportunities
-
-- Improve batching strategies for reference fetching coverage.
-- Add co-citation/shared-neighbor analytics in structured exports.
-- Provide ready-made Plotly/Dash templates for downstream analysis.
-
-### Dashboard Backlog (Tracked TODOs)
-
-- [TODO-dashboard] Add cluster-level labels/hulls in dashboard graph view (topic keyword extraction per cluster).
-- [TODO-dashboard] Add bridge-paper quick lens (betweenness/connector score + dedicated list mode).
-- [TODO-dashboard] Add graph-pane matrix toggle (adjacency heatmap ordered by cluster/relevance).
-- [TODO-dashboard] Add explicit "obscure gems" ranking lens (semantic relevance + citation-age normalization).
-- [TODO-dashboard] Add list-row relevance fingerprint meter (graph relevance + semantic/citation evidence decomposition).
-- [TODO-dashboard] Expand seed-relation facets for recommendation/embedding graphs (directed relation metadata beyond provenance/year heuristics).
-- [TODO-dashboard] Add reading-queue workflow (save/reject/note with `localStorage` export/import).
-- [TODO-dashboard] Add optional local PDF download + inline viewer workflow (`--download-pdfs` style export mode).
