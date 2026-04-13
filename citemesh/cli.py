@@ -326,15 +326,6 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
     "max_citations": HYBRID_DEFAULT_MAX_CITATIONS,
     "max_references": HYBRID_DEFAULT_MAX_REFERENCES,
 }
-_VALIDATION_NORMALIZED_FIELDS: Tuple[str, ...] = (
-    "binary_prefilter",
-    "binary_rescore_multiplier",
-    "cache_compression",
-    "cache_compression_level",
-    "max_papers",
-    "max_citations",
-    "max_references",
-)
 _PROGRAMMATIC_BUILD_VALUE_DESTS: Set[str] = set(_BUILD_STRATEGY_OPTION_SUPPORT) | {
     "paper_id",
     "max_papers",
@@ -771,6 +762,19 @@ def _validate_programmatic_build_values(
         setattr(args, dest, normalized)
 
 
+def _synchronize_namespace_values(
+    target: argparse.Namespace, source: argparse.Namespace
+) -> None:
+    """Copy validated namespace state back to the caller namespace.
+
+    :param argparse.Namespace target: Namespace mutated in-place.
+    :param argparse.Namespace source: Namespace carrying validated CLI-equivalent values.
+    :return None: Copies every field from ``source`` onto ``target``.
+    """
+    for field, value in vars(source).items():
+        setattr(target, field, value)
+
+
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
     "citation": _StrategyDispatchSpec(
         factory=lambda cli_args: CitationGraphBuilder(
@@ -875,10 +879,7 @@ def _build_strategy_graph(
             _ProgrammaticBuildParser(),  # type: ignore[arg-type]
             inferred_provided,
         )
-        # Preserve validation-time normalization for downstream builder parity.
-        for field in _VALIDATION_NORMALIZED_FIELDS:
-            if hasattr(args_for_validation, field):
-                setattr(args, field, getattr(args_for_validation, field))
+        _synchronize_namespace_values(args, args_for_validation)
 
     builder = _STRATEGY_DISPATCH[strategy].factory(args)
     return builder.build_graph(args.paper_id)

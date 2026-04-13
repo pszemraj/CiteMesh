@@ -464,10 +464,10 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     )
 
 
-def test_embedding_runtime_policy_selects_fp16_flash_and_cpu_backends(
+def test_embedding_runtime_policy_selects_safe_cuda_and_verified_cpu_backends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Runtime policy should cover fp16 CUDA and CPU accelerator backend branches."""
+    """Runtime policy should prefer safe CUDA attention and verified CPU accelerators."""
     disable_embedding_dep_checks(monkeypatch)
 
     available_modules: set[str] = set()
@@ -492,11 +492,9 @@ def test_embedding_runtime_policy_selects_fp16_flash_and_cpu_backends(
 
     assert init_log["kwargs"]["backend"] == "torch"
     assert init_log["kwargs"]["model_kwargs"]["dtype"] is fake_torch.float16
-    assert (
-        init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "flash_attention_2"
-    )
+    assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
     assert fp16_builder._source_dtype_hint == "float16"
-    assert fp16_builder._attention_implementation_hint == "flash_attention_2"
+    assert fp16_builder._attention_implementation_hint == "sdpa"
 
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     _install_fake_torch(
@@ -533,9 +531,29 @@ def test_embedding_runtime_policy_selects_fp16_flash_and_cpu_backends(
     )
     onnx_builder._load_model()
 
+    assert init_log["kwargs"]["backend"] == "torch"
+    assert "model_kwargs" not in init_log["kwargs"]
+    assert onnx_builder._runtime_backend_hint == "torch"
+    assert onnx_builder._source_dtype_hint == "float32"
+
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    available_modules.clear()
+    available_modules.update({"onnxruntime", "optimum.onnxruntime"})
+    verified_onnx_builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        client=MagicMock(),
+    )
+    verified_onnx_builder._load_model()
+
     assert init_log["kwargs"]["backend"] == "onnx"
     assert "model_kwargs" not in init_log["kwargs"]
-    assert onnx_builder._runtime_backend_hint == "onnx"
+    assert verified_onnx_builder._runtime_backend_hint == "onnx"
 
 
 def test_encode_texts_uses_length_bucketed_batches(

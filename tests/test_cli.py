@@ -1612,6 +1612,33 @@ def test_programmatic_embedding_dispatch_normalizes_lzf_level(
     assert namespace.cache_compression_level == 0
 
 
+def test_programmatic_embedding_dispatch_propagates_normalized_scalars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Programmatic embedding dispatch should pass normalized scalar values to builders."""
+    namespace = _dispatch_namespace(
+        top_k="4",
+        encode_batch_size="32",
+        cache_compression="lzf",
+    )
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "EmbeddingGraphBuilder",
+        build_fake_strategy_builder_factory(captured, graph=build_seed_graph("seed")),
+    )
+
+    graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
+    assert seed_id == "seed"
+    assert graph.number_of_nodes() == 1
+    assert captured["top_k"] == 4
+    assert captured["encode_batch_size"] == 32
+    assert captured["cache_compression_level"] == 0
+    assert namespace.top_k == 4
+    assert namespace.encode_batch_size == 32
+    assert namespace.cache_compression_level == 0
+
+
 def test_programmatic_strategy_dispatch_contracts() -> None:
     """Programmatic dispatch should enforce strategy validation."""
     namespace = _dispatch_namespace()

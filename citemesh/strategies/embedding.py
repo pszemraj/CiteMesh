@@ -742,7 +742,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         if _module_available("optimum.intel") and _module_available("openvino"):
             return "openvino"
-        if _module_available("onnxruntime"):
+        if _module_available("onnxruntime") and _module_available(
+            "optimum.onnxruntime"
+        ):
             return "onnx"
         return "torch"
 
@@ -764,8 +766,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not callable(cuda_available) or not bool(cuda_available()):
             return None
 
-        if _module_available("flash_attn"):
-            return "flash_attention_2"
+        preferred_attention = str(
+            self.model_profile.cuda_attention_implementation or ""
+        ).strip()
+        if preferred_attention == "flash_attention_2" and _module_available(
+            "flash_attn"
+        ):
+            return preferred_attention
         return "sdpa"
 
     def _resolve_source_dtype_hint(self) -> str:
