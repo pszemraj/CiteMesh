@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import multiprocessing as mp
 import tempfile
 from pathlib import Path
@@ -310,6 +311,54 @@ def test_embedding_cache_upsert_tracks_int8_saturation(
         with h5py.File(cache.h5_path, "r") as h5:
             assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 2
             assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 2
+
+
+def test_embedding_cache_default_int8_path_stays_local_to_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default int8 writes/search should not import sentence-transformers quantization."""
+
+    original_import = builtins.__import__
+
+    def _guarded_import(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        if name == "sentence_transformers.quantization":
+            raise AssertionError("EmbeddingCache quantization should stay local.")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _guarded_import)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="local-quantizer-default")
+        _set_test_int8_calibration(cache)
+        lookup = LookupEncodeModel(
+            {
+                "Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32),
+                "Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32),
+            }
+        )
+        cache.get_embeddings(
+            {
+                "p1": {"title": "Alpha", "abstract": "First"},
+                "p2": {"title": "Beta", "abstract": "Second"},
+            },
+            lookup,
+            show_progress=False,
+        )
+
+        results = cache.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=4,
+        )
+
+    assert [result.paper_id for result in results] == ["p1"]
 
 
 def test_embedding_cache_search_and_calibration_reuse_contract() -> None:

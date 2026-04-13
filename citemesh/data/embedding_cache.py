@@ -248,6 +248,54 @@ def _count_int8_saturated_values(
     return int(np.count_nonzero(clipped)), int(normalized.size)
 
 
+def _as_float32_embedding_matrix(embeddings: np.ndarray) -> np.ndarray:
+    """Normalize raw embeddings into a 2D float32 matrix.
+
+    :param np.ndarray embeddings: Raw embedding vector or matrix.
+    :return np.ndarray: Float32 matrix with shape ``(rows, dim)``.
+    :raises ValueError: If embeddings are already quantized or not 1D/2D.
+    """
+    array = np.asarray(embeddings)
+    if array.dtype in (np.int8, np.uint8):
+        raise ValueError("Embeddings to quantize must use a floating dtype.")
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    elif array.ndim != 2:
+        raise ValueError(
+            f"Embeddings to quantize must be 1D or 2D, got shape {array.shape}."
+        )
+    return np.asarray(array, dtype=np.float32)
+
+
+def _quantize_int8_embeddings(embeddings: np.ndarray, ranges: np.ndarray) -> np.ndarray:
+    """Quantize float embeddings into signed int8 rows with explicit clipping.
+
+    The cache already owns calibration persistence, saturation reporting, and
+    dequantization. Keeping the forward quantizer local avoids coupling the
+    default embedding/hybrid path to sentence-transformers' internal layout.
+
+    :param np.ndarray embeddings: Float embedding vector or matrix.
+    :param np.ndarray ranges: Persisted ``(2, dim)`` calibration ranges.
+    :return np.ndarray: Int8 embedding matrix.
+    """
+    matrix = _as_float32_embedding_matrix(embeddings)
+    sanitized_ranges = _sanitize_ranges(ranges)
+    starts = sanitized_ranges[0][None, :]
+    steps = ((sanitized_ranges[1] - sanitized_ranges[0]) / 255.0)[None, :]
+    scaled = (matrix - starts) / steps - 128.0
+    return np.clip(scaled, -128.0, 127.0).astype(np.int8)
+
+
+def _quantize_ubinary_embeddings(embeddings: np.ndarray) -> np.ndarray:
+    """Pack embedding sign bits into unsigned bytes for Hamming prefiltering.
+
+    :param np.ndarray embeddings: Float embedding vector or matrix.
+    :return np.ndarray: Packed unsigned binary embedding matrix.
+    """
+    matrix = _as_float32_embedding_matrix(embeddings)
+    return np.asarray(np.packbits(matrix > 0, axis=-1), dtype=np.uint8)
+
+
 @dataclass(frozen=True)
 class CacheSearchResult:
     """Search result returned by ``EmbeddingCache.search``."""
@@ -2281,13 +2329,7 @@ class EmbeddingCache:
         :param np.ndarray ranges: Persisted calibration ranges.
         :return np.ndarray: Int8 storage matrix.
         """
-        quantize_embeddings = self._get_quantize_embeddings()
-        int8_embeddings = quantize_embeddings(
-            embeddings_array,
-            precision="int8",
-            ranges=_sanitize_ranges(ranges),
-        )
-        return np.asarray(int8_embeddings, dtype=np.int8)
+        return _quantize_int8_embeddings(embeddings_array, ranges)
 
     def _to_binary_embeddings(
         self, embeddings_array: np.ndarray
@@ -2302,42 +2344,13 @@ class EmbeddingCache:
 
         return self._quantize_ubinary(embeddings_array)
 
-    @staticmethod
-    def _get_quantize_embeddings() -> Callable[..., np.ndarray]:
-        """Import and return sentence-transformers quantization helper.
-
-        :return Callable[..., np.ndarray]: ``quantize_embeddings`` function.
-        :raises ImportError: If sentence-transformers is unavailable.
-        """
-        try:
-            from sentence_transformers.quantization import quantize_embeddings
-        except ImportError as exc:  # pragma: no cover - dependency wiring
-            raise ImportError(
-                "int8/binary embedding cache requires sentence-transformers. "
-                "Install with: pip install citemesh[embeddings]"
-            ) from exc
-
-        return quantize_embeddings
-
     def _quantize_ubinary(self, embeddings_array: np.ndarray) -> np.ndarray:
         """Quantize embeddings to packed unsigned binary rows.
-
-        Uses sentence-transformers quantization first, then falls back to
-        ``np.packbits(axis=-1)`` for non-byte-aligned dimensions.
 
         :param np.ndarray embeddings_array: Float embedding matrix.
         :return np.ndarray: Packed unsigned binary matrix.
         """
-        quantize_embeddings = self._get_quantize_embeddings()
-        try:
-            ubinary = quantize_embeddings(
-                embeddings_array,
-                precision="ubinary",
-            )
-            return np.asarray(ubinary, dtype=np.uint8)
-        except ValueError:
-            packed = np.packbits(np.asarray(embeddings_array) > 0, axis=-1)
-            return np.asarray(packed, dtype=np.uint8)
+        return _quantize_ubinary_embeddings(embeddings_array)
 
     def _dequantize_int8(
         self, h5_file: h5py.File, int8_embeddings: np.ndarray
