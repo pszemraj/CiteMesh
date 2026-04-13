@@ -289,7 +289,17 @@ class GraphBuilderStrategy(ABC):
         without_references_weights: tuple[float, float, float, float],
         cap_at_one: bool = False,
     ) -> float:
-        """Compute indexed similarity with strategy-supplied weighting."""
+        """Compute indexed similarity with strategy-supplied weighting.
+
+        :param Paper paper1: First paper to compare.
+        :param Paper paper2: Second paper to compare.
+        :param tuple[float, float, float, float] with_references_weights: Component
+            weights used when reference data is available.
+        :param tuple[float, float, float, float] without_references_weights: Component
+            weights used when reference data is unavailable.
+        :param bool cap_at_one: Whether to clamp the combined similarity score to ``1.0``.
+        :return float: Composite indexed similarity score.
+        """
         return compute_indexed_similarity_score(
             paper1,
             paper2,

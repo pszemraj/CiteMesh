@@ -349,7 +349,17 @@ class SemanticScholarClient:
             tuple[type[Exception], Callable[[Exception], Any]], ...
         ] = (),
     ) -> Any:
-        """Run an API operation with shared retry/backoff behavior."""
+        """Run an API operation with shared retry/backoff behavior.
+
+        :param Callable[[], Any] operation: Zero-argument API operation to execute.
+        :param Callable[[int, float, Exception], None] on_retry: Callback invoked before
+            each retry with 1-based attempt count, sleep delay, and triggering exception.
+        :param Callable[[Exception], Any] on_final_failure: Callback used to produce the
+            final return value or raise when retries are exhausted.
+        :param tuple[tuple[type[Exception], Callable[[Exception], Any]], ...] handled_exceptions:
+            Exception-specific handlers that short-circuit normal retry handling.
+        :return Any: Result produced by ``operation`` or one of the failure handlers.
+        """
         for attempt in range(API_CONFIG.max_retries):
             try:
                 self._rate_limit()
@@ -453,14 +463,24 @@ class SemanticScholarClient:
 
     @staticmethod
     def _payload_get(payload: object, key: str, default: Any = None) -> Any:
-        """Read a field from dict-like or object-like API payloads."""
+        """Read a field from dict-like or object-like API payloads.
+
+        :param object payload: Raw API payload object or mapping.
+        :param str key: Field name to read.
+        :param Any default: Value returned when the field is absent.
+        :return Any: Extracted field value or ``default`` when unavailable.
+        """
         if isinstance(payload, dict):
             return payload.get(key, default)
         return getattr(payload, key, default)
 
     @classmethod
     def _extract_authors(cls, raw_authors: object) -> list[Author]:
-        """Extract up to three authors from raw API payload shapes."""
+        """Extract up to three authors from raw API payload shapes.
+
+        :param object raw_authors: Raw authors payload from Semantic Scholar.
+        :return list[Author]: Up to three normalized author records.
+        """
         if not isinstance(raw_authors, list):
             return []
 
@@ -479,7 +499,11 @@ class SemanticScholarClient:
 
     @staticmethod
     def _extract_categories(*raw_candidates: object) -> list[str]:
-        """Return the first usable category list from candidate payload fields."""
+        """Return the first usable category list from candidate payload fields.
+
+        :param object raw_candidates: Candidate category payload values.
+        :return list[str]: First normalized non-empty category list.
+        """
         for raw_categories in raw_candidates:
             if isinstance(raw_categories, str):
                 return [raw_categories]
@@ -494,7 +518,13 @@ class SemanticScholarClient:
         category_keys: tuple[str, ...],
         references: Optional[list[str]] = None,
     ) -> Optional[Paper]:
-        """Convert a dict-like or object-like paper payload into a Paper model."""
+        """Convert a dict-like or object-like paper payload into a ``Paper`` model.
+
+        :param object payload: Raw Semantic Scholar payload object or mapping.
+        :param tuple[str, ...] category_keys: Category field names checked in order.
+        :param Optional[list[str]] references: Optional normalized reference IDs.
+        :return Optional[Paper]: Converted paper or ``None`` when no usable paper ID exists.
+        """
         paper_id = self._payload_get(payload, "paperId")
         if not isinstance(paper_id, str) or not paper_id:
             return None
@@ -683,6 +713,10 @@ class SemanticScholarClient:
             fields.append("references")
 
         def _operation() -> Optional[Paper]:
+            """Fetch and normalize one paper payload from the API client.
+
+            :return Optional[Paper]: Converted paper or ``None`` when absent.
+            """
             api_paper = self.client.get_paper(paper_id, fields=fields)
             if not api_paper:
                 logger.warning("Paper not found: %s", paper_id)
@@ -780,6 +814,10 @@ class SemanticScholarClient:
         normalized_paper_id = normalize_paper_id(paper_id)
 
         def _operation() -> List[Paper]:
+            """Fetch and convert citation/reference relation records.
+
+            :return List[Paper]: Converted relation papers collected so far.
+            """
             relation_records = fetch_method(normalized_paper_id, limit=limit)
             if not relation_records:
                 return papers
@@ -878,6 +916,10 @@ class SemanticScholarClient:
                     cache_path.unlink(missing_ok=True)
 
         def _persist_empty() -> List[str]:
+            """Persist and return an empty cached reference-ID list.
+
+            :return List[str]: Empty reference-ID list.
+            """
             self._persist_reference_cache_entry(
                 cache_path,
                 normalized_paper_id,
@@ -886,6 +928,10 @@ class SemanticScholarClient:
             return []
 
         def _operation() -> List[str]:
+            """Fetch, normalize, and persist reference IDs for one paper.
+
+            :return List[str]: Normalized reference IDs.
+            """
             references = self.client.get_paper_references(
                 normalized_paper_id, fields=["paperId"]
             )
@@ -901,6 +947,12 @@ class SemanticScholarClient:
             return normalized_ref_ids
 
         def _raise_failure(exc: Exception) -> List[str]:
+            """Raise a stable retry-exhaustion error for reference-ID fetches.
+
+            :param Exception exc: Final exception raised by the API client.
+            :raises RuntimeError: Always raised after logging the retry failure.
+            :return List[str]: This function does not return successfully.
+            """
             logger.warning(
                 "Failed to fetch reference IDs for %s after %s attempts: %s",
                 normalized_paper_id,
