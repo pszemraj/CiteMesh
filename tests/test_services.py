@@ -27,6 +27,35 @@ from citemesh.services.semantic_scholar import (
 from tests._helpers import get_paper_id_normalization_cases
 
 
+def _assert_module_reload_is_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    module: Any,
+    blocked_prefixes: tuple[str, ...],
+    expected_exports: set[str],
+) -> None:
+    """Assert that reloading a lazy-export package avoids importing blocked modules."""
+    original_import = builtins.__import__
+
+    def _guarded_import(
+        name: str,
+        globals: Any = None,
+        locals: Any = None,
+        fromlist: object = (),
+        level: int = 0,
+    ) -> Any:
+        if any(
+            name == prefix or name.startswith(f"{prefix}.")
+            for prefix in blocked_prefixes
+        ):
+            raise AssertionError(f"unexpected eager import: {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _guarded_import)
+    reloaded = importlib.reload(module)
+    assert set(reloaded.__all__) == expected_exports
+
+
 def test_service_and_strategy_package_exports() -> None:
     """Package exports should resolve directly from their defining modules."""
     from citemesh.strategies import EmbeddingGraphBuilder
@@ -39,61 +68,35 @@ def test_service_and_strategy_package_exports() -> None:
 
 def test_services_package_init_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
     """Importing ``citemesh.services`` should not eagerly import service clients."""
-    original_import = builtins.__import__
-    blocked_prefixes = ("citemesh.services.semantic_scholar", "semanticscholar")
-
-    def _guarded_import(
-        name: str,
-        globals: Any = None,
-        locals: Any = None,
-        fromlist: object = (),
-        level: int = 0,
-    ) -> Any:
-        if any(
-            name == prefix or name.startswith(f"{prefix}.")
-            for prefix in blocked_prefixes
-        ):
-            raise AssertionError(f"unexpected eager import: {name}")
-        return original_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", _guarded_import)
-    reloaded = importlib.reload(services_module)
-    assert set(reloaded.__all__) == {
-        "SemanticScholarClient",
-        "get_client",
-        "reset_client",
-    }
+    _assert_module_reload_is_lazy(
+        monkeypatch,
+        module=services_module,
+        blocked_prefixes=("citemesh.services.semantic_scholar", "semanticscholar"),
+        expected_exports={"SemanticScholarClient", "get_client", "reset_client"},
+    )
 
 
 def test_strategies_package_init_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
     """Importing ``citemesh.strategies`` should not eagerly import strategy modules."""
     import citemesh.strategies as strategies_module
 
-    original_import = builtins.__import__
-    blocked_prefixes = (
-        "citemesh.strategies.citation",
-        "citemesh.strategies.embedding",
-        "citemesh.strategies.hybrid",
-        "citemesh.strategies.recommendation",
+    _assert_module_reload_is_lazy(
+        monkeypatch,
+        module=strategies_module,
+        blocked_prefixes=(
+            "citemesh.strategies.citation",
+            "citemesh.strategies.embedding",
+            "citemesh.strategies.hybrid",
+            "citemesh.strategies.recommendation",
+        ),
+        expected_exports={
+            "GraphBuilderStrategy",
+            "CitationGraphBuilder",
+            "RecommendationGraphBuilder",
+            "EmbeddingGraphBuilder",
+            "HybridGraphBuilder",
+        },
     )
-
-    def _guarded_import(
-        name: str,
-        globals: Any = None,
-        locals: Any = None,
-        fromlist: object = (),
-        level: int = 0,
-    ) -> Any:
-        if any(
-            name == prefix or name.startswith(f"{prefix}.")
-            for prefix in blocked_prefixes
-        ):
-            raise AssertionError(f"unexpected eager import: {name}")
-        return original_import(name, globals, locals, fromlist, level)
-
-    monkeypatch.setattr(builtins, "__import__", _guarded_import)
-    reloaded = importlib.reload(strategies_module)
-    assert "EmbeddingGraphBuilder" in reloaded.__all__
 
 
 class _MockResponse:

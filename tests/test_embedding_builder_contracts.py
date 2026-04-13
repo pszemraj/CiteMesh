@@ -25,12 +25,12 @@ from citemesh.strategies.embedding import (
     _extract_dataset_paper_metadata,
     _query_seed_id,
 )
-from tests._helpers import ConstantEncodeModel, disable_embedding_dep_checks
-
-
-def _raise_import_error(*_args: object, **_kwargs: object) -> Any:
-    """Raise ``ImportError`` for optional dependency contract tests."""
-    raise ImportError("optional dependency unavailable")
+from citemesh.text_batching import estimate_text_length_bucket
+from tests._helpers import (
+    ConstantEncodeModel,
+    disable_embedding_dep_checks,
+    raise_import_error,
+)
 
 
 def _install_fake_sentence_transformers(
@@ -187,16 +187,16 @@ def test_embedding_builder_requires_optional_deps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Embedding builder should fail with guidance when deps are missing."""
-    monkeypatch.setattr(embedding_module, "_import_torch", _raise_import_error)
+    monkeypatch.setattr(embedding_module, "_import_torch", raise_import_error)
     monkeypatch.setattr(
         embedding_module,
         "_import_sentence_transformer_class",
-        _raise_import_error,
+        raise_import_error,
     )
     monkeypatch.setattr(
         embedding_module,
         "_import_datasets_module",
-        _raise_import_error,
+        raise_import_error,
     )
 
     with pytest.raises(
@@ -594,7 +594,7 @@ def test_encode_texts_uses_length_bucketed_batches(
 
     assert [len(batch) for batch in captured_batches] == [2, 2, 1]
     batch_estimates = [
-        [builder._estimate_text_length_bucket(text) for text in batch]
+        [estimate_text_length_bucket(text) for text in batch]
         for batch in captured_batches
     ]
     assert batch_estimates == sorted(

@@ -43,6 +43,7 @@ from citemesh.data import (
     validate_compression_filter,
 )
 from citemesh.data.model_profiles import compose_title_abstract_text
+from citemesh.paper_ids import external_ids_from_canonical_paper_id
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -51,8 +52,6 @@ from citemesh.strategies.base import (
 )
 from citemesh.text_batching import (
     encode_texts_in_length_buckets,
-    estimate_text_length_bucket,
-    length_bucketed_index_batches,
 )
 
 if TYPE_CHECKING:
@@ -348,39 +347,6 @@ def _parse_venue(paper: Dict[str, Any]) -> str:
     return ""
 
 
-def _parse_arxiv_id_from_paper_id(paper_id: str) -> str:
-    """Extract canonical arXiv identifier suffix from canonicalized paper IDs.
-
-    :param str paper_id: Canonical paper identifier.
-    :return str: ArXiv identifier suffix (empty when unavailable).
-    """
-    if not isinstance(paper_id, str):
-        return ""
-    normalized = paper_id.strip()
-    if not normalized.lower().startswith("arxiv:"):
-        return ""
-    return re.sub(r"v\d+$", "", normalized.split(":", 1)[1], flags=re.IGNORECASE)
-
-
-def _parse_doi_from_paper_id(paper_id: str) -> str:
-    """Extract DOI suffix from canonicalized paper IDs when possible.
-
-    :param str paper_id: Canonical paper identifier.
-    :return str: DOI suffix (empty when unavailable).
-    """
-    if not isinstance(paper_id, str):
-        return ""
-    normalized = paper_id.strip()
-    if not normalized:
-        return ""
-    lowered = normalized.lower()
-    if lowered.startswith("doi:"):
-        return normalized.split(":", 1)[1].strip()
-    if re.match(r"^10\.\d{4,9}/\S+$", normalized):
-        return normalized
-    return ""
-
-
 def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) -> Dict:
     """Normalize a raw dataset record to embedding metadata fields.
 
@@ -395,6 +361,7 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
         or f"arxiv_{fallback_index}"
     )
     paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
+    arxiv_id, doi = external_ids_from_canonical_paper_id(paper_id)
     title = paper.get("title", "Unknown")
     if not isinstance(title, str) or not title.strip():
         title = "Unknown"
@@ -407,8 +374,8 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
         "title": title,
         "abstract": abstract,
         "venue": _parse_venue(paper),
-        "arxiv_id": _parse_arxiv_id_from_paper_id(paper_id),
-        "doi": _parse_doi_from_paper_id(paper_id),
+        "arxiv_id": arxiv_id,
+        "doi": doi,
         "year": _parse_year(paper),
         "authors": _parse_authors(paper.get("authors", [])),
         "categories": _parse_categories(paper.get("categories", [])),
@@ -1369,32 +1336,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
 
         return self._encode_model
-
-    @staticmethod
-    def _estimate_text_length_bucket(text: str) -> int:
-        """Estimate relative token length for length-bucketed encode batching.
-
-        This stays tokenizer-free on purpose so cache hydration can keep the
-        pre-encode CPU path cheap while still grouping similarly sized payloads
-        together to reduce padding waste.
-
-        :param str text: Text payload to estimate.
-        :return int: Best-effort length estimate.
-        """
-        return estimate_text_length_bucket(text)
-
-    def _length_bucketed_text_batches(
-        self,
-        texts: List[str],
-        batch_size: int,
-    ) -> List[List[int]]:
-        """Return input indices grouped into length-similar encode batches.
-
-        :param List[str] texts: Text payloads to encode.
-        :param int batch_size: Maximum rows per batch.
-        :return List[List[int]]: Original-text indices grouped by similar length.
-        """
-        return length_bucketed_index_batches(texts, batch_size)
 
     def _encode_texts(
         self,

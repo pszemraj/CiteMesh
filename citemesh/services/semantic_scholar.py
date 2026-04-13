@@ -8,7 +8,6 @@ import json
 import logging
 import numbers
 import os
-import re
 import tempfile
 import threading
 import time
@@ -23,10 +22,8 @@ from semanticscholar.SemanticScholarException import ObjectNotFoundException
 from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data import get_cache_dir
 from citemesh.paper_ids import (
+    external_ids_from_canonical_paper_id,
     normalize_paper_id,
-)
-from citemesh.paper_ids import (
-    strip_arxiv_version as _strip_arxiv_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -425,29 +422,21 @@ class SemanticScholarClient:
             return cls._extract_external_ids_from_mapping(external_ids)
         return "", ""
 
-    @staticmethod
-    def _external_ids_from_paper_id(paper_id: str) -> tuple[str, str]:
-        """Infer arXiv/DOI identifiers from canonical paper IDs when possible.
+    @classmethod
+    def _resolve_external_ids(
+        cls, external_ids: object, paper_id: object
+    ) -> tuple[str, str]:
+        """Resolve external IDs from payload data with canonical-ID fallback.
 
-        :param str paper_id: Canonical paper ID.
-        :return tuple[str, str]: ``(arxiv_id, doi)`` inference tuple.
+        :param object external_ids: Raw external ID payload.
+        :param object paper_id: Canonical or near-canonical paper ID fallback.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` pair.
         """
-        normalized = str(paper_id or "").strip()
-        if not normalized:
-            return "", ""
-
-        lowered = normalized.lower()
-        if lowered.startswith("arxiv:"):
-            return _strip_arxiv_version(normalized.split(":", 1)[1]), ""
-
-        if lowered.startswith("doi:"):
-            suffix = normalized.split(":", 1)[1].strip()
-            return "", suffix
-
-        if re.match(r"^10\.\d{4,9}/\S+$", normalized):
-            return "", normalized
-
-        return "", ""
+        arxiv_id, doi = cls._extract_external_ids(external_ids)
+        fallback_arxiv_id, fallback_doi = external_ids_from_canonical_paper_id(
+            str(paper_id)
+        )
+        return arxiv_id or fallback_arxiv_id, doi or fallback_doi
 
     def _convert_api_paper(self, api_paper: Any) -> Optional[Paper]:
         """
@@ -477,14 +466,10 @@ class SemanticScholarClient:
                 categories = [f for f in api_paper.fields if f]
             elif hasattr(api_paper, "fieldsOfStudy") and api_paper.fieldsOfStudy:
                 categories = [f for f in api_paper.fieldsOfStudy if f]
-            arxiv_id, doi = self._extract_external_ids(
-                getattr(api_paper, "externalIds", None)
+            arxiv_id, doi = self._resolve_external_ids(
+                getattr(api_paper, "externalIds", None),
+                getattr(api_paper, "paperId", ""),
             )
-            fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
-                str(api_paper.paperId)
-            )
-            arxiv_id = arxiv_id or fallback_arxiv_id
-            doi = doi or fallback_doi
 
             return Paper(
                 paper_id=api_paper.paperId,
@@ -536,12 +521,10 @@ class SemanticScholarClient:
             if isinstance(categories, str):
                 categories = [categories]
             references = self._extract_reference_ids(rec.get("references"))
-            arxiv_id, doi = self._extract_external_ids(rec.get("externalIds"))
-            fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
-                str(paper_id)
+            arxiv_id, doi = self._resolve_external_ids(
+                rec.get("externalIds"),
+                paper_id,
             )
-            arxiv_id = arxiv_id or fallback_arxiv_id
-            doi = doi or fallback_doi
 
             return Paper(
                 paper_id=paper_id,

@@ -305,3 +305,8 @@ def disable_embedding_dep_checks(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(embedding_strategy, "_check_embedding_deps", lambda: None)
     monkeypatch.setattr(hybrid_strategy, "_check_embedding_deps", lambda: None)
+
+
+def raise_import_error(*_args: object, **_kwargs: object) -> Any:
+    """Raise ``ImportError`` for optional dependency contract tests."""
+    raise ImportError("optional dependency unavailable")

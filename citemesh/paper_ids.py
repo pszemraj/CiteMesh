@@ -57,6 +57,29 @@ def host_matches_domain(host: str, domain: str) -> bool:
     )
 
 
+def external_ids_from_canonical_paper_id(paper_id: str) -> tuple[str, str]:
+    """Infer arXiv/DOI identifiers from a canonicalized paper ID.
+
+    :param str paper_id: Canonical paper identifier.
+    :return tuple[str, str]: ``(arxiv_id, doi)`` inference tuple.
+    """
+    normalized = str(paper_id or "").strip()
+    if not normalized:
+        return "", ""
+
+    lowered = normalized.lower()
+    if lowered.startswith("arxiv:"):
+        return strip_arxiv_version(normalized.split(":", 1)[1]), ""
+
+    if lowered.startswith("doi:"):
+        return "", normalized.split(":", 1)[1].strip()
+
+    if re.match(r"^10\.\d{4,9}/\S+$", normalized):
+        return "", normalized
+
+    return "", ""
+
+
 def normalize_paper_id(paper_id: str) -> str:
     """Normalize paper identifiers and DOI/arXiv URLs into canonical tokens.
 
