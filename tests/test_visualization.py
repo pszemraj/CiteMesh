@@ -443,6 +443,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="citemesh-dashboard-figure"',
         'id="citemesh-dashboard-collection"',
         'id="result-select"',
+        'id="dashboard-status"',
+        'accept=".json,.html"',
     ]:
         assert token in rendered
     for css_token in [
@@ -461,10 +463,17 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "applyImportedPayload(",
         "populateCollectionSelector(",
         "loadCollectionResult(",
+        "parseImportedPayloadFromText(",
+        "extractEmbeddedScriptJson(",
+        "recoverDashboardMetaFromFigure(",
+        "synthesizeLegacyDashboardMeta(",
+        "setDashboardStatus(",
         "renderWhyLines(",
         "state.hoverId || state.selectedId",
         "overlayState",
         "neighborhoodKey",
+        "Loaded legacy results from",
+        "console.warn(",
     ]:
         assert script_token in rendered
     assert rendered.count("let adjacency = new Map();") == 1

@@ -1309,6 +1309,29 @@ class GraphExporter:
     #dashboard-toolbar.collapsed #toolbar-controls {
       display: none;
     }
+    #dashboard-status {
+      display: none;
+      border-radius: 10px;
+      padding: 9px 11px;
+      font-size: 12px;
+      line-height: 1.45;
+      border: 1px solid color-mix(in srgb, var(--panel-border) 82%, transparent);
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text-muted);
+    }
+    #dashboard-status.visible {
+      display: block;
+    }
+    #dashboard-status.warning {
+      border-color: rgba(221, 166, 94, 0.52);
+      background: rgba(108, 74, 20, 0.24);
+      color: color-mix(in srgb, var(--text-primary) 88%, #ffe1ad);
+    }
+    #dashboard-status.info {
+      border-color: rgba(101, 162, 221, 0.46);
+      background: rgba(27, 61, 104, 0.18);
+      color: color-mix(in srgb, var(--text-primary) 90%, #d8eaff);
+    }
     .toolbar-row {
       display: grid;
       gap: 8px;
@@ -1740,7 +1763,7 @@ class GraphExporter:
         <button id="export-csv-btn" class="nav-btn" type="button">Export CSV</button>
         <button id="export-bib-btn" class="nav-btn" type="button">All BibTeX</button>
         <button id="load-json-btn" class="nav-btn" type="button">Load Results</button>
-        <input id="load-json-input" type="file" accept=".json" style="display:none" />
+        <input id="load-json-input" type="file" accept=".json,.html" style="display:none" />
       </div>
       <div class="nav-group">
         <label class="visually-hidden" for="result-select">Saved result</label>
@@ -1749,6 +1772,7 @@ class GraphExporter:
         </select>
       </div>
     </div>
+    <div id="dashboard-status" role="status" aria-live="polite"></div>
     <div id="toolbar-controls">
       <div class="toolbar-row primary">
         <input id="search-input" type="search" placeholder="Search title, authors, abstract..." />
@@ -1861,6 +1885,8 @@ class GraphExporter:
     let defaultNodeY = [];
     let adjacency = new Map();
     let collectionResultId = String(collectionBundle.current_result_id || "") || null;
+    let runtimeStatusMessage = "";
+    let runtimeStatusTone = "warning";
 
     function normalizeArray(rawValue, length, fallbackValue) {
       if (Array.isArray(rawValue)) {
@@ -1882,19 +1908,317 @@ class GraphExporter:
       return JSON.parse(JSON.stringify(value));
     }
 
-    function stableCurveDirection(leftId, rightId) {
-      const joined = `${String(leftId || "")}|${String(rightId || "")}`;
+    function escapeRegExp(value) {
+      return String(value || "").replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+    }
+
+    function safeFiniteNumber(value, fallbackValue) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : fallbackValue;
+    }
+
+    function stableHash(value) {
+      const text = String(value || "");
       let digest = 0;
-      for (const char of joined) {
+      for (const char of text) {
         digest = ((digest * 33) + char.charCodeAt(0)) >>> 0;
       }
-      return digest % 2 === 0 ? 1 : -1;
+      return digest >>> 0;
+    }
+
+    function stableCurveDirection(leftId, rightId) {
+      return stableHash(`${String(leftId || "")}|${String(rightId || "")}`) % 2 === 0 ? 1 : -1;
     }
 
     function currentSeedRingColor() {
       const styles = getComputedStyle(document.documentElement);
       const color = String(styles.getPropertyValue("--seed-ring") || "").trim();
       return color || "#d66cbf";
+    }
+
+    function computeImportedYearRange(importedNodes, fallbackRange) {
+      const validYears = importedNodes
+        .map((node) => Number(node && node.year))
+        .filter((year) => Number.isFinite(year) && year > 0);
+      if (validYears.length) {
+        return {
+          min: Math.min(...validYears),
+          max: Math.max(...validYears),
+        };
+      }
+      if (fallbackRange && typeof fallbackRange === "object") {
+        const minYear = safeFiniteNumber(fallbackRange.min, 2000);
+        const maxYear = safeFiniteNumber(fallbackRange.max, minYear);
+        return { min: minYear, max: maxYear };
+      }
+      return { min: 2000, max: 2001 };
+    }
+
+    function compareLegacyNodes(leftNode, rightNode) {
+      const left = leftNode || {};
+      const right = rightNode || {};
+      if (!!left.is_seed !== !!right.is_seed) {
+        return left.is_seed ? -1 : 1;
+      }
+      const citationDelta =
+        safeFiniteNumber(right.citation_count, 0) - safeFiniteNumber(left.citation_count, 0);
+      if (citationDelta !== 0) {
+        return citationDelta;
+      }
+      const leftYear = safeFiniteNumber(left.year, -1);
+      const rightYear = safeFiniteNumber(right.year, -1);
+      if (leftYear !== rightYear) {
+        return rightYear - leftYear;
+      }
+      return String(left.id || "").localeCompare(String(right.id || ""));
+    }
+
+    function computeImportedNodeSizes(importedNodes) {
+      const orderedNodes = Array.isArray(importedNodes) ? importedNodes.slice() : [];
+      const rankedNodes = orderedNodes.slice().sort(compareLegacyNodes);
+      const rankOf = new Map(
+        rankedNodes.map((node, index) => [String((node && node.id) || ""), index])
+      );
+      return orderedNodes.map((node) => {
+        const nodeId = String((node && node.id) || "");
+        const rank = rankOf.has(nodeId) ? rankOf.get(nodeId) : orderedNodes.length;
+        const citationCount = Math.max(0, safeFiniteNumber(node && node.citation_count, 0));
+        let size = 100;
+        if (node && node.is_seed) {
+          size = rank < 3 ? 2500 : 1000;
+        } else if (rank === 0) {
+          size = 2200;
+        } else if (rank < 3) {
+          size = 1200 + (3 - rank) * 200;
+        } else if (rank < 8) {
+          size = 500 + (8 - rank) * 80;
+        } else if (rank < 15) {
+          size = 250 + (15 - rank) * 30;
+        }
+        size += Math.log10(citationCount + 1) * 100;
+        return Math.max(6.0, size / 50.0);
+      });
+    }
+
+    function normalizePositionPairs(positionPairs, paddingRatio) {
+      const pairs = Array.isArray(positionPairs) ? positionPairs : [];
+      if (!pairs.length) {
+        return [];
+      }
+      const safePairs = pairs.map((pair) => {
+        const x = Array.isArray(pair) ? safeFiniteNumber(pair[0], 0) : 0;
+        const y = Array.isArray(pair) ? safeFiniteNumber(pair[1], 0) : 0;
+        return [x, y];
+      });
+      const xs = safePairs.map((pair) => pair[0]);
+      const ys = safePairs.map((pair) => pair[1]);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const centerX = (minX + maxX) * 0.5;
+      const centerY = (minY + maxY) * 0.5;
+      const spanX = maxX - minX;
+      const spanY = maxY - minY;
+      const maxSpan = Math.max(spanX, spanY);
+      const targetHalfExtent = Math.max(1e-6, 1.0 - safeFiniteNumber(paddingRatio, 0.1));
+      if (maxSpan <= 1e-9) {
+        return safePairs.map(() => [0, 0]);
+      }
+      const scale = targetHalfExtent / (maxSpan * 0.5);
+      return safePairs.map((pair) => [
+        (pair[0] - centerX) * scale,
+        (pair[1] - centerY) * scale,
+      ]);
+    }
+
+    function synthesizeLegacyDashboardMeta(importedNodes, importedEdges, baseMeta) {
+      const nodes = Array.isArray(importedNodes) ? importedNodes.slice() : [];
+      const edges = Array.isArray(importedEdges) ? importedEdges : [];
+      const nodeIds = nodes.map((node, index) => {
+        const nodeId = String((node && node.id) || "").trim();
+        return nodeId || `node-${index}`;
+      });
+      const seedNode = nodes.find((node) => !!(node && node.is_seed));
+      const resolvedSeedId = String(
+        (baseMeta && baseMeta.seed_id) || (seedNode && seedNode.id) || nodeIds[0] || ""
+      );
+      const adjacencyMap = new Map(nodeIds.map((nodeId) => [nodeId, new Set()]));
+      edges.forEach((edge) => {
+        const leftId = String((edge && edge.source) || "");
+        const rightId = String((edge && edge.target) || "");
+        if (!leftId || !rightId || leftId === rightId) {
+          return;
+        }
+        if (!adjacencyMap.has(leftId)) {
+          adjacencyMap.set(leftId, new Set());
+        }
+        if (!adjacencyMap.has(rightId)) {
+          adjacencyMap.set(rightId, new Set());
+        }
+        adjacencyMap.get(leftId).add(rightId);
+        adjacencyMap.get(rightId).add(leftId);
+      });
+
+      const distanceByNode = new Map();
+      if (resolvedSeedId && adjacencyMap.has(resolvedSeedId)) {
+        const queue = [resolvedSeedId];
+        distanceByNode.set(resolvedSeedId, 0);
+        while (queue.length) {
+          const currentId = queue.shift();
+          const currentDistance = distanceByNode.get(currentId) || 0;
+          (adjacencyMap.get(currentId) || new Set()).forEach((neighborId) => {
+            if (distanceByNode.has(neighborId)) {
+              return;
+            }
+            distanceByNode.set(neighborId, currentDistance + 1);
+            queue.push(neighborId);
+          });
+        }
+      }
+
+      let maxDistance = 0;
+      distanceByNode.forEach((distance) => {
+        maxDistance = Math.max(maxDistance, safeFiniteNumber(distance, 0));
+      });
+
+      const legacyNodes = nodes.map((node, index) =>
+        Object.assign({ id: nodeIds[index] }, node || {})
+      );
+      const byLevel = new Map();
+      let disconnectedOffset = maxDistance + 1;
+      legacyNodes.forEach((node) => {
+        const nodeId = String(node.id || "");
+        let level = distanceByNode.has(nodeId) ? distanceByNode.get(nodeId) : null;
+        if (level === null || level === undefined) {
+          level = disconnectedOffset;
+          disconnectedOffset += 1;
+        }
+        if (!byLevel.has(level)) {
+          byLevel.set(level, []);
+        }
+        byLevel.get(level).push(node);
+      });
+
+      const positionsById = new Map();
+      Array.from(byLevel.keys()).sort((left, right) => left - right).forEach((level) => {
+        const levelNodes = byLevel.get(level).slice().sort(compareLegacyNodes);
+        if (level === 0 && levelNodes.length) {
+          positionsById.set(String(levelNodes[0].id || resolvedSeedId), [0, 0]);
+          levelNodes.slice(1).forEach((node, index) => {
+            const angle = (2 * Math.PI * index) / Math.max(levelNodes.length - 1, 1);
+            positionsById.set(String(node.id || ""), [0.2 * Math.cos(angle), 0.2 * Math.sin(angle)]);
+          });
+          return;
+        }
+        const radius = 0.62 + Math.max(0, level - 1) * 0.48;
+        const offset = ((stableHash(`${resolvedSeedId}|${level}`) % 360) * Math.PI) / 180;
+        levelNodes.forEach((node, index) => {
+          const angle = offset + (2 * Math.PI * index) / Math.max(levelNodes.length, 1);
+          positionsById.set(String(node.id || ""), [
+            radius * Math.cos(angle),
+            radius * Math.sin(angle),
+          ]);
+        });
+      });
+
+      const normalizedPositions = normalizePositionPairs(
+        nodeIds.map((nodeId) => positionsById.get(nodeId) || [0, 0]),
+        0.1
+      );
+      return {
+        seed_id: resolvedSeedId,
+        theme: String((baseMeta && baseMeta.theme) || (payload.meta && payload.meta.theme) || "light"),
+        summary: (baseMeta && baseMeta.summary) || {
+          nodes: nodes.length,
+          edges: edges.length,
+        },
+        year_range: computeImportedYearRange(nodes, baseMeta && baseMeta.year_range),
+        plotly_node_order: nodeIds,
+        plotly_positions: normalizedPositions,
+        plotly_node_sizes: computeImportedNodeSizes(legacyNodes),
+      };
+    }
+
+    function recoverDashboardMetaFromFigure(importedNodes, baseMeta, figureSpec) {
+      if (!figureSpec || !Array.isArray(figureSpec.data)) {
+        return null;
+      }
+      const nodeTrace = figureSpec.data.find(
+        (trace) =>
+          String((trace && trace.name) || "") === "nodes"
+          || String((trace && trace.mode) || "").includes("markers+text")
+      );
+      if (!nodeTrace) {
+        return null;
+      }
+      const x = Array.isArray(nodeTrace.x) ? nodeTrace.x.map((value) => safeFiniteNumber(value, 0)) : [];
+      const y = Array.isArray(nodeTrace.y) ? nodeTrace.y.map((value) => safeFiniteNumber(value, 0)) : [];
+      if (!x.length || x.length !== y.length) {
+        return null;
+      }
+      let order = Array.isArray(baseMeta && baseMeta.plotly_node_order)
+        ? baseMeta.plotly_node_order.map((nodeId) => String(nodeId || ""))
+        : [];
+      if (!order.length || order.length !== x.length) {
+        const importedOrder = Array.isArray(importedNodes) ? importedNodes : [];
+        order = importedOrder.map((node, index) => {
+          const nodeId = String((node && node.id) || "").trim();
+          return nodeId || `node-${index}`;
+        });
+      }
+      if (!order.length || order.length !== x.length) {
+        return null;
+      }
+      return {
+        plotly_node_order: order,
+        plotly_positions: x.map((xValue, index) => [xValue, y[index]]),
+        plotly_node_sizes: normalizeArray(
+          nodeTrace && nodeTrace.marker ? nodeTrace.marker.size : [],
+          order.length,
+          8
+        ),
+      };
+    }
+
+    function extractEmbeddedScriptJson(text, scriptId) {
+      const pattern = new RegExp(
+        `<script id="${escapeRegExp(scriptId)}" type="application/json">([\\\\s\\\\S]*?)</script>`
+      );
+      const match = String(text || "").match(pattern);
+      if (!match) {
+        throw new Error(`Imported dashboard file is missing ${scriptId}.`);
+      }
+      return JSON.parse(match[1]);
+    }
+
+    function parseImportedPayloadFromText(fileText, filename) {
+      const text = String(fileText || "");
+      const lowerName = String(filename || "").toLowerCase();
+      const looksLikeDashboardHtml =
+        lowerName.endsWith(".html") || text.includes('id="citemesh-dashboard-data"');
+      if (!looksLikeDashboardHtml) {
+        return JSON.parse(text);
+      }
+      const importedPayload = extractEmbeddedScriptJson(text, "citemesh-dashboard-data");
+      const importedFigure = extractEmbeddedScriptJson(text, "citemesh-dashboard-figure");
+      return Object.assign({}, importedPayload, {
+        __citemesh_dashboard_figure: importedFigure,
+      });
+    }
+
+    function hasCompleteDashboardGeometry(meta) {
+      if (!meta || typeof meta !== "object") {
+        return false;
+      }
+      const order = Array.isArray(meta.plotly_node_order)
+        ? meta.plotly_node_order.map((nodeId) => String(nodeId || ""))
+        : [];
+      const positions = Array.isArray(meta.plotly_positions) ? meta.plotly_positions : [];
+      if (!order.length || positions.length !== order.length) {
+        return false;
+      }
+      return true;
     }
 
     function buildFigureSpecFromPayload(nextPayload) {
@@ -2203,7 +2527,36 @@ class GraphExporter:
       timelineYearMin: document.getElementById("timeline-year-min"),
       timelineYearMax: document.getElementById("timeline-year-max"),
       resultSelect: document.getElementById("result-select"),
+      statusBanner: document.getElementById("dashboard-status"),
     };
+
+    function clearDashboardStatus() {
+      runtimeStatusMessage = "";
+      runtimeStatusTone = "warning";
+      if (!controls.statusBanner) {
+        return;
+      }
+      controls.statusBanner.textContent = "";
+      controls.statusBanner.classList.remove("visible", "warning", "info");
+    }
+
+    function setDashboardStatus(message, tone) {
+      runtimeStatusMessage = String(message || "").trim();
+      runtimeStatusTone = tone === "info" ? "info" : "warning";
+      if (!controls.statusBanner) {
+        return;
+      }
+      controls.statusBanner.textContent = runtimeStatusMessage;
+      controls.statusBanner.classList.toggle("visible", !!runtimeStatusMessage);
+      controls.statusBanner.classList.toggle(
+        "warning",
+        !!runtimeStatusMessage && runtimeStatusTone === "warning"
+      );
+      controls.statusBanner.classList.toggle(
+        "info",
+        !!runtimeStatusMessage && runtimeStatusTone === "info"
+      );
+    }
 
     function escapeHtml(value) {
       return String(value || "")
@@ -2505,7 +2858,7 @@ class GraphExporter:
       controls.yearMax.placeholder = `Year max (${maxYear})`;
     }
 
-    function normalizeImportedDashboardPayload(imported) {
+    function normalizeImportedDashboardPayload(imported, label) {
       const importedNodes = Array.isArray(imported.nodes) ? imported.nodes : [];
       if (!importedNodes.length) {
         throw new Error("No nodes found in JSON file.");
@@ -2518,31 +2871,88 @@ class GraphExporter:
         imported && imported.meta && typeof imported.meta === "object"
           ? imported.meta
           : {};
-      const nextMeta = {
-        seed_id: String(imported.seed_id || importedDashboardMeta.seed_id || ""),
+      const baseMeta = {
+        seed_id: String(
+          imported.seed_id
+          || importedDashboardMeta.seed_id
+          || importedMeta.seed_id
+          || ((importedNodes.find((node) => !!(node && node.is_seed)) || {}).id || "")
+        ),
         strategy: String(importedDashboardMeta.strategy || importedMeta.strategy || ""),
-        theme: String((payload.meta && payload.meta.theme) || importedDashboardMeta.theme || "light"),
-        summary: imported.summary || importedDashboardMeta.summary || {
+        theme: String(
+          (payload.meta && payload.meta.theme)
+          || importedDashboardMeta.theme
+          || importedMeta.theme
+          || "light"
+        ),
+        summary: imported.summary || importedDashboardMeta.summary || importedMeta.summary || {
           nodes: importedNodes.length,
           edges: Array.isArray(imported.edges) ? imported.edges.length : 0,
         },
         year_range: importedDashboardMeta.year_range || importedMeta.year_range || {},
-        plotly_node_order: importedDashboardMeta.plotly_node_order || [],
-        plotly_positions: importedDashboardMeta.plotly_positions || [],
-        plotly_node_sizes: importedDashboardMeta.plotly_node_sizes || [],
+        plotly_node_order:
+          importedDashboardMeta.plotly_node_order || importedMeta.plotly_node_order || [],
+        plotly_positions:
+          importedDashboardMeta.plotly_positions || importedMeta.plotly_positions || [],
+        plotly_node_sizes:
+          importedDashboardMeta.plotly_node_sizes || importedMeta.plotly_node_sizes || [],
       };
+      let nextMeta = Object.assign({}, baseMeta);
+      let warningMessage = "";
+
+      if (
+        !hasCompleteDashboardGeometry(nextMeta)
+        && imported.__citemesh_dashboard_figure
+      ) {
+        const recoveredMeta = recoverDashboardMetaFromFigure(
+          importedNodes,
+          nextMeta,
+          imported.__citemesh_dashboard_figure
+        );
+        if (recoveredMeta) {
+          nextMeta = Object.assign({}, nextMeta, recoveredMeta);
+        }
+      }
+
+      if (!hasCompleteDashboardGeometry(nextMeta)) {
+        nextMeta = Object.assign(
+          {},
+          nextMeta,
+          synthesizeLegacyDashboardMeta(
+            importedNodes,
+            Array.isArray(imported.edges) ? imported.edges : [],
+            nextMeta
+          )
+        );
+        warningMessage = `Loaded legacy results from ${String(label || "the selected file")} without stored dashboard geometry. CiteMesh reconstructed a deterministic layout, so positions may differ from the original export. Export JSON to save the upgraded payload.`;
+      }
+
       return {
-        meta: nextMeta,
-        nodes: importedNodes,
-        edges: Array.isArray(imported.edges) ? imported.edges : [],
+        payload: {
+          meta: nextMeta,
+          nodes: importedNodes,
+          edges: Array.isArray(imported.edges) ? imported.edges : [],
+        },
+        warningMessage,
+        warningTone: "warning",
       };
     }
 
     function applyImportedPayload(imported, label) {
-      const nextPayload = normalizeImportedDashboardPayload(imported);
+      const normalizedImport = normalizeImportedDashboardPayload(imported, label);
+      const nextPayload = normalizedImport.payload;
       const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
       payload = nextPayload;
       figureSpec = nextFigureSpec;
+      if (normalizedImport.warningMessage) {
+        setDashboardStatus(
+          normalizedImport.warningMessage,
+          normalizedImport.warningTone
+        );
+        console.warn(normalizedImport.warningMessage);
+      } else {
+        clearDashboardStatus();
+      }
       collectionResultId = currentResultIdForPayload(nextPayload);
       rebuildDerivedData();
       overlayState.neighborhoodKey = "";
@@ -2599,6 +3009,7 @@ class GraphExporter:
         (candidate) => String(candidate.result_id || "") === normalizedId
       );
       collectionResultId = normalizedId;
+      clearDashboardStatus();
       return applyImportedPayload(
         nextPayload,
         entry ? collectionEntryLabel(entry) : normalizedId
@@ -3090,11 +3501,11 @@ class GraphExporter:
         const reader = new FileReader();
         reader.onload = (e) => {
           try {
-            const imported = JSON.parse(e.target.result);
+            const imported = parseImportedPayloadFromText(e.target.result, file.name);
             applyImportedPayload(imported, file.name).catch((err) => {
-              alert("Failed to load graph view from JSON: " + err.message);
+              alert("Failed to load graph view from imported results: " + err.message);
             });
-          } catch (err) { alert("Failed to parse JSON: " + err.message); }
+          } catch (err) { alert("Failed to parse imported results: " + err.message); }
         };
         reader.readAsText(file);
         loadInput.value = "";
