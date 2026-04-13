@@ -163,11 +163,13 @@ class GraphExporter:
         enriched = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
         dashboard_node_ids = [node_id for node_id, _ in self._sorted_nodes()]
-        dashboard_payload = self._dashboard_payload(
+        dashboard_meta = self._dashboard_meta(
             theme_obj=self.theme,
             node_ids=dashboard_node_ids,
+            node_payloads=enriched,
+            sorted_edges=sorted_edges,
+            include_plotly_geometry=self._layout is not None,
         )
-        dashboard_meta = dashboard_payload["meta"]
         data = {
             "seed_id": str(self.seed_id),
             "meta": {
@@ -814,21 +816,27 @@ class GraphExporter:
             node_payloads.append(serialized)
         return node_payloads
 
-    def _dashboard_payload(
-        self, *, theme_obj: Theme, node_ids: list[Hashable]
+    def _dashboard_meta(
+        self,
+        *,
+        theme_obj: Theme,
+        node_ids: list[Hashable],
+        node_payloads: list[Dict[str, Any]],
+        sorted_edges: list[tuple[Hashable, Hashable, Dict[str, Any]]],
+        include_plotly_geometry: bool,
     ) -> Dict[str, Any]:
-        """Build deterministic dashboard payload from graph metadata.
+        """Build dashboard metadata shared by dashboard HTML and JSON exports.
 
         :param Theme theme_obj: Active visualization theme.
         :param list[Hashable] node_ids: Node order used by Plotly points.
-        :return Dict[str, Any]: JSON payload consumed by dashboard JS.
+        :param list[Dict[str, Any]] node_payloads: Enriched node payloads.
+        :param list[tuple[Hashable, Hashable, Dict[str, Any]]] sorted_edges:
+            Deterministically ordered edge payloads.
+        :param bool include_plotly_geometry: Whether layout-backed Plotly geometry
+            should be embedded in the metadata.
+        :return Dict[str, Any]: Dashboard metadata payload.
         """
-        node_payloads = self._enriched_nodes()
-        sorted_edges = self._sorted_edges()
         strategy = self._strategy()
-        positions = self._get_layout()
-        node_sizes = [max(6.0, self._node_size(node_id) / 50.0) for node_id in node_ids]
-
         valid_years = [
             int(node.get("year", 0))
             for node in node_payloads
@@ -842,23 +850,47 @@ class GraphExporter:
                 "max": MISSING_YEAR_FALLBACK_MAX,
             }
 
-        payload: Dict[str, Any] = {
-            "meta": {
-                "seed_id": str(self.seed_id),
-                "strategy": strategy,
-                "theme": theme_obj.name,
-                "summary": {
-                    "nodes": len(node_payloads),
-                    "edges": len(sorted_edges),
-                },
-                "year_range": year_range,
-                "plotly_node_order": [str(node_id) for node_id in node_ids],
-                "plotly_positions": [
-                    [float(positions[node_id][0]), float(positions[node_id][1])]
-                    for node_id in node_ids
-                ],
-                "plotly_node_sizes": node_sizes,
+        meta: Dict[str, Any] = {
+            "seed_id": str(self.seed_id),
+            "strategy": strategy,
+            "theme": theme_obj.name,
+            "summary": {
+                "nodes": len(node_payloads),
+                "edges": len(sorted_edges),
             },
+            "year_range": year_range,
+        }
+        if include_plotly_geometry:
+            positions = self._get_layout()
+            meta["plotly_node_order"] = [str(node_id) for node_id in node_ids]
+            meta["plotly_positions"] = [
+                [float(positions[node_id][0]), float(positions[node_id][1])]
+                for node_id in node_ids
+            ]
+            meta["plotly_node_sizes"] = [
+                max(6.0, self._node_size(node_id) / 50.0) for node_id in node_ids
+            ]
+        return meta
+
+    def _dashboard_payload(
+        self, *, theme_obj: Theme, node_ids: list[Hashable]
+    ) -> Dict[str, Any]:
+        """Build deterministic dashboard payload from graph metadata.
+
+        :param Theme theme_obj: Active visualization theme.
+        :param list[Hashable] node_ids: Node order used by Plotly points.
+        :return Dict[str, Any]: JSON payload consumed by dashboard JS.
+        """
+        node_payloads = self._enriched_nodes()
+        sorted_edges = self._sorted_edges()
+        payload: Dict[str, Any] = {
+            "meta": self._dashboard_meta(
+                theme_obj=theme_obj,
+                node_ids=node_ids,
+                node_payloads=node_payloads,
+                sorted_edges=sorted_edges,
+                include_plotly_geometry=True,
+            ),
             "nodes": node_payloads,
             "edges": [
                 {

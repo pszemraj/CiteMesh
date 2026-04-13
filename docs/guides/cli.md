@@ -192,6 +192,9 @@ citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json -o rese
 # Explicit standalone dashboard file for a one-off result
 citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o report.dashboard.html --theme dark
 
+# Standalone dashboard file plus sibling JSON/config artifacts
+citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json -o report.dashboard.html --theme dark
+
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \
   --strategy embedding \

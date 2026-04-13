@@ -44,6 +44,10 @@ Canonical path-normalization rules:
   - if `--output` ends with a different known export suffix, that suffix is replaced
   - if `--output` has no known export suffix, the target suffix is appended
 - multi-export run (`--export all` or multiple formats) with explicit `--output`:
+  - if `dashboard` is among the selected formats and `--output` ends with
+    `.dashboard.html`, the dashboard stays a standalone file at that exact path,
+    collection mode is disabled, and sibling exports use the stripped base with
+    their own suffixes (for example `report.json`, `report.csv`, `report.config.json`)
   - if `--output` ends with a known export suffix (for example `out.png`), that suffix
     is stripped and the remainder is treated as directory base
   - if `--output` has no known suffix, it is treated directly as directory base
@@ -62,6 +66,8 @@ Examples:
   writes `report.json`
 - `citemesh build "<paper-id>" --strategy recommendation --export dashboard -o report.dashboard.html`
   writes the standalone dashboard file `report.dashboard.html`
+- `citemesh build "<paper-id>" --strategy recommendation --export dashboard --export json -o report.dashboard.html`
+  writes `report.dashboard.html`, `report.json`, and `report.config.json`
 
 ## JSON vs Sidecar
 
@@ -96,10 +102,13 @@ Each node includes:
 - external: `links` (arXiv abs/pdf URLs, DOI URL, Semantic Scholar URL)
 - `bibtex` (deterministic BibTeX entry)
 
-The JSON and dashboard formats share the same enriched node schema, and the JSON
-payload also carries dashboard render metadata (`dashboard.meta.plotly_*`) so
-current-version CiteMesh JSON files can be loaded back into the dashboard via
-the **Load Results** button without losing graph geometry.
+The JSON and dashboard formats share the same enriched node schema. When a
+precomputed/shared layout already exists (for example because the same run also
+exports `png`, `plotly`, or `dashboard`), the JSON payload also carries
+dashboard render metadata (`dashboard.meta.plotly_*`) so current-version
+CiteMesh JSON files can be loaded back into the dashboard via the
+**Load Results** button without losing graph geometry. JSON-only exports omit
+those geometry arrays to avoid unnecessary layout work during data-only runs.
 
 ### CSV (`<strategy>.csv`)
 
@@ -125,7 +134,7 @@ interface with embedded Plotly graph, paper list, and detail panel.
 - **Export CSV** — generates a CSV table client-side from the current dataset
 - **All BibTeX** — downloads all papers' BibTeX entries as a single `.bib` file
 - **Saved Results selector** — switches between JSON payload slots already tracked in the collection shell, with no extra file picking
-- **Load Results** — file picker that accepts current-version CiteMesh JSON files plus dashboard HTML exports. Current-version JSON keeps stored graph geometry. Legacy dashboard HTML can recover embedded geometry from the exported Plotly figure. Legacy JSON without stored dashboard geometry still loads, but CiteMesh reconstructs a deterministic fallback layout and shows a warning.
+- **Load Results** — file picker that accepts current-version CiteMesh JSON files plus dashboard HTML exports. Current-version JSON keeps stored graph geometry when that geometry was exported. Legacy dashboard HTML can recover embedded geometry from the exported Plotly figure. If you need JSON round-tripping through the dashboard, export JSON alongside a layout-based format such as `dashboard` or `plotly`.
 
 In collection mode, this means you can keep one `dashboard.html` open and move
 between saved result slots from the built-in selector, or load any other

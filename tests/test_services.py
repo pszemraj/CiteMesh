@@ -720,3 +720,33 @@ def test_service_module_lifecycle_contracts() -> None:
     finally:
         httpx_logger.setLevel(original_levels[0])
         httpcore_logger.setLevel(original_levels[1])
+
+
+def test_get_client_replaces_closed_singleton() -> None:
+    """Closed shared clients should be invalidated and recreated on demand."""
+    previous_session = semantic_module.requests.Session
+    previous_client = semantic_module.SemanticScholar
+    try:
+        semantic_module.requests.Session = _FakeRequestsSession
+        semantic_module.SemanticScholar = _build_fake_semantic_scholar_api()
+
+        reset_client()
+        first = get_client()
+        first.close()
+
+        second = get_client()
+        assert second is not first
+        assert first._closed is True
+        assert second._closed is False
+
+        with get_client() as shared_client:
+            assert shared_client is second
+
+        third = get_client()
+        assert third is not second
+        assert second._closed is True
+        assert third._closed is False
+    finally:
+        reset_client()
+        semantic_module.requests.Session = previous_session
+        semantic_module.SemanticScholar = previous_client

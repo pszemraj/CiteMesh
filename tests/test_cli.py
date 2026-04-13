@@ -1202,6 +1202,53 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
+def test_dashboard_standalone_multi_export_preserves_explicit_single_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit dashboard filenames should stay standalone during multi-export runs."""
+    graph = build_seed_graph("seed")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        _make_exporter_stub(
+            captured,
+            methods=("to_dashboard_html", "to_json"),
+        ),
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_file = Path(tmpdir) / "report.dashboard.html"
+        collection_root = output_file.parent / "report"
+        result = run_cli_command(
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "recommendation",
+                "--export",
+                "dashboard",
+                "--export",
+                "json",
+                "-o",
+                str(output_file),
+            ]
+        )
+        assert output_file.exists()
+        assert (output_file.parent / "report.json").exists()
+        assert (output_file.parent / "report.config.json").exists()
+        assert not (collection_root / "dashboard.html").exists()
+        assert not (collection_root / "dashboard.manifest.json").exists()
+        assert "dashboard_collection" not in captured["metadata"]
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+
+
 def test_dashboard_collection_helpers_cover_resolver_and_bundle_loading() -> None:
     """Collection helpers should imply JSON and skip invalid embedded payloads."""
     graph = nx.Graph()
@@ -1209,6 +1256,11 @@ def test_dashboard_collection_helpers_cover_resolver_and_bundle_loading() -> Non
     assert _is_standalone_dashboard_output(
         Path("reports/example.dashboard.html"),
         ["dashboard"],
+        True,
+    )
+    assert _is_standalone_dashboard_output(
+        Path("reports/example.dashboard.html"),
+        ["dashboard", "json"],
         True,
     )
     assert not _is_standalone_dashboard_output(
@@ -1994,6 +2046,15 @@ def test_output_path_and_slug_contracts() -> None:
             ["dashboard"],
             True,
             {"dashboard": Path("reports/example.dashboard.html")},
+        ),
+        (
+            Path("reports/example.dashboard.html"),
+            ["dashboard", "json"],
+            True,
+            {
+                "dashboard": Path("reports/example.dashboard.html"),
+                "json": Path("reports/example.json"),
+            },
         ),
     ]
     for base_output_path, formats, explicit_output, expected in path_cases:

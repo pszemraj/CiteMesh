@@ -177,6 +177,11 @@ class SemanticScholarClient:
         """Close the HTTP session and underlying API client handles."""
         if self._closed:
             return
+        self._closed = True
+        global _client_instance
+        with _client_lock:
+            if _client_instance is self:
+                _client_instance = None
         with contextlib.suppress(Exception):
             self._session.close()
         client_session = getattr(self.client, "session", None)
@@ -187,7 +192,6 @@ class SemanticScholarClient:
             close_api_client = getattr(self.client, "close", None)
             if callable(close_api_client):
                 close_api_client()
-        self._closed = True
 
     def __del__(self) -> None:
         """Attempt to close sessions on object finalization."""
@@ -1089,9 +1093,9 @@ def get_client() -> SemanticScholarClient:
     :return SemanticScholarClient: Process-wide singleton client.
     """
     global _client_instance
-    if _client_instance is None:
+    if _client_instance is None or _client_instance._closed:
         with _client_lock:
-            if _client_instance is None:
+            if _client_instance is None or _client_instance._closed:
                 _client_instance = SemanticScholarClient()
     return _client_instance
 
@@ -1099,7 +1103,9 @@ def get_client() -> SemanticScholarClient:
 def reset_client() -> None:
     """Reset cached client instance (for testing)."""
     global _client_instance
+    client_to_close: Optional[SemanticScholarClient] = None
     with _client_lock:
-        if _client_instance is not None:
-            _client_instance.close()
+        client_to_close = _client_instance
         _client_instance = None
+    if client_to_close is not None:
+        client_to_close.close()

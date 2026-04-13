@@ -1457,6 +1457,16 @@ def resolve_output_paths(
 
     output_paths: Dict[str, Path] = {}
     if explicit_output and len(selected_formats) > 1:
+        if "dashboard" in selected_formats and base_str.lower().endswith(
+            EXPORT_EXTENSIONS["dashboard"]
+        ):
+            for fmt in selected_formats:
+                if fmt == "dashboard":
+                    output_paths[fmt] = base_output_path
+                else:
+                    output_paths[fmt] = Path(stripped_base + EXPORT_EXTENSIONS[fmt])
+            return output_paths
+
         output_dir = Path(stripped_base) if has_known_suffix else base_output_path
         basename = strategy or "graph"
         for fmt in selected_formats:
@@ -1494,11 +1504,12 @@ def _is_standalone_dashboard_output(
     :param Path base_output_path: User-provided or generated base output path.
     :param List[str] selected_formats: Requested export formats.
     :param bool explicit_output: Whether ``--output`` was provided.
-    :return bool: ``True`` when an explicit single-file dashboard path was requested.
+    :return bool: ``True`` when an explicit standalone dashboard path was
+        requested, even if additional sibling exports were also selected.
     """
     return (
         explicit_output
-        and selected_formats == ["dashboard"]
+        and "dashboard" in selected_formats
         and str(base_output_path).lower().endswith(EXPORT_EXTENSIONS["dashboard"])
     )
 

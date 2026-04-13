@@ -173,7 +173,12 @@ def test_exporter_serialization_contracts_and_determinism(
 ) -> None:
     """Exporter outputs should preserve metadata, ordering, and determinism."""
     graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "citation"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
+    )
 
     json_path = tmp_path / "graph.json"
     graphml_path = tmp_path / "graph.graphml"
@@ -273,6 +278,33 @@ def test_exporter_serialization_contracts_and_determinism(
     assert edge_x[1] == pytest.approx(float(normalized_layout["z"][0]))
     assert edge_x[3] == pytest.approx(float(normalized_layout["seed"][0]))
     assert edge_x[4] == pytest.approx(float(normalized_layout["z"][0]))
+
+
+def test_json_export_skips_layout_without_precomputed_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JSON export should stay data-only unless layout geometry already exists."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+
+    def _fail_compute_layout(
+        *args: Any, **kwargs: Any
+    ) -> dict[str, tuple[float, float]]:
+        del args, kwargs
+        raise AssertionError("compute_layout should not run for JSON-only export")
+
+    monkeypatch.setattr(export_module, "compute_layout", _fail_compute_layout)
+
+    json_path = tmp_path / "graph.json"
+    exporter.to_json(json_path)
+
+    payload = json.loads(json_path.read_text())
+    assert payload["meta"]["strategy"] == "citation"
+    assert payload["summary"] == {"nodes": 2, "edges": 1}
+    assert payload["dashboard"]["meta"]["summary"] == {"nodes": 2, "edges": 1}
+    assert "plotly_node_order" not in payload["dashboard"]["meta"]
+    assert "plotly_positions" not in payload["dashboard"]["meta"]
+    assert "plotly_node_sizes" not in payload["dashboard"]["meta"]
 
 
 def test_exporter_interactive_html_contracts(
