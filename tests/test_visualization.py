@@ -391,6 +391,12 @@ def _extract_dashboard_script_json(html_text: str, script_id: str) -> dict[str, 
     return json.loads(match.group(1))
 
 
+def _extract_inline_script_bodies(html_text: str) -> list[str]:
+    """Extract bare inline script bodies in source order."""
+
+    return re.findall(r"<script>(.*?)</script>", html_text, flags=re.DOTALL)
+
+
 def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     """Dashboard export should render tri-pane shell and derived payload fields."""
     pytest.importorskip("plotly")
@@ -517,6 +523,36 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert marker["sizeref"] > 0
     assert max(marker["line"]["width"]) >= 4
     assert min(marker["line"]["width"]) == 0
+
+
+def test_exporter_dashboard_runtime_script_contracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dashboard runtime should stay intact and parse imported HTML safely."""
+
+    class FakeFigure(_BaseFakeFigure):
+        def to_plotly_json(self) -> dict[str, object]:
+            return {"data": self.data, "layout": self.layout}
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "runtime.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    runtime_scripts = _extract_inline_script_bodies(out_path.read_text())
+    assert len(runtime_scripts) == 2
+
+    runtime_script = runtime_scripts[-1]
+    assert "new DOMParser()" in runtime_script
+    assert "function parseImportedPayloadFromText" in runtime_script
+    assert "function hasCompleteDashboardGeometry" in runtime_script
+    assert "escapeRegExp" not in runtime_script
 
 
 def test_exporter_dashboard_missing_plotly_dependency(

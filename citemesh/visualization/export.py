@@ -1930,10 +1930,6 @@ class GraphExporter:
       return JSON.parse(JSON.stringify(value));
     }
 
-    function escapeRegExp(value) {
-      return String(value || "").replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
-    }
-
     function safeFiniteNumber(value, fallbackValue) {
       const numeric = Number(value);
       return Number.isFinite(numeric) ? numeric : fallbackValue;
@@ -1959,14 +1955,26 @@ class GraphExporter:
     }
 
     function extractEmbeddedScriptJson(text, scriptId) {
-      const pattern = new RegExp(
-        `<script id="${escapeRegExp(scriptId)}" type="application/json">([\\\\s\\\\S]*?)</script>`
+      // Parse imported dashboard HTML as a document instead of regex-matching script
+      // tags. This avoids brittle parsing and keeps the inline runtime free of raw
+      // script-closing sequences that would terminate the surrounding HTML script tag.
+      const parsedDocument = new DOMParser().parseFromString(
+        String(text || ""),
+        "text/html"
       );
-      const match = String(text || "").match(pattern);
-      if (!match) {
+      const scriptElement = parsedDocument.getElementById(String(scriptId || ""));
+      const isJsonScript =
+        scriptElement &&
+        String(scriptElement.tagName || "").toLowerCase() === "script" &&
+        String(scriptElement.getAttribute("type") || "").toLowerCase() === "application/json";
+      if (!isJsonScript) {
         throw new Error(`Imported dashboard file is missing ${scriptId}.`);
       }
-      return JSON.parse(match[1]);
+      const rawJson = String(scriptElement.textContent || "").trim();
+      if (!rawJson) {
+        throw new Error(`Imported dashboard file is missing ${scriptId}.`);
+      }
+      return JSON.parse(rawJson);
     }
 
     function parseImportedPayloadFromText(fileText, filename) {
