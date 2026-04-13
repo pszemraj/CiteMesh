@@ -924,7 +924,7 @@ class GraphExporter:
         :param str strategy: Strategy metadata token.
         :return str: One of ``citation`` or ``semantic``.
         """
-        if strategy == "embedding":
+        if strategy in {"embedding", "recommendation"}:
             return "semantic"
         return "citation"
 

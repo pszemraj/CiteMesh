@@ -1076,3 +1076,25 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
     bib_text = bib_path.read_text()
     assert "@article{" in bib_text
     assert "Seed Paper" in bib_text or "Related Paper" in bib_text
+
+
+def test_recommendation_export_defaults_to_semantic_provenance(
+    tmp_path: Path,
+) -> None:
+    """Recommendation exports should classify fallback provenance as semantic."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "recommendation"})
+
+    json_path = tmp_path / "recommendation.json"
+    exporter.to_json(json_path)
+
+    payload = json.loads(json_path.read_text())
+    seed_node = next(node for node in payload["nodes"] if node["id"] == seed_id)
+    related_node = next(node for node in payload["nodes"] if node["id"] == "related")
+
+    assert seed_node["provenance"] == "seed"
+    assert seed_node["provenance_base"] == "semantic"
+    assert seed_node["seed_relation"] == "seed"
+    assert related_node["provenance"] == "semantic"
+    assert related_node["provenance_base"] == "semantic"
+    assert related_node["seed_relation"] == "semantic_only"

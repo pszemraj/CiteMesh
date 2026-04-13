@@ -144,7 +144,9 @@ Top-level fields:
 
 `build` includes strategy-specific sections:
 
-- `citation` for citation/recommendation/hybrid collection knobs.
+- `citation` for reference/citation collection knobs that affected the run.
+  Recommendation sidecars include only shared reference-hydration settings, while
+  citation and hybrid sidecars also include citation-expansion budgets.
 - `hybrid` for resolved `max_semantic`.
 - `embedding` for embedding/hybrid semantic settings.
 

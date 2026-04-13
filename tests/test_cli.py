@@ -1412,6 +1412,36 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "embedding" not in metadata
 
 
+def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> None:
+    """Recommendation sidecars should only record settings that affect the run."""
+    _, build_parser, _ = cli_module._create_parser()
+    cli_args = build_parser.parse_args(
+        [
+            "seed",
+            "--strategy",
+            "recommendation",
+            "--no-references",
+            "--refresh-reference-cache",
+        ]
+    )
+
+    payload = cli_module._build_graph_config_payload(
+        cli_args=cli_args,
+        seed_id="seed",
+        metadata={"strategy": "recommendation"},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/recommendation.json")},
+    )
+
+    citation_config = payload["build"]["citation"]
+    assert citation_config == {
+        "fetch_references": False,
+        "refresh_reference_cache": True,
+    }
+    assert "max_citations" not in citation_config
+    assert "max_references" not in citation_config
+
+
 def test_embedding_build_logs_side_effect_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

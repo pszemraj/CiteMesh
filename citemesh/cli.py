@@ -1742,6 +1742,33 @@ def _drop_none_values(value: Any) -> Any:
     return value
 
 
+def _build_citation_config_payload(
+    cli_args: argparse.Namespace, *, strategy: str
+) -> Optional[Dict[str, Any]]:
+    """Build strategy-scoped citation/reference settings for config sidecars.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :param str strategy: Active build strategy.
+    :return Optional[Dict[str, Any]]: Citation config payload when applicable.
+    """
+    fetch_references = not bool(cli_args.no_references)
+    refresh_reference_cache = bool(cli_args.refresh_reference_cache)
+
+    if strategy == "recommendation":
+        return {
+            "fetch_references": fetch_references,
+            "refresh_reference_cache": refresh_reference_cache,
+        }
+    if strategy in {"citation", "hybrid"}:
+        return {
+            "max_citations": int(cli_args.max_citations),
+            "max_references": int(cli_args.max_references),
+            "fetch_references": fetch_references,
+            "refresh_reference_cache": refresh_reference_cache,
+        }
+    return None
+
+
 def _build_graph_config_payload(
     cli_args: argparse.Namespace,
     seed_id: str,
@@ -1795,16 +1822,7 @@ def _build_graph_config_payload(
             "seed_id": seed_id,
             "strategy": strategy,
             "max_papers": int(cli_args.max_papers),
-            "citation": (
-                {
-                    "max_citations": int(cli_args.max_citations),
-                    "max_references": int(cli_args.max_references),
-                    "fetch_references": not bool(cli_args.no_references),
-                    "refresh_reference_cache": bool(cli_args.refresh_reference_cache),
-                }
-                if strategy in {"citation", "hybrid", "recommendation"}
-                else None
-            ),
+            "citation": _build_citation_config_payload(cli_args, strategy=strategy),
             "hybrid": (
                 {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}
                 if strategy == "hybrid"
