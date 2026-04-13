@@ -33,7 +33,7 @@ from citemesh.data.embedding_cache import (
     _resolve_cache_lock_timeout_seconds,
 )
 from citemesh.data.model_profiles import get_embedding_model_profile
-from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel, connect_db
+from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
 
 
 def _set_test_int8_calibration(cache: EmbeddingCache, embedding_dim: int = 2) -> None:
@@ -109,7 +109,7 @@ def test_embedding_cache_lifecycle_contract() -> None:
         cache.get_embeddings(papers_v2, model, show_progress=False)
         cache.get_embeddings(papers_v3, model, show_progress=False)
 
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             rows = conn.execute(
                 "SELECT paper_id, row_idx FROM papers ORDER BY row_idx"
             ).fetchall()
@@ -212,7 +212,7 @@ def test_embedding_cache_rechecks_misses_after_encode_race(
             show_progress=False,
         )
 
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             paper_rows = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
             row_idx = conn.execute(
                 "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
@@ -420,7 +420,7 @@ def test_embedding_cache_metadata_refresh_survives_mixed_batch_encode_failure() 
                 show_progress=False,
             )
 
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             refreshed_row = conn.execute(
                 """
                 SELECT year, venue, arxiv_id, doi
@@ -499,7 +499,7 @@ def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:
             show_progress=False,
         )
 
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             conn.execute("DELETE FROM papers")
             conn.commit()
 
@@ -608,7 +608,7 @@ def test_embedding_cache_search_fails_closed_on_metadata_provenance_mismatch(
             show_progress=False,
         )
 
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             conn.execute(
                 "UPDATE cache_metadata SET value = ? WHERE key = ?",
                 (metadata_value, metadata_key),
@@ -707,7 +707,7 @@ def test_embedding_cache_compression_codec_contracts() -> None:
             show_progress=False,
         )
 
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             metadata = dict(conn.execute("SELECT key, value FROM cache_metadata"))
             assert metadata[COMPRESSION_FILTER_KEY] == "lzf"
             assert metadata[COMPRESSION_LEVEL_KEY] == "0"
@@ -805,7 +805,7 @@ def test_embedding_cache_restart_persistence_contracts() -> None:
             cache_dir=tmpdir, model_name="fingerprint-persistence"
         )
         assert reloaded_fingerprint.get_model_fingerprint() == "hf::org/model::abc123"
-        with connect_db(reloaded_fingerprint.db_path) as conn:
+        with reloaded_fingerprint._connect_db() as conn:
             metadata = {
                 key: value
                 for key, value in conn.execute("SELECT key, value FROM cache_metadata")
@@ -871,12 +871,12 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
         cache.h5_path.unlink(missing_ok=True)
 
     def _delete_metadata_rows(cache: EmbeddingCache) -> None:
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             conn.execute("DELETE FROM papers")
             conn.commit()
 
     def _clear_dataset_source(cache: EmbeddingCache) -> None:
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             conn.execute(
                 "UPDATE cache_metadata SET value = '' WHERE key = ?",
                 (HYDRATION_DATASET_SOURCE_KEY,),
@@ -974,7 +974,7 @@ def test_embedding_cache_recovery_clears_hydration_metadata() -> None:
             corpus_size=2048,
             dataset_source="librarian-bots/arxiv-metadata-snapshot",
         )
-        with connect_db(cache.db_path) as conn:
+        with cache._connect_db() as conn:
             cursor = conn.cursor()
             metadata = {
                 key: value
@@ -1008,7 +1008,7 @@ def test_embedding_cache_recovery_when_h5_missing_clears_stale_sqlite_rows() -> 
         cache.h5_path.unlink(missing_ok=True)
 
         reloaded = EmbeddingCache(cache_dir=tmpdir, model_name="missing-h5-stale-db")
-        with connect_db(reloaded.db_path) as conn:
+        with reloaded._connect_db() as conn:
             paper_count = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
             metadata = {
                 key: value
@@ -1096,7 +1096,7 @@ def test_embedding_cache_serializes_multiprocess_initialization_recovery(
 ) -> None:
     """Concurrent init/recovery should not race when repairing stale namespace state."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="process-init-recovery")
-    with connect_db(cache.db_path) as conn:
+    with cache._connect_db() as conn:
         conn.execute(
             """
             INSERT INTO papers (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx)
@@ -1132,7 +1132,7 @@ def test_embedding_cache_serializes_multiprocess_initialization_recovery(
     assert not errors, f"Concurrent cache init recovery failed: {errors}"
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="process-init-recovery")
-    with connect_db(reloaded.db_path) as conn:
+    with reloaded._connect_db() as conn:
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
 
@@ -1146,7 +1146,7 @@ def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
     with h5py.File(cache.h5_path, "w") as h5:
         h5.create_dataset("legacy_payload", data=np.array([1, 2, 3], dtype=np.float32))
 
-    with connect_db(cache.db_path) as conn:
+    with cache._connect_db() as conn:
         conn.execute(
             """
             INSERT INTO papers (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx)
@@ -1156,7 +1156,7 @@ def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
         conn.commit()
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
-    with connect_db(reloaded.db_path) as conn:
+    with reloaded._connect_db() as conn:
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
     _set_test_int8_calibration(reloaded)
@@ -1191,7 +1191,7 @@ def test_embedding_cache_recovery_clears_orphan_h5_rows(tmp_path: Path) -> None:
         binary[current_rows] = np.asarray([0], dtype=np.uint8)
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="orphan-h5-row-recovery")
-    with connect_db(reloaded.db_path) as conn:
+    with reloaded._connect_db() as conn:
         paper_rows = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
 
     assert paper_rows == 0
@@ -1221,6 +1221,6 @@ def test_embedding_cache_clear_releases_file_handles(tmp_path: Path) -> None:
     assert not cache.h5_path.exists()
     # DB is recreated by clear() via _init_db, so it should exist but be empty
     assert cache.db_path.exists()
-    with connect_db(cache.db_path) as conn:
+    with cache._connect_db() as conn:
         paper_rows = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
     assert paper_rows == 0

@@ -52,6 +52,7 @@ from citemesh.strategies.base import (
 )
 from citemesh.text_batching import (
     encode_texts_in_length_buckets,
+    l2_normalize_embeddings,
 )
 
 if TYPE_CHECKING:
@@ -208,17 +209,6 @@ def _query_seed_id(query_text: str) -> str:
     """
     digest = sha1(query_text.encode("utf-8")).hexdigest()[:8]
     return f"query:{digest}"
-
-
-def _normalize_embedding_vector(embedding: np.ndarray) -> np.ndarray:
-    """Return a unit-length float32 embedding vector.
-
-    :param np.ndarray embedding: Input embedding vector.
-    :return np.ndarray: L2-normalized float32 vector.
-    """
-    vector = np.asarray(embedding, dtype=np.float32)
-    norm = float(np.linalg.norm(vector))
-    return vector / max(norm, 1e-12)
 
 
 class _AutocastEncodeProxy:
@@ -2728,8 +2718,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         # Semantic similarity from embeddings
         if paper1.paper_id in self.embeddings and paper2.paper_id in self.embeddings:
-            emb1 = _normalize_embedding_vector(self.embeddings[paper1.paper_id])
-            emb2 = _normalize_embedding_vector(self.embeddings[paper2.paper_id])
+            emb1 = l2_normalize_embeddings(self.embeddings[paper1.paper_id])
+            emb2 = l2_normalize_embeddings(self.embeddings[paper2.paper_id])
             semantic_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
         else:
             semantic_sim = 0.0

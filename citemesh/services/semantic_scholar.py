@@ -85,9 +85,6 @@ def _reference_cache_path(paper_id: str) -> Path:
 def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
     """Validate and normalize cached reference ID payloads.
 
-    Supports current payloads (list of strings) and legacy/mixed list entries
-    that include ``{"paperId": ...}``-style objects.
-
     :param Any payload: Cached ``references`` field from JSON payload.
     :return Optional[List[str]]: Normalized ID list, or ``None`` when invalid.
     """
@@ -98,23 +95,9 @@ def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
     seen: set[str] = set()
 
     for raw_value in payload:
-        candidate: Optional[str] = None
-        if isinstance(raw_value, str):
-            candidate = raw_value
-        elif isinstance(raw_value, dict):
-            if isinstance(raw_value.get("paperId"), str):
-                candidate = raw_value["paperId"]
-            elif isinstance(raw_value.get("paper_id"), str):
-                candidate = raw_value["paper_id"]
-            elif isinstance(raw_value.get("paper"), dict) and isinstance(
-                raw_value["paper"].get("paperId"), str
-            ):
-                candidate = raw_value["paper"]["paperId"]
-
-        if candidate is None:
-            continue
-
-        paper_id = candidate.strip()
+        if not isinstance(raw_value, str):
+            return None
+        paper_id = raw_value.strip()
         if not paper_id or paper_id in seen:
             continue
         seen.add(paper_id)
@@ -885,18 +868,7 @@ class SemanticScholarClient:
                     )
                     return []
 
-                ref_ids: List[str] = []
-                for ref in references:
-                    if (
-                        hasattr(ref, "paper")
-                        and ref.paper
-                        and hasattr(ref.paper, "paperId")
-                    ):
-                        ref_ids.append(ref.paper.paperId)
-
-                normalized_ref_ids = _coerce_cached_reference_ids(ref_ids)
-                if normalized_ref_ids is None:
-                    normalized_ref_ids = []
+                normalized_ref_ids = self._extract_reference_ids(references)
                 self._persist_reference_cache_entry(
                     cache_path,
                     normalized_paper_id,

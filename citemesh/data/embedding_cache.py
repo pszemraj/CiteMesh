@@ -29,7 +29,10 @@ from filelock import FileLock, Timeout
 from tqdm.auto import tqdm
 
 from citemesh._runtime import stderr_isatty
-from citemesh.text_batching import encode_texts_in_length_buckets
+from citemesh.text_batching import (
+    encode_texts_in_length_buckets,
+    l2_normalize_embeddings,
+)
 
 from .cache import format_bytes, get_cache_dir
 from .model_profiles import DEFAULT_EMBEDDING_MODEL_NAME, compose_title_abstract_text
@@ -225,25 +228,6 @@ def _sanitize_ranges(ranges: np.ndarray) -> np.ndarray:
         maxs = maxs.copy()
         maxs[too_small] = mins[too_small] + 1e-6
     return np.vstack((mins, maxs)).astype(np.float32)
-
-
-def _l2_normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
-    """Return row-wise/unit-vector normalized embeddings in float32.
-
-    Int8 cache rows are normalized before quantization, but affine dequantization
-    does not preserve unit norm. Re-normalizing restored float32 rows keeps
-    cache-native rescoring aligned with cosine-style semantics used elsewhere.
-
-    :param np.ndarray embeddings: Vector or matrix payload to normalize.
-    :return np.ndarray: Float32 array with L2-normalized rows.
-    """
-    normalized = np.asarray(embeddings, dtype=np.float32)
-    if normalized.ndim == 1:
-        norm = float(np.linalg.norm(normalized))
-        return normalized / max(norm, 1e-12)
-
-    norms = np.linalg.norm(normalized, axis=1, keepdims=True)
-    return normalized / np.clip(norms, 1e-12, None)
 
 
 def _count_int8_saturated_values(
@@ -2400,7 +2384,7 @@ class EmbeddingCache:
                 h5_file,
                 matrix.astype(np.int8, copy=False),
             )
-            matrix_f32 = _l2_normalize_embeddings(matrix_f32)
+            matrix_f32 = l2_normalize_embeddings(matrix_f32)
         elif self.storage_precision == "float16":
             matrix_f32 = matrix.astype(np.float32, copy=False)
         else:
@@ -2481,7 +2465,7 @@ class EmbeddingCache:
         :param Optional[np.ndarray] row_indices: Optional candidate subset.
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
         """
-        query = _l2_normalize_embeddings(query_embedding)
+        query = l2_normalize_embeddings(query_embedding)
         if row_indices is not None:
             rows = np.unique(np.asarray(row_indices, dtype=np.int64))
             if rows.size == 0:
@@ -2492,7 +2476,7 @@ class EmbeddingCache:
                 )
 
             int8_matrix = np.asarray(embeddings_dataset[rows], dtype=np.int8)
-            matrix = _l2_normalize_embeddings(
+            matrix = l2_normalize_embeddings(
                 self._dequantize_int8(h5_file, int8_matrix)
             )
             scores = matrix @ query
@@ -2507,7 +2491,7 @@ class EmbeddingCache:
         for start in range(0, row_count, chunk_size):
             end = min(start + chunk_size, row_count)
             int8_chunk = np.asarray(embeddings_dataset[start:end], dtype=np.int8)
-            chunk_matrix = _l2_normalize_embeddings(
+            chunk_matrix = l2_normalize_embeddings(
                 self._dequantize_int8(h5_file, int8_chunk)
             )
             chunk_scores = chunk_matrix @ query

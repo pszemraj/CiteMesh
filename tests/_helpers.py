@@ -2,37 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Sequence
+from typing import Any, Dict, Iterable, List, Sequence
 
 import networkx as nx
 import numpy as np
 import pytest
-
-from citemesh.core import Paper
-
-
-@contextmanager
-def connect_db(db_path: Path) -> Iterator[sqlite3.Connection]:
-    """Open a SQLite connection that is closed on context exit.
-
-    Mirrors ``EmbeddingCache._connect_db`` for test code — prevents
-    ``[WinError 32]`` when temp-dir cleanup runs while a handle is open.
-
-    :param Path db_path: Path to the SQLite database file.
-    :return Iterator[sqlite3.Connection]: Context manager yielding an open connection.
-    """
-    conn = sqlite3.connect(db_path)
-    try:
-        yield conn
-        conn.commit()
-    except BaseException:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
 
 def build_seed_graph(seed_id: str = "seed") -> nx.Graph:
@@ -51,21 +26,6 @@ def build_seed_graph(seed_id: str = "seed") -> nx.Graph:
         is_seed=True,
     )
     return graph
-
-
-def build_top_k_papers() -> Dict[str, Paper]:
-    """Create a deterministic four-paper fixture used by capping tests.
-
-    :return Dict[str, Paper]: Deterministic paper mapping with one seed paper.
-    """
-    papers = {
-        "seed": Paper(paper_id="seed", title="Seed", year=2024, abstract="seed"),
-        "a": Paper(paper_id="a", title="A", year=2024, abstract="alpha"),
-        "b": Paper(paper_id="b", title="B", year=2024, abstract="beta"),
-        "c": Paper(paper_id="c", title="C", year=2024, abstract="gamma"),
-    }
-    papers["seed"].is_seed = True
-    return papers
 
 
 class ConstantEncodeModel:
@@ -184,7 +144,18 @@ def build_fake_exporter_factory(
     :return type: Fake exporter class.
     """
 
-    requested_methods = set(methods or [])
+    from citemesh.cli import _EXPORTER_METHOD
+
+    requested_methods = set(methods or _EXPORTER_METHOD.values())
+    payloads = {
+        "to_json": "{}",
+        "to_interactive_html": "<html/>",
+        "to_plotly_html": "<html/>",
+        "to_dashboard_html": "<html/>",
+        "to_graphml": "<graphml/>",
+        "to_csv": "id,title\n",
+        "to_bibtex": "@article{test,}\n",
+    }
 
     class _FakeExporter:
         """Fake graph exporter used by CLI tests."""
@@ -201,78 +172,26 @@ def build_fake_exporter_factory(
             captured_data["metadata"] = kwargs.get("metadata")
             captured_data["layout"] = kwargs.get("layout")
 
-        def to_json(self, path: Path) -> None:
-            """Write minimal JSON payload when enabled.
+    def _write_payload(
+        self: object, path: Path, method_name: str, *_args: object, **_kwargs: object
+    ) -> None:
+        """Write the minimal artifact body for the requested fake exporter method."""
+        del self, _args, _kwargs
+        if method_name in requested_methods:
+            path.write_text(payloads[method_name])
 
-            :param Path path: Target output path.
-            :return None: Writes test artifact conditionally.
-            """
-            if "to_json" in requested_methods or not requested_methods:
-                path.write_text("{}")
-
-        def to_interactive_html(
-            self, path: Path, *_args: object, **_kwargs: object
-        ) -> None:
-            """Write minimal interactive HTML payload when enabled.
-
-            :param Path path: Target output path.
-            :param object _args: Ignored positional args.
-            :param object _kwargs: Ignored keyword args.
-            :return None: Writes test artifact conditionally.
-            """
-            if "to_interactive_html" in requested_methods or not requested_methods:
-                path.write_text("<html/>")
-
-        def to_plotly_html(self, path: Path, *_args: object, **_kwargs: object) -> None:
-            """Write minimal Plotly HTML payload when enabled.
-
-            :param Path path: Target output path.
-            :param object _args: Ignored positional args.
-            :param object _kwargs: Ignored keyword args.
-            :return None: Writes test artifact conditionally.
-            """
-            if "to_plotly_html" in requested_methods or not requested_methods:
-                path.write_text("<html/>")
-
-        def to_dashboard_html(
-            self, path: Path, *_args: object, **_kwargs: object
-        ) -> None:
-            """Write minimal dashboard HTML payload when enabled.
-
-            :param Path path: Target output path.
-            :param object _args: Ignored positional args.
-            :param object _kwargs: Ignored keyword args.
-            :return None: Writes test artifact conditionally.
-            """
-            if "to_dashboard_html" in requested_methods or not requested_methods:
-                path.write_text("<html/>")
-
-        def to_graphml(self, path: Path) -> None:
-            """Write minimal GraphML payload when enabled.
-
-            :param Path path: Target output path.
-            :return None: Writes test artifact conditionally.
-            """
-            if "to_graphml" in requested_methods or not requested_methods:
-                path.write_text("<graphml/>")
-
-        def to_csv(self, path: Path) -> None:
-            """Write minimal CSV payload when enabled.
-
-            :param Path path: Target output path.
-            :return None: Writes test artifact conditionally.
-            """
-            if "to_csv" in requested_methods or not requested_methods:
-                path.write_text("id,title\n")
-
-        def to_bibtex(self, path: Path) -> None:
-            """Write minimal BibTeX payload when enabled.
-
-            :param Path path: Target output path.
-            :return None: Writes test artifact conditionally.
-            """
-            if "to_bibtex" in requested_methods or not requested_methods:
-                path.write_text("@article{test,}\n")
+    for method_name in payloads:
+        setattr(
+            _FakeExporter,
+            method_name,
+            lambda self, path, *args, _method=method_name, **kwargs: _write_payload(
+                self,
+                path,
+                _method,
+                *args,
+                **kwargs,
+            ),
+        )
 
     return _FakeExporter
 

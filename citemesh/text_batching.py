@@ -22,6 +22,21 @@ def estimate_text_length_bucket(text: str) -> int:
     return max(whitespace_tokens, char_tokens)
 
 
+def l2_normalize_embeddings(embeddings: np.ndarray) -> np.ndarray:
+    """Return float32 embeddings normalized to unit length.
+
+    :param np.ndarray embeddings: Vector or matrix payload to normalize.
+    :return np.ndarray: Float32 array with L2-normalized rows.
+    """
+    normalized = np.asarray(embeddings, dtype=np.float32)
+    if normalized.ndim == 1:
+        norm = float(np.linalg.norm(normalized))
+        return normalized / max(norm, 1e-12)
+
+    norms = np.linalg.norm(normalized, axis=1, keepdims=True)
+    return normalized / np.clip(norms, 1e-12, None)
+
+
 def length_bucketed_index_batches(
     texts: Sequence[str],
     batch_size: int,

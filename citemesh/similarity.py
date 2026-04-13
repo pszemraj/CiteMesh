@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Dict
 
 from citemesh.core import Paper
+from citemesh.data.model_profiles import compose_title_abstract_text
 
 
 class AbstractSimilarityIndex:
@@ -26,7 +27,9 @@ class AbstractSimilarityIndex:
         ids = []
         texts = []
         for paper_id, paper in papers.items():
-            text = f"{paper.title}. {paper.abstract}".strip()
+            text = compose_title_abstract_text(
+                {"title": paper.title, "abstract": paper.abstract}
+            )
             if text:
                 ids.append(paper_id)
                 texts.append(text)

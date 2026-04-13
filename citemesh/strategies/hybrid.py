@@ -29,8 +29,8 @@ from citemesh.strategies.embedding import (
     ENCODE_BATCH_SIZE,
     EmbeddingGraphBuilder,
     _check_embedding_deps,
-    _normalize_embedding_vector,
 )
+from citemesh.text_batching import l2_normalize_embeddings
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -743,10 +743,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             and paper1.paper_id in self.embedding_builder.embeddings
             and paper2.paper_id in self.embedding_builder.embeddings
         ):
-            emb1 = _normalize_embedding_vector(
+            emb1 = l2_normalize_embeddings(
                 self.embedding_builder.embeddings[paper1.paper_id]
             )
-            emb2 = _normalize_embedding_vector(
+            emb2 = l2_normalize_embeddings(
                 self.embedding_builder.embeddings[paper2.paper_id]
             )
             embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
