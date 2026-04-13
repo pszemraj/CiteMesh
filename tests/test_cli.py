@@ -51,26 +51,7 @@ def run_cli_command(args: list[str]) -> SimpleNamespace:
     :param list[str] args: CLI arguments.
     :return SimpleNamespace: Return code and captured streams.
     """
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        try:
-            returncode = cli_module.main(args)
-        except SystemExit as exc:
-            code = exc.code
-            if isinstance(code, int):
-                returncode = code
-            elif code is None:
-                returncode = 0
-            else:
-                returncode = 1
-
-    return SimpleNamespace(
-        returncode=returncode,
-        stdout=stdout.getvalue(),
-        stderr=stderr.getvalue(),
-    )
+    return _run_captured_cli(lambda: cli_module.main(args))
 
 
 def run_cli_command_via_sys_argv(
@@ -78,12 +59,17 @@ def run_cli_command_via_sys_argv(
 ) -> SimpleNamespace:
     """Run CLI through ``sys.argv`` to exercise ``main(argv=None)``."""
     monkeypatch.setattr("sys.argv", ["citemesh", *args])
+    return _run_captured_cli(cli_module.main)
+
+
+def _run_captured_cli(entrypoint: Any) -> SimpleNamespace:
+    """Run a CLI entrypoint and capture stdout/stderr."""
     stdout = io.StringIO()
     stderr = io.StringIO()
 
     with redirect_stdout(stdout), redirect_stderr(stderr):
         try:
-            returncode = cli_module.main()
+            returncode = entrypoint()
         except SystemExit as exc:
             code = exc.code
             if isinstance(code, int):
@@ -627,48 +613,48 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
         assert token in result.stderr
 
 
-def test_main_without_argv_preserves_explicit_default_valued_strategy_flags(
+@pytest.mark.parametrize(
+    ("args", "expected_tokens"),
+    [
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "--storage-precision",
+                "int8",
+            ],
+            ["Unsupported option(s)", "--storage-precision"],
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--all-corpus",
+                "--corpus-size",
+                "50000",
+            ],
+            ["--all-corpus cannot be combined with explicit --corpus-size"],
+        ),
+    ],
+)
+def test_main_without_argv_preserves_explicit_default_valued_flags(
     monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
+    expected_tokens: list[str],
 ) -> None:
     """``main()`` should validate explicit default-valued flags from ``sys.argv``."""
     result = run_cli_command_via_sys_argv(
         monkeypatch,
-        [
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "citation",
-            "--storage-precision",
-            "int8",
-        ],
+        args,
     )
 
     assert result.returncode != 0
-    assert "Unsupported option(s)" in result.stderr
-    assert "--storage-precision" in result.stderr
-
-
-def test_main_without_argv_preserves_explicit_default_valued_dependency_flags(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``main()`` should reject explicit default-valued dependent flags from ``sys.argv``."""
-    result = run_cli_command_via_sys_argv(
-        monkeypatch,
-        [
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "embedding",
-            "--all-corpus",
-            "--corpus-size",
-            "50000",
-        ],
-    )
-
-    assert result.returncode != 0
-    assert (
-        "--all-corpus cannot be combined with explicit --corpus-size" in result.stderr
-    )
+    for token in expected_tokens:
+        assert token in result.stderr
 
 
 def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(

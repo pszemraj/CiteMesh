@@ -162,35 +162,22 @@ class GraphExporter:
         """
         enriched = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
-        strategy = self._strategy()
         dashboard_node_ids = [node_id for node_id, _ in self._sorted_nodes()]
         dashboard_payload = self._dashboard_payload(
             theme_obj=self.theme,
             node_ids=dashboard_node_ids,
         )
-        valid_years = [
-            int(n.get("year", 0)) for n in enriched if int(n.get("year", 0)) > 0
-        ]
+        dashboard_meta = dashboard_payload["meta"]
         data = {
             "seed_id": str(self.seed_id),
             "meta": {
-                "strategy": strategy,
-                "year_range": (
-                    {"min": min(valid_years), "max": max(valid_years)}
-                    if valid_years
-                    else {
-                        "min": MISSING_YEAR_FALLBACK_MIN,
-                        "max": MISSING_YEAR_FALLBACK_MAX,
-                    }
-                ),
+                "strategy": dashboard_meta["strategy"],
+                "year_range": dashboard_meta["year_range"],
             },
-            "summary": {
-                "nodes": len(enriched),
-                "edges": len(sorted_edges),
-            },
+            "summary": dashboard_meta["summary"],
             "nodes": enriched,
             "dashboard": {
-                "meta": dashboard_payload["meta"],
+                "meta": dashboard_meta,
             },
             "edges": [
                 {

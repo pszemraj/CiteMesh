@@ -88,6 +88,25 @@ def select_capped_undirected_edges(
     return selected_edges
 
 
+def build_capped_undirected_graph(graph: nx.Graph, max_edges_per_node: int) -> nx.Graph:
+    """Copy a graph while retaining only the strongest capped undirected edges.
+
+    :param nx.Graph graph: Source graph whose nodes and metadata should be preserved.
+    :param int max_edges_per_node: Maximum degree per node in the rebuilt graph.
+    :return nx.Graph: Rebuilt graph with selected weighted edges.
+    """
+    filtered_graph = nx.Graph()
+    filtered_graph.graph.update(graph.graph)
+    filtered_graph.add_nodes_from(graph.nodes(data=True))
+
+    for u, v, weight in select_capped_undirected_edges(
+        graph.edges(data=True), max_edges_per_node
+    ):
+        filtered_graph.add_edge(u, v, weight=weight)
+
+    return filtered_graph
+
+
 class GraphBuilderStrategy(ABC):
     """
     Abstract base class for all paper graph building strategies.

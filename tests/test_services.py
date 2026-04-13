@@ -68,64 +68,64 @@ def test_service_and_strategy_package_exports() -> None:
     assert EmbeddingGraphBuilder.__module__ == "citemesh.strategies.embedding"
 
 
-def test_services_package_init_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Importing ``citemesh.services`` should not eagerly import service clients."""
-    _assert_module_reload_is_lazy(
-        monkeypatch,
-        module=services_module,
-        blocked_prefixes=("citemesh.services.semantic_scholar", "semanticscholar"),
-        expected_exports={"SemanticScholarClient", "get_client", "reset_client"},
-    )
-
-
-def test_strategies_package_init_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Importing ``citemesh.strategies`` should not eagerly import strategy modules."""
-    import citemesh.strategies as strategies_module
-
-    _assert_module_reload_is_lazy(
-        monkeypatch,
-        module=strategies_module,
-        blocked_prefixes=(
-            "citemesh.strategies.citation",
-            "citemesh.strategies.embedding",
-            "citemesh.strategies.hybrid",
-            "citemesh.strategies.recommendation",
+@pytest.mark.parametrize(
+    ("module", "blocked_prefixes", "expected_exports"),
+    [
+        (
+            services_module,
+            ("citemesh.services.semantic_scholar", "semanticscholar"),
+            {"SemanticScholarClient", "get_client", "reset_client"},
         ),
-        expected_exports={
-            "GraphBuilderStrategy",
-            "CitationGraphBuilder",
-            "RecommendationGraphBuilder",
-            "EmbeddingGraphBuilder",
-            "HybridGraphBuilder",
-        },
-    )
-
-
-def test_citemesh_package_init_preserves_lazy_top_level_strategy_exports(
+        (
+            importlib.import_module("citemesh.strategies"),
+            (
+                "citemesh.strategies.citation",
+                "citemesh.strategies.embedding",
+                "citemesh.strategies.hybrid",
+                "citemesh.strategies.recommendation",
+            ),
+            {
+                "GraphBuilderStrategy",
+                "CitationGraphBuilder",
+                "RecommendationGraphBuilder",
+                "EmbeddingGraphBuilder",
+                "HybridGraphBuilder",
+            },
+        ),
+        (
+            importlib.import_module("citemesh"),
+            (
+                "citemesh.strategies.citation",
+                "citemesh.strategies.embedding",
+                "citemesh.strategies.hybrid",
+                "citemesh.strategies.recommendation",
+            ),
+            {
+                "__version__",
+                "Paper",
+                "Author",
+                "GraphBuilderStrategy",
+                "CitationGraphBuilder",
+                "RecommendationGraphBuilder",
+                "EmbeddingGraphBuilder",
+                "HybridGraphBuilder",
+            },
+        ),
+    ],
+    ids=["services", "strategies", "top_level"],
+)
+def test_package_init_exports_remain_lazy(
     monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+    blocked_prefixes: tuple[str, ...],
+    expected_exports: set[str],
 ) -> None:
-    """Importing ``citemesh`` should keep top-level strategy exports available lazily."""
-    import citemesh as citemesh_module
-
+    """Lazy package exports should not import implementation modules eagerly."""
     _assert_module_reload_is_lazy(
         monkeypatch,
-        module=citemesh_module,
-        blocked_prefixes=(
-            "citemesh.strategies.citation",
-            "citemesh.strategies.embedding",
-            "citemesh.strategies.hybrid",
-            "citemesh.strategies.recommendation",
-        ),
-        expected_exports={
-            "__version__",
-            "Paper",
-            "Author",
-            "GraphBuilderStrategy",
-            "CitationGraphBuilder",
-            "RecommendationGraphBuilder",
-            "EmbeddingGraphBuilder",
-            "HybridGraphBuilder",
-        },
+        module=module,
+        blocked_prefixes=blocked_prefixes,
+        expected_exports=expected_exports,
     )
 
 

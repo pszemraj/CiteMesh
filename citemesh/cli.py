@@ -1452,18 +1452,12 @@ def resolve_output_paths(
     :return Dict[str, Path]: Mapping of export format -> resolved output path.
     """
     base_str = str(base_output_path)
-    matched_suffix = next(
-        (ext for ext in KNOWN_EXPORT_SUFFIXES if base_str.lower().endswith(ext)),
-        None,
-    )
+    stripped_base = _strip_known_export_suffix(base_str)
+    has_known_suffix = stripped_base != base_str
 
     output_paths: Dict[str, Path] = {}
     if explicit_output and len(selected_formats) > 1:
-        output_dir = (
-            Path(base_str[: -len(matched_suffix)])
-            if matched_suffix
-            else base_output_path
-        )
+        output_dir = Path(stripped_base) if has_known_suffix else base_output_path
         basename = strategy or "graph"
         for fmt in selected_formats:
             output_paths[fmt] = output_dir / f"{basename}{EXPORT_EXTENSIONS[fmt]}"
@@ -1473,24 +1467,19 @@ def resolve_output_paths(
         fmt = selected_formats[0]
         desired_ext = EXPORT_EXTENSIONS[fmt]
 
-        if matched_suffix == desired_ext:
+        if base_str.lower().endswith(desired_ext):
             output_paths[fmt] = base_output_path
             return output_paths
 
-        if matched_suffix:
-            output_paths[fmt] = Path(base_str[: -len(matched_suffix)] + desired_ext)
+        if has_known_suffix:
+            output_paths[fmt] = Path(stripped_base + desired_ext)
             return output_paths
 
         output_paths[fmt] = Path(base_str + desired_ext)
         return output_paths
 
-    if matched_suffix:
-        output_base = base_str[: -len(matched_suffix)]
-    else:
-        output_base = base_str
-
     for fmt in selected_formats:
-        output_paths[fmt] = Path(output_base + EXPORT_EXTENSIONS[fmt])
+        output_paths[fmt] = Path(stripped_base + EXPORT_EXTENSIONS[fmt])
 
     return output_paths
 
@@ -1527,12 +1516,9 @@ def _resolve_dashboard_collection_root(
     """
     if explicit_output:
         base_str = str(base_output_path)
-        matched_suffix = next(
-            (ext for ext in KNOWN_EXPORT_SUFFIXES if base_str.lower().endswith(ext)),
-            None,
-        )
-        if matched_suffix:
-            return Path(base_str[: -len(matched_suffix)])
+        stripped_base = _strip_known_export_suffix(base_str)
+        if stripped_base != base_str:
+            return Path(stripped_base)
         return base_output_path
 
     parent = base_output_path.parent

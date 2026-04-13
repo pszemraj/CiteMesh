@@ -21,8 +21,8 @@ from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
+    build_capped_undirected_graph,
     deterministic_sort_key,
-    select_capped_undirected_edges,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
@@ -825,14 +825,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if not max_edges or max_edges <= 0:
             return graph, actual_seed_id
 
-        filtered_graph = nx.Graph()
-        filtered_graph.graph.update(graph.graph)
-        filtered_graph.add_nodes_from(graph.nodes(data=True))
-
-        for u, v, weight in select_capped_undirected_edges(
-            graph.edges(data=True), max_edges
-        ):
-            filtered_graph.add_edge(u, v, weight=weight)
+        filtered_graph = build_capped_undirected_graph(graph, max_edges)
 
         logger.info(
             "Hybrid edge cap applied: %s -> %s edges",

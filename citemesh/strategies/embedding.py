@@ -47,8 +47,8 @@ from citemesh.paper_ids import external_ids_from_canonical_paper_id
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
+    build_capped_undirected_graph,
     deterministic_sort_key,
-    select_capped_undirected_edges,
 )
 from citemesh.text_batching import (
     encode_texts_in_length_buckets,
@@ -2777,14 +2777,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         graph.graph["strategy"] = self._resolved_strategy_name()
         graph.graph["embedding_runtime"] = self._embedding_runtime_metadata()
         # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
-        filtered_graph = nx.Graph()
-        filtered_graph.graph.update(graph.graph)
-        filtered_graph.add_nodes_from(graph.nodes(data=True))
-
-        for u, v, weight in select_capped_undirected_edges(
-            graph.edges(data=True), self.top_k
-        ):
-            filtered_graph.add_edge(u, v, weight=weight)
+        filtered_graph = build_capped_undirected_graph(graph, self.top_k)
 
         logger.info(
             f"Filtered graph: {filtered_graph.number_of_nodes()} nodes, "
