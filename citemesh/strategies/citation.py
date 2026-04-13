@@ -37,6 +37,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
     - Sparse edge creation for readability
     """
 
+    strategy_name = "citation"
+
     def __init__(
         self,
         max_papers: int = 40,
@@ -319,6 +321,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :return Tuple[nx.Graph, str]: Built graph and canonical seed identifier.
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph.graph["strategy"] = self._resolved_strategy_name()
         graph.graph["seed_relations"] = {
             str(node_id): str(relation)
             for node_id, relation in sorted(

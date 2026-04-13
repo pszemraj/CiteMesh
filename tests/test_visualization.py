@@ -1098,3 +1098,31 @@ def test_recommendation_export_defaults_to_semantic_provenance(
     assert related_node["provenance"] == "semantic"
     assert related_node["provenance_base"] == "semantic"
     assert related_node["seed_relation"] == "semantic_only"
+
+
+@pytest.mark.parametrize("strategy", ["recommendation", "embedding"])
+def test_semantic_export_uses_graph_strategy_when_metadata_is_omitted(
+    tmp_path: Path, strategy: str
+) -> None:
+    """Semantic exports should stay correct when callers omit exporter metadata."""
+    graph, seed_id = _build_graph()
+    graph.graph["strategy"] = strategy
+    if strategy == "embedding":
+        graph.graph["embedding_runtime"] = {"storage_precision": "int8"}
+
+    exporter = GraphExporter(graph, seed_id)
+    json_path = tmp_path / f"{strategy}.json"
+    exporter.to_json(json_path)
+
+    payload = json.loads(json_path.read_text())
+    assert payload["meta"]["strategy"] == strategy
+
+    seed_node = next(node for node in payload["nodes"] if node["id"] == seed_id)
+    related_node = next(node for node in payload["nodes"] if node["id"] == "related")
+
+    assert seed_node["provenance"] == "seed"
+    assert seed_node["provenance_base"] == "semantic"
+    assert seed_node["seed_relation"] == "seed"
+    assert related_node["provenance"] == "semantic"
+    assert related_node["provenance_base"] == "semantic"
+    assert related_node["seed_relation"] == "semantic_only"

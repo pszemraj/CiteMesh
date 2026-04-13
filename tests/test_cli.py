@@ -73,6 +73,33 @@ def run_cli_command(args: list[str]) -> SimpleNamespace:
     )
 
 
+def run_cli_command_via_sys_argv(
+    monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> SimpleNamespace:
+    """Run CLI through ``sys.argv`` to exercise ``main(argv=None)``."""
+    monkeypatch.setattr("sys.argv", ["citemesh", *args])
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        try:
+            returncode = cli_module.main()
+        except SystemExit as exc:
+            code = exc.code
+            if isinstance(code, int):
+                returncode = code
+            elif code is None:
+                returncode = 0
+            else:
+                returncode = 1
+
+    return SimpleNamespace(
+        returncode=returncode,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+    )
+
+
 def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
     """Build argparse namespace fixture for strategy dispatch tests."""
     values = {
@@ -598,6 +625,50 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
         result = run_cli_command(args)
         assert result.returncode != 0
         assert token in result.stderr
+
+
+def test_main_without_argv_preserves_explicit_default_valued_strategy_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``main()`` should validate explicit default-valued flags from ``sys.argv``."""
+    result = run_cli_command_via_sys_argv(
+        monkeypatch,
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "citation",
+            "--storage-precision",
+            "int8",
+        ],
+    )
+
+    assert result.returncode != 0
+    assert "Unsupported option(s)" in result.stderr
+    assert "--storage-precision" in result.stderr
+
+
+def test_main_without_argv_preserves_explicit_default_valued_dependency_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``main()`` should reject explicit default-valued dependent flags from ``sys.argv``."""
+    result = run_cli_command_via_sys_argv(
+        monkeypatch,
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--all-corpus",
+            "--corpus-size",
+            "50000",
+        ],
+    )
+
+    assert result.returncode != 0
+    assert (
+        "--all-corpus cannot be combined with explicit --corpus-size" in result.stderr
+    )
 
 
 def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(

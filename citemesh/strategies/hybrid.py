@@ -56,6 +56,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
     3. Uses adaptive similarity computation based on relationship type
     """
 
+    strategy_name = "hybrid"
+
     def __init__(
         self,
         max_papers: int = HYBRID_DEFAULT_MAX_PAPERS,
@@ -801,6 +803,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed_id).
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph.graph["strategy"] = self._resolved_strategy_name()
         if self.embedding_builder is not None:
             graph.graph["embedding_runtime"] = (
                 self.embedding_builder._embedding_runtime_metadata()

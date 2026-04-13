@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -2127,15 +2128,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     :return int: Process-style exit code.
     """
     parser, build_parser, cache_parser = _create_parser()
-    argv_list = list(argv) if argv is not None else None
-    args = parser.parse_args(argv_list if argv_list is not None else None)
+    argv_list = list(argv) if argv is not None else list(sys.argv[1:])
+    args = parser.parse_args(argv_list)
     _configure_logging(log_level=args.log_level, log_width=args.log_width)
-    if argv_list is not None:
-        provided_build_options = _provided_build_option_dests_from_argv(
-            argv_list, build_parser
-        )
-    else:
-        provided_build_options = _infer_provided_build_option_dests(args, build_parser)
+    provided_build_options = _provided_build_option_dests_from_argv(
+        argv_list, build_parser
+    )
 
     if not args.command:
         parser.print_help()

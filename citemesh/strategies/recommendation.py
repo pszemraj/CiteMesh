@@ -22,6 +22,8 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
     Build a graph from S2 recommendation neighbors.
     """
 
+    strategy_name = "recommendation"
+
     def __init__(
         self,
         max_papers: int = 40,

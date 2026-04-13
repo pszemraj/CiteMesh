@@ -7,7 +7,7 @@ enabling the Strategy pattern for different similarity computation approaches.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import networkx as nx
 import numpy as np
@@ -96,6 +96,9 @@ class GraphBuilderStrategy(ABC):
     Subclasses must implement the abstract methods for collecting papers and
     computing similarity, while the base class handles common graph construction logic.
     """
+
+    strategy_name: ClassVar[str] = ""
+    """Canonical strategy token persisted into graph-level metadata."""
 
     def __init__(self, max_papers: int = 40):
         """
@@ -220,6 +223,9 @@ class GraphBuilderStrategy(ABC):
                 doi=paper.doi,
                 is_seed=paper.is_seed,
             )
+        resolved_strategy_name = self._resolved_strategy_name()
+        if resolved_strategy_name:
+            graph.graph["strategy"] = resolved_strategy_name
 
         # Step 3: Compute similarities and create edges
         logger.info("Computing similarities and creating edges...")
@@ -244,6 +250,25 @@ class GraphBuilderStrategy(ABC):
             edges_created,
         )
         return graph, actual_seed_id
+
+    def _resolved_strategy_name(self) -> str:
+        """Resolve canonical strategy token for graph metadata.
+
+        Subclasses should set ``strategy_name`` explicitly. The class-name fallback
+        keeps builder-produced graphs self-describing if a strategy omits that field.
+
+        :return str: Normalized strategy token or an empty string.
+        """
+        explicit_strategy = (
+            str(getattr(self, "strategy_name", "") or "").strip().lower()
+        )
+        if explicit_strategy:
+            return explicit_strategy
+
+        class_name = self.__class__.__name__
+        if class_name.endswith("GraphBuilder"):
+            class_name = class_name[: -len("GraphBuilder")]
+        return class_name.strip().lower()
 
     # Utility methods for common similarity computations
 

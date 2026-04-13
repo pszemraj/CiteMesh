@@ -276,11 +276,33 @@ def test_citation_build_graph_persists_seed_relation_metadata() -> None:
     graph, seed_id = builder.build_graph("seed")
 
     assert seed_id == "seed"
+    assert graph.graph["strategy"] == "citation"
     assert graph.graph["seed_relations"] == {
         "cit1": "cites_seed",
         "ref1": "referenced_by_seed",
         "seed": "seed",
     }
+
+
+def test_recommendation_build_graph_persists_strategy_metadata() -> None:
+    """Recommendation graphs should persist strategy metadata for downstream exports."""
+    client = MagicMock()
+    client.get_paper.return_value = _seed_paper()
+    client.get_recommended_papers.return_value = [
+        _paper("rec1", year=2023),
+        _paper("rec2", year=2022),
+    ]
+
+    builder = RecommendationGraphBuilder(
+        max_papers=3,
+        fetch_references=False,
+        similarity_threshold=0.0,
+        client=client,
+    )
+    graph, seed_id = builder.build_graph("seed")
+
+    assert seed_id == "seed"
+    assert graph.graph["strategy"] == "recommendation"
 
 
 def test_refresh_reference_cache_force_lookup_contracts() -> None:
@@ -707,6 +729,7 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
     out_graph, out_seed = builder.build_graph("seed")
     assert out_graph is graph
     assert out_seed == "seed"
+    assert out_graph.graph["strategy"] == "hybrid"
     assert out_graph.graph["paper_sources"] == {"a": "semantic", "seed": "citation"}
     assert out_graph.graph["seed_relations"] == {"a": "semantic_only", "seed": "seed"}
 
@@ -848,14 +871,23 @@ def test_max_papers_is_total_node_cap_including_seed(
 
 
 @pytest.mark.parametrize(
-    "builder_factory",
+    ("builder_factory", "expected_strategy"),
     [
-        lambda: EmbeddingGraphBuilder(max_papers=4, top_k=1, client=MagicMock()),
-        lambda: HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock()),
+        (
+            lambda: EmbeddingGraphBuilder(max_papers=4, top_k=1, client=MagicMock()),
+            "embedding",
+        ),
+        (
+            lambda: HybridGraphBuilder(
+                max_papers=4, max_semantic=0, client=MagicMock()
+            ),
+            "hybrid",
+        ),
     ],
 )
 def test_degree_capping_preserves_per_node_limit(
     builder_factory: Callable[[], object],
+    expected_strategy: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Pruning should cap node degree deterministically."""
@@ -878,6 +910,7 @@ def test_degree_capping_preserves_per_node_limit(
     }
 
     assert graph.number_of_nodes() == 4
+    assert graph.graph["strategy"] == expected_strategy
     assert graph.number_of_edges() == len(expected_edges)
     assert all(degree <= max_edges_per_node for _, degree in graph.degree())
     assert {(min(u, v), max(u, v)) for u, v in graph.edges()} == expected_edges

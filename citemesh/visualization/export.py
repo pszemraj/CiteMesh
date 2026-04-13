@@ -113,7 +113,9 @@ class GraphExporter:
 
         :param nx.Graph graph: Graph to export.
         :param str seed_id: Seed paper identifier.
-        :param Optional[Dict] metadata: Optional metadata to include in outputs.
+        :param Optional[Dict] metadata: Optional metadata to include in outputs. When
+            omitted, strategy-sensitive enrichments fall back to graph-level metadata
+            when available.
         :param str theme_name: Theme for visual color defaults.
         :param Optional[Dict[Hashable, Iterable[float]]] layout: Optional precomputed
             layout.
@@ -160,7 +162,7 @@ class GraphExporter:
         """
         enriched = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
-        strategy = str(self.metadata.get("strategy") or "").strip().lower()
+        strategy = self._strategy()
         dashboard_node_ids = [node_id for node_id, _ in self._sorted_nodes()]
         dashboard_payload = self._dashboard_payload(
             theme_obj=self.theme,
@@ -778,7 +780,7 @@ class GraphExporter:
         seed_relations = self._seed_relation_map()
         relevance = self._seed_relevance_scores()
         sorted_nodes = self._sorted_nodes()
-        strategy = str(self.metadata.get("strategy") or "").strip().lower()
+        strategy = self._strategy()
 
         node_payloads: list[Dict[str, Any]] = []
         for node_id, attrs in sorted_nodes:
@@ -836,7 +838,7 @@ class GraphExporter:
         """
         node_payloads = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
-        strategy = str(self.metadata.get("strategy") or "").strip().lower()
+        strategy = self._strategy()
         positions = self._get_layout()
         node_sizes = [max(6.0, self._node_size(node_id) / 50.0) for node_id in node_ids]
 
@@ -927,6 +929,47 @@ class GraphExporter:
         if strategy in {"embedding", "recommendation"}:
             return "semantic"
         return "citation"
+
+    @staticmethod
+    def _normalize_strategy_token(raw_strategy: object) -> str:
+        """Normalize strategy tokens to the exporter-supported vocabulary.
+
+        :param object raw_strategy: Candidate strategy token.
+        :return str: Normalized strategy token or an empty string.
+        """
+        normalized = str(raw_strategy or "").strip().lower()
+        if normalized in {"citation", "recommendation", "embedding", "hybrid"}:
+            return normalized
+        return ""
+
+    def _strategy(self) -> str:
+        """Resolve effective strategy token for export metadata and enrichment.
+
+        Explicit exporter metadata wins. When omitted, exporter falls back to graph
+        metadata persisted by builders, then to lightweight structural heuristics for
+        older graphs that predate explicit strategy tagging.
+
+        :return str: Normalized strategy token when available.
+        """
+        metadata_strategy = self._normalize_strategy_token(
+            self.metadata.get("strategy")
+        )
+        if metadata_strategy:
+            return metadata_strategy
+
+        graph_strategy = self._normalize_strategy_token(
+            self.graph.graph.get("strategy")
+        )
+        if graph_strategy:
+            return graph_strategy
+
+        if isinstance(self.graph.graph.get("paper_sources"), dict):
+            return "hybrid"
+        if isinstance(self.graph.graph.get("embedding_runtime"), dict):
+            return "embedding"
+        if isinstance(self.graph.graph.get("seed_relations"), dict):
+            return "citation"
+        return ""
 
     def _provenance_map(self) -> Dict[str, str]:
         """Resolve normalized per-node provenance map.
