@@ -2774,7 +2774,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         # Use base class to collect papers and create nodes
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
-        graph.graph["strategy"] = self._resolved_strategy_name()
         graph.graph["embedding_runtime"] = self._embedding_runtime_metadata()
         # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
         filtered_graph = build_capped_undirected_graph(graph, self.top_k)

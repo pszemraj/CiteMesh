@@ -13,6 +13,7 @@ import networkx as nx
 import numpy as np
 
 from citemesh.core import TEMPORAL_CONFIG, Paper
+from citemesh.strategies.similarity import compute_indexed_similarity_score
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +289,29 @@ class GraphBuilderStrategy(ABC):
         if class_name.endswith("GraphBuilder"):
             class_name = class_name[: -len("GraphBuilder")]
         return class_name.strip().lower()
+
+    def _compute_indexed_similarity(
+        self,
+        paper1: Paper,
+        paper2: Paper,
+        *,
+        with_references_weights: tuple[float, float, float, float],
+        without_references_weights: tuple[float, float, float, float],
+        cap_at_one: bool = False,
+    ) -> float:
+        """Compute indexed similarity with strategy-supplied weighting."""
+        return compute_indexed_similarity_score(
+            paper1,
+            paper2,
+            abstract_index=self._abstract_index,
+            temporal_similarity_fn=self.temporal_similarity,
+            citation_similarity_fn=self.citation_similarity,
+            bibliographic_coupling_fn=self.bibliographic_coupling,
+            fetch_references=bool(getattr(self, "fetch_references", False)),
+            with_references_weights=with_references_weights,
+            without_references_weights=without_references_weights,
+            cap_at_one=cap_at_one,
+        )
 
     # Utility methods for common similarity computations
 

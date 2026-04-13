@@ -421,6 +421,79 @@ class SemanticScholarClient:
         )
         return arxiv_id or fallback_arxiv_id, doi or fallback_doi
 
+    @staticmethod
+    def _payload_get(payload: object, key: str, default: Any = None) -> Any:
+        """Read a field from dict-like or object-like API payloads."""
+        if isinstance(payload, dict):
+            return payload.get(key, default)
+        return getattr(payload, key, default)
+
+    @classmethod
+    def _extract_authors(cls, raw_authors: object) -> list[Author]:
+        """Extract up to three authors from raw API payload shapes."""
+        if not isinstance(raw_authors, list):
+            return []
+
+        authors: list[Author] = []
+        for raw_author in raw_authors[:3]:
+            name = cls._payload_get(raw_author, "name")
+            if not isinstance(name, str) or not name:
+                continue
+            authors.append(
+                Author(
+                    name=name,
+                    author_id=cls._payload_get(raw_author, "authorId"),
+                )
+            )
+        return authors
+
+    @staticmethod
+    def _extract_categories(*raw_candidates: object) -> list[str]:
+        """Return the first usable category list from candidate payload fields."""
+        for raw_categories in raw_candidates:
+            if isinstance(raw_categories, str):
+                return [raw_categories]
+            if isinstance(raw_categories, list):
+                return [category for category in raw_categories if category]
+        return []
+
+    def _convert_payload_paper(
+        self,
+        payload: object,
+        *,
+        category_keys: tuple[str, ...],
+        references: Optional[list[str]] = None,
+    ) -> Optional[Paper]:
+        """Convert a dict-like or object-like paper payload into a Paper model."""
+        paper_id = self._payload_get(payload, "paperId")
+        if not isinstance(paper_id, str) or not paper_id:
+            return None
+
+        arxiv_id, doi = self._resolve_external_ids(
+            self._payload_get(payload, "externalIds"),
+            paper_id,
+        )
+        return Paper(
+            paper_id=paper_id,
+            title=self._payload_get(payload, "title") or "Unknown",
+            year=self._payload_get(payload, "year"),
+            authors=self._extract_authors(self._payload_get(payload, "authors")),
+            citation_count=self._payload_get(payload, "citationCount", 0) or 0,
+            abstract=self._payload_get(payload, "abstract") or "",
+            venue=self._extract_venue(
+                self._payload_get(payload, "venue"),
+                self._payload_get(payload, "publicationVenue"),
+                self._payload_get(payload, "journal"),
+            ),
+            arxiv_id=arxiv_id,
+            doi=doi,
+            categories=self._extract_categories(
+                *(self._payload_get(payload, key) for key in category_keys)
+            ),
+            references=references or [],
+            is_seed=False,
+        )
+
     def _convert_api_paper(self, api_paper: Any) -> Optional[Paper]:
         """
         Convert Semantic Scholar API response to Paper model.
@@ -429,50 +502,10 @@ class SemanticScholarClient:
         :return Optional[Paper]: Paper object or None if conversion fails
         """
         try:
-            if not api_paper or not hasattr(api_paper, "paperId"):
-                return None
-
-            # Extract authors
-            authors = []
-            if hasattr(api_paper, "authors") and api_paper.authors:
-                for author in api_paper.authors[:3]:
-                    if hasattr(author, "name") and author.name:
-                        author_id = (
-                            getattr(author, "authorId", None)
-                            if hasattr(author, "authorId")
-                            else None
-                        )
-                        authors.append(Author(name=author.name, author_id=author_id))
-
-            categories = []
-            if hasattr(api_paper, "fields") and api_paper.fields:
-                categories = [f for f in api_paper.fields if f]
-            elif hasattr(api_paper, "fieldsOfStudy") and api_paper.fieldsOfStudy:
-                categories = [f for f in api_paper.fieldsOfStudy if f]
-            arxiv_id, doi = self._resolve_external_ids(
-                getattr(api_paper, "externalIds", None),
-                getattr(api_paper, "paperId", ""),
+            return self._convert_payload_paper(
+                api_paper,
+                category_keys=("fields", "fieldsOfStudy"),
             )
-
-            return Paper(
-                paper_id=api_paper.paperId,
-                title=api_paper.title or "Unknown",
-                year=getattr(api_paper, "year", None),
-                authors=authors,
-                citation_count=api_paper.citationCount or 0,
-                abstract=getattr(api_paper, "abstract", "") or "",
-                venue=self._extract_venue(
-                    getattr(api_paper, "venue", None),
-                    getattr(api_paper, "publicationVenue", None),
-                    getattr(api_paper, "journal", None),
-                ),
-                arxiv_id=arxiv_id,
-                doi=doi,
-                categories=categories,
-                references=[],  # Will be populated separately if needed
-                is_seed=False,
-            )
-
         except Exception as exc:
             logger.warning("Failed to convert API paper: %s", exc)
             return None
@@ -484,48 +517,10 @@ class SemanticScholarClient:
         :return Optional[Paper]: Parsed Paper model or ``None`` on malformed payload.
         """
         try:
-            paper_id = rec.get("paperId")
-            if not paper_id:
-                return None
-
-            authors = []
-            for author_data in rec.get("authors", [])[:3]:
-                if isinstance(author_data, dict):
-                    name = author_data.get("name")
-                    if name:
-                        authors.append(
-                            Author(
-                                name=name,
-                                author_id=author_data.get("authorId"),
-                            )
-                        )
-
-            categories = rec.get("fieldsOfStudy") or rec.get("fields") or []
-            if isinstance(categories, str):
-                categories = [categories]
-            references = self._extract_reference_ids(rec.get("references"))
-            arxiv_id, doi = self._resolve_external_ids(
-                rec.get("externalIds"),
-                paper_id,
-            )
-
-            return Paper(
-                paper_id=paper_id,
-                title=rec.get("title") or "Unknown",
-                year=rec.get("year"),
-                authors=authors,
-                citation_count=rec.get("citationCount", 0) or 0,
-                abstract=rec.get("abstract") or "",
-                venue=self._extract_venue(
-                    rec.get("venue"),
-                    rec.get("publicationVenue"),
-                    rec.get("journal"),
-                ),
-                arxiv_id=arxiv_id,
-                doi=doi,
-                categories=categories,
-                references=references,
-                is_seed=False,
+            return self._convert_payload_paper(
+                rec,
+                category_keys=("fieldsOfStudy", "fields"),
+                references=self._extract_reference_ids(rec.get("references")),
             )
         except (TypeError, ValueError) as exc:
             logger.debug("Skipping malformed recommendation record: %s", exc)
@@ -666,13 +661,10 @@ class SemanticScholarClient:
                     return None
 
                 paper = self._convert_api_paper(api_paper)
-                if fetch_references and paper and hasattr(api_paper, "references"):
-                    if api_paper.references:
-                        paper.references = [
-                            ref.paperId
-                            for ref in api_paper.references
-                            if hasattr(ref, "paperId") and ref.paperId
-                        ]
+                if fetch_references and paper:
+                    paper.references = self._extract_reference_ids(
+                        getattr(api_paper, "references", None)
+                    )
                 return paper
 
             except ObjectNotFoundException:
@@ -764,14 +756,9 @@ class SemanticScholarClient:
                     return papers
 
                 for record in relation_records:
-                    if (
-                        hasattr(record, "paper")
-                        and record.paper
-                        and hasattr(record.paper, "paperId")
-                    ):
-                        paper = self._convert_api_paper(record.paper)
-                        if paper:
-                            papers.append(paper)
+                    paper = self._convert_api_paper(getattr(record, "paper", None))
+                    if paper:
+                        papers.append(paper)
 
                     if len(papers) >= limit:
                         break

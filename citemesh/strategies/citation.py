@@ -18,7 +18,6 @@ from citemesh.core import Paper
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
-from citemesh.strategies.similarity import compute_indexed_similarity_score
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -321,7 +320,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :return Tuple[nx.Graph, str]: Built graph and canonical seed identifier.
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
-        graph.graph["strategy"] = self._resolved_strategy_name()
         graph.graph["seed_relations"] = {
             str(node_id): str(relation)
             for node_id, relation in sorted(
@@ -339,14 +337,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param Paper paper2: Second paper
         :return float: Similarity score (0.0 to 1.0)
         """
-        return compute_indexed_similarity_score(
+        return self._compute_indexed_similarity(
             paper1,
             paper2,
-            abstract_index=self._abstract_index,
-            temporal_similarity_fn=self.temporal_similarity,
-            citation_similarity_fn=self.citation_similarity,
-            bibliographic_coupling_fn=self.bibliographic_coupling,
-            fetch_references=self.fetch_references,
             with_references_weights=(0.40, 0.20, 0.00, 0.40),
             without_references_weights=(0.65, 0.20, 0.15, 0.00),
         )
