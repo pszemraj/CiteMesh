@@ -54,6 +54,7 @@ embeddings = [
     "sentence-transformers>=3.0.0",
     "torch>=2.9.0",
 ]
+recommended = ["citemesh[embeddings,viz]"]
 dev = [
     "datasets>=2.14.0",
     "pytest>=8.0.0",

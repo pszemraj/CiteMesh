@@ -32,26 +32,32 @@ may stop working between revisions unless explicitly documented otherwise.
 Install from GitHub:
 
 ```bash
-pip install "git+https://github.com/pszemraj/CiteMesh.git"
+pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.git"
 ```
 
 For local development:
 
 ```bash
 git clone https://github.com/pszemraj/CiteMesh.git && cd CiteMesh
-pip install -e ".[dev]"
+pip install -e ".[dev,viz]"
 ```
 
 Optional extras:
 
 ```bash
+# Minimal citation/recommendation CLI only
+pip install "git+https://github.com/pszemraj/CiteMesh.git"
+
+# Recommended runtime bundle: embeddings + interactive exports
+pip install -e ".[recommended]"
+
 # Embedding strategy + semantic enrichment support
 pip install -e ".[embeddings]"
 
 # Interactive HTML/Plotly exports
 pip install -e ".[viz]"
 
-# all
+# Everything currently defined by the project, including dev tools
 pip install -e ".[all]"
 ```
 
