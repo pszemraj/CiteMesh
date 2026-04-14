@@ -961,8 +961,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
 
         requested_revision = self._requested_hf_revision_token()
-        if fingerprint.endswith("::offline"):
-            return fingerprint == self._offline_model_fingerprint_fallback()
         if fingerprint.endswith("::offline-unverified"):
             return fingerprint == self._offline_model_fingerprint_fallback()
         if fingerprint == self._offline_model_fingerprint_fallback():
@@ -1726,10 +1724,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             logger.debug(
                 "Using streaming hydration path for cache-native semantic search..."
             )
-            candidates = self._select_candidates_streaming(seed_embedding)
         else:
             logger.debug("Using cache-native semantic search...")
-            candidates = self._select_candidates_from_loaded(seed_embedding)
+        candidates = self._select_candidates(
+            seed_embedding,
+            use_streaming=use_streaming,
+        )
 
         # Convert candidates to Paper objects while respecting max_papers total.
         for paper_id, metadata, embedding in candidates:
@@ -1759,28 +1759,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         self._update_citation_counts(papers)
         return papers
-
-    def _select_candidates_from_loaded(
-        self, seed_embedding: np.ndarray
-    ) -> List[Tuple[str, Dict, np.ndarray]]:
-        """
-        Select top candidates from cache using non-streaming hydration policy.
-
-        :param np.ndarray seed_embedding: Normalized seed embedding vector
-        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
-        """
-        return self._select_candidates(seed_embedding, use_streaming=False)
-
-    def _select_candidates_streaming(
-        self, seed_embedding: np.ndarray
-    ) -> List[Tuple[str, Dict, np.ndarray]]:
-        """
-        Select top candidates from cache using streaming hydration policy.
-
-        :param np.ndarray seed_embedding: Normalized seed embedding vector
-        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
-        """
-        return self._select_candidates(seed_embedding, use_streaming=True)
 
     def _format_seed_for_embedding(
         self,

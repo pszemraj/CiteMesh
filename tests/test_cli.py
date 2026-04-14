@@ -1266,9 +1266,11 @@ def test_dashboard_collection_manifest_serializes_concurrent_updates(
     second_write_started = threading.Event()
     write_counter = 0
     write_counter_lock = threading.Lock()
-    original_atomic_write = cli_module._atomic_write_json_payload
+    original_atomic_write = cli_module.atomic_write_json
 
-    def delayed_atomic_write(path: Path, payload: dict[str, object]) -> None:
+    def delayed_atomic_write(
+        path: Path, payload: dict[str, object], **kwargs: object
+    ) -> None:
         nonlocal write_counter
         with write_counter_lock:
             write_counter += 1
@@ -1278,9 +1280,9 @@ def test_dashboard_collection_manifest_serializes_concurrent_updates(
             assert allow_first_write.wait(timeout=5), "first write never released"
         else:
             second_write_started.set()
-        original_atomic_write(path, payload)
+        original_atomic_write(path, payload, **kwargs)
 
-    monkeypatch.setattr(cli_module, "_atomic_write_json_payload", delayed_atomic_write)
+    monkeypatch.setattr(cli_module, "atomic_write_json", delayed_atomic_write)
 
     errors: list[BaseException] = []
 
@@ -1327,10 +1329,20 @@ def test_dashboard_collection_manifest_serializes_concurrent_updates(
     }
 
 
+@pytest.mark.parametrize(
+    ("extra_exports", "exporter_methods", "expected_extra_outputs"),
+    [
+        ([], ("to_dashboard_html",), []),
+        (["json"], ("to_dashboard_html", "to_json"), ["report.json"]),
+    ],
+)
 def test_dashboard_standalone_export_preserves_explicit_single_file(
     monkeypatch: pytest.MonkeyPatch,
+    extra_exports: list[str],
+    exporter_methods: tuple[str, ...],
+    expected_extra_outputs: list[str],
 ) -> None:
-    """Explicit ``*.dashboard.html`` targets should bypass collection mode."""
+    """Explicit dashboard filenames should bypass collection mode."""
     graph = build_seed_graph("seed")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
@@ -1343,75 +1355,32 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
         "GraphExporter",
         _make_exporter_stub(
             captured,
-            methods=("to_dashboard_html",),
-        ),
-    )
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output_file = Path(tmpdir) / "report.dashboard.html"
-        result = run_cli_command(
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "recommendation",
-                "--export",
-                "dashboard",
-                "-o",
-                str(output_file),
-            ]
-        )
-        assert output_file.exists()
-        assert not (output_file.parent / "dashboard.manifest.json").exists()
-        assert not (output_file.parent / "recommendation.json").exists()
-        assert (output_file.parent / "report.config.json").exists()
-        assert "dashboard_collection" not in captured["metadata"]
-
-    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-
-
-def test_dashboard_standalone_multi_export_preserves_explicit_single_file(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Explicit dashboard filenames should stay standalone during multi-export runs."""
-    graph = build_seed_graph("seed")
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        cli_module,
-        "_build_strategy_graph",
-        lambda args, strategy, **_kwargs: (graph, "seed"),
-    )
-    monkeypatch.setattr(
-        cli_module,
-        "GraphExporter",
-        _make_exporter_stub(
-            captured,
-            methods=("to_dashboard_html", "to_json"),
+            methods=exporter_methods,
         ),
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output_file = Path(tmpdir) / "report.dashboard.html"
         collection_root = output_file.parent / "report"
-        result = run_cli_command(
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "recommendation",
-                "--export",
-                "dashboard",
-                "--export",
-                "json",
-                "-o",
-                str(output_file),
-            ]
-        )
+        command = [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "dashboard",
+        ]
+        for export_format in extra_exports:
+            command.extend(["--export", export_format])
+        command.extend(["-o", str(output_file)])
+        result = run_cli_command(command)
         assert output_file.exists()
-        assert (output_file.parent / "report.json").exists()
         assert (output_file.parent / "report.config.json").exists()
+        for expected_output in expected_extra_outputs:
+            assert (output_file.parent / expected_output).exists()
         assert not (collection_root / "dashboard.html").exists()
         assert not (collection_root / "dashboard.manifest.json").exists()
+        assert not (output_file.parent / "recommendation.json").exists()
         assert "dashboard_collection" not in captured["metadata"]
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"

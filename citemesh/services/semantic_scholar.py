@@ -8,7 +8,6 @@ import json
 import logging
 import numbers
 import os
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -21,6 +20,7 @@ from semanticscholar.SemanticScholarException import ObjectNotFoundException
 
 from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data import get_cache_dir
+from citemesh.data.cache import atomic_write_json
 from citemesh.paper_ids import (
     external_ids_from_canonical_paper_id,
     normalize_paper_id,
@@ -262,44 +262,6 @@ class SemanticScholarClient:
         with contextlib.suppress(Exception):
             self.close()
 
-    def _atomic_write_json(self, cache_path: Path, payload: Dict[str, Any]) -> None:
-        """Write JSON payload with crash-safe atomic rename.
-
-        :param Path cache_path: Target cache file path.
-        :param Dict[str, Any] payload: JSON payload to persist.
-        """
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path: Optional[Path] = None
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{cache_path.name}.",
-            suffix=".tmp",
-            dir=cache_path.parent,
-            text=True,
-        )
-        tmp_path = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                json.dump(payload, tmp, sort_keys=True)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-
-            os.replace(tmp_name, cache_path)
-            with cache_path.open("r+b") as final_file:
-                os.fsync(final_file.fileno())
-            directory_fd: Optional[int] = None
-            try:
-                directory_fd = os.open(str(cache_path.parent), os.O_RDONLY)
-                os.fsync(directory_fd)
-            except OSError:
-                pass
-            finally:
-                if directory_fd is not None:
-                    os.close(directory_fd)
-        finally:
-            if tmp_path is not None and tmp_path.exists():
-                with contextlib.suppress(Exception):
-                    tmp_path.unlink()
-
     def _persist_reference_cache_entry(
         self, cache_path: Path, paper_id: str, reference_ids: List[str]
     ) -> None:
@@ -315,7 +277,7 @@ class SemanticScholarClient:
             normalized_reference_ids = []
 
         try:
-            self._atomic_write_json(
+            atomic_write_json(
                 cache_path,
                 {
                     "paper_id": paper_id,

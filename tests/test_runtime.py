@@ -23,21 +23,24 @@ def test_stdin_isatty_respects_replaced_stream(
     assert runtime_module.stdin_isatty() is False
 
 
-def test_stderr_isatty_falls_back_to_fd_when_stream_lacks_isatty(
+@pytest.mark.parametrize(
+    ("stream_name", "fd", "helper_name"),
+    [
+        ("stderr", 2, "stderr_isatty"),
+        ("stdout", 1, "stdout_isatty"),
+    ],
+)
+def test_stream_isatty_falls_back_to_fd_when_stream_lacks_isatty(
     monkeypatch: pytest.MonkeyPatch,
+    stream_name: str,
+    fd: int,
+    helper_name: str,
 ) -> None:
-    """stderr TTY detection should fall back to fd checks for shim streams."""
-    monkeypatch.setattr(runtime_module, "_fd_isatty", lambda fd: fd == 2)
-    monkeypatch.setattr(runtime_module.sys, "stderr", _StreamWithoutIsatty())
+    """TTY detection should fall back to fd checks for shim streams."""
+    monkeypatch.setattr(
+        runtime_module, "_fd_isatty", lambda candidate_fd: candidate_fd == fd
+    )
+    monkeypatch.setattr(runtime_module.sys, stream_name, _StreamWithoutIsatty())
 
-    assert runtime_module.stderr_isatty() is True
-
-
-def test_stdout_isatty_falls_back_to_fd_when_stream_lacks_isatty(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """stdout TTY detection should fall back to fd checks for shim streams."""
-    monkeypatch.setattr(runtime_module, "_fd_isatty", lambda fd: fd == 1)
-    monkeypatch.setattr(runtime_module.sys, "stdout", _StreamWithoutIsatty())
-
-    assert runtime_module.stdout_isatty() is True
+    helper = getattr(runtime_module, helper_name)
+    assert helper() is True

@@ -821,7 +821,7 @@ def test_max_papers_is_total_node_cap_including_seed(
         builder.client.get_paper.return_value = _seed_paper()
         builder._load_model = lambda: None
         builder._update_citation_counts = lambda _: None
-        builder._select_candidates_from_loaded = lambda _: [
+        builder._select_candidates = lambda _seed_embedding, *, use_streaming: [
             (
                 "c1",
                 {"title": "Paper c1", "abstract": "A", "authors": [], "categories": []},

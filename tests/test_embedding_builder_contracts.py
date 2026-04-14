@@ -1226,7 +1226,11 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
             [[1.0, 0.0] for _ in texts], dtype=np.float32
         ),
     )
-    monkeypatch.setattr(builder, "_select_candidates_from_loaded", lambda _: [])
+    monkeypatch.setattr(
+        builder,
+        "_select_candidates",
+        lambda _seed_embedding, *, use_streaming: [],
+    )
     monkeypatch.setattr(builder, "_update_citation_counts", lambda _: None)
 
     query = "attention mechanism test query"
@@ -1283,49 +1287,12 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
         fake_load_dataset_for_hydration,
     )
 
-    candidates = builder._select_candidates_from_loaded(
-        np.asarray([1.0, 0.0], dtype=np.float32)
+    candidates = builder._select_candidates(
+        np.asarray([1.0, 0.0], dtype=np.float32),
+        use_streaming=False,
     )
     assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
     fake_load_dataset_for_hydration.assert_not_called()
-
-
-def test_collect_papers_reuses_prefetched_seed_metadata(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Embedding collection should reuse caller-supplied seed metadata."""
-    builder = EmbeddingGraphBuilder(
-        max_papers=1,
-        use_streaming=False,
-        client=MagicMock(),
-    )
-    builder.client.get_paper = MagicMock(
-        side_effect=AssertionError("seed should be reused from caller")
-    )
-    monkeypatch.setattr(builder, "_load_model", lambda: None)
-    monkeypatch.setattr(
-        builder,
-        "_encode_texts",
-        lambda texts, show_progress_bar=False: np.asarray(
-            [[1.0, 0.0] for _ in texts], dtype=np.float32
-        ),
-    )
-    monkeypatch.setattr(builder, "_select_candidates_from_loaded", lambda _: [])
-    monkeypatch.setattr(builder, "_update_citation_counts", lambda _: None)
-
-    seed_paper = Paper(
-        paper_id="seed-paper",
-        title="Seed Title",
-        abstract="Seed Abstract",
-        year=2024,
-        is_seed=True,
-    )
-
-    papers = builder.collect_papers("seed-paper", seed_paper=seed_paper)
-
-    assert list(papers.keys()) == ["seed-paper"]
-    assert papers["seed-paper"].is_seed is True
-    assert builder.embeddings["seed-paper"].tolist() == [1.0, 0.0]
 
 
 def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
@@ -1353,8 +1320,8 @@ def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
         monkeypatch.setattr(builder, "_load_model", lambda: None)
         monkeypatch.setattr(
             builder,
-            "_select_candidates_from_loaded",
-            lambda _seed_embedding: [],
+            "_select_candidates",
+            lambda _seed_embedding, *, use_streaming: [],
         )
         monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
         return builder, query_calls, document_calls
@@ -1402,6 +1369,37 @@ def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
     assert paper_queries == []
     assert paper_documents == [{"title": "Seed Title", "abstract": "Seed Abstract"}]
     assert paper_texts == ["D::Seed Title::Seed Abstract"]
+
+    prefetched_builder, prefetched_queries, prefetched_documents = _build_builder()
+    prefetched_texts: list[str] = []
+    monkeypatch.setattr(
+        prefetched_builder,
+        "_encode_texts",
+        lambda texts, show_progress_bar=False: (
+            prefetched_texts.extend(texts),
+            np.asarray([[1.0, 0.0]], dtype=np.float32),
+        )[1],
+    )
+    prefetched_builder.client.get_paper = MagicMock(
+        side_effect=AssertionError("seed should be reused from caller")
+    )
+
+    prefetched_builder.collect_papers(
+        "paper-1",
+        seed_paper=Paper(
+            paper_id="paper-1",
+            title="Seed Title",
+            abstract="Seed Abstract",
+            year=2024,
+            is_seed=True,
+        ),
+    )
+
+    assert prefetched_queries == []
+    assert prefetched_documents == [
+        {"title": "Seed Title", "abstract": "Seed Abstract"}
+    ]
+    assert prefetched_texts == ["D::Seed Title::Seed Abstract"]
 
 
 def test_collect_papers_dataset_source_revalidation_contracts(
@@ -1454,8 +1452,9 @@ def test_collect_papers_dataset_source_revalidation_contracts(
         lambda: ConstantEncodeModel(),
     )
 
-    candidates = revalidate_builder._select_candidates_from_loaded(
-        np.asarray([1.0, 0.0], dtype=np.float32)
+    candidates = revalidate_builder._select_candidates(
+        np.asarray([1.0, 0.0], dtype=np.float32),
+        use_streaming=False,
     )
     assert candidates == []
     assert loaded_sources == [(False, source)]
@@ -1481,8 +1480,9 @@ def test_collect_papers_dataset_source_revalidation_contracts(
         RuntimeError,
         match="Failed to resolve hydration dataset source",
     ) as exc_info:
-        fail_closed_builder._select_candidates_from_loaded(
-            np.asarray([1.0, 0.0], dtype=np.float32)
+        fail_closed_builder._select_candidates(
+            np.asarray([1.0, 0.0], dtype=np.float32),
+            use_streaming=False,
         )
 
     assert isinstance(exc_info.value.__cause__, RuntimeError)
@@ -2238,8 +2238,9 @@ def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
         ),
     )
 
-    candidates = builder._select_candidates_from_loaded(
-        np.asarray([1.0, 0.0], dtype=np.float32)
+    candidates = builder._select_candidates(
+        np.asarray([1.0, 0.0], dtype=np.float32),
+        use_streaming=False,
     )
 
     assert candidates == []
@@ -2282,8 +2283,9 @@ def test_embedding_top_k_validation_and_tie_order(
         ]
     )
 
-    candidates = builder._select_candidates_from_loaded(
-        np.asarray([1.0, 0.0], dtype=np.float32)
+    candidates = builder._select_candidates(
+        np.asarray([1.0, 0.0], dtype=np.float32),
+        use_streaming=False,
     )
     assert [paper_id for paper_id, _, _ in candidates] == ["a", "b"]
 
@@ -2299,8 +2301,9 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
     builder.embedding_cache.last_search_used_binary_prefilter = False
     builder.embedding_cache.search = MagicMock(return_value=[])
 
-    candidates = builder._select_candidates_from_loaded(
-        np.asarray([1.0, 0.0], dtype=np.float32)
+    candidates = builder._select_candidates(
+        np.asarray([1.0, 0.0], dtype=np.float32),
+        use_streaming=False,
     )
     assert candidates == []
     assert builder._embedding_runtime_metadata() == {"binary_prefilter_used": False}
@@ -2330,8 +2333,9 @@ def test_embedding_candidate_search_logs_comparison_counts(
 
     caplog.clear()
     with caplog.at_level(logging.INFO):
-        candidates = builder._select_candidates_from_loaded(
-            np.asarray([1.0, 0.0], dtype=np.float32)
+        candidates = builder._select_candidates(
+            np.asarray([1.0, 0.0], dtype=np.float32),
+            use_streaming=False,
         )
 
     assert [paper_id for paper_id, _, _ in candidates] == ["a"]

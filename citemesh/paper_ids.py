@@ -80,6 +80,29 @@ def external_ids_from_canonical_paper_id(paper_id: str) -> tuple[str, str]:
     return "", ""
 
 
+def _normalize_hosted_identifier(candidate: str) -> Optional[str]:
+    """Normalize DOI/arXiv identifiers embedded in hosted URL-like inputs.
+
+    :param str candidate: URL-like identifier candidate.
+    :return Optional[str]: Canonical ID when the host/path matches a known source.
+    """
+    parsed = urlparse(candidate)
+    host = (parsed.hostname or "").lower()
+    path = unquote(parsed.path)
+
+    if host_matches_domain(host, "arxiv.org"):
+        arxiv_id = extract_arxiv_identifier(path)
+        if arxiv_id:
+            return f"arxiv:{arxiv_id}"
+
+    if host_matches_domain(host, "doi.org"):
+        doi_id = path.strip("/")
+        if doi_id:
+            return doi_id
+
+    return None
+
+
 def normalize_paper_id(paper_id: str) -> str:
     """Normalize paper identifiers and DOI/arXiv URLs into canonical tokens.
 
@@ -110,33 +133,13 @@ def normalize_paper_id(paper_id: str) -> str:
         return f"arxiv:{suffix}"
 
     if lowered.startswith("http://") or lowered.startswith("https://"):
-        parsed = urlparse(normalized)
-        host = (parsed.hostname or "").lower()
-        path = unquote(parsed.path)
-
-        if host_matches_domain(host, "arxiv.org"):
-            arxiv_id = extract_arxiv_identifier(path)
-            if arxiv_id:
-                return f"arxiv:{arxiv_id}"
-
-        if host_matches_domain(host, "doi.org"):
-            doi_id = path.strip("/")
-            if doi_id:
-                return doi_id
+        hosted_identifier = _normalize_hosted_identifier(normalized)
+        if hosted_identifier:
+            return hosted_identifier
 
     if "://" not in lowered and "/" in lowered:
-        parsed = urlparse(f"https://{normalized}")
-        host = (parsed.hostname or "").lower()
-        path = unquote(parsed.path)
-
-        if host_matches_domain(host, "doi.org"):
-            doi_id = path.strip("/")
-            if doi_id:
-                return doi_id
-
-        if host_matches_domain(host, "arxiv.org"):
-            arxiv_id = extract_arxiv_identifier(path)
-            if arxiv_id:
-                return f"arxiv:{arxiv_id}"
+        hosted_identifier = _normalize_hosted_identifier(f"https://{normalized}")
+        if hosted_identifier:
+            return hosted_identifier
 
     return normalized

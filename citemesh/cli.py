@@ -10,9 +10,7 @@ import argparse
 import json
 import logging
 import math
-import os
 import shutil
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +30,7 @@ from citemesh.data import (
     get_cache_dir,
     validate_compression_filter,
 )
+from citemesh.data.cache import atomic_write_json
 from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
 from citemesh.strategies.citation import CitationGraphBuilder
@@ -1764,52 +1763,13 @@ def update_dashboard_manifest(
                 "schema_version": 1,
                 "results": [entry, *filtered],
             }
-            _atomic_write_json_payload(manifest_path, manifest_payload)
+            atomic_write_json(manifest_path, manifest_payload, indent=2)
             return manifest_payload
     except Timeout as exc:
         raise RuntimeError(
             "Timed out waiting for dashboard manifest lock "
             f"at {lock_path} after {DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS:.1f}s."
         ) from exc
-
-
-def _atomic_write_json_payload(path: Path, payload: Dict[str, Any]) -> None:
-    """Persist a JSON payload with an atomic rename.
-
-    :param Path path: Target JSON file path.
-    :param Dict[str, Any] payload: JSON-compatible object to serialize.
-    :return None: Writes the file in place.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path: Optional[Path] = None
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        dir=path.parent,
-        text=True,
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-            json.dump(payload, tmp_file, indent=2, sort_keys=True)
-            tmp_file.flush()
-            os.fsync(tmp_file.fileno())
-
-        os.replace(tmp_name, path)
-        with path.open("r+b") as final_file:
-            os.fsync(final_file.fileno())
-        directory_fd: Optional[int] = None
-        try:
-            directory_fd = os.open(str(path.parent), os.O_RDONLY)
-            os.fsync(directory_fd)
-        except OSError:
-            pass
-        finally:
-            if directory_fd is not None:
-                os.close(directory_fd)
-    finally:
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
 
 
 def _resolve_collection_payload_path(

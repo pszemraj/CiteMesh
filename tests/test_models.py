@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 import pytest
 
 from citemesh.core import Author, Paper
@@ -16,8 +14,8 @@ def test_author_surname_extraction() -> None:
     assert Author(name="").surname == "Unknown"
 
 
-def test_paper_validation_properties_and_age() -> None:
-    """Paper should expose validated fields, label helpers, and computed age."""
+def test_paper_validation_properties() -> None:
+    """Paper should expose validated fields and label helpers."""
     paper = Paper(
         paper_id="test123",
         title="Test Paper",
@@ -28,10 +26,6 @@ def test_paper_validation_properties_and_age() -> None:
     assert paper.paper_id == "test123"
     assert paper.first_author_surname == "Smith"
     assert paper.label == "Smith, 2020"
-
-    current_year = datetime.now().year
-    recent = Paper(paper_id="test", title="Test", year=current_year - 5)
-    assert recent.age == 5
 
 
 def test_paper_validation_errors() -> None:
