@@ -100,7 +100,8 @@ On-disk layout and invalidation behavior are documented in [Caching & Data](../g
 - **Semantic Scholar API** for citation/recommendation data.
 - **HuggingFace Datasets** for embedding corpus sources.
 - **SentenceTransformers** for semantic embeddings.
-- **Optional `.[viz]` extras** for interactive HTML exporters.
+- **`.[recommended]` extra** for the primary embedding + interactive-export runtime bundle.
+- **Optional `.[viz]` extra** when a base/dev install only needs interactive HTML exporters.
 
 ## Extensibility
 

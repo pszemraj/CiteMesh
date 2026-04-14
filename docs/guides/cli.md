@@ -10,6 +10,11 @@ Related docs:
 - Defaults parameter study: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
 - Environment variables: [Environment Variables](../reference/environment.md)
 
+Install notes:
+
+- For the normal full-featured runtime, use the `recommended` extra from [README](../../README.md).
+- `embeddings` and `viz` remain useful as targeted add-ons when you want only one optional capability.
+
 ## Basic Invocation
 
 ```bash
@@ -167,7 +172,7 @@ Format-specific files, dashboard collection behavior, `*.config.json` sidecars,
 and determinism notes are covered in
 [Output Artifacts](../reference/output-artifacts.md).
 
-Interactive exports require optional viz dependencies:
+Interactive exports require viz dependencies. The `recommended` extra already includes them; otherwise install `viz` explicitly:
 
 ```bash
 pip install -e ".[viz]"
