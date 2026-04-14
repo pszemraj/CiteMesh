@@ -1427,6 +1427,58 @@ def test_dashboard_collection_helpers_cover_resolver_and_bundle_loading() -> Non
     assert set(bundle["payloads"]) == {"recommendation:seed-a"}
 
 
+def test_build_dashboard_collection_bundle_rejects_escaping_payload_paths() -> None:
+    """Collection bundles should ignore manifest payload paths outside the root."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        root = tmp_root / "collection"
+        root.mkdir(parents=True, exist_ok=True)
+
+        valid_path = root / "seed-a" / "recommendation.json"
+        valid_path.parent.mkdir(parents=True, exist_ok=True)
+        valid_path.write_text(
+            json.dumps({"result_id": "recommendation:seed-a", "safe": True}),
+            encoding="utf-8",
+        )
+
+        outside_path = tmp_root / "outside.json"
+        outside_path.write_text(
+            json.dumps({"result_id": "outside", "leaked": True}),
+            encoding="utf-8",
+        )
+
+        manifest_path = root / "dashboard.manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "results": [
+                        {
+                            "result_id": "recommendation:seed-a",
+                            "json_path": "seed-a/recommendation.json",
+                        },
+                        {
+                            "result_id": "recommendation:seed-b",
+                            "json_path": "../outside.json",
+                        },
+                        {
+                            "result_id": "recommendation:seed-c",
+                            "json_path": str(outside_path),
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        bundle = build_dashboard_collection_bundle(
+            manifest_path,
+            current_result_id="recommendation:seed-a",
+        )
+
+    assert set(bundle["payloads"]) == {"recommendation:seed-a"}
+
+
 def test_dashboard_collection_mode_logs_side_effects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

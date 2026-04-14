@@ -20,6 +20,7 @@ For current usage details, see:
 - Centralized theming (light, dark, solarized, auto) for static and interactive exporters.
 - Added adaptive metadata callout contrast based on active theme.
 - Switched node coloring to continuous gradients for consistent year-based styling.
+- Restricted dashboard collection bundle payload reads to manifest paths that stay under the collection root.
 
 ## Graph Rendering
 
@@ -54,6 +55,7 @@ For current usage details, see:
 - **Embedding**: for torch 2.9/2.10 CUDA compile paths, switched TF32 control to `torch.set_float32_matmul_precision("high")` so `torch.compile` remains available without tripping the mixed TF32 API conflict in release-branch Inductor.
 - **Embedding**: changed default checkpoint to `unsloth/embeddinggemma-300m` (ungated) and added automatic fallback to `google/embeddinggemma-300m` for default-revision loads.
 - **Embedding**: citation-count enrichment logs now show bounded target counts and render a visible progress bar on TTY runs.
+- **Embedding**: citation-count enrichment now batches Semantic Scholar paper lookups before falling back to single-paper retries for unresolved IDs.
 - **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection, preventing stale cross-checkpoint reuse in shared namespaces.
 - **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
 - **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.

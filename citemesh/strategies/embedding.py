@@ -42,7 +42,7 @@ from citemesh.data import (
     validate_compression_filter,
 )
 from citemesh.data.model_profiles import compose_title_abstract_text
-from citemesh.paper_ids import external_ids_from_canonical_paper_id
+from citemesh.paper_ids import external_ids_from_canonical_paper_id, normalize_paper_id
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -2654,7 +2654,30 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
         iterator = progress_bar if progress_bar is not None else targets
 
+        batch_results: Dict[str, Paper] = {}
+        batch_fetch = getattr(self.client, "get_papers", None)
+        if callable(batch_fetch):
+            try:
+                batch_response = batch_fetch([paper_id for paper_id, _paper in targets])
+                if isinstance(batch_response, dict):
+                    batch_results = {
+                        normalize_paper_id(str(paper_id)): paper
+                        for paper_id, paper in batch_response.items()
+                        if isinstance(paper, Paper)
+                    }
+                else:
+                    logger.debug(
+                        "Ignoring unexpected batch citation-count response type %s.",
+                        type(batch_response).__name__,
+                    )
+            except Exception as exc:
+                logger.warning("Could not batch fetch citation counts: %s", exc)
+
         for paper_id, paper in iterator:
+            batch_paper = batch_results.get(normalize_paper_id(paper_id))
+            if batch_paper is not None:
+                paper.citation_count = batch_paper.citation_count
+                continue
             try:
                 s2_paper = self.client.get_paper(paper_id)
                 if s2_paper:

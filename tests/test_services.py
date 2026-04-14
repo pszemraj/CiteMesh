@@ -359,6 +359,43 @@ def test_normalization_and_get_paper_id_contracts() -> None:
     assert client.client.get_paper.call_args.args[0] == "arxiv:2508.14040"
 
 
+def test_get_papers_batches_and_falls_back_for_unmatched_ids() -> None:
+    """Batch paper fetches should map results back to requested IDs and retry misses."""
+    batch_paper = SimpleNamespace(
+        paperId="seed",
+        title="Seed",
+        year=2025,
+        authors=[],
+        citationCount=11,
+        abstract="abstract",
+        fieldsOfStudy=[],
+        externalIds={"ArXiv": "2508.14040"},
+    )
+    fallback_paper = Paper(
+        paper_id="fallback",
+        title="Fallback",
+        year=2024,
+        abstract="fallback abstract",
+        citation_count=22,
+    )
+
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_papers = MagicMock(return_value=([batch_paper], ["missing-id"]))
+    client.get_paper = MagicMock(return_value=fallback_paper)
+
+    result = client.get_papers(["https://arxiv.org/abs/2508.14040", "missing-id"])
+
+    assert set(result) == {"arxiv:2508.14040", "missing-id"}
+    assert result["arxiv:2508.14040"].paper_id == "seed"
+    assert result["missing-id"].paper_id == "fallback"
+    assert client.client.get_papers.call_args.args[0] == [
+        "arxiv:2508.14040",
+        "missing-id",
+    ]
+    assert client.get_paper.call_args.args[0] == "missing-id"
+
+
 def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     """Direct endpoint payload conversion and validation should match API contracts."""
     client = SemanticScholarClient(timeout=1)

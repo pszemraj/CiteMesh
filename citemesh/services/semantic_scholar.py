@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import quote
 
 import requests
@@ -70,6 +70,26 @@ def _default_paper_fields() -> List[str]:
     :return List[str]: Default paper fields for search/recommendation/get operations.
     """
     return list(DEFAULT_PAPER_FIELDS)
+
+
+def _paper_lookup_keys(paper: Paper) -> set[str]:
+    """Build normalized aliases for matching batch responses to requested IDs.
+
+    :param Paper paper: Converted paper payload from Semantic Scholar.
+    :return set[str]: Normalized identifier aliases for the paper.
+    """
+    keys: set[str] = set()
+    candidates = [paper.paper_id, paper.doi]
+    if paper.arxiv_id:
+        candidates.extend([paper.arxiv_id, f"arxiv:{paper.arxiv_id}"])
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        with contextlib.suppress(ValueError):
+            keys.add(normalize_paper_id(candidate))
+
+    return keys
 
 
 def _reference_cache_path(paper_id: str) -> Path:
@@ -779,6 +799,116 @@ class SemanticScholarClient:
                 ),
             ),
         )
+
+    def get_papers(self, paper_ids: Sequence[str]) -> Dict[str, Paper]:
+        """Fetch multiple papers by ID, preferring the batch endpoint when available.
+
+        :param Sequence[str] paper_ids: Paper identifiers (DOI, arXiv ID, or S2 IDs).
+        :return Dict[str, Paper]: Mapping of normalized requested IDs to fetched papers.
+        :raises ValueError: If any requested ID is missing or not a string.
+        """
+        normalized_ids: list[str] = []
+        for raw_paper_id in paper_ids:
+            if not raw_paper_id or not isinstance(raw_paper_id, str):
+                raise ValueError(f"Invalid paper ID: {raw_paper_id}")
+            normalized_ids.append(normalize_paper_id(raw_paper_id))
+
+        normalized_ids = list(dict.fromkeys(normalized_ids))
+        if not normalized_ids:
+            return {}
+
+        batch_fetch = getattr(self.client, "get_papers", None)
+        if not callable(batch_fetch):
+            return {
+                paper_id: paper
+                for paper_id in normalized_ids
+                if (paper := self.get_paper(paper_id)) is not None
+            }
+
+        def _operation() -> Dict[str, Paper]:
+            """Fetch and match a batch of paper payloads to requested identifiers.
+
+            :return Dict[str, Paper]: Matched batch results keyed by requested ID.
+            """
+            api_response = batch_fetch(
+                normalized_ids,
+                fields=_default_paper_fields(),
+                return_not_found=True,
+            )
+            if isinstance(api_response, tuple):
+                api_papers = api_response[0]
+            elif isinstance(api_response, list):
+                api_papers = api_response
+            else:
+                raise TypeError(
+                    "Unexpected response type from Semantic Scholar batch fetch: "
+                    f"{type(api_response).__name__}"
+                )
+
+            matched: Dict[str, Paper] = {}
+            remaining_ids = set(normalized_ids)
+            for api_paper in api_papers:
+                paper = self._convert_api_paper(api_paper)
+                if paper is None:
+                    continue
+
+                lookup_keys = _paper_lookup_keys(paper)
+                matched_id = next(
+                    (
+                        requested_id
+                        for requested_id in normalized_ids
+                        if requested_id in remaining_ids and requested_id in lookup_keys
+                    ),
+                    None,
+                )
+                if matched_id is None:
+                    continue
+
+                matched[matched_id] = paper
+                remaining_ids.remove(matched_id)
+
+            return matched
+
+        matched = self._call_with_retries(
+            _operation,
+            on_retry=lambda attempt, wait_time, exc: logger.warning(
+                "Failed to batch fetch papers (attempt %s). Retrying in %ss: %s",
+                attempt,
+                wait_time,
+                exc,
+            ),
+            on_final_failure=lambda exc: (
+                logger.warning(
+                    "Failed to batch fetch %s papers after %s attempts: %s",
+                    len(normalized_ids),
+                    API_CONFIG.max_retries,
+                    exc,
+                )
+                or {}
+            ),
+            handled_exceptions=(
+                (
+                    ObjectNotFoundException,
+                    lambda _exc: {},
+                ),
+            ),
+        )
+
+        unresolved_ids = [
+            paper_id for paper_id in normalized_ids if paper_id not in matched
+        ]
+        if unresolved_ids:
+            logger.debug(
+                "Falling back to single-paper fetch for %d unresolved batch IDs.",
+                len(unresolved_ids),
+            )
+
+        for paper_id in unresolved_ids:
+            paper = self.get_paper(paper_id)
+            if paper is not None:
+                matched[paper_id] = paper
+
+        return matched
 
     def get_paper_citations(self, paper_id: str, limit: int = 20) -> List[Paper]:
         """

@@ -1746,6 +1746,28 @@ def _atomic_write_json_payload(path: Path, payload: Dict[str, Any]) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
+def _resolve_collection_payload_path(
+    collection_root: Path, json_rel_path: str
+) -> Optional[Path]:
+    """Resolve a manifest JSON payload path confined to the collection root.
+
+    :param Path collection_root: Shared dashboard collection directory.
+    :param str json_rel_path: Manifest-provided JSON payload path.
+    :return Optional[Path]: Resolved payload path, or ``None`` when invalid.
+    """
+    candidate = Path(json_rel_path)
+    if candidate.is_absolute():
+        return None
+
+    resolved_root = collection_root.resolve()
+    resolved_candidate = (resolved_root / candidate).resolve()
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved_candidate
+
+
 def build_dashboard_collection_bundle(
     manifest_path: Path,
     *,
@@ -1773,7 +1795,9 @@ def build_dashboard_collection_bundle(
         json_rel_path = str(entry.get("json_path") or "").strip()
         if not result_id or not json_rel_path:
             continue
-        payload_path = collection_root / Path(json_rel_path)
+        payload_path = _resolve_collection_payload_path(collection_root, json_rel_path)
+        if payload_path is None:
+            continue
         try:
             payload = json.loads(payload_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
