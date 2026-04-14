@@ -5,21 +5,34 @@ This strategy uses semantic similarity from sentence transformers
 to find conceptually similar papers without relying on citations.
 """
 
+from __future__ import annotations
+
+import importlib.util
 import logging
-import os
+import random
 import re
-import sys
 import warnings
 from contextlib import nullcontext
 from hashlib import sha1, sha256
 from itertools import islice
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+)
 
 import networkx as nx
 import numpy as np
 from tqdm.auto import tqdm
 
+from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
@@ -29,12 +42,20 @@ from citemesh.data import (
     validate_compression_filter,
 )
 from citemesh.data.model_profiles import compose_title_abstract_text
-from citemesh.services import SemanticScholarClient, get_client
+from citemesh.paper_ids import external_ids_from_canonical_paper_id, normalize_paper_id
+from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
+    build_capped_undirected_graph,
     deterministic_sort_key,
-    select_capped_undirected_edges,
 )
+from citemesh.text_batching import (
+    encode_texts_in_length_buckets,
+    l2_normalize_embeddings,
+)
+
+if TYPE_CHECKING:
+    from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)
 _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
@@ -58,19 +79,17 @@ def _check_embedding_deps() -> None:
     torch_module: Any | None = None
 
     try:
-        import torch
-
-        torch_module = torch
+        torch_module = _import_torch()
     except ImportError:
         missing.append("torch")
 
     try:
-        import sentence_transformers  # noqa: F401
+        _import_sentence_transformer_class()
     except ImportError:
         missing.append("sentence-transformers")
 
     try:
-        import datasets  # noqa: F401
+        _import_datasets_module()
     except ImportError:
         missing.append("datasets")
 
@@ -89,16 +108,70 @@ def _check_embedding_deps() -> None:
         )
 
 
+def _module_available(module_name: str) -> bool:
+    """Return whether a Python module can be imported in the current runtime.
+
+    :param str module_name: Absolute module name to probe.
+    :return bool: ``True`` when the module exists and is importable.
+    """
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError, ModuleNotFoundError):
+        return False
+
+
+def _import_torch() -> Any:
+    """Import and return the ``torch`` module.
+
+    :return Any: Imported ``torch`` module object.
+    """
+    import torch
+
+    return torch
+
+
+def _import_sentence_transformer_class() -> Any:
+    """Import and return ``SentenceTransformer``.
+
+    :return Any: Imported ``SentenceTransformer`` class.
+    """
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer
+
+
+def _import_datasets_module() -> Any:
+    """Import and return the ``datasets`` module.
+
+    :return Any: Imported ``datasets`` module object.
+    """
+    import datasets
+
+    return datasets
+
+
+def _import_huggingface_hub_module() -> Any:
+    """Import and return the ``huggingface_hub`` module.
+
+    :return Any: Imported ``huggingface_hub`` module object.
+    """
+    import huggingface_hub
+
+    return huggingface_hub
+
+
 ENCODE_BATCH_SIZE = 32
 HYDRATION_FLUSH_SIZE = 256
 CANDIDATE_MULTIPLIER = 4
 CITATION_COUNT_ENRICHMENT_LIMIT = 20
+CALIBRATION_RESERVOIR_SEED = 0
+CALIBRATION_LOWER_PERCENTILE = 0.1
+CALIBRATION_UPPER_PERCENTILE = 99.9
 ARXIV_DATASET_CANDIDATES = (
     "librarian-bots/arxiv-metadata-snapshot",
     "CShorten/ML-ArXiv-Papers",
     "gfissore/arxiv-abstracts-2021",
 )
-STRICT_OFFLINE_FINGERPRINT_ENV_VAR = "CITEMESH_STRICT_OFFLINE_FINGERPRINT"
 ARXIV_IDENTIFIER_PATTERN = re.compile(
     r"^(?:arxiv:)?((?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z\-]+)?/\d{7})(?:v\d+)?)$",
     re.IGNORECASE,
@@ -262,39 +335,6 @@ def _parse_venue(paper: Dict[str, Any]) -> str:
     return ""
 
 
-def _parse_arxiv_id_from_paper_id(paper_id: str) -> str:
-    """Extract canonical arXiv identifier suffix from canonicalized paper IDs.
-
-    :param str paper_id: Canonical paper identifier.
-    :return str: ArXiv identifier suffix (empty when unavailable).
-    """
-    if not isinstance(paper_id, str):
-        return ""
-    normalized = paper_id.strip()
-    if not normalized.lower().startswith("arxiv:"):
-        return ""
-    return re.sub(r"v\d+$", "", normalized.split(":", 1)[1], flags=re.IGNORECASE)
-
-
-def _parse_doi_from_paper_id(paper_id: str) -> str:
-    """Extract DOI suffix from canonicalized paper IDs when possible.
-
-    :param str paper_id: Canonical paper identifier.
-    :return str: DOI suffix (empty when unavailable).
-    """
-    if not isinstance(paper_id, str):
-        return ""
-    normalized = paper_id.strip()
-    if not normalized:
-        return ""
-    lowered = normalized.lower()
-    if lowered.startswith("doi:"):
-        return normalized.split(":", 1)[1].strip()
-    if re.match(r"^10\.\d{4,9}/\S+$", normalized):
-        return normalized
-    return ""
-
-
 def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) -> Dict:
     """Normalize a raw dataset record to embedding metadata fields.
 
@@ -309,6 +349,7 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
         or f"arxiv_{fallback_index}"
     )
     paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
+    arxiv_id, doi = external_ids_from_canonical_paper_id(paper_id)
     title = paper.get("title", "Unknown")
     if not isinstance(title, str) or not title.strip():
         title = "Unknown"
@@ -321,8 +362,8 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
         "title": title,
         "abstract": abstract,
         "venue": _parse_venue(paper),
-        "arxiv_id": _parse_arxiv_id_from_paper_id(paper_id),
-        "doi": _parse_doi_from_paper_id(paper_id),
+        "arxiv_id": arxiv_id,
+        "doi": doi,
         "year": _parse_year(paper),
         "authors": _parse_authors(paper.get("authors", [])),
         "categories": _parse_categories(paper.get("categories", [])),
@@ -338,6 +379,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
     - Executes cache-native semantic retrieval
     - Combines semantic with temporal/category/author factors
     """
+
+    strategy_name = "embedding"
 
     def __init__(
         self,
@@ -358,7 +401,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         encode_batch_size: int = ENCODE_BATCH_SIZE,
-        enable_torch_compile: bool = True,
+        enable_torch_compile: bool = False,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -469,6 +512,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._resolve_document_formatter_fingerprint()
         )
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
+        self._attention_implementation_hint = (
+            self._resolve_attention_implementation_hint()
+        )
         self._source_dtype_hint = self._resolve_source_dtype_hint()
         self.top_k = top_k
         self.model = None
@@ -634,25 +680,53 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         return self.binary_prefilter
 
+    def _resolve_attention_implementation_hint(self) -> Optional[str]:
+        """Resolve preferred CUDA attention implementation for torch CUDA runs.
+
+        :return Optional[str]: Attention implementation token or ``None``.
+        """
+        try:
+            torch = _import_torch()
+        except ImportError:
+            return None
+
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        if not callable(cuda_available) or not bool(cuda_available()):
+            return None
+
+        preferred_attention = str(
+            self.model_profile.cuda_attention_implementation or ""
+        ).strip()
+        if preferred_attention == "flash_attention_2" and _module_available(
+            "flash_attn"
+        ):
+            return preferred_attention
+        return "sdpa"
+
     def _resolve_source_dtype_hint(self) -> str:
         """Resolve source dtype token used for cache provenance metadata.
 
         :return str: Source dtype token.
         """
-        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
-        if preferred_dtype != "bfloat16":
-            return "float32"
-
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             return "float32"
 
-        if not torch.cuda.is_available():
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        if not callable(cuda_available) or not bool(cuda_available()):
             return "float32"
-        if not bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)()):
-            return "float32"
-        return "bfloat16"
+
+        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
+        if preferred_dtype == "bfloat16" and bool(
+            getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+        ):
+            return "bfloat16"
+        if bool(self.model_profile.float16_supported):
+            return "float16"
+        return "float32"
 
     def _resolve_model_fingerprint(self) -> str:
         """Resolve deterministic model fingerprint for cache validity checks.
@@ -682,9 +756,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         resolution_error: Optional[Exception] = None
 
         try:
-            from huggingface_hub import HfApi
-
-            model_info = HfApi().model_info(
+            huggingface_hub = _import_huggingface_hub_module()
+            model_info = huggingface_hub.HfApi().model_info(
                 repo_id=model_id,
                 revision=requested_revision,
             )
@@ -744,7 +817,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return Optional[str]: Locally resolved snapshot SHA, if available.
         """
         try:
-            from huggingface_hub import snapshot_download
+            snapshot_download = _import_huggingface_hub_module().snapshot_download
         except Exception:
             return None
 
@@ -801,7 +874,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return Optional[str]: Deterministic local artifact fingerprint if available.
         """
         try:
-            from huggingface_hub import snapshot_download
+            snapshot_download = _import_huggingface_hub_module().snapshot_download
         except Exception:
             return None
 
@@ -888,8 +961,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
 
         requested_revision = self._requested_hf_revision_token()
-        if fingerprint.endswith("::offline"):
-            return fingerprint == self._offline_model_fingerprint_fallback()
         if fingerprint.endswith("::offline-unverified"):
             return fingerprint == self._offline_model_fingerprint_fallback()
         if fingerprint == self._offline_model_fingerprint_fallback():
@@ -901,42 +972,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         if re.fullmatch(r"[0-9a-f]{40}", requested_revision, flags=re.IGNORECASE):
             return suffix.lower() == requested_revision.lower()
-
-        # Legacy sha-only fingerprints do not encode non-default revision tokens.
-        return requested_revision == "main" and not self._strict_offline_mode_enabled()
-
-    @staticmethod
-    def _strict_offline_mode_enabled() -> bool:
-        """Return whether strict offline fingerprint checks are enabled.
-
-        :return bool: ``True`` when legacy offline identity assumptions are disabled.
-        """
-        raw_value = (
-            str(os.getenv(STRICT_OFFLINE_FINGERPRINT_ENV_VAR, "")).strip().lower()
-        )
-        return raw_value in {"1", "true", "yes", "on"}
-
-    def _is_legacy_main_sha_assumption(self, cached_fingerprint: Optional[str]) -> bool:
-        """Return whether compatibility relies on legacy ``main`` SHA assumption.
-
-        :param Optional[str] cached_fingerprint: Existing cached fingerprint token.
-        :return bool: ``True`` when reuse assumes ``main`` still maps to cached SHA.
-        """
-        if cached_fingerprint is None:
-            return False
-        fingerprint = str(cached_fingerprint).strip()
-        if not fingerprint:
-            return False
-        model_id = self._cache_model_identity()
-        if "/" not in model_id:
-            return False
-        if self._requested_hf_revision_token() != "main":
-            return False
-        expected_prefix = f"hf::{model_id}::"
-        if not fingerprint.startswith(expected_prefix):
-            return False
-        suffix = fingerprint[len(expected_prefix) :]
-        return bool(re.fullmatch(r"[0-9a-f]{40}", suffix, flags=re.IGNORECASE))
+        return False
 
     def _ensure_cache_model_fingerprint(self) -> None:
         """Verify cache payload is bound to the active model fingerprint."""
@@ -952,14 +988,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     cached_fingerprint
                 ):
                     self._resolved_model_fingerprint = str(cached_fingerprint)
-                    if self._is_legacy_main_sha_assumption(cached_fingerprint):
-                        logger.warning(
-                            "Could not verify whether requested revision 'main' still "
-                            "matches cached SHA fingerprint %s for %s. Reusing cache "
-                            "under assumption of unchanged local model artifacts.",
-                            cached_fingerprint,
-                            self.model_name,
-                        )
                     logger.warning(
                         "Could not resolve Hugging Face model fingerprint for %s while "
                         "reuse checks are active. Reusing compatible cached fingerprint %s.",
@@ -1126,52 +1154,58 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return Dict[str, Any]: ``SentenceTransformer`` constructor kwargs.
         """
         self._reset_precision_runtime()
-        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
-        if preferred_dtype != "bfloat16":
-            self._source_dtype_hint = "float32"
-            return {}
+        model_kwargs: Dict[str, Any] = {}
+        if self._attention_implementation_hint is not None:
+            model_kwargs["attn_implementation"] = self._attention_implementation_hint
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
-            logger.warning(
-                "%s prefers bfloat16, but torch is unavailable; using float32.",
-                self.model_name,
-            )
             self._source_dtype_hint = "float32"
-            return {}
+            return model_kwargs
 
-        if not torch.cuda.is_available():
-            logger.debug(
-                "%s prefers bfloat16, but CUDA is unavailable; using float32.",
-                self.model_name,
-            )
+        cuda_module = getattr(torch, "cuda", None)
+        cuda_available = getattr(cuda_module, "is_available", None)
+        if not callable(cuda_available) or not bool(cuda_available()):
             self._source_dtype_hint = "float32"
-            return {}
+            return model_kwargs
 
-        bf16_supported = bool(getattr(torch.cuda, "is_bf16_supported", lambda: False)())
-        if not bf16_supported:
-            logger.debug(
-                "%s prefers bfloat16, but CUDA bfloat16 is unsupported; using float32.",
-                self.model_name,
-            )
-            self._source_dtype_hint = "float32"
-            return {}
+        if self._source_dtype_hint == "bfloat16":
+            self._autocast_dtype = torch.bfloat16
+            model_kwargs["dtype"] = torch.bfloat16
+        elif self._source_dtype_hint == "float16":
+            float16_dtype = getattr(torch, "float16", None)
+            if (
+                float16_dtype is None
+            ):  # pragma: no cover - defensive for torch API drift
+                logger.warning(
+                    "%s selected float16 runtime, but torch.float16 is unavailable; using float32.",
+                    self.model_name,
+                )
+                self._source_dtype_hint = "float32"
+                return model_kwargs
+            self._autocast_dtype = float16_dtype
+            model_kwargs["dtype"] = float16_dtype
+        else:
+            return model_kwargs
 
-        self._autocast_dtype = torch.bfloat16
         self._autocast_device_type = "cuda"
         self._autocast_enabled = bool(self.model_profile.use_cuda_autocast)
-        self._source_dtype_hint = "bfloat16"
 
         if self._autocast_enabled:
             logger.debug(
-                "%s will run with dtype=bfloat16 and CUDA autocast.",
+                "%s will run with dtype=%s and CUDA autocast.",
                 self.model_name,
+                self._source_dtype_hint,
             )
         else:
-            logger.debug("%s will run with dtype=bfloat16.", self.model_name)
+            logger.debug(
+                "%s will run with dtype=%s.",
+                self.model_name,
+                self._source_dtype_hint,
+            )
 
-        return {"dtype": torch.bfloat16}
+        return model_kwargs
 
     def _autocast_context(self) -> Any:
         """Return autocast context for model encoding.
@@ -1186,7 +1220,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return nullcontext()
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             return nullcontext()
 
@@ -1227,17 +1261,25 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return np.ndarray: Embeddings with shape ``(len(texts), dim)``.
         """
         encode_model = self._get_model_for_encoding()
+        effective_batch_size = len(texts) if batch_size is None else int(batch_size)
+        if effective_batch_size < 1:
+            raise ValueError("batch_size must be at least 1 when provided")
 
-        encode_kwargs: Dict[str, Any] = {
-            "convert_to_tensor": False,
-            "normalize_embeddings": True,
-            "show_progress_bar": show_progress_bar,
-        }
-        if batch_size is not None:
-            encode_kwargs["batch_size"] = batch_size
-
-        embeddings = encode_model.encode(texts, **encode_kwargs)
-        return np.asarray(embeddings, dtype=np.float32)
+        return encode_texts_in_length_buckets(
+            texts,
+            batch_size=min(effective_batch_size, len(texts)),
+            show_progress_bar=show_progress_bar,
+            encode_batch=lambda batch_texts, batch_progress: np.asarray(
+                encode_model.encode(
+                    batch_texts,
+                    batch_size=min(effective_batch_size, len(batch_texts)),
+                    convert_to_tensor=False,
+                    normalize_embeddings=True,
+                    show_progress_bar=batch_progress,
+                ),
+                dtype=np.float32,
+            ),
+        )
 
     def _model_load_candidates(self) -> Tuple[str, ...]:
         """Return ordered candidate model IDs used for lazy model loading.
@@ -1303,7 +1345,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return None: Model is initialized in-place on first access.
         """
         if self.model is None:
-            from sentence_transformers import SentenceTransformer
+            sentence_transformer_cls = _import_sentence_transformer_class()
 
             logger.info(f"Loading embedding model: {self.model_name}")
             model_kwargs = self._resolve_model_kwargs()
@@ -1320,9 +1362,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             for idx, candidate_model in enumerate(load_candidates):
                 try:
                     if st_kwargs:
-                        self.model = SentenceTransformer(candidate_model, **st_kwargs)
+                        self.model = sentence_transformer_cls(
+                            candidate_model, **st_kwargs
+                        )
                     else:
-                        self.model = SentenceTransformer(candidate_model)
+                        self.model = sentence_transformer_cls(candidate_model)
                 except Exception as exc:
                     model_errors.append((candidate_model, exc))
                     has_more_candidates = idx + 1 < len(load_candidates)
@@ -1391,7 +1435,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._tf32_mode = "off"
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             logger.debug(
                 "Skipping TF32 config for %s: torch unavailable.", self.model_name
@@ -1498,11 +1542,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         compute_dtype_label = self._source_dtype_hint
         if self._autocast_enabled:
             compute_dtype_label = f"{compute_dtype_label}+autocast"
+        attention_label = self._attention_implementation_hint or "auto"
         logger.info(
-            "%s runtime: dim=%s, compute=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
+            "%s runtime: dim=%s, compute=%s, attn=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
             self.model_name,
             dim_label,
             compute_dtype_label,
+            attention_label,
             self.storage_precision,
             "on" if self._inner_model_compiled else "off",
             self._tf32_mode,
@@ -1538,7 +1584,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         try:
-            import torch
+            torch = _import_torch()
         except ImportError:
             self._compile_status_reason = "torch unavailable"
             logger.debug(
@@ -1599,11 +1645,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.model_name,
         )
 
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
+    def collect_papers(
+        self,
+        seed_id: str,
+        *,
+        seed_paper: Optional[Paper] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
 
         :param str seed_id: Seed paper identifier (ArXiv ID or text query)
+        :param Optional[Paper] seed_paper: Optional pre-fetched seed paper metadata to
+            reuse instead of fetching the seed from Semantic Scholar again.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -1613,17 +1667,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         # Load model lazily.
         self._load_model()
 
-        # Try to get seed from Semantic Scholar first
-        seed_paper = self.client.get_paper(seed_id)
+        # Reuse caller-provided seed metadata when available to avoid redundant
+        # Semantic Scholar fetches in hybrid mode.
+        resolved_seed_paper = seed_paper
+        if resolved_seed_paper is None:
+            resolved_seed_paper = self.client.get_paper(seed_id)
 
         seed_metadata: Dict[str, str] = {}
 
-        if seed_paper:
+        if resolved_seed_paper:
             # Found via S2 API
-            seed_paper.is_seed = True
-            papers[seed_paper.paper_id] = seed_paper
-            seed_title = (seed_paper.title or "").strip()
-            seed_abstract = (seed_paper.abstract or "").strip()
+            resolved_seed_paper.is_seed = True
+            papers[resolved_seed_paper.paper_id] = resolved_seed_paper
+            seed_title = (resolved_seed_paper.title or "").strip()
+            seed_abstract = (resolved_seed_paper.abstract or "").strip()
             seed_text = (
                 compose_title_abstract_text(
                     {"title": seed_title, "abstract": seed_abstract}
@@ -1640,22 +1697,26 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             seed_text = seed_id
             # Create dummy seed paper
             query_seed = _query_seed_id(seed_id)
-            seed_paper = Paper(
+            resolved_seed_paper = Paper(
                 paper_id=query_seed,
                 title=seed_id,
                 year=None,
                 is_seed=True,
             )
-            papers[query_seed] = seed_paper
+            papers[query_seed] = resolved_seed_paper
             seed_metadata = {"title": seed_id, "abstract": ""}
 
         # Compute normalized seed embedding
         logger.debug("Computing seed embedding...")
-        formatted_seed_text = self.model_profile.format_query(seed_text, seed_metadata)
+        formatted_seed_text = self._format_seed_for_embedding(
+            seed_text=seed_text,
+            seed_metadata=seed_metadata,
+            seed_is_free_text_query=resolved_seed_paper.paper_id.startswith("query:"),
+        )
         seed_embedding = self._encode_texts(
             [formatted_seed_text], show_progress_bar=False
         )[0]
-        self.embeddings[seed_paper.paper_id] = seed_embedding
+        self.embeddings[resolved_seed_paper.paper_id] = seed_embedding
 
         use_streaming = self.use_streaming
 
@@ -1663,10 +1724,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             logger.debug(
                 "Using streaming hydration path for cache-native semantic search..."
             )
-            candidates = self._select_candidates_streaming(seed_embedding)
         else:
             logger.debug("Using cache-native semantic search...")
-            candidates = self._select_candidates_from_loaded(seed_embedding)
+        candidates = self._select_candidates(
+            seed_embedding,
+            use_streaming=use_streaming,
+        )
 
         # Convert candidates to Paper objects while respecting max_papers total.
         for paper_id, metadata, embedding in candidates:
@@ -1697,27 +1760,33 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._update_citation_counts(papers)
         return papers
 
-    def _select_candidates_from_loaded(
-        self, seed_embedding: np.ndarray
-    ) -> List[Tuple[str, Dict, np.ndarray]]:
-        """
-        Select top candidates from cache using non-streaming hydration policy.
+    def _format_seed_for_embedding(
+        self,
+        seed_text: str,
+        seed_metadata: Dict[str, str],
+        *,
+        seed_is_free_text_query: bool,
+    ) -> str:
+        """Format a seed input into the correct embedding prompt space.
 
-        :param np.ndarray seed_embedding: Normalized seed embedding vector
-        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
-        """
-        return self._select_candidates(seed_embedding, use_streaming=False)
+        Paper-to-paper retrieval stays in document space. Only free-text user
+        queries should cross from query space into the hydrated document corpus.
 
-    def _select_candidates_streaming(
-        self, seed_embedding: np.ndarray
-    ) -> List[Tuple[str, Dict, np.ndarray]]:
+        :param str seed_text: Raw seed text or fallback identifier.
+        :param Dict[str, str] seed_metadata: Seed metadata payload.
+        :param bool seed_is_free_text_query: Whether the seed came from user query text.
+        :return str: Prompt-formatted seed text for embedding encode.
         """
-        Select top candidates from cache using streaming hydration policy.
+        if seed_is_free_text_query:
+            return self.model_profile.format_query(seed_text, seed_metadata)
 
-        :param np.ndarray seed_embedding: Normalized seed embedding vector
-        :return List[Tuple[str, Dict, np.ndarray]]: List of (paper_id, metadata, embedding) tuples sorted by similarity
-        """
-        return self._select_candidates(seed_embedding, use_streaming=True)
+        document_text = self.model_profile.format_document(
+            {
+                "title": seed_metadata.get("title", ""),
+                "abstract": seed_metadata.get("abstract", ""),
+            }
+        )
+        return document_text or seed_text
 
     def _select_candidates(
         self, seed_embedding: np.ndarray, use_streaming: bool
@@ -1844,6 +1913,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 "all" if self.corpus_size is None else self.corpus_size,
             )
 
+        try:
+            if self._resume_incomplete_full_corpus_cache(
+                use_streaming=use_streaming,
+                cached_dataset_source=cached_dataset_source,
+            ):
+                return
+        except Exception as exc:
+            logger.warning(
+                "Incomplete full-corpus resume failed for source=%s; "
+                "performing full source revalidation: %s",
+                cached_dataset_source or "unknown",
+                exc,
+            )
+
         dataset_source: Optional[str]
         dataset: Iterable[Dict[str, Any]]
 
@@ -1898,12 +1981,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             complete=False,
         )
 
-        progress_total = self.corpus_size if self.corpus_size else None
-        if not use_streaming and self.corpus_size is None:
-            try:
-                progress_total = len(dataset)
-            except TypeError:  # pragma: no cover - defensive for dataset APIs
-                progress_total = None
+        progress_total = self._resolve_hydration_progress_total(
+            dataset,
+            use_streaming=use_streaming,
+        )
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=dataset_source,
+        )
 
         hydrated_records = self._hydrate_dataset_records(
             dataset=dataset,
@@ -1926,6 +2011,277 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             corpus_size=self.corpus_size,
             complete=True,
         )
+
+    def _resume_incomplete_full_corpus_cache(
+        self,
+        *,
+        use_streaming: bool,
+        cached_dataset_source: Optional[str],
+    ) -> bool:
+        """Resume an incomplete full-corpus hydration when cached rows are reusable.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param Optional[str] cached_dataset_source: Dataset source recorded on the
+            incomplete cache attempt.
+        :return bool: ``True`` when the incomplete cache was resumed and marked
+            complete without requiring a full namespace clear.
+        """
+        if self.corpus_size is not None:
+            return False
+        if ":" in str(self.dataset_split):
+            return False
+
+        source = str(cached_dataset_source or "").strip()
+        if not source:
+            return False
+
+        stats = self.embedding_cache.payload_stats()
+        if stats.hydration_complete:
+            return False
+        if stats.hydration_split != self.dataset_split:
+            return False
+        if stats.hydration_corpus_size != "all":
+            return False
+        if stats.hydration_dataset_source != source:
+            return False
+        if stats.sqlite_rows < 1 or stats.embedding_rows < 1:
+            return False
+        if stats.sqlite_rows != stats.embedding_rows:
+            logger.warning(
+                "Incomplete full-corpus cache rows diverged for %s/%s "
+                "(sqlite_rows=%d, embedding_rows=%d); performing full rebuild.",
+                source,
+                self.dataset_split,
+                stats.sqlite_rows,
+                stats.embedding_rows,
+            )
+            return False
+        if (
+            self.storage_precision == "int8"
+            and not self.embedding_cache.has_calibration_ranges()
+        ):
+            logger.warning(
+                "Incomplete full-corpus cache for %s/%s is missing int8 calibration "
+                "ranges; performing full rebuild.",
+                source,
+                self.dataset_split,
+            )
+            return False
+
+        cached_rows = int(stats.sqlite_rows)
+        upstream_rows = self._resolve_dataset_split_row_count(source)
+        if upstream_rows is not None:
+            if upstream_rows < cached_rows:
+                logger.warning(
+                    "Incomplete full-corpus cache rows (%d) exceed upstream split rows "
+                    "(%d) for %s/%s; performing full rebuild.",
+                    cached_rows,
+                    upstream_rows,
+                    source,
+                    self.dataset_split,
+                )
+                return False
+            if upstream_rows == cached_rows:
+                logger.info(
+                    "Incomplete full-corpus cache for %s/%s already matches upstream "
+                    "row count (%d); marking hydration complete.",
+                    source,
+                    self.dataset_split,
+                    cached_rows,
+                )
+                self.embedding_cache.mark_hydrated(
+                    dataset_source=source,
+                    dataset_split=self.dataset_split,
+                    corpus_size=self.corpus_size,
+                    complete=True,
+                )
+                self.embedding_cache.clear_hydration_rowcount_reconciliation()
+                return True
+
+        row_limit = None if upstream_rows is None else upstream_rows - cached_rows
+        logger.info(
+            "Resuming incomplete full-corpus cache for %s/%s from cached_rows=%d%s.",
+            source,
+            self.dataset_split,
+            cached_rows,
+            "" if upstream_rows is None else f" toward upstream_rows={upstream_rows}",
+        )
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=source,
+        )
+        resumed_source, dataset = self._load_dataset_for_hydration(
+            use_streaming=use_streaming,
+            preferred_dataset_source=source,
+            row_limit=row_limit,
+            row_offset=cached_rows,
+            allow_source_fallback=False,
+        )
+        if resumed_source != source:
+            raise RuntimeError(
+                "Incomplete hydration resume resolved unexpected dataset source "
+                f"{resumed_source!r} (expected {source!r})."
+            )
+
+        resumed_records = self._hydrate_dataset_records(
+            dataset=dataset,
+            progress_total=row_limit,
+            progress_label=f"Resuming {source}",
+        )
+        updated_rows = self._cached_payload_row_count()
+        if updated_rows < cached_rows:
+            raise RuntimeError(
+                "Incomplete hydration resume reduced cached row count unexpectedly "
+                f"({updated_rows} < {cached_rows})."
+            )
+
+        if upstream_rows is not None and updated_rows < upstream_rows:
+            logger.warning(
+                "Incomplete full-corpus resume for %s/%s stopped short of upstream "
+                "row count (cache_rows=%d, upstream_rows=%d); performing full rebuild.",
+                source,
+                self.dataset_split,
+                updated_rows,
+                upstream_rows,
+            )
+            return False
+
+        self.embedding_cache.mark_hydrated(
+            dataset_source=source,
+            dataset_split=self.dataset_split,
+            corpus_size=self.corpus_size,
+            complete=True,
+        )
+        self.embedding_cache.clear_hydration_rowcount_reconciliation()
+        logger.info(
+            "Resumed incomplete full-corpus cache for %s/%s (added=%d, cache_rows=%d).",
+            source,
+            self.dataset_split,
+            resumed_records,
+            updated_rows,
+        )
+        return True
+
+    def _resolve_hydration_progress_total(
+        self, dataset: Iterable[Dict[str, Any]], *, use_streaming: bool
+    ) -> Optional[int]:
+        """Resolve best-effort progress totals for hydration-related passes.
+
+        :param Iterable[Dict[str, Any]] dataset: Dataset iterable used by the pass.
+        :param bool use_streaming: Whether the iterable came from streaming mode.
+        :return Optional[int]: Progress-bar total when it can be inferred.
+        """
+        progress_total = self.corpus_size if self.corpus_size else None
+        if not use_streaming and self.corpus_size is None:
+            try:
+                progress_total = len(dataset)
+            except TypeError:  # pragma: no cover - defensive for dataset APIs
+                progress_total = None
+        return progress_total
+
+    def _needs_explicit_int8_calibration(self) -> bool:
+        """Return whether int8 hydration must initialize persisted ranges first.
+
+        :return bool: ``True`` when int8 cache writes would otherwise fail closed.
+        """
+        return (
+            self.storage_precision == "int8"
+            and not self.embedding_cache.has_calibration_ranges()
+        )
+
+    def _sample_calibration_records(
+        self,
+        dataset: Iterable[Dict[str, Any]],
+        *,
+        progress_total: Optional[int],
+        progress_label: str,
+    ) -> List[Dict]:
+        """Reservoir-sample representative metadata records for int8 calibration.
+
+        The sample is deterministic so cache bootstrap remains reproducible under
+        tests and across repeated local runs given the same corpus slice/order.
+
+        :param Iterable[Dict[str, Any]] dataset: Dataset records to sample.
+        :param Optional[int] progress_total: Optional progress-bar total.
+        :param str progress_label: Progress-bar description label.
+        :return List[Dict]: Reservoir-sampled metadata records.
+        """
+        rng = random.Random(CALIBRATION_RESERVOIR_SEED)
+        sampled_records: List[Dict] = []
+
+        with tqdm(
+            total=progress_total,
+            desc=progress_label,
+            unit="papers",
+            dynamic_ncols=True,
+            disable=not stderr_isatty(),
+        ) as progress:
+            for idx, raw_record in enumerate(dataset):
+                if self.corpus_size is not None and idx >= self.corpus_size:
+                    break
+
+                metadata = _extract_dataset_paper_metadata(raw_record, idx)
+                if len(sampled_records) < self.calibration_sample_size:
+                    sampled_records.append(metadata)
+                else:
+                    replace_idx = rng.randint(0, idx)
+                    if replace_idx < self.calibration_sample_size:
+                        sampled_records[replace_idx] = metadata
+                progress.update(1)
+
+            if progress_total is None:
+                progress.set_postfix_str(f"processed {progress.n}")
+
+        return sampled_records
+
+    def _ensure_int8_calibration_ranges(
+        self,
+        *,
+        use_streaming: bool,
+        dataset_source: str,
+    ) -> None:
+        """Initialize representative int8 calibration ranges before hydration writes.
+
+        :param bool use_streaming: Whether the hydration source streams records.
+        :param str dataset_source: Resolved dataset source token for hydration.
+        :return None: Persists calibration ranges in cache when required.
+        :raises RuntimeError: If calibration source resolution or sampling fails.
+        """
+        if not self._needs_explicit_int8_calibration():
+            return
+
+        logger.info(
+            "Initializing representative int8 calibration ranges from %s (sample_size=%d).",
+            dataset_source,
+            self.calibration_sample_size,
+        )
+        calibration_source, calibration_dataset = self._load_dataset_for_hydration(
+            use_streaming=use_streaming,
+            preferred_dataset_source=dataset_source,
+            allow_source_fallback=False,
+        )
+        if calibration_source != dataset_source:
+            raise RuntimeError(
+                "Calibration prepass resolved unexpected dataset source "
+                f"{calibration_source!r} (expected {dataset_source!r})."
+            )
+
+        calibration_records = self._sample_calibration_records(
+            calibration_dataset,
+            progress_total=self._resolve_hydration_progress_total(
+                calibration_dataset,
+                use_streaming=use_streaming,
+            ),
+            progress_label=f"Calibrating {dataset_source}",
+        )
+        if not calibration_records:
+            logger.warning(
+                "Representative int8 calibration prepass produced zero records for %s; "
+                "hydration will remain incomplete until a non-empty source is available.",
+                dataset_source,
+            )
+            return
+        self._initialize_calibration_ranges(calibration_records)
 
     def _hydrate_dataset_records(
         self,
@@ -1951,25 +2307,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         hydrated_records = 0
         selected_records = 0
-        calibration_records: List[Dict] = []
-        calibration_ready = (
-            self.storage_precision != "int8"
-            or self.embedding_cache.has_calibration_ranges()
-        )
 
         with tqdm(
             total=progress_total,
             desc=progress_label,
             unit="papers",
             dynamic_ncols=True,
-            disable=not sys.stderr.isatty(),
+            disable=not stderr_isatty(),
         ) as progress:
             batch: List[Dict] = []
             for idx, raw_record in enumerate(dataset):
                 if self.corpus_size is not None and idx >= self.corpus_size:
                     break
 
-                metadata = self._extract_paper_metadata(raw_record, idx)
+                metadata = _extract_dataset_paper_metadata(raw_record, idx)
                 if existing_paper_ids is not None:
                     paper_id = str(metadata.get("paper_id", "")).strip()
                     if not paper_id or paper_id in existing_paper_ids:
@@ -1978,23 +2329,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     existing_paper_ids.add(paper_id)
 
                 selected_records += 1
-                if (
-                    not calibration_ready
-                    and len(calibration_records) < self.calibration_sample_size
-                ):
-                    calibration_records.append(metadata)
-                    if len(calibration_records) == self.calibration_sample_size:
-                        self._initialize_calibration_ranges(calibration_records)
-                        calibration_ready = True
-                        batch.extend(calibration_records)
-                        calibration_records = []
-                    progress.update(1)
-                    if max_new_records is not None and selected_records >= int(
-                        max_new_records
-                    ):
-                        break
-                    continue
-
                 batch.append(metadata)
                 if len(batch) >= HYDRATION_FLUSH_SIZE:
                     hydrated_records += self._cache_metadata_batch(batch)
@@ -2004,12 +2338,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     max_new_records
                 ):
                     break
-
-            if calibration_records and not calibration_ready:
-                self._initialize_calibration_ranges(calibration_records)
-                calibration_ready = True
-                batch.extend(calibration_records)
-                calibration_records = []
 
             if batch:
                 hydrated_records += self._cache_metadata_batch(batch)
@@ -2036,7 +2364,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if ":" in str(self.dataset_split):
             return None
 
-        from datasets import load_dataset_builder
+        load_dataset_builder = _import_datasets_module().load_dataset_builder
 
         try:
             builder = load_dataset_builder(dataset_source)
@@ -2110,6 +2438,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 )
             self.embedding_cache.clear_hydration_rowcount_reconciliation()
             return
+
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=source,
+        )
 
         previous_reconciliation = (
             self.embedding_cache.get_hydration_rowcount_reconciliation()
@@ -2272,7 +2605,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool allow_source_fallback: Whether alternate sources may be tried.
         :return Tuple[str, Iterable[Dict[str, Any]]]: Dataset source name and iterable.
         """
-        from datasets import load_dataset
+        load_dataset = _import_datasets_module().load_dataset
 
         parsed_row_limit: Optional[int] = None
         if row_limit is not None:
@@ -2398,12 +2731,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             batch_size=self.encode_batch_size,
             show_progress_bar=False,
         )
-        ranges = np.vstack(
-            (
-                np.min(sample_embeddings, axis=0),
-                np.max(sample_embeddings, axis=0),
-            )
-        )
+        ranges = np.percentile(
+            sample_embeddings,
+            [CALIBRATION_LOWER_PERCENTILE, CALIBRATION_UPPER_PERCENTILE],
+            axis=0,
+        ).astype(np.float32)
         self.embedding_cache.set_calibration_ranges(
             ranges=ranges,
             embedding_dim=int(sample_embeddings.shape[1]),
@@ -2430,7 +2762,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not metadata_map:
             return 0
 
-        self.embedding_cache.get_embeddings(
+        self.embedding_cache.upsert_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=min(self.encode_batch_size, len(metadata_map)),
@@ -2438,16 +2770,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             text_builder=self.model_profile.format_document,
         )
         return len(metadata_map)
-
-    def _extract_paper_metadata(self, paper: Dict, fallback_index: int) -> Dict:
-        """
-        Normalize dataset record into metadata dictionary.
-
-        :param Dict paper: Raw dataset record
-        :param int fallback_index: Index used to generate ID if missing
-        :return Dict: Dictionary with normalized fields
-        """
-        return _extract_dataset_paper_metadata(paper, fallback_index)
 
     def _update_citation_counts(self, papers: Dict[str, Paper]) -> None:
         """
@@ -2471,7 +2793,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             len(targets),
         )
 
-        progress_enabled = sys.stderr.isatty() and len(targets) > 1
+        progress_enabled = stderr_isatty() and len(targets) > 1
         progress_bar = (
             tqdm(
                 targets,
@@ -2485,7 +2807,30 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
         iterator = progress_bar if progress_bar is not None else targets
 
+        batch_results: Dict[str, Paper] = {}
+        batch_fetch = getattr(self.client, "get_papers", None)
+        if callable(batch_fetch):
+            try:
+                batch_response = batch_fetch([paper_id for paper_id, _paper in targets])
+                if isinstance(batch_response, dict):
+                    batch_results = {
+                        normalize_paper_id(str(paper_id)): paper
+                        for paper_id, paper in batch_response.items()
+                        if isinstance(paper, Paper)
+                    }
+                else:
+                    logger.debug(
+                        "Ignoring unexpected batch citation-count response type %s.",
+                        type(batch_response).__name__,
+                    )
+            except Exception as exc:
+                logger.warning("Could not batch fetch citation counts: %s", exc)
+
         for paper_id, paper in iterator:
+            batch_paper = batch_results.get(normalize_paper_id(paper_id))
+            if batch_paper is not None:
+                paper.citation_count = batch_paper.citation_count
+                continue
             try:
                 s2_paper = self.client.get_paper(paper_id)
                 if s2_paper:
@@ -2506,8 +2851,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         # Semantic similarity from embeddings
         if paper1.paper_id in self.embeddings and paper2.paper_id in self.embeddings:
-            emb1 = self.embeddings[paper1.paper_id]
-            emb2 = self.embeddings[paper2.paper_id]
+            emb1 = l2_normalize_embeddings(self.embeddings[paper1.paper_id])
+            emb2 = l2_normalize_embeddings(self.embeddings[paper2.paper_id])
             semantic_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
         else:
             semantic_sim = 0.0
@@ -2562,14 +2907,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
         graph.graph["embedding_runtime"] = self._embedding_runtime_metadata()
         # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
-        filtered_graph = nx.Graph()
-        filtered_graph.graph.update(graph.graph)
-        filtered_graph.add_nodes_from(graph.nodes(data=True))
-
-        for u, v, weight in select_capped_undirected_edges(
-            graph.edges(data=True), self.top_k
-        ):
-            filtered_graph.add_edge(u, v, weight=weight)
+        filtered_graph = build_capped_undirected_graph(graph, self.top_k)
 
         logger.info(
             f"Filtered graph: {filtered_graph.number_of_nodes()} nodes, "

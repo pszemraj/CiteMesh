@@ -1,12 +1,12 @@
 # Changelog & Key Improvements
 
-This changelog summarizes notable changes from early script-based prototypes to the current package architecture.
+Notable changes from the early script-based prototypes to the current package layout.
 For current usage details, see:
 
-- [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- [CLI Usage](../guides/cli.md)
+- [Caching & Data](../guides/caching.md)
+- [Environment Variables](../reference/environment.md)
+- [Embedding Runtime](../reference/embedding-runtime.md)
 
 ## Breaking Changes
 
@@ -16,10 +16,11 @@ For current usage details, see:
 
 ## Export & Visualization
 
-- Added `GraphExporter` to emit PNG, Pyvis HTML, Plotly HTML, JSON, and GraphML from one graph object.
+- Added `GraphExporter` to emit PNG, Pyvis HTML, Plotly HTML, Dashboard HTML, JSON, CSV, BibTeX, and GraphML from one graph object.
 - Centralized theming (light, dark, solarized, auto) for static and interactive exporters.
 - Added adaptive metadata callout contrast based on active theme.
 - Switched node coloring to continuous gradients for consistent year-based styling.
+- Restricted dashboard collection bundle payload reads to manifest paths that stay under the collection root.
 
 ## Graph Rendering
 
@@ -43,7 +44,11 @@ For current usage details, see:
 - Added incremental full-corpus hydration growth checks so upstream row-count increases append only delta records instead of forcing full namespace rebuilds.
 - Strengthened full-corpus incremental hydration with staged tail/head delta checks plus missing-ID reconciliation fallback, and memoized duplicate-only row-count deltas to avoid repeated full-split rescans.
 - Fixed incremental full-corpus hydration to fetch tail slices (`offset=cached_rows`) so delta refreshes hydrate newly appended records instead of reloading leading rows.
+- Resumed interrupted full-corpus hydration runs from the cached row boundary when SQLite/HDF5 payload rows and hydration metadata still match the requested source/split, instead of immediately discarding partial progress.
 - Hardened reference-cache reuse against unreadable/non-object JSON entries and improved atomic write durability with parent-directory fsync.
+- Clarified embedding-cache clear logs to label replaced payload metadata as `cached_*`, avoiding confusion during capped-to-full corpus rebuilds.
+- Suppressed repeated per-batch int8 saturation warnings after the first warning in a run while continuing to persist cumulative clipping stats.
+- Suppressed empty-reference cache hit debug spam so long citation/hybrid runs no longer emit one `Loaded 0 cached references` line per paper.
 
 ## Strategy Evolution
 
@@ -54,21 +59,26 @@ For current usage details, see:
 - **Embedding**: for torch 2.9/2.10 CUDA compile paths, switched TF32 control to `torch.set_float32_matmul_precision("high")` so `torch.compile` remains available without tripping the mixed TF32 API conflict in release-branch Inductor.
 - **Embedding**: changed default checkpoint to `unsloth/embeddinggemma-300m` (ungated) and added automatic fallback to `google/embeddinggemma-300m` for default-revision loads.
 - **Embedding**: citation-count enrichment logs now show bounded target counts and render a visible progress bar on TTY runs.
+- **Embedding**: citation-count enrichment now batches Semantic Scholar paper lookups before falling back to single-paper retries for unresolved IDs.
 - **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection, preventing stale cross-checkpoint reuse in shared namespaces.
+- **Embedding/Hybrid**: semantic enrichment reuses the citation branch seed metadata when available, avoiding a second Semantic Scholar fetch for the same seed paper during hybrid runs.
 - **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
 - **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
-- **Hybrid**: updated implicit CLI defaults for omitted hybrid budgets to `max-papers=45`, `max-references=12`, `max-citations=45`, and semantic cap `min(20, max-papers - 1)` after focused fuzzy-match + abstract relevance review.
+- **Hybrid**: updated omitted-budget defaults again after the February 2026 follow-up review; see [Defaults Tuning Study](../reference/defaults-tuning-study.md) for the current values and rationale.
 - **Recommendation**: added recommendation-based discovery with direct endpoint handling and rate-limit-aware behavior.
 - Unified edge gating for citation/recommendation under `--similarity-threshold`.
 - Added explicit streaming split validation for embedding mode.
 
 ## CLI & Developer Experience
 
-- Added `--export all` for multi-format runs.
+- Added `--export all` and multi-export (`-e json -e dashboard`) for selective format combinations.
 - Improved parser validation and test coverage around CLI ergonomics.
 - Added embedding/hybrid cache controls: `--storage-precision`, binary prefilter toggles, binary rescore multiplier, calibration sample size, and cache compression knobs.
 - Added explicit overwrite acknowledgement for embedding cache rebuilds (`--force-rebuild-cache` + `--overwrite-cache`) with default confirmation prompts.
 - Added optional cache-clear rationale flags (`--cache-overwrite-reason`, `cache clear --reason`) and standardized destructive-clear logs with file/size snapshots and large-cache warnings.
+- Switched default Rich CLI width selection to auto-size on TTYs while keeping a fixed fallback for redirected output, preventing double-wrapped local terminal logs.
+- Added shared `--log-file` CLI support for build/search/cache commands so verbose runs can capture plain-text diagnostics without shell redirection, while keeping debug-only chatter out of the Rich console.
+- Clamped noisy dependency debug loggers (`filelock`, `urllib3`, `matplotlib`, `semanticscholar`, and similar) to `WARNING` so `--log-file` traces stay focused on CiteMesh internals.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
 - Switched multi-export explicit `--output` handling to directory-based exports with strategy-named files.
@@ -90,20 +100,3 @@ For current usage details, see:
 - Removed dead configuration/helpers that were no longer referenced.
 - Deduplicated Semantic Scholar citation/reference fetch loop logic.
 - Tightened slow-test policy to keep one explicit smoke path.
-
-## Future Opportunities
-
-- Improve batching strategies for reference fetching coverage.
-- Add co-citation/shared-neighbor analytics in structured exports.
-- Provide ready-made Plotly/Dash templates for downstream analysis.
-
-### Dashboard Backlog (Tracked TODOs)
-
-- [TODO-dashboard] Add cluster-level labels/hulls in dashboard graph view (topic keyword extraction per cluster).
-- [TODO-dashboard] Add bridge-paper quick lens (betweenness/connector score + dedicated list mode).
-- [TODO-dashboard] Add graph-pane matrix toggle (adjacency heatmap ordered by cluster/relevance).
-- [TODO-dashboard] Add explicit "obscure gems" ranking lens (semantic relevance + citation-age normalization).
-- [TODO-dashboard] Add list-row relevance fingerprint meter (graph relevance + semantic/citation evidence decomposition).
-- [TODO-dashboard] Expand seed-relation facets for recommendation/embedding graphs (directed relation metadata beyond provenance/year heuristics).
-- [TODO-dashboard] Add reading-queue workflow (save/reject/note with `localStorage` export/import).
-- [TODO-dashboard] Add optional local PDF download + inline viewer workflow (`--download-pdfs` style export mode).

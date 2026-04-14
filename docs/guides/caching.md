@@ -4,10 +4,9 @@ CiteMesh uses persistent caches to avoid recomputing expensive datasets and embe
 
 Related docs:
 
-- CLI command usage: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
-- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- CLI command usage: [CLI Usage](cli.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
+- Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
 
 ## Cache Root
 
@@ -23,7 +22,7 @@ Override the root with:
 export CITEMESH_CACHE_DIR=/path/to/custom/cache
 ```
 
-Variable details are documented in [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md).
+Variable details are documented in [Environment Variables](../reference/environment.md).
 
 ## Directory Layout
 
@@ -37,7 +36,7 @@ citemesh cache root
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
-Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + resolved truncate dim + storage precision + effective binary prefilter mode + resolved source torch dtype + document-formatter fingerprint, and adds calibration sample size in `int8` mode.
+Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + resolved truncate dim + storage precision + effective binary prefilter mode + resolved runtime backend + resolved source torch dtype + document-formatter fingerprint, and adds calibration sample size in `int8` mode.
 
 ## Embedding Cache Behavior
 
@@ -51,6 +50,13 @@ Default storage mode is quantized:
 
 The `binary_index` is an auxiliary retrieval index, not the primary embedding store.
 Final ranking still uses the cached `int8`/`float16`/`float32` vectors.
+For `int8`, calibration ranges must already exist before cache writes begin.
+Hydration-managed embedding workflows create and persist those ranges before the
+first int8 cache write; raw `EmbeddingCache` int8 writes now fail closed instead of
+bootstrapping ranges from an arbitrary request batch.
+Hydration no longer takes the first-N records for calibration. Instead, it runs a
+separate representative reservoir-sampling prepass over the active hydration slice
+and persists ranges before the main cache-write pass begins.
 
 Non-int8 modes (`float16`, `float32`) are supported via `--storage-precision`.
 CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected).
@@ -74,15 +80,17 @@ Metadata-only changes (`year`, `authors`, `categories`, or other stored fields t
 not alter embedding input text) refresh SQLite metadata rows without re-encoding vectors.
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races.
+The expensive encode step runs outside that lock; the lock only wraps short lookup and
+commit phases, and the commit phase re-checks cache misses before assigning final rows.
 Lock acquisition timeout defaults to `900` seconds and can be overridden with
-`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)).
+`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
 Hydration write policy:
 
 - Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--encode-batch-size`.
 - Cache persistence flushes metadata/embedding appends in larger bursts (`256` records) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
 
-Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)).
+Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)).
 By default, CiteMesh asks for confirmation before applying this destructive rebuild.
 Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts).
 Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata.
@@ -98,12 +106,8 @@ deterministic offline identity token (`...::offline-unverified`) and emits warni
 that cache reuse is based on assumptions rather than full verification.
 In that mode, CiteMesh records the assumed fingerprint in cache metadata so future
 offline checks are explicit and traceable.
-When requested revision is `main` and only a legacy cached SHA is available, reuse
-is still allowed with a warning because `main` cannot be proven offline.
-Set `CITEMESH_STRICT_OFFLINE_FINGERPRINT=1` to disable that legacy `main` reuse
-assumption and force namespace clear/rebuild when identity cannot be verified
-(details: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)).
-If compatibility checks fail (for example unresolved revision mismatch), CiteMesh clears
+If compatibility checks fail (for example unresolved revision mismatch or an old cache
+entry that stored only a bare SHA without the requested revision identity), CiteMesh clears
 and rebuilds that namespace before reuse to avoid stale model-version mixing.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
@@ -112,11 +116,19 @@ For hydrated full-corpus runs (`--all-corpus`), CiteMesh performs an incremental
 growth check using upstream split row counts. When upstream rows increased, it uses a
 staged reconciliation flow:
 
+`--all-corpus` means "the full selected `--dataset-split`".
+For example, `--dataset-split train --all-corpus` hydrates the full `train` split; it
+does not merge `train`, `validation`, and `test` into one cache namespace.
+
 - tail delta slice (`cached_rows:upstream_rows`)
 - head delta slice (`0:delta_rows`) if tail under-fills
 - full-split missing-ID reconciliation only when needed
 
 All reconciliation steps are ID-aware and append only uncached paper IDs.
+If a prior full-corpus hydration was interrupted but the cached SQLite/HDF5 row counts
+still match each other and the hydration metadata still matches the requested
+source/split, CiteMesh resumes from `cached_rows` instead of clearing the namespace and
+starting from zero again.
 If upstream split row counts shrink below cached payload size, CiteMesh marks
 the namespace hydration state incomplete and forces full source revalidation
 instead of serving stale over-cap rows from the prior cache snapshot.
@@ -124,6 +136,16 @@ If full reconciliation confirms no uncached IDs while row-count delta remains,
 CiteMesh treats that as duplicate-ID upstream growth (not a cache failure), records
 the reconciled row-count state, and skips repeated full-split scans until row counts
 change again.
+
+When switching a namespace from a capped corpus (for example `--corpus-size 50000`) to
+`--all-corpus`, cache-clear logs report both the requested target and the replaced cached
+payload. Seeing `requested_corpus=all` alongside `cached_corpus=50000` means CiteMesh is
+replacing the old capped namespace before hydrating the full split; it does not mean the
+new run is silently limited to `50000`.
+
+When int8 calibration clipping is detected during a hydration run, CiteMesh emits that
+warning once per namespace and keeps accumulating the underlying saturation stats in
+cache metadata instead of repeating the same warning every flush window.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus
 metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias
@@ -147,6 +169,9 @@ using hashed filenames.
   fresh reference IDs from the API (write-through cache update).
 - Successful empty reference responses are cached as explicit empty lists to avoid
   repeated API calls for papers with no references.
+- Empty cached reference hits are reused silently; debug logging emits cache-hit lines
+  only for non-empty reference lists so long runs do not spam one zero-count line per
+  paper.
 - Non-empty cached payloads that contain no valid reference IDs are treated as invalid
   and rebuilt from API data instead of being reused as implicit empties.
 - Corrupt/unreadable JSON cache entries (including non-object payloads) are treated as
@@ -176,7 +201,7 @@ citemesh cache clear --yes --reason "manual local reset"
 
 Omit `--yes` for interactive confirmation.
 
-For command syntax and defaults, see [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md); this section focuses on cache maintenance workflows.
+For command syntax and defaults, see [CLI Usage](cli.md); this section focuses on cache maintenance workflows.
 
 To remove artifacts for one namespace, delete matching `.db` and `.h5` files in `embeddings/`.
 

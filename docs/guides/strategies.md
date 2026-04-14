@@ -1,15 +1,14 @@
 # Strategy Guide
 
-The `citemesh` CLI can build graphs with four strategies: `recommendation`, `citation`, `embedding`, and `hybrid`. This guide explains how they differ and when to use each.
+Use this guide to choose between `recommendation`, `citation`, `embedding`, and `hybrid`.
 
 Related docs:
 
-- CLI flags and defaults: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Cache behavior: [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- Environment variables: [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- Embedding runtime defaults and precision policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
-- Default-parameter sweep rationale: [Defaults Tuning Study](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/defaults-tuning-study.md)
-- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- CLI flags and defaults: [CLI Usage](cli.md)
+- Cache behavior: [Caching & Data](caching.md)
+- Embedding runtime defaults and precision policy: [Embedding Runtime](../reference/embedding-runtime.md)
+- Default-parameter sweep rationale: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
 
 ## At a Glance
 
@@ -41,8 +40,8 @@ Related docs:
 - Limitations: first run hydrates a cache for the selected corpus spec; requires optional embedding dependencies.
 - Typical use: semantic exploration and discovery beyond citation graphs.
 
-Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
-Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md).
+Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md).
+Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](../reference/embedding-runtime.md).
 
 ## Hybrid Strategy
 
@@ -60,10 +59,3 @@ Embedding model defaults/fallbacks and compile policy are defined in [Embedding 
 - Use `citation` when explicit reference structure is most important.
 - Use `embedding` to surface conceptually similar papers without citation dependency.
 - Use `hybrid` when you want citation grounding plus semantic expansion.
-
-## Related Docs
-
-- [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- [Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- [Environment Variables](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- [Architecture](https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/architecture.md)

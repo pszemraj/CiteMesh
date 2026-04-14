@@ -5,18 +5,22 @@ This strategy builds similarity graphs using citation relationships,
 bibliographic coupling (shared references), and co-citation analysis.
 """
 
+from __future__ import annotations
+
 import logging
-import sys
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 import networkx as nx
 from tqdm.auto import tqdm
 
+from citemesh._runtime import stderr_isatty
 from citemesh.core import Paper
-from citemesh.services import SemanticScholarClient, get_client
+from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
-from citemesh.strategies.similarity import compute_indexed_similarity_score
+
+if TYPE_CHECKING:
+    from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +36,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
     - Sparse edge creation for readability
     """
 
+    strategy_name = "citation"
+
     def __init__(
         self,
         max_papers: int = 40,
-        max_citations: int = 20,
-        max_references: int = 20,
+        max_citations: int = 25,
+        max_references: int = 25,
         similarity_threshold: float = 0.2,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
@@ -46,8 +52,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         Initialize citation graph builder.
 
         :param int max_papers: Maximum total papers in graph
-        :param int max_citations: Maximum citing papers to fetch
-        :param int max_references: Maximum referenced papers to fetch
+        :param int max_citations: Maximum citing papers to fetch (default matches CLI)
+        :param int max_references: Maximum referenced papers to fetch (default matches CLI)
         :param float similarity_threshold: Minimum similarity for edges
         :param bool fetch_references: Whether to fetch reference lists (enables real bibliographic coupling)
         :param bool refresh_reference_cache: Whether to bypass persisted reference-cache reads.
@@ -271,7 +277,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         references = self.client.get_paper_references(
             seed.paper_id, limit=self.max_references
         )
-        progress_enabled = sys.stderr.isatty()
+        progress_enabled = stderr_isatty()
         reference_ids = self._ingest_relation_batch(
             papers,
             references,
@@ -331,14 +337,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param Paper paper2: Second paper
         :return float: Similarity score (0.0 to 1.0)
         """
-        return compute_indexed_similarity_score(
+        return self._compute_indexed_similarity(
             paper1,
             paper2,
-            abstract_index=self._abstract_index,
-            temporal_similarity_fn=self.temporal_similarity,
-            citation_similarity_fn=self.citation_similarity,
-            bibliographic_coupling_fn=self.bibliographic_coupling,
-            fetch_references=self.fetch_references,
             with_references_weights=(0.40, 0.20, 0.00, 0.40),
             without_references_weights=(0.65, 0.20, 0.15, 0.00),
         )

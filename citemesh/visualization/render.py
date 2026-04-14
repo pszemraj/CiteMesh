@@ -307,7 +307,9 @@ def _normalize_layout_positions(
     keys = list(pos.keys())
     coords = np.array([np.asarray(pos[key], dtype=float) for key in keys], dtype=float)
     if coords.ndim != 2 or coords.shape[1] != 2:
-        return {key: np.asarray(value, dtype=float) for key, value in pos.items()}
+        return {
+            key: np.asarray(value, dtype=float).copy() for key, value in pos.items()
+        }
 
     min_xy = coords.min(axis=0)
     max_xy = coords.max(axis=0)

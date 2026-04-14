@@ -5,9 +5,11 @@ Combines citation relationships with semantic similarity for
 comprehensive paper discovery.
 """
 
+from __future__ import annotations
+
 import logging
 import re
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
 import numpy as np
@@ -15,12 +17,12 @@ import numpy as np
 from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.model_profiles import compose_title_abstract_text
-from citemesh.services import SemanticScholarClient, get_client
-from citemesh.services.semantic_scholar import normalize_paper_id
+from citemesh.paper_ids import normalize_paper_id
+from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
+    build_capped_undirected_graph,
     deterministic_sort_key,
-    select_capped_undirected_edges,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
@@ -28,6 +30,10 @@ from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
     _check_embedding_deps,
 )
+from citemesh.text_batching import l2_normalize_embeddings
+
+if TYPE_CHECKING:
+    from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)
 HYBRID_DEFAULT_MAX_PAPERS = 45
@@ -49,6 +55,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
     2. Enriches with semantically similar papers from corpus
     3. Uses adaptive similarity computation based on relationship type
     """
+
+    strategy_name = "hybrid"
 
     def __init__(
         self,
@@ -73,7 +81,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         encode_batch_size: int = ENCODE_BATCH_SIZE,
-        enable_torch_compile: bool = True,
+        enable_torch_compile: bool = False,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -440,12 +448,15 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         seed_embedding = embeddings_map.get(seed_paper.paper_id)
         if seed_embedding is None:
             try:
-                seed_text = self.embedding_builder.model_profile.format_query(
-                    self._seed_query_text(seed_paper),
-                    {
+                seed_text = self.embedding_builder._format_seed_for_embedding(
+                    seed_text=self._seed_query_text(seed_paper),
+                    seed_metadata={
                         "title": seed_paper.title or "",
                         "abstract": seed_paper.abstract or "",
                     },
+                    seed_is_free_text_query=str(seed_paper.paper_id).startswith(
+                        "query:"
+                    ),
                 )
                 seed_embedding = self.embedding_builder._encode_texts(
                     [seed_text], show_progress_bar=False
@@ -656,7 +667,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.info("Enriching with up to %s semantic matches...", semantic_budget)
 
         try:
-            semantic_papers = self.embedding_builder.collect_papers(seed_id)
+            semantic_papers = self.embedding_builder.collect_papers(
+                seed_id,
+                seed_paper=seed_paper,
+            )
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
@@ -734,8 +748,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             and paper1.paper_id in self.embedding_builder.embeddings
             and paper2.paper_id in self.embedding_builder.embeddings
         ):
-            emb1 = self.embedding_builder.embeddings[paper1.paper_id]
-            emb2 = self.embedding_builder.embeddings[paper2.paper_id]
+            emb1 = l2_normalize_embeddings(
+                self.embedding_builder.embeddings[paper1.paper_id]
+            )
+            emb2 = l2_normalize_embeddings(
+                self.embedding_builder.embeddings[paper2.paper_id]
+            )
             embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
 
         source1_has_semantic = source1 in {"semantic", "both"}
@@ -788,6 +806,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :return Tuple[nx.Graph, str]: Tuple of (NetworkX graph, seed_id).
         """
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph.graph["strategy"] = self._resolved_strategy_name()
         if self.embedding_builder is not None:
             graph.graph["embedding_runtime"] = (
                 self.embedding_builder._embedding_runtime_metadata()
@@ -809,14 +828,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if not max_edges or max_edges <= 0:
             return graph, actual_seed_id
 
-        filtered_graph = nx.Graph()
-        filtered_graph.graph.update(graph.graph)
-        filtered_graph.add_nodes_from(graph.nodes(data=True))
-
-        for u, v, weight in select_capped_undirected_edges(
-            graph.edges(data=True), max_edges
-        ):
-            filtered_graph.add_edge(u, v, weight=weight)
+        filtered_graph = build_capped_undirected_graph(graph, max_edges)
 
         logger.info(
             "Hybrid edge cap applied: %s -> %s edges",

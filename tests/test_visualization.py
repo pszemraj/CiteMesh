@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,6 +15,7 @@ import pytest
 
 from citemesh.core import Author, Paper
 from citemesh.data.model_profiles import get_embedding_model_profile
+from citemesh.visualization import export as export_module
 from citemesh.visualization.export import (
     GRAPHML_DETERMINISM_POLICY_STRICT,
     GRAPHML_LAYOUT_METADATA_KEY,
@@ -32,6 +32,7 @@ from citemesh.visualization.render import (
     visualize_graph,
 )
 from citemesh.visualization.themes import get_theme
+from tests._helpers import raise_import_error
 
 
 def _install_fake_plotly(
@@ -39,6 +40,7 @@ def _install_fake_plotly(
     *,
     figure_cls: type,
     scatter_factory: Callable[..., dict[str, object]] | None = None,
+    plotly_js: str = "window.Plotly={};",
 ) -> None:
     """Install a minimal ``plotly`` module with configurable graph_objects types."""
     fake_go = types.SimpleNamespace(
@@ -46,9 +48,12 @@ def _install_fake_plotly(
         Layout=lambda **kwargs: {"type": "layout", **kwargs},
         Figure=figure_cls,
     )
-    fake_plotly = types.ModuleType("plotly")
-    fake_plotly.graph_objects = fake_go
-    monkeypatch.setitem(sys.modules, "plotly", fake_plotly)
+    monkeypatch.setattr(export_module, "_load_plotly_graph_objects", lambda: fake_go)
+    monkeypatch.setattr(
+        export_module,
+        "_load_plotly_dashboard_runtime",
+        lambda: (fake_go, lambda: plotly_js),
+    )
 
 
 class _BaseFakeFigure:
@@ -139,6 +144,7 @@ def _build_graph() -> tuple[nx.Graph, str]:
     )
 
     graph = nx.Graph()
+    graph.graph["strategy"] = "citation"
     graph.add_node(
         seed.paper_id,
         paper=seed,
@@ -167,7 +173,12 @@ def test_exporter_serialization_contracts_and_determinism(
 ) -> None:
     """Exporter outputs should preserve metadata, ordering, and determinism."""
     graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "citation"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
+    )
 
     json_path = tmp_path / "graph.json"
     graphml_path = tmp_path / "graph.graphml"
@@ -181,6 +192,11 @@ def test_exporter_serialization_contracts_and_determinism(
     assert payload["seed_id"] == seed_id
     assert "metadata" not in payload
     assert payload["summary"] == {"nodes": 2, "edges": 1}
+    assert "dashboard" in payload
+    assert payload["dashboard"]["meta"]["seed_id"] == seed_id
+    assert len(payload["dashboard"]["meta"]["plotly_node_order"]) == 2
+    assert len(payload["dashboard"]["meta"]["plotly_positions"]) == 2
+    assert len(payload["dashboard"]["meta"]["plotly_node_sizes"]) == 2
     assert len(payload["nodes"]) == 2
     assert payload["edges"][0]["weight"] == pytest.approx(0.7)
     assert payload["edges"][0]["source_title"] == "Related Paper"
@@ -264,6 +280,33 @@ def test_exporter_serialization_contracts_and_determinism(
     assert edge_x[4] == pytest.approx(float(normalized_layout["z"][0]))
 
 
+def test_json_export_skips_layout_without_precomputed_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JSON export should stay data-only unless layout geometry already exists."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+
+    def _fail_compute_layout(
+        *args: Any, **kwargs: Any
+    ) -> dict[str, tuple[float, float]]:
+        del args, kwargs
+        raise AssertionError("compute_layout should not run for JSON-only export")
+
+    monkeypatch.setattr(export_module, "compute_layout", _fail_compute_layout)
+
+    json_path = tmp_path / "graph.json"
+    exporter.to_json(json_path)
+
+    payload = json.loads(json_path.read_text())
+    assert payload["meta"]["strategy"] == "citation"
+    assert payload["summary"] == {"nodes": 2, "edges": 1}
+    assert payload["dashboard"]["meta"]["summary"] == {"nodes": 2, "edges": 1}
+    assert "plotly_node_order" not in payload["dashboard"]["meta"]
+    assert "plotly_positions" not in payload["dashboard"]["meta"]
+    assert "plotly_node_sizes" not in payload["dashboard"]["meta"]
+
+
 def test_exporter_interactive_html_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -271,8 +314,7 @@ def test_exporter_interactive_html_contracts(
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setitem(sys.modules, "pyvis", None)
-    monkeypatch.setitem(sys.modules, "pyvis.network", None)
+    monkeypatch.setattr(export_module, "_load_pyvis_network_class", raise_import_error)
     with pytest.raises(RuntimeError, match="pyvis is required"):
         exporter.to_interactive_html(tmp_path / "missing.html")
 
@@ -298,12 +340,7 @@ def test_exporter_interactive_html_contracts(
         def save_graph(self, path: str) -> None:
             Path(path).write_text("<html>fake</html>")
 
-    fake_pyvis = types.ModuleType("pyvis")
-    fake_pyvis_network = types.ModuleType("pyvis.network")
-    fake_pyvis_network.Network = FakeNetwork
-    fake_pyvis.network = fake_pyvis_network
-    monkeypatch.setitem(sys.modules, "pyvis", fake_pyvis)
-    monkeypatch.setitem(sys.modules, "pyvis.network", fake_pyvis_network)
+    monkeypatch.setattr(export_module, "_load_pyvis_network_class", lambda: FakeNetwork)
 
     out_path = tmp_path / "graph.html"
     exporter = GraphExporter(graph, seed_id, theme_name="dark")
@@ -324,7 +361,7 @@ def test_exporter_plotly_contracts(
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setitem(sys.modules, "plotly", None)
+    monkeypatch.setattr(export_module, "_load_plotly_graph_objects", raise_import_error)
     with pytest.raises(RuntimeError, match="plotly is required"):
         exporter.to_plotly_html(tmp_path / "missing.plotly.html")
 
@@ -374,10 +411,11 @@ def test_exporter_plotly_contracts(
         exporter.to_plotly_html(tmp_path / "nodivid.plotly.html")
 
 
-def _extract_dashboard_payload(html_text: str) -> dict[str, Any]:
-    """Extract dashboard JSON payload from exported HTML."""
+def _extract_dashboard_script_json(html_text: str, script_id: str) -> dict[str, Any]:
+    """Extract embedded JSON payload from a dashboard script tag."""
+
     match = re.search(
-        r'<script id="citemesh-dashboard-data" type="application/json">(.*?)</script>',
+        rf'<script id="{re.escape(script_id)}" type="application/json">(.*?)</script>',
         html_text,
         flags=re.DOTALL,
     )
@@ -385,15 +423,10 @@ def _extract_dashboard_payload(html_text: str) -> dict[str, Any]:
     return json.loads(match.group(1))
 
 
-def _extract_dashboard_figure(html_text: str) -> dict[str, Any]:
-    """Extract embedded Plotly figure JSON from exported dashboard HTML."""
-    match = re.search(
-        r'<script id="citemesh-dashboard-figure" type="application/json">(.*?)</script>',
-        html_text,
-        flags=re.DOTALL,
-    )
-    assert match is not None
-    return json.loads(match.group(1))
+def _extract_inline_script_bodies(html_text: str) -> list[str]:
+    """Extract bare inline script bodies in source order."""
+
+    return re.findall(r"<script>(.*?)</script>", html_text, flags=re.DOTALL)
 
 
 def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
@@ -405,7 +438,31 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     exporter = GraphExporter(
         graph,
         seed_id,
-        metadata={"strategy": "hybrid"},
+        metadata={
+            "strategy": "hybrid",
+            "dashboard_collection": {
+                "current_result_id": "hybrid:seed",
+                "results": [
+                    {
+                        "result_id": "hybrid:seed",
+                        "seed_id": "seed",
+                        "title": "Seed Paper",
+                        "strategy": "hybrid",
+                        "summary": {"nodes": 2, "edges": 1},
+                    }
+                ],
+                "payloads": {
+                    "hybrid:seed": {
+                        "seed_id": "seed",
+                        "meta": {"strategy": "hybrid"},
+                        "summary": {"nodes": 2, "edges": 1},
+                        "nodes": [],
+                        "edges": [],
+                        "dashboard": {"meta": {}},
+                    }
+                },
+            },
+        },
         layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
     )
     out_path = tmp_path / "graph.dashboard.html"
@@ -423,6 +480,10 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="detail-pane"',
         'id="citemesh-dashboard-data"',
         'id="citemesh-dashboard-figure"',
+        'id="citemesh-dashboard-collection"',
+        'id="result-select"',
+        'id="dashboard-status"',
+        'accept=".json,.html"',
     ]:
         assert token in rendered
     for css_token in [
@@ -433,24 +494,14 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "width: 100%;\n      height: 100%;\n      min-height: 0;",
     ]:
         assert css_token in rendered
-    for script_token in [
-        "is-filter-hidden",
-        "is-neighbor",
-        "neighborhood-edges",
-        "renderWhyLines(",
-        "state.hoverId || state.selectedId",
-        "overlayState",
-        "neighborhoodKey",
-    ]:
-        assert script_token in rendered
-    assert "data-point-number" in rendered
-    assert "path.parentNode.appendChild(path)" not in rendered
 
-    payload = _extract_dashboard_payload(rendered)
+    payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
     assert payload["meta"]["seed_id"] == "seed"
     assert payload["meta"]["strategy"] == "hybrid"
     assert payload["meta"]["summary"] == {"nodes": 2, "edges": 1}
     assert payload["meta"]["plotly_node_order"] == ["related", "seed"]
+    assert len(payload["meta"]["plotly_positions"]) == 2
+    assert len(payload["meta"]["plotly_node_sizes"]) == 2
     seed_node = next(node for node in payload["nodes"] if node["id"] == "seed")
     related_node = next(node for node in payload["nodes"] if node["id"] == "related")
     assert seed_node["provenance"] == "seed"
@@ -466,7 +517,14 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert seed_node["links"]["semantic_scholar"] is not None
     assert isinstance(seed_node["bibtex"], str)
 
-    figure = _extract_dashboard_figure(rendered)
+    collection = _extract_dashboard_script_json(
+        rendered, "citemesh-dashboard-collection"
+    )
+    assert collection["current_result_id"] == "hybrid:seed"
+    assert collection["results"][0]["title"] == "Seed Paper"
+    assert "hybrid:seed" in collection["payloads"]
+
+    figure = _extract_dashboard_script_json(rendered, "citemesh-dashboard-figure")
     assert len(figure["data"]) == 3
     assert len(figure["layout"].get("shapes", [])) == 1
     assert figure["layout"]["uirevision"] == "citemesh-dashboard-static-layout-v1"
@@ -499,6 +557,36 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert min(marker["line"]["width"]) == 0
 
 
+def test_exporter_dashboard_runtime_script_contracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dashboard runtime should stay intact and parse imported HTML safely."""
+
+    class FakeFigure(_BaseFakeFigure):
+        def to_plotly_json(self) -> dict[str, object]:
+            return {"data": self.data, "layout": self.layout}
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "runtime.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    runtime_scripts = _extract_inline_script_bodies(out_path.read_text())
+    assert len(runtime_scripts) == 2
+
+    runtime_script = runtime_scripts[-1]
+    assert "new DOMParser()" in runtime_script
+    assert "function parseImportedPayloadFromText" in runtime_script
+    assert "function hasCompleteDashboardGeometry" in runtime_script
+    assert "escapeRegExp" not in runtime_script
+
+
 def test_exporter_dashboard_missing_plotly_dependency(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -506,8 +594,9 @@ def test_exporter_dashboard_missing_plotly_dependency(
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setitem(sys.modules, "plotly", None)
-    monkeypatch.setitem(sys.modules, "plotly.offline", None)
+    monkeypatch.setattr(
+        export_module, "_load_plotly_dashboard_runtime", raise_import_error
+    )
     with pytest.raises(RuntimeError, match="plotly is required for Dashboard export"):
         exporter.to_dashboard_html(tmp_path / "missing.dashboard.html")
 
@@ -579,7 +668,9 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     out_path = tmp_path / "links.dashboard.html"
     exporter.to_dashboard_html(out_path, theme="light")
 
-    payload = _extract_dashboard_payload(out_path.read_text())
+    payload = _extract_dashboard_script_json(
+        out_path.read_text(), "citemesh-dashboard-data"
+    )
     nodes = {node["id"]: node for node in payload["nodes"]}
 
     arxiv_links = nodes["arxiv:2411.03884"]["links"]
@@ -981,3 +1072,102 @@ def test_model_profiles_match_expected_formatters() -> None:
     assert default.recommended_truncate_dim is None
     assert default.format_query("plain") == "plain"
     assert default.format_document({"title": "T", "abstract": ""}) == "T"
+
+
+def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
+    """JSON export should include enriched fields; CSV and BibTeX should work."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "hybrid"})
+
+    json_path = tmp_path / "enriched.json"
+    csv_path = tmp_path / "enriched.csv"
+    bib_path = tmp_path / "enriched.bib"
+
+    exporter.to_json(json_path)
+    exporter.to_csv(csv_path)
+    exporter.to_bibtex(bib_path)
+
+    # --- JSON enrichment ---
+    payload = json.loads(json_path.read_text())
+    assert "meta" in payload
+    assert payload["meta"]["strategy"] == "hybrid"
+    assert "year_range" in payload["meta"]
+    nodes = payload["nodes"]
+    assert len(nodes) == 2
+    seed_node = next(n for n in nodes if n["is_seed"])
+    assert "provenance" in seed_node
+    assert "seed_relevance" in seed_node
+    assert isinstance(seed_node["seed_relevance"], float)
+    assert "links" in seed_node
+    assert "bibtex" in seed_node
+    assert seed_node["provenance"] == "seed"
+    assert seed_node["seed_relation"] == "seed"
+
+    related_node = next(n for n in nodes if not n["is_seed"])
+    assert related_node["provenance"] in {"citation", "semantic", "both"}
+    assert "links" in related_node
+    assert "semantic_scholar" in related_node["links"]
+
+    # --- CSV ---
+    csv_text = csv_path.read_text()
+    lines = csv_text.strip().split("\n")
+    assert len(lines) == 3  # header + 2 papers
+    header = lines[0]
+    assert "provenance" in header
+    assert "seed_relevance" in header
+    assert "arxiv_url" in header
+
+    # --- BibTeX ---
+    bib_text = bib_path.read_text()
+    assert "@article{" in bib_text
+    assert "Seed Paper" in bib_text or "Related Paper" in bib_text
+
+
+def test_recommendation_export_defaults_to_semantic_provenance(
+    tmp_path: Path,
+) -> None:
+    """Recommendation exports should classify fallback provenance as semantic."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "recommendation"})
+
+    json_path = tmp_path / "recommendation.json"
+    exporter.to_json(json_path)
+
+    payload = json.loads(json_path.read_text())
+    seed_node = next(node for node in payload["nodes"] if node["id"] == seed_id)
+    related_node = next(node for node in payload["nodes"] if node["id"] == "related")
+
+    assert seed_node["provenance"] == "seed"
+    assert seed_node["provenance_base"] == "semantic"
+    assert seed_node["seed_relation"] == "seed"
+    assert related_node["provenance"] == "semantic"
+    assert related_node["provenance_base"] == "semantic"
+    assert related_node["seed_relation"] == "semantic_only"
+
+
+@pytest.mark.parametrize("strategy", ["recommendation", "embedding"])
+def test_semantic_export_uses_graph_strategy_when_metadata_is_omitted(
+    tmp_path: Path, strategy: str
+) -> None:
+    """Semantic exports should stay correct when callers omit exporter metadata."""
+    graph, seed_id = _build_graph()
+    graph.graph["strategy"] = strategy
+    if strategy == "embedding":
+        graph.graph["embedding_runtime"] = {"storage_precision": "int8"}
+
+    exporter = GraphExporter(graph, seed_id)
+    json_path = tmp_path / f"{strategy}.json"
+    exporter.to_json(json_path)
+
+    payload = json.loads(json_path.read_text())
+    assert payload["meta"]["strategy"] == strategy
+
+    seed_node = next(node for node in payload["nodes"] if node["id"] == seed_id)
+    related_node = next(node for node in payload["nodes"] if node["id"] == "related")
+
+    assert seed_node["provenance"] == "seed"
+    assert seed_node["provenance_base"] == "semantic"
+    assert seed_node["seed_relation"] == "seed"
+    assert related_node["provenance"] == "semantic"
+    assert related_node["provenance_base"] == "semantic"
+    assert related_node["seed_relation"] == "semantic_only"

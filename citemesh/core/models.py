@@ -97,16 +97,6 @@ class Paper:
         return "Unknown"
 
     @property
-    def age(self) -> Optional[int]:
-        """Return paper age in years relative to current year.
-
-        :return Optional[int]: Paper age in years or ``None`` when publication year is missing.
-        """
-        if self.year is None:
-            return None
-        return datetime.now().year - self.year
-
-    @property
     def author_names(self) -> Set[str]:
         """Get set of all author names for comparison.
 

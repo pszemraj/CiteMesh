@@ -7,12 +7,13 @@ enabling the Strategy pattern for different similarity computation approaches.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import networkx as nx
 import numpy as np
 
 from citemesh.core import TEMPORAL_CONFIG, Paper
+from citemesh.strategies.similarity import compute_indexed_similarity_score
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,25 @@ def select_capped_undirected_edges(
     return selected_edges
 
 
+def build_capped_undirected_graph(graph: nx.Graph, max_edges_per_node: int) -> nx.Graph:
+    """Copy a graph while retaining only the strongest capped undirected edges.
+
+    :param nx.Graph graph: Source graph whose nodes and metadata should be preserved.
+    :param int max_edges_per_node: Maximum degree per node in the rebuilt graph.
+    :return nx.Graph: Rebuilt graph with selected weighted edges.
+    """
+    filtered_graph = nx.Graph()
+    filtered_graph.graph.update(graph.graph)
+    filtered_graph.add_nodes_from(graph.nodes(data=True))
+
+    for u, v, weight in select_capped_undirected_edges(
+        graph.edges(data=True), max_edges_per_node
+    ):
+        filtered_graph.add_edge(u, v, weight=weight)
+
+    return filtered_graph
+
+
 class GraphBuilderStrategy(ABC):
     """
     Abstract base class for all paper graph building strategies.
@@ -96,6 +116,9 @@ class GraphBuilderStrategy(ABC):
     Subclasses must implement the abstract methods for collecting papers and
     computing similarity, while the base class handles common graph construction logic.
     """
+
+    strategy_name: ClassVar[str] = ""
+    """Canonical strategy token persisted into graph-level metadata."""
 
     def __init__(self, max_papers: int = 40):
         """
@@ -210,7 +233,7 @@ class GraphBuilderStrategy(ABC):
             graph.add_node(
                 paper.paper_id,
                 paper=paper,  # Store full paper object
-                # Also store individual attributes for backward compatibility
+                # Mirror commonly-read scalar fields for render/export paths.
                 title=paper.title,
                 year=paper.year,
                 authors=[a.name for a in paper.authors[:3]],
@@ -220,6 +243,9 @@ class GraphBuilderStrategy(ABC):
                 doi=paper.doi,
                 is_seed=paper.is_seed,
             )
+        resolved_strategy_name = self._resolved_strategy_name()
+        if resolved_strategy_name:
+            graph.graph["strategy"] = resolved_strategy_name
 
         # Step 3: Compute similarities and create edges
         logger.info("Computing similarities and creating edges...")
@@ -244,6 +270,48 @@ class GraphBuilderStrategy(ABC):
             edges_created,
         )
         return graph, actual_seed_id
+
+    def _resolved_strategy_name(self) -> str:
+        """Resolve canonical strategy token for graph metadata.
+
+        Current strategy builders define ``strategy_name`` explicitly.
+
+        :return str: Normalized strategy token or an empty string.
+        """
+        return str(getattr(self, "strategy_name", "") or "").strip().lower()
+
+    def _compute_indexed_similarity(
+        self,
+        paper1: Paper,
+        paper2: Paper,
+        *,
+        with_references_weights: tuple[float, float, float, float],
+        without_references_weights: tuple[float, float, float, float],
+        cap_at_one: bool = False,
+    ) -> float:
+        """Compute indexed similarity with strategy-supplied weighting.
+
+        :param Paper paper1: First paper to compare.
+        :param Paper paper2: Second paper to compare.
+        :param tuple[float, float, float, float] with_references_weights: Component
+            weights used when reference data is available.
+        :param tuple[float, float, float, float] without_references_weights: Component
+            weights used when reference data is unavailable.
+        :param bool cap_at_one: Whether to clamp the combined similarity score to ``1.0``.
+        :return float: Composite indexed similarity score.
+        """
+        return compute_indexed_similarity_score(
+            paper1,
+            paper2,
+            abstract_index=self._abstract_index,
+            temporal_similarity_fn=self.temporal_similarity,
+            citation_similarity_fn=self.citation_similarity,
+            bibliographic_coupling_fn=self.bibliographic_coupling,
+            fetch_references=bool(getattr(self, "fetch_references", False)),
+            with_references_weights=with_references_weights,
+            without_references_weights=without_references_weights,
+            cap_at_one=cap_at_one,
+        )
 
     # Utility methods for common similarity computations
 

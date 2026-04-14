@@ -1,12 +1,12 @@
 # Defaults Tuning Study (February 2026)
 
-This document records the sweep work used to choose current graph-building defaults for hybrid discovery workflows.
+Hybrid-default sweep results used to choose the current discovery-oriented defaults.
 
 Related docs:
 
-- CLI defaults and flags: [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Strategy behavior overview: [Strategy Guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
-- Embedding runtime policy: [Embedding Runtime](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+- CLI defaults and flags: [CLI Usage](../guides/cli.md)
+- Strategy behavior overview: [Strategy Guide](../guides/strategies.md)
+- Embedding runtime policy: [Embedding Runtime](embedding-runtime.md)
 
 ## Scope
 
@@ -76,7 +76,7 @@ Per-run elapsed time has heavy-tail behavior driven by network-bound citation-co
 
 ## Remaining Work
 
-- Citation-count enrichment still shows long-tail latency on some runs; adding a tighter timeout/retry budget would make end-to-end runtime more predictable.
+- Citation-count enrichment is now batched and visible in progress output, but it can still dominate tail latency on some runs; tighter timeout/retry budgets would make end-to-end runtime more predictable.
 - Static plot readability in dense clusters can still improve (label collision handling and optional label-priority filtering).
 
 ## Default Decision

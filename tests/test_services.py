@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import json
 import logging
@@ -13,6 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
+import citemesh.services as services_module
 from citemesh.core import API_CONFIG, Paper
 from citemesh.services import semantic_scholar as s2
 from citemesh.services import semantic_scholar as semantic_module
@@ -23,6 +25,108 @@ from citemesh.services.semantic_scholar import (
     reset_client,
 )
 from tests._helpers import get_paper_id_normalization_cases
+
+
+def _assert_module_reload_is_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    module: Any,
+    blocked_prefixes: tuple[str, ...],
+    expected_exports: set[str],
+) -> None:
+    """Assert that reloading a lazy-export package avoids importing blocked modules."""
+    original_import = builtins.__import__
+
+    def _guarded_import(
+        name: str,
+        globals: Any = None,
+        locals: Any = None,
+        fromlist: object = (),
+        level: int = 0,
+    ) -> Any:
+        if any(
+            name == prefix or name.startswith(f"{prefix}.")
+            for prefix in blocked_prefixes
+        ):
+            raise AssertionError(f"unexpected eager import: {name}")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _guarded_import)
+    reloaded = importlib.reload(module)
+    assert set(reloaded.__all__) == expected_exports
+
+
+def test_service_and_strategy_package_exports() -> None:
+    """Package exports should resolve directly from their defining modules."""
+    from citemesh import EmbeddingGraphBuilder as TopLevelEmbeddingGraphBuilder
+    from citemesh.strategies import EmbeddingGraphBuilder
+
+    assert services_module.get_client is get_client
+    assert services_module.reset_client is reset_client
+    assert services_module.SemanticScholarClient is SemanticScholarClient
+    assert TopLevelEmbeddingGraphBuilder is EmbeddingGraphBuilder
+    assert EmbeddingGraphBuilder.__module__ == "citemesh.strategies.embedding"
+
+
+@pytest.mark.parametrize(
+    ("module", "blocked_prefixes", "expected_exports"),
+    [
+        (
+            services_module,
+            ("citemesh.services.semantic_scholar", "semanticscholar"),
+            {"SemanticScholarClient", "get_client", "reset_client"},
+        ),
+        (
+            importlib.import_module("citemesh.strategies"),
+            (
+                "citemesh.strategies.citation",
+                "citemesh.strategies.embedding",
+                "citemesh.strategies.hybrid",
+                "citemesh.strategies.recommendation",
+            ),
+            {
+                "GraphBuilderStrategy",
+                "CitationGraphBuilder",
+                "RecommendationGraphBuilder",
+                "EmbeddingGraphBuilder",
+                "HybridGraphBuilder",
+            },
+        ),
+        (
+            importlib.import_module("citemesh"),
+            (
+                "citemesh.strategies.citation",
+                "citemesh.strategies.embedding",
+                "citemesh.strategies.hybrid",
+                "citemesh.strategies.recommendation",
+            ),
+            {
+                "__version__",
+                "Paper",
+                "Author",
+                "GraphBuilderStrategy",
+                "CitationGraphBuilder",
+                "RecommendationGraphBuilder",
+                "EmbeddingGraphBuilder",
+                "HybridGraphBuilder",
+            },
+        ),
+    ],
+    ids=["services", "strategies", "top_level"],
+)
+def test_package_init_exports_remain_lazy(
+    monkeypatch: pytest.MonkeyPatch,
+    module: Any,
+    blocked_prefixes: tuple[str, ...],
+    expected_exports: set[str],
+) -> None:
+    """Lazy package exports should not import implementation modules eagerly."""
+    _assert_module_reload_is_lazy(
+        monkeypatch,
+        module=module,
+        blocked_prefixes=blocked_prefixes,
+        expected_exports=expected_exports,
+    )
 
 
 class _MockResponse:
@@ -255,6 +359,43 @@ def test_normalization_and_get_paper_id_contracts() -> None:
     assert client.client.get_paper.call_args.args[0] == "arxiv:2508.14040"
 
 
+def test_get_papers_batches_and_falls_back_for_unmatched_ids() -> None:
+    """Batch paper fetches should map results back to requested IDs and retry misses."""
+    batch_paper = SimpleNamespace(
+        paperId="seed",
+        title="Seed",
+        year=2025,
+        authors=[],
+        citationCount=11,
+        abstract="abstract",
+        fieldsOfStudy=[],
+        externalIds={"ArXiv": "2508.14040"},
+    )
+    fallback_paper = Paper(
+        paper_id="fallback",
+        title="Fallback",
+        year=2024,
+        abstract="fallback abstract",
+        citation_count=22,
+    )
+
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_papers = MagicMock(return_value=([batch_paper], ["missing-id"]))
+    client.get_paper = MagicMock(return_value=fallback_paper)
+
+    result = client.get_papers(["https://arxiv.org/abs/2508.14040", "missing-id"])
+
+    assert set(result) == {"arxiv:2508.14040", "missing-id"}
+    assert result["arxiv:2508.14040"].paper_id == "seed"
+    assert result["missing-id"].paper_id == "fallback"
+    assert client.client.get_papers.call_args.args[0] == [
+        "arxiv:2508.14040",
+        "missing-id",
+    ]
+    assert client.get_paper.call_args.args[0] == "missing-id"
+
+
 def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     """Direct endpoint payload conversion and validation should match API contracts."""
     client = SemanticScholarClient(timeout=1)
@@ -407,7 +548,7 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reference cache should support hit, refresh, corrupt-rebuild, and type-error fallback."""
+    """Reference cache should reuse valid/legacy hits and rebuild invalid payloads."""
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
@@ -428,6 +569,47 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     )
     assert client.get_reference_ids("arxiv:1234.5678") == ["r1", "r2"]
 
+    legacy_mixed_paper_id = s2.normalize_paper_id("seed-mixed")
+    legacy_mixed_cache_path = s2._reference_cache_path(legacy_mixed_paper_id)
+    legacy_mixed_cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": legacy_mixed_paper_id,
+                "references": [
+                    "ok-1",
+                    None,
+                    {"paperId": "ok-2"},
+                    {"paper_id": "ok-3"},
+                    {"paper": {"paperId": "ok-4"}},
+                    {"paper": {"paper_id": "ok-5"}},
+                    {"paperId": "   "},
+                    123,
+                    "ok-1",
+                ],
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        )
+    )
+    client.client.get_paper_references = MagicMock(
+        side_effect=AssertionError(
+            "API should not be called on compatible legacy cache"
+        )
+    )
+    assert client.get_reference_ids("seed-mixed") == [
+        "ok-1",
+        "ok-2",
+        "ok-3",
+        "ok-4",
+        "ok-5",
+    ]
+    assert json.loads(legacy_mixed_cache_path.read_text())["references"] == [
+        "ok-1",
+        "ok-2",
+        "ok-3",
+        "ok-4",
+        "ok-5",
+    ]
+
     client.client.get_paper_references = MagicMock(
         return_value=[
             _make_reference_record("fresh-1"),
@@ -441,121 +623,41 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
     ]
     assert json.loads(cache_path.read_text())["references"] == ["fresh-1", "fresh-2"]
 
-    normalized_seed = s2.normalize_paper_id("seed")
-    seed_cache_path = s2._reference_cache_path(normalized_seed)
-    seed_cache_path.write_text("{bad-json")
-    client.client.get_paper_references = MagicMock(
-        return_value=[_make_reference_record("a"), _make_reference_record("b")]
-    )
-    refs = client.get_reference_ids("seed")
-    assert refs == ["a", "b"]
-    assert json.loads(seed_cache_path.read_text())["references"] == ["a", "b"]
-
-    unicode_seed = s2.normalize_paper_id("seed-unicode")
-    unicode_cache_path = s2._reference_cache_path(unicode_seed)
-    unicode_cache_path.write_bytes(b"\xff\xfe")
-    client.client.get_paper_references = MagicMock(
-        return_value=[_make_reference_record("unicode-fixed")]
-    )
-    unicode_refs = client.get_reference_ids("seed-unicode")
-    assert unicode_refs == ["unicode-fixed"]
-    assert json.loads(unicode_cache_path.read_text())["references"] == ["unicode-fixed"]
-
-    non_object_seed = s2.normalize_paper_id("seed-non-object")
-    non_object_cache_path = s2._reference_cache_path(non_object_seed)
-    non_object_cache_path.write_text(
-        json.dumps(
-            [
-                "not",
-                "a",
-                "dict",
-            ]
-        )
-    )
-    client.client.get_paper_references = MagicMock(
-        return_value=[_make_reference_record("non-object-fixed")]
-    )
-    rebuilt_non_object_refs = client.get_reference_ids("seed-non-object")
-    assert rebuilt_non_object_refs == ["non-object-fixed"]
-    assert json.loads(non_object_cache_path.read_text())["references"] == [
-        "non-object-fixed"
+    rebuild_cases = [
+        ("seed", "{bad-json", "text", ["a", "b"]),
+        ("seed-unicode", b"\xff\xfe", "bytes", ["unicode-fixed"]),
+        (
+            "seed-non-object",
+            json.dumps(["not", "a", "dict"]),
+            "text",
+            ["non-object-fixed"],
+        ),
+        (
+            "seed-malformed",
+            json.dumps(
+                {
+                    "paper_id": s2.normalize_paper_id("seed-malformed"),
+                    "references": {"unexpected": "mapping"},
+                    "version": s2.REFERENCE_CACHE_VERSION,
+                }
+            ),
+            "text",
+            ["fixed-1", "fixed-2"],
+        ),
     ]
-
-    malformed_seed = s2.normalize_paper_id("seed-malformed")
-    malformed_cache_path = s2._reference_cache_path(malformed_seed)
-    malformed_cache_path.write_text(
-        json.dumps(
-            {
-                "paper_id": malformed_seed,
-                "references": {"unexpected": "mapping"},
-                "version": s2.REFERENCE_CACHE_VERSION,
-            }
+    for paper_id, cached_payload, write_mode, rebuilt_ids in rebuild_cases:
+        normalized_paper_id = s2.normalize_paper_id(paper_id)
+        rebuilt_cache_path = s2._reference_cache_path(normalized_paper_id)
+        if write_mode == "bytes":
+            rebuilt_cache_path.write_bytes(cached_payload)
+        else:
+            rebuilt_cache_path.write_text(cached_payload)
+        client.client.get_paper_references = MagicMock(
+            return_value=[_make_reference_record(ref_id) for ref_id in rebuilt_ids]
         )
-    )
-    client.client.get_paper_references = MagicMock(
-        return_value=[
-            _make_reference_record("fixed-1"),
-            _make_reference_record("fixed-2"),
-        ]
-    )
-    rebuilt_refs = client.get_reference_ids("seed-malformed")
-    assert rebuilt_refs == ["fixed-1", "fixed-2"]
-    assert json.loads(malformed_cache_path.read_text())["references"] == [
-        "fixed-1",
-        "fixed-2",
-    ]
-
-    mixed_seed = s2.normalize_paper_id("seed-mixed")
-    mixed_cache_path = s2._reference_cache_path(mixed_seed)
-    mixed_cache_path.write_text(
-        json.dumps(
-            {
-                "paper_id": mixed_seed,
-                "references": [
-                    "ok-1",
-                    None,
-                    {"paperId": "ok-2"},
-                    {"paper_id": "ok-3"},
-                    {"paper": {"paperId": "ok-4"}},
-                    {"paperId": "   "},
-                    123,
-                    "ok-1",
-                ],
-                "version": s2.REFERENCE_CACHE_VERSION,
-            }
-        )
-    )
-    client.client.get_paper_references = MagicMock(
-        side_effect=AssertionError("API should not be called for mixed cache payload")
-    )
-    mixed_refs = client.get_reference_ids("seed-mixed")
-    assert mixed_refs == ["ok-1", "ok-2", "ok-3", "ok-4"]
-    assert json.loads(mixed_cache_path.read_text())["references"] == [
-        "ok-1",
-        "ok-2",
-        "ok-3",
-        "ok-4",
-    ]
-
-    invalid_only_seed = s2.normalize_paper_id("seed-invalid-only")
-    invalid_only_cache_path = s2._reference_cache_path(invalid_only_seed)
-    invalid_only_cache_path.write_text(
-        json.dumps(
-            {
-                "paper_id": invalid_only_seed,
-                "references": [None, {"paperId": "   "}, {"paper": {}}, 123],
-                "version": s2.REFERENCE_CACHE_VERSION,
-            }
-        )
-    )
-    client.client.get_paper_references = MagicMock(
-        return_value=[_make_reference_record("rebuilt-1")]
-    )
-    rebuilt_invalid_only_refs = client.get_reference_ids("seed-invalid-only")
-    assert rebuilt_invalid_only_refs == ["rebuilt-1"]
-    assert json.loads(invalid_only_cache_path.read_text())["references"] == [
-        "rebuilt-1"
-    ]
+        rebuilt_refs = client.get_reference_ids(paper_id)
+        assert rebuilt_refs == rebuilt_ids
+        assert json.loads(rebuilt_cache_path.read_text())["references"] == rebuilt_ids
 
     client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
     assert client.get_reference_ids("seed-type-error") == []
@@ -631,6 +733,37 @@ def test_reference_cache_resilience_contracts(
     assert json.loads(cache_path.read_text()) == prior_payload
 
 
+def test_reference_cache_empty_hit_stays_quiet_in_debug_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Empty cached reference lists should not spam one debug line per paper."""
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    client = SemanticScholarClient(timeout=1)
+
+    normalized = s2.normalize_paper_id("seed-empty")
+    cache_path = s2._reference_cache_path(normalized)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": normalized,
+                "references": [],
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        refs = client.get_reference_ids("seed-empty")
+
+    assert refs == []
+    assert not any(
+        "Loaded 0 cached references" in record.message for record in caplog.records
+    )
+
+
 def test_service_module_lifecycle_contracts() -> None:
     """Singleton/context lifecycle and reload behavior should preserve global state."""
     first_client = get_client()
@@ -675,3 +808,33 @@ def test_service_module_lifecycle_contracts() -> None:
     finally:
         httpx_logger.setLevel(original_levels[0])
         httpcore_logger.setLevel(original_levels[1])
+
+
+def test_get_client_replaces_closed_singleton() -> None:
+    """Closed shared clients should be invalidated and recreated on demand."""
+    previous_session = semantic_module.requests.Session
+    previous_client = semantic_module.SemanticScholar
+    try:
+        semantic_module.requests.Session = _FakeRequestsSession
+        semantic_module.SemanticScholar = _build_fake_semantic_scholar_api()
+
+        reset_client()
+        first = get_client()
+        first.close()
+
+        second = get_client()
+        assert second is not first
+        assert first._closed is True
+        assert second._closed is False
+
+        with get_client() as shared_client:
+            assert shared_client is second
+
+        third = get_client()
+        assert third is not second
+        assert second._closed is True
+        assert third._closed is False
+    finally:
+        reset_client()
+        semantic_module.requests.Session = previous_session
+        semantic_module.SemanticScholar = previous_client

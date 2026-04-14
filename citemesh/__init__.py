@@ -1,9 +1,4 @@
-"""
-CiteMesh: Citation mesh visualization toolkit.
-
-A unified package for creating academic paper similarity graphs using
-multiple strategies: citation networks, semantic embeddings, or hybrid approaches.
-"""
+"""CiteMesh package exports."""
 
 from importlib import import_module
 from typing import Any
@@ -15,7 +10,18 @@ except ImportError:  # pragma: no cover - fallback for editable/source environme
 
 __author__ = "CiteMesh Contributors"
 
-from citemesh.core import Author, Paper
+from .core import Author, Paper
+
+__all__ = [
+    "__version__",
+    "Paper",
+    "Author",
+    "GraphBuilderStrategy",
+    "CitationGraphBuilder",
+    "RecommendationGraphBuilder",
+    "EmbeddingGraphBuilder",
+    "HybridGraphBuilder",
+]
 
 _LAZY_STRATEGY_EXPORTS = {
     "GraphBuilderStrategy": ("citemesh.strategies.base", "GraphBuilderStrategy"),
@@ -31,28 +37,27 @@ _LAZY_STRATEGY_EXPORTS = {
     "HybridGraphBuilder": ("citemesh.strategies.hybrid", "HybridGraphBuilder"),
 }
 
-__all__ = [
-    "__version__",
-    "Paper",
-    "Author",
-    "GraphBuilderStrategy",
-    "CitationGraphBuilder",
-    "RecommendationGraphBuilder",
-    "EmbeddingGraphBuilder",
-    "HybridGraphBuilder",
-]
-
 
 def __getattr__(name: str) -> Any:
-    """Lazily resolve strategy exports to keep optional boundaries lightweight."""
-    if name in _LAZY_STRATEGY_EXPORTS:
-        module_name, attr_name = _LAZY_STRATEGY_EXPORTS[name]
-        value = getattr(import_module(module_name), attr_name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module 'citemesh' has no attribute '{name}'")
+    """Resolve strategy exports lazily to preserve the historical top-level API.
+
+    :param str name: Requested module attribute.
+    :return Any: Lazily imported strategy export.
+    :raises AttributeError: If ``name`` is not a supported export.
+    """
+    target = _LAZY_STRATEGY_EXPORTS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    module_name, attr_name = target
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value
 
 
 def __dir__() -> list[str]:
-    """Expose lazy-exported names to IDEs and runtime introspection."""
+    """Return sorted module attribute names for interactive inspection.
+
+    :return list[str]: Sorted module attribute names plus lazy exports.
+    """
     return sorted(set(globals()) | set(__all__))

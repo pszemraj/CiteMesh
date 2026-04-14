@@ -4,9 +4,8 @@ Runtime environment variables consumed by CiteMesh.
 
 Related docs:
 
-- CLI usage: [Guides: CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Cache behavior: [Guides: Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- Docs index: [Documentation](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
+- CLI usage: [Guides: CLI Usage](../guides/cli.md)
+- Cache behavior: [Guides: Caching & Data](../guides/caching.md)
 
 ## CiteMesh Variables
 
@@ -15,14 +14,13 @@ Related docs:
 | `S2_API_KEY` | unset | non-empty string | Adds Semantic Scholar API key for higher API limits and authenticated requests. |
 | `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path | Overrides CiteMesh cache root used for embedding/reference caches. |
 | `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
-| `CITEMESH_STRICT_OFFLINE_FINGERPRINT` | disabled | `1`, `true`, `yes`, `on` (case-insensitive) | Disables legacy offline assumption that cached SHA for `main` may still be reused when full fingerprint verification is unavailable. |
 
 Implementation references:
 
-- [Semantic Scholar API key lookup](https://github.com/pszemraj/CiteMesh/blob/main/citemesh/services/semantic_scholar.py)
-- [Cache-root override handling](https://github.com/pszemraj/CiteMesh/blob/main/citemesh/data/cache.py)
-- [Embedding lock-timeout handling](https://github.com/pszemraj/CiteMesh/blob/main/citemesh/data/embedding_cache.py)
-- [Strict offline fingerprint mode](https://github.com/pszemraj/CiteMesh/blob/main/citemesh/strategies/embedding.py)
+- [Semantic Scholar API key lookup](../../citemesh/services/semantic_scholar.py)
+- [Cache-root override handling](../../citemesh/data/cache.py)
+- [Embedding lock-timeout handling](../../citemesh/data/embedding_cache.py)
+- [Embedding fingerprint verification](../../citemesh/strategies/embedding.py)
 
 ## Platform Variables Respected by Cache-Root Resolution
 
@@ -34,4 +32,4 @@ These are not CiteMesh-specific, but CiteMesh honors them when `CITEMESH_CACHE_D
 | `LOCALAPPDATA` | Windows | Primary base for default cache root (`%LOCALAPPDATA%\\CiteMesh`). |
 | `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset. |
 
-Cache-root behavior details are covered in [Guides: Caching & Data](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md).
+Cache-root behavior details are covered in [Guides: Caching & Data](../guides/caching.md).

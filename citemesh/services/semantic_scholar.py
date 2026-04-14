@@ -8,13 +8,11 @@ import json
 import logging
 import numbers
 import os
-import re
-import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import quote, unquote, urlparse
+from typing import Any, Callable, Dict, List, Optional, Sequence
+from urllib.parse import quote
 
 import requests
 from semanticscholar import SemanticScholar
@@ -22,6 +20,11 @@ from semanticscholar.SemanticScholarException import ObjectNotFoundException
 
 from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data import get_cache_dir
+from citemesh.data.cache import atomic_write_json
+from citemesh.paper_ids import (
+    external_ids_from_canonical_paper_id,
+    normalize_paper_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,121 +72,24 @@ def _default_paper_fields() -> List[str]:
     return list(DEFAULT_PAPER_FIELDS)
 
 
-def _strip_arxiv_version(identifier: str) -> str:
-    """Strip trailing arXiv version suffixes.
+def _paper_lookup_keys(paper: Paper) -> set[str]:
+    """Build normalized aliases for matching batch responses to requested IDs.
 
-    :param str identifier: Raw arXiv identifier candidate.
-    :return str: Identifier without trailing ``v<digits>`` suffix.
+    :param Paper paper: Converted paper payload from Semantic Scholar.
+    :return set[str]: Normalized identifier aliases for the paper.
     """
-    return re.sub(r"v\d+$", "", identifier.strip(), flags=re.IGNORECASE)
+    keys: set[str] = set()
+    candidates = [paper.paper_id, paper.doi]
+    if paper.arxiv_id:
+        candidates.extend([paper.arxiv_id, f"arxiv:{paper.arxiv_id}"])
 
+    for candidate in candidates:
+        if not candidate:
+            continue
+        with contextlib.suppress(ValueError):
+            keys.add(normalize_paper_id(candidate))
 
-def _extract_arxiv_identifier(raw_path: str) -> Optional[str]:
-    """
-    Extract an arXiv identifier from an arXiv URL path.
-
-    :param str raw_path: URL path component (for example ``/abs/2508.14040``).
-    :return Optional[str]: Canonical arXiv identifier suffix without prefix (for example ``2508.14040``), or ``None`` when extraction fails.
-    """
-    segments = [segment for segment in raw_path.strip("/").split("/") if segment]
-    if not segments:
-        return None
-
-    if segments[0] in {"abs", "pdf"}:
-        candidate = "/".join(segments[1:])
-    else:
-        candidate = "/".join(segments)
-
-    candidate = candidate.strip()
-    if not candidate:
-        return None
-
-    if candidate.endswith(".pdf"):
-        candidate = candidate[:-4]
-    candidate = candidate.strip()
-
-    # Some valid arXiv URLs include a legacy "arXiv:" prefix in the path.
-    candidate = re.sub(r"^(?:arxiv:)", "", candidate, flags=re.IGNORECASE)
-    candidate = _strip_arxiv_version(candidate)
-    return candidate or None
-
-
-def _host_matches_domain(host: str, domain: str) -> bool:
-    """Check whether a parsed host belongs to an expected domain.
-
-    :param str host: Parsed hostname candidate.
-    :param str domain: Expected domain suffix.
-    :return bool: ``True`` when host is exactly ``domain`` or a valid subdomain.
-    """
-    normalized_host = host.lower().strip()
-    normalized_domain = domain.lower().strip()
-    return normalized_host == normalized_domain or normalized_host.endswith(
-        f".{normalized_domain}"
-    )
-
-
-def normalize_paper_id(paper_id: str) -> str:
-    """
-    Normalize paper identifiers (including arXiv/DOI URLs) for S2 API calls.
-
-    :param str paper_id: Raw user-provided identifier (ID or URL).
-    :return str: Canonical Semantic Scholar paper identifier string.
-    :raises ValueError: If the identifier is invalid or empty after trimming.
-    """
-    if not isinstance(paper_id, str):
-        raise ValueError(f"Invalid paper ID: {paper_id}")
-
-    normalized = paper_id.strip()
-    if not normalized:
-        raise ValueError(f"Invalid paper ID: {paper_id}")
-
-    lowered = normalized.lower()
-
-    if lowered.startswith("doi:"):
-        suffix = unquote(normalized.split(":", 1)[1]).strip()
-        if not suffix:
-            raise ValueError(f"Invalid paper ID: {paper_id}")
-        return suffix
-
-    if lowered.startswith("arxiv:"):
-        suffix = unquote(normalized.split(":", 1)[1]).strip()
-        suffix = _strip_arxiv_version(suffix)
-        if not suffix:
-            raise ValueError(f"Invalid paper ID: {paper_id}")
-        return f"arxiv:{suffix}"
-
-    if lowered.startswith("http://") or lowered.startswith("https://"):
-        parsed = urlparse(normalized)
-        host = (parsed.hostname or "").lower()
-        path = unquote(parsed.path)
-
-        if _host_matches_domain(host, "arxiv.org"):
-            arxiv_id = _extract_arxiv_identifier(path)
-            if arxiv_id:
-                return f"arxiv:{arxiv_id}"
-
-        if _host_matches_domain(host, "doi.org"):
-            doi_id = path.strip("/")
-            if doi_id:
-                return doi_id
-
-    # Support schemeless URL-like IDs such as doi.org/<id> or arxiv.org/abs/<id>.
-    if "://" not in lowered and "/" in lowered:
-        parsed = urlparse(f"https://{normalized}")
-        host = (parsed.hostname or "").lower()
-        path = unquote(parsed.path)
-
-        if _host_matches_domain(host, "doi.org"):
-            doi_id = path.strip("/")
-            if doi_id:
-                return doi_id
-
-        if _host_matches_domain(host, "arxiv.org"):
-            arxiv_id = _extract_arxiv_identifier(path)
-            if arxiv_id:
-                return f"arxiv:{arxiv_id}"
-
-    return normalized
+    return keys
 
 
 def _reference_cache_path(paper_id: str) -> Path:
@@ -196,11 +102,51 @@ def _reference_cache_path(paper_id: str) -> Path:
     return _reference_cache_dir() / f"{digest}.json"
 
 
+def _reference_id_candidate(raw_value: Any) -> Optional[str]:
+    """Extract a paper ID from accepted reference payload shapes.
+
+    Supports current cache entries, legacy mixed-format cache entries, and
+    Semantic Scholar relation objects returned by the SDK.
+
+    :param Any raw_value: Raw reference-like entry.
+    :return Optional[str]: Candidate paper ID string, or ``None`` when absent.
+    """
+    if isinstance(raw_value, str):
+        return raw_value
+
+    if isinstance(raw_value, dict):
+        for key in ("paperId", "paper_id"):
+            candidate = raw_value.get(key)
+            if isinstance(candidate, str):
+                return candidate
+
+        nested_paper = raw_value.get("paper")
+        if isinstance(nested_paper, dict):
+            for key in ("paperId", "paper_id"):
+                candidate = nested_paper.get(key)
+                if isinstance(candidate, str):
+                    return candidate
+        return None
+
+    for attr in ("paperId", "paper_id"):
+        candidate = getattr(raw_value, attr, None)
+        if isinstance(candidate, str):
+            return candidate
+
+    nested_paper = getattr(raw_value, "paper", None)
+    for attr in ("paperId", "paper_id"):
+        candidate = getattr(nested_paper, attr, None)
+        if isinstance(candidate, str):
+            return candidate
+
+    return None
+
+
 def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
     """Validate and normalize cached reference ID payloads.
 
     Supports current payloads (list of strings) and legacy/mixed list entries
-    that include ``{"paperId": ...}``-style objects.
+    that store paper IDs in relation-shaped dictionaries.
 
     :param Any payload: Cached ``references`` field from JSON payload.
     :return Optional[List[str]]: Normalized ID list, or ``None`` when invalid.
@@ -212,22 +158,9 @@ def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
     seen: set[str] = set()
 
     for raw_value in payload:
-        candidate: Optional[str] = None
-        if isinstance(raw_value, str):
-            candidate = raw_value
-        elif isinstance(raw_value, dict):
-            if isinstance(raw_value.get("paperId"), str):
-                candidate = raw_value["paperId"]
-            elif isinstance(raw_value.get("paper_id"), str):
-                candidate = raw_value["paper_id"]
-            elif isinstance(raw_value.get("paper"), dict) and isinstance(
-                raw_value["paper"].get("paperId"), str
-            ):
-                candidate = raw_value["paper"]["paperId"]
-
+        candidate = _reference_id_candidate(raw_value)
         if candidate is None:
             continue
-
         paper_id = candidate.strip()
         if not paper_id or paper_id in seen:
             continue
@@ -308,6 +241,11 @@ class SemanticScholarClient:
         """Close the HTTP session and underlying API client handles."""
         if self._closed:
             return
+        self._closed = True
+        global _client_instance
+        with _client_lock:
+            if _client_instance is self:
+                _client_instance = None
         with contextlib.suppress(Exception):
             self._session.close()
         client_session = getattr(self.client, "session", None)
@@ -318,50 +256,11 @@ class SemanticScholarClient:
             close_api_client = getattr(self.client, "close", None)
             if callable(close_api_client):
                 close_api_client()
-        self._closed = True
 
     def __del__(self) -> None:
         """Attempt to close sessions on object finalization."""
         with contextlib.suppress(Exception):
             self.close()
-
-    def _atomic_write_json(self, cache_path: Path, payload: Dict[str, Any]) -> None:
-        """Write JSON payload with crash-safe atomic rename.
-
-        :param Path cache_path: Target cache file path.
-        :param Dict[str, Any] payload: JSON payload to persist.
-        """
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path: Optional[Path] = None
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{cache_path.name}.",
-            suffix=".tmp",
-            dir=cache_path.parent,
-            text=True,
-        )
-        tmp_path = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                json.dump(payload, tmp, sort_keys=True)
-                tmp.flush()
-                os.fsync(tmp.fileno())
-
-            os.replace(tmp_name, cache_path)
-            with cache_path.open("r+b") as final_file:
-                os.fsync(final_file.fileno())
-            directory_fd: Optional[int] = None
-            try:
-                directory_fd = os.open(str(cache_path.parent), os.O_RDONLY)
-                os.fsync(directory_fd)
-            except OSError:
-                pass
-            finally:
-                if directory_fd is not None:
-                    os.close(directory_fd)
-        finally:
-            if tmp_path is not None and tmp_path.exists():
-                with contextlib.suppress(Exception):
-                    tmp_path.unlink()
 
     def _persist_reference_cache_entry(
         self, cache_path: Path, paper_id: str, reference_ids: List[str]
@@ -378,7 +277,7 @@ class SemanticScholarClient:
             normalized_reference_ids = []
 
         try:
-            self._atomic_write_json(
+            atomic_write_json(
                 cache_path,
                 {
                     "paper_id": paper_id,
@@ -470,44 +369,74 @@ class SemanticScholarClient:
                 )
         return API_CONFIG.retry_delay
 
-    @staticmethod
-    def _extract_venue_from_api_paper(api_paper: Any) -> str:
-        """Extract publication venue label from Semantic Scholar API objects.
+    def _call_with_retries(
+        self,
+        operation: Callable[[], Any],
+        *,
+        on_retry: Callable[[int, float, Exception], None],
+        on_final_failure: Callable[[Exception], Any],
+        handled_exceptions: tuple[
+            tuple[type[Exception], Callable[[Exception], Any]], ...
+        ] = (),
+    ) -> Any:
+        """Run an API operation with shared retry/backoff behavior.
 
-        :param Any api_paper: Raw API object.
-        :return str: Normalized venue name (or empty string when unavailable).
+        :param Callable[[], Any] operation: Zero-argument API operation to execute.
+        :param Callable[[int, float, Exception], None] on_retry: Callback invoked before
+            each retry with 1-based attempt count, sleep delay, and triggering exception.
+        :param Callable[[Exception], Any] on_final_failure: Callback used to produce the
+            final return value or raise when retries are exhausted.
+        :param tuple[tuple[type[Exception], Callable[[Exception], Any]], ...] handled_exceptions:
+            Exception-specific handlers that short-circuit normal retry handling.
+        :return Any: Result produced by ``operation`` or one of the failure handlers.
         """
-        direct_venue = getattr(api_paper, "venue", None)
-        if isinstance(direct_venue, str) and direct_venue.strip():
-            return direct_venue.strip()
+        for attempt in range(API_CONFIG.max_retries):
+            try:
+                self._rate_limit()
+                return operation()
+            except Exception as exc:
+                for error_type, handler in handled_exceptions:
+                    if isinstance(exc, error_type):
+                        return handler(exc)
 
-        publication_venue = getattr(api_paper, "publicationVenue", None)
-        publication_venue_name = getattr(publication_venue, "name", None)
-        if isinstance(publication_venue_name, str) and publication_venue_name.strip():
-            return publication_venue_name.strip()
+                if attempt < API_CONFIG.max_retries - 1:
+                    wait_time = self._retry_wait_time(exc, attempt)
+                    on_retry(attempt + 1, wait_time, exc)
+                    time.sleep(wait_time)
+                    continue
 
-        journal = getattr(api_paper, "journal", None)
-        journal_name = getattr(journal, "name", None)
-        if isinstance(journal_name, str) and journal_name.strip():
-            return journal_name.strip()
+                return on_final_failure(exc)
 
+        raise AssertionError("retry loop exhausted without returning")
+
+    @staticmethod
+    def _extract_venue_name(value: object) -> str:
+        """Normalize venue-like payload values into a display string.
+
+        :param object value: Raw venue payload value.
+        :return str: Normalized venue string (empty when unavailable).
+        """
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            value = value.get("name")
+        else:
+            value = getattr(value, "name", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
         return ""
 
-    @staticmethod
-    def _extract_venue_from_record(record: Dict[str, Any]) -> str:
-        """Extract publication venue label from recommendation/search payloads.
+    @classmethod
+    def _extract_venue(cls, *candidates: object) -> str:
+        """Extract the first non-empty venue label from candidate payloads.
 
-        :param Dict[str, Any] record: Recommendation/search payload dict.
-        :return str: Normalized venue string (empty when unknown).
+        :param object candidates: Venue candidate payloads.
+        :return str: Normalized venue string (empty when unavailable).
         """
-        for key in ("venue", "publicationVenue", "journal"):
-            value = record.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-            if isinstance(value, dict):
-                name = value.get("name")
-                if isinstance(name, str) and name.strip():
-                    return name.strip()
+        for candidate in candidates:
+            venue = cls._extract_venue_name(candidate)
+            if venue:
+                return venue
         return ""
 
     @staticmethod
@@ -536,55 +465,124 @@ class SemanticScholarClient:
         return arxiv_id, doi
 
     @classmethod
-    def _extract_external_ids_from_api_paper(cls, api_paper: Any) -> tuple[str, str]:
-        """Extract arXiv and DOI values from API paper payloads.
+    def _extract_external_ids(cls, external_ids: object) -> tuple[str, str]:
+        """Extract arXiv and DOI values from raw external-id payloads.
 
-        :param Any api_paper: Raw Semantic Scholar API object.
+        :param object external_ids: Raw external ID payload.
         :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
         """
-        external_ids = getattr(api_paper, "externalIds", None)
         if isinstance(external_ids, dict):
             return cls._extract_external_ids_from_mapping(external_ids)
-
         return "", ""
 
     @classmethod
-    def _extract_external_ids_from_record(
-        cls, record: Dict[str, Any]
+    def _resolve_external_ids(
+        cls, external_ids: object, paper_id: object
     ) -> tuple[str, str]:
-        """Extract arXiv and DOI values from recommendation/search dict records.
+        """Resolve external IDs from payload data with canonical-ID fallback.
 
-        :param Dict[str, Any] record: Recommendation/search record.
-        :return tuple[str, str]: ``(arxiv_id, doi)`` normalized identifiers.
+        :param object external_ids: Raw external ID payload.
+        :param object paper_id: Canonical or near-canonical paper ID fallback.
+        :return tuple[str, str]: ``(arxiv_id, doi)`` pair.
         """
-        external_ids = record.get("externalIds")
-        if isinstance(external_ids, dict):
-            return cls._extract_external_ids_from_mapping(external_ids)
-        return "", ""
+        arxiv_id, doi = cls._extract_external_ids(external_ids)
+        fallback_arxiv_id, fallback_doi = external_ids_from_canonical_paper_id(
+            str(paper_id)
+        )
+        return arxiv_id or fallback_arxiv_id, doi or fallback_doi
 
     @staticmethod
-    def _external_ids_from_paper_id(paper_id: str) -> tuple[str, str]:
-        """Infer arXiv/DOI identifiers from canonical paper IDs when possible.
+    def _payload_get(payload: object, key: str, default: Any = None) -> Any:
+        """Read a field from dict-like or object-like API payloads.
 
-        :param str paper_id: Canonical paper ID.
-        :return tuple[str, str]: ``(arxiv_id, doi)`` inference tuple.
+        :param object payload: Raw API payload object or mapping.
+        :param str key: Field name to read.
+        :param Any default: Value returned when the field is absent.
+        :return Any: Extracted field value or ``default`` when unavailable.
         """
-        normalized = str(paper_id or "").strip()
-        if not normalized:
-            return "", ""
+        if isinstance(payload, dict):
+            return payload.get(key, default)
+        return getattr(payload, key, default)
 
-        lowered = normalized.lower()
-        if lowered.startswith("arxiv:"):
-            return _strip_arxiv_version(normalized.split(":", 1)[1]), ""
+    @classmethod
+    def _extract_authors(cls, raw_authors: object) -> list[Author]:
+        """Extract up to three authors from raw API payload shapes.
 
-        if lowered.startswith("doi:"):
-            suffix = normalized.split(":", 1)[1].strip()
-            return "", suffix
+        :param object raw_authors: Raw authors payload from Semantic Scholar.
+        :return list[Author]: Up to three normalized author records.
+        """
+        if not isinstance(raw_authors, list):
+            return []
 
-        if re.match(r"^10\.\d{4,9}/\S+$", normalized):
-            return "", normalized
+        authors: list[Author] = []
+        for raw_author in raw_authors[:3]:
+            name = cls._payload_get(raw_author, "name")
+            if not isinstance(name, str) or not name:
+                continue
+            authors.append(
+                Author(
+                    name=name,
+                    author_id=cls._payload_get(raw_author, "authorId"),
+                )
+            )
+        return authors
 
-        return "", ""
+    @staticmethod
+    def _extract_categories(*raw_candidates: object) -> list[str]:
+        """Return the first usable category list from candidate payload fields.
+
+        :param object raw_candidates: Candidate category payload values.
+        :return list[str]: First normalized non-empty category list.
+        """
+        for raw_categories in raw_candidates:
+            if isinstance(raw_categories, str):
+                return [raw_categories]
+            if isinstance(raw_categories, list):
+                return [category for category in raw_categories if category]
+        return []
+
+    def _convert_payload_paper(
+        self,
+        payload: object,
+        *,
+        category_keys: tuple[str, ...],
+        references: Optional[list[str]] = None,
+    ) -> Optional[Paper]:
+        """Convert a dict-like or object-like paper payload into a ``Paper`` model.
+
+        :param object payload: Raw Semantic Scholar payload object or mapping.
+        :param tuple[str, ...] category_keys: Category field names checked in order.
+        :param Optional[list[str]] references: Optional normalized reference IDs.
+        :return Optional[Paper]: Converted paper or ``None`` when no usable paper ID exists.
+        """
+        paper_id = self._payload_get(payload, "paperId")
+        if not isinstance(paper_id, str) or not paper_id:
+            return None
+
+        arxiv_id, doi = self._resolve_external_ids(
+            self._payload_get(payload, "externalIds"),
+            paper_id,
+        )
+        return Paper(
+            paper_id=paper_id,
+            title=self._payload_get(payload, "title") or "Unknown",
+            year=self._payload_get(payload, "year"),
+            authors=self._extract_authors(self._payload_get(payload, "authors")),
+            citation_count=self._payload_get(payload, "citationCount", 0) or 0,
+            abstract=self._payload_get(payload, "abstract") or "",
+            venue=self._extract_venue(
+                self._payload_get(payload, "venue"),
+                self._payload_get(payload, "publicationVenue"),
+                self._payload_get(payload, "journal"),
+            ),
+            arxiv_id=arxiv_id,
+            doi=doi,
+            categories=self._extract_categories(
+                *(self._payload_get(payload, key) for key in category_keys)
+            ),
+            references=references or [],
+            is_seed=False,
+        )
 
     def _convert_api_paper(self, api_paper: Any) -> Optional[Paper]:
         """
@@ -594,48 +592,10 @@ class SemanticScholarClient:
         :return Optional[Paper]: Paper object or None if conversion fails
         """
         try:
-            if not api_paper or not hasattr(api_paper, "paperId"):
-                return None
-
-            # Extract authors
-            authors = []
-            if hasattr(api_paper, "authors") and api_paper.authors:
-                for author in api_paper.authors[:3]:
-                    if hasattr(author, "name") and author.name:
-                        author_id = (
-                            getattr(author, "authorId", None)
-                            if hasattr(author, "authorId")
-                            else None
-                        )
-                        authors.append(Author(name=author.name, author_id=author_id))
-
-            categories = []
-            if hasattr(api_paper, "fields") and api_paper.fields:
-                categories = [f for f in api_paper.fields if f]
-            elif hasattr(api_paper, "fieldsOfStudy") and api_paper.fieldsOfStudy:
-                categories = [f for f in api_paper.fieldsOfStudy if f]
-            arxiv_id, doi = self._extract_external_ids_from_api_paper(api_paper)
-            fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
-                str(api_paper.paperId)
+            return self._convert_payload_paper(
+                api_paper,
+                category_keys=("fields", "fieldsOfStudy"),
             )
-            arxiv_id = arxiv_id or fallback_arxiv_id
-            doi = doi or fallback_doi
-
-            return Paper(
-                paper_id=api_paper.paperId,
-                title=api_paper.title or "Unknown",
-                year=getattr(api_paper, "year", None),
-                authors=authors,
-                citation_count=api_paper.citationCount or 0,
-                abstract=getattr(api_paper, "abstract", "") or "",
-                venue=self._extract_venue_from_api_paper(api_paper),
-                arxiv_id=arxiv_id,
-                doi=doi,
-                categories=categories,
-                references=[],  # Will be populated separately if needed
-                is_seed=False,
-            )
-
         except Exception as exc:
             logger.warning("Failed to convert API paper: %s", exc)
             return None
@@ -647,46 +607,10 @@ class SemanticScholarClient:
         :return Optional[Paper]: Parsed Paper model or ``None`` on malformed payload.
         """
         try:
-            paper_id = rec.get("paperId")
-            if not paper_id:
-                return None
-
-            authors = []
-            for author_data in rec.get("authors", [])[:3]:
-                if isinstance(author_data, dict):
-                    name = author_data.get("name")
-                    if name:
-                        authors.append(
-                            Author(
-                                name=name,
-                                author_id=author_data.get("authorId"),
-                            )
-                        )
-
-            categories = rec.get("fieldsOfStudy") or rec.get("fields") or []
-            if isinstance(categories, str):
-                categories = [categories]
-            references = self._extract_reference_ids(rec.get("references"))
-            arxiv_id, doi = self._extract_external_ids_from_record(rec)
-            fallback_arxiv_id, fallback_doi = self._external_ids_from_paper_id(
-                str(paper_id)
-            )
-            arxiv_id = arxiv_id or fallback_arxiv_id
-            doi = doi or fallback_doi
-
-            return Paper(
-                paper_id=paper_id,
-                title=rec.get("title") or "Unknown",
-                year=rec.get("year"),
-                authors=authors,
-                citation_count=rec.get("citationCount", 0) or 0,
-                abstract=rec.get("abstract") or "",
-                venue=self._extract_venue_from_record(rec),
-                arxiv_id=arxiv_id,
-                doi=doi,
-                categories=categories,
-                references=references,
-                is_seed=False,
+            return self._convert_payload_paper(
+                rec,
+                category_keys=("fieldsOfStudy", "fields"),
+                references=self._extract_reference_ids(rec.get("references")),
             )
         except (TypeError, ValueError) as exc:
             logger.debug("Skipping malformed recommendation record: %s", exc)
@@ -720,32 +644,7 @@ class SemanticScholarClient:
             parsed.append(normalized)
 
         for ref in raw_references:
-            if isinstance(ref, str):
-                _add_candidate(ref)
-                continue
-
-            if isinstance(ref, dict):
-                ref_id = ref.get("paperId") or ref.get("paper_id")
-                if isinstance(ref_id, str):
-                    _add_candidate(ref_id)
-                    continue
-
-                nested_paper = ref.get("paper")
-                if isinstance(nested_paper, dict):
-                    nested_id = nested_paper.get("paperId")
-                    if isinstance(nested_id, str):
-                        _add_candidate(nested_id)
-                continue
-
-            ref_id = getattr(ref, "paperId", None)
-            if isinstance(ref_id, str):
-                _add_candidate(ref_id)
-                continue
-
-            nested_paper = getattr(ref, "paper", None)
-            nested_id = getattr(nested_paper, "paperId", None)
-            if isinstance(nested_id, str):
-                _add_candidate(nested_id)
+            _add_candidate(_reference_id_candidate(ref))
 
         return parsed
 
@@ -814,52 +713,164 @@ class SemanticScholarClient:
             raise ValueError(f"Invalid paper ID: {paper_id}")
 
         paper_id = normalize_paper_id(paper_id)
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                fields = _default_paper_fields()
-                if fetch_references:
-                    fields.append("references")
+        fields = _default_paper_fields()
+        if fetch_references:
+            fields.append("references")
 
-                api_paper = self.client.get_paper(paper_id, fields=fields)
-                if not api_paper:
-                    logger.warning("Paper not found: %s", paper_id)
-                    return None
+        def _operation() -> Optional[Paper]:
+            """Fetch and normalize one paper payload from the API client.
 
-                paper = self._convert_api_paper(api_paper)
-                if fetch_references and paper and hasattr(api_paper, "references"):
-                    if api_paper.references:
-                        paper.references = [
-                            ref.paperId
-                            for ref in api_paper.references
-                            if hasattr(ref, "paperId") and ref.paperId
-                        ]
-                return paper
-
-            except ObjectNotFoundException:
+            :return Optional[Paper]: Converted paper or ``None`` when absent.
+            """
+            api_paper = self.client.get_paper(paper_id, fields=fields)
+            if not api_paper:
                 logger.warning("Paper not found: %s", paper_id)
                 return None
-            except Exception as exc:
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    logger.warning(
-                        "Attempt %s failed for %s: %s. Retrying in %ss",
-                        attempt + 1,
-                        paper_id,
-                        exc,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                else:
-                    logger.error(
-                        "Failed to fetch paper %s after %s attempts: %s",
-                        paper_id,
-                        API_CONFIG.max_retries,
-                        exc,
-                    )
-                    return None
 
-        return None
+            paper = self._convert_api_paper(api_paper)
+            if fetch_references and paper:
+                paper.references = self._extract_reference_ids(
+                    getattr(api_paper, "references", None)
+                )
+            return paper
+
+        return self._call_with_retries(
+            _operation,
+            on_retry=lambda attempt, wait_time, exc: logger.warning(
+                "Attempt %s failed for %s: %s. Retrying in %ss",
+                attempt,
+                paper_id,
+                exc,
+                wait_time,
+            ),
+            on_final_failure=lambda exc: (
+                logger.error(
+                    "Failed to fetch paper %s after %s attempts: %s",
+                    paper_id,
+                    API_CONFIG.max_retries,
+                    exc,
+                )
+                or None
+            ),
+            handled_exceptions=(
+                (
+                    ObjectNotFoundException,
+                    lambda _exc: (
+                        logger.warning("Paper not found: %s", paper_id) or None
+                    ),
+                ),
+            ),
+        )
+
+    def get_papers(self, paper_ids: Sequence[str]) -> Dict[str, Paper]:
+        """Fetch multiple papers by ID, preferring the batch endpoint when available.
+
+        :param Sequence[str] paper_ids: Paper identifiers (DOI, arXiv ID, or S2 IDs).
+        :return Dict[str, Paper]: Mapping of normalized requested IDs to fetched papers.
+        :raises ValueError: If any requested ID is missing or not a string.
+        """
+        normalized_ids: list[str] = []
+        for raw_paper_id in paper_ids:
+            if not raw_paper_id or not isinstance(raw_paper_id, str):
+                raise ValueError(f"Invalid paper ID: {raw_paper_id}")
+            normalized_ids.append(normalize_paper_id(raw_paper_id))
+
+        normalized_ids = list(dict.fromkeys(normalized_ids))
+        if not normalized_ids:
+            return {}
+
+        batch_fetch = getattr(self.client, "get_papers", None)
+        if not callable(batch_fetch):
+            return {
+                paper_id: paper
+                for paper_id in normalized_ids
+                if (paper := self.get_paper(paper_id)) is not None
+            }
+
+        def _operation() -> Dict[str, Paper]:
+            """Fetch and match a batch of paper payloads to requested identifiers.
+
+            :return Dict[str, Paper]: Matched batch results keyed by requested ID.
+            """
+            api_response = batch_fetch(
+                normalized_ids,
+                fields=_default_paper_fields(),
+                return_not_found=True,
+            )
+            if isinstance(api_response, tuple):
+                api_papers = api_response[0]
+            elif isinstance(api_response, list):
+                api_papers = api_response
+            else:
+                raise TypeError(
+                    "Unexpected response type from Semantic Scholar batch fetch: "
+                    f"{type(api_response).__name__}"
+                )
+
+            matched: Dict[str, Paper] = {}
+            remaining_ids = set(normalized_ids)
+            for api_paper in api_papers:
+                paper = self._convert_api_paper(api_paper)
+                if paper is None:
+                    continue
+
+                lookup_keys = _paper_lookup_keys(paper)
+                matched_id = next(
+                    (
+                        requested_id
+                        for requested_id in normalized_ids
+                        if requested_id in remaining_ids and requested_id in lookup_keys
+                    ),
+                    None,
+                )
+                if matched_id is None:
+                    continue
+
+                matched[matched_id] = paper
+                remaining_ids.remove(matched_id)
+
+            return matched
+
+        matched = self._call_with_retries(
+            _operation,
+            on_retry=lambda attempt, wait_time, exc: logger.warning(
+                "Failed to batch fetch papers (attempt %s). Retrying in %ss: %s",
+                attempt,
+                wait_time,
+                exc,
+            ),
+            on_final_failure=lambda exc: (
+                logger.warning(
+                    "Failed to batch fetch %s papers after %s attempts: %s",
+                    len(normalized_ids),
+                    API_CONFIG.max_retries,
+                    exc,
+                )
+                or {}
+            ),
+            handled_exceptions=(
+                (
+                    ObjectNotFoundException,
+                    lambda _exc: {},
+                ),
+            ),
+        )
+
+        unresolved_ids = [
+            paper_id for paper_id in normalized_ids if paper_id not in matched
+        ]
+        if unresolved_ids:
+            logger.debug(
+                "Falling back to single-paper fetch for %d unresolved batch IDs.",
+                len(unresolved_ids),
+            )
+
+        for paper_id in unresolved_ids:
+            paper = self.get_paper(paper_id)
+            if paper is not None:
+                matched[paper_id] = paper
+
+        return matched
 
     def get_paper_citations(self, paper_id: str, limit: int = 20) -> List[Paper]:
         """
@@ -917,54 +928,58 @@ class SemanticScholarClient:
         papers: List[Paper] = []
         normalized_paper_id = normalize_paper_id(paper_id)
 
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                relation_records = fetch_method(normalized_paper_id, limit=limit)
-                if not relation_records:
-                    return papers
+        def _operation() -> List[Paper]:
+            """Fetch and convert citation/reference relation records.
 
-                for record in relation_records:
-                    if (
-                        hasattr(record, "paper")
-                        and record.paper
-                        and hasattr(record.paper, "paperId")
-                    ):
-                        paper = self._convert_api_paper(record.paper)
-                        if paper:
-                            papers.append(paper)
-
-                    if len(papers) >= limit:
-                        break
-
+            :return List[Paper]: Converted relation papers collected so far.
+            """
+            relation_records = fetch_method(normalized_paper_id, limit=limit)
+            if not relation_records:
                 return papers
 
-            except ObjectNotFoundException:
+            for record in relation_records:
+                paper = self._convert_api_paper(getattr(record, "paper", None))
+                if paper:
+                    papers.append(paper)
+
+                if len(papers) >= limit:
+                    break
+
+            return papers
+
+        return self._call_with_retries(
+            _operation,
+            on_retry=lambda attempt, wait_time, exc: logger.warning(
+                "Failed to fetch %s for %s (attempt %s). Retrying in %ss",
+                relation_label,
+                normalized_paper_id,
+                attempt,
+                wait_time,
+            ),
+            on_final_failure=lambda exc: (
                 logger.warning(
-                    "Paper not found for %s: %s", relation_label, normalized_paper_id
+                    "Failed to fetch %s for %s after %s attempts: %s",
+                    relation_label,
+                    normalized_paper_id,
+                    API_CONFIG.max_retries,
+                    exc,
                 )
-                return papers
-            except Exception as exc:
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    logger.warning(
-                        "Failed to fetch %s for %s (attempt %s). Retrying in %ss",
-                        relation_label,
-                        normalized_paper_id,
-                        attempt + 1,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                else:
-                    logger.warning(
-                        "Failed to fetch %s for %s after %s attempts: %s",
-                        relation_label,
-                        normalized_paper_id,
-                        API_CONFIG.max_retries,
-                        exc,
-                    )
-
-        return papers
+                or papers
+            ),
+            handled_exceptions=(
+                (
+                    ObjectNotFoundException,
+                    lambda _exc: (
+                        logger.warning(
+                            "Paper not found for %s: %s",
+                            relation_label,
+                            normalized_paper_id,
+                        )
+                        or papers
+                    ),
+                ),
+            ),
+        )
 
     def get_reference_ids(
         self, paper_id: str, *, force_refresh: bool = False
@@ -1005,95 +1020,96 @@ class SemanticScholarClient:
                                 normalized_paper_id,
                                 refs,
                             )
-                        logger.debug(
-                            "Loaded %d cached references for %s",
-                            len(refs),
-                            normalized_paper_id,
-                        )
+                        if refs:
+                            logger.debug(
+                                "Loaded %d cached references for %s",
+                                len(refs),
+                                normalized_paper_id,
+                            )
                         return refs
             except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
                 with contextlib.suppress(OSError):
                     cache_path.unlink(missing_ok=True)
 
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                references = self.client.get_paper_references(
-                    normalized_paper_id, fields=["paperId"]
-                )
-                if not references:
-                    self._persist_reference_cache_entry(
-                        cache_path,
-                        normalized_paper_id,
-                        [],
-                    )
-                    return []
+        def _persist_empty() -> List[str]:
+            """Persist and return an empty cached reference-ID list.
 
-                ref_ids: List[str] = []
-                for ref in references:
-                    if (
-                        hasattr(ref, "paper")
-                        and ref.paper
-                        and hasattr(ref.paper, "paperId")
-                    ):
-                        ref_ids.append(ref.paper.paperId)
+            :return List[str]: Empty reference-ID list.
+            """
+            self._persist_reference_cache_entry(
+                cache_path,
+                normalized_paper_id,
+                [],
+            )
+            return []
 
-                normalized_ref_ids = _coerce_cached_reference_ids(ref_ids)
-                if normalized_ref_ids is None:
-                    normalized_ref_ids = []
-                self._persist_reference_cache_entry(
-                    cache_path,
-                    normalized_paper_id,
-                    normalized_ref_ids,
-                )
-                return normalized_ref_ids
+        def _operation() -> List[str]:
+            """Fetch, normalize, and persist reference IDs for one paper.
 
-            except TypeError:
-                logger.debug(
-                    "Reference payload missing for %s (treating as empty)",
-                    normalized_paper_id,
-                )
-                self._persist_reference_cache_entry(
-                    cache_path,
-                    normalized_paper_id,
-                    [],
-                )
-                return []
-            except ObjectNotFoundException:
-                logger.warning(
-                    "Paper not found for reference IDs: %s", normalized_paper_id
-                )
-                self._persist_reference_cache_entry(
-                    cache_path,
-                    normalized_paper_id,
-                    [],
-                )
-                return []
-            except Exception as exc:
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    logger.warning(
-                        "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
-                        normalized_paper_id,
-                        attempt + 1,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                    continue
+            :return List[str]: Normalized reference IDs.
+            """
+            references = self.client.get_paper_references(
+                normalized_paper_id, fields=["paperId"]
+            )
+            if not references:
+                return _persist_empty()
 
-                logger.warning(
-                    "Failed to fetch reference IDs for %s after %s attempts: %s",
-                    normalized_paper_id,
-                    API_CONFIG.max_retries,
-                    exc,
-                )
-                raise RuntimeError(
-                    "Failed to fetch reference IDs after retries for "
-                    f"{normalized_paper_id}."
-                ) from exc
+            normalized_ref_ids = self._extract_reference_ids(references)
+            self._persist_reference_cache_entry(
+                cache_path,
+                normalized_paper_id,
+                normalized_ref_ids,
+            )
+            return normalized_ref_ids
 
-        raise RuntimeError(
-            f"Failed to fetch reference IDs after retries for {normalized_paper_id}."
+        def _raise_failure(exc: Exception) -> List[str]:
+            """Raise a stable retry-exhaustion error for reference-ID fetches.
+
+            :param Exception exc: Final exception raised by the API client.
+            :raises RuntimeError: Always raised after logging the retry failure.
+            :return List[str]: This function does not return successfully.
+            """
+            logger.warning(
+                "Failed to fetch reference IDs for %s after %s attempts: %s",
+                normalized_paper_id,
+                API_CONFIG.max_retries,
+                exc,
+            )
+            raise RuntimeError(
+                f"Failed to fetch reference IDs after retries for {normalized_paper_id}."
+            ) from exc
+
+        return self._call_with_retries(
+            _operation,
+            on_retry=lambda attempt, wait_time, exc: logger.warning(
+                "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
+                normalized_paper_id,
+                attempt,
+                wait_time,
+            ),
+            on_final_failure=_raise_failure,
+            handled_exceptions=(
+                (
+                    TypeError,
+                    lambda _exc: (
+                        logger.debug(
+                            "Reference payload missing for %s (treating as empty)",
+                            normalized_paper_id,
+                        )
+                        or _persist_empty()
+                    ),
+                ),
+                (
+                    ObjectNotFoundException,
+                    lambda _exc: (
+                        logger.warning(
+                            "Paper not found for reference IDs: %s",
+                            normalized_paper_id,
+                        )
+                        or _persist_empty()
+                    ),
+                ),
+            ),
         )
 
     def get_recommended_papers(
@@ -1189,9 +1205,9 @@ def get_client() -> SemanticScholarClient:
     :return SemanticScholarClient: Process-wide singleton client.
     """
     global _client_instance
-    if _client_instance is None:
+    if _client_instance is None or _client_instance._closed:
         with _client_lock:
-            if _client_instance is None:
+            if _client_instance is None or _client_instance._closed:
                 _client_instance = SemanticScholarClient()
     return _client_instance
 
@@ -1199,7 +1215,9 @@ def get_client() -> SemanticScholarClient:
 def reset_client() -> None:
     """Reset cached client instance (for testing)."""
     global _client_instance
+    client_to_close: Optional[SemanticScholarClient] = None
     with _client_lock:
-        if _client_instance is not None:
-            _client_instance.close()
+        client_to_close = _client_instance
         _client_instance = None
+    if client_to_close is not None:
+        client_to_close.close()

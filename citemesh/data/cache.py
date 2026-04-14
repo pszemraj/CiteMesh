@@ -4,9 +4,12 @@ Helpers for determining cache directories in a cross-platform way.
 
 from __future__ import annotations
 
+import json
 import os
-import sys
+import platform
+import tempfile
 from pathlib import Path
+from typing import Any
 
 
 def _default_cache_root() -> Path:
@@ -18,13 +21,15 @@ def _default_cache_root() -> Path:
     if override:
         return Path(override)
 
-    if sys.platform.startswith("win"):
+    system = platform.system()
+
+    if system == "Windows":
         base = os.getenv("LOCALAPPDATA") or os.getenv("APPDATA")
         if base:
             return Path(base) / "CiteMesh"
         return Path.home() / "AppData" / "Local" / "CiteMesh"
 
-    if sys.platform == "darwin":
+    if system == "Darwin":
         return Path.home() / "Library" / "Caches" / "citemesh"
 
     xdg_cache = os.getenv("XDG_CACHE_HOME")
@@ -46,6 +51,56 @@ def get_cache_dir(*parts: str, create: bool = True) -> Path:
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def atomic_write_json(
+    path: Path,
+    payload: Any,
+    *,
+    indent: int | None = None,
+    sort_keys: bool = True,
+) -> None:
+    """Persist JSON content with a crash-safe atomic rename.
+
+    :param Path path: Target JSON file path.
+    :param Any payload: JSON-serializable payload to write.
+    :param int | None indent: Optional JSON indentation level.
+    :param bool sort_keys: Whether to sort object keys during serialization.
+    :return None: Writes the target file in place.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            json.dump(payload, tmp_file, indent=indent, sort_keys=sort_keys)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+
+        os.replace(tmp_name, path)
+        with path.open("r+b") as final_file:
+            os.fsync(final_file.fileno())
+        directory_fd: int | None = None
+        try:
+            directory_fd = os.open(str(path.parent), os.O_RDONLY)
+            os.fsync(directory_fd)
+        except OSError:
+            pass
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def format_bytes(num_bytes: int) -> str:

@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from citemesh.core import Paper
-from citemesh.services import SemanticScholarClient, get_client
+from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
-from citemesh.strategies.similarity import compute_indexed_similarity_score
+
+if TYPE_CHECKING:
+    from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +21,14 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
     Build a graph from S2 recommendation neighbors.
     """
 
+    strategy_name = "recommendation"
+
     def __init__(
         self,
         max_papers: int = 40,
-        fetch_references: bool = False,
+        fetch_references: bool = True,
         refresh_reference_cache: bool = False,
-        similarity_threshold: float = 0.15,
+        similarity_threshold: float = 0.2,
         client: Optional[SemanticScholarClient] = None,
     ):
         """Initialize recommendation graph builder.
@@ -32,7 +36,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param int max_papers: Maximum papers to include in graph.
         :param bool fetch_references: Whether to fetch references for seed and recommended papers.
         :param bool refresh_reference_cache: Whether to bypass persisted reference-cache reads.
-        :param float similarity_threshold: Threshold for edge creation.
+        :param float similarity_threshold: Threshold for edge creation (default matches CLI).
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         super().__init__(max_papers=max_papers)
@@ -133,14 +137,9 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param Paper paper2: Second paper.
         :return float: Similarity score in [0.0, 1.0].
         """
-        return compute_indexed_similarity_score(
+        return self._compute_indexed_similarity(
             paper1,
             paper2,
-            abstract_index=self._abstract_index,
-            temporal_similarity_fn=self.temporal_similarity,
-            citation_similarity_fn=self.citation_similarity,
-            bibliographic_coupling_fn=self.bibliographic_coupling,
-            fetch_references=self.fetch_references,
             with_references_weights=(0.60, 0.15, 0.00, 0.25),
             without_references_weights=(0.75, 0.25, 0.00, 0.00),
             cap_at_one=True,

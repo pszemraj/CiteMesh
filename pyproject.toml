@@ -54,6 +54,7 @@ embeddings = [
     "sentence-transformers>=3.0.0",
     "torch>=2.9.0",
 ]
+recommended = ["citemesh[embeddings,viz]"]
 dev = [
     "datasets>=2.14.0",
     "pytest>=8.0.0",
@@ -66,7 +67,7 @@ dev = [
 all = ["citemesh[dev,embeddings,viz]"]
 
 [project.scripts]
-citemesh = "citemesh.cli:main"
+citemesh = "citemesh.__main__:run"
 
 [project.urls]
 Homepage = "https://github.com/pszemraj/CiteMesh"

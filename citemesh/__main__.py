@@ -1,10 +1,16 @@
-"""
-Entry point for python -m citemesh execution.
+"""Module entry point for ``python -m citemesh``."""
 
-This is just a thin wrapper - all CLI logic lives in citemesh.cli
-"""
+from .cli import main
 
-from citemesh.cli import main
+
+def run() -> int:
+    """Run the CLI using argparse's default process-argv handling.
+
+    :return int: Process-style exit code from :func:`citemesh.cli.main`.
+    """
+
+    return main()
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(run())

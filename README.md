@@ -2,6 +2,8 @@
 
 Build exploration-friendly paper graphs from a single paper or query using recommendation, citation, embedding, or hybrid strategies. CiteMesh ships as a single CLI with consistent visuals and export formats so you can switch approaches without changing tools.
 
+![CiteMesh UI](assets/ui.png)
+
 ## Core Use Case
 
 Start from one paper you already know, then quickly discover:
@@ -9,17 +11,19 @@ Start from one paper you already know, then quickly discover:
 - newer papers that are genuinely related to that paper's core topic
 - older, high-quality foundational papers that matter for understanding the same area
 
-The default hybrid workflow is tuned around this discovery pattern rather than maximizing raw graph size.
+The CLI defaults to the `recommendation` strategy for the fastest topical pass.
+Use `--strategy hybrid` when you want the tuned citation-plus-semantic workflow for this discovery pattern.
+
+## Project Status
+
+CiteMesh is currently a private, fast-moving pre-release tool. The project
+optimizes for discovery quality, correctness, and simpler internals over
+backward compatibility. Older exports, checkpoints, or intermediate artifacts
+may stop working between revisions unless explicitly documented otherwise.
 
 ## Documentation
 
-- Documentation index: [docs/README.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/README.md)
-- CLI guide: [docs/guides/cli.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md)
-- Strategy guide: [docs/guides/strategies.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md)
-- Caching and data: [docs/guides/caching.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/caching.md)
-- Environment variables: [docs/reference/environment.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/environment.md)
-- Output files and sidecar schema: [docs/reference/output-artifacts.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/output-artifacts.md)
-- Embedding runtime behavior: [docs/reference/embedding-runtime.md](https://github.com/pszemraj/CiteMesh/blob/main/docs/reference/embedding-runtime.md)
+[Documentation index](docs/README.md)
 
 ## Quick Start
 
@@ -28,26 +32,32 @@ The default hybrid workflow is tuned around this discovery pattern rather than m
 Install from GitHub:
 
 ```bash
-pip install "git+https://github.com/pszemraj/CiteMesh.git"
+pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.git"
 ```
 
 For local development:
 
 ```bash
 git clone https://github.com/pszemraj/CiteMesh.git && cd CiteMesh
-pip install -e ".[dev]"
+pip install -e ".[dev,viz]"
 ```
 
 Optional extras:
 
 ```bash
+# Minimal citation/recommendation CLI only
+pip install "git+https://github.com/pszemraj/CiteMesh.git"
+
+# Recommended runtime bundle: embeddings + interactive exports
+pip install -e ".[recommended]"
+
 # Embedding strategy + semantic enrichment support
 pip install -e ".[embeddings]"
 
 # Interactive HTML/Plotly exports
 pip install -e ".[viz]"
 
-# all
+# Everything currently defined by the project, including dev tools
 pip install -e ".[all]"
 ```
 
@@ -57,17 +67,20 @@ pip install -e ".[all]"
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
-For complete command behavior and examples, use [CLI Usage](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md).
+For command syntax and operational details, use:
+
+- [CLI Usage](docs/guides/cli.md)
+- [Strategy Guide](docs/guides/strategies.md)
+- [Caching & Data](docs/guides/caching.md)
 
 ## Why CiteMesh
 
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
 - Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
-- Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, JSON, GraphML, plus a per-run config sidecar.
-- Theme-aware visuals shared across exporters.
-- Persistent user-level caching for embeddings and corpus data.
-- Typed, modular architecture that is straightforward to extend.
+- Multi-format outputs with one shared run contract across static, interactive, and structured exports.
+- Persistent user-level caching for embeddings and reference expansion.
+- Typed, modular internals that are straightforward to extend.
 
 ## License
 
-MIT License. See [LICENSE](https://github.com/pszemraj/CiteMesh/blob/main/LICENSE).
+MIT License. See [LICENSE](LICENSE).

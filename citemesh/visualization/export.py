@@ -7,8 +7,10 @@ including interactive visualizations.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import html
+import io
 import json
 import logging
 import math
@@ -19,7 +21,6 @@ from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
 from urllib.parse import quote
 
 import networkx as nx
-import numpy as np
 
 from citemesh.core import Paper
 
@@ -27,6 +28,7 @@ from .ordering import ordered_edges_with_data, ordered_nodes
 from .render import (
     MISSING_YEAR_FALLBACK_MAX,
     MISSING_YEAR_FALLBACK_MIN,
+    _normalize_layout_positions,
     compute_layout,
     compute_node_colors,
     compute_node_sizes,
@@ -40,7 +42,36 @@ GRAPHML_DETERMINISM_POLICY_BEST_EFFORT = "best_effort_sorted_nodes_edges"
 _GRAPHML_BEST_EFFORT_MIN_VERSION = (2, 8)
 GRAPHML_LAYOUT_METADATA_KEY = "citemesh_graphml_determinism"
 GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
-EXPORT_LAYOUT_PADDING_RATIO = 0.1
+
+
+def _load_pyvis_network_class() -> Any:
+    """Import and return the PyVis ``Network`` class.
+
+    :return Any: Imported ``pyvis.network.Network`` class.
+    """
+    from pyvis.network import Network
+
+    return Network
+
+
+def _load_plotly_graph_objects() -> Any:
+    """Import and return Plotly graph objects.
+
+    :return Any: Imported ``plotly.graph_objects`` module proxy.
+    """
+    from plotly import graph_objects as go
+
+    return go
+
+
+def _load_plotly_dashboard_runtime() -> tuple[Any, Any]:
+    """Import and return Plotly graph objects plus inline JS provider.
+
+    :return tuple[Any, Any]: Plotly graph objects and ``get_plotlyjs`` callable.
+    """
+    from plotly.offline import get_plotlyjs
+
+    return _load_plotly_graph_objects(), get_plotlyjs
 
 
 def _graphml_determinism_policy() -> str:
@@ -82,7 +113,9 @@ class GraphExporter:
 
         :param nx.Graph graph: Graph to export.
         :param str seed_id: Seed paper identifier.
-        :param Optional[Dict] metadata: Optional metadata to include in outputs.
+        :param Optional[Dict] metadata: Optional metadata to include in outputs. When
+            omitted, strategy-sensitive enrichments fall back to graph-level metadata
+            when available.
         :param str theme_name: Theme for visual color defaults.
         :param Optional[Dict[Hashable, Iterable[float]]] layout: Optional precomputed
             layout.
@@ -122,18 +155,32 @@ class GraphExporter:
     # Public export methods
 
     def to_json(self, path: Path) -> None:
-        """Export graph data JSON focused on nodes/edges and readable edge context."""
-        sorted_nodes = self._sorted_nodes()
+        """Export enriched graph data JSON with analysis fields.
+
+        Includes provenance, seed relevance scores, external links, and
+        BibTeX entries — the same rich fields available in the dashboard.
+        """
+        enriched = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
+        dashboard_node_ids = [node_id for node_id, _ in self._sorted_nodes()]
+        dashboard_meta = self._dashboard_meta(
+            theme_obj=self.theme,
+            node_ids=dashboard_node_ids,
+            node_payloads=enriched,
+            sorted_edges=sorted_edges,
+            include_plotly_geometry=self._layout is not None,
+        )
         data = {
             "seed_id": str(self.seed_id),
-            "summary": {
-                "nodes": len(sorted_nodes),
-                "edges": len(sorted_edges),
+            "meta": {
+                "strategy": dashboard_meta["strategy"],
+                "year_range": dashboard_meta["year_range"],
             },
-            "nodes": [
-                self._serialize_node(node, attrs) for node, attrs in sorted_nodes
-            ],
+            "summary": dashboard_meta["summary"],
+            "nodes": enriched,
+            "dashboard": {
+                "meta": dashboard_meta,
+            },
             "edges": [
                 {
                     "source": str(u),
@@ -142,12 +189,79 @@ class GraphExporter:
                     "target_title": self._node_title(self.graph.nodes[v], v),
                     "source_label": self._node_short_label(self.graph.nodes[u], u),
                     "target_label": self._node_short_label(self.graph.nodes[v], v),
-                    "weight": float(data.get("weight", 0.0)),
+                    "weight": float(edge_data.get("weight", 0.0)),
                 }
-                for u, v, data in sorted_edges
+                for u, v, edge_data in sorted_edges
             ],
         }
         Path(path).write_text(json.dumps(data, sort_keys=True, indent=2))
+
+    def to_csv(self, path: Path) -> None:
+        """Export flat CSV table with one row per paper.
+
+        Includes all enriched fields for direct import into pandas or
+        spreadsheets.
+        """
+        enriched = self._enriched_nodes()
+        if not enriched:
+            Path(path).write_text("")
+            return
+
+        columns = [
+            "id",
+            "title",
+            "year",
+            "authors",
+            "citation_count",
+            "venue",
+            "arxiv_id",
+            "doi",
+            "categories",
+            "is_seed",
+            "provenance",
+            "seed_relation",
+            "seed_relevance",
+            "arxiv_url",
+            "doi_url",
+            "semantic_scholar_url",
+            "abstract",
+        ]
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for node in enriched:
+            links = node.get("links") or {}
+            row = {
+                "id": node.get("id", ""),
+                "title": node.get("title", ""),
+                "year": node.get("year", ""),
+                "authors": "; ".join(node.get("authors", [])),
+                "citation_count": node.get("citation_count", 0),
+                "venue": node.get("venue", ""),
+                "arxiv_id": node.get("arxiv_id", ""),
+                "doi": node.get("doi", ""),
+                "categories": "; ".join(node.get("categories", [])),
+                "is_seed": node.get("is_seed", False),
+                "provenance": node.get("provenance", ""),
+                "seed_relation": node.get("seed_relation", ""),
+                "seed_relevance": f"{node.get('seed_relevance', 0.0):.6f}",
+                "arxiv_url": links.get("arxiv_abs", ""),
+                "doi_url": links.get("doi", ""),
+                "semantic_scholar_url": links.get("semantic_scholar", ""),
+                "abstract": node.get("abstract", ""),
+            }
+            writer.writerow(row)
+        Path(path).write_text(buf.getvalue(), encoding="utf-8")
+
+    def to_bibtex(self, path: Path) -> None:
+        """Export all papers as a single BibTeX file."""
+        enriched = self._enriched_nodes()
+        entries = [
+            str(node.get("bibtex", "")).strip()
+            for node in enriched
+            if node.get("bibtex", "").strip()
+        ]
+        Path(path).write_text("\n\n".join(entries) + "\n", encoding="utf-8")
 
     def to_graphml(self, path: Path) -> None:
         """Export to GraphML for external tools such as Gephi or Cytoscape."""
@@ -205,7 +319,7 @@ class GraphExporter:
         :param bool physics: Whether to enable force-directed physics.
         """
         try:
-            from pyvis.network import Network
+            network_cls = _load_pyvis_network_class()
         except ImportError as exc:
             raise RuntimeError(
                 "pyvis is required for HTML export. Install with: pip install citemesh[viz]."
@@ -213,7 +327,7 @@ class GraphExporter:
 
         theme_obj = get_theme(theme) if theme else self.theme
 
-        net = Network(
+        net = network_cls(
             height="900px",
             width="100%",
             bgcolor=theme_obj.background,
@@ -283,7 +397,7 @@ class GraphExporter:
         :param Optional[str] theme: Optional theme override.
         """
         try:
-            from plotly import graph_objects as go
+            go = _load_plotly_graph_objects()
         except ImportError as exc:
             raise RuntimeError(
                 "plotly is required for Plotly export. Install with: pip install citemesh[viz]."
@@ -308,8 +422,7 @@ class GraphExporter:
         :param Optional[str] theme: Optional theme override.
         """
         try:
-            from plotly import graph_objects as go
-            from plotly.offline import get_plotlyjs
+            go, get_plotlyjs = _load_plotly_dashboard_runtime()
         except ImportError as exc:
             raise RuntimeError(
                 "plotly is required for Dashboard export. Install with: pip install citemesh[viz]."
@@ -331,12 +444,20 @@ class GraphExporter:
         figure_json = self._safe_script_content(
             json.dumps(fig.to_plotly_json(), sort_keys=True, separators=(",", ":"))
         )
+        collection_json = self._safe_script_content(
+            json.dumps(
+                self._dashboard_collection_bundle(),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         html_output = self._dashboard_template(
             theme_obj=theme_obj,
             div_id=div_id,
             plotly_js=self._safe_script_content(get_plotlyjs()),
             payload_json=payload_json,
             figure_json=figure_json,
+            collection_json=collection_json,
         )
         Path(path).write_text(html_output, encoding="utf-8")
 
@@ -636,21 +757,19 @@ class GraphExporter:
             return "CiteMesh"
         return title_text
 
-    def _dashboard_payload(
-        self, *, theme_obj: Theme, node_ids: list[Hashable]
-    ) -> Dict[str, Any]:
-        """Build deterministic dashboard payload from graph metadata.
+    def _enriched_nodes(self) -> list[Dict[str, Any]]:
+        """Build enriched node payloads with provenance, relevance, links, and BibTeX.
 
-        :param Theme theme_obj: Active visualization theme.
-        :param list[Hashable] node_ids: Node order used by Plotly points.
-        :return Dict[str, Any]: JSON payload consumed by dashboard JS.
+        This is the canonical node enrichment used by JSON export, CSV export,
+        BibTeX export, and the dashboard payload.
+
+        :return list[Dict[str, Any]]: Enriched node payloads.
         """
         provenance = self._provenance_map()
         seed_relations = self._seed_relation_map()
         relevance = self._seed_relevance_scores()
         sorted_nodes = self._sorted_nodes()
-        sorted_edges = self._sorted_edges()
-        strategy = str(self.metadata.get("strategy") or "").strip().lower()
+        strategy = self._strategy()
 
         node_payloads: list[Dict[str, Any]] = []
         for node_id, attrs in sorted_nodes:
@@ -695,6 +814,29 @@ class GraphExporter:
             serialized["links"] = links
             serialized["bibtex"] = self._node_bibtex(serialized, links=links)
             node_payloads.append(serialized)
+        return node_payloads
+
+    def _dashboard_meta(
+        self,
+        *,
+        theme_obj: Theme,
+        node_ids: list[Hashable],
+        node_payloads: list[Dict[str, Any]],
+        sorted_edges: list[tuple[Hashable, Hashable, Dict[str, Any]]],
+        include_plotly_geometry: bool,
+    ) -> Dict[str, Any]:
+        """Build dashboard metadata shared by dashboard HTML and JSON exports.
+
+        :param Theme theme_obj: Active visualization theme.
+        :param list[Hashable] node_ids: Node order used by Plotly points.
+        :param list[Dict[str, Any]] node_payloads: Enriched node payloads.
+        :param list[tuple[Hashable, Hashable, Dict[str, Any]]] sorted_edges:
+            Deterministically ordered edge payloads.
+        :param bool include_plotly_geometry: Whether layout-backed Plotly geometry
+            should be embedded in the metadata.
+        :return Dict[str, Any]: Dashboard metadata payload.
+        """
+        strategy = self._strategy()
         valid_years = [
             int(node.get("year", 0))
             for node in node_payloads
@@ -708,18 +850,47 @@ class GraphExporter:
                 "max": MISSING_YEAR_FALLBACK_MAX,
             }
 
-        payload: Dict[str, Any] = {
-            "meta": {
-                "seed_id": str(self.seed_id),
-                "strategy": strategy,
-                "theme": theme_obj.name,
-                "summary": {
-                    "nodes": len(sorted_nodes),
-                    "edges": len(sorted_edges),
-                },
-                "year_range": year_range,
-                "plotly_node_order": [str(node_id) for node_id in node_ids],
+        meta: Dict[str, Any] = {
+            "seed_id": str(self.seed_id),
+            "strategy": strategy,
+            "theme": theme_obj.name,
+            "summary": {
+                "nodes": len(node_payloads),
+                "edges": len(sorted_edges),
             },
+            "year_range": year_range,
+        }
+        if include_plotly_geometry:
+            positions = self._get_layout()
+            meta["plotly_node_order"] = [str(node_id) for node_id in node_ids]
+            meta["plotly_positions"] = [
+                [float(positions[node_id][0]), float(positions[node_id][1])]
+                for node_id in node_ids
+            ]
+            meta["plotly_node_sizes"] = [
+                max(6.0, self._node_size(node_id) / 50.0) for node_id in node_ids
+            ]
+        return meta
+
+    def _dashboard_payload(
+        self, *, theme_obj: Theme, node_ids: list[Hashable]
+    ) -> Dict[str, Any]:
+        """Build deterministic dashboard payload from graph metadata.
+
+        :param Theme theme_obj: Active visualization theme.
+        :param list[Hashable] node_ids: Node order used by Plotly points.
+        :return Dict[str, Any]: JSON payload consumed by dashboard JS.
+        """
+        node_payloads = self._enriched_nodes()
+        sorted_edges = self._sorted_edges()
+        payload: Dict[str, Any] = {
+            "meta": self._dashboard_meta(
+                theme_obj=theme_obj,
+                node_ids=node_ids,
+                node_payloads=node_payloads,
+                sorted_edges=sorted_edges,
+                include_plotly_geometry=True,
+            ),
             "nodes": node_payloads,
             "edges": [
                 {
@@ -732,15 +903,84 @@ class GraphExporter:
         }
         return payload
 
+    def _dashboard_collection_bundle(self) -> Dict[str, Any]:
+        """Normalize optional collection metadata for shared dashboard shells.
+
+        :return Dict[str, Any]: Collection result descriptors and embedded payloads.
+        """
+        raw_bundle = self.metadata.get("dashboard_collection")
+        if not isinstance(raw_bundle, dict):
+            return {"current_result_id": None, "results": [], "payloads": {}}
+
+        raw_results = raw_bundle.get("results")
+        raw_payloads = raw_bundle.get("payloads")
+        results = (
+            [entry for entry in raw_results if isinstance(entry, dict)]
+            if isinstance(raw_results, list)
+            else []
+        )
+        payloads = (
+            {
+                str(result_id): payload
+                for result_id, payload in raw_payloads.items()
+                if isinstance(result_id, str) and isinstance(payload, dict)
+            }
+            if isinstance(raw_payloads, dict)
+            else {}
+        )
+        current_result_id = raw_bundle.get("current_result_id")
+        return {
+            "current_result_id": (
+                str(current_result_id).strip()
+                if current_result_id is not None
+                else None
+            ),
+            "results": results,
+            "payloads": payloads,
+        }
+
     def _default_provenance(self, *, strategy: str) -> str:
         """Resolve default provenance class for non-hybrid strategies.
 
         :param str strategy: Strategy metadata token.
         :return str: One of ``citation`` or ``semantic``.
         """
-        if strategy == "embedding":
+        if strategy in {"embedding", "recommendation"}:
             return "semantic"
         return "citation"
+
+    @staticmethod
+    def _normalize_strategy_token(raw_strategy: object) -> str:
+        """Normalize strategy tokens to the exporter-supported vocabulary.
+
+        :param object raw_strategy: Candidate strategy token.
+        :return str: Normalized strategy token or an empty string.
+        """
+        normalized = str(raw_strategy or "").strip().lower()
+        if normalized in {"citation", "recommendation", "embedding", "hybrid"}:
+            return normalized
+        return ""
+
+    def _strategy(self) -> str:
+        """Resolve effective strategy token for export metadata and enrichment.
+
+        Explicit exporter metadata wins. When omitted, exporter falls back to graph
+        metadata persisted by current builders.
+
+        :return str: Normalized strategy token when available.
+        """
+        metadata_strategy = self._normalize_strategy_token(
+            self.metadata.get("strategy")
+        )
+        if metadata_strategy:
+            return metadata_strategy
+
+        graph_strategy = self._normalize_strategy_token(
+            self.graph.graph.get("strategy")
+        )
+        if graph_strategy:
+            return graph_strategy
+        return ""
 
     def _provenance_map(self) -> Dict[str, str]:
         """Resolve normalized per-node provenance map.
@@ -980,6 +1220,7 @@ class GraphExporter:
         plotly_js: str,
         payload_json: str,
         figure_json: str,
+        collection_json: str,
     ) -> str:
         """Render standalone dashboard HTML template.
 
@@ -988,6 +1229,7 @@ class GraphExporter:
         :param str plotly_js: Inline Plotly runtime JS.
         :param str payload_json: Serialized dashboard payload JSON.
         :param str figure_json: Serialized Plotly figure JSON.
+        :param str collection_json: Serialized collection bundle JSON.
         :return str: Dashboard HTML content.
         """
         is_dark = theme_obj.name in {"dark", "solarized"}
@@ -1005,6 +1247,7 @@ class GraphExporter:
             "__PLOTLY_JS__": plotly_js,
             "__PAYLOAD_JSON__": payload_json,
             "__FIGURE_JSON__": figure_json,
+            "__COLLECTION_JSON__": collection_json,
             "__PLOTLY_DIV_ID__": div_id,
         }
         template = """<!doctype html>
@@ -1052,6 +1295,17 @@ class GraphExporter:
       padding: 9px 11px;
     }
     input::placeholder { color: var(--text-muted); }
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
     button {
       cursor: pointer;
       transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease;
@@ -1098,12 +1352,39 @@ class GraphExporter:
       border-color: color-mix(in srgb, var(--accent) 70%, var(--panel-border));
       background: var(--accent-soft);
     }
+    #result-select {
+      min-width: 240px;
+      max-width: min(46vw, 360px);
+    }
     #toolbar-controls {
       display: grid;
       gap: 8px;
     }
     #dashboard-toolbar.collapsed #toolbar-controls {
       display: none;
+    }
+    #dashboard-status {
+      display: none;
+      border-radius: 10px;
+      padding: 9px 11px;
+      font-size: 12px;
+      line-height: 1.45;
+      border: 1px solid color-mix(in srgb, var(--panel-border) 82%, transparent);
+      background: rgba(255, 255, 255, 0.02);
+      color: var(--text-muted);
+    }
+    #dashboard-status.visible {
+      display: block;
+    }
+    #dashboard-status.warning {
+      border-color: rgba(221, 166, 94, 0.52);
+      background: rgba(108, 74, 20, 0.24);
+      color: color-mix(in srgb, var(--text-primary) 88%, #ffe1ad);
+    }
+    #dashboard-status.info {
+      border-color: rgba(101, 162, 221, 0.46);
+      background: rgba(27, 61, 104, 0.18);
+      color: color-mix(in srgb, var(--text-primary) 90%, #d8eaff);
     }
     .toolbar-row {
       display: grid;
@@ -1531,7 +1812,21 @@ class GraphExporter:
         <button id="filters-toggle" class="nav-btn active" type="button">Filters</button>
         <button id="more-btn" class="nav-btn" type="button">More</button>
       </div>
+      <div class="nav-group">
+        <button id="export-json-btn" class="nav-btn" type="button">Export JSON</button>
+        <button id="export-csv-btn" class="nav-btn" type="button">Export CSV</button>
+        <button id="export-bib-btn" class="nav-btn" type="button">All BibTeX</button>
+        <button id="load-json-btn" class="nav-btn" type="button">Load Results</button>
+        <input id="load-json-input" type="file" accept=".json,.html" style="display:none" />
+      </div>
+      <div class="nav-group">
+        <label class="visually-hidden" for="result-select">Saved result</label>
+        <select id="result-select" title="Switch saved result">
+          <option value="">Current result</option>
+        </select>
+      </div>
     </div>
+    <div id="dashboard-status" role="status" aria-live="polite"></div>
     <div id="toolbar-controls">
       <div class="toolbar-row primary">
         <input id="search-input" type="search" placeholder="Search title, authors, abstract..." />
@@ -1614,20 +1909,38 @@ class GraphExporter:
   <script>__PLOTLY_JS__</script>
   <script id="citemesh-dashboard-data" type="application/json">__PAYLOAD_JSON__</script>
   <script id="citemesh-dashboard-figure" type="application/json">__FIGURE_JSON__</script>
+  <script id="citemesh-dashboard-collection" type="application/json">__COLLECTION_JSON__</script>
   <script>
-    const payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
-    const figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
+    let payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
+    const baseFigureTemplate = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
+    let figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
+    // Embed the collection bundle directly in the shell so saved-result browsing
+    // still works when the dashboard is opened from the local filesystem.
+    const collectionBundle = JSON.parse(document.getElementById("citemesh-dashboard-collection").textContent);
     const graphDiv = document.getElementById("__PLOTLY_DIV_ID__");
+    const plotConfig = {
+      displaylogo: false,
+      responsive: true,
+    };
 
-    const nodes = payload.nodes || [];
-    const nodeOrder = (payload.meta && payload.meta.plotly_node_order) || [];
-    const nodeById = new Map(nodes.map((node) => [node.id, node]));
-    const nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
-    const yearRange = (payload.meta && payload.meta.year_range) || {};
-    const seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "");
-    const seedYear = seedNode && Number.isFinite(Number(seedNode.year)) && Number(seedNode.year) > 0
-      ? Number(seedNode.year)
-      : null;
+    let nodes = [];
+    let nodeOrder = [];
+    let nodeById = new Map();
+    let nodeIndexById = new Map();
+    let yearRange = {};
+    let seedNode = null;
+    let seedYear = null;
+    let traceSpecs = [];
+    let nodeTraceIndex = 0;
+    let haloTraceIndex = -1;
+    let neighborhoodTraceIndex = -1;
+    let defaultNodeSizes = [];
+    let defaultNodeX = [];
+    let defaultNodeY = [];
+    let adjacency = new Map();
+    let collectionResultId = String(collectionBundle.current_result_id || "") || null;
+    let runtimeStatusMessage = "";
+    let runtimeStatusTone = "warning";
 
     function normalizeArray(rawValue, length, fallbackValue) {
       if (Array.isArray(rawValue)) {
@@ -1645,26 +1958,344 @@ class GraphExporter:
       return Array.from({ length }, () => safe);
     }
 
-    const traceSpecs = figureSpec.data || [];
-    const nodeTraceIndex = (() => {
-      const namedIdx = traceSpecs.findIndex((trace) => String(trace.name || "") === "nodes");
-      if (namedIdx >= 0) {
-        return namedIdx;
+    function deepClone(value) {
+      return JSON.parse(JSON.stringify(value));
+    }
+
+    function safeFiniteNumber(value, fallbackValue) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) ? numeric : fallbackValue;
+    }
+
+    function stableHash(value) {
+      const text = String(value || "");
+      let digest = 0;
+      for (const char of text) {
+        digest = ((digest * 33) + char.charCodeAt(0)) >>> 0;
       }
-      const fallbackIdx = traceSpecs.findIndex((trace) => String(trace.mode || "").includes("markers+text"));
-      return fallbackIdx >= 0 ? fallbackIdx : 0;
-    })();
-    const haloTraceIndex = traceSpecs.findIndex(
-      (trace) => String(trace.name || "") === "selection-halo"
-    );
-    const neighborhoodTraceIndex = traceSpecs.findIndex(
-      (trace) => String(trace.name || "") === "neighborhood-edges"
-    );
-    const nodeTraceSource = (traceSpecs[nodeTraceIndex] || {});
-    const markerSource = nodeTraceSource.marker || {};
-    const defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
-    const defaultNodeX = normalizeArray(nodeTraceSource.x, nodeOrder.length, 0);
-    const defaultNodeY = normalizeArray(nodeTraceSource.y, nodeOrder.length, 0);
+      return digest >>> 0;
+    }
+
+    function stableCurveDirection(leftId, rightId) {
+      return stableHash(`${String(leftId || "")}|${String(rightId || "")}`) % 2 === 0 ? 1 : -1;
+    }
+
+    function currentSeedRingColor() {
+      const styles = getComputedStyle(document.documentElement);
+      const color = String(styles.getPropertyValue("--seed-ring") || "").trim();
+      return color || "#d66cbf";
+    }
+
+    function extractEmbeddedScriptJson(text, scriptId) {
+      // Parse imported dashboard HTML as a document instead of regex-matching script
+      // tags. This avoids brittle parsing and keeps the inline runtime free of raw
+      // script-closing sequences that would terminate the surrounding HTML script tag.
+      const parsedDocument = new DOMParser().parseFromString(
+        String(text || ""),
+        "text/html"
+      );
+      const scriptElement = parsedDocument.getElementById(String(scriptId || ""));
+      const isJsonScript =
+        scriptElement &&
+        String(scriptElement.tagName || "").toLowerCase() === "script" &&
+        String(scriptElement.getAttribute("type") || "").toLowerCase() === "application/json";
+      if (!isJsonScript) {
+        throw new Error(`Imported dashboard file is missing ${scriptId}.`);
+      }
+      const rawJson = String(scriptElement.textContent || "").trim();
+      if (!rawJson) {
+        throw new Error(`Imported dashboard file is missing ${scriptId}.`);
+      }
+      return JSON.parse(rawJson);
+    }
+
+    function parseImportedPayloadFromText(fileText, filename) {
+      const text = String(fileText || "");
+      const lowerName = String(filename || "").toLowerCase();
+      const looksLikeDashboardHtml =
+        lowerName.endsWith(".html") || text.includes('id="citemesh-dashboard-data"');
+      if (!looksLikeDashboardHtml) {
+        return JSON.parse(text);
+      }
+      return extractEmbeddedScriptJson(text, "citemesh-dashboard-data");
+    }
+
+    function hasCompleteDashboardGeometry(meta) {
+      if (!meta || typeof meta !== "object") {
+        return false;
+      }
+      const order = Array.isArray(meta.plotly_node_order)
+        ? meta.plotly_node_order.map((nodeId) => String(nodeId || ""))
+        : [];
+      const positions = Array.isArray(meta.plotly_positions) ? meta.plotly_positions : [];
+      if (!order.length || positions.length !== order.length) {
+        return false;
+      }
+      return true;
+    }
+
+    function buildFigureSpecFromPayload(nextPayload) {
+      const meta = (nextPayload && nextPayload.meta) || {};
+      const order = Array.isArray(meta.plotly_node_order)
+        ? meta.plotly_node_order.map((nodeId) => String(nodeId || ""))
+        : [];
+      const positions = Array.isArray(meta.plotly_positions) ? meta.plotly_positions : [];
+      const alignedNodeSizes = normalizeArray(meta.plotly_node_sizes, order.length, 8);
+      if (!order.length || positions.length !== order.length) {
+        throw new Error(
+          "JSON is missing dashboard layout positions. Re-export results with a newer CiteMesh build."
+        );
+      }
+
+      const template = deepClone(baseFigureTemplate);
+      const nextNodes = Array.isArray(nextPayload.nodes) ? nextPayload.nodes : [];
+      const nextNodeById = new Map(
+        nextNodes.map((node) => [String(node.id || ""), node])
+      );
+      const nextEdges = Array.isArray(nextPayload.edges) ? nextPayload.edges : [];
+      const nextYearRange = meta.year_range || {};
+      const nextTraceSpecs = Array.isArray(template.data) ? template.data : [];
+      const nextNodeTraceIndex = (() => {
+        const namedIdx = nextTraceSpecs.findIndex(
+          (trace) => String(trace.name || "") === "nodes"
+        );
+        if (namedIdx >= 0) {
+          return namedIdx;
+        }
+        const fallbackIdx = nextTraceSpecs.findIndex((trace) =>
+          String(trace.mode || "").includes("markers+text")
+        );
+        return fallbackIdx >= 0 ? fallbackIdx : 0;
+      })();
+      const nextHaloTraceIndex = nextTraceSpecs.findIndex(
+        (trace) => String(trace.name || "") === "selection-halo"
+      );
+      const nextNeighborhoodTraceIndex = nextTraceSpecs.findIndex(
+        (trace) => String(trace.name || "") === "neighborhood-edges"
+      );
+      const templateNodeTrace = nextTraceSpecs[nextNodeTraceIndex] || {};
+      const templateMarker = templateNodeTrace.marker || {};
+      const templateLayout = template.layout || {};
+      const xPairs = normalizeArray(
+        positions.map((position) => Array.isArray(position) ? position[0] : 0),
+        order.length,
+        0
+      );
+      const yPairs = normalizeArray(
+        positions.map((position) => Array.isArray(position) ? position[1] : 0),
+        order.length,
+        0
+      );
+      const yearMin = Number(nextYearRange.min || 0);
+      const yearMax = Number(nextYearRange.max || 0);
+      const safeYearMin = Number.isFinite(yearMin) ? yearMin : 0;
+      const safeYearMax = Number.isFinite(yearMax) ? yearMax : safeYearMin;
+      const labelRanking = order
+        .map((nodeId) => nextNodeById.get(nodeId))
+        .filter(Boolean)
+        .sort((leftNode, rightNode) => {
+          const left = leftNode || {};
+          const right = rightNode || {};
+          if (!!left.is_seed !== !!right.is_seed) {
+            return left.is_seed ? -1 : 1;
+          }
+          const citationDelta =
+            Number(right.citation_count || 0) - Number(left.citation_count || 0);
+          if (citationDelta !== 0) {
+            return citationDelta;
+          }
+          const leftYear = Number.isFinite(Number(left.year)) ? Number(left.year) : -1;
+          const rightYear = Number.isFinite(Number(right.year)) ? Number(right.year) : -1;
+          if (leftYear !== rightYear) {
+            return rightYear - leftYear;
+          }
+          return String(left.id || "").localeCompare(String(right.id || ""));
+        })
+        .slice(0, Math.min(14, order.length));
+      const labelIds = new Set(labelRanking.map((node) => String(node.id || "")));
+      const seedId = String(meta.seed_id || "");
+      const seedRingColor = currentSeedRingColor();
+
+      const nodeTexts = [];
+      const hoverTexts = [];
+      const nodeYears = [];
+      const lineWidths = [];
+      const lineColors = [];
+      for (let idx = 0; idx < order.length; idx += 1) {
+        const nodeId = order[idx];
+        const node = nextNodeById.get(nodeId) || {};
+        const label = labelIds.has(nodeId) ? String(node.title || nodeId) : "";
+        nodeTexts.push(label);
+        const authors = Array.isArray(node.authors) && node.authors.length
+          ? node.authors.slice(0, 3).join(", ")
+          : "Unknown";
+        const nodeYear = Number.isFinite(Number(node.year)) && Number(node.year) > 0
+          ? Number(node.year)
+          : safeYearMin;
+        nodeYears.push(nodeYear);
+        hoverTexts.push([
+          `<b>${escapeHtml(node.title || nodeId)}</b>`,
+          escapeHtml(authors),
+          `Year: ${node.year || "n.d."} | Citations: ${Number(node.citation_count || 0)}`,
+        ].join("<br>"));
+        if (node.is_seed) {
+          lineWidths.push(4.0);
+          lineColors.push(seedRingColor);
+        } else {
+          lineWidths.push(0.0);
+          lineColors.push("rgba(0,0,0,0)");
+        }
+      }
+
+      const xMin = Math.min(...xPairs);
+      const xMax = Math.max(...xPairs);
+      const yMin = Math.min(...yPairs);
+      const yMax = Math.max(...yPairs);
+      const xSpan = Math.max(xMax - xMin, 1e-6);
+      const ySpan = Math.max(yMax - yMin, 1e-6);
+      const xPad = Math.max(0.28, xSpan * 0.08);
+      const yPad = Math.max(0.28, ySpan * 0.08);
+      const baseShapeColor =
+        (((templateLayout.shapes || [])[0] || {}).line || {}).color
+        || "rgba(127, 143, 163, 0.24)";
+      const edgeShapes = [];
+      nextEdges.forEach((edge) => {
+        const leftId = String(edge.source || "");
+        const rightId = String(edge.target || "");
+        const leftIdx = order.indexOf(leftId);
+        const rightIdx = order.indexOf(rightId);
+        if (leftIdx < 0 || rightIdx < 0) {
+          return;
+        }
+        const x0 = xPairs[leftIdx];
+        const y0 = yPairs[leftIdx];
+        const x1 = xPairs[rightIdx];
+        const y1 = yPairs[rightIdx];
+        const midX = (x0 + x1) / 2.0;
+        const midY = (y0 + y1) / 2.0;
+        const dx = x1 - x0;
+        const dy = y1 - y0;
+        const direction = stableCurveDirection(leftId, rightId);
+        const cx = midX - (dy * 0.15 * direction);
+        const cy = midY + (dx * 0.15 * direction);
+        edgeShapes.push({
+          type: "path",
+          path: `M ${x0},${y0} Q ${cx},${cy} ${x1},${y1}`,
+          line: {
+            color: baseShapeColor,
+            width: Math.max(0.5, Number(edge.weight || 0) * 2.0),
+          },
+          layer: "below",
+        });
+      });
+
+      const nodeTrace = templateNodeTrace;
+      nodeTrace.x = xPairs;
+      nodeTrace.y = yPairs;
+      nodeTrace.text = nodeTexts;
+      nodeTrace.hovertext = hoverTexts;
+      nodeTrace.marker = Object.assign({}, templateMarker, {
+        size: alignedNodeSizes,
+        color: nodeYears,
+        cmin: safeYearMin,
+        cmax: safeYearMax,
+        line: {
+          width: lineWidths,
+          color: lineColors,
+        },
+      });
+      nextTraceSpecs[nextNodeTraceIndex] = nodeTrace;
+
+      if (nextHaloTraceIndex >= 0) {
+        const seedIdx = order.indexOf(seedId);
+        const haloTrace = nextTraceSpecs[nextHaloTraceIndex] || {};
+        haloTrace.x = seedIdx >= 0 ? [xPairs[seedIdx]] : [];
+        haloTrace.y = seedIdx >= 0 ? [yPairs[seedIdx]] : [];
+        haloTrace.marker = Object.assign({}, haloTrace.marker || {}, {
+          size: seedIdx >= 0 ? [alignedNodeSizes[seedIdx] * 2.05] : [],
+          color: seedIdx >= 0 ? ["rgba(214, 108, 191, 0.26)"] : [],
+        });
+        nextTraceSpecs[nextHaloTraceIndex] = haloTrace;
+      }
+
+      if (nextNeighborhoodTraceIndex >= 0) {
+        const neighborhoodTrace = nextTraceSpecs[nextNeighborhoodTraceIndex] || {};
+        neighborhoodTrace.x = [];
+        neighborhoodTrace.y = [];
+        nextTraceSpecs[nextNeighborhoodTraceIndex] = neighborhoodTrace;
+      }
+
+      const layout = Object.assign({}, templateLayout);
+      layout.xaxis = Object.assign({}, layout.xaxis || {}, {
+        autorange: false,
+        range: [xMin - xPad, xMax + xPad],
+      });
+      layout.yaxis = Object.assign({}, layout.yaxis || {}, {
+        autorange: false,
+        range: [yMin - yPad, yMax + yPad],
+      });
+      layout.shapes = edgeShapes;
+      layout.uirevision = "citemesh-dashboard-static-layout-v1";
+
+      template.data = nextTraceSpecs;
+      template.layout = layout;
+      return template;
+    }
+
+    function rebuildDerivedData() {
+      nodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+      nodeOrder = Array.isArray(payload.meta && payload.meta.plotly_node_order)
+        ? payload.meta.plotly_node_order.map((nodeId) => String(nodeId || ""))
+        : [];
+      nodeById = new Map(nodes.map((node) => [String(node.id || ""), node]));
+      nodeIndexById = new Map(nodeOrder.map((nodeId, idx) => [nodeId, idx]));
+      yearRange = (payload.meta && payload.meta.year_range) || {};
+      seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "") || null;
+      seedYear = seedNode && Number.isFinite(Number(seedNode.year)) && Number(seedNode.year) > 0
+        ? Number(seedNode.year)
+        : null;
+
+      traceSpecs = figureSpec.data || [];
+      nodeTraceIndex = (() => {
+        const namedIdx = traceSpecs.findIndex((trace) => String(trace.name || "") === "nodes");
+        if (namedIdx >= 0) {
+          return namedIdx;
+        }
+        const fallbackIdx = traceSpecs.findIndex((trace) => String(trace.mode || "").includes("markers+text"));
+        return fallbackIdx >= 0 ? fallbackIdx : 0;
+      })();
+      haloTraceIndex = traceSpecs.findIndex(
+        (trace) => String(trace.name || "") === "selection-halo"
+      );
+      neighborhoodTraceIndex = traceSpecs.findIndex(
+        (trace) => String(trace.name || "") === "neighborhood-edges"
+      );
+      const nodeTraceSource = (traceSpecs[nodeTraceIndex] || {});
+      const markerSource = nodeTraceSource.marker || {};
+      defaultNodeSizes = normalizeArray(markerSource.size, nodeOrder.length, 8);
+      defaultNodeX = normalizeArray(nodeTraceSource.x, nodeOrder.length, 0);
+      defaultNodeY = normalizeArray(nodeTraceSource.y, nodeOrder.length, 0);
+
+      adjacency = new Map();
+      (payload.edges || []).forEach((edge) => {
+        const left = String(edge.source || "");
+        const right = String(edge.target || "");
+        const weight = Number(edge.weight || 0);
+        if (!left || !right) {
+          return;
+        }
+        if (!adjacency.has(left)) {
+          adjacency.set(left, []);
+        }
+        if (!adjacency.has(right)) {
+          adjacency.set(right, []);
+        }
+        adjacency.get(left).push({ id: right, weight });
+        adjacency.get(right).push({ id: left, weight });
+      });
+    }
+
+    rebuildDerivedData();
 
     const state = {
       selectedId: (payload.meta && payload.meta.seed_id) || null,
@@ -1681,24 +2312,6 @@ class GraphExporter:
       neighborhoodKey: "",
       haloKey: "",
     };
-
-    const adjacency = new Map();
-    (payload.edges || []).forEach((edge) => {
-      const left = String(edge.source || "");
-      const right = String(edge.target || "");
-      const weight = Number(edge.weight || 0);
-      if (!left || !right) {
-        return;
-      }
-      if (!adjacency.has(left)) {
-        adjacency.set(left, []);
-      }
-      if (!adjacency.has(right)) {
-        adjacency.set(right, []);
-      }
-      adjacency.get(left).push({ id: right, weight });
-      adjacency.get(right).push({ id: left, weight });
-    });
 
     const controls = {
       list: document.getElementById("paper-list"),
@@ -1726,7 +2339,37 @@ class GraphExporter:
       graphHint: document.getElementById("graph-hint"),
       timelineYearMin: document.getElementById("timeline-year-min"),
       timelineYearMax: document.getElementById("timeline-year-max"),
+      resultSelect: document.getElementById("result-select"),
+      statusBanner: document.getElementById("dashboard-status"),
     };
+
+    function clearDashboardStatus() {
+      runtimeStatusMessage = "";
+      runtimeStatusTone = "warning";
+      if (!controls.statusBanner) {
+        return;
+      }
+      controls.statusBanner.textContent = "";
+      controls.statusBanner.classList.remove("visible", "warning", "info");
+    }
+
+    function setDashboardStatus(message, tone) {
+      runtimeStatusMessage = String(message || "").trim();
+      runtimeStatusTone = tone === "info" ? "info" : "warning";
+      if (!controls.statusBanner) {
+        return;
+      }
+      controls.statusBanner.textContent = runtimeStatusMessage;
+      controls.statusBanner.classList.toggle("visible", !!runtimeStatusMessage);
+      controls.statusBanner.classList.toggle(
+        "warning",
+        !!runtimeStatusMessage && runtimeStatusTone === "warning"
+      );
+      controls.statusBanner.classList.toggle(
+        "info",
+        !!runtimeStatusMessage && runtimeStatusTone === "info"
+      );
+    }
 
     function escapeHtml(value) {
       return String(value || "")
@@ -1921,6 +2564,245 @@ class GraphExporter:
         return `${surname}, ${year}`;
       }
       return String(node.title || node.id || nodeId);
+    }
+
+    function buildPortableJsonPayload() {
+      const summary = (payload.meta && payload.meta.summary) || {
+        nodes: Array.isArray(payload.nodes) ? payload.nodes.length : 0,
+        edges: Array.isArray(payload.edges) ? payload.edges.length : 0,
+      };
+      const dashboardMeta = Object.assign({}, (payload.meta || {}), {
+        summary,
+      });
+      const edges = (payload.edges || []).map((edge) => {
+        const sourceId = String(edge.source || "");
+        const targetId = String(edge.target || "");
+        const sourceNode = nodeById.get(sourceId);
+        const targetNode = nodeById.get(targetId);
+        return {
+          source: sourceId,
+          target: targetId,
+          source_title: sourceNode ? String(sourceNode.title || sourceId) : sourceId,
+          target_title: targetNode ? String(targetNode.title || targetId) : targetId,
+          source_label: compactNodeLabel(sourceId),
+          target_label: compactNodeLabel(targetId),
+          weight: Number(edge.weight || 0),
+        };
+      });
+      return {
+        seed_id: (payload.meta && payload.meta.seed_id) || "",
+        meta: {
+          strategy: (payload.meta && payload.meta.strategy) || "",
+          year_range: (payload.meta && payload.meta.year_range) || {},
+        },
+        summary,
+        dashboard: {
+          meta: dashboardMeta,
+        },
+        nodes: payload.nodes || [],
+        edges,
+      };
+    }
+
+    function currentResultIdForPayload(nextPayload) {
+      const meta = (nextPayload && nextPayload.meta) || {};
+      const seedId = String(meta.seed_id || "");
+      const strategy = String(meta.strategy || "");
+      if (!seedId || !strategy) {
+        return null;
+      }
+      return `${strategy}:${seedId}`;
+    }
+
+    function collectionEntryLabel(entry) {
+      const title = String(entry.title || entry.seed_id || entry.result_id || "Saved result");
+      const strategy = String(entry.strategy || "");
+      const summary = entry.summary || {};
+      const nodeCount = Number(summary.nodes || 0);
+      const edgeCount = Number(summary.edges || 0);
+      const strategyLabel = strategy ? ` [${strategy}]` : "";
+      return `${title}${strategyLabel} • ${nodeCount} papers / ${edgeCount} links`;
+    }
+
+    function collectionEntries() {
+      return Array.isArray(collectionBundle.results) ? collectionBundle.results : [];
+    }
+
+    function populateCollectionSelector() {
+      const select = controls.resultSelect;
+      if (!select) {
+        return;
+      }
+      const results = collectionEntries();
+      const currentId = collectionResultId || currentResultIdForPayload(payload);
+      select.innerHTML = "";
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = results.length ? "Saved results" : "Current result only";
+      select.appendChild(placeholder);
+
+      results.forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = String(entry.result_id || "");
+        option.textContent = collectionEntryLabel(entry);
+        select.appendChild(option);
+      });
+
+      if (currentId && results.some((entry) => String(entry.result_id || "") === currentId)) {
+        select.value = currentId;
+      } else {
+        select.value = "";
+      }
+      select.disabled = results.length <= 1;
+    }
+
+    function updateYearPlaceholders() {
+      const validYears = nodes
+        .map((node) => (hasYear(node) ? Number(node.year) : null))
+        .filter((year) => year !== null);
+      if (!validYears.length) {
+        controls.yearMin.placeholder = "Year min";
+        controls.yearMax.placeholder = "Year max";
+        return;
+      }
+      const minYear = Math.min(...validYears);
+      const maxYear = Math.max(...validYears);
+      controls.yearMin.placeholder = `Year min (${minYear})`;
+      controls.yearMax.placeholder = `Year max (${maxYear})`;
+    }
+
+    function normalizeImportedDashboardPayload(imported, label) {
+      const importedNodes = Array.isArray(imported.nodes) ? imported.nodes : [];
+      if (!importedNodes.length) {
+        throw new Error("No nodes found in JSON file.");
+      }
+      const importedDashboardMeta =
+        imported && imported.dashboard && imported.dashboard.meta
+          ? imported.dashboard.meta
+          : {};
+      const importedMeta =
+        imported && imported.meta && typeof imported.meta === "object"
+          ? imported.meta
+          : {};
+      const baseMeta = {
+        seed_id: String(
+          imported.seed_id
+          || importedDashboardMeta.seed_id
+          || importedMeta.seed_id
+          || ((importedNodes.find((node) => !!(node && node.is_seed)) || {}).id || "")
+        ),
+        strategy: String(importedDashboardMeta.strategy || importedMeta.strategy || ""),
+        theme: String(
+          (payload.meta && payload.meta.theme)
+          || importedDashboardMeta.theme
+          || importedMeta.theme
+          || "light"
+        ),
+        summary: imported.summary || importedDashboardMeta.summary || importedMeta.summary || {
+          nodes: importedNodes.length,
+          edges: Array.isArray(imported.edges) ? imported.edges.length : 0,
+        },
+        year_range: importedDashboardMeta.year_range || importedMeta.year_range || {},
+        plotly_node_order:
+          importedDashboardMeta.plotly_node_order || importedMeta.plotly_node_order || [],
+        plotly_positions:
+          importedDashboardMeta.plotly_positions || importedMeta.plotly_positions || [],
+        plotly_node_sizes:
+          importedDashboardMeta.plotly_node_sizes || importedMeta.plotly_node_sizes || [],
+      };
+      if (!hasCompleteDashboardGeometry(baseMeta)) {
+        throw new Error(
+          `Imported results from ${String(label || "the selected file")} are missing stored dashboard geometry. Only current CiteMesh dashboard exports are supported.`
+        );
+      }
+
+      return {
+        payload: {
+          meta: baseMeta,
+          nodes: importedNodes,
+          edges: Array.isArray(imported.edges) ? imported.edges : [],
+        },
+        warningMessage: "",
+        warningTone: "warning",
+      };
+    }
+
+    function applyImportedPayload(imported, label) {
+      const normalizedImport = normalizeImportedDashboardPayload(imported, label);
+      const nextPayload = normalizedImport.payload;
+      const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
+      payload = nextPayload;
+      figureSpec = nextFigureSpec;
+      if (normalizedImport.warningMessage) {
+        setDashboardStatus(
+          normalizedImport.warningMessage,
+          normalizedImport.warningTone
+        );
+        console.warn(normalizedImport.warningMessage);
+      } else {
+        clearDashboardStatus();
+      }
+      collectionResultId = currentResultIdForPayload(nextPayload);
+      rebuildDerivedData();
+      overlayState.neighborhoodKey = "";
+      overlayState.haloKey = "";
+      state.selectedId = (payload.meta && payload.meta.seed_id) || null;
+      state.hoverId = null;
+      state.searchText = "";
+      state.sortKey = "relevance";
+      state.scopeMode = "all";
+      state.yearMin = null;
+      state.yearMax = null;
+      state.visibleIds = new Set(nodeOrder);
+      controls.search.value = "";
+      controls.sort.value = "relevance";
+      controls.yearMin.value = "";
+      controls.yearMax.value = "";
+      controls.scopeButtons.forEach((entry) => entry.classList.remove("active"));
+      controls.chips.forEach((chip) => {
+        const filterKey = chip.getAttribute("data-filter");
+        if (!filterKey) {
+          return;
+        }
+        state.filters[filterKey] = true;
+        chip.classList.add("active");
+      });
+      populateCollectionSelector();
+      updateYearPlaceholders();
+      renderTimeline();
+      return Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
+        setupGraphInteractions();
+        if (state.selectedId && nodeById.has(state.selectedId)) {
+          renderDetail(state.selectedId, false);
+        } else {
+          renderDetail(null, false);
+        }
+        renderList();
+        const loadedTitle = nodeById.get(state.selectedId || "");
+        controls.graphHint.textContent = "Loaded: " + (loadedTitle ? loadedTitle.title : label);
+      });
+    }
+
+    function loadCollectionResult(resultId) {
+      const normalizedId = String(resultId || "").trim();
+      if (!normalizedId) {
+        return Promise.resolve();
+      }
+      const payloads = collectionBundle && collectionBundle.payloads ? collectionBundle.payloads : {};
+      const nextPayload = payloads[normalizedId];
+      if (!nextPayload) {
+        alert("Saved result payload is not embedded in this dashboard shell. Rebuild the collection or use Load Results.");
+        return Promise.resolve();
+      }
+      const entry = collectionEntries().find(
+        (candidate) => String(candidate.result_id || "") === normalizedId
+      );
+      collectionResultId = normalizedId;
+      clearDashboardStatus();
+      return applyImportedPayload(
+        nextPayload,
+        entry ? collectionEntryLabel(entry) : normalizedId
+      );
     }
 
     function shortestPathIds(sourceId, targetId) {
@@ -2355,20 +3237,90 @@ class GraphExporter:
           window.open(target, "_blank", "noopener,noreferrer");
         }
       });
-      setControlsCollapsed(false);
 
-      const validYears = nodes
-        .map((node) => (hasYear(node) ? Number(node.year) : null))
-        .filter((year) => year !== null);
-      if (validYears.length) {
-        const minYear = Math.min(...validYears);
-        const maxYear = Math.max(...validYears);
-        controls.yearMin.placeholder = `Year min (${minYear})`;
-        controls.yearMax.placeholder = `Year max (${maxYear})`;
+      function downloadBlob(content, filename, mime) {
+        const blob = new Blob([content], { type: mime });
+        const anchor = document.createElement("a");
+        anchor.href = URL.createObjectURL(blob);
+        anchor.download = filename;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(anchor.href);
       }
+
+      function seedSlug() {
+        const seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "");
+        if (seedNode && seedNode.title) {
+          return seedNode.title.replace(/[^a-zA-Z0-9]+/g, "_").substring(0, 40).replace(/_+$/, "").toLowerCase();
+        }
+        return "citemesh";
+      }
+
+      document.getElementById("export-json-btn").addEventListener("click", () => {
+        const exportPayload = buildPortableJsonPayload();
+        downloadBlob(JSON.stringify(exportPayload, null, 2), seedSlug() + ".json", "application/json");
+      });
+
+      document.getElementById("export-csv-btn").addEventListener("click", () => {
+        const cols = ["id","title","year","authors","citation_count","venue","arxiv_id","doi","categories","is_seed","provenance","seed_relation","seed_relevance","arxiv_url","doi_url","semantic_scholar_url","abstract"];
+        function csvEscape(v) { const s = String(v == null ? "" : v); return s.includes(",") || s.includes('"') || s.includes("\\n") ? '"' + s.replace(/"/g, '""') + '"' : s; }
+        const rows = [cols.join(",")];
+        for (const n of (payload.nodes || [])) {
+          const links = n.links || {};
+          rows.push([
+            n.id, n.title, n.year, (n.authors||[]).join("; "), n.citation_count, n.venue||"", n.arxiv_id||"", n.doi||"",
+            (n.categories||[]).join("; "), n.is_seed, n.provenance||"", n.seed_relation||"",
+            Number(n.seed_relevance||0).toFixed(6), links.arxiv_abs||"", links.doi||"", links.semantic_scholar||"", n.abstract||""
+          ].map(csvEscape).join(","));
+        }
+        downloadBlob(rows.join("\\n"), seedSlug() + ".csv", "text/csv;charset=utf-8");
+      });
+
+      document.getElementById("export-bib-btn").addEventListener("click", () => {
+        const entries = (payload.nodes || []).map((n) => (n.bibtex || "").trim()).filter(Boolean);
+        downloadBlob(entries.join("\\n\\n") + "\\n", seedSlug() + ".bib", "text/plain;charset=utf-8");
+      });
+
+      const loadInput = document.getElementById("load-json-input");
+      document.getElementById("load-json-btn").addEventListener("click", () => { loadInput.click(); });
+      loadInput.addEventListener("change", (event) => {
+        const file = event.target.files && event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const imported = parseImportedPayloadFromText(e.target.result, file.name);
+            applyImportedPayload(imported, file.name).catch((err) => {
+              alert("Failed to load graph view from imported results: " + err.message);
+            });
+          } catch (err) { alert("Failed to parse imported results: " + err.message); }
+        };
+        reader.readAsText(file);
+        loadInput.value = "";
+      });
+      controls.resultSelect.addEventListener("change", (event) => {
+        const resultId = String(event.target.value || "").trim();
+        if (!resultId) {
+          return;
+        }
+        loadCollectionResult(resultId).catch((err) => {
+          alert("Failed to load saved results: " + err.message);
+        });
+      });
+
+      setControlsCollapsed(false);
+      populateCollectionSelector();
+      updateYearPlaceholders();
     }
 
     function setupGraphInteractions() {
+      if (typeof graphDiv.removeAllListeners === "function") {
+        graphDiv.removeAllListeners("plotly_hover");
+        graphDiv.removeAllListeners("plotly_unhover");
+        graphDiv.removeAllListeners("plotly_click");
+      }
+
       graphDiv.on("plotly_hover", (event) => {
         if (!event || !Array.isArray(event.points)) {
           return;
@@ -2425,10 +3377,7 @@ class GraphExporter:
     function initialize() {
       setupControls();
       renderTimeline();
-      Plotly.newPlot(graphDiv, figureSpec.data, figureSpec.layout, {
-        displaylogo: false,
-        responsive: true,
-      }).then(() => {
+      Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
         setupGraphInteractions();
         if (state.selectedId && nodeById.has(state.selectedId)) {
           renderDetail(state.selectedId, false);
@@ -2475,56 +3424,8 @@ class GraphExporter:
         """
         if self._layout is None:
             self._layout = compute_layout(self.graph)
-        self._layout = self._normalize_layout_positions(self._layout)
+        self._layout = _normalize_layout_positions(self._layout)
         return self._layout
-
-    @staticmethod
-    def _normalize_layout_positions(
-        pos: Dict[Hashable, Iterable[float]],
-        *,
-        padding_ratio: float = EXPORT_LAYOUT_PADDING_RATIO,
-    ) -> Dict[Hashable, np.ndarray]:
-        """Normalize layout positions to a centered square viewport.
-
-        Exporters consume shared layouts directly; normalizing here keeps Plotly and
-        dashboard geometry comparable to static PNG rendering and prevents over-squeezed
-        micro-clusters when raw layout coordinates have uneven spans.
-
-        :param Dict[Hashable, Iterable[float]] pos: Raw or precomputed layout map.
-        :param float padding_ratio: Fractional interior padding around graph extents.
-        :return Dict[Hashable, np.ndarray]: Normalized coordinates in approximately
-            ``[-1, 1]``.
-        """
-        if not pos:
-            return {}
-
-        keys = list(pos.keys())
-        coords = np.array(
-            [np.asarray(pos[key], dtype=float) for key in keys],
-            dtype=float,
-        )
-        if coords.ndim != 2 or coords.shape[1] != 2:
-            return {
-                key: np.asarray(value, dtype=float).copy() for key, value in pos.items()
-            }
-
-        min_xy = coords.min(axis=0)
-        max_xy = coords.max(axis=0)
-        center_xy = (min_xy + max_xy) * 0.5
-        span_xy = max_xy - min_xy
-        max_span = float(np.max(span_xy))
-        target_half_extent = max(1e-6, 1.0 - float(padding_ratio))
-
-        if max_span <= 1e-9:
-            normalized = np.zeros_like(coords)
-        else:
-            normalized = (coords - center_xy) / (max_span * 0.5)
-            normalized *= target_half_extent
-
-        return {
-            key: np.array([float(normalized[idx, 0]), float(normalized[idx, 1])])
-            for idx, key in enumerate(keys)
-        }
 
     def _node_size(self, node: Hashable) -> float:
         """Compute cached node size for a node ID.

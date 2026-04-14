@@ -7,22 +7,22 @@ providing a single interface to all graph building strategies.
 """
 
 import argparse
-import copy
 import json
 import logging
 import math
 import shutil
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
 
 import networkx as nx
+from filelock import FileLock, Timeout
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+from citemesh._runtime import stderr_isatty, stdin_isatty, stdout_isatty
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
@@ -30,8 +30,9 @@ from citemesh.data import (
     get_cache_dir,
     validate_compression_filter,
 )
+from citemesh.data.cache import atomic_write_json
+from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
-from citemesh.services.semantic_scholar import normalize_paper_id
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE, EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import (
@@ -49,23 +50,127 @@ from citemesh.visualization import (
     visualize_graph,
 )
 
-DEFAULT_LOG_WIDTH = 140
+DEFAULT_LOG_WIDTH = 0
+REDIRECTED_LOG_WIDTH = 140
 LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
+DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS = 60.0
 
-log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
-output_console = Console(width=DEFAULT_LOG_WIDTH)
+
+def _resolve_console_width(log_width: int, *, interactive: bool) -> Optional[int]:
+    """Resolve the configured Rich console width for a target stream.
+
+    :param int log_width: Requested Rich console width in columns.
+    :param bool interactive: Whether the target stream is attached to a TTY.
+    :return Optional[int]: Explicit column width or ``None`` for auto sizing.
+    """
+    resolved_width = int(log_width)
+    if resolved_width > 0:
+        return resolved_width
+    if interactive:
+        return None
+    return REDIRECTED_LOG_WIDTH
+
+
+log_console = Console(
+    stderr=True,
+    width=_resolve_console_width(DEFAULT_LOG_WIDTH, interactive=stderr_isatty()),
+)
+output_console = Console(
+    width=_resolve_console_width(DEFAULT_LOG_WIDTH, interactive=stdout_isatty())
+)
 _LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
+_TRACKED_OPTION_DESTS_ATTR = "_citemesh_provided_option_dests"
+_TRACKED_ACTION_CACHE: Dict[type[argparse.Action], type[argparse.Action]] = {}
+
+
+def _tracking_action_class(
+    action_cls: type[argparse.Action],
+) -> type[argparse.Action]:
+    """Wrap an argparse action so explicit CLI usage records its destination.
+
+    :param type[argparse.Action] action_cls: Action class to wrap.
+    :return type[argparse.Action]: Wrapper class recording explicit option use.
+    """
+    cached = _TRACKED_ACTION_CACHE.get(action_cls)
+    if cached is not None:
+        return cached
+
+    class _TrackedAction(action_cls):
+        """Action wrapper that records explicit option usage on the namespace."""
+
+        _citemesh_tracks_presence = True
+
+        def __call__(
+            self,
+            parser: argparse.ArgumentParser,
+            namespace: argparse.Namespace,
+            values: object,
+            option_string: str | None = None,
+        ) -> None:
+            if self.option_strings:
+                provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, None)
+                if not isinstance(provided, set):
+                    provided = set()
+                    setattr(namespace, _TRACKED_OPTION_DESTS_ATTR, provided)
+                provided.add(self.dest)
+            super().__call__(parser, namespace, values, option_string)
+
+    _TrackedAction.__name__ = f"CiteMeshTracked{action_cls.__name__}"
+    _TRACKED_ACTION_CACHE[action_cls] = _TrackedAction
+    return _TrackedAction
+
+
+def _instrument_parser_actions(parser: argparse.ArgumentParser) -> None:
+    """Wrap parser actions so explicit CLI option usage is recorded at parse time.
+
+    The instrumentation walks the parser tree after construction, including all
+    subparsers, which keeps presence tracking correct for arguments added via
+    argument groups and mutually exclusive groups.
+
+    :param argparse.ArgumentParser parser: Root or subparser to instrument.
+    :return None: Mutates parser action classes in place.
+    """
+    for action in parser._actions:
+        if action.option_strings and not getattr(
+            action.__class__, "_citemesh_tracks_presence", False
+        ):
+            tracked_cls = _tracking_action_class(action.__class__)
+            try:
+                action.__class__ = tracked_cls
+            except TypeError:
+                pass
+        if isinstance(action, argparse._SubParsersAction):
+            for subparser in action.choices.values():
+                _instrument_parser_actions(subparser)
+
+
+def _pop_tracked_option_dests(args: argparse.Namespace) -> Set[str]:
+    """Return and remove parser-tracked explicit option destinations.
+
+    :param argparse.Namespace args: Parsed CLI namespace.
+    :return Set[str]: Destinations explicitly supplied by the caller.
+    """
+    raw_provided = getattr(args, _TRACKED_OPTION_DESTS_ATTR, None)
+    if hasattr(args, _TRACKED_OPTION_DESTS_ATTR):
+        delattr(args, _TRACKED_OPTION_DESTS_ATTR)
+    if not isinstance(raw_provided, set):
+        return set()
+    return {str(dest).strip() for dest in raw_provided if str(dest).strip()}
 
 
 def _configure_logging(
-    *, log_level: str = "info", log_width: int = DEFAULT_LOG_WIDTH
+    *,
+    log_level: str = "info",
+    log_width: int = DEFAULT_LOG_WIDTH,
+    log_file: str | None = None,
 ) -> None:
     """Configure CLI logging once at runtime.
 
     :param str log_level: Log level token.
-    :param int log_width: Rich console width; non-positive values use auto width.
+    :param int log_width: Rich console width; non-positive values use stream defaults.
+    :param str | None log_file: Optional plain-text log file path.
     :return None: Mutates global logging handlers and consoles once.
     """
     global _LOGGING_CONFIGURED
@@ -78,27 +183,59 @@ def _configure_logging(
     if level_name not in LOG_LEVEL_CHOICES:
         level_name = "info"
     resolved_level = getattr(logging, level_name.upper(), logging.INFO)
-    resolved_width = None if int(log_width) <= 0 else int(log_width)
-    log_console = Console(stderr=True, width=resolved_width)
-    output_console = Console(width=resolved_width)
+    console_level = (
+        max(resolved_level, logging.INFO) if log_file is not None else resolved_level
+    )
+    log_console = Console(
+        stderr=True,
+        width=_resolve_console_width(log_width, interactive=stderr_isatty()),
+    )
+    output_console = Console(
+        width=_resolve_console_width(log_width, interactive=stdout_isatty())
+    )
+    console_handler = RichHandler(
+        console=log_console,
+        show_time=False,
+        show_path=False,
+        rich_tracebacks=False,
+        markup=True,
+    )
+    console_handler.setLevel(console_level)
+    handlers: list[logging.Handler] = [console_handler]
+    if log_file is not None:
+        resolved_log_file = Path(log_file).expanduser()
+        resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(
+            resolved_log_file,
+            mode="w",
+            encoding="utf-8",
+        )
+        file_handler.setLevel(resolved_level)
+        file_handler.setFormatter(
+            logging.Formatter(
+                fmt="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        handlers.append(file_handler)
 
     logging.basicConfig(
         level=resolved_level,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[
-            RichHandler(
-                console=log_console,
-                show_time=False,
-                show_path=False,
-                rich_tracebacks=False,
-                markup=True,
-            )
-        ],
+        handlers=handlers,
     )
     # Keep third-party HTTP logs concise without import-time side effects.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("filelock").setLevel(logging.WARNING)
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+    logging.getLogger("h5py").setLevel(logging.WARNING)
+    logging.getLogger("fsspec").setLevel(logging.WARNING)
+    logging.getLogger("semanticscholar").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
     logging.getLogger("transformers").setLevel(logging.WARNING)
     logging.getLogger("datasets").setLevel(logging.WARNING)
@@ -113,6 +250,8 @@ def _bounded_int(value: str, *, minimum: int) -> int:
     :return int: Parsed integer.
     :raises argparse.ArgumentTypeError: If parsing fails or value is below minimum.
     """
+    if isinstance(value, bool):
+        raise argparse.ArgumentTypeError("must be an integer")
     try:
         parsed = int(value)
     except ValueError as exc:
@@ -147,6 +286,8 @@ def _threshold_float(value: str) -> float:
     :return float: Parsed threshold value.
     :raises argparse.ArgumentTypeError: If value is outside [0, 1].
     """
+    if isinstance(value, bool):
+        raise argparse.ArgumentTypeError("must be a float")
     try:
         parsed = float(value)
     except ValueError as exc:
@@ -182,9 +323,11 @@ def _add_logging_arguments(
     """
     default_log_level: object = "info"
     default_log_width: object = DEFAULT_LOG_WIDTH
+    default_log_file: object = None
     if suppress_defaults:
         default_log_level = argparse.SUPPRESS
         default_log_width = argparse.SUPPRESS
+        default_log_file = argparse.SUPPRESS
 
     target.add_argument(
         "--log-level",
@@ -196,21 +339,58 @@ def _add_logging_arguments(
         "--log-width",
         type=_non_negative_int,
         default=default_log_width,
-        help="Rich console wrap width in columns (0 = auto terminal width; default: 140)",
+        help="Rich console wrap width in columns (0 = auto width; default: 0)",
+    )
+    target.add_argument(
+        "--log-file",
+        type=_non_empty_str,
+        default=default_log_file,
+        help="Optional plain-text log file path (overwrites existing file).",
     )
 
 
-EXPORT_FORMATS = ("png", "html", "plotly", "dashboard", "json", "graphml")
+EXPORT_FORMATS = (
+    "png",
+    "html",
+    "plotly",
+    "dashboard",
+    "json",
+    "csv",
+    "bibtex",
+    "graphml",
+)
 EXPORT_EXTENSIONS: Dict[str, str] = {
     "png": ".png",
     "html": ".html",
     "plotly": ".plotly.html",
     "dashboard": ".dashboard.html",
     "json": ".json",
+    "csv": ".csv",
+    "bibtex": ".bib",
     "graphml": ".graphml",
 }
 KNOWN_EXPORT_SUFFIXES: List[str] = sorted(
     EXPORT_EXTENSIONS.values(), key=len, reverse=True
+)
+# Table-driven export dispatch: format → GraphExporter method name.
+# ``png`` is handled separately (uses ``visualize_graph``, not the exporter).
+_EXPORTER_METHOD: Dict[str, str] = {
+    "html": "to_interactive_html",
+    "plotly": "to_plotly_html",
+    "dashboard": "to_dashboard_html",
+    "json": "to_json",
+    "csv": "to_csv",
+    "bibtex": "to_bibtex",
+    "graphml": "to_graphml",
+}
+_THEME_AWARE_FORMATS: frozenset = frozenset({"html", "plotly", "dashboard"})
+DASHBOARD_COLLECTION_FILENAME = "dashboard.html"
+DASHBOARD_MANIFEST_FILENAME = "dashboard.manifest.json"
+# Verify dispatch coverage at import time — a new EXPORT_FORMATS entry without
+# a dispatch mapping will fail fast here rather than silently skip at runtime.
+assert set(_EXPORTER_METHOD) | {"png"} == set(EXPORT_FORMATS), (
+    f"Export dispatch gap: covered={sorted(set(_EXPORTER_METHOD) | {'png'})}, "
+    f"declared={sorted(EXPORT_FORMATS)}"
 )
 
 
@@ -292,15 +472,10 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
     "max_citations": HYBRID_DEFAULT_MAX_CITATIONS,
     "max_references": HYBRID_DEFAULT_MAX_REFERENCES,
 }
-_VALIDATION_NORMALIZED_FIELDS: Tuple[str, ...] = (
-    "binary_prefilter",
-    "binary_rescore_multiplier",
-    "cache_compression",
-    "cache_compression_level",
+_PROGRAMMATIC_BUILD_VALUE_DESTS: Set[str] = set(_BUILD_STRATEGY_OPTION_SUPPORT) | {
+    "paper_id",
     "max_papers",
-    "max_citations",
-    "max_references",
-)
+}
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
     "model_revision",
@@ -454,6 +629,20 @@ def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
     return _resolved_hybrid_max_semantic(cli_args) > 0
 
 
+def _embedding_branch_enabled(cli_args: argparse.Namespace) -> bool:
+    """Return whether the active build will execute an embedding-backed workflow.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :return bool: ``True`` when embedding runtime, cache, and corpus work may run.
+    """
+    strategy = str(getattr(cli_args, "strategy", "")).strip().lower()
+    if strategy == "embedding":
+        return True
+    if strategy == "hybrid":
+        return _hybrid_semantic_branch_enabled(cli_args)
+    return False
+
+
 def _strategy_score_contract(strategy: str) -> Dict[str, object]:
     """Return strategy-specific score semantics metadata for export payloads.
 
@@ -494,48 +683,6 @@ def _strategy_score_contract(strategy: str) -> Dict[str, object]:
         **base_contract,
         "score_type": "unknown",
     }
-
-
-def _collect_provided_build_option_dests(
-    build_parser: argparse.ArgumentParser, argv: List[str]
-) -> Set[str]:
-    """Return build-option destinations explicitly present in CLI argv.
-
-    :param argparse.ArgumentParser build_parser: Build-subcommand parser.
-    :param List[str] argv: Raw argv list without executable name.
-    :return Set[str]: Explicitly provided build option destinations.
-    """
-    if not argv:
-        return set()
-
-    try:
-        build_idx = argv.index("build")
-    except ValueError:
-        return set()
-
-    provided: Set[str] = set()
-    probe_parser = copy.deepcopy(build_parser)
-    probe_default = object()
-    for action in probe_parser._actions:
-        if action.option_strings:
-            action.default = probe_default
-    probe_parser.set_defaults(**{key: probe_default for key in probe_parser._defaults})
-
-    try:
-        parsed, _ = probe_parser.parse_known_args(argv[build_idx + 1 :])
-    except SystemExit:
-        return provided
-
-    for action in probe_parser._actions:
-        if (
-            not action.option_strings
-            or not hasattr(parsed, action.dest)
-            or getattr(parsed, action.dest) is probe_default
-        ):
-            continue
-        provided.add(action.dest)
-
-    return provided
 
 
 def _validate_build_cli_contract(
@@ -657,8 +804,16 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     :param argparse.Namespace args: Parsed build arguments.
     :return None: Emits info-level contract summary logs.
     """
-    if args.strategy not in {"embedding", "hybrid"}:
+    if not _embedding_branch_enabled(args):
         return
+
+    _, cache_files, _ = _embedding_cache_directory_stats()
+    if cache_files == 0:
+        logger.warning(
+            "No embedding cache found; model and corpus downloads may be "
+            "required (network access needed, may take several minutes on "
+            "first use)."
+        )
 
     corpus_label = "all" if args.all_corpus else str(args.corpus_size)
     cache_root = get_cache_dir("embeddings")
@@ -691,6 +846,79 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
                 "Cache overwrite rationale: %s",
                 overwrite_reason,
             )
+
+
+def _normalize_programmatic_build_value(
+    action: argparse.Action,
+    value: object,
+    parser_error_sink: argparse.ArgumentParser,
+) -> object:
+    """Normalize a programmatic build value using the parser action contract.
+
+    :param argparse.Action action: Parser action defining the value contract.
+    :param object value: Programmatic value to validate.
+    :param argparse.ArgumentParser parser_error_sink: Parser-like error sink.
+    :return object: Normalized value compatible with CLI parsing rules.
+    """
+    if value is None:
+        return None
+
+    primary_label = action.option_strings[0] if action.option_strings else action.dest
+    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
+        if not isinstance(value, bool):
+            parser_error_sink.error(f"{primary_label} must be a boolean.")
+        return value
+
+    normalized = value
+    if action.type is not None:
+        try:
+            normalized = action.type(value)
+        except argparse.ArgumentTypeError as exc:
+            parser_error_sink.error(str(exc))
+        except (TypeError, ValueError) as exc:
+            parser_error_sink.error(str(exc))
+
+    if action.choices is not None and normalized not in action.choices:
+        choices_text = ", ".join(str(choice) for choice in action.choices)
+        parser_error_sink.error(f"{primary_label} must be one of: {choices_text}.")
+    return normalized
+
+
+def _validate_programmatic_build_values(
+    args: argparse.Namespace,
+    build_parser: argparse.ArgumentParser,
+    parser_error_sink: argparse.ArgumentParser,
+) -> None:
+    """Validate programmatic build namespaces against CLI scalar contracts.
+
+    :param argparse.Namespace args: Candidate build namespace.
+    :param argparse.ArgumentParser build_parser: Build parser used for action metadata.
+    :param argparse.ArgumentParser parser_error_sink: Parser-like error sink.
+    :return None: Mutates ``args`` with normalized CLI-equivalent values.
+    """
+    for action in build_parser._actions:
+        dest = str(getattr(action, "dest", "") or "")
+        if dest not in _PROGRAMMATIC_BUILD_VALUE_DESTS or not hasattr(args, dest):
+            continue
+        normalized = _normalize_programmatic_build_value(
+            action,
+            getattr(args, dest),
+            parser_error_sink,
+        )
+        setattr(args, dest, normalized)
+
+
+def _synchronize_namespace_values(
+    target: argparse.Namespace, source: argparse.Namespace
+) -> None:
+    """Copy validated namespace state back to the caller namespace.
+
+    :param argparse.Namespace target: Namespace mutated in-place.
+    :param argparse.Namespace source: Namespace carrying validated CLI-equivalent values.
+    :return None: Copies every field from ``source`` onto ``target``.
+    """
+    for field, value in vars(source).items():
+        setattr(target, field, value)
 
 
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
@@ -734,13 +962,21 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
 
 
 def _build_strategy_graph(
-    args: argparse.Namespace, strategy: str, *, validate_contract: bool = True
+    args: argparse.Namespace,
+    strategy: str,
+    *,
+    validate_contract: bool = True,
+    provided: Optional[Set[str]] = None,
 ) -> tuple[nx.Graph, str]:
     """Build a graph for a strategy selected from CLI arguments.
 
     :param argparse.Namespace args: Parsed arguments.
     :param str strategy: Strategy name.
     :param bool validate_contract: Whether to run strategy-option contract checks.
+    :param Optional[Set[str]] provided: Explicit set of option destinations that were
+        provided by the caller.  When ``None``, provided fields are inferred by
+        comparing namespace values against parser defaults (note: re-specifying a
+        default value is invisible to the heuristic).
     :return tuple[nx.Graph, str]: Graph and normalized seed paper ID.
     :raises ValueError: If strategy is unsupported.
     """
@@ -758,9 +994,13 @@ def _build_strategy_graph(
         merged_values.update(vars(args_for_validation))
         args_for_validation = argparse.Namespace(**merged_values)
         setattr(args_for_validation, "strategy", strategy)
-        inferred_provided = _infer_provided_build_option_dests(
-            args=args_for_validation,
-            build_parser=build_parser_snapshot,
+        inferred_provided = (
+            provided
+            if provided is not None
+            else _infer_provided_build_option_dests(
+                args=args_for_validation,
+                build_parser=build_parser_snapshot,
+            )
         )
 
         class _ProgrammaticBuildParser:
@@ -775,15 +1015,17 @@ def _build_strategy_graph(
                 """
                 raise ValueError(message)
 
+        _validate_programmatic_build_values(
+            args_for_validation,
+            build_parser_snapshot,
+            _ProgrammaticBuildParser(),  # type: ignore[arg-type]
+        )
         _validate_build_cli_contract(
             args_for_validation,
             _ProgrammaticBuildParser(),  # type: ignore[arg-type]
             inferred_provided,
         )
-        # Preserve validation-time normalization for downstream builder parity.
-        for field in _VALIDATION_NORMALIZED_FIELDS:
-            if hasattr(args_for_validation, field):
-                setattr(args, field, getattr(args_for_validation, field))
+        _synchronize_namespace_values(args, args_for_validation)
 
     builder = _STRATEGY_DISPATCH[strategy].factory(args)
     return builder.build_graph(args.paper_id)
@@ -798,6 +1040,9 @@ def _infer_provided_build_option_dests(
     explicit re-specification of the same default, but it prevents most silent
     programmatic bypasses for strategy-scoped option contracts.
 
+    For precise control, programmatic callers should pass the ``provided`` parameter
+    to :func:`_build_strategy_graph` directly, bypassing this heuristic entirely.
+
     :param argparse.Namespace args: Candidate parsed namespace.
     :param argparse.ArgumentParser build_parser: Build subcommand parser.
     :return Set[str]: Option destinations inferred as explicitly set.
@@ -810,9 +1055,13 @@ def _infer_provided_build_option_dests(
         if not hasattr(args, dest):
             continue
         current_value = getattr(args, dest)
-        default_value = build_parser.get_default(dest)
-        if current_value != default_value:
-            provided.add(dest)
+        if isinstance(action, argparse._AppendAction):
+            if current_value is not None:
+                provided.add(dest)
+        else:
+            default_value = build_parser.get_default(dest)
+            if current_value != default_value:
+                provided.add(dest)
     return provided
 
 
@@ -852,10 +1101,18 @@ Examples:
 
   # Quick test with fewer papers
   citemesh build "arxiv:1810.04805" -p 20 --strategy citation
+
+Environment variables:
+  S2_API_KEY                                      Semantic Scholar API key (higher rate limits)
+  CITEMESH_CACHE_DIR                              Override cache directory location
+  CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS   Embedding cache lock timeout (default: 900s)
         """,
     )
 
-    subparsers = parser.add_subparsers(dest="command", help="Commands")
+    subparsers = parser.add_subparsers(
+        dest="command",
+        help="Commands",
+    )
 
     # Build command
     build_parser = subparsers.add_parser(
@@ -888,17 +1145,25 @@ Examples:
         type=str,
         default=None,
         help=(
-            "Output file path for single export, or output directory base for "
-            "multi-export runs (auto-named if not specified)"
+            "Output file path for single export, or output/collection root for "
+            "multi-export runs. With dashboard export, an explicit "
+            "*.dashboard.html path keeps standalone mode; otherwise CiteMesh "
+            "writes dashboard.html + dashboard.manifest.json under the output root."
         ),
     )
 
     build_parser.add_argument(
         "--export",
         "-e",
-        choices=["png", "html", "plotly", "dashboard", "json", "graphml", "all"],
-        default="png",
-        help="Export format (default: png)",
+        choices=[*EXPORT_FORMATS, "all"],
+        action="append",
+        default=None,
+        help=(
+            "Export format; repeat for multiple (default: png). Dashboard export "
+            "normally uses collection mode (shared dashboard.html + manifest + "
+            "per-run JSON/config artifacts). Use -o <name>.dashboard.html for a "
+            "standalone one-file dashboard."
+        ),
     )
 
     build_parser.add_argument(
@@ -1166,7 +1431,7 @@ Examples:
         action="store_true",
         help=(
             "Enable best-effort torch.compile for supported embedding profiles "
-            "(default: enabled)."
+            "(default: disabled)."
         ),
     )
     torch_compile_group.add_argument(
@@ -1175,7 +1440,7 @@ Examples:
         action="store_false",
         help="Disable torch.compile and keep eager runtime for embedding models.",
     )
-    build_parser.set_defaults(torch_compile=True)
+    build_parser.set_defaults(torch_compile=False)
 
     # Hybrid strategy arguments
     hybrid_group = build_parser.add_argument_group("hybrid strategy options")
@@ -1211,7 +1476,8 @@ Examples:
         parents=[command_logging_parent],
     )
     cache_subparsers = cache_parser.add_subparsers(
-        dest="cache_command", help="Cache operations"
+        dest="cache_command",
+        help="Cache operations",
     )
     cache_clear_parser = cache_subparsers.add_parser(
         "clear",
@@ -1235,6 +1501,7 @@ Examples:
         help="Scan cache usage (sections, file counts, and total size)",
         parents=[command_logging_parent],
     )
+    _instrument_parser_actions(parser)
     return parser, build_parser, cache_parser
 
 
@@ -1254,18 +1521,22 @@ def resolve_output_paths(
     :return Dict[str, Path]: Mapping of export format -> resolved output path.
     """
     base_str = str(base_output_path)
-    matched_suffix = next(
-        (ext for ext in KNOWN_EXPORT_SUFFIXES if base_str.lower().endswith(ext)),
-        None,
-    )
+    stripped_base = _strip_known_export_suffix(base_str)
+    has_known_suffix = stripped_base != base_str
 
     output_paths: Dict[str, Path] = {}
     if explicit_output and len(selected_formats) > 1:
-        output_dir = (
-            Path(base_str[: -len(matched_suffix)])
-            if matched_suffix
-            else base_output_path
-        )
+        if "dashboard" in selected_formats and base_str.lower().endswith(
+            EXPORT_EXTENSIONS["dashboard"]
+        ):
+            for fmt in selected_formats:
+                if fmt == "dashboard":
+                    output_paths[fmt] = base_output_path
+                else:
+                    output_paths[fmt] = Path(stripped_base + EXPORT_EXTENSIONS[fmt])
+            return output_paths
+
+        output_dir = Path(stripped_base) if has_known_suffix else base_output_path
         basename = strategy or "graph"
         for fmt in selected_formats:
             output_paths[fmt] = output_dir / f"{basename}{EXPORT_EXTENSIONS[fmt]}"
@@ -1275,26 +1546,112 @@ def resolve_output_paths(
         fmt = selected_formats[0]
         desired_ext = EXPORT_EXTENSIONS[fmt]
 
-        if matched_suffix == desired_ext:
+        if base_str.lower().endswith(desired_ext):
             output_paths[fmt] = base_output_path
             return output_paths
 
-        if matched_suffix:
-            output_paths[fmt] = Path(base_str[: -len(matched_suffix)] + desired_ext)
+        if has_known_suffix:
+            output_paths[fmt] = Path(stripped_base + desired_ext)
             return output_paths
 
         output_paths[fmt] = Path(base_str + desired_ext)
         return output_paths
 
-    if matched_suffix:
-        output_base = base_str[: -len(matched_suffix)]
-    else:
-        output_base = base_str
-
     for fmt in selected_formats:
-        output_paths[fmt] = Path(output_base + EXPORT_EXTENSIONS[fmt])
+        output_paths[fmt] = Path(stripped_base + EXPORT_EXTENSIONS[fmt])
 
     return output_paths
+
+
+def _is_standalone_dashboard_output(
+    base_output_path: Path,
+    selected_formats: List[str],
+    explicit_output: bool,
+) -> bool:
+    """Return whether dashboard export should remain a standalone HTML artifact.
+
+    :param Path base_output_path: User-provided or generated base output path.
+    :param List[str] selected_formats: Requested export formats.
+    :param bool explicit_output: Whether ``--output`` was provided.
+    :return bool: ``True`` when an explicit standalone dashboard path was
+        requested, even if additional sibling exports were also selected.
+    """
+    return (
+        explicit_output
+        and "dashboard" in selected_formats
+        and str(base_output_path).lower().endswith(EXPORT_EXTENSIONS["dashboard"])
+    )
+
+
+def _resolve_dashboard_collection_root(
+    base_output_path: Path,
+    *,
+    explicit_output: bool,
+) -> Path:
+    """Resolve root directory for shared dashboard collection artifacts.
+
+    :param Path base_output_path: User-provided or generated base output path.
+    :param bool explicit_output: Whether ``--output`` was provided.
+    :return Path: Collection root directory containing shared dashboard shell.
+    """
+    if explicit_output:
+        base_str = str(base_output_path)
+        stripped_base = _strip_known_export_suffix(base_str)
+        if stripped_base != base_str:
+            return Path(stripped_base)
+        return base_output_path
+
+    parent = base_output_path.parent
+    grandparent = parent.parent
+    if str(grandparent) and grandparent != Path("."):
+        return grandparent
+    return parent
+
+
+def resolve_dashboard_collection_outputs(
+    *,
+    base_output_path: Path,
+    selected_formats: List[str],
+    explicit_output: bool,
+    strategy: str,
+    graph: nx.Graph,
+    seed_id: str,
+) -> tuple[Dict[str, Path], Path]:
+    """Resolve shared-dashboard output paths plus per-run result artifact paths.
+
+    The dashboard shell lives at the collection root, while each build run writes
+    its JSON/config and any other requested artifacts into a unique seed-specific
+    result directory beneath that root.
+
+    :param Path base_output_path: User-provided or generated base output path.
+    :param List[str] selected_formats: Requested export formats.
+    :param bool explicit_output: Whether ``--output`` was provided.
+    :param str strategy: Active strategy name.
+    :param nx.Graph graph: Built graph used for run-specific output naming.
+    :param str seed_id: Seed node identifier.
+    :return tuple[Dict[str, Path], Path]: Resolved output paths and manifest path.
+    """
+    collection_root = _resolve_dashboard_collection_root(
+        base_output_path,
+        explicit_output=explicit_output,
+    )
+    run_base_output_path = generate_output_path(
+        graph,
+        seed_id,
+        output_dir=collection_root,
+        strategy=strategy,
+    )
+    run_formats = [fmt for fmt in selected_formats if fmt != "dashboard"]
+    if "json" not in run_formats:
+        run_formats.append("json")
+    output_paths = resolve_output_paths(
+        base_output_path=run_base_output_path,
+        selected_formats=run_formats,
+        explicit_output=False,
+        strategy=strategy,
+    )
+    output_paths["dashboard"] = collection_root / DASHBOARD_COLLECTION_FILENAME
+    return output_paths, collection_root / DASHBOARD_MANIFEST_FILENAME
 
 
 def _strip_known_export_suffix(filename: str) -> str:
@@ -1327,6 +1684,161 @@ def resolve_graph_config_path(output_paths: Dict[str, Path], strategy: str) -> P
     return anchor_path.parent / f"{stem}.config.json"
 
 
+def _relative_output_path(path: Path, root: Path) -> str:
+    """Resolve a stable manifest path relative to a collection root when possible.
+
+    :param Path path: Absolute or relative artifact path.
+    :param Path root: Collection root directory.
+    :return str: Relative path when possible, else normalized string form.
+    """
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return str(path)
+
+
+def update_dashboard_manifest(
+    manifest_path: Path,
+    *,
+    collection_root: Path,
+    graph: nx.Graph,
+    seed_id: str,
+    strategy: str,
+    json_path: Path,
+    config_path: Path,
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Create or update shared dashboard manifest for collection-style outputs.
+
+    Dashboard collections intentionally keep one manifest slot per
+    ``(strategy, seed_id)`` pair. Re-running the same seed/strategy refreshes
+    that slot because the per-run JSON/config artifact paths are also stable for
+    a given seed title and identifier.
+
+    :param Path manifest_path: Manifest JSON path to write.
+    :param Path collection_root: Shared dashboard collection root directory.
+    :param nx.Graph graph: Built graph used for seed metadata.
+    :param str seed_id: Seed node identifier.
+    :param str strategy: Active strategy name.
+    :param Path json_path: Per-run JSON payload path.
+    :param Path config_path: Per-run config sidecar path.
+    :param Dict[str, Any] metadata: Export metadata payload for summary fields.
+    :return Dict[str, Any]: Manifest payload written to disk.
+    """
+    seed_title = str(graph.nodes[seed_id].get("title", seed_id))
+    result_id = f"{strategy}:{seed_id}"
+    entry = {
+        "result_id": result_id,
+        "seed_id": seed_id,
+        "title": seed_title,
+        "strategy": strategy,
+        "summary": {
+            "nodes": int(metadata.get("nodes", 0) or 0),
+            "edges": int(metadata.get("edges", 0) or 0),
+        },
+        "json_path": _relative_output_path(json_path, collection_root),
+        "config_path": _relative_output_path(config_path, collection_root),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = manifest_path.with_name(f".{manifest_path.name}.lock")
+    lock = FileLock(str(lock_path), timeout=DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS)
+    try:
+        with lock:
+            results: list[Dict[str, Any]] = []
+            if manifest_path.exists():
+                try:
+                    existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    existing = {}
+                if isinstance(existing, dict) and isinstance(
+                    existing.get("results"), list
+                ):
+                    results = [
+                        item for item in existing["results"] if isinstance(item, dict)
+                    ]
+
+            filtered = [item for item in results if item.get("result_id") != result_id]
+            manifest_payload = {
+                "schema_version": 1,
+                "results": [entry, *filtered],
+            }
+            atomic_write_json(manifest_path, manifest_payload, indent=2)
+            return manifest_payload
+    except Timeout as exc:
+        raise RuntimeError(
+            "Timed out waiting for dashboard manifest lock "
+            f"at {lock_path} after {DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS:.1f}s."
+        ) from exc
+
+
+def _resolve_collection_payload_path(
+    collection_root: Path, json_rel_path: str
+) -> Optional[Path]:
+    """Resolve a manifest JSON payload path confined to the collection root.
+
+    :param Path collection_root: Shared dashboard collection directory.
+    :param str json_rel_path: Manifest-provided JSON payload path.
+    :return Optional[Path]: Resolved payload path, or ``None`` when invalid.
+    """
+    candidate = Path(json_rel_path)
+    if candidate.is_absolute():
+        return None
+
+    resolved_root = collection_root.resolve()
+    resolved_candidate = (resolved_root / candidate).resolve()
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved_candidate
+
+
+def build_dashboard_collection_bundle(
+    manifest_path: Path,
+    *,
+    current_result_id: str,
+) -> Dict[str, Any]:
+    """Load manifest entries plus embedded JSON payloads for shared dashboard UX.
+
+    :param Path manifest_path: Manifest JSON path for the collection.
+    :param str current_result_id: Result identifier for the graph just built.
+    :return Dict[str, Any]: Embedded dashboard collection bundle.
+    """
+    collection_root = manifest_path.parent
+    try:
+        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        manifest_payload = {}
+
+    raw_results = (
+        manifest_payload.get("results") if isinstance(manifest_payload, dict) else []
+    )
+    results = [entry for entry in raw_results if isinstance(entry, dict)]
+    payloads: Dict[str, Any] = {}
+    for entry in results:
+        result_id = str(entry.get("result_id") or "").strip()
+        json_rel_path = str(entry.get("json_path") or "").strip()
+        if not result_id or not json_rel_path:
+            continue
+        payload_path = _resolve_collection_payload_path(collection_root, json_rel_path)
+        if payload_path is None:
+            continue
+        try:
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payloads[result_id] = payload
+
+    return {
+        "current_result_id": current_result_id,
+        "results": results,
+        "payloads": payloads,
+    }
+
+
 def _drop_none_values(value: Any) -> Any:
     """Recursively drop ``None`` entries from dictionaries/lists.
 
@@ -1342,6 +1854,33 @@ def _drop_none_values(value: Any) -> Any:
     if isinstance(value, list):
         return [_drop_none_values(item) for item in value]
     return value
+
+
+def _build_citation_config_payload(
+    cli_args: argparse.Namespace, *, strategy: str
+) -> Optional[Dict[str, Any]]:
+    """Build strategy-scoped citation/reference settings for config sidecars.
+
+    :param argparse.Namespace cli_args: Parsed CLI arguments.
+    :param str strategy: Active build strategy.
+    :return Optional[Dict[str, Any]]: Citation config payload when applicable.
+    """
+    fetch_references = not bool(cli_args.no_references)
+    refresh_reference_cache = bool(cli_args.refresh_reference_cache)
+
+    if strategy == "recommendation":
+        return {
+            "fetch_references": fetch_references,
+            "refresh_reference_cache": refresh_reference_cache,
+        }
+    if strategy in {"citation", "hybrid"}:
+        return {
+            "max_citations": int(cli_args.max_citations),
+            "max_references": int(cli_args.max_references),
+            "fetch_references": fetch_references,
+            "refresh_reference_cache": refresh_reference_cache,
+        }
+    return None
 
 
 def _build_graph_config_payload(
@@ -1397,16 +1936,7 @@ def _build_graph_config_payload(
             "seed_id": seed_id,
             "strategy": strategy,
             "max_papers": int(cli_args.max_papers),
-            "citation": (
-                {
-                    "max_citations": int(cli_args.max_citations),
-                    "max_references": int(cli_args.max_references),
-                    "fetch_references": not bool(cli_args.no_references),
-                    "refresh_reference_cache": bool(cli_args.refresh_reference_cache),
-                }
-                if strategy in {"citation", "hybrid", "recommendation"}
-                else None
-            ),
+            "citation": _build_citation_config_payload(cli_args, strategy=strategy),
             "hybrid": (
                 {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}
                 if strategy == "hybrid"
@@ -1494,7 +2024,7 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
             logger.warning("Cache overwrite rationale: %s", overwrite_reason)
         return True
 
-    if not sys.stdin.isatty():
+    if not stdin_isatty():
         logger.error(
             "Refusing --force-rebuild-cache in non-interactive mode without "
             "--overwrite-cache. Re-run with --overwrite-cache to proceed."
@@ -1564,7 +2094,7 @@ def _confirmed_cache_clear(
             logger.warning("Cache clear rationale: %s", normalized_reason)
         return True
 
-    if not sys.stdin.isatty():
+    if not stdin_isatty():
         logger.error(
             "Refusing to clear cache in non-interactive mode without --yes. "
             "Re-run with: citemesh cache clear --yes"
@@ -1704,26 +2234,32 @@ def _scan_cache_directory() -> int:
     return 0
 
 
-def main() -> None:
-    """Main CLI entry point."""
-    parser, build_parser, cache_parser = _create_parser()
+def main(argv: Sequence[str] | None = None) -> int:
+    """Main CLI entry point.
 
-    args = parser.parse_args()
-    _configure_logging(log_level=args.log_level, log_width=args.log_width)
-    provided_build_options = _collect_provided_build_option_dests(
-        build_parser, sys.argv[1:]
+    :param Sequence[str] | None argv: Optional CLI argument list without executable.
+    :return int: Process-style exit code.
+    """
+    parser, build_parser, cache_parser = _create_parser()
+    argv_list = list(argv) if argv is not None else None
+    args = parser.parse_args(argv_list)
+    _configure_logging(
+        log_level=args.log_level,
+        log_width=args.log_width,
+        log_file=getattr(args, "log_file", None),
     )
+    provided_build_options = _pop_tracked_option_dests(args)
 
     if not args.command:
         parser.print_help()
-        sys.exit(1)
+        return 1
 
     if args.command == "build":
         _validate_build_cli_contract(args, build_parser, provided_build_options)
         try:
             if not _confirm_force_rebuild_cache(args):
                 logger.info("Build aborted.")
-                sys.exit(1)
+                return 1
             _log_build_side_effect_contract(args)
             # Build graph based on strategy
             logger.info(f"Building graph using {args.strategy} strategy...")
@@ -1739,15 +2275,46 @@ def main() -> None:
                     graph, seed_id, strategy=args.strategy
                 )
 
-            selected_formats = (
-                list(EXPORT_FORMATS) if args.export == "all" else [args.export]
-            )
-            output_paths = resolve_output_paths(
+            raw_exports = args.export or ["png"]
+            if "all" in raw_exports:
+                selected_formats = list(EXPORT_FORMATS)
+            else:
+                selected_formats = list(dict.fromkeys(raw_exports))
+            dashboard_manifest_path: Optional[Path] = None
+            if "dashboard" in selected_formats and not _is_standalone_dashboard_output(
                 base_output_path=base_output_path,
                 selected_formats=selected_formats,
                 explicit_output=bool(args.output),
-                strategy=args.strategy,
-            )
+            ):
+                output_paths, dashboard_manifest_path = (
+                    resolve_dashboard_collection_outputs(
+                        base_output_path=base_output_path,
+                        selected_formats=selected_formats,
+                        explicit_output=bool(args.output),
+                        strategy=args.strategy,
+                        graph=graph,
+                        seed_id=seed_id,
+                    )
+                )
+            else:
+                output_paths = resolve_output_paths(
+                    base_output_path=base_output_path,
+                    selected_formats=selected_formats,
+                    explicit_output=bool(args.output),
+                    strategy=args.strategy,
+                )
+            if dashboard_manifest_path is not None:
+                run_artifact_root = (
+                    output_paths["json"].parent
+                    if "json" in output_paths
+                    else next(iter(output_paths.values())).parent
+                )
+                logger.info(
+                    "Dashboard collection mode: shell=%s manifest=%s run_artifacts=%s.",
+                    output_paths["dashboard"],
+                    dashboard_manifest_path,
+                    run_artifact_root,
+                )
             for parent in {path.parent for path in output_paths.values()}:
                 if parent and not parent.exists():
                     parent.mkdir(parents=True, exist_ok=True)
@@ -1762,9 +2329,7 @@ def main() -> None:
                 "theme": args.theme,
                 "score_contract": _strategy_score_contract(args.strategy),
             }
-            include_embedding_metadata = args.strategy == "embedding" or (
-                args.strategy == "hybrid" and _hybrid_semantic_branch_enabled(args)
-            )
+            include_embedding_metadata = _embedding_branch_enabled(args)
             if include_embedding_metadata:
                 runtime_embedding_metadata: Optional[Dict[str, Any]] = None
                 raw_runtime_metadata = graph.graph.get("embedding_runtime")
@@ -1809,20 +2374,18 @@ def main() -> None:
                     layout=shared_layout,
                 )
 
-            if "html" in output_paths:
-                exporter.to_interactive_html(output_paths["html"], theme=args.theme)
-
-            if "plotly" in output_paths:
-                exporter.to_plotly_html(output_paths["plotly"], theme=args.theme)
-
-            if "dashboard" in output_paths:
-                exporter.to_dashboard_html(output_paths["dashboard"], theme=args.theme)
-
-            if "json" in output_paths:
-                exporter.to_json(output_paths["json"])
-
-            if "graphml" in output_paths:
-                exporter.to_graphml(output_paths["graphml"])
+            for fmt, method_name in _EXPORTER_METHOD.items():
+                if fmt not in output_paths:
+                    continue
+                if fmt == "dashboard" and dashboard_manifest_path is not None:
+                    # Shared dashboards are rendered after the manifest update so the
+                    # shell can embed the current collection bundle for offline reuse.
+                    continue
+                method = getattr(exporter, method_name)
+                if fmt in _THEME_AWARE_FORMATS:
+                    method(output_paths[fmt], theme=args.theme)
+                else:
+                    method(output_paths[fmt])
 
             graph_config_path = resolve_graph_config_path(
                 output_paths=output_paths,
@@ -1839,9 +2402,35 @@ def main() -> None:
                 json.dumps(graph_config_payload, indent=2, sort_keys=True),
                 encoding="utf-8",
             )
+            if (
+                dashboard_manifest_path is not None
+                and "json" in output_paths
+                and output_paths["json"].exists()
+            ):
+                manifest_payload = update_dashboard_manifest(
+                    dashboard_manifest_path,
+                    collection_root=dashboard_manifest_path.parent,
+                    graph=graph,
+                    seed_id=seed_id,
+                    strategy=args.strategy,
+                    json_path=output_paths["json"],
+                    config_path=graph_config_path,
+                    metadata=metadata,
+                )
+                metadata["dashboard_collection"] = build_dashboard_collection_bundle(
+                    dashboard_manifest_path,
+                    current_result_id=str(
+                        manifest_payload["results"][0].get(
+                            "result_id", f"{args.strategy}:{seed_id}"
+                        )
+                    ),
+                )
+                exporter.to_dashboard_html(output_paths["dashboard"], theme=args.theme)
 
             artifact_paths = dict(output_paths)
             artifact_paths["config"] = graph_config_path
+            if dashboard_manifest_path is not None:
+                artifact_paths["dashboard_manifest"] = dashboard_manifest_path
             saved_artifact_count = len(artifact_paths)
             output_dirs = sorted({str(path.parent) for path in artifact_paths.values()})
             if saved_artifact_count:
@@ -1871,7 +2460,7 @@ def main() -> None:
                 e,
                 exc_info=logging.getLogger().level == logging.DEBUG,
             )
-            sys.exit(1)
+            return 1
     elif args.command == "search":
         try:
             client = get_client()
@@ -1880,7 +2469,7 @@ def main() -> None:
 
             if not results:
                 logger.error("No results found.")
-                sys.exit(1)
+                return 1
 
             table = Table(title=f"Search results for '{args.query}'")
             table.add_column("#", style="dim", width=3)
@@ -1916,23 +2505,25 @@ def main() -> None:
 
         except Exception as e:
             logger.error(f"Search failed: {e}")
-            sys.exit(1)
+            return 1
     elif args.command == "cache":
         if args.cache_command == "scan":
             exit_code = _scan_cache_directory()
             if exit_code != 0:
-                sys.exit(exit_code)
+                return exit_code
         elif args.cache_command == "clear":
             exit_code = _clear_cache_directory(
                 assume_yes=bool(args.yes),
                 clear_reason=getattr(args, "reason", None),
             )
             if exit_code != 0:
-                sys.exit(exit_code)
+                return exit_code
         else:
             cache_parser.print_help()
-            sys.exit(1)
+            return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

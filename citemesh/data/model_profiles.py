@@ -66,6 +66,7 @@ class EmbeddingModelProfile:
     float16_supported: bool = True
     preferred_torch_dtype: Optional[str] = None
     use_cuda_autocast: bool = False
+    cuda_attention_implementation: Optional[str] = None
     compile_inner_transformer: bool = False
     available_truncate_dims: Optional[Tuple[int, ...]] = None
     recommended_truncate_dim: Optional[int] = None
