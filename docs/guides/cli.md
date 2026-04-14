@@ -144,7 +144,7 @@ Execution transparency:
   - [Embedding Runtime](../reference/embedding-runtime.md)
   - [Caching & Data](caching.md)
 - Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
-- Add `--log-file out/run.log` when you want a shareable plain-text trace alongside the Rich console output; `*.log` is already ignored by git in this repo.
+- Add `--log-file out/run.log` when you want a shareable plain-text trace alongside the Rich console output; with `--log-level debug`, the file keeps debug detail while the console stays at `info`. `*.log` is already ignored by git in this repo.
 
 ### Hybrid Strategy
 

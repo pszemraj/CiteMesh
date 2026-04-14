@@ -368,20 +368,23 @@ def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None
 
 
 def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
-    """Shared CLI logging should support a plain-text file sink."""
+    """File logging should keep debug details off the console by default."""
     saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     log_path = tmp_path / "logs" / "cli-debug.log"
+    stderr = io.StringIO()
 
     try:
-        cli_module._configure_logging(
-            log_level="debug",
-            log_width=0,
-            log_file=str(log_path),
-        )
-        cli_module.logger.debug("debug file sink test")
-        root_logger = logging.getLogger()
-        for handler in root_logger.handlers:
-            handler.flush()
+        with redirect_stderr(stderr):
+            cli_module._configure_logging(
+                log_level="debug",
+                log_width=0,
+                log_file=str(log_path),
+            )
+            cli_module.logger.debug("debug file sink test")
+            cli_module.logger.info("info file sink test")
+            root_logger = logging.getLogger()
+            for handler in root_logger.handlers:
+                handler.flush()
     finally:
         _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
@@ -389,7 +392,11 @@ def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
     content = log_path.read_text(encoding="utf-8")
     assert "DEBUG" in content
     assert "debug file sink test" in content
+    assert "INFO" in content
+    assert "info file sink test" in content
     assert "\x1b[" not in content
+    assert "debug file sink test" not in stderr.getvalue()
+    assert "info file sink test" in stderr.getvalue()
 
 
 @pytest.mark.slow

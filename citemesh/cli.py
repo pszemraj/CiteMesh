@@ -184,6 +184,9 @@ def _configure_logging(
     if level_name not in LOG_LEVEL_CHOICES:
         level_name = "info"
     resolved_level = getattr(logging, level_name.upper(), logging.INFO)
+    console_level = (
+        max(resolved_level, logging.INFO) if log_file is not None else resolved_level
+    )
     log_console = Console(
         stderr=True,
         width=_resolve_console_width(log_width, interactive=stderr_isatty()),
@@ -191,15 +194,15 @@ def _configure_logging(
     output_console = Console(
         width=_resolve_console_width(log_width, interactive=stdout_isatty())
     )
-    handlers: list[logging.Handler] = [
-        RichHandler(
-            console=log_console,
-            show_time=False,
-            show_path=False,
-            rich_tracebacks=False,
-            markup=True,
-        )
-    ]
+    console_handler = RichHandler(
+        console=log_console,
+        show_time=False,
+        show_path=False,
+        rich_tracebacks=False,
+        markup=True,
+    )
+    console_handler.setLevel(console_level)
+    handlers: list[logging.Handler] = [console_handler]
     if log_file is not None:
         resolved_log_file = Path(log_file).expanduser()
         resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -208,6 +211,7 @@ def _configure_logging(
             mode="w",
             encoding="utf-8",
         )
+        file_handler.setLevel(resolved_level)
         file_handler.setFormatter(
             logging.Formatter(
                 fmt="%(asctime)s %(levelname)-8s %(name)s %(message)s",
