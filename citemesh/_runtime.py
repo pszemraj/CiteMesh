@@ -48,3 +48,11 @@ def stderr_isatty() -> bool:
     :return bool: ``True`` when stderr is interactive.
     """
     return _stream_isatty(sys.stderr, 2)
+
+
+def stdout_isatty() -> bool:
+    """Return whether stdout is attached to a TTY.
+
+    :return bool: ``True`` when stdout is interactive.
+    """
+    return _stream_isatty(sys.stdout, 1)

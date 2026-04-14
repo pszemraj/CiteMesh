@@ -24,7 +24,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
-from citemesh._runtime import stdin_isatty
+from citemesh._runtime import stderr_isatty, stdin_isatty, stdout_isatty
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
@@ -51,13 +51,35 @@ from citemesh.visualization import (
     visualize_graph,
 )
 
-DEFAULT_LOG_WIDTH = 140
+DEFAULT_LOG_WIDTH = 0
+REDIRECTED_LOG_WIDTH = 140
 LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
 DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS = 60.0
 
-log_console = Console(stderr=True, width=DEFAULT_LOG_WIDTH)
-output_console = Console(width=DEFAULT_LOG_WIDTH)
+
+def _resolve_console_width(log_width: int, *, interactive: bool) -> Optional[int]:
+    """Resolve the configured Rich console width for a target stream.
+
+    :param int log_width: Requested Rich console width in columns.
+    :param bool interactive: Whether the target stream is attached to a TTY.
+    :return Optional[int]: Explicit column width or ``None`` for auto sizing.
+    """
+    resolved_width = int(log_width)
+    if resolved_width > 0:
+        return resolved_width
+    if interactive:
+        return None
+    return REDIRECTED_LOG_WIDTH
+
+
+log_console = Console(
+    stderr=True,
+    width=_resolve_console_width(DEFAULT_LOG_WIDTH, interactive=stderr_isatty()),
+)
+output_console = Console(
+    width=_resolve_console_width(DEFAULT_LOG_WIDTH, interactive=stdout_isatty())
+)
 _LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
 _TRACKED_OPTION_DESTS_ATTR = "_citemesh_provided_option_dests"
@@ -145,7 +167,7 @@ def _configure_logging(
     """Configure CLI logging once at runtime.
 
     :param str log_level: Log level token.
-    :param int log_width: Rich console width; non-positive values use auto width.
+    :param int log_width: Rich console width; non-positive values use stream defaults.
     :return None: Mutates global logging handlers and consoles once.
     """
     global _LOGGING_CONFIGURED
@@ -158,9 +180,13 @@ def _configure_logging(
     if level_name not in LOG_LEVEL_CHOICES:
         level_name = "info"
     resolved_level = getattr(logging, level_name.upper(), logging.INFO)
-    resolved_width = None if int(log_width) <= 0 else int(log_width)
-    log_console = Console(stderr=True, width=resolved_width)
-    output_console = Console(width=resolved_width)
+    log_console = Console(
+        stderr=True,
+        width=_resolve_console_width(log_width, interactive=stderr_isatty()),
+    )
+    output_console = Console(
+        width=_resolve_console_width(log_width, interactive=stdout_isatty())
+    )
 
     logging.basicConfig(
         level=resolved_level,
@@ -280,7 +306,7 @@ def _add_logging_arguments(
         "--log-width",
         type=_non_negative_int,
         default=default_log_width,
-        help="Rich console wrap width in columns (0 = auto terminal width; default: 140)",
+        help="Rich console wrap width in columns (0 = auto width; default: 0)",
     )
 
 

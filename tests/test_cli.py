@@ -319,6 +319,20 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
             assert parsed.log_width == 0
 
 
+def test_resolve_console_width_uses_auto_width_for_tty_streams() -> None:
+    """TTY streams should default Rich consoles to auto width."""
+    assert cli_module._resolve_console_width(0, interactive=True) is None
+
+
+def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None:
+    """Redirected streams should keep a stable fallback width by default."""
+    assert (
+        cli_module._resolve_console_width(0, interactive=False)
+        == cli_module.REDIRECTED_LOG_WIDTH
+    )
+    assert cli_module._resolve_console_width(96, interactive=True) == 96
+
+
 @pytest.mark.slow
 @pytest.mark.integration
 def test_citation_strategy_runs() -> None:

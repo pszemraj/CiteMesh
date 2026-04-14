@@ -58,7 +58,7 @@ In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--ov
 | `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
-| `--log-width` | Rich console wrap width in columns (`0` uses terminal width) | `140` |
+| `--log-width` | Rich console wrap width in columns (`0` uses terminal width on TTYs and a stable redirected fallback) | `0` |
 
 Output-path normalization, file naming, and sidecar placement are defined in
 [Output Artifacts](../reference/output-artifacts.md).

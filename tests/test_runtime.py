@@ -31,3 +31,13 @@ def test_stderr_isatty_falls_back_to_fd_when_stream_lacks_isatty(
     monkeypatch.setattr(runtime_module.sys, "stderr", _StreamWithoutIsatty())
 
     assert runtime_module.stderr_isatty() is True
+
+
+def test_stdout_isatty_falls_back_to_fd_when_stream_lacks_isatty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """stdout TTY detection should fall back to fd checks for shim streams."""
+    monkeypatch.setattr(runtime_module, "_fd_isatty", lambda fd: fd == 1)
+    monkeypatch.setattr(runtime_module.sys, "stdout", _StreamWithoutIsatty())
+
+    assert runtime_module.stdout_isatty() is True
