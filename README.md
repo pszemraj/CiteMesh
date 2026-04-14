@@ -2,6 +2,8 @@
 
 Build exploration-friendly paper graphs from a single paper or query using recommendation, citation, embedding, or hybrid strategies. CiteMesh ships as a single CLI with consistent visuals and export formats so you can switch approaches without changing tools.
 
+![CiteMesh UI](assets/ui.png)
+
 ## Core Use Case
 
 Start from one paper you already know, then quickly discover:
