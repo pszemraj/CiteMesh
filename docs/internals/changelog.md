@@ -74,6 +74,7 @@ For current usage details, see:
 - Added explicit overwrite acknowledgement for embedding cache rebuilds (`--force-rebuild-cache` + `--overwrite-cache`) with default confirmation prompts.
 - Added optional cache-clear rationale flags (`--cache-overwrite-reason`, `cache clear --reason`) and standardized destructive-clear logs with file/size snapshots and large-cache warnings.
 - Switched default Rich CLI width selection to auto-size on TTYs while keeping a fixed fallback for redirected output, preventing double-wrapped local terminal logs.
+- Added shared `--log-file` CLI support for build/search/cache commands so verbose runs can capture plain-text diagnostics without shell redirection.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
 - Switched multi-export explicit `--output` handling to directory-based exports with strategy-named files.

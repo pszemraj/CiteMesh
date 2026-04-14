@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import logging
 import re
 import runpy
 import shlex
@@ -184,6 +185,35 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
+def _reset_cli_logging_state() -> tuple[list[logging.Handler], int, bool]:
+    """Reset root/CLI logging state for direct logging configuration tests."""
+    root_logger = logging.getLogger()
+    saved_handlers = list(root_logger.handlers)
+    saved_level = int(root_logger.level)
+    saved_configured = bool(cli_module._LOGGING_CONFIGURED)
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+    cli_module._LOGGING_CONFIGURED = False
+    return saved_handlers, saved_level, saved_configured
+
+
+def _restore_cli_logging_state(
+    saved_handlers: list[logging.Handler], saved_level: int, saved_configured: bool
+) -> None:
+    """Restore root/CLI logging state after direct logging configuration tests."""
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+    for handler in saved_handlers:
+        root_logger.addHandler(handler)
+    root_logger.setLevel(saved_level)
+    cli_module._LOGGING_CONFIGURED = saved_configured
+
+
 def test_cache_commands_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -309,6 +339,8 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
         ["cache", "scan", "--log-level", "debug"],
         ["--log-width", "0", "build", "arxiv:1706.03762"],
         ["build", "arxiv:1706.03762", "--log-width", "0"],
+        ["--log-file", "run.log", "build", "arxiv:1706.03762"],
+        ["build", "arxiv:1706.03762", "--log-file", "run.log"],
     ]
 
     for argv in cases:
@@ -317,6 +349,8 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
             assert parsed.log_level == "debug"
         if "--log-width" in argv:
             assert parsed.log_width == 0
+        if "--log-file" in argv:
+            assert parsed.log_file == "run.log"
 
 
 def test_resolve_console_width_uses_auto_width_for_tty_streams() -> None:
@@ -331,6 +365,31 @@ def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None
         == cli_module.REDIRECTED_LOG_WIDTH
     )
     assert cli_module._resolve_console_width(96, interactive=True) == 96
+
+
+def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
+    """Shared CLI logging should support a plain-text file sink."""
+    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
+    log_path = tmp_path / "logs" / "cli-debug.log"
+
+    try:
+        cli_module._configure_logging(
+            log_level="debug",
+            log_width=0,
+            log_file=str(log_path),
+        )
+        cli_module.logger.debug("debug file sink test")
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers:
+            handler.flush()
+    finally:
+        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
+
+    assert log_path.exists()
+    content = log_path.read_text(encoding="utf-8")
+    assert "DEBUG" in content
+    assert "debug file sink test" in content
+    assert "\x1b[" not in content
 
 
 @pytest.mark.slow

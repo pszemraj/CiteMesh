@@ -26,6 +26,7 @@ citemesh search "<query>" [--limit N|-n N]
 # Cache management commands
 citemesh cache scan
 citemesh cache scan --log-level debug
+citemesh build "arxiv:1706.03762" --strategy hybrid --log-level debug --log-file out/run.log
 citemesh cache clear [--yes] [--reason "<text>"]
 ```
 
@@ -59,11 +60,12 @@ In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--ov
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
 | `--log-width` | Rich console wrap width in columns (`0` uses terminal width on TTYs and a stable redirected fallback) | `0` |
+| `--log-file` | Optional plain-text log file path (overwrites existing file) | disabled |
 
 Output-path normalization, file naming, and sidecar placement are defined in
 [Output Artifacts](../reference/output-artifacts.md).
 
-`--log-level` and `--log-width` are shared command options and are accepted for
+`--log-level`, `--log-width`, and `--log-file` are shared command options and are accepted for
 `build`, `search`, and `cache` command trees (including `cache scan` / `cache clear`).
 
 `--seed` controls shared layout generation for `png`, `plotly`, and `dashboard` exports. Pyvis
@@ -142,6 +144,7 @@ Execution transparency:
   - [Embedding Runtime](../reference/embedding-runtime.md)
   - [Caching & Data](caching.md)
 - Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
+- Add `--log-file out/run.log` when you want a shareable plain-text trace alongside the Rich console output; `*.log` is already ignored by git in this repo.
 
 ### Hybrid Strategy
 

@@ -162,12 +162,16 @@ def _pop_tracked_option_dests(args: argparse.Namespace) -> Set[str]:
 
 
 def _configure_logging(
-    *, log_level: str = "info", log_width: int = DEFAULT_LOG_WIDTH
+    *,
+    log_level: str = "info",
+    log_width: int = DEFAULT_LOG_WIDTH,
+    log_file: str | None = None,
 ) -> None:
     """Configure CLI logging once at runtime.
 
     :param str log_level: Log level token.
     :param int log_width: Rich console width; non-positive values use stream defaults.
+    :param str | None log_file: Optional plain-text log file path.
     :return None: Mutates global logging handlers and consoles once.
     """
     global _LOGGING_CONFIGURED
@@ -187,20 +191,36 @@ def _configure_logging(
     output_console = Console(
         width=_resolve_console_width(log_width, interactive=stdout_isatty())
     )
+    handlers: list[logging.Handler] = [
+        RichHandler(
+            console=log_console,
+            show_time=False,
+            show_path=False,
+            rich_tracebacks=False,
+            markup=True,
+        )
+    ]
+    if log_file is not None:
+        resolved_log_file = Path(log_file).expanduser()
+        resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(
+            resolved_log_file,
+            mode="w",
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(
+            logging.Formatter(
+                fmt="%(asctime)s %(levelname)-8s %(name)s %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        handlers.append(file_handler)
 
     logging.basicConfig(
         level=resolved_level,
         format="%(message)s",
         datefmt="[%X]",
-        handlers=[
-            RichHandler(
-                console=log_console,
-                show_time=False,
-                show_path=False,
-                rich_tracebacks=False,
-                markup=True,
-            )
-        ],
+        handlers=handlers,
     )
     # Keep third-party HTTP logs concise without import-time side effects.
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -292,9 +312,11 @@ def _add_logging_arguments(
     """
     default_log_level: object = "info"
     default_log_width: object = DEFAULT_LOG_WIDTH
+    default_log_file: object = None
     if suppress_defaults:
         default_log_level = argparse.SUPPRESS
         default_log_width = argparse.SUPPRESS
+        default_log_file = argparse.SUPPRESS
 
     target.add_argument(
         "--log-level",
@@ -307,6 +329,12 @@ def _add_logging_arguments(
         type=_non_negative_int,
         default=default_log_width,
         help="Rich console wrap width in columns (0 = auto width; default: 0)",
+    )
+    target.add_argument(
+        "--log-file",
+        type=_non_empty_str,
+        default=default_log_file,
+        help="Optional plain-text log file path (overwrites existing file).",
     )
 
 
@@ -2243,7 +2271,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser, build_parser, cache_parser = _create_parser()
     argv_list = list(argv) if argv is not None else None
     args = parser.parse_args(argv_list)
-    _configure_logging(log_level=args.log_level, log_width=args.log_width)
+    _configure_logging(
+        log_level=args.log_level,
+        log_width=args.log_width,
+        log_file=getattr(args, "log_file", None),
+    )
     provided_build_options = _pop_tracked_option_dests(args)
 
     if not args.command:
