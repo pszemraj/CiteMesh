@@ -45,6 +45,8 @@ For current usage details, see:
 - Strengthened full-corpus incremental hydration with staged tail/head delta checks plus missing-ID reconciliation fallback, and memoized duplicate-only row-count deltas to avoid repeated full-split rescans.
 - Fixed incremental full-corpus hydration to fetch tail slices (`offset=cached_rows`) so delta refreshes hydrate newly appended records instead of reloading leading rows.
 - Hardened reference-cache reuse against unreadable/non-object JSON entries and improved atomic write durability with parent-directory fsync.
+- Clarified embedding-cache clear logs to label replaced payload metadata as `cached_*`, avoiding confusion during capped-to-full corpus rebuilds.
+- Suppressed repeated per-batch int8 saturation warnings after the first warning in a run while continuing to persist cumulative clipping stats.
 
 ## Strategy Evolution
 

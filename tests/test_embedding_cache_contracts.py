@@ -313,6 +313,53 @@ def test_embedding_cache_upsert_tracks_int8_saturation(
             assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 2
 
 
+def test_embedding_cache_int8_saturation_warning_emits_once_per_run(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Repeated clipped writes should warn once per cache instance."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="int8-warn-once")
+        cache.set_calibration_ranges(
+            ranges=np.vstack(
+                (
+                    np.zeros(2, dtype=np.float32),
+                    np.ones(2, dtype=np.float32),
+                )
+            ),
+            embedding_dim=2,
+        )
+        model = LookupEncodeModel(
+            {
+                "Alpha. First": np.asarray([2.0, -1.0], dtype=np.float32),
+                "Beta. Second": np.asarray([3.0, -2.0], dtype=np.float32),
+            }
+        )
+
+        with caplog.at_level("WARNING"):
+            cache.upsert_embeddings(
+                {"p1": {"title": "Alpha", "abstract": "First"}},
+                model,
+                show_progress=False,
+            )
+            cache.upsert_embeddings(
+                {"p2": {"title": "Beta", "abstract": "Second"}},
+                model,
+                show_progress=False,
+            )
+
+        warning_messages = [
+            record.message
+            for record in caplog.records
+            if "Int8 calibration saturation detected" in record.message
+        ]
+        assert len(warning_messages) == 1
+        assert "Further warnings are suppressed for this run" in warning_messages[0]
+
+        with h5py.File(cache.h5_path, "r") as h5:
+            assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 4
+            assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 4
+
+
 def test_embedding_cache_default_int8_path_stays_local_to_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1273,3 +1320,31 @@ def test_embedding_cache_clear_releases_file_handles(tmp_path: Path) -> None:
     with cache._connect_db() as conn:
         paper_rows = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
     assert paper_rows == 0
+
+
+def test_embedding_cache_clear_logs_cached_hydration_scope(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """clear() logs should describe the cached payload being replaced."""
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="clear-log-scope")
+    _set_test_int8_calibration(cache)
+    cache.get_embeddings(
+        {"p1": {"title": "Test", "abstract": "Abstract"}},
+        SeededRandomEncodeModel(),
+        show_progress=False,
+    )
+    cache.mark_hydrated(
+        dataset_source="librarian-bots/arxiv-metadata-snapshot",
+        dataset_split="train",
+        corpus_size=50000,
+        complete=True,
+    )
+
+    with caplog.at_level("WARNING"):
+        cache.clear(reason="scope test")
+
+    assert any(
+        "cached_split=train, cached_corpus=50000, "
+        "cached_source=librarian-bots/arxiv-metadata-snapshot" in record.message
+        for record in caplog.records
+    )

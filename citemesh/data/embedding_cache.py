@@ -413,6 +413,7 @@ class EmbeddingCache:
         self.last_search_used_binary_prefilter: Optional[bool] = None
         self.last_search_total_embeddings: Optional[int] = None
         self.last_search_rescored_embeddings: Optional[int] = None
+        self._int8_saturation_warning_emitted = False
 
         with self._cache_lock():
             self._init_db()
@@ -1085,12 +1086,20 @@ class EmbeddingCache:
         )
 
         saturation_ratio = float(clipped_value_count) / float(total_value_count)
-        if saturation_ratio >= INT8_SATURATION_WARN_RATIO:
+        cumulative_clipped = previous_clipped + int(clipped_value_count)
+        cumulative_total = previous_total + int(total_value_count)
+        cumulative_ratio = float(cumulative_clipped) / float(cumulative_total)
+        if (
+            saturation_ratio >= INT8_SATURATION_WARN_RATIO
+            and not self._int8_saturation_warning_emitted
+        ):
             logger.warning(
-                "Int8 calibration saturation detected for %s: %.2f%% of values were clipped in this write. Rebuild calibration ranges if recall degrades.",
+                "Int8 calibration saturation detected for %s: %.2f%% of values were clipped in this write (cumulative %.2f%% across cached writes). Further warnings are suppressed for this run; rebuild calibration ranges if recall degrades.",
                 self.model_name,
                 saturation_ratio * 100.0,
+                cumulative_ratio * 100.0,
             )
+            self._int8_saturation_warning_emitted = True
 
     def is_hydrated(
         self,
@@ -1340,7 +1349,7 @@ class EmbeddingCache:
                 logger.warning(
                     "Clearing embedding cache namespace '%s' (reason=%s, files=%d, "
                     "size=%s, sqlite_rows=%d, embedding_rows=%d, hydrated=%s, "
-                    "split=%s, corpus=%s, source=%s).",
+                    "cached_split=%s, cached_corpus=%s, cached_source=%s).",
                     self.model_name,
                     normalized_reason,
                     stats.file_count,
