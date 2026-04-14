@@ -7,7 +7,6 @@ Related docs:
 - CLI command usage: [CLI Usage](cli.md)
 - Environment variables: [Environment Variables](../reference/environment.md)
 - Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
-- Docs index: [Documentation](../README.md)
 
 ## Cache Root
 
@@ -117,6 +116,10 @@ For hydrated full-corpus runs (`--all-corpus`), CiteMesh performs an incremental
 growth check using upstream split row counts. When upstream rows increased, it uses a
 staged reconciliation flow:
 
+`--all-corpus` means "the full selected `--dataset-split`".
+For example, `--dataset-split train --all-corpus` hydrates the full `train` split; it
+does not merge `train`, `validation`, and `test` into one cache namespace.
+
 - tail delta slice (`cached_rows:upstream_rows`)
 - head delta slice (`0:delta_rows`) if tail under-fills
 - full-split missing-ID reconciliation only when needed
@@ -139,6 +142,10 @@ When switching a namespace from a capped corpus (for example `--corpus-size 5000
 payload. Seeing `requested_corpus=all` alongside `cached_corpus=50000` means CiteMesh is
 replacing the old capped namespace before hydrating the full split; it does not mean the
 new run is silently limited to `50000`.
+
+When int8 calibration clipping is detected during a hydration run, CiteMesh emits that
+warning once per namespace and keeps accumulating the underlying saturation stats in
+cache metadata instead of repeating the same warning every flush window.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus
 metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias

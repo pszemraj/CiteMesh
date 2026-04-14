@@ -6,7 +6,6 @@ Related docs:
 
 - CLI usage: [Guides: CLI Usage](../guides/cli.md)
 - Cache behavior: [Guides: Caching & Data](../guides/caching.md)
-- Docs index: [Documentation](../README.md)
 
 ## CiteMesh Variables
 

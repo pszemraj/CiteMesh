@@ -21,7 +21,7 @@ may stop working between revisions unless explicitly documented otherwise.
 
 ## Documentation
 
-- [Documentation index](docs/README.md)
+[Documentation index](docs/README.md)
 
 ## Quick Start
 
@@ -59,16 +59,19 @@ pip install -e ".[all]"
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
-For complete command behavior and examples, use [CLI Usage](docs/guides/cli.md).
+For command syntax and operational details, use:
+
+- [CLI Usage](docs/guides/cli.md)
+- [Strategy Guide](docs/guides/strategies.md)
+- [Caching & Data](docs/guides/caching.md)
 
 ## Why CiteMesh
 
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
 - Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
-- Multi-format outputs: PNG, Pyvis HTML, Plotly HTML, Dashboard HTML, JSON, CSV, BibTeX, GraphML, plus a per-run config sidecar.
-- Theme-aware visuals shared across exporters.
-- Persistent user-level caching for embeddings and corpus data.
-- Typed, modular architecture that is straightforward to extend.
+- Multi-format outputs with one shared run contract across static, interactive, and structured exports.
+- Persistent user-level caching for embeddings and reference expansion.
+- Typed, modular internals that are straightforward to extend.
 
 ## License
 

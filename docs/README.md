@@ -1,13 +1,8 @@
 # Documentation
 
-> [!IMPORTANT]
-> CiteMesh is a private pre-release codebase. These docs describe current
-> behavior; backward compatibility with older exports, checkpoints, or
-> intermediate artifacts is not a project goal unless explicitly stated.
-
 ## Overview
 
-- Project overview and installation: [README](../README.md)
+- Project overview, installation, and current project status: [README](../README.md)
 - Command usage: [CLI guide](guides/cli.md)
 - Strategy selection: [Strategy guide](guides/strategies.md)
 - Cache behavior and maintenance: [Caching guide](guides/caching.md)

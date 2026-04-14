@@ -5,11 +5,10 @@ Build paper graphs with `recommendation`, `citation`, `embedding`, or `hybrid`.
 Related docs:
 
 - Cache layout and hydration: [Caching & Data](caching.md)
-- Environment variables: [Environment Variables](../reference/environment.md)
 - Output files and sidecar schema: [Output Artifacts](../reference/output-artifacts.md)
 - Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
 - Defaults parameter study: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
-- Docs index: [Documentation](../README.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
 
 ## Basic Invocation
 
@@ -118,6 +117,7 @@ ignoring it.
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
 - With non-streaming unsliced splits, CiteMesh loads `split[:corpus_size]` directly (it does not download/process the full split just to stop after `corpus_size` rows).
 - `--all-corpus`: remove corpus-size cap and process the full selected split
+- `--all-corpus` applies within the selected `--dataset-split`; `--dataset-split train --all-corpus` means "all of `train`", not "every split published by the dataset"
 - If a same-model cache namespace was previously hydrated with a capped corpus, `--all-corpus` rebuilds that namespace; cache-clear logs label the replaced payload as `cached_*` to distinguish it from the new target.
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
@@ -136,16 +136,7 @@ ignoring it.
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). When enabled, compile is deferred on cold-cache hydration runs and attempted on warm-cache runs.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
-
-Execution transparency:
-
-- Embedding/hybrid runs print a compact config summary (model, split, corpus cap, streaming mode, storage precision).
-- Retrieval/caching internals (prefilter semantics, compared/rescored counts, compile guard behavior, hydration/lock policy) are defined in:
-  - [Embedding Runtime](../reference/embedding-runtime.md)
-  - [Caching & Data](caching.md)
-- Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
-- Add `--log-file out/run.log` when you want a shareable plain-text trace alongside the Rich console output; with `--log-level debug`, the file keeps debug detail while the console stays at `info`. `*.log` is already ignored by git in this repo.
-- `--log-file` traces intentionally clamp noisy dependency debug loggers such as `filelock`, `urllib3`, `matplotlib`, and `semanticscholar` to `warning` so the file stays useful for CiteMesh debugging instead of filling with lock polling, HTTP transport churn, and font-manager noise.
+- Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in a shareable plain-text file without flooding the Rich console. `*.log` is ignored by git in this repo.
 
 ### Hybrid Strategy
 
@@ -194,11 +185,8 @@ citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 # Shared dashboard shell + per-run JSON payloads under ./research
 citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json -o research --theme dark
 
-# Explicit standalone dashboard file for a one-off result
+# Standalone dashboard file for a one-off result
 citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o report.dashboard.html --theme dark
-
-# Standalone dashboard file plus sibling JSON/config artifacts
-citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json -o report.dashboard.html --theme dark
 
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \
@@ -207,17 +195,25 @@ citemesh build "arxiv:1810.04805" \
   --dataset-split "train[:2%]" \
   --export plotly
 
+# Full selected split with a separate debug trace file
+citemesh build "arxiv:2404.08801" \
+  --strategy hybrid \
+  --dataset-split train \
+  --all-corpus \
+  --export all \
+  --theme dark \
+  --log-level debug \
+  --log-file out/full-corpus.log
+
 # Search then build from selected ID
 citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
-
-# Build directly from an arXiv URL
-citemesh build "https://arxiv.org/abs/1706.03762" --strategy recommendation --export all
 ```
 
 ## Troubleshooting
 
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
 - **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
+- **Full-corpus run still mentions `50000`**: that usually means CiteMesh is replacing an older capped namespace before hydrating the requested full selected split. Check the compact config log line for `split=...` and `corpus=all`.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
 - **API limits**: configure `S2_API_KEY`; see [Environment Variables](../reference/environment.md).

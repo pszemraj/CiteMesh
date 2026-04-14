@@ -8,7 +8,6 @@ Related docs:
 - Cache layout and hydration details: [Caching & Data](../guides/caching.md)
 - Environment variables: [Environment Variables](../reference/environment.md)
 - Export/sidecar file contracts: [Output Artifacts](../reference/output-artifacts.md)
-- Docs index: [Documentation](../README.md)
 
 ## Execution Flow
 

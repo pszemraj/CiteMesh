@@ -8,7 +8,6 @@ Related docs:
 - Cache layout and hydration: [Caching & Data](../guides/caching.md)
 - Output metadata fields in exports: [Output Artifacts](output-artifacts.md)
 - Defaults parameter study: [Defaults Tuning Study](defaults-tuning-study.md)
-- Docs index: [Documentation](../README.md)
 
 ## Default Model Selection
 

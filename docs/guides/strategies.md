@@ -6,10 +6,9 @@ Related docs:
 
 - CLI flags and defaults: [CLI Usage](cli.md)
 - Cache behavior: [Caching & Data](caching.md)
-- Environment variables: [Environment Variables](../reference/environment.md)
 - Embedding runtime defaults and precision policy: [Embedding Runtime](../reference/embedding-runtime.md)
 - Default-parameter sweep rationale: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
-- Docs index: [Documentation](../README.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
 
 ## At a Glance
 

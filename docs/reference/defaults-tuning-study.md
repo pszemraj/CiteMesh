@@ -76,7 +76,7 @@ Per-run elapsed time has heavy-tail behavior driven by network-bound citation-co
 
 ## Remaining Work
 
-- Citation-count enrichment still shows long-tail latency on some runs; adding a tighter timeout/retry budget would make end-to-end runtime more predictable.
+- Citation-count enrichment is now batched and visible in progress output, but it can still dominate tail latency on some runs; tighter timeout/retry budgets would make end-to-end runtime more predictable.
 - Static plot readability in dense clusters can still improve (label collision handling and optional label-priority filtering).
 
 ## Default Decision
