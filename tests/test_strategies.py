@@ -420,6 +420,10 @@ def test_hybrid_collection_merges_and_tracks_sources(
     papers = builder.collect_papers("seed")
 
     assert set(papers) == {"seed", "c1", "s1", "s2"}
+    builder.embedding_builder.collect_papers.assert_called_once_with(
+        "seed",
+        seed_paper=seed,
+    )
     assert builder.paper_sources["seed"] == "citation"
     assert builder.paper_sources["s1"] == "semantic"
     assert builder.seed_relations["seed"] == "seed"

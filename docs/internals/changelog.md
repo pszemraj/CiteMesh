@@ -44,9 +44,11 @@ For current usage details, see:
 - Added incremental full-corpus hydration growth checks so upstream row-count increases append only delta records instead of forcing full namespace rebuilds.
 - Strengthened full-corpus incremental hydration with staged tail/head delta checks plus missing-ID reconciliation fallback, and memoized duplicate-only row-count deltas to avoid repeated full-split rescans.
 - Fixed incremental full-corpus hydration to fetch tail slices (`offset=cached_rows`) so delta refreshes hydrate newly appended records instead of reloading leading rows.
+- Resumed interrupted full-corpus hydration runs from the cached row boundary when SQLite/HDF5 payload rows and hydration metadata still match the requested source/split, instead of immediately discarding partial progress.
 - Hardened reference-cache reuse against unreadable/non-object JSON entries and improved atomic write durability with parent-directory fsync.
 - Clarified embedding-cache clear logs to label replaced payload metadata as `cached_*`, avoiding confusion during capped-to-full corpus rebuilds.
 - Suppressed repeated per-batch int8 saturation warnings after the first warning in a run while continuing to persist cumulative clipping stats.
+- Suppressed empty-reference cache hit debug spam so long citation/hybrid runs no longer emit one `Loaded 0 cached references` line per paper.
 
 ## Strategy Evolution
 
@@ -59,6 +61,7 @@ For current usage details, see:
 - **Embedding**: citation-count enrichment logs now show bounded target counts and render a visible progress bar on TTY runs.
 - **Embedding**: citation-count enrichment now batches Semantic Scholar paper lookups before falling back to single-paper retries for unresolved IDs.
 - **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection, preventing stale cross-checkpoint reuse in shared namespaces.
+- **Embedding/Hybrid**: semantic enrichment reuses the citation branch seed metadata when available, avoiding a second Semantic Scholar fetch for the same seed paper during hybrid runs.
 - **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
 - **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
 - **Hybrid**: updated omitted-budget defaults again after the February 2026 follow-up review; see [Defaults Tuning Study](../reference/defaults-tuning-study.md) for the current values and rationale.
@@ -75,6 +78,7 @@ For current usage details, see:
 - Added optional cache-clear rationale flags (`--cache-overwrite-reason`, `cache clear --reason`) and standardized destructive-clear logs with file/size snapshots and large-cache warnings.
 - Switched default Rich CLI width selection to auto-size on TTYs while keeping a fixed fallback for redirected output, preventing double-wrapped local terminal logs.
 - Added shared `--log-file` CLI support for build/search/cache commands so verbose runs can capture plain-text diagnostics without shell redirection, while keeping debug-only chatter out of the Rich console.
+- Clamped noisy dependency debug loggers (`filelock`, `urllib3`, `matplotlib`, `semanticscholar`, and similar) to `WARNING` so `--log-file` traces stay focused on CiteMesh internals.
 - Removed legacy module shims after package consolidation.
 - Expanded paper-ID normalization for DOI/arXiv URL forms.
 - Switched multi-export explicit `--output` handling to directory-based exports with strategy-named files.

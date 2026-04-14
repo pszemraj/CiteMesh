@@ -1058,11 +1058,12 @@ class SemanticScholarClient:
                                 normalized_paper_id,
                                 refs,
                             )
-                        logger.debug(
-                            "Loaded %d cached references for %s",
-                            len(refs),
-                            normalized_paper_id,
-                        )
+                        if refs:
+                            logger.debug(
+                                "Loaded %d cached references for %s",
+                                len(refs),
+                                normalized_paper_id,
+                            )
                         return refs
             except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
                 with contextlib.suppress(OSError):

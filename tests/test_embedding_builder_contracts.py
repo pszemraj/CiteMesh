@@ -1290,6 +1290,44 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     fake_load_dataset_for_hydration.assert_not_called()
 
 
+def test_collect_papers_reuses_prefetched_seed_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding collection should reuse caller-supplied seed metadata."""
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    builder.client.get_paper = MagicMock(
+        side_effect=AssertionError("seed should be reused from caller")
+    )
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_encode_texts",
+        lambda texts, show_progress_bar=False: np.asarray(
+            [[1.0, 0.0] for _ in texts], dtype=np.float32
+        ),
+    )
+    monkeypatch.setattr(builder, "_select_candidates_from_loaded", lambda _: [])
+    monkeypatch.setattr(builder, "_update_citation_counts", lambda _: None)
+
+    seed_paper = Paper(
+        paper_id="seed-paper",
+        title="Seed Title",
+        abstract="Seed Abstract",
+        year=2024,
+        is_seed=True,
+    )
+
+    papers = builder.collect_papers("seed-paper", seed_paper=seed_paper)
+
+    assert list(papers.keys()) == ["seed-paper"]
+    assert papers["seed-paper"].is_seed is True
+    assert builder.embeddings["seed-paper"].tolist() == [1.0, 0.0]
+
+
 def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1520,6 +1558,81 @@ def test_full_corpus_hydrated_cache_refreshes_incremental_delta(
         allow_source_fallback=False,
     )
     assert builder.embedding_cache.clear.call_count == 0
+    builder.embedding_cache.mark_hydrated.assert_called_once_with(
+        dataset_source=source,
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
+
+
+def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Incomplete full-corpus hydration should resume from the cached row boundary."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=False)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    builder.embedding_cache.payload_stats = MagicMock(
+        side_effect=[
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=100,
+                embedding_rows=100,
+                hydration_complete=False,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=150,
+                embedding_rows=150,
+                hydration_complete=False,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+        ]
+    )
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
+    clear_cache_mock = MagicMock()
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 150)
+    monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
+    load_mock = MagicMock(
+        return_value=(
+            source,
+            [
+                {"id": f"new-{idx}", "title": f"Title {idx}", "abstract": "A"}
+                for idx in range(50)
+            ],
+        )
+    )
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
+    monkeypatch.setattr(builder, "_hydrate_dataset_records", MagicMock(return_value=50))
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    load_mock.assert_called_once_with(
+        use_streaming=False,
+        preferred_dataset_source=source,
+        row_limit=50,
+        row_offset=100,
+        allow_source_fallback=False,
+    )
+    clear_cache_mock.assert_not_called()
     builder.embedding_cache.mark_hydrated.assert_called_once_with(
         dataset_source=source,
         dataset_split=builder.dataset_split,

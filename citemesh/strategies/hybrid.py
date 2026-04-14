@@ -667,7 +667,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.info("Enriching with up to %s semantic matches...", semantic_budget)
 
         try:
-            semantic_papers = self.embedding_builder.collect_papers(seed_id)
+            semantic_papers = self.embedding_builder.collect_papers(
+                seed_id,
+                seed_paper=seed_paper,
+            )
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 

@@ -733,6 +733,37 @@ def test_reference_cache_resilience_contracts(
     assert json.loads(cache_path.read_text()) == prior_payload
 
 
+def test_reference_cache_empty_hit_stays_quiet_in_debug_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Empty cached reference lists should not spam one debug line per paper."""
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    client = SemanticScholarClient(timeout=1)
+
+    normalized = s2.normalize_paper_id("seed-empty")
+    cache_path = s2._reference_cache_path(normalized)
+    cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": normalized,
+                "references": [],
+                "version": s2.REFERENCE_CACHE_VERSION,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        refs = client.get_reference_ids("seed-empty")
+
+    assert refs == []
+    assert not any(
+        "Loaded 0 cached references" in record.message for record in caplog.records
+    )
+
+
 def test_service_module_lifecycle_contracts() -> None:
     """Singleton/context lifecycle and reload behavior should preserve global state."""
     first_client = get_client()

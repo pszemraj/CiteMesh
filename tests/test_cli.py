@@ -372,6 +372,10 @@ def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
     saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     log_path = tmp_path / "logs" / "cli-debug.log"
     stderr = io.StringIO()
+    noisy_logger_names = ("filelock", "matplotlib", "urllib3", "semanticscholar")
+    saved_logger_levels = {
+        name: logging.getLogger(name).level for name in noisy_logger_names
+    }
 
     try:
         with redirect_stderr(stderr):
@@ -385,7 +389,13 @@ def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
             root_logger = logging.getLogger()
             for handler in root_logger.handlers:
                 handler.flush()
+            assert logging.getLogger("filelock").level == logging.WARNING
+            assert logging.getLogger("matplotlib").level == logging.WARNING
+            assert logging.getLogger("urllib3").level == logging.WARNING
+            assert logging.getLogger("semanticscholar").level == logging.WARNING
     finally:
+        for name, level in saved_logger_levels.items():
+            logging.getLogger(name).setLevel(level)
         _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
 
     assert log_path.exists()

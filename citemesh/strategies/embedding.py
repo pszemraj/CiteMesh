@@ -1647,11 +1647,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.model_name,
         )
 
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
+    def collect_papers(
+        self,
+        seed_id: str,
+        *,
+        seed_paper: Optional[Paper] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
 
         :param str seed_id: Seed paper identifier (ArXiv ID or text query)
+        :param Optional[Paper] seed_paper: Optional pre-fetched seed paper metadata to
+            reuse instead of fetching the seed from Semantic Scholar again.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -1661,17 +1669,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         # Load model lazily.
         self._load_model()
 
-        # Try to get seed from Semantic Scholar first
-        seed_paper = self.client.get_paper(seed_id)
+        # Reuse caller-provided seed metadata when available to avoid redundant
+        # Semantic Scholar fetches in hybrid mode.
+        resolved_seed_paper = seed_paper
+        if resolved_seed_paper is None:
+            resolved_seed_paper = self.client.get_paper(seed_id)
 
         seed_metadata: Dict[str, str] = {}
 
-        if seed_paper:
+        if resolved_seed_paper:
             # Found via S2 API
-            seed_paper.is_seed = True
-            papers[seed_paper.paper_id] = seed_paper
-            seed_title = (seed_paper.title or "").strip()
-            seed_abstract = (seed_paper.abstract or "").strip()
+            resolved_seed_paper.is_seed = True
+            papers[resolved_seed_paper.paper_id] = resolved_seed_paper
+            seed_title = (resolved_seed_paper.title or "").strip()
+            seed_abstract = (resolved_seed_paper.abstract or "").strip()
             seed_text = (
                 compose_title_abstract_text(
                     {"title": seed_title, "abstract": seed_abstract}
@@ -1688,13 +1699,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             seed_text = seed_id
             # Create dummy seed paper
             query_seed = _query_seed_id(seed_id)
-            seed_paper = Paper(
+            resolved_seed_paper = Paper(
                 paper_id=query_seed,
                 title=seed_id,
                 year=None,
                 is_seed=True,
             )
-            papers[query_seed] = seed_paper
+            papers[query_seed] = resolved_seed_paper
             seed_metadata = {"title": seed_id, "abstract": ""}
 
         # Compute normalized seed embedding
@@ -1702,12 +1713,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         formatted_seed_text = self._format_seed_for_embedding(
             seed_text=seed_text,
             seed_metadata=seed_metadata,
-            seed_is_free_text_query=seed_paper.paper_id.startswith("query:"),
+            seed_is_free_text_query=resolved_seed_paper.paper_id.startswith("query:"),
         )
         seed_embedding = self._encode_texts(
             [formatted_seed_text], show_progress_bar=False
         )[0]
-        self.embeddings[seed_paper.paper_id] = seed_embedding
+        self.embeddings[resolved_seed_paper.paper_id] = seed_embedding
 
         use_streaming = self.use_streaming
 
@@ -1924,6 +1935,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 "all" if self.corpus_size is None else self.corpus_size,
             )
 
+        try:
+            if self._resume_incomplete_full_corpus_cache(
+                use_streaming=use_streaming,
+                cached_dataset_source=cached_dataset_source,
+            ):
+                return
+        except Exception as exc:
+            logger.warning(
+                "Incomplete full-corpus resume failed for source=%s; "
+                "performing full source revalidation: %s",
+                cached_dataset_source or "unknown",
+                exc,
+            )
+
         dataset_source: Optional[str]
         dataset: Iterable[Dict[str, Any]]
 
@@ -2008,6 +2033,156 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             corpus_size=self.corpus_size,
             complete=True,
         )
+
+    def _resume_incomplete_full_corpus_cache(
+        self,
+        *,
+        use_streaming: bool,
+        cached_dataset_source: Optional[str],
+    ) -> bool:
+        """Resume an incomplete full-corpus hydration when cached rows are reusable.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param Optional[str] cached_dataset_source: Dataset source recorded on the
+            incomplete cache attempt.
+        :return bool: ``True`` when the incomplete cache was resumed and marked
+            complete without requiring a full namespace clear.
+        """
+        if self.corpus_size is not None:
+            return False
+        if ":" in str(self.dataset_split):
+            return False
+
+        source = str(cached_dataset_source or "").strip()
+        if not source:
+            return False
+
+        stats = self.embedding_cache.payload_stats()
+        if stats.hydration_complete:
+            return False
+        if stats.hydration_split != self.dataset_split:
+            return False
+        if stats.hydration_corpus_size != "all":
+            return False
+        if stats.hydration_dataset_source != source:
+            return False
+        if stats.sqlite_rows < 1 or stats.embedding_rows < 1:
+            return False
+        if stats.sqlite_rows != stats.embedding_rows:
+            logger.warning(
+                "Incomplete full-corpus cache rows diverged for %s/%s "
+                "(sqlite_rows=%d, embedding_rows=%d); performing full rebuild.",
+                source,
+                self.dataset_split,
+                stats.sqlite_rows,
+                stats.embedding_rows,
+            )
+            return False
+        if (
+            self.storage_precision == "int8"
+            and not self.embedding_cache.has_calibration_ranges()
+        ):
+            logger.warning(
+                "Incomplete full-corpus cache for %s/%s is missing int8 calibration "
+                "ranges; performing full rebuild.",
+                source,
+                self.dataset_split,
+            )
+            return False
+
+        cached_rows = int(stats.sqlite_rows)
+        upstream_rows = self._resolve_dataset_split_row_count(source)
+        if upstream_rows is not None:
+            if upstream_rows < cached_rows:
+                logger.warning(
+                    "Incomplete full-corpus cache rows (%d) exceed upstream split rows "
+                    "(%d) for %s/%s; performing full rebuild.",
+                    cached_rows,
+                    upstream_rows,
+                    source,
+                    self.dataset_split,
+                )
+                return False
+            if upstream_rows == cached_rows:
+                logger.info(
+                    "Incomplete full-corpus cache for %s/%s already matches upstream "
+                    "row count (%d); marking hydration complete.",
+                    source,
+                    self.dataset_split,
+                    cached_rows,
+                )
+                self.embedding_cache.mark_hydrated(
+                    dataset_source=source,
+                    dataset_split=self.dataset_split,
+                    corpus_size=self.corpus_size,
+                    complete=True,
+                )
+                self.embedding_cache.clear_hydration_rowcount_reconciliation()
+                return True
+
+        row_limit = None if upstream_rows is None else upstream_rows - cached_rows
+        logger.info(
+            "Resuming incomplete full-corpus cache for %s/%s from cached_rows=%d%s.",
+            source,
+            self.dataset_split,
+            cached_rows,
+            "" if upstream_rows is None else f" toward upstream_rows={upstream_rows}",
+        )
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=source,
+        )
+        resumed_source, dataset = self._load_dataset_for_hydration(
+            use_streaming=use_streaming,
+            preferred_dataset_source=source,
+            row_limit=row_limit,
+            row_offset=cached_rows,
+            allow_source_fallback=False,
+        )
+        if resumed_source != source:
+            raise RuntimeError(
+                "Incomplete hydration resume resolved unexpected dataset source "
+                f"{resumed_source!r} (expected {source!r})."
+            )
+
+        resumed_records = self._hydrate_dataset_records(
+            dataset=dataset,
+            progress_total=row_limit,
+            progress_label=f"Resuming {source}",
+        )
+        updated_rows = self._cached_payload_row_count()
+        if updated_rows < cached_rows:
+            raise RuntimeError(
+                "Incomplete hydration resume reduced cached row count unexpectedly "
+                f"({updated_rows} < {cached_rows})."
+            )
+
+        if upstream_rows is not None and updated_rows < upstream_rows:
+            logger.warning(
+                "Incomplete full-corpus resume for %s/%s stopped short of upstream "
+                "row count (cache_rows=%d, upstream_rows=%d); performing full rebuild.",
+                source,
+                self.dataset_split,
+                updated_rows,
+                upstream_rows,
+            )
+            return False
+
+        self.embedding_cache.mark_hydrated(
+            dataset_source=source,
+            dataset_split=self.dataset_split,
+            corpus_size=self.corpus_size,
+            complete=True,
+        )
+        self.embedding_cache.clear_hydration_rowcount_reconciliation()
+        logger.info(
+            "Resumed incomplete full-corpus cache for %s/%s (added=%d, cache_rows=%d).",
+            source,
+            self.dataset_split,
+            resumed_records,
+            updated_rows,
+        )
+        return True
 
     def _resolve_hydration_progress_total(
         self, dataset: Iterable[Dict[str, Any]], *, use_streaming: bool

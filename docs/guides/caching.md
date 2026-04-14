@@ -122,6 +122,10 @@ staged reconciliation flow:
 - full-split missing-ID reconciliation only when needed
 
 All reconciliation steps are ID-aware and append only uncached paper IDs.
+If a prior full-corpus hydration was interrupted but the cached SQLite/HDF5 row counts
+still match each other and the hydration metadata still matches the requested
+source/split, CiteMesh resumes from `cached_rows` instead of clearing the namespace and
+starting from zero again.
 If upstream split row counts shrink below cached payload size, CiteMesh marks
 the namespace hydration state incomplete and forces full source revalidation
 instead of serving stale over-cap rows from the prior cache snapshot.
@@ -129,6 +133,12 @@ If full reconciliation confirms no uncached IDs while row-count delta remains,
 CiteMesh treats that as duplicate-ID upstream growth (not a cache failure), records
 the reconciled row-count state, and skips repeated full-split scans until row counts
 change again.
+
+When switching a namespace from a capped corpus (for example `--corpus-size 50000`) to
+`--all-corpus`, cache-clear logs report both the requested target and the replaced cached
+payload. Seeing `requested_corpus=all` alongside `cached_corpus=50000` means CiteMesh is
+replacing the old capped namespace before hydrating the full split; it does not mean the
+new run is silently limited to `50000`.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus
 metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias
@@ -152,6 +162,9 @@ using hashed filenames.
   fresh reference IDs from the API (write-through cache update).
 - Successful empty reference responses are cached as explicit empty lists to avoid
   repeated API calls for papers with no references.
+- Empty cached reference hits are reused silently; debug logging emits cache-hit lines
+  only for non-empty reference lists so long runs do not spam one zero-count line per
+  paper.
 - Non-empty cached payloads that contain no valid reference IDs are treated as invalid
   and rebuilt from API data instead of being reused as implicit empties.
 - Corrupt/unreadable JSON cache entries (including non-object payloads) are treated as

@@ -145,6 +145,7 @@ Execution transparency:
   - [Caching & Data](caching.md)
 - Use `--log-level debug` when you want detailed internals (cache selection, compile skip reasons, dataset-source selection, and similar diagnostics).
 - Add `--log-file out/run.log` when you want a shareable plain-text trace alongside the Rich console output; with `--log-level debug`, the file keeps debug detail while the console stays at `info`. `*.log` is already ignored by git in this repo.
+- `--log-file` traces intentionally clamp noisy dependency debug loggers such as `filelock`, `urllib3`, `matplotlib`, and `semanticscholar` to `warning` so the file stays useful for CiteMesh debugging instead of filling with lock polling, HTTP transport churn, and font-manager noise.
 
 ### Hybrid Strategy
 
