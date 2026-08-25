@@ -8,6 +8,28 @@ For current usage details, see:
 - [Environment Variables](../reference/environment.md)
 - [Embedding Runtime](../reference/embedding-runtime.md)
 
+## Semantic Sources
+
+- Candidate-only ("corpus-free") semantic sourcing is now the DEFAULT for the
+  embedding and hybrid strategies (`--semantic-source candidates`): candidates
+  come from S2 seed neighbors (references/citations/recommendations, capped by
+  `--candidate-pool-size`) and only those abstracts are embedded locally, with
+  vectors persisted incrementally in a candidate-scoped cache namespace.
+- The arXiv corpus path remains available via `--semantic-source arxiv-corpus`;
+  corpus-only flags imply it when `--semantic-source` is omitted, so existing
+  invocations keep working.
+- Candidate mode stores embeddings as float32 (int8 calibration is computed
+  during corpus hydration only); explicit `--storage-precision int8` now
+  requires `arxiv-corpus`.
+- Hybrid candidate rerank vectors now persist through the embedding cache in
+  candidate mode instead of being re-encoded every run (corpus mode keeps the
+  in-memory path so corpus row counts stay undistorted).
+- Capped corpus hydration now warns that it takes the first `--corpus-size`
+  rows of the split (typically the oldest arXiv records) and that interrupted
+  capped hydrations restart from zero; a newest-slice policy and capped-resume
+  support remain open follow-ups.
+- The `datasets` dependency is now only required for `arxiv-corpus` mode.
+
 ## Runtime & Devices
 
 - Added explicit device resolution with a `--device {auto,cuda,mps,cpu}` flag for

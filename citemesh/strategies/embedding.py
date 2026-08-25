@@ -49,6 +49,12 @@ from citemesh.strategies.base import (
     build_capped_undirected_graph,
     deterministic_sort_key,
 )
+from citemesh.strategies.candidates import (
+    DEFAULT_CANDIDATE_POOL_SIZE,
+    SEMANTIC_SOURCE_CHOICES,
+    fetch_candidate_pool,
+    paper_embedding_metadata,
+)
 from citemesh.text_batching import (
     encode_texts_in_length_buckets,
     l2_normalize_embeddings,
@@ -161,8 +167,12 @@ def resolve_embedding_device(requested: Optional[str]) -> str:
     return normalized
 
 
-def _check_embedding_deps() -> None:
-    """Verify embedding dependencies are installed."""
+def _check_embedding_deps(require_corpus: bool = True) -> None:
+    """Verify embedding dependencies are installed.
+
+    :param bool require_corpus: Whether corpus hydration deps (``datasets``)
+        are required. Candidate mode only needs the encoder stack.
+    """
     missing: list[str] = []
     torch_module: Any | None = None
 
@@ -176,10 +186,11 @@ def _check_embedding_deps() -> None:
     except ImportError:
         missing.append("sentence-transformers")
 
-    try:
-        _import_datasets_module()
-    except ImportError:
-        missing.append("datasets")
+    if require_corpus:
+        try:
+            _import_datasets_module()
+        except ImportError:
+            missing.append("datasets")
 
     if missing:
         raise ImportError(
@@ -491,6 +502,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         encode_batch_size: int = ENCODE_BATCH_SIZE,
         enable_torch_compile: bool = False,
         device: Optional[str] = None,
+        semantic_source: str = "candidates",
+        candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -524,9 +537,31 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param Optional[str] device: Requested compute device token
             (``auto``/``cuda``/``mps``/``cpu``). ``None`` means ``auto``
             (cuda, then mps, then cpu). Explicit unavailable devices raise.
+        :param str semantic_source: Candidate sourcing mode: ``candidates``
+            (default; embed S2 seed neighbors only) or ``arxiv-corpus``
+            (hydrate a local arXiv corpus).
+        :param int candidate_pool_size: Maximum S2 candidate pool size fetched
+            in ``candidates`` mode.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
-        _check_embedding_deps()
+        normalized_semantic_source = str(semantic_source).strip().lower()
+        if normalized_semantic_source not in SEMANTIC_SOURCE_CHOICES:
+            formatted = ", ".join(SEMANTIC_SOURCE_CHOICES)
+            raise ValueError(f"semantic_source must be one of: {formatted}")
+        _check_embedding_deps(
+            require_corpus=normalized_semantic_source == "arxiv-corpus"
+        )
+        if candidate_pool_size < 1:
+            raise ValueError("candidate_pool_size must be at least 1")
+        if normalized_semantic_source != "arxiv-corpus" and storage_precision == "int8":
+            # int8 calibration ranges are only computed during corpus hydration;
+            # candidate pools are small enough that float32 storage is free.
+            logger.debug("Candidate mode does not support int8 storage; using float32.")
+            storage_precision = "float32"
+            if binary_prefilter is None:
+                binary_prefilter = False
+            if binary_rescore_multiplier is None:
+                binary_rescore_multiplier = 1
         normalized_model_name = str(model_name).strip()
         if not normalized_model_name:
             raise ValueError("model_name must be a non-empty string")
@@ -558,6 +593,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError("encode_batch_size must be at least 1")
         validate_compression_filter(cache_compression)
         super().__init__(max_papers)
+        self.semantic_source = normalized_semantic_source
+        self.candidate_pool_size = int(candidate_pool_size)
         self.model_name = normalized_model_name
         normalized_revision = (
             str(model_revision).strip() if model_revision is not None else ""
@@ -734,6 +771,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
         parts.append(f"source_dtype={self._source_dtype_hint}")
         parts.append(f"doc_formatter={self._document_formatter_fingerprint}")
+        # Candidate mode gets its own namespace so incremental candidate rows
+        # never mix with (and never distort row counts of) corpus hydrations.
+        # The corpus namespace stays token-free for legacy cache compatibility.
+        if self.semantic_source != "arxiv-corpus":
+            parts.append(f"mode={self.semantic_source}")
         return "::".join(parts)
 
     def _resolve_document_formatter_fingerprint(self) -> str:
@@ -1848,6 +1890,21 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )[0]
         self.embeddings[resolved_seed_paper.paper_id] = seed_embedding
 
+        if self.semantic_source != "arxiv-corpus":
+            logger.debug("Using candidate-pool semantic search...")
+            pool_candidates = self._select_candidates_from_pool(
+                seed_embedding, resolved_seed_paper
+            )
+            for paper_id, paper, embedding in pool_candidates:
+                if len(papers) >= self.max_papers:
+                    break
+                if paper_id in papers:
+                    continue
+                papers[paper_id] = paper
+                self.embeddings[paper_id] = embedding
+            self._update_citation_counts(papers)
+            return papers
+
         use_streaming = self.use_streaming
 
         if use_streaming:
@@ -1889,6 +1946,88 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         self._update_citation_counts(papers)
         return papers
+
+    def _candidate_pool_budgets(self) -> Tuple[int, int, int]:
+        """Split the candidate pool size into per-source fetch budgets.
+
+        :return Tuple[int, int, int]: ``(max_references, max_citations,
+            max_recommendations)`` budgets.
+        """
+        pool_size = self.candidate_pool_size
+        max_recommendations = min(100, pool_size)
+        remaining = max(0, pool_size - max_recommendations)
+        max_references = min(100, remaining // 2)
+        max_citations = max(0, remaining - max_references)
+        return max_references, max_citations, max_recommendations
+
+    def _select_candidates_from_pool(
+        self, seed_embedding: np.ndarray, seed_paper: Paper
+    ) -> List[Tuple[str, Paper, np.ndarray]]:
+        """Rank S2 candidate-pool papers by cosine similarity to the seed.
+
+        :param np.ndarray seed_embedding: Normalized seed embedding vector.
+        :param Paper seed_paper: Resolved seed paper (S2-backed or query seed).
+        :return List[Tuple[str, Paper, np.ndarray]]: Ranked candidate tuples.
+        """
+        max_references, max_citations, max_recommendations = (
+            self._candidate_pool_budgets()
+        )
+        pool = fetch_candidate_pool(
+            self.client,
+            seed_paper,
+            max_references=max_references,
+            max_citations=max_citations,
+            max_recommendations=max_recommendations,
+        )
+        if not pool.papers:
+            logger.warning(
+                "Candidate pool for %s is empty; graph will only contain the seed.",
+                seed_paper.paper_id,
+            )
+            return []
+
+        embeddings = self.embed_papers(pool.papers)
+        query = np.asarray(seed_embedding, dtype=np.float32)
+        scored: List[Tuple[float, str, Paper, np.ndarray, int]] = []
+        for idx, (paper_id, paper) in enumerate(pool.papers.items()):
+            embedding = embeddings.get(paper_id)
+            if embedding is None:
+                continue
+            vector = np.asarray(embedding, dtype=np.float32)
+            score = float(np.clip(np.dot(query, vector), -1.0, 1.0))
+            scored.append((score, paper_id, paper, vector, idx))
+        scored.sort(
+            key=lambda item: deterministic_sort_key(
+                item[0], item[1], stable_index=item[4]
+            )
+        )
+        logger.info(
+            "Candidate semantic search ranked %d of %d pooled papers.",
+            len(scored),
+            len(pool.papers),
+        )
+        return [(paper_id, paper, vector) for _, paper_id, paper, vector, _ in scored]
+
+    def embed_papers(self, papers: Dict[str, Paper]) -> Dict[str, np.ndarray]:
+        """Embed papers through the persistent cache, encoding only missing ones.
+
+        :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
+        :return Dict[str, np.ndarray]: Mapping of paper IDs to float32 embeddings.
+        """
+        if not papers:
+            return {}
+        self._load_model()
+        metadata_map = {
+            paper_id: paper_embedding_metadata(paper)
+            for paper_id, paper in papers.items()
+        }
+        return self.embedding_cache.get_embeddings(
+            metadata_map,
+            self._get_model_for_encoding(),
+            batch_size=self.encode_batch_size,
+            show_progress=False,
+            text_builder=self.model_profile.format_document,
+        )
 
     def _format_seed_for_embedding(
         self,
@@ -2084,6 +2223,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             "all" if self.corpus_size is None else self.corpus_size,
             use_streaming,
         )
+        if self.corpus_size is not None and ":" not in str(self.dataset_split):
+            logger.warning(
+                "Capped corpus hydration takes the FIRST %d rows of the split; "
+                "for arXiv snapshot datasets these are typically the oldest "
+                "records. Prefer the default --semantic-source candidates for "
+                "seed-relevant results, or --all-corpus for full coverage.",
+                int(self.corpus_size),
+            )
         retained_fingerprint = (
             str(self._resolved_model_fingerprint).strip()
             if self._resolved_model_fingerprint is not None

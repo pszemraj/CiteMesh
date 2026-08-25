@@ -8,7 +8,6 @@ comprehensive paper discovery.
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
@@ -17,12 +16,22 @@ import numpy as np
 from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.model_profiles import compose_title_abstract_text
-from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     build_capped_undirected_graph,
     deterministic_sort_key,
+)
+from citemesh.strategies.candidates import (
+    DEFAULT_CANDIDATE_POOL_SIZE,
+    SEMANTIC_SOURCE_CHOICES,
+    fetch_candidate_pool,
+    merge_paper_metadata,
+    merge_seed_relation,
+    paper_embedding_metadata,
+    paper_identity_aliases,
+    register_aliases,
+    resolve_alias,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
@@ -83,6 +92,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         encode_batch_size: int = ENCODE_BATCH_SIZE,
         enable_torch_compile: bool = False,
         device: Optional[str] = None,
+        semantic_source: str = "candidates",
+        candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -119,8 +130,18 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             best-effort inner-model ``torch.compile`` optimization.
         :param Optional[str] device: Requested compute device token for the
             semantic branch (``auto``/``cuda``/``mps``/``cpu``).
+        :param str semantic_source: Semantic candidate sourcing mode:
+            ``candidates`` (default; S2 recommendations, no local corpus) or
+            ``arxiv-corpus`` (hydrated arXiv corpus search).
+        :param int candidate_pool_size: Maximum S2 candidate pool size used by
+            the embedding builder in ``candidates`` mode.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
+        normalized_semantic_source = str(semantic_source).strip().lower()
+        if normalized_semantic_source not in SEMANTIC_SOURCE_CHOICES:
+            formatted = ", ".join(SEMANTIC_SOURCE_CHOICES)
+            raise ValueError(f"semantic_source must be one of: {formatted}")
+
         if max_semantic is None:
             resolved_max_semantic = max(0, min(DEFAULT_MAX_SEMANTIC, max_papers - 1))
         else:
@@ -137,10 +158,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         super().__init__(max_papers)
         self.client = client or get_client()
         self.max_semantic = resolved_max_semantic
+        self.semantic_source = normalized_semantic_source
         self._semantic_candidate_cap = 0
 
         if self.max_semantic > 0:
-            _check_embedding_deps()
+            _check_embedding_deps(
+                require_corpus=normalized_semantic_source == "arxiv-corpus"
+            )
             self._semantic_candidate_cap = max(
                 self.max_semantic,
                 min(
@@ -169,6 +193,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 encode_batch_size=encode_batch_size,
                 enable_torch_compile=enable_torch_compile,
                 device=device,
+                semantic_source=normalized_semantic_source,
+                candidate_pool_size=candidate_pool_size,
                 client=self.client,
             )
         else:
@@ -194,52 +220,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.seed_relations: Dict[str, str] = {}
 
     @staticmethod
-    def _normalize_identity_text(raw_text: str) -> str:
-        """Normalize free-form text for deterministic paper identity matching.
-
-        :param str raw_text: Raw user/content text.
-        :return str: Lowercased alphanumeric text with compact spacing.
-        """
-        compact = re.sub(r"[^0-9a-z]+", " ", str(raw_text).strip().lower())
-        return " ".join(compact.split())
-
-    @classmethod
-    def _paper_identity_aliases(cls, paper: Paper) -> List[str]:
+    def _paper_identity_aliases(paper: Paper) -> List[str]:
         """Return deterministic alias keys used to deduplicate equivalent papers.
 
         :param Paper paper: Paper candidate to alias.
         :return List[str]: Stable sorted alias keys.
         """
-        aliases: Set[str] = set()
-        raw_id = str(paper.paper_id).strip()
-        if raw_id:
-            aliases.add(f"id:{raw_id.lower()}")
-            try:
-                aliases.add(f"id:{normalize_paper_id(raw_id).lower()}")
-            except ValueError:
-                pass
-
-        normalized_title = cls._normalize_identity_text(paper.title or "")
-        if normalized_title:
-            year_token = (
-                str(int(paper.year))
-                if isinstance(paper.year, int) and paper.year > 0
-                else "n.d."
-            )
-            aliases.add(f"meta:{normalized_title}|{year_token}")
-            normalized_abstract = cls._normalize_identity_text(paper.abstract or "")
-            if normalized_abstract:
-                aliases.add(f"meta:{normalized_title}|abs:{normalized_abstract[:256]}")
-            author_tokens = [
-                cls._normalize_identity_text(author.name)
-                for author in paper.authors[:3]
-                if getattr(author, "name", None)
-            ]
-            compact_authors = "|".join(token for token in author_tokens if token)
-            if compact_authors:
-                aliases.add(f"meta:{normalized_title}|{year_token}|{compact_authors}")
-
-        return sorted(aliases)
+        return paper_identity_aliases(paper)
 
     def _resolve_alias(self, aliases: Dict[str, str], paper: Paper) -> Optional[str]:
         """Resolve an existing canonical paper ID from alias map.
@@ -248,11 +235,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Paper paper: Incoming paper payload.
         :return Optional[str]: Canonical paper ID when already known.
         """
-        for alias in self._paper_identity_aliases(paper):
-            canonical_id = aliases.get(alias)
-            if canonical_id is not None:
-                return canonical_id
-        return None
+        return resolve_alias(aliases, paper)
 
     def _register_aliases(
         self, aliases: Dict[str, str], canonical_id: str, paper: Paper
@@ -264,8 +247,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Paper paper: Paper payload providing alias candidates.
         :return None: Alias map is mutated in place.
         """
-        for alias in self._paper_identity_aliases(paper):
-            aliases.setdefault(alias, canonical_id)
+        register_aliases(aliases, canonical_id, paper)
 
     @staticmethod
     def _merge_seed_relation(existing: str, incoming: str) -> str:
@@ -275,28 +257,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param str incoming: Incoming relation label.
         :return str: Merged relation label.
         """
-        normalized_existing = str(existing or "").strip().lower()
-        normalized_incoming = str(incoming or "").strip().lower()
-        if not normalized_existing:
-            return normalized_incoming
-        if (
-            not normalized_incoming
-            or normalized_existing == normalized_incoming
-            or normalized_existing == "seed"
-        ):
-            return normalized_existing
-        if normalized_existing == "overlap" or normalized_incoming == "overlap":
-            return "overlap"
-        if {
-            normalized_existing,
-            normalized_incoming,
-        } == {"referenced_by_seed", "cites_seed"}:
-            return "overlap"
-        if normalized_existing == "semantic_only":
-            return normalized_incoming
-        if normalized_incoming == "semantic_only":
-            return normalized_existing
-        return normalized_existing
+        return merge_seed_relation(existing, incoming)
 
     def _merge_paper_metadata(self, preferred: Paper, incoming: Paper) -> Paper:
         """Merge supplemental metadata from an alternate source into ``preferred``.
@@ -305,25 +266,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Paper incoming: Supplemental paper record to merge.
         :return Paper: ``preferred`` with missing metadata hydrated.
         """
-        if not preferred.abstract and incoming.abstract:
-            preferred.abstract = incoming.abstract
-        if preferred.year is None and incoming.year is not None:
-            preferred.year = incoming.year
-        if (not preferred.authors) and incoming.authors:
-            preferred.authors = incoming.authors
-        if preferred.citation_count <= 0 and incoming.citation_count > 0:
-            preferred.citation_count = incoming.citation_count
-        if (not preferred.venue) and incoming.venue:
-            preferred.venue = incoming.venue
-        if (not preferred.arxiv_id) and incoming.arxiv_id:
-            preferred.arxiv_id = incoming.arxiv_id
-        if (not preferred.doi) and incoming.doi:
-            preferred.doi = incoming.doi
-        if (not preferred.categories) and incoming.categories:
-            preferred.categories = incoming.categories
-        if (not preferred.references) and incoming.references:
-            preferred.references = incoming.references
-        return preferred
+        return merge_paper_metadata(preferred, incoming)
 
     def _paper_embedding_metadata(self, paper: Paper) -> Dict[str, object]:
         """Build embedding-cache metadata payload for a paper.
@@ -331,16 +274,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Paper paper: Paper to normalize.
         :return Dict[str, object]: Metadata payload accepted by embedding cache.
         """
-        return {
-            "title": paper.title or "",
-            "abstract": paper.abstract or "",
-            "year": paper.year,
-            "authors": [author.name for author in paper.authors],
-            "venue": paper.venue or "",
-            "arxiv_id": paper.arxiv_id or "",
-            "doi": paper.doi or "",
-            "categories": list(paper.categories or []),
-        }
+        return paper_embedding_metadata(paper)
 
     def _seed_query_text(self, seed_paper: Paper) -> str:
         """Build query text used to embed the hybrid seed paper.
@@ -356,13 +290,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
         return text or str(seed_paper.paper_id)
 
-    def _embed_candidates_in_memory(
+    def _embed_candidates(
         self,
         candidate_ids: List[str],
         candidates: Dict[str, Paper],
         embeddings_map: Dict[str, np.ndarray],
     ) -> None:
-        """Embed rerank candidates without mutating the persistent corpus cache.
+        """Embed rerank candidates for seed-relevance scoring.
+
+        Candidate mode persists vectors through the embedding cache (its
+        namespace is candidate-scoped). Corpus mode encodes in memory only, so
+        S2 candidate rows never distort corpus-hydration row counts.
 
         :param List[str] candidate_ids: Candidate IDs needing embeddings.
         :param Dict[str, Paper] candidates: Candidate paper payloads.
@@ -370,6 +308,27 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :return None: Mutates ``embeddings_map`` in place when encoding succeeds.
         """
         if not candidate_ids or self.embedding_builder is None:
+            return
+
+        if self.semantic_source != "arxiv-corpus":
+            subset = {
+                paper_id: candidates[paper_id]
+                for paper_id in candidate_ids
+                if paper_id in candidates
+            }
+            if not subset:
+                return
+            try:
+                encoded_map = self.embedding_builder.embed_papers(subset)
+            except Exception as exc:
+                logger.debug(
+                    "Hybrid candidate embedding via cache failed; rerank falls "
+                    "back to non-semantic scoring (%s: %s).",
+                    type(exc).__name__,
+                    exc,
+                )
+                return
+            embeddings_map.update(encoded_map)
             return
 
         model_profile = getattr(self.embedding_builder, "model_profile", None)
@@ -481,7 +440,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             paper_id for paper_id in candidates if paper_id not in embeddings_map
         ]
         if missing_ids and seed_embedding is not None:
-            self._embed_candidates_in_memory(
+            self._embed_candidates(
                 candidate_ids=missing_ids,
                 candidates=candidates,
                 embeddings_map=embeddings_map,
@@ -671,10 +630,21 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.info("Enriching with up to %s semantic matches...", semantic_budget)
 
         try:
-            semantic_papers = self.embedding_builder.collect_papers(
-                seed_id,
-                seed_paper=seed_paper,
-            )
+            if self.semantic_source == "arxiv-corpus":
+                semantic_papers = self.embedding_builder.collect_papers(
+                    seed_id,
+                    seed_paper=seed_paper,
+                )
+            else:
+                # Candidate mode: the citation branch already covers references
+                # and citations, so the semantic branch adds recommendations only.
+                self.embedding_builder._load_model()
+                pool = fetch_candidate_pool(
+                    self.client,
+                    seed_paper,
+                    max_recommendations=self._semantic_candidate_cap,
+                )
+                semantic_papers = pool.papers
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 

@@ -140,6 +140,8 @@ ignoring it.
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`; unsupported with `--cache-compression lzf`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). When enabled, compile is deferred on cold-cache hydration runs and attempted on warm-cache runs.
 - `--device {auto,cuda,mps,cpu}`: compute device for embedding model runs (default `auto`, which prefers CUDA, then MPS on Apple Silicon, then CPU). Explicit unavailable devices fail fast. Shared with hybrid.
+- `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing (default `candidates`, which embeds only S2 seed neighbors — no corpus download). Corpus-only flags (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--streaming`) imply `arxiv-corpus` when `--semantic-source` is omitted, and are rejected with explicit `candidates`. Candidate mode stores vectors as float32 (`--storage-precision int8` requires `arxiv-corpus`).
+- `--candidate-pool-size`: maximum S2 candidate pool fetched in candidates mode (default `400`; candidates mode only).
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 - Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in a shareable plain-text file without flooding the Rich console. `*.log` is ignored by git in this repo.

@@ -36,7 +36,7 @@ citemesh cache root
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
-Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + resolved truncate dim + storage precision + effective binary prefilter mode + resolved source torch dtype + document-formatter fingerprint, and adds calibration sample size in `int8` mode. The namespace intentionally carries no device token: it tracks the compute dtype, so caches built at the same dtype (for example bf16 on CUDA and bf16 on MPS) are portable across machines.
+Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + resolved truncate dim + storage precision + effective binary prefilter mode + resolved source torch dtype + document-formatter fingerprint, and adds calibration sample size in `int8` mode. Candidate mode (`--semantic-source candidates`, the default) appends a `mode=candidates` token so incrementally embedded S2 candidates never mix with corpus hydrations; corpus namespaces stay token-free for compatibility with previously built caches. The namespace intentionally carries no device token: it tracks the compute dtype, so caches built at the same dtype (for example bf16 on CUDA and bf16 on MPS) are portable across machines.
 
 ## Embedding Cache Behavior
 

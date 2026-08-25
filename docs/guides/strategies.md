@@ -16,8 +16,8 @@ Related docs:
 | --- | --- | --- | --- |
 | `recommendation` | Semantic Scholar recommendations | Semantic Scholar API | Fast topical exploration |
 | `citation` | References + citations + bibliographic coupling | Semantic Scholar API | Relationship-grounded neighborhoods |
-| `embedding` | Dense vector similarity | HuggingFace corpus + embedding model | Conceptual similarity beyond citations |
-| `hybrid` | Citation graph + semantic enrichment | Semantic Scholar API + HuggingFace corpus | Balanced recall with grounded edges |
+| `embedding` | Dense vector similarity | S2 candidate pool + embedding model (default) or HuggingFace corpus | Conceptual similarity beyond citations |
+| `hybrid` | Citation graph + semantic enrichment | Semantic Scholar API + embedding model | Balanced recall with grounded edges |
 
 ## Recommendation Strategy
 
@@ -35,9 +35,27 @@ Related docs:
 
 ## Embedding Strategy
 
-- Data source: HuggingFace ArXiv-like corpus + sentence-transformer model.
+Two semantic sources, selected with `--semantic-source`:
+
+- `candidates` (default): fetches the seed's Semantic Scholar neighbors
+  (references, citations, and recommendations, up to `--candidate-pool-size`),
+  embeds only those abstracts locally, and ranks them by cosine similarity to
+  the seed. Fast (seconds after the one-time model download), covers all venues
+  S2 indexes, and needs no corpus download. Candidate vectors persist
+  incrementally in a candidate-scoped cache namespace.
+- `arxiv-corpus` (opt-in): hydrates a local arXiv abstract corpus from
+  HuggingFace and searches it. This can surface papers with no citation path to
+  the seed, but cold hydration encodes the full corpus cap and is only
+  practical on strong accelerators. Note: a capped hydration takes the FIRST
+  `--corpus-size` rows of the split, which for arXiv snapshots is typically the
+  oldest records — prefer `--all-corpus` (resumable) when you opt into corpus
+  mode. Requires the `datasets` dependency.
+
+Providing corpus flags (`--dataset-split`, `--corpus-size`, `--all-corpus`,
+`--streaming`) without `--semantic-source` implies `arxiv-corpus` for
+backwards compatibility.
+
 - Strengths: captures semantic similarity even when citations are missing.
-- Limitations: first run hydrates a cache for the selected corpus spec; requires optional embedding dependencies.
 - Typical use: semantic exploration and discovery beyond citation graphs.
 
 Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md).
@@ -45,7 +63,10 @@ Embedding model defaults/fallbacks and compile policy are defined in [Embedding 
 
 ## Hybrid Strategy
 
-- Data source: citation collection plus semantic enrichment.
+- Data source: citation collection plus semantic enrichment. In the default
+  `candidates` mode the semantic branch pulls S2 recommendations and embeds the
+  merged candidate pool locally; `arxiv-corpus` mode searches the hydrated
+  corpus instead.
 - Strengths: combines grounded citation edges with semantic reranking of the whole candidate pool.
 - Limitations: inherits dependency and cache requirements from the embedding path.
 - Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.

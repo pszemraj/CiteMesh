@@ -33,6 +33,10 @@ from citemesh.data import (
 from citemesh.data.cache import atomic_write_json
 from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
+from citemesh.strategies.candidates import (
+    DEFAULT_CANDIDATE_POOL_SIZE,
+    SEMANTIC_SOURCE_CHOICES,
+)
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
     EMBEDDING_DEVICE_CHOICES,
@@ -440,7 +444,17 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "encode_batch_size": {"embedding", "hybrid"},
     "torch_compile": {"embedding", "hybrid"},
     "device": {"embedding", "hybrid"},
+    "semantic_source": {"embedding", "hybrid"},
+    "candidate_pool_size": {"embedding", "hybrid"},
     "max_semantic": {"hybrid"},
+}
+# Flags that only affect arxiv-corpus hydration; providing them implies (or
+# requires) --semantic-source arxiv-corpus.
+_CORPUS_ONLY_OPTION_DESTS: Set[str] = {
+    "dataset_split",
+    "corpus_size",
+    "all_corpus",
+    "streaming",
 }
 _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "max_citations": ["--max-citations", "-c"],
@@ -468,6 +482,8 @@ _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "encode_batch_size": ["--encode-batch-size"],
     "torch_compile": ["--torch-compile", "--no-torch-compile"],
     "device": ["--device"],
+    "semantic_source": ["--semantic-source"],
+    "candidate_pool_size": ["--candidate-pool-size"],
     "max_semantic": ["--max-semantic"],
 }
 _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
@@ -503,6 +519,8 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "encode_batch_size",
     "torch_compile",
     "device",
+    "semantic_source",
+    "candidate_pool_size",
 }
 
 
@@ -537,6 +555,8 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "encode_batch_size": cli_args.encode_batch_size,
         "enable_torch_compile": cli_args.torch_compile,
         "device": cli_args.device,
+        "semantic_source": cli_args.semantic_source,
+        "candidate_pool_size": cli_args.candidate_pool_size,
     }
 
 
@@ -586,6 +606,8 @@ def _embedding_export_metadata(
         "effective_vector_dtype": "float32",
         "effective_device": effective_device,
         "effective_compute_dtype": effective_compute_dtype,
+        "semantic_source": str(cli_args.semantic_source),
+        "candidate_pool_size": int(cli_args.candidate_pool_size),
         "storage_precision": str(cli_args.storage_precision),
         "binary_prefilter_enabled": binary_prefilter_enabled,
         "binary_prefilter_used_for_query": binary_prefilter_used_for_query,
@@ -733,6 +755,41 @@ def _validate_build_cli_contract(
         )
 
     if strategy in {"embedding", "hybrid"}:
+        provided_corpus_flags = sorted(
+            _BUILD_OPTION_PRIMARY_FLAG[dest]
+            for dest in provided
+            if dest in _CORPUS_ONLY_OPTION_DESTS
+        )
+        if provided_corpus_flags and "semantic_source" not in provided:
+            args.semantic_source = "arxiv-corpus"
+            logger.info(
+                "Corpus option(s) %s imply --semantic-source arxiv-corpus.",
+                ", ".join(provided_corpus_flags),
+            )
+        if args.semantic_source != "arxiv-corpus":
+            if provided_corpus_flags:
+                option_text = ", ".join(provided_corpus_flags)
+                build_parser.error(
+                    f"Corpus-only option(s) require --semantic-source arxiv-corpus: "
+                    f"{option_text}."
+                )
+            if "storage_precision" in provided and args.storage_precision == "int8":
+                build_parser.error(
+                    "--storage-precision int8 requires --semantic-source "
+                    "arxiv-corpus (int8 calibration ranges are computed during "
+                    "corpus hydration)."
+                )
+            if args.storage_precision == "int8":
+                # Normalize the implicit int8 default to candidate-mode storage.
+                args.storage_precision = "float32"
+                logger.info(
+                    "Candidate mode stores embeddings as float32 "
+                    "(int8 calibration requires corpus hydration)."
+                )
+        elif "candidate_pool_size" in provided:
+            build_parser.error(
+                "--candidate-pool-size requires --semantic-source candidates."
+            )
         if args.streaming and ":" in str(args.dataset_split):
             build_parser.error(
                 "Streaming mode does not support sliced --dataset-split values "
@@ -833,29 +890,48 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     if not _embedding_branch_enabled(args):
         return
 
+    corpus_mode = str(args.semantic_source) == "arxiv-corpus"
     _, cache_files, _ = _embedding_cache_directory_stats()
     if cache_files == 0:
-        logger.warning(
-            "No embedding cache found; model and corpus downloads may be "
-            "required (network access needed, may take several minutes on "
-            "first use)."
-        )
+        if corpus_mode:
+            logger.warning(
+                "No embedding cache found; model and corpus downloads may be "
+                "required (network access needed, may take several minutes on "
+                "first use)."
+            )
+        else:
+            logger.info(
+                "No embedding cache found; the embedding model will be "
+                "downloaded on first use (network access needed)."
+            )
 
-    corpus_label = "all" if args.all_corpus else str(args.corpus_size)
     cache_root = get_cache_dir("embeddings")
     revision_label = args.model_revision or "default"
     logger.debug("Embedding cache namespace root: %s.", cache_root)
-    logger.info(
-        "Embedding config: model=%s@%s device=%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
-        args.model,
-        revision_label,
-        args.device,
-        args.dataset_split,
-        corpus_label,
-        bool(args.streaming),
-        args.storage_precision,
-        int(args.encode_batch_size),
-    )
+    if corpus_mode:
+        corpus_label = "all" if args.all_corpus else str(args.corpus_size)
+        logger.info(
+            "Embedding config: model=%s@%s device=%s source=arxiv-corpus split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
+            args.model,
+            revision_label,
+            args.device,
+            args.dataset_split,
+            corpus_label,
+            bool(args.streaming),
+            args.storage_precision,
+            int(args.encode_batch_size),
+        )
+    else:
+        logger.info(
+            "Embedding config: model=%s@%s device=%s source=%s pool=%s storage=%s encode_batch=%s.",
+            args.model,
+            revision_label,
+            args.device,
+            args.semantic_source,
+            int(args.candidate_pool_size),
+            args.storage_precision,
+            int(args.encode_batch_size),
+        )
     if args.force_rebuild_cache:
         overwrite_reason = _normalized_cache_reason(
             getattr(args, "cache_overwrite_reason", None)
@@ -1470,6 +1546,29 @@ Environment variables:
     build_parser.set_defaults(torch_compile=False)
 
     embedding_group.add_argument(
+        "--semantic-source",
+        dest="semantic_source",
+        choices=list(SEMANTIC_SOURCE_CHOICES),
+        default="candidates",
+        help=(
+            "Semantic candidate sourcing: 'candidates' embeds only S2 seed "
+            "neighbors (references/citations/recommendations; fast, no local "
+            "corpus); 'arxiv-corpus' hydrates a local arXiv corpus. Corpus-only "
+            "flags imply arxiv-corpus for backwards compatibility "
+            "(default: %(default)s)."
+        ),
+    )
+    embedding_group.add_argument(
+        "--candidate-pool-size",
+        dest="candidate_pool_size",
+        type=_positive_int,
+        default=DEFAULT_CANDIDATE_POOL_SIZE,
+        help=(
+            "Maximum S2 candidate pool size fetched in candidates mode "
+            "(default: %(default)s)."
+        ),
+    )
+    embedding_group.add_argument(
         "--device",
         dest="device",
         choices=list(EMBEDDING_DEVICE_CHOICES),
@@ -1947,6 +2046,8 @@ def _build_graph_config_payload(
         embedding_config = {
             "model": cli_args.model,
             "model_revision": cli_args.model_revision,
+            "semantic_source": str(cli_args.semantic_source),
+            "candidate_pool_size": int(cli_args.candidate_pool_size),
             "dataset_split": cli_args.dataset_split,
             "corpus_size": None if cli_args.all_corpus else int(cli_args.corpus_size),
             "all_corpus": bool(cli_args.all_corpus),

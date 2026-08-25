@@ -181,6 +181,8 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "encode_batch_size": ENCODE_BATCH_SIZE,
         "torch_compile": False,
         "device": "auto",
+        "semantic_source": "candidates",
+        "candidate_pool_size": 400,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -1742,6 +1744,8 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "effective_vector_dtype": "float32",
         "effective_device": None,
         "effective_compute_dtype": None,
+        "semantic_source": "candidates",
+        "candidate_pool_size": 400,
         "storage_precision": "float32",
         "binary_prefilter_enabled": False,
         "binary_prefilter_used_for_query": False,
@@ -1761,7 +1765,13 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     metadata = _capture_metadata(
         strategy="embedding",
-        extra_args=["--storage-precision", "int8", "--binary-prefilter"],
+        extra_args=[
+            "--semantic-source",
+            "arxiv-corpus",
+            "--storage-precision",
+            "int8",
+            "--binary-prefilter",
+        ],
         graph=runtime_graph,
     )
     assert metadata["embedding"]["binary_prefilter_enabled"] is True
@@ -1970,6 +1980,8 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "encode_batch_size": 48,
                 "enable_torch_compile": False,
                 "device": "auto",
+                "semantic_source": "arxiv-corpus",
+                "candidate_pool_size": 400,
             },
         ),
         (
@@ -2013,6 +2025,8 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "encode_batch_size": 48,
                 "enable_torch_compile": False,
                 "device": "auto",
+                "semantic_source": "arxiv-corpus",
+                "candidate_pool_size": 400,
             },
         ),
     ]
@@ -2609,3 +2623,79 @@ def test_export_metadata_records_effective_device() -> None:
     )
     assert metadata["effective_device"] == "mps"
     assert metadata["effective_compute_dtype"] == "bfloat16"
+
+
+def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:
+    """Corpus-only flags without --semantic-source should imply arxiv-corpus."""
+    _, build_parser, _ = cli_module._create_parser()
+    args = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--corpus-size", "1234"]
+    )
+    provided = cli_module._pop_tracked_option_dests(args)
+    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    assert args.semantic_source == "arxiv-corpus"
+
+    args = build_parser.parse_args(["seed", "--strategy", "embedding"])
+    provided = cli_module._pop_tracked_option_dests(args)
+    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    assert args.semantic_source == "candidates"
+    assert args.storage_precision == "float32"
+
+
+def test_build_rejects_corpus_flags_with_explicit_candidates_source() -> None:
+    """Explicit candidates mode should reject corpus-only flags."""
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--semantic-source",
+            "candidates",
+            "--corpus-size",
+            "5000",
+        ]
+    )
+    assert result.returncode != 0
+    assert "Corpus-only option(s) require --semantic-source arxiv-corpus" in (
+        result.stderr
+    )
+    assert "--corpus-size" in result.stderr
+
+
+def test_build_rejects_int8_storage_in_candidate_mode() -> None:
+    """Explicit int8 storage should require the corpus source."""
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--storage-precision",
+            "int8",
+        ]
+    )
+    assert result.returncode != 0
+    assert "--storage-precision int8 requires --semantic-source arxiv-corpus" in (
+        result.stderr
+    )
+
+
+def test_build_rejects_candidate_pool_size_in_corpus_mode() -> None:
+    """--candidate-pool-size should be candidates-mode only."""
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--semantic-source",
+            "arxiv-corpus",
+            "--candidate-pool-size",
+            "100",
+        ]
+    )
+    assert result.returncode != 0
+    assert "--candidate-pool-size requires --semantic-source candidates" in (
+        result.stderr
+    )

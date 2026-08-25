@@ -121,8 +121,10 @@ def disable_embedding_dep_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     from citemesh.strategies import embedding as embedding_strategy
     from citemesh.strategies import hybrid as hybrid_strategy
 
-    monkeypatch.setattr(embedding_strategy, "_check_embedding_deps", lambda: None)
-    monkeypatch.setattr(hybrid_strategy, "_check_embedding_deps", lambda: None)
+    monkeypatch.setattr(
+        embedding_strategy, "_check_embedding_deps", lambda *a, **k: None
+    )
+    monkeypatch.setattr(hybrid_strategy, "_check_embedding_deps", lambda *a, **k: None)
 
 
 def raise_import_error(*_args: object, **_kwargs: object) -> Any:

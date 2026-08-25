@@ -1,0 +1,300 @@
+"""
+Candidate pool collection and paper-identity helpers.
+
+Provides the corpus-free ("candidates") semantic source: candidates come from
+Semantic Scholar neighbors of the seed (references, citations, and
+recommendations) instead of a locally hydrated arXiv corpus. The identity
+alias/merge helpers here are shared by hybrid and embedding strategies so both
+deduplicate equivalent papers identically.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
+
+from citemesh.core import Paper
+from citemesh.paper_ids import normalize_paper_id
+
+if TYPE_CHECKING:
+    from citemesh.services.semantic_scholar import SemanticScholarClient
+
+logger = logging.getLogger(__name__)
+
+SEMANTIC_SOURCE_CHOICES = ("candidates", "arxiv-corpus")
+DEFAULT_CANDIDATE_POOL_SIZE = 400
+QUERY_SEED_SEARCH_LIMIT = 20
+
+
+def normalize_identity_text(raw_text: str) -> str:
+    """Normalize free-form text for deterministic paper identity matching.
+
+    :param str raw_text: Raw user/content text.
+    :return str: Lowercased alphanumeric text with compact spacing.
+    """
+    compact = re.sub(r"[^0-9a-z]+", " ", str(raw_text).strip().lower())
+    return " ".join(compact.split())
+
+
+def paper_identity_aliases(paper: Paper) -> List[str]:
+    """Return deterministic alias keys used to deduplicate equivalent papers.
+
+    :param Paper paper: Paper candidate to alias.
+    :return List[str]: Stable sorted alias keys.
+    """
+    aliases: Set[str] = set()
+    raw_id = str(paper.paper_id).strip()
+    if raw_id:
+        aliases.add(f"id:{raw_id.lower()}")
+        try:
+            aliases.add(f"id:{normalize_paper_id(raw_id).lower()}")
+        except ValueError:
+            pass
+
+    normalized_title = normalize_identity_text(paper.title or "")
+    if normalized_title:
+        year_token = (
+            str(int(paper.year))
+            if isinstance(paper.year, int) and paper.year > 0
+            else "n.d."
+        )
+        aliases.add(f"meta:{normalized_title}|{year_token}")
+        normalized_abstract = normalize_identity_text(paper.abstract or "")
+        if normalized_abstract:
+            aliases.add(f"meta:{normalized_title}|abs:{normalized_abstract[:256]}")
+        author_tokens = [
+            normalize_identity_text(author.name)
+            for author in paper.authors[:3]
+            if getattr(author, "name", None)
+        ]
+        compact_authors = "|".join(token for token in author_tokens if token)
+        if compact_authors:
+            aliases.add(f"meta:{normalized_title}|{year_token}|{compact_authors}")
+
+    return sorted(aliases)
+
+
+def resolve_alias(aliases: Dict[str, str], paper: Paper) -> Optional[str]:
+    """Resolve an existing canonical paper ID from alias map.
+
+    :param Dict[str, str] aliases: Alias-to-canonical map.
+    :param Paper paper: Incoming paper payload.
+    :return Optional[str]: Canonical paper ID when already known.
+    """
+    for alias in paper_identity_aliases(paper):
+        canonical_id = aliases.get(alias)
+        if canonical_id is not None:
+            return canonical_id
+    return None
+
+
+def register_aliases(aliases: Dict[str, str], canonical_id: str, paper: Paper) -> None:
+    """Register identity aliases for a canonical paper ID.
+
+    :param Dict[str, str] aliases: Alias-to-canonical map to mutate.
+    :param str canonical_id: Canonical paper identifier.
+    :param Paper paper: Paper payload providing alias candidates.
+    :return None: Alias map is mutated in place.
+    """
+    for alias in paper_identity_aliases(paper):
+        aliases.setdefault(alias, canonical_id)
+
+
+def merge_seed_relation(existing: str, incoming: str) -> str:
+    """Merge two seed-relation labels conservatively.
+
+    :param str existing: Existing relation label.
+    :param str incoming: Incoming relation label.
+    :return str: Merged relation label.
+    """
+    normalized_existing = str(existing or "").strip().lower()
+    normalized_incoming = str(incoming or "").strip().lower()
+    if not normalized_existing:
+        return normalized_incoming
+    if (
+        not normalized_incoming
+        or normalized_existing == normalized_incoming
+        or normalized_existing == "seed"
+    ):
+        return normalized_existing
+    if normalized_existing == "overlap" or normalized_incoming == "overlap":
+        return "overlap"
+    if {
+        normalized_existing,
+        normalized_incoming,
+    } == {"referenced_by_seed", "cites_seed"}:
+        return "overlap"
+    if normalized_existing == "semantic_only":
+        return normalized_incoming
+    if normalized_incoming == "semantic_only":
+        return normalized_existing
+    return normalized_existing
+
+
+def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
+    """Merge supplemental metadata from an alternate source into ``preferred``.
+
+    :param Paper preferred: Canonical paper record to retain.
+    :param Paper incoming: Supplemental paper record to merge.
+    :return Paper: ``preferred`` with missing metadata hydrated.
+    """
+    if not preferred.abstract and incoming.abstract:
+        preferred.abstract = incoming.abstract
+    if preferred.year is None and incoming.year is not None:
+        preferred.year = incoming.year
+    if (not preferred.authors) and incoming.authors:
+        preferred.authors = incoming.authors
+    if preferred.citation_count <= 0 and incoming.citation_count > 0:
+        preferred.citation_count = incoming.citation_count
+    if (not preferred.venue) and incoming.venue:
+        preferred.venue = incoming.venue
+    if (not preferred.arxiv_id) and incoming.arxiv_id:
+        preferred.arxiv_id = incoming.arxiv_id
+    if (not preferred.doi) and incoming.doi:
+        preferred.doi = incoming.doi
+    if (not preferred.categories) and incoming.categories:
+        preferred.categories = incoming.categories
+    if (not preferred.references) and incoming.references:
+        preferred.references = incoming.references
+    return preferred
+
+
+def paper_embedding_metadata(paper: Paper) -> Dict[str, object]:
+    """Build embedding-cache metadata payload for a paper.
+
+    :param Paper paper: Paper to normalize.
+    :return Dict[str, object]: Metadata payload accepted by embedding cache.
+    """
+    return {
+        "title": paper.title or "",
+        "abstract": paper.abstract or "",
+        "year": paper.year,
+        "authors": [author.name for author in paper.authors],
+        "venue": paper.venue or "",
+        "arxiv_id": paper.arxiv_id or "",
+        "doi": paper.doi or "",
+        "categories": list(paper.categories or []),
+    }
+
+
+@dataclass
+class CandidatePool:
+    """Deduplicated candidate papers fetched from Semantic Scholar."""
+
+    seed: Paper
+    papers: Dict[str, Paper] = field(default_factory=dict)
+    sources: Dict[str, Set[str]] = field(default_factory=dict)
+    seed_relations: Dict[str, str] = field(default_factory=dict)
+
+    def add(self, paper: Paper, *, source: str, relation: str) -> None:
+        """Add a paper to the pool, merging duplicates by identity aliases.
+
+        :param Paper paper: Candidate paper payload.
+        :param str source: Provenance tag (``reference``/``citation``/``recommendation``).
+        :param str relation: Seed-relation label for this provenance.
+        :return None: Pool state is mutated in place.
+        """
+        if paper.is_seed:
+            return
+        resolved = resolve_alias(self._aliases, paper)
+        if resolved == self.seed.paper_id:
+            merge_paper_metadata(self.seed, paper)
+            register_aliases(self._aliases, self.seed.paper_id, paper)
+            return
+        if resolved is not None:
+            merge_paper_metadata(self.papers[resolved], paper)
+            canonical_id = resolved
+        else:
+            canonical_id = str(paper.paper_id)
+            self.papers[canonical_id] = paper
+        self.sources.setdefault(canonical_id, set()).add(source)
+        merged_relation = merge_seed_relation(
+            self.seed_relations.get(canonical_id, ""), relation
+        )
+        if merged_relation:
+            self.seed_relations[canonical_id] = merged_relation
+        register_aliases(self._aliases, canonical_id, paper)
+
+    def __post_init__(self) -> None:
+        """Initialize alias map with seed identity."""
+        self._aliases: Dict[str, str] = {}
+        register_aliases(self._aliases, self.seed.paper_id, self.seed)
+
+
+def fetch_candidate_pool(
+    client: "SemanticScholarClient",
+    seed_paper: Paper,
+    *,
+    max_references: int = 0,
+    max_citations: int = 0,
+    max_recommendations: int = 0,
+) -> CandidatePool:
+    """Fetch a deduplicated candidate pool from Semantic Scholar seed neighbors.
+
+    Free-text query seeds (``query:`` IDs) have no S2 neighbors; they are proxied
+    through paper search on the query text before recommendation expansion.
+
+    :param SemanticScholarClient client: Semantic Scholar client.
+    :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
+    :param int max_references: Maximum seed references to fetch (0 disables).
+    :param int max_citations: Maximum citing papers to fetch (0 disables).
+    :param int max_recommendations: Maximum recommendations to fetch (0 disables).
+    :return CandidatePool: Deduplicated candidate pool with provenance tags.
+    """
+    pool = CandidatePool(seed=seed_paper)
+    seed_id = str(seed_paper.paper_id)
+    is_query_seed = seed_id.startswith("query:")
+
+    if is_query_seed:
+        query_text = (seed_paper.title or "").strip() or seed_id
+        try:
+            search_hits = client.search_papers(
+                query_text, limit=QUERY_SEED_SEARCH_LIMIT
+            )
+        except Exception as exc:
+            logger.warning(
+                "Candidate search for query seed failed (%s: %s); pool stays empty.",
+                type(exc).__name__,
+                exc,
+            )
+            search_hits = []
+        for paper in search_hits:
+            pool.add(paper, source="recommendation", relation="semantic_only")
+        anchor_ids = list(pool.papers)[:1]
+    else:
+        anchor_ids = [seed_id]
+        if max_references > 0:
+            for paper in client.get_paper_references(seed_id, limit=max_references):
+                pool.add(paper, source="reference", relation="referenced_by_seed")
+        if max_citations > 0:
+            for paper in client.get_paper_citations(seed_id, limit=max_citations):
+                pool.add(paper, source="citation", relation="cites_seed")
+
+    if max_recommendations > 0 and anchor_ids:
+        try:
+            recommendations = client.get_recommended_papers(
+                anchor_ids[0], limit=max_recommendations
+            )
+        except Exception as exc:
+            logger.warning(
+                "Candidate recommendations fetch failed (%s: %s); continuing "
+                "with %d pooled candidates.",
+                type(exc).__name__,
+                exc,
+                len(pool.papers),
+            )
+            recommendations = []
+        for paper in recommendations:
+            pool.add(paper, source="recommendation", relation="semantic_only")
+
+    logger.debug(
+        "Candidate pool for %s: %d papers (refs<=%d cites<=%d recs<=%d).",
+        seed_id,
+        len(pool.papers),
+        max_references,
+        max_citations,
+        max_recommendations,
+    )
+    return pool

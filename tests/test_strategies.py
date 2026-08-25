@@ -402,7 +402,9 @@ def test_hybrid_collection_merges_and_tracks_sources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should merge citation+semantic papers and source labels."""
-    builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
+    builder = HybridGraphBuilder(
+        max_papers=5, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
+    )
 
     seed = _paper("seed")
     seed.is_seed = True
@@ -479,7 +481,9 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should fail when semantic enrichment cannot complete."""
-    builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
+    builder = HybridGraphBuilder(
+        max_papers=5, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
+    )
 
     seed = _paper("seed")
     seed.is_seed = True
@@ -532,7 +536,9 @@ def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid rerank should not persist citation-candidate embeddings into cache."""
-    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
+    builder = HybridGraphBuilder(
+        max_papers=4, max_semantic=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
     assert builder.embedding_builder is not None
 
     seed = _seed_paper("seed")
@@ -629,7 +635,9 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid rerank should cap semantic-only additions while preserving overlap papers."""
-    builder = HybridGraphBuilder(max_papers=5, max_semantic=1, client=MagicMock())
+    builder = HybridGraphBuilder(
+        max_papers=5, max_semantic=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
 
     seed = _paper("seed")
     seed.is_seed = True
@@ -666,7 +674,9 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Hybrid collection should collapse semantic seed aliases into the citation seed."""
-    builder = HybridGraphBuilder(max_papers=5, max_semantic=2, client=MagicMock())
+    builder = HybridGraphBuilder(
+        max_papers=5, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
+    )
 
     seed = Paper(
         paper_id="ca997f1a733e53ad0fa29041246ff655243e8c1b",
@@ -816,6 +826,7 @@ def test_max_papers_is_total_node_cap_including_seed(
             model_name="dummy",
             top_k=2,
             corpus_size=10,
+            semantic_source="arxiv-corpus",
             client=MagicMock(),
         )
         builder.client.get_paper.return_value = _seed_paper()
@@ -867,7 +878,10 @@ def test_max_papers_is_total_node_cap_including_seed(
     monkeypatch.setattr(hybrid_strategy, "EmbeddingGraphBuilder", FakeEmbeddingBuilder)
 
     papers = HybridGraphBuilder(
-        max_papers=4, max_semantic=1, client=MagicMock()
+        max_papers=4,
+        max_semantic=1,
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
     ).collect_papers("seed")
     assert len(papers) == 4
     assert "seed" in papers
@@ -1020,3 +1034,142 @@ def test_bibliographic_coupling_delegates_to_paper(
 
     monkeypatch.setattr(Paper, "reference_overlap", lambda self, other: 0.42)
     assert GraphBuilderStrategy.bibliographic_coupling(paper1, paper2) == 0.42
+
+
+def test_candidate_pool_dedupes_equivalent_papers() -> None:
+    """CandidatePool should merge papers with matching identity aliases."""
+    from citemesh.strategies.candidates import CandidatePool
+
+    seed = _seed_paper()
+    pool = CandidatePool(seed=seed)
+    first = Paper(
+        paper_id="s2:abc",
+        title="Same Paper",
+        year=2021,
+        abstract="An abstract",
+        citation_count=5,
+    )
+    duplicate = Paper(
+        paper_id="arxiv:2101.00001",
+        title="Same  Paper",
+        year=2021,
+        abstract="",
+        citation_count=0,
+    )
+    pool.add(first, source="reference", relation="referenced_by_seed")
+    pool.add(duplicate, source="recommendation", relation="semantic_only")
+
+    assert list(pool.papers) == ["s2:abc"]
+    assert pool.sources["s2:abc"] == {"reference", "recommendation"}
+    assert pool.seed_relations["s2:abc"] == "referenced_by_seed"
+
+    seed_duplicate = Paper(
+        paper_id="other:seed",
+        title=seed.title,
+        year=seed.year,
+        abstract="richer seed abstract",
+    )
+    pool.add(seed_duplicate, source="citation", relation="cites_seed")
+    assert "other:seed" not in pool.papers
+
+
+def test_embedding_candidate_mode_skips_corpus_and_persists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate mode should rank S2 neighbors without touching corpus hydration."""
+    from tests._helpers import SeededRandomEncodeModel
+
+    client = MagicMock()
+    client.get_paper.return_value = _seed_paper()
+    client.get_paper_references.return_value = [_paper("r1"), _paper("r2")]
+    client.get_paper_citations.return_value = [_paper("c1")]
+    client.get_recommended_papers.return_value = [_paper("rec1"), _paper("rec2")]
+
+    builder = EmbeddingGraphBuilder(max_papers=4, client=client)
+    assert builder.semantic_source == "candidates"
+    assert builder.storage_precision == "float32"
+    assert "mode=candidates" in builder.embedding_cache.model_name
+
+    def _raise_hydration(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("corpus hydration must not run in candidate mode")
+
+    monkeypatch.setattr(builder, "_ensure_cache_hydrated", _raise_hydration)
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+    builder.model = SeededRandomEncodeModel(embedding_dim=4)
+
+    papers = builder.collect_papers("seed")
+
+    assert "seed" in papers
+    assert len(papers) == 4
+    assert client.get_recommended_papers.called
+    non_seed = [paper_id for paper_id in papers if paper_id != "seed"]
+    for paper_id in non_seed:
+        assert paper_id in builder.embeddings
+
+    # A fresh builder must hit the persisted candidate cache without encoding.
+    class _RaisingModel:
+        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            raise AssertionError("cache hit expected; encode must not run")
+
+    second = EmbeddingGraphBuilder(max_papers=4, client=client)
+    monkeypatch.setattr(second, "_load_model", lambda: None)
+    second.model = _RaisingModel()
+    cached = second.embed_papers({paper_id: papers[paper_id] for paper_id in non_seed})
+    assert sorted(cached) == sorted(non_seed)
+
+
+def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid candidate mode should source semantics from S2 recommendations."""
+    from tests._helpers import SeededRandomEncodeModel
+
+    client = MagicMock()
+    client.get_recommended_papers.return_value = [_paper("rec1"), _paper("rec2")]
+
+    builder = HybridGraphBuilder(max_papers=6, max_semantic=2, client=client)
+    assert builder.semantic_source == "candidates"
+    assert builder.embedding_builder is not None
+
+    citation_papers = {
+        "seed": _seed_paper(),
+        "c1": _paper("c1"),
+        "c2": _paper("c2"),
+    }
+    monkeypatch.setattr(
+        builder.citation_builder,
+        "collect_papers",
+        lambda _seed_id, **_kwargs: dict(citation_papers),
+    )
+
+    def _raise_hydration(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("corpus hydration must not run in candidate mode")
+
+    monkeypatch.setattr(
+        builder.embedding_builder, "_ensure_cache_hydrated", _raise_hydration
+    )
+    monkeypatch.setattr(
+        builder.embedding_builder,
+        "collect_papers",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("corpus collect_papers must not run in candidate mode")
+        ),
+    )
+    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
+    builder.embedding_builder.model = SeededRandomEncodeModel(embedding_dim=4)
+
+    papers = builder.collect_papers("seed")
+
+    assert "seed" in papers
+    assert client.get_recommended_papers.called
+    semantic_added = [
+        paper_id
+        for paper_id, source in builder.paper_sources.items()
+        if source == "semantic"
+    ]
+    assert semantic_added
+    for paper_id in semantic_added:
+        assert builder.seed_relations[paper_id] == "semantic_only"
+    # Candidate vectors flow through the persistent cache namespace.
+    assert "mode=candidates" in builder.embedding_builder.embedding_cache.model_name

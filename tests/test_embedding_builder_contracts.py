@@ -222,10 +222,22 @@ def test_embedding_builder_requires_optional_deps(
 
     with pytest.raises(
         ImportError,
-        match=r"Embedding strategy requires: torch, sentence-transformers, datasets\. "
+        match=r"Embedding strategy requires: torch, sentence-transformers\. "
         r"Install with: pip install citemesh\[embeddings\]",
     ):
         EmbeddingGraphBuilder(max_papers=5, model_name="test-model", client=MagicMock())
+
+    with pytest.raises(
+        ImportError,
+        match=r"Embedding strategy requires: torch, sentence-transformers, datasets\. "
+        r"Install with: pip install citemesh\[embeddings\]",
+    ):
+        EmbeddingGraphBuilder(
+            max_papers=5,
+            model_name="test-model",
+            semantic_source="arxiv-corpus",
+            client=MagicMock(),
+        )
 
 
 def test_embedding_builder_requires_modern_torch(
@@ -685,10 +697,16 @@ def test_embedding_cache_namespace_partition_contracts(
     """Namespace identity should partition precision, source dtype, and calibration."""
 
     int8_builder = EmbeddingGraphBuilder(
-        max_papers=1, storage_precision="int8", client=MagicMock()
+        max_papers=1,
+        storage_precision="int8",
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
     )
     f32_builder = EmbeddingGraphBuilder(
-        max_papers=1, storage_precision="float32", client=MagicMock()
+        max_papers=1,
+        storage_precision="float32",
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
     )
     assert (
         int8_builder.embedding_cache.model_name
@@ -722,16 +740,21 @@ def test_embedding_cache_namespace_partition_contracts(
         max_papers=1,
         storage_precision="int8",
         calibration_sample_size=32,
+        semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
     int8_large = EmbeddingGraphBuilder(
         max_papers=1,
         storage_precision="int8",
         calibration_sample_size=128,
+        semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
     f32_builder = EmbeddingGraphBuilder(
-        max_papers=1, storage_precision="float32", client=MagicMock()
+        max_papers=1,
+        storage_precision="float32",
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
     )
     assert (
         int8_small.embedding_cache.model_name != int8_large.embedding_cache.model_name
@@ -786,12 +809,14 @@ def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
         max_papers=1,
         storage_precision="int8",
         binary_prefilter=True,
+        semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
     int8_prefilter_off = EmbeddingGraphBuilder(
         max_papers=1,
         storage_precision="int8",
         binary_prefilter=False,
+        semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
 
@@ -2023,6 +2048,7 @@ def test_int8_hydration_calibration_uses_representative_prepass(
         calibration_sample_size=2,
         use_streaming=False,
         corpus_size=5,
+        semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder)
@@ -2095,6 +2121,7 @@ def test_int8_calibration_uses_percentile_clipping(
         calibration_sample_size=101,
         use_streaming=False,
         corpus_size=101,
+        semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
     sample_records = [
