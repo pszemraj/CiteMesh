@@ -333,7 +333,7 @@ def test_force_rebuild_cache_confirmation_contracts(
 
 def test_cli_logging_flags_are_position_agnostic() -> None:
     """Logging options should parse identically before/after subcommands."""
-    parser, _, _ = cli_module._create_parser()
+    parser, _, _, _ = cli_module._create_parser()
     cases = [
         ["--log-level", "debug", "build", "arxiv:1706.03762"],
         ["build", "arxiv:1706.03762", "--log-level", "debug"],
@@ -852,7 +852,7 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
 
 def test_embedding_lzf_compression_level_normalization_contract() -> None:
     """Embedding validation should normalize implicit lzf compression level to 0."""
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
     )
@@ -865,7 +865,7 @@ def test_embedding_lzf_compression_level_normalization_contract() -> None:
 
 def test_hybrid_implicit_budget_defaults_contract() -> None:
     """Hybrid should apply tuned defaults only when budget knobs are omitted."""
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     hybrid_defaults = build_parser.parse_args(["seed", "--strategy", "hybrid"])
     cli_module._validate_build_cli_contract(
         hybrid_defaults, build_parser, provided=set()
@@ -1786,7 +1786,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> None:
     """Recommendation sidecars should only record settings that affect the run."""
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     cli_args = build_parser.parse_args(
         [
             "seed",
@@ -2048,7 +2048,7 @@ def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Programmatic hybrid dispatch should carry normalized implicit defaults."""
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
     captured: dict[str, object] = {}
     monkeypatch.setattr(
@@ -2072,7 +2072,7 @@ def test_programmatic_embedding_dispatch_normalizes_lzf_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Programmatic embedding dispatch should pass normalized lzf level to builder."""
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     namespace = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
     )
@@ -2369,7 +2369,7 @@ def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
 
 def test_documented_cli_examples_are_parseable() -> None:
     """README and CLI guide command examples should remain parseable in CI."""
-    parser, _, _ = cli_module._create_parser()
+    parser, _, _, _ = cli_module._create_parser()
     docs = [Path("README.md"), Path("docs/guides/cli.md")]
 
     commands: list[list[str]] = []
@@ -2483,7 +2483,7 @@ def test_programmatic_dispatch_respects_explicit_provided_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """_build_strategy_graph with explicit provided set should bypass inference."""
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
     captured: dict[str, object] = {}
     monkeypatch.setattr(
@@ -2506,7 +2506,7 @@ def test_builder_defaults_match_cli_defaults() -> None:
     from citemesh.strategies.citation import CitationGraphBuilder
     from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     defaults = build_parser.parse_args(["seed", "--strategy", "citation"])
 
     assert CitationGraphBuilder.__init__.__defaults__ is not None
@@ -2594,7 +2594,7 @@ def test_build_rejects_unavailable_explicit_device(
 
 def test_graph_config_payload_records_device() -> None:
     """Embedding sidecar config should persist the requested device token."""
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     cli_args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--device", "cpu"]
     )
@@ -2627,7 +2627,7 @@ def test_export_metadata_records_effective_device() -> None:
 
 def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:
     """Corpus-only flags without --semantic-source should imply arxiv-corpus."""
-    _, build_parser, _ = cli_module._create_parser()
+    _, build_parser, _, _ = cli_module._create_parser()
     args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--corpus-size", "1234"]
     )

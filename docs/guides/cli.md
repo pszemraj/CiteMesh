@@ -5,6 +5,7 @@ Build paper graphs with `recommendation`, `citation`, `embedding`, or `hybrid`.
 Related docs:
 
 - Cache layout and hydration: [Caching & Data](caching.md)
+- Persistent user defaults: [User Configuration](configuration.md)
 - Output files and sidecar schema: [Output Artifacts](../reference/output-artifacts.md)
 - Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
 - Defaults parameter study: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
@@ -32,11 +33,24 @@ citemesh cache scan
 citemesh cache scan --log-level debug
 citemesh build "arxiv:1706.03762" --strategy hybrid --log-level debug --log-file out/run.log
 citemesh cache clear [--yes] [--reason "<text>"]
+
+# Persistent user configuration (config.toml at the cache root)
+citemesh config list
+citemesh config set defaults.semantic_source arxiv-corpus
+citemesh config get defaults.semantic_source
+citemesh config unset defaults.semantic_source
+citemesh config path
 ```
 
 For cache path/layout/hydration details, see [Caching & Data](caching.md).
 In non-interactive shells, `citemesh cache clear` requires `--yes`.
+`citemesh cache clear` never deletes `config.toml`.
 In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--overwrite-cache`.
+
+Persistent defaults for most build flags can be stored with `citemesh config`;
+precedence is explicit CLI flag > environment variable > `config.toml` >
+built-in default. Keys, value forms, and precedence subtleties are documented
+in [User Configuration](configuration.md).
 
 ## Accepted Identifiers
 
@@ -70,7 +84,7 @@ Output-path normalization, file naming, and sidecar placement are defined in
 [Output Artifacts](../reference/output-artifacts.md).
 
 `--log-level`, `--log-width`, and `--log-file` are shared command options and are accepted for
-`build`, `search`, and `cache` command trees (including `cache scan` / `cache clear`).
+`build`, `search`, `cache`, and `config` command trees (including `cache scan` / `cache clear`).
 
 `--seed` controls shared layout generation for `png`, `plotly`, and `dashboard` exports. Pyvis
 `html` exports use vis.js browser physics and do not consume this precomputed layout.

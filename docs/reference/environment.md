@@ -11,14 +11,15 @@ Related docs:
 
 | Variable | Default | Accepted values | Runtime effect |
 | --- | --- | --- | --- |
-| `S2_API_KEY` | unset | non-empty string | Adds Semantic Scholar API key for higher API limits and authenticated requests. |
-| `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path | Overrides CiteMesh cache root used for embedding/reference caches. |
+| `S2_API_KEY` | unset | string | Adds Semantic Scholar API key for higher API limits and authenticated requests. When present (even empty), it wins over a configured `api.s2_api_key` in `config.toml`. |
+| `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path | Overrides CiteMesh cache root used for embedding/reference caches and the `config.toml` location. |
 | `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
 
 Implementation references:
 
 - [Semantic Scholar API key lookup](../../citemesh/services/semantic_scholar.py)
 - [Cache-root override handling](../../citemesh/data/cache.py)
+- [User config precedence handling](../../citemesh/core/user_config.py)
 - [Embedding lock-timeout handling](../../citemesh/data/embedding_cache.py)
 - [Embedding fingerprint verification](../../citemesh/strategies/embedding.py)
 
@@ -28,7 +29,7 @@ These are not CiteMesh-specific, but CiteMesh honors them when `CITEMESH_CACHE_D
 
 | Variable | Platform | Effect |
 | --- | --- | --- |
-| `XDG_CACHE_HOME` | Linux/Unix | Base for default cache root (`$XDG_CACHE_HOME/citemesh`). |
+| `XDG_CACHE_HOME` | Linux/macOS | Base for default cache root (`$XDG_CACHE_HOME/citemesh`). |
 | `LOCALAPPDATA` | Windows | Primary base for default cache root (`%LOCALAPPDATA%\\CiteMesh`). |
 | `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset. |
 

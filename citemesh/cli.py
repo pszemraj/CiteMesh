@@ -10,6 +10,7 @@ import argparse
 import json
 import logging
 import math
+import os
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,13 +25,26 @@ from rich.table import Table
 
 from citemesh._runtime import stderr_isatty, stdin_isatty, stdout_isatty
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
+from citemesh.core.user_config import (
+    USER_CONFIG_FILENAME,
+    ConfigFileError,
+    ConfigKeyError,
+    ConfigValueError,
+    UserConfig,
+    format_config_value,
+    load_user_config,
+    parse_config_key,
+    set_config_value,
+    unset_config_value,
+    user_config_path,
+)
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     format_bytes,
     get_cache_dir,
     validate_compression_filter,
 )
-from citemesh.data.cache import atomic_write_json
+from citemesh.data.cache import atomic_write_json, legacy_macos_cache_root
 from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
 from citemesh.strategies.candidates import (
@@ -663,6 +677,50 @@ def _apply_hybrid_default_overrides(
         setattr(args, dest, int(value))
 
 
+def _apply_user_config_defaults(
+    args: argparse.Namespace, provided: Set[str], user_config: UserConfig
+) -> Set[str]:
+    """Overlay config.toml defaults onto build args the user did not set.
+
+    Precedence: explicit CLI flag > config.toml > built-in default. Values are
+    already whitelist-validated at config load time.
+
+    :param argparse.Namespace args: Parsed build arguments.
+    :param Set[str] provided: Explicit option destinations found in argv.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return Set[str]: Destinations that were filled from config.toml.
+    """
+    applied: Set[str] = set()
+    for dest in sorted(user_config.defaults):
+        if dest in provided or not hasattr(args, dest):
+            continue
+        value = user_config.defaults[dest]
+        setattr(args, dest, list(value) if isinstance(value, list) else value)
+        applied.add(dest)
+    if applied:
+        summary = ", ".join(
+            f"{dest}={format_config_value(user_config.defaults[dest])}"
+            for dest in sorted(applied)
+        )
+        logger.info("Applying config defaults from %s: %s", user_config.path, summary)
+    return applied
+
+
+def _apply_user_config_api_key(user_config: UserConfig) -> None:
+    """Export the configured S2 API key unless the environment already set one.
+
+    Environment presence wins even for an empty value, so ``S2_API_KEY=""``
+    still explicitly disables the configured key.
+
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return None: May set ``S2_API_KEY`` in the process environment.
+    """
+    if not user_config.s2_api_key or "S2_API_KEY" in os.environ:
+        return
+    os.environ["S2_API_KEY"] = user_config.s2_api_key
+    logger.debug("Using api.s2_api_key from %s.", user_config.path)
+
+
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
     """Return whether hybrid semantic branch is effectively enabled.
 
@@ -729,17 +787,23 @@ def _strategy_score_contract(strategy: str) -> Dict[str, object]:
 
 
 def _validate_build_cli_contract(
-    args: argparse.Namespace, build_parser: argparse.ArgumentParser, provided: Set[str]
+    args: argparse.Namespace,
+    build_parser: argparse.ArgumentParser,
+    provided: Set[str],
+    config_defaults: Set[str] = frozenset(),
 ) -> None:
     """Validate strategy-scoped and dependent build options before execution.
 
     :param argparse.Namespace args: Parsed build arguments.
     :param argparse.ArgumentParser build_parser: Build subcommand parser.
     :param Set[str] provided: Explicit option destinations found in argv.
+    :param Set[str] config_defaults: Destinations filled from config.toml; they
+        outrank built-in defaults (hybrid implicit budgets) but never count as
+        explicit flags for strategy gating or corpus-mode implication.
     :return None: Mutates normalized args for effective no-op elimination.
     """
     strategy = str(args.strategy)
-    _apply_hybrid_default_overrides(args, provided)
+    _apply_hybrid_default_overrides(args, provided | set(config_defaults))
     unsupported: List[str] = []
     for dest in sorted(provided):
         allowed = _BUILD_STRATEGY_OPTION_SUPPORT.get(dest)
@@ -1090,7 +1154,7 @@ def _build_strategy_graph(
     setattr(args_for_validation, "strategy", strategy)
 
     if validate_contract:
-        parser_snapshot, build_parser_snapshot, _ = _create_parser()
+        parser_snapshot, build_parser_snapshot, _, _ = _create_parser()
         del parser_snapshot
         defaults_namespace = build_parser_snapshot.parse_args(["seed"])
         merged_values = vars(defaults_namespace)
@@ -1169,12 +1233,16 @@ def _infer_provided_build_option_dests(
 
 
 def _create_parser() -> Tuple[
-    argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
 ]:
     """Create and return the root parser and key subcommand parsers.
 
-    :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
-        Root parser, build subcommand parser, cache subcommand parser.
+    :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
+        Root parser, build subcommand parser, cache subcommand parser,
+        config subcommand parser.
     """
     root_logging_parent = argparse.ArgumentParser(add_help=False)
     _add_logging_arguments(root_logging_parent)
@@ -1209,6 +1277,13 @@ Environment variables:
   S2_API_KEY                                      Semantic Scholar API key (higher rate limits)
   CITEMESH_CACHE_DIR                              Override cache directory location
   CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS   Embedding cache lock timeout (default: 900s)
+
+User configuration:
+  Persistent defaults live in <cache_root>/config.toml (see `citemesh config --help`).
+  Precedence: explicit CLI flag > environment variable > config.toml > built-in default.
+
+  # Always default to corpus-backed semantic sourcing
+  citemesh config set defaults.semantic_source arxiv-corpus
         """,
     )
 
@@ -1619,7 +1694,7 @@ Environment variables:
     )
     cache_clear_parser = cache_subparsers.add_parser(
         "clear",
-        help="Delete the entire CiteMesh cache directory",
+        help="Delete cached data under the CiteMesh cache root (config.toml is preserved)",
         parents=[command_logging_parent],
     )
     cache_clear_parser.add_argument(
@@ -1639,8 +1714,69 @@ Environment variables:
         help="Scan cache usage (sections, file counts, and total size)",
         parents=[command_logging_parent],
     )
+
+    # Config subcommand
+    config_parser = subparsers.add_parser(
+        "config",
+        help="Manage persistent user configuration (config.toml)",
+        parents=[command_logging_parent],
+        description=(
+            "Manage persistent CiteMesh defaults stored in config.toml under "
+            "the cache root. Precedence: explicit CLI flag > environment "
+            "variable > config.toml > built-in default."
+        ),
+    )
+    config_subparsers = config_parser.add_subparsers(
+        dest="config_command",
+        help="Config operations",
+    )
+    config_subparsers.add_parser(
+        "list",
+        help="Show configured values and the config file path",
+        parents=[command_logging_parent],
+    )
+    config_get_parser = config_subparsers.add_parser(
+        "get",
+        help="Print one configured value",
+        parents=[command_logging_parent],
+    )
+    config_get_parser.add_argument(
+        "key",
+        type=_non_empty_str,
+        help="Dotted config key (for example defaults.semantic_source)",
+    )
+    config_set_parser = config_subparsers.add_parser(
+        "set",
+        help="Set and persist one config value",
+        parents=[command_logging_parent],
+    )
+    config_set_parser.add_argument(
+        "key",
+        type=_non_empty_str,
+        help="Dotted config key (for example defaults.semantic_source)",
+    )
+    config_set_parser.add_argument(
+        "value",
+        type=_non_empty_str,
+        help="Value to persist (booleans: true/false; lists: comma-separated)",
+    )
+    config_unset_parser = config_subparsers.add_parser(
+        "unset",
+        help="Remove one configured value",
+        parents=[command_logging_parent],
+    )
+    config_unset_parser.add_argument(
+        "key",
+        type=_non_empty_str,
+        help="Dotted config key (for example defaults.semantic_source)",
+    )
+    config_subparsers.add_parser(
+        "path",
+        help="Print the config file path",
+        parents=[command_logging_parent],
+    )
     _instrument_parser_actions(parser)
-    return parser, build_parser, cache_parser
+    return parser, build_parser, cache_parser, config_parser
 
 
 def resolve_output_paths(
@@ -2290,16 +2426,32 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
         logger.info("Cache clear aborted.")
         return 1
 
+    # Clear cache payloads but never the persistent user config file.
+    config_path = cache_root / USER_CONFIG_FILENAME
+    preserved_config = config_path.is_file()
     try:
-        shutil.rmtree(cache_root)
+        for child in sorted(cache_root.iterdir()):
+            if child == config_path:
+                continue
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        if not preserved_config:
+            cache_root.rmdir()
     except OSError as exc:
         logger.error("Failed to clear cache directory %s: %s", cache_root, exc)
         return 1
 
+    suffix_parts = []
+    if preserved_config:
+        suffix_parts.append(f"preserved {USER_CONFIG_FILENAME}")
     normalized_reason = _normalized_cache_reason(clear_reason)
     if normalized_reason:
+        suffix_parts.append(f"reason={normalized_reason}")
+    if suffix_parts:
         logger.info(
-            "✓ Cleared cache directory: %s (reason=%s)", cache_root, normalized_reason
+            "✓ Cleared cache directory: %s (%s)", cache_root, ", ".join(suffix_parts)
         )
     else:
         logger.info("✓ Cleared cache directory: %s", cache_root)
@@ -2341,6 +2493,7 @@ def _scan_cache_directory() -> int:
 
     if not cache_root.exists():
         logger.info("Cache directory does not exist: %s", cache_root)
+        _log_legacy_macos_cache_hint(cache_root)
         return 0
     if not cache_root.is_dir():
         logger.error("Cache path exists but is not a directory: %s", cache_root)
@@ -2372,7 +2525,136 @@ def _scan_cache_directory() -> int:
         f"[bold]{format_bytes(total_bytes)}[/bold]",
     )
     output_console.print(table)
+    _log_legacy_macos_cache_hint(cache_root)
     return 0
+
+
+def _log_legacy_macos_cache_hint(cache_root: Path) -> None:
+    """Point at the pre-unification macOS cache directory when it lingers.
+
+    :param Path cache_root: Active resolved cache root.
+    :return None: Emits an info-level migration hint when applicable.
+    """
+    legacy_root = legacy_macos_cache_root()
+    if legacy_root is None:
+        return
+    try:
+        if legacy_root.resolve() == cache_root:
+            return
+    except OSError:
+        return
+    logger.info(
+        "Legacy macOS cache directory detected at %s. CiteMesh now uses %s; "
+        "move or delete the old directory to reclaim space.",
+        legacy_root,
+        cache_root,
+    )
+
+
+def _masked_secret(value: str) -> str:
+    """Mask a secret for display, keeping a short recognizable suffix.
+
+    :param str value: Secret value to mask.
+    :return str: Masked representation.
+    """
+    if len(value) <= 8:
+        return "****"
+    return f"****{value[-4:]}"
+
+
+def _run_config_command(
+    args: argparse.Namespace, config_parser: argparse.ArgumentParser
+) -> int:
+    """Execute the ``citemesh config`` subcommand.
+
+    :param argparse.Namespace args: Parsed config arguments.
+    :param argparse.ArgumentParser config_parser: Config subcommand parser.
+    :return int: Process-style exit code.
+    """
+    command = getattr(args, "config_command", None)
+    if not command:
+        config_parser.print_help()
+        return 1
+
+    if command == "path":
+        # Plain print keeps `citemesh config path`/`get` output unwrapped and
+        # markup-free for shell substitution.
+        print(user_config_path())
+        return 0
+
+    if command == "list":
+        user_config = load_user_config()
+        output_console.print(f"[bold]Config file:[/bold] {user_config.path}")
+        if not user_config.path.is_file():
+            output_console.print(
+                "[dim]File does not exist yet; using built-in defaults. "
+                "Create it with `citemesh config set <key> <value>`.[/dim]"
+            )
+        rows: List[Tuple[str, str]] = [
+            (f"defaults.{key}", format_config_value(value))
+            for key, value in sorted(user_config.defaults.items())
+        ]
+        if user_config.s2_api_key:
+            rows.append(("api.s2_api_key", _masked_secret(user_config.s2_api_key)))
+        table = Table(title="CiteMesh User Config")
+        table.add_column("Key")
+        table.add_column("Value")
+        if rows:
+            for key, value in rows:
+                table.add_row(key, value)
+        else:
+            table.add_row("(no values set)", "")
+        output_console.print(table)
+        return 0
+
+    if command == "get":
+        try:
+            table_name, key, _spec = parse_config_key(args.key)
+        except ConfigKeyError as exc:
+            config_parser.error(str(exc))
+        user_config = load_user_config()
+        if table_name == "api":
+            value: Any = user_config.s2_api_key
+        else:
+            value = user_config.defaults.get(key)
+        if value is None:
+            logger.error("Config key '%s' is not set.", args.key)
+            return 1
+        print(format_config_value(value))
+        return 0
+
+    if command == "set":
+        try:
+            value = set_config_value(args.key, args.value)
+        except (ConfigKeyError, ConfigValueError) as exc:
+            config_parser.error(str(exc))
+        except ConfigFileError as exc:
+            logger.error("%s", exc)
+            return 1
+        display_value = (
+            _masked_secret(str(value))
+            if str(args.key).strip() == "api.s2_api_key"
+            else format_config_value(value)
+        )
+        logger.info("✓ Set %s = %s in %s", args.key, display_value, user_config_path())
+        return 0
+
+    if command == "unset":
+        try:
+            removed = unset_config_value(args.key)
+        except ConfigKeyError as exc:
+            config_parser.error(str(exc))
+        except ConfigFileError as exc:
+            logger.error("%s", exc)
+            return 1
+        if removed:
+            logger.info("✓ Unset %s in %s", args.key, user_config_path())
+        else:
+            logger.info("Config key '%s' was not set.", args.key)
+        return 0
+
+    config_parser.print_help()
+    return 1
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2381,7 +2663,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     :param Sequence[str] | None argv: Optional CLI argument list without executable.
     :return int: Process-style exit code.
     """
-    parser, build_parser, cache_parser = _create_parser()
+    parser, build_parser, cache_parser, config_parser = _create_parser()
     argv_list = list(argv) if argv is not None else None
     args = parser.parse_args(argv_list)
     _configure_logging(
@@ -2395,8 +2677,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 1
 
+    if args.command == "config":
+        return _run_config_command(args, config_parser)
+
+    user_config = load_user_config()
+    _apply_user_config_api_key(user_config)
+
     if args.command == "build":
-        _validate_build_cli_contract(args, build_parser, provided_build_options)
+        config_default_dests = _apply_user_config_defaults(
+            args, provided_build_options, user_config
+        )
+        _validate_build_cli_contract(
+            args,
+            build_parser,
+            provided_build_options,
+            config_defaults=config_default_dests,
+        )
         try:
             if not _confirm_force_rebuild_cache(args):
                 logger.info("Build aborted.")

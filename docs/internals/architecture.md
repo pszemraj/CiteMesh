@@ -62,6 +62,16 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 - Utility helpers support label generation and overlap checks.
 - Model payloads are designed for both graph operations and export serialization.
 
+### `citemesh/core/user_config.py`
+
+- Loads, validates, and rewrites the persistent `config.toml` at the cache root.
+- Whitelists `[defaults]` build-flag keys and `[api] s2_api_key` with per-key
+  casters; invalid entries are ignored with warnings so a bad config never
+  blocks CLI usage.
+- The CLI applies these values post-parse for options not explicitly provided
+  (precedence: CLI flag > environment > config.toml > built-in default); see
+  [Guides: User Configuration](../guides/configuration.md).
+
 ### Visualization (`citemesh/visualization/render.py`)
 
 - Computes layouts, node sizes/colors, labels, and metadata overlays.

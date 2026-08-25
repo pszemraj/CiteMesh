@@ -29,12 +29,22 @@ def _default_cache_root() -> Path:
             return Path(base) / "CiteMesh"
         return Path.home() / "AppData" / "Local" / "CiteMesh"
 
-    if system == "Darwin":
-        return Path.home() / "Library" / "Caches" / "citemesh"
-
+    # macOS and Linux share the HuggingFace-style ~/.cache/citemesh layout so
+    # cache paths (and config.toml) are predictable across machines.
     xdg_cache = os.getenv("XDG_CACHE_HOME")
     cache_root = Path(xdg_cache) if xdg_cache else Path.home() / ".cache"
     return cache_root / "citemesh"
+
+
+def legacy_macos_cache_root() -> Path | None:
+    """Return the pre-unification macOS cache root when it still exists.
+
+    :return Path | None: Legacy ``~/Library/Caches/citemesh`` path or ``None``.
+    """
+    if platform.system() != "Darwin":
+        return None
+    legacy = Path.home() / "Library" / "Caches" / "citemesh"
+    return legacy if legacy.exists() else None
 
 
 def get_cache_dir(*parts: str, create: bool = True) -> Path:

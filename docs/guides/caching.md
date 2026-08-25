@@ -5,6 +5,7 @@ CiteMesh uses persistent caches to avoid recomputing expensive datasets and embe
 Related docs:
 
 - CLI command usage: [CLI Usage](cli.md)
+- Persistent user defaults: [User Configuration](configuration.md)
 - Environment variables: [Environment Variables](../reference/environment.md)
 - Embedding runtime policy: [Embedding Runtime](../reference/embedding-runtime.md)
 
@@ -12,9 +13,14 @@ Related docs:
 
 By default, project caches are stored under:
 
-- **Linux**: `${XDG_CACHE_HOME:-~/.cache}/citemesh`
-- **macOS**: `~/Library/Caches/citemesh`
+- **Linux and macOS**: `${XDG_CACHE_HOME:-~/.cache}/citemesh`
 - **Windows**: `%LOCALAPPDATA%\\CiteMesh` (or `%APPDATA%\\CiteMesh` if `LOCALAPPDATA` is unset)
+
+macOS previously used `~/Library/Caches/citemesh`; the root is now unified
+with Linux (HuggingFace-style `~/.cache/citemesh`) so cache paths and
+`config.toml` are predictable across machines. `citemesh cache scan` prints a
+migration hint if the legacy macOS directory still exists — move or delete it
+to reclaim space.
 
 Override the root with:
 
@@ -28,6 +34,7 @@ Variable details are documented in [Environment Variables](../reference/environm
 
 ```text
 citemesh cache root
+├── config.toml                    # Persistent user configuration (see Configuration guide)
 ├── embeddings/
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, text hashes, row_idx, authors/categories JSON, hydration state)
 │   ├── embeddings_<model-hash>.h5 # Quantized HDF5 matrix datasets (int8/f16/f32 + optional binary index + calibration ranges)
@@ -35,6 +42,9 @@ citemesh cache root
 └── references/
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
+
+`config.toml` is configuration, not cache: it is documented in
+[User Configuration](configuration.md) and survives `citemesh cache clear`.
 
 Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace string includes model + resolved truncate dim + storage precision + effective binary prefilter mode + resolved source torch dtype + document-formatter fingerprint, and adds calibration sample size in `int8` mode. Candidate mode (`--semantic-source candidates`, the default) appends a `mode=candidates` token so incrementally embedded S2 candidates never mix with corpus hydrations; corpus namespaces stay token-free for compatibility with previously built caches. The namespace intentionally carries no device token: it tracks the compute dtype, so caches built at the same dtype (for example bf16 on CUDA and bf16 on MPS) are portable across machines.
 
@@ -193,25 +203,27 @@ Inspect cache usage:
 citemesh cache scan
 ```
 
-Clear entire CiteMesh cache root:
+Clear cached data under the CiteMesh cache root:
 
 ```bash
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
-Omit `--yes` for interactive confirmation.
+Omit `--yes` for interactive confirmation. `cache clear` deletes cache
+payloads (embeddings, references) but always preserves `config.toml`.
 
 For command syntax and defaults, see [CLI Usage](cli.md); this section focuses on cache maintenance workflows.
 
 To remove artifacts for one namespace, delete matching `.db` and `.h5` files in `embeddings/`.
 
-Manual full reset examples:
+Manual full reset examples (note: unlike `citemesh cache clear`, these also
+delete `config.toml`):
 
 ```bash
-# Linux
+# Linux / macOS
 rm -rf "${XDG_CACHE_HOME:-$HOME/.cache}/citemesh"
 
-# macOS
+# macOS legacy pre-unification root (if it still exists)
 rm -rf "$HOME/Library/Caches/citemesh"
 
 # custom root

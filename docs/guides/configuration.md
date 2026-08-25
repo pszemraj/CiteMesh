@@ -1,0 +1,114 @@
+# User Configuration
+
+CiteMesh stores durable personal defaults in a TOML file at the cache root:
+
+```text
+<cache_root>/config.toml       # default: ~/.cache/citemesh/config.toml
+```
+
+Use it for preferences you would otherwise repeat on every invocation — for
+example always using corpus-backed semantic sourcing, a preferred theme, or a
+Semantic Scholar API key.
+
+Related docs:
+
+- Command syntax: [CLI Usage](cli.md)
+- Cache root resolution: [Caching & Data](caching.md)
+- Environment variables: [Environment Variables](../reference/environment.md)
+
+## Precedence
+
+Effective values resolve in this order (first match wins):
+
+1. Explicit CLI flag (`--semantic-source arxiv-corpus`)
+2. Environment variable (only `S2_API_KEY` today; presence wins even when empty)
+3. `config.toml` value
+4. Built-in default
+
+Config values behave like personal built-in defaults, not like explicit flags:
+
+- They never trigger "unsupported option for strategy" errors. Setting
+  `defaults.device` does not break `--strategy citation` runs; the value is
+  simply unused there.
+- They outrank tuned implicit defaults (for example the hybrid strategy's
+  implicit citation/reference budgets).
+- Explicit corpus-only CLI flags (for example `--corpus-size`) still imply
+  `--semantic-source arxiv-corpus`, overriding a configured
+  `defaults.semantic_source = "candidates"` for that run.
+
+When config defaults are applied to a build, CiteMesh logs one INFO line
+listing the applied keys and the config file path.
+
+## Commands
+
+```bash
+citemesh config list                                   # show configured values + file path
+citemesh config get defaults.semantic_source           # print one value (script-friendly)
+citemesh config set defaults.semantic_source arxiv-corpus
+citemesh config unset defaults.semantic_source
+citemesh config path                                   # print the config file path
+```
+
+Value forms for `config set`:
+
+- Booleans: `true` / `false` (also `1/0`, `yes/no`, `on/off`)
+- Export lists: comma-separated, e.g. `citemesh config set defaults.export json,dashboard`
+- Everything else: plain strings/integers
+
+Invalid keys and values are rejected at `set` time with the list of valid
+options. Invalid entries hand-edited into the file are ignored with a warning
+at load time, so a bad config never blocks CLI usage. Unknown keys already in
+the file are preserved when CiteMesh rewrites it (comments are not — the TOML
+round-trip is value-level).
+
+## Supported keys
+
+`[defaults]` — whitelisted build-flag defaults:
+
+| Key | Meaning |
+| --- | --- |
+| `strategy` | Default `--strategy` (`recommendation`, `citation`, `embedding`, `hybrid`) |
+| `export` | Default `--export` format list |
+| `theme` | Default `--theme` (`light`, `dark`, `solarized`, `auto`) |
+| `model` | Default `--model` checkpoint |
+| `model_revision` | Default `--model-revision` |
+| `device` | Default `--device` (`auto`, `cuda`, `mps`, `cpu`) |
+| `semantic_source` | Default `--semantic-source` (`candidates`, `arxiv-corpus`) |
+| `candidate_pool_size` | Default `--candidate-pool-size` |
+| `encode_batch_size` | Default `--encode-batch-size` |
+| `storage_precision` | Default `--storage-precision` (`int8`, `float16`, `float32`) |
+| `max_papers` | Default `--max-papers` |
+| `max_semantic` | Default `--max-semantic` |
+| `max_citations` | Default `--max-citations` |
+| `max_references` | Default `--max-references` |
+| `top_k` | Default `--top-k` |
+| `truncate_dim` | Default `--truncate-dim` |
+| `corpus_size` | Default `--corpus-size` |
+| `dataset_split` | Default `--dataset-split` |
+| `streaming` | Default `--streaming` toggle |
+| `torch_compile` | Default `--torch-compile` toggle |
+
+`[api]`:
+
+| Key | Meaning |
+| --- | --- |
+| `s2_api_key` | Semantic Scholar API key. The `S2_API_KEY` environment variable wins when present (even when set to an empty string). Masked in `config list` output; `config get` prints the full value. |
+
+Example `config.toml`:
+
+```toml
+[defaults]
+semantic_source = "arxiv-corpus"
+theme = "dark"
+export = ["json", "dashboard"]
+
+[api]
+s2_api_key = "your-key-here"
+```
+
+## Location and lifecycle
+
+- The file lives at the cache root, so `CITEMESH_CACHE_DIR` moves it too.
+- `citemesh cache clear` deletes cached payloads but **never** `config.toml`.
+- To reset configuration, delete the file (`rm "$(citemesh config path)"`) or
+  `citemesh config unset` individual keys.

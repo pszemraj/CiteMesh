@@ -6,6 +6,7 @@
 - Command usage: [CLI guide](guides/cli.md)
 - Strategy selection: [Strategy guide](guides/strategies.md)
 - Cache behavior and maintenance: [Caching guide](guides/caching.md)
+- Persistent user defaults (`citemesh config`): [Configuration guide](guides/configuration.md)
 
 ## Reference
 

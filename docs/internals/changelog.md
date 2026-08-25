@@ -5,8 +5,28 @@ For current usage details, see:
 
 - [CLI Usage](../guides/cli.md)
 - [Caching & Data](../guides/caching.md)
+- [User Configuration](../guides/configuration.md)
 - [Environment Variables](../reference/environment.md)
 - [Embedding Runtime](../reference/embedding-runtime.md)
+
+## User Configuration
+
+- Added a persistent user config system: `config.toml` at the cache root plus
+  a `citemesh config` subcommand (`list`/`get`/`set`/`unset`/`path`). A
+  whitelisted `[defaults]` table overrides built-in defaults for most build
+  flags (for example `semantic_source = "arxiv-corpus"` to restore the corpus
+  default), and `[api] s2_api_key` supplies a Semantic Scholar key when the
+  `S2_API_KEY` environment variable is absent. Precedence: explicit CLI flag >
+  environment variable > config.toml > built-in default.
+- Config-supplied defaults outrank tuned implicit defaults (hybrid budget
+  knobs) but never count as explicit flags for strategy gating or corpus-mode
+  implication, so a global default cannot break unrelated strategies.
+- Unified the macOS cache root with Linux: `~/.cache/citemesh`
+  (HuggingFace-style) instead of `~/Library/Caches/citemesh` (pre-release
+  breaking change; `citemesh cache scan` hints when the legacy directory still
+  exists).
+- `citemesh cache clear` now preserves `config.toml` while deleting cache
+  payloads.
 
 ## Semantic Sources
 
