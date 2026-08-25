@@ -11,7 +11,7 @@ Related docs:
 
 | Variable | Default | Accepted values | Runtime effect |
 | --- | --- | --- | --- |
-| `S2_API_KEY` | unset | string | Adds Semantic Scholar API key for higher API limits and authenticated requests. When present (even empty), it wins over a configured `api.s2_api_key` in `config.toml`. |
+| `S2_API_KEY` | unset | string | Adds Semantic Scholar API key for authenticated requests; CiteMesh then paces at 1 request/second instead of the anonymous 0.5. When present (even empty), it wins over a configured `api.s2_api_key` in `config.toml`. |
 | `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path | Overrides CiteMesh cache root used for embedding/reference caches and the `config.toml` location. |
 | `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
 

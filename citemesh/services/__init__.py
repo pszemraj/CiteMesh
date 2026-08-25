@@ -6,9 +6,19 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .semantic_scholar import SemanticScholarClient, get_client, reset_client
+    from .semantic_scholar import (
+        SemanticScholarClient,
+        SemanticScholarUnavailableError,
+        get_client,
+        reset_client,
+    )
 
-__all__ = ["SemanticScholarClient", "get_client", "reset_client"]
+__all__ = [
+    "SemanticScholarClient",
+    "SemanticScholarUnavailableError",
+    "get_client",
+    "reset_client",
+]
 
 
 def __getattr__(name: str) -> Any:

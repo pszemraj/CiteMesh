@@ -139,8 +139,10 @@ class APIConfig:
     max_retries: int = 3
     retry_delay: float = 2.0  # Initial delay, increases exponentially
 
-    # Rate limiting
-    requests_per_second: float = 0.5  # Conservative rate limit
+    # Rate limiting: anonymous requests share a small public pool; authenticated
+    # keys are granted 1 request/second by Semantic Scholar.
+    requests_per_second: float = 0.5
+    authenticated_requests_per_second: float = 1.0
 
 
 # Global config instances (can be overridden)

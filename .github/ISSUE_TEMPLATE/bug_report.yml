@@ -1,0 +1,38 @@
+name: Bug report
+description: Something in CiteMesh misbehaves or crashes
+labels: [bug]
+body:
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: The exact citemesh command you ran.
+      placeholder: citemesh build "arxiv:1706.03762" --strategy hybrid --export all
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened / what did you expect?
+      description: Include log output — ideally rerun with `--log-level debug`.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and Python version
+      placeholder: macOS 15 (Apple Silicon), Python 3.12
+    validations:
+      required: true
+  - type: input
+    id: install
+    attributes:
+      label: How did you install CiteMesh?
+      placeholder: pip install "citemesh[recommended] @ git+..." / pip install -e ".[all]"
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Compute device (embedding/hybrid bugs only)
+      placeholder: mps / cuda / cpu, torch version

@@ -2,8 +2,9 @@
 out/*
 cache/*
 citemesh/_version.py
-*.yaml
-!docs/config.yaml.example
+# stray run configs at repo root only — never .github/workflows/*.yaml
+/*.yaml
+.claude/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

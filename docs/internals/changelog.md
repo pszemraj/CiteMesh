@@ -9,6 +9,23 @@ For current usage details, see:
 - [Environment Variables](../reference/environment.md)
 - [Embedding Runtime](../reference/embedding-runtime.md)
 
+## Public Release Readiness
+
+- Added GitHub Actions CI: ruff lint/format, test matrix (Ubuntu + macOS ×
+  Python 3.10/3.13, CPU torch), and a no-extras install smoke that locks in
+  the lazy-import contract for the core CLI.
+- Key-aware Semantic Scholar rate limiting: authenticated clients pace at
+  1 request/second, anonymous clients stay at 0.5. A one-time INFO notice on
+  key-less runs points at the free API key signup.
+- Seed-paper fetch failures now distinguish "identifier unknown to Semantic
+  Scholar" (`ValueError`) from "API rate-limited/unreachable after retries"
+  (`SemanticScholarUnavailableError`) for citation/recommendation seeds.
+- Rewrote the README for public beta (reference tool comparison, macOS/MPS
+  support statement, S2 key guidance) and added CONTRIBUTING.md, AGENTS.md,
+  and issue/PR templates.
+- Narrowed the root `.gitignore` `*.yaml` rule so workflow files are
+  trackable.
+
 ## User Configuration
 
 - Added a persistent user config system: `config.toml` at the cache root plus

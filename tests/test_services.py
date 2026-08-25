@@ -74,7 +74,12 @@ def test_service_and_strategy_package_exports() -> None:
         (
             services_module,
             ("citemesh.services.semantic_scholar", "semanticscholar"),
-            {"SemanticScholarClient", "get_client", "reset_client"},
+            {
+                "SemanticScholarClient",
+                "SemanticScholarUnavailableError",
+                "get_client",
+                "reset_client",
+            },
         ),
         (
             importlib.import_module("citemesh.strategies"),
@@ -838,3 +843,72 @@ def test_get_client_replaces_closed_singleton() -> None:
         reset_client()
         semantic_module.requests.Session = previous_session
         semantic_module.SemanticScholar = previous_client
+
+
+def test_rate_limit_pace_is_key_aware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Authenticated clients pace at the faster keyed rate; anonymous stays slow."""
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    anonymous = SemanticScholarClient(timeout=1)
+    assert anonymous.requests_per_second == API_CONFIG.requests_per_second
+
+    monkeypatch.setenv("S2_API_KEY", "test-key")
+    keyed = SemanticScholarClient(timeout=1)
+    assert keyed.requests_per_second == API_CONFIG.authenticated_requests_per_second
+    assert keyed._session.headers["x-api-key"] == "test-key"
+
+    # Empty env value means "explicitly anonymous" (CI convention).
+    monkeypatch.setenv("S2_API_KEY", "")
+    explicit_anonymous = SemanticScholarClient(timeout=1)
+    assert explicit_anonymous.requests_per_second == API_CONFIG.requests_per_second
+    assert "x-api-key" not in explicit_anonymous._session.headers
+
+
+def test_anonymous_pool_notice_logged_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The key-less shared-pool notice appears once per process, not per client."""
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    monkeypatch.setattr(semantic_module, "_anonymous_pool_announced", False)
+    with caplog.at_level(logging.INFO, logger="citemesh.services.semantic_scholar"):
+        SemanticScholarClient(timeout=1)
+        SemanticScholarClient(timeout=1)
+    notices = [
+        record
+        for record in caplog.records
+        if "shared anonymous Semantic" in record.getMessage()
+    ]
+    assert len(notices) == 1
+    assert semantic_module.S2_API_KEY_SIGNUP_URL in notices[0].getMessage()
+
+
+def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
+    """Exhausted retries raise SemanticScholarUnavailableError in strict mode."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper = MagicMock(side_effect=Exception("connection reset"))
+    with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with pytest.raises(
+            semantic_module.SemanticScholarUnavailableError,
+            match="unreachable while fetching seed",
+        ):
+            client.get_paper("seed", raise_on_unavailable=True)
+
+    rate_limited = SemanticScholarClient(timeout=1)
+    rate_limited._rate_limit = lambda: None
+    rate_limited.client.get_paper = MagicMock(side_effect=Exception("HTTP 429"))
+    with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with pytest.raises(
+            semantic_module.SemanticScholarUnavailableError,
+            match="rate-limited",
+        ):
+            rate_limited.get_paper("seed", raise_on_unavailable=True)
+
+
+def test_get_paper_not_found_still_returns_none_in_strict_mode() -> None:
+    """Strict mode only changes outage handling; genuine not-found stays None."""
+    from semanticscholar.SemanticScholarException import ObjectNotFoundException
+
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper = MagicMock(side_effect=ObjectNotFoundException("missing"))
+    assert client.get_paper("missing-id", raise_on_unavailable=True) is None

@@ -257,10 +257,17 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         # Step 1: Fetch seed paper
         logger.info(f"Fetching seed paper: {seed_id}")
-        seed = self.client.get_paper(seed_id, fetch_references=self.fetch_references)
+        seed = self.client.get_paper(
+            seed_id,
+            fetch_references=self.fetch_references,
+            raise_on_unavailable=True,
+        )
 
         if not seed:
-            raise ValueError(f"Seed paper not found: {seed_id}")
+            raise ValueError(
+                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
+                "know this identifier; check the DOI/arXiv/S2 ID)."
+            )
 
         seed.is_seed = True
         papers[seed.paper_id] = seed

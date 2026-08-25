@@ -51,6 +51,14 @@ DEFAULT_PAPER_FIELDS = (
 )
 
 
+S2_API_KEY_SIGNUP_URL = "https://www.semanticscholar.org/product/api"
+_anonymous_pool_announced = False
+
+
+class SemanticScholarUnavailableError(RuntimeError):
+    """Raised when the Semantic Scholar API stays unreachable after retries."""
+
+
 def _reference_cache_dir() -> Path:
     """Resolve reference-cache directory at call time.
 
@@ -212,17 +220,32 @@ class SemanticScholarClient:
 
         :param float timeout: Request timeout in seconds
         """
-        api_key = os.getenv("S2_API_KEY")
+        api_key = os.getenv("S2_API_KEY") or None
 
         self.client = SemanticScholar(timeout=timeout, api_key=api_key)
         self.timeout = timeout
         self.last_request_time = 0.0
         self._session = requests.Session()
         self._closed = False
+        self.requests_per_second = (
+            API_CONFIG.authenticated_requests_per_second
+            if api_key
+            else API_CONFIG.requests_per_second
+        )
 
         if api_key:
             self._session.headers["x-api-key"] = api_key
             logger.info("Using Semantic Scholar API key from S2_API_KEY")
+        else:
+            global _anonymous_pool_announced
+            if not _anonymous_pool_announced:
+                _anonymous_pool_announced = True
+                logger.info(
+                    "No S2_API_KEY set; using the shared anonymous Semantic "
+                    "Scholar pool (slower rate limit, higher 429 likelihood). "
+                    "Free keys: %s",
+                    S2_API_KEY_SIGNUP_URL,
+                )
 
     def __enter__(self) -> "SemanticScholarClient":
         """Return this client for context-manager use."""
@@ -293,9 +316,9 @@ class SemanticScholarClient:
             )
 
     def _rate_limit(self) -> None:
-        """Enforce rate limiting between requests."""
+        """Enforce rate limiting between requests (key-aware pace)."""
         elapsed = time.time() - self.last_request_time
-        min_interval = 1.0 / API_CONFIG.requests_per_second
+        min_interval = 1.0 / self.requests_per_second
         if elapsed < min_interval:
             time.sleep(min_interval - elapsed)
         self.last_request_time = time.time()
@@ -700,13 +723,20 @@ class SemanticScholarClient:
         return None
 
     def get_paper(
-        self, paper_id: str, fetch_references: bool = False
+        self,
+        paper_id: str,
+        fetch_references: bool = False,
+        *,
+        raise_on_unavailable: bool = False,
     ) -> Optional[Paper]:
         """
         Fetch a paper by ID with retry logic.
 
         :param str paper_id: Paper identifier (DOI, arXiv ID, or S2 ID)
         :param bool fetch_references: Whether to fetch reference list (slower)
+        :param bool raise_on_unavailable: When ``True``, exhausted retries raise
+            :class:`SemanticScholarUnavailableError` instead of returning
+            ``None``, so callers can distinguish "not found" from "API down".
         :return Optional[Paper]: Paper object or None if not found
         """
         if not paper_id or not isinstance(paper_id, str):
@@ -734,6 +764,33 @@ class SemanticScholarClient:
                 )
             return paper
 
+        def _final_failure(exc: Exception) -> Optional[Paper]:
+            """Report exhausted retries per the caller's failure contract.
+
+            :param Exception exc: Last captured exception.
+            :return Optional[Paper]: ``None`` in tolerant mode.
+            """
+            if raise_on_unavailable:
+                flavor = (
+                    "rate-limited (HTTP 429)"
+                    if self._is_rate_limit_error(exc)
+                    else "unreachable"
+                )
+                raise SemanticScholarUnavailableError(
+                    f"Semantic Scholar API {flavor} while fetching {paper_id} "
+                    f"(after {API_CONFIG.max_retries} attempts: {exc}). "
+                    "This is a service availability issue, not a bad paper ID - "
+                    "retry shortly, or set S2_API_KEY for a dedicated rate "
+                    f"limit (free keys: {S2_API_KEY_SIGNUP_URL})."
+                ) from exc
+            logger.error(
+                "Failed to fetch paper %s after %s attempts: %s",
+                paper_id,
+                API_CONFIG.max_retries,
+                exc,
+            )
+            return None
+
         return self._call_with_retries(
             _operation,
             on_retry=lambda attempt, wait_time, exc: logger.warning(
@@ -743,15 +800,7 @@ class SemanticScholarClient:
                 exc,
                 wait_time,
             ),
-            on_final_failure=lambda exc: (
-                logger.error(
-                    "Failed to fetch paper %s after %s attempts: %s",
-                    paper_id,
-                    API_CONFIG.max_retries,
-                    exc,
-                )
-                or None
-            ),
+            on_final_failure=_final_failure,
             handled_exceptions=(
                 (
                     ObjectNotFoundException,
