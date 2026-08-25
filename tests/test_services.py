@@ -912,3 +912,39 @@ def test_get_paper_not_found_still_returns_none_in_strict_mode() -> None:
     client._rate_limit = lambda: None
     client.client.get_paper = MagicMock(side_effect=ObjectNotFoundException("missing"))
     assert client.get_paper("missing-id", raise_on_unavailable=True) is None
+
+
+def test_recommendations_fall_back_to_all_cs_pool() -> None:
+    """Empty default-pool responses retry against the broader all-cs pool."""
+    client = SemanticScholarClient(timeout=1)
+    client._request_json = MagicMock(
+        side_effect=[
+            {"recommendedPapers": []},
+            {
+                "recommendedPapers": [
+                    {
+                        "paperId": "classic1",
+                        "title": "Classic Result",
+                        "year": 2017,
+                        "abstract": "A",
+                        "citationCount": 10,
+                        "authors": [],
+                        "fieldsOfStudy": [],
+                    }
+                ]
+            },
+        ]
+    )
+    recommendations = client.get_recommended_papers("seed", limit=5)
+    assert [paper.paper_id for paper in recommendations] == ["classic1"]
+    assert client._request_json.call_count == 2
+    first_params = client._request_json.call_args_list[0].args[1]
+    second_params = client._request_json.call_args_list[1].args[1]
+    assert "from" not in first_params
+    assert second_params["from"] == "all-cs"
+    assert second_params["limit"] == first_params["limit"]
+
+    # Both pools empty (e.g. non-CS paper): returns [] without error.
+    client._request_json = MagicMock(return_value={"recommendedPapers": []})
+    assert client.get_recommended_papers("seed", limit=5) == []
+    assert client._request_json.call_count == 2

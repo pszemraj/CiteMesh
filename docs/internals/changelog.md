@@ -17,6 +17,12 @@ For current usage details, see:
 - Key-aware Semantic Scholar rate limiting: authenticated clients pace at
   1 request/second, anonymous clients stay at 0.5. A one-time INFO notice on
   key-less runs points at the free API key signup.
+- Fixed empty recommendation results for classic seed papers: the S2
+  recommendations endpoint's default "recent" candidate pool returns nothing
+  for older landmark papers (e.g. arXiv:1706.03762), which silently emptied
+  the recommendation strategy and the hybrid/embedding candidate pools.
+  CiteMesh now retries the broader `all-cs` pool when the default pool comes
+  back empty.
 - Seed-paper fetch failures now distinguish "identifier unknown to Semantic
   Scholar" (`ValueError`) from "API rate-limited/unreachable after retries"
   (`SemanticScholarUnavailableError`) for citation/recommendation seeds.

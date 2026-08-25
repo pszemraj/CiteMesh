@@ -1191,15 +1191,29 @@ class SemanticScholarClient:
 
         normalized_paper_id = normalize_paper_id(paper_id)
         encoded_paper_id = quote(normalized_paper_id, safe="")
+        base_params = {"fields": ",".join(fields), "limit": parsed_limit}
         payload = self._request_json(
-            f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
-            {"fields": ",".join(fields), "limit": parsed_limit},
+            f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}", base_params
         )
-        if not payload:
-            return []
+        raw_recommendations = (payload or {}).get("recommendedPapers", [])
+        if not raw_recommendations:
+            # The default candidate pool ("recent") only covers recent papers
+            # and returns nothing for classic seeds (e.g. 2017 landmark
+            # papers). Fall back to the broader CS pool before giving up.
+            fallback_payload = self._request_json(
+                f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
+                {**base_params, "from": "all-cs"},
+            )
+            raw_recommendations = (fallback_payload or {}).get("recommendedPapers", [])
+            if raw_recommendations:
+                logger.debug(
+                    "Recommendations for %s came from the all-cs pool "
+                    "(recent pool was empty).",
+                    normalized_paper_id,
+                )
 
         papers = []
-        for rec in payload.get("recommendedPapers", []):
+        for rec in raw_recommendations:
             paper = self._convert_recommendation(rec)
             if paper:
                 papers.append(paper)
