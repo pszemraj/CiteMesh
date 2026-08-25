@@ -139,6 +139,7 @@ ignoring it.
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`; unsupported with `--cache-compression lzf`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). When enabled, compile is deferred on cold-cache hydration runs and attempted on warm-cache runs.
+- `--device {auto,cuda,mps,cpu}`: compute device for embedding model runs (default `auto`, which prefers CUDA, then MPS on Apple Silicon, then CPU). Explicit unavailable devices fail fast. Shared with hybrid.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 - Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in a shareable plain-text file without flooding the Rich console. `*.log` is ignored by git in this repo.
@@ -146,7 +147,7 @@ ignoring it.
 ### Hybrid Strategy
 
 - Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
-- Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, binary prefilter/rescore flags, calibration/compression flags).
+- Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, `--device`, binary prefilter/rescore flags, calibration/compression flags).
 - When omitted, hybrid applies tuned seed-discovery defaults for collection depth:
   - `--max-papers`: `45`
   - `--max-citations`: `45`

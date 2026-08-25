@@ -34,7 +34,12 @@ from citemesh.data.cache import atomic_write_json
 from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import get_client
 from citemesh.strategies.citation import CitationGraphBuilder
-from citemesh.strategies.embedding import ENCODE_BATCH_SIZE, EmbeddingGraphBuilder
+from citemesh.strategies.embedding import (
+    EMBEDDING_DEVICE_CHOICES,
+    ENCODE_BATCH_SIZE,
+    EmbeddingGraphBuilder,
+    resolve_embedding_device,
+)
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
@@ -434,6 +439,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "cache_compression_level": {"embedding", "hybrid"},
     "encode_batch_size": {"embedding", "hybrid"},
     "torch_compile": {"embedding", "hybrid"},
+    "device": {"embedding", "hybrid"},
     "max_semantic": {"hybrid"},
 }
 _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
@@ -461,6 +467,7 @@ _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "cache_compression_level": ["--cache-compression-level"],
     "encode_batch_size": ["--encode-batch-size"],
     "torch_compile": ["--torch-compile", "--no-torch-compile"],
+    "device": ["--device"],
     "max_semantic": ["--max-semantic"],
 }
 _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
@@ -495,6 +502,7 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "cache_compression_level",
     "encode_batch_size",
     "torch_compile",
+    "device",
 }
 
 
@@ -528,6 +536,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "cache_compression_level": cli_args.cache_compression_level,
         "encode_batch_size": cli_args.encode_batch_size,
         "enable_torch_compile": cli_args.torch_compile,
+        "device": cli_args.device,
     }
 
 
@@ -563,8 +572,20 @@ def _embedding_export_metadata(
     elif not int8_mode:
         binary_prefilter_used_for_query = False
 
+    effective_device: Optional[str] = None
+    effective_compute_dtype: Optional[str] = None
+    if isinstance(runtime_metadata, dict):
+        raw_device = runtime_metadata.get("device")
+        raw_compute_dtype = runtime_metadata.get("compute_dtype")
+        if isinstance(raw_device, str) and raw_device:
+            effective_device = raw_device
+        if isinstance(raw_compute_dtype, str) and raw_compute_dtype:
+            effective_compute_dtype = raw_compute_dtype
+
     return {
         "effective_vector_dtype": "float32",
+        "effective_device": effective_device,
+        "effective_compute_dtype": effective_compute_dtype,
         "storage_precision": str(cli_args.storage_precision),
         "binary_prefilter_enabled": binary_prefilter_enabled,
         "binary_prefilter_used_for_query": binary_prefilter_used_for_query,
@@ -730,6 +751,11 @@ def _validate_build_cli_contract(
             build_parser.error(
                 "--all-corpus cannot be combined with explicit --corpus-size."
             )
+        if str(args.device) != "auto":
+            try:
+                resolve_embedding_device(args.device)
+            except ValueError as exc:
+                build_parser.error(str(exc))
         try:
             args.cache_compression = validate_compression_filter(
                 str(args.cache_compression)
@@ -820,9 +846,10 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     revision_label = args.model_revision or "default"
     logger.debug("Embedding cache namespace root: %s.", cache_root)
     logger.info(
-        "Embedding config: model=%s@%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
+        "Embedding config: model=%s@%s device=%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
         args.model,
         revision_label,
+        args.device,
         args.dataset_split,
         corpus_label,
         bool(args.streaming),
@@ -1442,6 +1469,18 @@ Environment variables:
     )
     build_parser.set_defaults(torch_compile=False)
 
+    embedding_group.add_argument(
+        "--device",
+        dest="device",
+        choices=list(EMBEDDING_DEVICE_CHOICES),
+        default="auto",
+        help=(
+            "Compute device for embedding model runs. 'auto' prefers CUDA, then "
+            "MPS (Apple Silicon), then CPU; explicit unavailable devices fail "
+            "fast (default: %(default)s)."
+        ),
+    )
+
     # Hybrid strategy arguments
     hybrid_group = build_parser.add_argument_group("hybrid strategy options")
     hybrid_group.add_argument(
@@ -1921,6 +1960,7 @@ def _build_graph_config_payload(
             "cache_compression_level": int(cli_args.cache_compression_level),
             "encode_batch_size": int(cli_args.encode_batch_size),
             "torch_compile": bool(cli_args.torch_compile),
+            "device": str(cli_args.device),
             "force_rebuild_cache": bool(cli_args.force_rebuild_cache),
             "overwrite_cache": bool(cli_args.overwrite_cache),
             "cache_overwrite_reason": _normalized_cache_reason(

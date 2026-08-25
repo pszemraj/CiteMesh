@@ -59,6 +59,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
+# bf16-on-MPS is only enabled on torch releases verified on Apple Silicon; this is
+# a policy floor, not a hard technical cliff — lower it once older wheels are vetted.
+_MPS_MIN_TORCH_VERSION = (2, 13)
+EMBEDDING_DEVICE_CHOICES = ("auto", "cuda", "mps", "cpu")
+_COMPILE_ELIGIBLE_DEVICES = frozenset({"cuda", "mps"})
+# Legacy release-branch workaround window where Inductor conflicted with the
+# fp32_precision TF32 API; later torch releases use the modern API directly.
+_TF32_COMPILE_BRIDGE_TORCH_VERSIONS = frozenset({(2, 9), (2, 10)})
 
 
 def _parse_torch_major_minor(version: str) -> tuple[int, int]:
@@ -71,6 +79,86 @@ def _parse_torch_major_minor(version: str) -> tuple[int, int]:
     if version_match:
         return int(version_match.group(1)), int(version_match.group(2))
     return (0, 0)
+
+
+def _cuda_available(torch: Any) -> bool:
+    """Return whether a CUDA device is usable in the current runtime.
+
+    :param Any torch: Imported ``torch`` module object.
+    :return bool: ``True`` when CUDA reports at least one usable device.
+    """
+    cuda_module = getattr(torch, "cuda", None)
+    cuda_available = getattr(cuda_module, "is_available", None)
+    if not callable(cuda_available):
+        return False
+    try:
+        return bool(cuda_available())
+    except Exception:
+        return False
+
+
+def _mps_available(torch: Any) -> bool:
+    """Return whether the MPS (Apple Metal) backend is usable in this runtime.
+
+    :param Any torch: Imported ``torch`` module object.
+    :return bool: ``True`` when MPS reports as available; ``False`` on any probe
+        failure (missing backend attribute, sandboxed Metal access, etc.).
+    """
+    backends = getattr(torch, "backends", None)
+    mps_module = getattr(backends, "mps", None)
+    mps_available = getattr(mps_module, "is_available", None)
+    if not callable(mps_available):
+        return False
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return bool(mps_available())
+    except Exception:
+        return False
+
+
+def resolve_embedding_device(requested: Optional[str]) -> str:
+    """Resolve a requested device token to a concrete torch device string.
+
+    ``auto`` (or ``None``) prefers ``cuda``, then ``mps``, then ``cpu``. An
+    explicit accelerator request fails loudly when that backend is unavailable
+    rather than silently downgrading to a slower device.
+
+    :param Optional[str] requested: Requested device token
+        (``auto``/``cuda``/``mps``/``cpu`` or ``None``).
+    :return str: Resolved device token: ``cuda``, ``mps``, or ``cpu``.
+    :raises ValueError: If the token is unknown or names an unavailable backend.
+    """
+    normalized = str(requested or "auto").strip().lower()
+    if normalized not in EMBEDDING_DEVICE_CHOICES:
+        formatted = ", ".join(EMBEDDING_DEVICE_CHOICES)
+        raise ValueError(f"device must be one of: {formatted} (got {requested!r})")
+
+    try:
+        torch = _import_torch()
+    except ImportError:
+        if normalized in {"auto", "cpu"}:
+            return "cpu"
+        raise ValueError(
+            f"device='{normalized}' requires torch; install citemesh[embeddings]."
+        ) from None
+
+    if normalized == "auto":
+        if _cuda_available(torch):
+            return "cuda"
+        if _mps_available(torch):
+            return "mps"
+        return "cpu"
+    if normalized == "cuda" and not _cuda_available(torch):
+        raise ValueError(
+            "device='cuda' was requested but CUDA is not available in this runtime."
+        )
+    if normalized == "mps" and not _mps_available(torch):
+        raise ValueError(
+            "device='mps' was requested but the MPS backend is not available "
+            "in this runtime."
+        )
+    return normalized
 
 
 def _check_embedding_deps() -> None:
@@ -402,6 +490,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         encode_batch_size: int = ENCODE_BATCH_SIZE,
         enable_torch_compile: bool = False,
+        device: Optional[str] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -432,6 +521,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int encode_batch_size: Batch size used when encoding text payloads.
         :param bool enable_torch_compile: Whether to enable best-effort inner-model
             ``torch.compile`` optimization for supported profiles.
+        :param Optional[str] device: Requested compute device token
+            (``auto``/``cuda``/``mps``/``cpu``). ``None`` means ``auto``
+            (cuda, then mps, then cpu). Explicit unavailable devices raise.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         _check_embedding_deps()
@@ -508,6 +600,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.encode_batch_size = int(encode_batch_size)
         self.enable_torch_compile = bool(enable_torch_compile)
         self.model_profile = get_embedding_model_profile(self.model_name)
+        # Device must resolve before the attention/dtype hints below: those hints
+        # feed the cache namespace computed for EmbeddingCache further down.
+        self.requested_device = str(device or "auto").strip().lower()
+        self.device = resolve_embedding_device(self.requested_device)
         self._document_formatter_fingerprint = (
             self._resolve_document_formatter_fingerprint()
         )
@@ -582,6 +678,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         return {
             "binary_prefilter_used": self._last_search_used_binary_prefilter,
+            "device": self.device,
+            "requested_device": self.requested_device,
+            "compute_dtype": self._source_dtype_hint,
+            "autocast": self._autocast_enabled,
         }
 
     def _cache_model_identity(self) -> str:
@@ -681,22 +781,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         return self.binary_prefilter
 
     def _resolve_attention_implementation_hint(self) -> Optional[str]:
-        """Resolve preferred CUDA attention implementation for torch CUDA runs.
+        """Resolve preferred attention implementation for the resolved device.
 
         :return Optional[str]: Attention implementation token or ``None``.
         """
-        try:
-            torch = _import_torch()
-        except ImportError:
+        if self.device == "cpu":
             return None
-
-        cuda_module = getattr(torch, "cuda", None)
-        cuda_available = getattr(cuda_module, "is_available", None)
-        if not callable(cuda_available) or not bool(cuda_available()):
-            return None
+        if self.device == "mps":
+            # flash_attn ships CUDA-only kernels; never probe it off-CUDA.
+            return "sdpa"
 
         preferred_attention = str(
-            self.model_profile.cuda_attention_implementation or ""
+            self.model_profile.preferred_attention_implementation or ""
         ).strip()
         if preferred_attention == "flash_attention_2" and _module_available(
             "flash_attn"
@@ -714,12 +810,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         except ImportError:
             return "float32"
 
-        cuda_module = getattr(torch, "cuda", None)
-        cuda_available = getattr(cuda_module, "is_available", None)
-        if not callable(cuda_available) or not bool(cuda_available()):
+        if self.device == "cpu":
             return "float32"
 
         preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
+        if self.device == "mps":
+            if preferred_dtype == "bfloat16" and self._mps_bf16_allowed(torch):
+                return "bfloat16"
+            if bool(self.model_profile.float16_supported):
+                return "float16"
+            return "float32"
+
         if preferred_dtype == "bfloat16" and bool(
             getattr(torch.cuda, "is_bf16_supported", lambda: False)()
         ):
@@ -727,6 +828,24 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if bool(self.model_profile.float16_supported):
             return "float16"
         return "float32"
+
+    def _mps_bf16_allowed(self, torch: Any) -> bool:
+        """Return whether bf16 weights are allowed on MPS for this torch build.
+
+        :param Any torch: Imported ``torch`` module object.
+        :return bool: ``True`` when torch meets the MPS bf16 policy floor.
+        """
+        torch_version = _parse_torch_major_minor(getattr(torch, "__version__", ""))
+        if torch_version >= _MPS_MIN_TORCH_VERSION:
+            return True
+        logger.warning(
+            "%s prefers bfloat16 on MPS, but torch %s predates the verified "
+            "MPS floor %s; falling back to a lower-precision policy.",
+            self.model_name,
+            getattr(torch, "__version__", "unknown"),
+            ".".join(str(part) for part in _MPS_MIN_TORCH_VERSION),
+        )
+        return False
 
     def _resolve_model_fingerprint(self) -> str:
         """Resolve deterministic model fingerprint for cache validity checks.
@@ -1164,9 +1283,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._source_dtype_hint = "float32"
             return model_kwargs
 
-        cuda_module = getattr(torch, "cuda", None)
-        cuda_available = getattr(cuda_module, "is_available", None)
-        if not callable(cuda_available) or not bool(cuda_available()):
+        if self.device == "cpu":
             self._source_dtype_hint = "float32"
             return model_kwargs
 
@@ -1189,14 +1306,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         else:
             return model_kwargs
 
-        self._autocast_device_type = "cuda"
-        self._autocast_enabled = bool(self.model_profile.use_cuda_autocast)
+        self._autocast_device_type = self.device
+        self._autocast_enabled = self.device in self.model_profile.autocast_devices
 
         if self._autocast_enabled:
             logger.debug(
-                "%s will run with dtype=%s and CUDA autocast.",
+                "%s will run with dtype=%s and %s autocast.",
                 self.model_name,
                 self._source_dtype_hint,
+                self.device,
             )
         else:
             logger.debug(
@@ -1349,7 +1467,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             logger.info(f"Loading embedding model: {self.model_name}")
             model_kwargs = self._resolve_model_kwargs()
-            st_kwargs: Dict[str, Any] = {}
+            st_kwargs: Dict[str, Any] = {"device": self.device}
             if model_kwargs:
                 st_kwargs["model_kwargs"] = model_kwargs
             if self.truncate_dim is not None:
@@ -1361,12 +1479,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             model_errors: List[Tuple[str, Exception]] = []
             for idx, candidate_model in enumerate(load_candidates):
                 try:
-                    if st_kwargs:
-                        self.model = sentence_transformer_cls(
-                            candidate_model, **st_kwargs
-                        )
-                    else:
-                        self.model = sentence_transformer_cls(candidate_model)
+                    self.model = sentence_transformer_cls(candidate_model, **st_kwargs)
                 except Exception as exc:
                     model_errors.append((candidate_model, exc))
                     has_more_candidates = idx + 1 < len(load_candidates)
@@ -1434,6 +1547,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._tf32_runtime_configured = True
         self._tf32_mode = "off"
 
+        if self.device != "cuda":
+            logger.debug(
+                "Skipping TF32 config for %s: device=%s is not CUDA.",
+                self.model_name,
+                self.device,
+            )
+            return
+
         try:
             torch = _import_torch()
         except ImportError:
@@ -1443,13 +1564,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         cuda_module = getattr(torch, "cuda", None)
-        cuda_available = getattr(cuda_module, "is_available", None)
-        if not callable(cuda_available) or not bool(cuda_available()):
-            logger.debug(
-                "Skipping TF32 config for %s: CUDA unavailable.", self.model_name
-            )
-            return
-
         get_capability = getattr(cuda_module, "get_device_capability", None)
         capability = get_capability(0) if callable(get_capability) else None
         if not isinstance(capability, tuple) or len(capability) < 2:
@@ -1475,7 +1589,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.enable_torch_compile
             and self.model_profile.compile_inner_transformer
             and callable(compile_fn)
-            and torch_version in {(2, 9), (2, 10)}
+            and torch_version in _TF32_COMPILE_BRIDGE_TORCH_VERSIONS
         )
         if should_use_compile_bridge:
             set_matmul_precision = getattr(torch, "set_float32_matmul_precision", None)
@@ -1544,8 +1658,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             compute_dtype_label = f"{compute_dtype_label}+autocast"
         attention_label = self._attention_implementation_hint or "auto"
         logger.info(
-            "%s runtime: dim=%s, compute=%s, attn=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
+            "%s runtime: device=%s, dim=%s, compute=%s, attn=%s, output=float32, cache=%s, compile=%s, tf32=%s.",
             self.model_name,
+            self.device,
             dim_label,
             compute_dtype_label,
             attention_label,
@@ -1578,6 +1693,21 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 self.model_name,
             )
             return
+
+        if self.device not in _COMPILE_ELIGIBLE_DEVICES:
+            self._compile_status_reason = f"compile disabled for device={self.device}"
+            logger.debug(
+                "Skipping torch.compile for %s: device=%s is not compile-eligible.",
+                self.model_name,
+                self.device,
+            )
+            return
+
+        if self.device == "mps":
+            logger.info(
+                "torch.compile on MPS (Inductor/Metal) is experimental; "
+                "falling back to eager execution on compile failure."
+            )
 
         if not self.model_profile.compile_inner_transformer:
             self._compile_status_reason = "profile does not support inner-model compile"

@@ -1047,7 +1047,7 @@ def test_model_profiles_match_expected_formatters() -> None:
     assert gemma.name == "google/embeddinggemma"
     assert gemma.float16_supported is False
     assert gemma.preferred_torch_dtype == "bfloat16"
-    assert gemma.use_cuda_autocast is True
+    assert gemma.autocast_devices == ("cuda",)
     assert gemma.compile_inner_transformer is True
     assert gemma.available_truncate_dims == (768, 512, 256, 128)
     assert gemma.recommended_truncate_dim == 256
@@ -1066,7 +1066,7 @@ def test_model_profiles_match_expected_formatters() -> None:
     default = get_embedding_model_profile("all-MiniLM-L6-v2")
     assert default.name == "default"
     assert default.preferred_torch_dtype is None
-    assert default.use_cuda_autocast is False
+    assert default.autocast_devices == ()
     assert default.compile_inner_transformer is False
     assert default.available_truncate_dims is None
     assert default.recommended_truncate_dim is None
@@ -1171,3 +1171,17 @@ def test_semantic_export_uses_graph_strategy_when_metadata_is_omitted(
     assert related_node["provenance"] == "semantic"
     assert related_node["provenance_base"] == "semantic"
     assert related_node["seed_relation"] == "semantic_only"
+
+
+def test_visualization_pins_headless_backend() -> None:
+    """Importing the visualization package should pin a headless matplotlib backend."""
+    import os
+
+    if os.environ.get("MPLBACKEND"):
+        pytest.skip("MPLBACKEND explicitly set; backend pin intentionally skipped")
+
+    import matplotlib
+
+    import citemesh.visualization  # noqa: F401
+
+    assert matplotlib.get_backend().lower() == "agg"

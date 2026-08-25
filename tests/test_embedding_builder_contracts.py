@@ -24,6 +24,7 @@ from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
     _extract_dataset_paper_metadata,
     _query_seed_id,
+    resolve_embedding_device,
 )
 from citemesh.text_batching import estimate_text_length_bucket
 from tests._helpers import (
@@ -103,6 +104,7 @@ def _install_fake_torch(
     cuda_available: bool,
     bf16_supported: bool,
     *,
+    mps_available: bool = False,
     compile_behavior: str = "identity",
     capability: tuple[int, int] | None = (8, 0),
     include_tf32_global_api: bool = True,
@@ -174,6 +176,10 @@ def _install_fake_torch(
             cuda=types.SimpleNamespace(matmul=matmul_backend),
             cudnn=cudnn_backend,
         )
+    fake_backends.mps = types.SimpleNamespace(
+        is_available=lambda: mps_available,
+        is_built=lambda: mps_available,
+    )
 
     cuda_module = types.SimpleNamespace(
         is_available=lambda: cuda_available,
@@ -459,7 +465,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         if record.levelno == logging.DEBUG
     ]
 
-    assert any("runtime: dim=" in message for message in info_messages)
+    assert any("runtime: device=" in message for message in info_messages)
     assert not any(
         "Adds recommended query/document prompts for EmbeddingGemma." in message
         for message in info_messages
@@ -521,7 +527,7 @@ def test_embedding_runtime_policy_keeps_torch_cpu_fallback_unmodified(
     )
     cpu_builder._load_model()
 
-    assert init_log["kwargs"] == {}
+    assert init_log["kwargs"] == {"device": "cpu"}
     assert cpu_builder._source_dtype_hint == "float32"
     assert cpu_builder._attention_implementation_hint is None
 
@@ -2306,7 +2312,13 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
         use_streaming=False,
     )
     assert candidates == []
-    assert builder._embedding_runtime_metadata() == {"binary_prefilter_used": False}
+    assert builder._embedding_runtime_metadata() == {
+        "binary_prefilter_used": False,
+        "device": builder.device,
+        "requested_device": "auto",
+        "compute_dtype": builder._source_dtype_hint,
+        "autocast": False,
+    }
 
 
 def test_embedding_candidate_search_logs_comparison_counts(
@@ -2415,4 +2427,309 @@ def test_embedding_build_graph_persists_runtime_metadata(
 
     graph, seed_id = builder.build_graph("seed")
     assert seed_id == "seed"
-    assert graph.graph["embedding_runtime"] == {"binary_prefilter_used": True}
+    assert graph.graph["embedding_runtime"] == {
+        "binary_prefilter_used": True,
+        "device": builder.device,
+        "requested_device": "auto",
+        "compute_dtype": builder._source_dtype_hint,
+        "autocast": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("cuda_available", "mps_available", "requested", "expected"),
+    [
+        (True, True, "auto", "cuda"),
+        (False, True, "auto", "mps"),
+        (False, False, "auto", "cpu"),
+        (True, True, None, "cuda"),
+        (True, False, "cuda", "cuda"),
+        (False, True, "mps", "mps"),
+        (True, True, "cpu", "cpu"),
+        (False, False, "cpu", "cpu"),
+    ],
+)
+def test_embedding_device_resolution_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    cuda_available: bool,
+    mps_available: bool,
+    requested: str | None,
+    expected: str,
+) -> None:
+    """Device resolution should prefer cuda, then mps, then cpu."""
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=cuda_available,
+        bf16_supported=True,
+        mps_available=mps_available,
+    )
+    assert resolve_embedding_device(requested) == expected
+
+
+@pytest.mark.parametrize(
+    ("cuda_available", "mps_available", "requested"),
+    [
+        (False, True, "cuda"),
+        (True, False, "mps"),
+        (False, False, "tpu"),
+    ],
+)
+def test_embedding_device_resolution_rejects_unavailable_or_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+    cuda_available: bool,
+    mps_available: bool,
+    requested: str,
+) -> None:
+    """Explicit unavailable accelerators and unknown tokens should raise."""
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=cuda_available,
+        bf16_supported=True,
+        mps_available=mps_available,
+    )
+    with pytest.raises(ValueError):
+        resolve_embedding_device(requested)
+
+
+def test_embedding_device_forwarded_to_sentence_transformer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolved device should always be passed to SentenceTransformer."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=True,
+        torch_version="2.13.0",
+    )
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert builder.requested_device == "auto"
+    assert builder.device == "mps"
+    assert init_log["kwargs"]["device"] == "mps"
+
+
+def test_embedding_mps_precision_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EmbeddingGemma on MPS should load bf16 weights with sdpa and no autocast."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    bf16_token, autocast_log, _fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=True,
+        torch_version="2.13.0",
+    )
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert builder.device == "mps"
+    assert builder._source_dtype_hint == "bfloat16"
+    assert init_log["kwargs"]["model_kwargs"]["dtype"] is bf16_token
+    assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
+    assert builder._autocast_enabled is False
+    assert builder._get_model_for_encoding() is builder.model
+    assert autocast_log == []
+
+
+def test_embedding_mps_bf16_soft_gate_pre_2_13(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """MPS with pre-2.13 torch should decline bf16 with a warning."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=True,
+        torch_version="2.11.0",
+    )
+    with caplog.at_level(logging.WARNING):
+        builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert builder.device == "mps"
+    assert builder._source_dtype_hint == "float32"
+    assert "dtype" not in init_log["kwargs"].get("model_kwargs", {})
+    assert any(
+        "predates the verified MPS floor" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_embedding_mps_float16_profile_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """float16-capable profiles should run fp16 on MPS with sdpa, no autocast."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, autocast_log, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=True,
+        torch_version="2.13.0",
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        client=MagicMock(),
+    )
+    builder._load_model()
+
+    assert builder._source_dtype_hint == "float16"
+    assert init_log["kwargs"]["model_kwargs"]["dtype"] is fake_torch.float16
+    assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
+    assert builder._autocast_enabled is False
+    assert autocast_log == []
+
+
+def test_embedding_mps_never_probes_flash_attn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MPS attention policy should not consult flash_attn availability."""
+    _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=True,
+        torch_version="2.13.0",
+    )
+    probed: list[str] = []
+
+    def _record_probe(module_name: str) -> bool:
+        probed.append(module_name)
+        return True
+
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding._module_available", _record_probe
+    )
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+    assert builder._attention_implementation_hint == "sdpa"
+    assert "flash_attn" not in probed
+
+
+def test_embedding_compile_device_gating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """torch.compile should run on cuda/mps but be declined on cpu."""
+    for device_setup, expect_compiled in [
+        ({"cuda_available": True, "mps_available": False}, True),
+        ({"cuda_available": False, "mps_available": True}, True),
+        ({"cuda_available": False, "mps_available": False}, False),
+    ]:
+        _install_fake_sentence_transformers(monkeypatch)
+        _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+            monkeypatch,
+            bf16_supported=True,
+            torch_version="2.13.0",
+            compile_behavior="tagged",
+            **device_setup,
+        )
+        builder = EmbeddingGraphBuilder(
+            max_papers=1,
+            enable_torch_compile=True,
+            client=MagicMock(),
+        )
+        monkeypatch.setattr(
+            builder,
+            "_should_defer_compile_for_cache_hydration",
+            lambda: False,
+        )
+        builder._load_model()
+
+        assert builder._inner_model_compiled is expect_compiled
+        if not expect_compiled:
+            assert builder._compile_status_reason == "compile disabled for device=cpu"
+            assert fake_torch._compile_calls == []
+
+
+def test_embedding_tf32_skipped_for_non_cuda_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit non-CUDA device on a CUDA host must not flip global TF32 state."""
+    _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        torch_version="2.13.0",
+    )
+    builder = EmbeddingGraphBuilder(max_papers=1, device="cpu", client=MagicMock())
+    builder._load_model()
+
+    assert builder.device == "cpu"
+    assert builder._tf32_mode == "off"
+    assert fake_torch.backends.fp32_precision == "none"
+
+
+def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """bf16 caches must share a namespace across cuda/mps; cpu-fp32 differs."""
+    _install_fake_sentence_transformers(monkeypatch)
+
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        torch_version="2.13.0",
+    )
+    cuda_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=True,
+        torch_version="2.13.0",
+    )
+    mps_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=False,
+        torch_version="2.13.0",
+    )
+    cpu_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+
+    assert cuda_builder._source_dtype_hint == "bfloat16"
+    assert mps_builder._source_dtype_hint == "bfloat16"
+    assert cpu_builder._source_dtype_hint == "float32"
+    assert (
+        cuda_builder._embedding_cache_namespace()
+        == mps_builder._embedding_cache_namespace()
+    )
+    assert (
+        cpu_builder._embedding_cache_namespace()
+        != cuda_builder._embedding_cache_namespace()
+    )
+
+
+@pytest.mark.slow
+def test_embedding_real_mps_smoke() -> None:
+    """Load the real default model on MPS and encode two strings.
+
+    Requires real Metal access: skips on Linux CI and inside sandboxes that
+    hide the MPS device. Run escalated on Apple Silicon for a meaningful pass.
+    """
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("sentence_transformers")
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS backend unavailable in this runtime")
+
+    builder = EmbeddingGraphBuilder(max_papers=2, client=MagicMock())
+    assert builder.device == "mps"
+    builder._load_model()
+    vectors = builder._encode_texts(
+        ["attention is all you need", "graph neural networks survey"]
+    )
+    assert vectors.shape[0] == 2
+    assert np.isfinite(vectors).all()

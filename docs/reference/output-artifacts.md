@@ -157,13 +157,16 @@ Top-level fields:
   Recommendation sidecars include only shared reference-hydration settings, while
   citation and hybrid sidecars also include citation-expansion budgets.
 - `hybrid` for resolved `max_semantic`.
-- `embedding` for embedding/hybrid semantic settings.
+- `embedding` for embedding/hybrid semantic settings, including the requested
+  `device` token.
 
 `metadata` includes:
 
 - common run metadata (`paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`)
 - strategy score semantics (`score_contract`)
-- embedding/hybrid runtime retrieval metadata when available
+- embedding/hybrid runtime retrieval metadata when available, including
+  `effective_device` and `effective_compute_dtype` (the device and dtype the
+  encoder actually ran with)
 
 See embedding metadata term definitions in
 [Embedding Runtime](embedding-runtime.md).

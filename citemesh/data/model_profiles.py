@@ -65,8 +65,8 @@ class EmbeddingModelProfile:
     document_formatter: DocumentFormatter = _identity_document_formatter
     float16_supported: bool = True
     preferred_torch_dtype: Optional[str] = None
-    use_cuda_autocast: bool = False
-    cuda_attention_implementation: Optional[str] = None
+    autocast_devices: Tuple[str, ...] = ()
+    preferred_attention_implementation: Optional[str] = None
     compile_inner_transformer: bool = False
     available_truncate_dims: Optional[Tuple[int, ...]] = None
     recommended_truncate_dim: Optional[int] = None
@@ -134,11 +134,14 @@ EMBEDDING_MODEL_PROFILES = (
         document_formatter=_gemma_document_formatter,
         float16_supported=False,
         preferred_torch_dtype="bfloat16",
-        use_cuda_autocast=True,
+        autocast_devices=("cuda",),
         compile_inner_transformer=True,
         available_truncate_dims=(768, 512, 256, 128),
         recommended_truncate_dim=256,
-        notes="Adds recommended query/document prompts for EmbeddingGemma.",
+        notes=(
+            "Adds recommended query/document prompts for EmbeddingGemma. "
+            "Runs bf16 on CUDA (with autocast) and on MPS (autocast off)."
+        ),
     ),
 )
 

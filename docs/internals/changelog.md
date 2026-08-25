@@ -8,6 +8,26 @@ For current usage details, see:
 - [Environment Variables](../reference/environment.md)
 - [Embedding Runtime](../reference/embedding-runtime.md)
 
+## Runtime & Devices
+
+- Added explicit device resolution with a `--device {auto,cuda,mps,cpu}` flag for
+  embedding/hybrid strategies: `auto` prefers CUDA, then MPS (Apple Silicon),
+  then CPU; explicit unavailable devices fail fast at parse time.
+- Added first-class MPS support: EmbeddingGemma loads bf16 weights on MPS
+  (torch >= 2.13) with `sdpa` attention and autocast off; float16-safe profiles
+  run fp16. CPU stays float32.
+- Cache namespaces track compute dtype (not device), so bf16 caches built on
+  CUDA and MPS interoperate; warm-on-GPU-then-copy-to-Mac now works.
+- TF32 configuration is now gated on the resolved device: `--device cpu` on a
+  CUDA host no longer flips global TF32 backend state (bug fix).
+- `--torch-compile` is now declined on CPU (pure warm-up cost for CLI runs) and
+  marked experimental on MPS (Inductor/Metal, eager fallback on failure).
+- Split the torch dependency floor by platform: `>=2.9` on Linux/Windows,
+  `>=2.13` on macOS. Declared the previously transitive `huggingface_hub`
+  dependency explicitly.
+- Pinned a headless matplotlib backend (`Agg`) for static exports unless
+  `MPLBACKEND` is set, avoiding the main-thread-only MacOSX GUI backend.
+
 ## Breaking Changes
 
 - Removed deprecated `GraphBuilderStrategy.exponential_temporal_decay`.

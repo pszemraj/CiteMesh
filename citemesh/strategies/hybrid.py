@@ -82,6 +82,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         encode_batch_size: int = ENCODE_BATCH_SIZE,
         enable_torch_compile: bool = False,
+        device: Optional[str] = None,
         client: Optional[SemanticScholarClient] = None,
     ):
         """
@@ -116,6 +117,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param int encode_batch_size: Batch size used for semantic branch embedding encodes.
         :param bool enable_torch_compile: Whether semantic branch may use
             best-effort inner-model ``torch.compile`` optimization.
+        :param Optional[str] device: Requested compute device token for the
+            semantic branch (``auto``/``cuda``/``mps``/``cpu``).
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         """
         if max_semantic is None:
@@ -165,6 +168,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 cache_compression_level=cache_compression_level,
                 encode_batch_size=encode_batch_size,
                 enable_torch_compile=enable_torch_compile,
+                device=device,
                 client=self.client,
             )
         else:

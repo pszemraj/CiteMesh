@@ -33,3 +33,11 @@ These are not CiteMesh-specific, but CiteMesh honors them when `CITEMESH_CACHE_D
 | `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset. |
 
 Cache-root behavior details are covered in [Guides: Caching & Data](../guides/caching.md).
+
+## Other Respected Variables
+
+| Variable | Effect |
+| --- | --- |
+| `MPLBACKEND` | When set, CiteMesh skips its default headless `Agg` matplotlib backend pin and uses your backend for static exports. |
+| `CUDA_VISIBLE_DEVICES` | Honored by torch for CUDA device visibility/selection. |
+| `PYTORCH_ENABLE_MPS_FALLBACK` | Honored by torch: falls back to CPU for individual ops missing MPS kernels. |

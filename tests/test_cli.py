@@ -180,6 +180,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "cache_compression_level": 1,
         "encode_batch_size": ENCODE_BATCH_SIZE,
         "torch_compile": False,
+        "device": "auto",
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -1739,6 +1740,8 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert metadata["embedding"] == {
         "effective_vector_dtype": "float32",
+        "effective_device": None,
+        "effective_compute_dtype": None,
         "storage_precision": "float32",
         "binary_prefilter_enabled": False,
         "binary_prefilter_used_for_query": False,
@@ -1966,6 +1969,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "cache_compression_level": 1,
                 "encode_batch_size": 48,
                 "enable_torch_compile": False,
+                "device": "auto",
             },
         ),
         (
@@ -2008,6 +2012,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "cache_compression_level": 1,
                 "encode_batch_size": 48,
                 "enable_torch_compile": False,
+                "device": "auto",
             },
         ),
     ]
@@ -2510,3 +2515,97 @@ def test_builder_defaults_match_cli_defaults() -> None:
     assert rec_sig.parameters["fetch_references"].default is (
         not defaults.no_references
     )
+
+
+def test_build_rejects_device_flag_for_non_embedding_strategies() -> None:
+    """--device is embedding/hybrid-scoped and rejected elsewhere."""
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "citation",
+            "--device",
+            "cpu",
+        ]
+    )
+    assert result.returncode != 0
+    assert "Unsupported option(s)" in result.stderr
+    assert "--device" in result.stderr
+
+
+def test_build_rejects_device_flag_when_hybrid_semantic_disabled() -> None:
+    """--device is embedding-only for hybrid and invalid with --max-semantic 0."""
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "hybrid",
+            "--max-semantic",
+            "0",
+            "--device",
+            "cpu",
+        ]
+    )
+    assert result.returncode != 0
+    assert "Hybrid semantic branch is disabled" in result.stderr
+    assert "--device" in result.stderr
+
+
+def test_build_rejects_unavailable_explicit_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicitly requesting an unavailable device fails as a clean parser error."""
+
+    def _raise_unavailable(_requested: str) -> str:
+        raise ValueError(
+            "device='cuda' was requested but CUDA is not available in this runtime."
+        )
+
+    monkeypatch.setattr(cli_module, "resolve_embedding_device", _raise_unavailable)
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--device",
+            "cuda",
+        ]
+    )
+    assert result.returncode == 2
+    assert "device='cuda' was requested but CUDA is not available" in result.stderr
+
+
+def test_graph_config_payload_records_device() -> None:
+    """Embedding sidecar config should persist the requested device token."""
+    _, build_parser, _ = cli_module._create_parser()
+    cli_args = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--device", "cpu"]
+    )
+
+    payload = cli_module._build_graph_config_payload(
+        cli_args=cli_args,
+        seed_id="seed",
+        metadata={"strategy": "embedding"},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/embedding.json")},
+    )
+
+    assert payload["build"]["embedding"]["device"] == "cpu"
+
+
+def test_export_metadata_records_effective_device() -> None:
+    """Export metadata should surface effective device/dtype from runtime."""
+    namespace = _dispatch_namespace()
+    metadata = cli_module._embedding_export_metadata(
+        namespace,
+        runtime_metadata={
+            "binary_prefilter_used": True,
+            "device": "mps",
+            "compute_dtype": "bfloat16",
+        },
+    )
+    assert metadata["effective_device"] == "mps"
+    assert metadata["effective_compute_dtype"] == "bfloat16"
