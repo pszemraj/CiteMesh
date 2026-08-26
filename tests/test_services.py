@@ -948,3 +948,45 @@ def test_recommendations_fall_back_to_all_cs_pool() -> None:
     client._request_json = MagicMock(return_value={"recommendedPapers": []})
     assert client.get_recommended_papers("seed", limit=5) == []
     assert client._request_json.call_count == 2
+
+
+def test_search_raise_on_unavailable_distinguishes_rate_limit() -> None:
+    """Exhausted search retries raise in strict mode instead of returning []."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client._session.get = MagicMock(return_value=_MockResponse(status_code=429))
+
+    with patch("citemesh.services.semantic_scholar.time.sleep"):
+        assert client.search_papers("attention") == []
+        with pytest.raises(
+            semantic_module.SemanticScholarUnavailableError,
+            match="rate-limited .* searching for 'attention'",
+        ):
+            client.search_papers("attention", raise_on_unavailable=True)
+
+
+def test_search_raise_on_unavailable_distinguishes_outage() -> None:
+    """Connection failures surface as 'unreachable' in strict mode."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client._session.get = MagicMock(side_effect=requests.ConnectionError("boom"))
+
+    with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with pytest.raises(
+            semantic_module.SemanticScholarUnavailableError,
+            match="unreachable while searching",
+        ):
+            client.search_papers("attention", raise_on_unavailable=True)
+
+
+def test_search_empty_results_stay_empty_in_strict_mode() -> None:
+    """Strict mode only changes outage handling; genuinely empty stays []."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client._session.get = MagicMock(
+        return_value=_MockResponse(status_code=200, payload={"data": []})
+    )
+    assert client.search_papers("attention", raise_on_unavailable=True) == []
+
+    client._session.get = MagicMock(return_value=_MockResponse(status_code=404))
+    assert client.search_papers("attention", raise_on_unavailable=True) == []

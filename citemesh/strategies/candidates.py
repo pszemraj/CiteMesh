@@ -251,7 +251,9 @@ def fetch_candidate_pool(
         query_text = (seed_paper.title or "").strip() or seed_id
         try:
             search_hits = client.search_papers(
-                query_text, limit=QUERY_SEED_SEARCH_LIMIT
+                query_text,
+                limit=QUERY_SEED_SEARCH_LIMIT,
+                raise_on_unavailable=True,
             )
         except Exception as exc:
             logger.warning(

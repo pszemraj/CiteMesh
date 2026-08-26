@@ -26,6 +26,10 @@ For current usage details, see:
 - Seed-paper fetch failures now distinguish "identifier unknown to Semantic
   Scholar" (`ValueError`) from "API rate-limited/unreachable after retries"
   (`SemanticScholarUnavailableError`) for citation/recommendation seeds.
+- Paper search gets the same treatment: `citemesh search` and free-text query
+  seeds no longer report "No results found" when the search API was actually
+  rate-limited or unreachable — exhausted retries now surface as a
+  `SemanticScholarUnavailableError` with the free-key pointer.
 - Rewrote the README for public beta (reference tool comparison, macOS/MPS
   support statement, S2 key guidance) and added CONTRIBUTING.md, AGENTS.md,
   and issue/PR templates.

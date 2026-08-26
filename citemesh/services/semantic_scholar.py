@@ -671,13 +671,42 @@ class SemanticScholarClient:
 
         return parsed
 
+    @staticmethod
+    def _unavailable_error(
+        context: str, detail: str, *, rate_limited: bool
+    ) -> "SemanticScholarUnavailableError":
+        """Build the availability error raised when retries are exhausted.
+
+        :param str context: Human-readable request context (e.g. ``"searching for 'x'"``).
+        :param str detail: Trailing detail appended after the attempt count.
+        :param bool rate_limited: Whether the final failure was an HTTP 429.
+        :return SemanticScholarUnavailableError: Flavored availability error.
+        """
+        flavor = "rate-limited (HTTP 429)" if rate_limited else "unreachable"
+        return SemanticScholarUnavailableError(
+            f"Semantic Scholar API {flavor} while {context} "
+            f"(after {API_CONFIG.max_retries} attempts{detail}). "
+            "This is a service availability issue - retry shortly, or set "
+            f"S2_API_KEY for a dedicated rate limit (free keys: {S2_API_KEY_SIGNUP_URL})."
+        )
+
     def _request_json(
-        self, url: str, params: Dict[str, Any]
+        self,
+        url: str,
+        params: Dict[str, Any],
+        *,
+        raise_on_unavailable: bool = False,
+        context: str = "requesting data",
     ) -> Optional[Dict[str, Any]]:
         """Request JSON payload from direct Semantic Scholar REST endpoints.
 
         :param str url: Endpoint URL.
         :param Dict[str, Any] params: Query parameters.
+        :param bool raise_on_unavailable: When ``True``, exhausted retries raise
+            :class:`SemanticScholarUnavailableError` instead of returning
+            ``None``, so callers can distinguish "no data" from "API down".
+            HTTP 404 still returns ``None`` (genuinely absent resource).
+        :param str context: Request description used in availability errors.
         :return Optional[Dict[str, Any]]: Parsed JSON payload or ``None`` on failure.
         """
         for attempt in range(API_CONFIG.max_retries):
@@ -697,6 +726,8 @@ class SemanticScholarClient:
                     if attempt < API_CONFIG.max_retries - 1:
                         time.sleep(retry_after)
                         continue
+                    if raise_on_unavailable:
+                        raise self._unavailable_error(context, "", rate_limited=True)
                     return None
 
                 response.raise_for_status()
@@ -714,6 +745,12 @@ class SemanticScholarClient:
                     )
                     time.sleep(wait_time)
                 else:
+                    if raise_on_unavailable:
+                        raise self._unavailable_error(
+                            context,
+                            f": {exc}",
+                            rate_limited=self._is_rate_limit_error(exc),
+                        ) from exc
                     logger.error(
                         "Failed to call %s after %s attempts: %s",
                         url,
@@ -1220,13 +1257,21 @@ class SemanticScholarClient:
         return papers
 
     def search_papers(
-        self, query: str, limit: int = 10, fields: Optional[List[str]] = None
+        self,
+        query: str,
+        limit: int = 10,
+        fields: Optional[List[str]] = None,
+        *,
+        raise_on_unavailable: bool = False,
     ) -> List[Paper]:
         """Search papers by title or keyword.
 
         :param str query: Search query string.
         :param int limit: Maximum number of results.
         :param Optional[List[str]] fields: Optional fields list for API payload.
+        :param bool raise_on_unavailable: When ``True``, exhausted retries raise
+            :class:`SemanticScholarUnavailableError` instead of returning an
+            empty list, so callers can distinguish "no matches" from "API down".
         :return List[Paper]: Search results.
         """
         parsed_limit = _validate_integer_limit(limit, "limit")
@@ -1246,6 +1291,8 @@ class SemanticScholarClient:
                 "fields": ",".join(fields),
                 "limit": parsed_limit,
             },
+            raise_on_unavailable=raise_on_unavailable,
+            context=f"searching for {normalized_query!r}",
         )
         if not payload:
             return []

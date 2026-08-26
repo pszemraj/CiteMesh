@@ -46,7 +46,7 @@ from citemesh.data import (
 )
 from citemesh.data.cache import atomic_write_json, legacy_macos_cache_root
 from citemesh.paper_ids import normalize_paper_id
-from citemesh.services import get_client
+from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
@@ -2902,7 +2902,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             client = get_client()
             logger.info(f"Searching for: {args.query}")
-            results = client.search_papers(args.query, limit=args.limit)
+            results = client.search_papers(
+                args.query, limit=args.limit, raise_on_unavailable=True
+            )
 
             if not results:
                 logger.error("No results found.")
@@ -2940,6 +2942,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 'citemesh build "<ID>" --strategy recommendation'
             )
 
+        except SemanticScholarUnavailableError as e:
+            logger.error(str(e))
+            return 1
         except Exception as e:
             logger.error(f"Search failed: {e}")
             return 1
