@@ -61,6 +61,12 @@ Notable changes from the early script-based prototypes to the current package la
 - Switched node coloring to continuous gradients for consistent year-based styling.
 - Restricted dashboard collection bundle payload reads to manifest paths that stay under the collection root.
 - HTML exports (dashboard, Plotly, pyvis) now carry a `darkreader-lock` meta tag plus a transparent-overlay CSS guard: the Dark Reader browser extension repaints Plotly's transparent overlay SVGs with an opaque background, which hid the entire dashboard graph. Verified live in Chrome with Dark Reader installed — the lock disengages the extension and the graph renders in the native theme. Also fixed the paper-count label pluralization ("1 paper").
+- HTML exports additionally declare the standards-based `color-scheme` meta + CSS property (dark or light per theme) so Chrome's Auto Dark Mode and other well-behaved darkening extensions skip repainting; this complements the Dark Reader-specific lock (Plotly/vis.js offer no such signal themselves — the page-level declaration is the mechanism).
+- Dashboard hover tooltips are now theme-styled glance cards (panel background and border instead of raw marker color), wrap long titles instead of spanning the full pane, and add venue plus a relation line ("referenced by seed", "cites seed", "semantic match") so hover answers "should I look at this paper".
+- Fixed a misleading dashboard legend that claimed nodes were colored by provenance (seed/citation/semantic/both) while they are colored by a publication-year gradient; the legend now shows the real encodings (seed ring, older-to-newer gradient, size = citations) and the year timeline reuses the exact node colorscale.
+- Dashboard edge opacity/width is now min-max normalized per graph (raw hybrid weights cluster in 0.55-0.95 and previously clamped to a flat 0.6 alpha, rendering every edge identically); relative link strength is finally visible.
+- Added a saved-papers reading list to the dashboard: star toggles on list rows and in the details panel, a Saved filter chip, localStorage persistence per seed graph, plus "Saved BibTeX" download and "Copy Saved Links" (markdown list) so a triage session does not require opening every paper in a browser tab.
+- The seed's "Why This Paper" panel no longer prints a meaningless self-relevance score and self-path; it states the node is the seed and keeps its strongest links.
 
 ## Graph Rendering
 

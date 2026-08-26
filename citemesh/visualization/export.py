@@ -100,17 +100,88 @@ def _ordered_attrs(attrs: Dict[str, object]) -> Dict[str, object]:
 
 DARKREADER_LOCK_META = '<meta name="darkreader-lock" />'
 
+# Shared UI chrome palette for HTML exports (dashboard vars and Plotly
+# hoverlabels must agree so tooltips look native to the page).
+_UI_PALETTES: Dict[str, Dict[str, str]] = {
+    "dark": {
+        "body_bg": "#0f1318",
+        "panel_bg": "#171d25",
+        "panel_border": "#2e3948",
+        "text_primary": "#ecf1f8",
+        "text_muted": "#9ab0cb",
+        "accent": "#4aa3ff",
+        "accent_soft": "rgba(74, 163, 255, 0.2)",
+    },
+    "light": {
+        "body_bg": "#eef2f7",
+        "panel_bg": "#ffffff",
+        "panel_border": "#d5dce8",
+        "text_primary": "#1b2738",
+        "text_muted": "#5a6a80",
+        "accent": "#0f67d8",
+        "accent_soft": "rgba(15, 103, 216, 0.14)",
+    },
+}
 
-def _inject_darkreader_lock(path: Path) -> None:
-    """Insert the Dark Reader opt-out meta tag into a written HTML export.
 
-    CiteMesh HTML exports ship their own tuned themes; Dark Reader re-theming
-    breaks them outright (it paints Plotly's transparent overlay SVGs with an
-    opaque background, hiding the entire graph). The ``darkreader-lock`` meta
-    tag tells the extension to leave the page untouched.
+def _theme_color_scheme(theme_obj: Theme) -> str:
+    """Resolve the CSS ``color-scheme`` value a theme should declare.
+
+    :param Theme theme_obj: Active visualization theme.
+    :return str: ``"dark"`` or ``"light"``.
+    """
+    return "dark" if theme_obj.name in {"dark", "solarized"} else "light"
+
+
+# Hover-tooltip relation labels, keyed by seed_relation first and provenance
+# as fallback. The tooltip's job is answering "why is this paper here".
+_HOVER_RELATION_LABELS: Dict[str, str] = {
+    "seed": "seed paper",
+    "referenced_by_seed": "referenced by seed",
+    "cites_seed": "cites seed",
+    "overlap": "prior + derivative work",
+    "semantic_only": "semantic match",
+    "citation": "citation graph",
+    "semantic": "semantic match",
+    "both": "citations + semantic match",
+}
+
+
+def _edge_strength_scale(weights: list[float]) -> list[float]:
+    """Normalize edge weights to per-graph relative strengths in ``[0, 1]``.
+
+    Raw hybrid edge weights concentrate in a narrow band (typically
+    0.55-0.95), so mapping them straight to opacity rendered every edge at a
+    visually identical strength. Min-max scaling within the graph makes
+    *relative* link strength legible.
+
+    :param list[float] weights: Non-negative raw edge weights.
+    :return list[float]: Normalized strengths (all ``0.5`` when weights tie).
+    """
+    if not weights:
+        return []
+    w_min = min(weights)
+    w_max = max(weights)
+    span = w_max - w_min
+    if span <= 1e-9:
+        return [0.5 for _ in weights]
+    return [(weight - w_min) / span for weight in weights]
+
+
+def _inject_darkreader_lock(path: Path, color_scheme: str = "light") -> None:
+    """Insert dark-mode-extension defenses into a written HTML export.
+
+    CiteMesh HTML exports ship their own tuned themes; auto-darkening
+    re-theming breaks them outright (Dark Reader paints Plotly's transparent
+    overlay SVGs with an opaque background, hiding the entire graph). Two
+    signals are injected: the Dark Reader-specific ``darkreader-lock`` opt-out
+    meta, and the standards-based ``color-scheme`` meta that Chrome's Auto
+    Dark Mode and well-behaved extensions consult before repainting a page.
 
     :param Path path: HTML file to rewrite in place (no-op when it has no
         ``<head>`` tag or already carries the lock).
+    :param str color_scheme: Declared scheme for the export, ``dark`` or
+        ``light``.
     :return None: Rewrites the file in place.
     """
     try:
@@ -119,8 +190,10 @@ def _inject_darkreader_lock(path: Path) -> None:
         return
     if "darkreader-lock" in content or "<head>" not in content:
         return
+    scheme = color_scheme if color_scheme in {"dark", "light"} else "light"
+    scheme_meta = f'<meta name="color-scheme" content="{scheme}" />'
     path.write_text(
-        content.replace("<head>", f"<head>{DARKREADER_LOCK_META}", 1),
+        content.replace("<head>", f"<head>{DARKREADER_LOCK_META}{scheme_meta}", 1),
         encoding="utf-8",
     )
 
@@ -416,7 +489,7 @@ class GraphExporter:
             net.add_edge(u, v, value=max(0.1, weight * 5))
 
         net.save_graph(str(path))
-        _inject_darkreader_lock(path)
+        _inject_darkreader_lock(path, _theme_color_scheme(theme_obj))
 
     def to_plotly_html(self, path: Path, theme: Optional[str] = None) -> None:
         """Create Plotly interactive visualization.
@@ -442,7 +515,7 @@ class GraphExporter:
                 "Deterministic Plotly export requires write_html(div_id=...). "
                 "Upgrade plotly to a version that supports div_id."
             ) from exc
-        _inject_darkreader_lock(path)
+        _inject_darkreader_lock(path, _theme_color_scheme(theme_obj))
 
     def to_dashboard_html(self, path: Path, theme: Optional[str] = None) -> None:
         """Create a standalone Plotly-backed research dashboard HTML export.
@@ -519,7 +592,14 @@ class GraphExporter:
 
         if for_dashboard:
             curvature = 0.15
-            for u, v, attrs in self._sorted_edges():
+            edge_records = list(self._sorted_edges())
+            edge_strengths = _edge_strength_scale(
+                [
+                    max(float(attrs.get("weight", 0.0)), 0.0)
+                    for _, _, attrs in edge_records
+                ]
+            )
+            for (u, v, attrs), strength in zip(edge_records, edge_strengths):
                 x0f = float(pos[u][0])
                 y0f = float(pos[u][1])
                 x1f = float(pos[v][0])
@@ -535,15 +615,15 @@ class GraphExporter:
                 direction = -1.0 if int(direction_digest[:2], 16) % 2 else 1.0
                 cx = mid_x - dy * curvature * direction
                 cy = mid_y + dx * curvature * direction
-                weight = max(float(attrs.get("weight", 0.0)), 0.0)
-                alpha = min(0.6, max(0.05, weight))
                 layout_shapes.append(
                     {
                         "type": "path",
                         "path": f"M {x0f},{y0f} Q {cx},{cy} {x1f},{y1f}",
                         "line": {
-                            "color": _rgb_tuple_to_rgba(theme_obj.edge_color, alpha),
-                            "width": max(0.5, weight * 2.0),
+                            "color": _rgb_tuple_to_rgba(
+                                theme_obj.edge_color, 0.16 + 0.54 * strength
+                            ),
+                            "width": 0.7 + 2.1 * strength,
                         },
                         "layer": "below",
                     }
@@ -632,24 +712,50 @@ class GraphExporter:
                 title=dict(text="Year", side="right"),
             )
 
+        seed_relations = self._seed_relation_map()
+        provenance_map = self._provenance_map()
         hover_texts = []
         for node in node_ids:
-            paper: Optional[Paper] = self.graph.nodes[node].get("paper")
+            attrs = self.graph.nodes[node]
+            paper: Optional[Paper] = attrs.get("paper")
+            raw_title = " ".join(
+                str(paper.title if paper else attrs.get("title", node)).split()
+            )
+            title_html = "<br>".join(
+                html.escape(line)
+                for line in textwrap.wrap(raw_title, width=58, break_long_words=False)
+            ) or html.escape(str(node))
+            lines = [f"<b>{title_html}</b>"]
             if paper:
                 authors = ", ".join(a.name for a in paper.authors[:3]) or "Unknown"
-                hover_texts.append(
-                    "<br>".join(
-                        [
-                            f"<b>{html.escape(paper.title)}</b>",
-                            html.escape(authors),
-                            f"Year: {paper.year} | Citations: {paper.citation_count}",
-                        ]
-                    )
+                if len(paper.authors) > 3:
+                    authors += f" +{len(paper.authors) - 3}"
+                lines.append(html.escape(authors))
+                fact_bits = [str(paper.year), f"{paper.citation_count:,} citations"]
+                venue = " ".join(str(attrs.get("venue") or "").split())
+                if venue:
+                    fact_bits.append(venue if len(venue) <= 44 else venue[:41] + "...")
+                lines.append(html.escape(" | ".join(fact_bits)))
+            node_str = str(node)
+            relation_label = (
+                "seed paper"
+                if bool(attrs.get("is_seed", False))
+                else _HOVER_RELATION_LABELS.get(
+                    seed_relations.get(node_str, ""),
+                    _HOVER_RELATION_LABELS.get(provenance_map.get(node_str, ""), ""),
                 )
-            else:
-                hover_texts.append(
-                    html.escape(self.graph.nodes[node].get("title", node))
-                )
+            )
+            if relation_label:
+                lines.append(f"<i>{html.escape(relation_label)}</i>")
+            hover_texts.append("<br>".join(lines))
+
+        hover_palette = _UI_PALETTES[_theme_color_scheme(theme_obj)]
+        node_hoverlabel = dict(
+            bgcolor=hover_palette["panel_bg"],
+            bordercolor=hover_palette["panel_border"],
+            font=dict(color=hover_palette["text_primary"], size=12),
+            align="left",
+        )
 
         node_trace = go.Scatter(
             x=node_x,
@@ -674,6 +780,7 @@ class GraphExporter:
                 colorbar=marker_colorbar,
             ),
             hovertext=hover_texts,
+            hoverlabel=node_hoverlabel,
         )
 
         halo_trace: Optional[Any] = None
@@ -1261,18 +1368,20 @@ class GraphExporter:
         :param str collection_json: Serialized collection bundle JSON.
         :return str: Dashboard HTML content.
         """
-        is_dark = theme_obj.name in {"dark", "solarized"}
+        color_scheme = _theme_color_scheme(theme_obj)
+        palette = _UI_PALETTES[color_scheme]
         vars_map = {
-            "__BODY_BG__": "#0f1318" if is_dark else "#eef2f7",
-            "__PANEL_BG__": "#171d25" if is_dark else "#ffffff",
-            "__PANEL_BORDER__": "#2e3948" if is_dark else "#d5dce8",
-            "__TEXT_PRIMARY__": "#ecf1f8" if is_dark else "#1b2738",
-            "__TEXT_MUTED__": "#9ab0cb" if is_dark else "#5a6a80",
-            "__ACCENT__": "#4aa3ff" if is_dark else "#0f67d8",
-            "__ACCENT_SOFT__": "rgba(74, 163, 255, 0.2)"
-            if is_dark
-            else "rgba(15, 103, 216, 0.14)",
+            "__COLOR_SCHEME__": color_scheme,
+            "__BODY_BG__": palette["body_bg"],
+            "__PANEL_BG__": palette["panel_bg"],
+            "__PANEL_BORDER__": palette["panel_border"],
+            "__TEXT_PRIMARY__": palette["text_primary"],
+            "__TEXT_MUTED__": palette["text_muted"],
+            "__ACCENT__": palette["accent"],
+            "__ACCENT_SOFT__": palette["accent_soft"],
             "__GRAPH_BG__": theme_obj.background,
+            "__NODE_COLOR_OLD__": _rgb_tuple_to_hex(theme_obj.node_color_old),
+            "__NODE_COLOR_NEW__": _rgb_tuple_to_hex(theme_obj.node_color_new),
             "__PLOTLY_JS__": plotly_js,
             "__PAYLOAD_JSON__": payload_json,
             "__FIGURE_JSON__": figure_json,
@@ -1285,9 +1394,11 @@ class GraphExporter:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="darkreader-lock" />
+  <meta name="color-scheme" content="__COLOR_SCHEME__" />
   <title>CiteMesh Dashboard</title>
   <style>
     :root {
+      color-scheme: __COLOR_SCHEME__;
       --body-bg: __BODY_BG__;
       --panel-bg: __PANEL_BG__;
       --panel-border: __PANEL_BORDER__;
@@ -1444,6 +1555,10 @@ class GraphExporter:
       letter-spacing: 0.01em;
       color: var(--text-muted);
     }
+    #saved-filter {
+      justify-self: start;
+      width: fit-content;
+    }
     .chip.active {
       color: var(--text-primary);
       border-color: color-mix(in srgb, var(--accent) 70%, var(--panel-border));
@@ -1511,10 +1626,26 @@ class GraphExporter:
     }
     .paper-row-head {
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: 1fr auto auto;
       gap: 8px;
       align-items: baseline;
     }
+    .star-btn {
+      background: none;
+      border: none;
+      padding: 0 2px;
+      font-size: 15px;
+      line-height: 1;
+      color: var(--text-muted);
+      cursor: pointer;
+    }
+    .star-btn:hover {
+      background: none;
+      border: none;
+      transform: none;
+      color: #f5c451;
+    }
+    .star-btn.saved { color: #f5c451; }
     .paper-title {
       font-size: 20px;
       font-size: clamp(13.5px, 0.88vw, 15px);
@@ -1622,9 +1753,14 @@ class GraphExporter:
       border: 2px solid var(--seed-ring);
       background: rgba(214, 108, 191, 0.28);
     }
-    .legend-marker.citation { background: #7f8fa3; }
-    .legend-marker.semantic { background: #6d9f9b; }
-    .legend-marker.both { background: #a196b1; }
+    .legend-gradient {
+      width: 36px;
+      height: 10px;
+      border-radius: 999px;
+      display: inline-block;
+      border: 1px solid rgba(255, 255, 255, 0.32);
+      background: linear-gradient(90deg, __NODE_COLOR_OLD__, __NODE_COLOR_NEW__);
+    }
     #year-timeline {
       display: inline-grid;
       grid-template-columns: auto minmax(190px, 240px) auto;
@@ -1642,7 +1778,8 @@ class GraphExporter:
       height: 10px;
       border-radius: 999px;
       border: 1px solid color-mix(in srgb, var(--panel-border) 80%, transparent);
-      background: linear-gradient(90deg, #5a4f71 0%, #5e6381 20%, #4b7783 40%, #5b8b8c 60%, #7c9f94 80%, #c8be9f 100%);
+      /* Must match the node colorscale so the timeline doubles as the color legend. */
+      background: linear-gradient(90deg, __NODE_COLOR_OLD__ 0%, __NODE_COLOR_NEW__ 100%);
     }
     #detail-content {
       padding: 14px 13px 12px;
@@ -1849,6 +1986,8 @@ class GraphExporter:
         <button id="export-json-btn" class="nav-btn" type="button">Export JSON</button>
         <button id="export-csv-btn" class="nav-btn" type="button">Export CSV</button>
         <button id="export-bib-btn" class="nav-btn" type="button">All BibTeX</button>
+        <button id="export-saved-bib-btn" class="nav-btn" type="button" style="display:none">Saved BibTeX</button>
+        <button id="copy-saved-links-btn" class="nav-btn" type="button" style="display:none" title="Copy a markdown list of saved papers with links">Copy Saved Links</button>
         <button id="load-json-btn" class="nav-btn" type="button">Load Results</button>
         <input id="load-json-input" type="file" accept=".json,.html" style="display:none" />
       </div>
@@ -1879,6 +2018,7 @@ class GraphExporter:
           <button class="chip active" data-filter="semantic" type="button">semantic</button>
           <button class="chip active" data-filter="both" type="button">both</button>
         </div>
+        <button id="saved-filter" class="chip" type="button" title="Show only papers saved to your reading list">Saved</button>
       </div>
     </div>
   </header>
@@ -1902,11 +2042,10 @@ class GraphExporter:
         <div id="graph-footer">
           <div id="graph-legend">
             <span class="legend-item"><span class="legend-marker seed"></span>seed</span>
-            <span class="legend-item"><span class="legend-marker citation"></span>citation</span>
-            <span class="legend-item"><span class="legend-marker semantic"></span>semantic</span>
-            <span class="legend-item"><span class="legend-marker both"></span>both</span>
+            <span class="legend-item"><span class="legend-gradient"></span>older &#8594; newer</span>
+            <span class="legend-item muted">size = citations</span>
           </div>
-          <div id="year-timeline">
+          <div id="year-timeline" title="Node color encodes publication year">
             <span id="timeline-year-min">-</span>
             <div id="timeline-bar"></div>
             <span id="timeline-year-max">-</span>
@@ -2340,6 +2479,8 @@ class GraphExporter:
       yearMin: null,
       yearMax: null,
       visibleIds: new Set(nodeOrder),
+      savedOnly: false,
+      savedIds: loadSavedIdSet(),
     };
     const overlayState = {
       neighborhoodKey: "",
@@ -2374,7 +2515,85 @@ class GraphExporter:
       timelineYearMax: document.getElementById("timeline-year-max"),
       resultSelect: document.getElementById("result-select"),
       statusBanner: document.getElementById("dashboard-status"),
+      savedChip: document.getElementById("saved-filter"),
+      savedBibBtn: document.getElementById("export-saved-bib-btn"),
+      copySavedBtn: document.getElementById("copy-saved-links-btn"),
     };
+
+    function savedStorageKey() {
+      return "citemesh-saved:" + String((payload.meta && payload.meta.seed_id) || "default");
+    }
+
+    function loadSavedIdSet() {
+      try {
+        const raw = window.localStorage.getItem(savedStorageKey());
+        const parsed = raw ? JSON.parse(raw) : [];
+        return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+      } catch (err) {
+        return new Set();
+      }
+    }
+
+    function persistSavedIds() {
+      try {
+        window.localStorage.setItem(savedStorageKey(), JSON.stringify(Array.from(state.savedIds)));
+      } catch (err) {
+        // Storage unavailable (strict privacy mode, some file:// contexts):
+        // the reading list still works for the current session.
+      }
+    }
+
+    function isSaved(nodeId) {
+      return state.savedIds.has(String(nodeId || ""));
+    }
+
+    function savedNodes() {
+      return (payload.nodes || []).filter((node) => state.savedIds.has(String(node.id || "")));
+    }
+
+    function updateSavedUi() {
+      const count = state.savedIds.size;
+      if (controls.savedChip) {
+        controls.savedChip.textContent = count ? `Saved (${count})` : "Saved";
+        controls.savedChip.classList.toggle("active", state.savedOnly);
+      }
+      const showExports = count > 0;
+      if (controls.savedBibBtn) {
+        controls.savedBibBtn.style.display = showExports ? "" : "none";
+      }
+      if (controls.copySavedBtn) {
+        controls.copySavedBtn.style.display = showExports ? "" : "none";
+      }
+    }
+
+    function refreshSavedState() {
+      state.savedIds = loadSavedIdSet();
+      state.savedOnly = false;
+      updateSavedUi();
+    }
+
+    function toggleSaved(nodeId) {
+      const key = String(nodeId || "");
+      if (!key) {
+        return;
+      }
+      if (state.savedIds.has(key)) {
+        state.savedIds.delete(key);
+      } else {
+        state.savedIds.add(key);
+      }
+      persistSavedIds();
+      if (!state.savedIds.size) {
+        state.savedOnly = false;
+      }
+      updateSavedUi();
+      renderList();
+      if (state.hoverId === key) {
+        renderDetail(key, true);
+      } else if (state.selectedId === key && !state.hoverId) {
+        renderDetail(key, false);
+      }
+    }
 
     function clearDashboardStatus() {
       runtimeStatusMessage = "";
@@ -2423,6 +2642,9 @@ class GraphExporter:
     }
 
     function nodeMatches(node) {
+      if (state.savedOnly && !state.savedIds.has(String(node.id || ""))) {
+        return false;
+      }
       if (!nodeFilterClass(node)) {
         return false;
       }
@@ -2777,6 +2999,7 @@ class GraphExporter:
       }
       collectionResultId = currentResultIdForPayload(nextPayload);
       rebuildDerivedData();
+      refreshSavedState();
       overlayState.neighborhoodKey = "";
       overlayState.haloKey = "";
       state.selectedId = (payload.meta && payload.meta.seed_id) || null;
@@ -2892,6 +3115,14 @@ class GraphExporter:
       const neighborLine = neighbors.length
         ? `Top links: ${neighbors.map((entry) => `${compactNodeLabel(entry.id)} (w=${Number(entry.weight || 0).toFixed(2)})`).join("; ")}`
         : "Top links: none";
+      if (node.is_seed) {
+        controls.detailWhy.classList.remove("muted");
+        controls.detailWhy.innerHTML = [
+          `<div>${escapeHtml("Seed paper - every other node in this graph was gathered around it.")}</div>`,
+          `<div>${escapeHtml(neighborLine)}</div>`,
+        ].join("");
+        return;
+      }
       const seedId = (payload.meta && payload.meta.seed_id) || null;
       const path = seedId ? shortestPathIds(seedId, node.id) : [];
       const pathLine = path.length
@@ -2968,6 +3199,17 @@ class GraphExporter:
       controls.detailAbstract.classList.toggle("muted", !node.abstract);
 
       controls.detailActions.innerHTML = "";
+      const saveBtn = document.createElement("button");
+      saveBtn.type = "button";
+      saveBtn.textContent = isSaved(node.id) ? "★ Saved" : "☆ Save";
+      saveBtn.title = isSaved(node.id)
+        ? "Remove from reading list"
+        : "Save to reading list";
+      saveBtn.addEventListener("click", () => {
+        toggleSaved(node.id);
+      });
+      controls.detailActions.appendChild(saveBtn);
+
       const copyBtn = document.createElement("button");
       copyBtn.type = "button";
       copyBtn.textContent = "Copy BibTeX";
@@ -3147,9 +3389,11 @@ class GraphExporter:
         const provenanceClass = node.is_seed ? "meta-origin" : "";
         const provenanceLabel = provenance;
 
+        const saved = isSaved(node.id);
         row.innerHTML = `
           <div class="paper-row-head">
             <div class="paper-title">${escapeHtml(node.title || node.id)}</div>
+            <button class="star-btn${saved ? " saved" : ""}" type="button" title="${saved ? "Remove from reading list" : "Save to reading list"}" aria-label="${saved ? "Remove from reading list" : "Save to reading list"}" aria-pressed="${saved ? "true" : "false"}">${saved ? "&#9733;" : "&#9734;"}</button>
             <div class="paper-year">${escapeHtml(yearText)}</div>
           </div>
           <div class="paper-subline">${escapeHtml(authors)}</div>
@@ -3159,6 +3403,14 @@ class GraphExporter:
             <span class="${provenanceClass}">${escapeHtml(provenanceLabel)}</span>
           </div>
         `;
+
+        const starBtn = row.querySelector(".star-btn");
+        if (starBtn) {
+          starBtn.addEventListener("click", (event) => {
+            event.stopPropagation();
+            toggleSaved(node.id);
+          });
+        }
 
         row.addEventListener("mouseenter", () => {
           state.hoverId = node.id;
@@ -3315,6 +3567,39 @@ class GraphExporter:
         downloadBlob(entries.join("\\n\\n") + "\\n", seedSlug() + ".bib", "text/plain;charset=utf-8");
       });
 
+      controls.savedBibBtn.addEventListener("click", () => {
+        const entries = savedNodes().map((n) => (n.bibtex || "").trim()).filter(Boolean);
+        if (!entries.length) {
+          return;
+        }
+        downloadBlob(entries.join("\\n\\n") + "\\n", seedSlug() + "-saved.bib", "text/plain;charset=utf-8");
+      });
+
+      controls.copySavedBtn.addEventListener("click", () => {
+        const lines = savedNodes().map((n) => {
+          const links = n.links || {};
+          const href = links.arxiv_abs || links.doi || links.semantic_scholar || "";
+          const yearText = hasYear(n) ? ` (${n.year})` : "";
+          const title = String(n.title || n.id);
+          return href ? `- [${title}](${href})${yearText}` : `- ${title}${yearText}`;
+        });
+        if (!lines.length) {
+          return;
+        }
+        copyText(lines.join("\\n")).then(() => {
+          controls.copySavedBtn.textContent = "Copied";
+          window.setTimeout(() => {
+            controls.copySavedBtn.textContent = "Copy Saved Links";
+          }, 1000);
+        });
+      });
+
+      controls.savedChip.addEventListener("click", () => {
+        state.savedOnly = !state.savedOnly;
+        updateSavedUi();
+        renderList();
+      });
+
       const loadInput = document.getElementById("load-json-input");
       document.getElementById("load-json-btn").addEventListener("click", () => { loadInput.click(); });
       loadInput.addEventListener("change", (event) => {
@@ -3345,6 +3630,7 @@ class GraphExporter:
       setControlsCollapsed(false);
       populateCollectionSelector();
       updateYearPlaceholders();
+      updateSavedUi();
     }
 
     function setupGraphInteractions() {

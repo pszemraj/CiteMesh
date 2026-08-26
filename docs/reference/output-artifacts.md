@@ -107,10 +107,17 @@ The dashboard shell (`dashboard.html` in collection mode, or `<name>.dashboard.h
 - **Export JSON** — downloads the embedded enriched payload as a standalone `.json` file
 - **Export CSV** — generates a CSV table client-side from the current dataset
 - **All BibTeX** — downloads all papers' BibTeX entries as a single `.bib` file
+- **Saved BibTeX / Copy Saved Links** — appear once you star papers; download the reading list as `.bib`, or copy it as a markdown link list
 - **Saved Results selector** — switches between JSON payload slots already tracked in the collection shell, with no extra file picking
 - **Load Results** — file picker that accepts current-version CiteMesh JSON files plus current-version dashboard HTML exports. Current-version JSON keeps stored graph geometry when that geometry was exported. Older dashboard HTML exports are not supported; re-export them from the current code if you still need dashboard import. If you need JSON round-tripping through the dashboard, export JSON alongside a layout-based format such as `dashboard` or `plotly`.
 
 In collection mode, this means you can keep one `dashboard.html` open and move between saved result slots from the built-in selector, or load any other compatible JSON payload manually, rather than opening a separate dashboard HTML file for each paper. Re-running the same seed with the same strategy refreshes that slot instead of adding another selector entry.
+
+**Reading list:** every paper row and the detail panel carry a star toggle. Starred papers persist in browser `localStorage` per seed graph, the `Saved` chip filters the list down to them, and the saved-scoped export buttons above turn a triage session into a `.bib` file or a markdown link list without opening each paper in a tab.
+
+**Visual encodings:** node color is a publication-year gradient (the on-graph legend and year timeline share the exact colorscale), node size tracks citation count, the seed wears a ring halo, and edge opacity/width scale with relative link weight within the graph. Hovering a node shows a theme-styled card (wrapped title, authors, year | citations | venue, and its relation to the seed) and previews the full details panel; clicking locks the selection and draws its strongest links as arcs.
+
+All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening browser extensions leave the tuned palettes alone.
 
 ### Sidecar (`<strategy>.config.json`)
 

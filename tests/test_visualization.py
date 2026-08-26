@@ -430,20 +430,87 @@ def _extract_inline_script_bodies(html_text: str) -> list[str]:
 
 
 def test_inject_darkreader_lock_is_idempotent_and_head_gated(tmp_path: Path) -> None:
-    """HTML exports get exactly one Dark Reader lock tag; headless files stay put."""
+    """HTML exports get one Dark Reader lock plus a color-scheme declaration."""
     from citemesh.visualization.export import _inject_darkreader_lock
 
     page = tmp_path / "page.html"
     page.write_text("<html><head><title>x</title></head></html>", encoding="utf-8")
-    _inject_darkreader_lock(page)
-    assert page.read_text(encoding="utf-8").count("darkreader-lock") == 1
-    _inject_darkreader_lock(page)
+    _inject_darkreader_lock(page, "dark")
+    content = page.read_text(encoding="utf-8")
+    assert content.count("darkreader-lock") == 1
+    assert content.count('<meta name="color-scheme" content="dark" />') == 1
+    _inject_darkreader_lock(page, "dark")
     assert page.read_text(encoding="utf-8").count("darkreader-lock") == 1
 
     fragment = tmp_path / "fragment.html"
     fragment.write_text("<div>no head</div>", encoding="utf-8")
     _inject_darkreader_lock(fragment)
     assert "darkreader-lock" not in fragment.read_text(encoding="utf-8")
+
+    unknown = tmp_path / "unknown.html"
+    unknown.write_text("<html><head></head></html>", encoding="utf-8")
+    _inject_darkreader_lock(unknown, "hotdog")
+    assert '<meta name="color-scheme" content="light" />' in unknown.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_edge_strength_scale_normalizes_within_graph() -> None:
+    """Edge strengths must be min-max scaled so relative weight is visible."""
+    from citemesh.visualization.export import _edge_strength_scale
+
+    assert _edge_strength_scale([]) == []
+    assert _edge_strength_scale([0.7]) == [0.5]
+    assert _edge_strength_scale([0.9, 0.9, 0.9]) == [0.5, 0.5, 0.5]
+    scaled = _edge_strength_scale([0.55, 0.75, 0.95])
+    assert scaled[0] == pytest.approx(0.0)
+    assert scaled[1] == pytest.approx(0.5)
+    assert scaled[2] == pytest.approx(1.0)
+
+
+def test_plotly_hover_text_wraps_long_titles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Long titles wrap across hover lines instead of one full-width banner."""
+    graph, seed_id = _build_graph()
+    long_title = (
+        "A Remarkably Verbose and Meandering Study of Attention Mechanisms "
+        "Across Extremely Wide Tooltip Layouts"
+    )
+    graph.nodes["related"]["paper"] = Paper(
+        paper_id="related",
+        title=long_title,
+        year=2021,
+        authors=[Author(name="Bob Jones")],
+        citation_count=10,
+        venue="Related Journal",
+    )
+    graph.nodes["related"]["title"] = long_title
+
+    captured: dict[str, object] = {}
+
+    class FakeFigure(_BaseFakeFigure):
+        def __init__(self, data: Any, layout: Any) -> None:
+            super().__init__(data, layout)
+            captured["data"] = data
+
+        def write_html(self, path: str, **kwargs: Any) -> None:
+            del kwargs
+            Path(path).write_text("<html>plotly</html>")
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    exporter.to_plotly_html(tmp_path / "graph.plotly.html")
+
+    node_trace = captured["data"][1]
+    related_hover = node_trace["hovertext"][0]
+    title_line = related_hover.split("</b>")[0]
+    assert title_line.count("<br>") >= 1
+    assert all(
+        len(chunk) <= 58 for chunk in title_line.replace("<b>", "").split("<br>")
+    )
 
 
 def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
@@ -489,6 +556,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     rendered = out_path.read_text()
     for token in [
         '<meta name="darkreader-lock" />',
+        '<meta name="color-scheme" content="',
+        "color-scheme: ",
         'id="global-nav"',
         'id="filters-toggle"',
         'id="detail-why-lines"',
@@ -502,8 +571,22 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="result-select"',
         'id="dashboard-status"',
         'accept=".json,.html"',
+        'id="saved-filter"',
+        'id="export-saved-bib-btn"',
+        'id="copy-saved-links-btn"',
+        "legend-gradient",
+        "star-btn",
+        "citemesh-saved:",
     ]:
         assert token in rendered
+    # The legend must not advertise a provenance encoding the graph does not
+    # render (nodes are colored by year, not by source).
+    for stale_token in [
+        "legend-marker citation",
+        "legend-marker semantic",
+        "legend-marker both",
+    ]:
+        assert stale_token not in rendered
     for css_token in [
         "html, body {\n      margin: 0;\n      height: 100%;\n      overflow: hidden;",
         "#dashboard-root {\n      display: grid;\n      gap: 12px;\n      padding: 12px;\n      flex: 1 1 auto;",
@@ -553,6 +636,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     edge_shape = figure["layout"]["shapes"][0]
     assert edge_shape["type"] == "path"
     assert " Q " in edge_shape["path"]
+    # Single edge -> tie-normalized strength 0.5 -> midpoint of the visual range.
+    assert edge_shape["line"]["width"] == pytest.approx(0.7 + 2.1 * 0.5)
     halo_trace = next(
         trace for trace in figure["data"] if trace.get("name") == "selection-halo"
     )
@@ -573,6 +658,14 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert marker["sizeref"] > 0
     assert max(marker["line"]["width"]) >= 4
     assert min(marker["line"]["width"]) == 0
+    related_hover = node_trace["hovertext"][0]
+    seed_hover = node_trace["hovertext"][1]
+    assert "Related Journal" in related_hover
+    assert "semantic match" in related_hover
+    assert "10 citations" in related_hover
+    assert "seed paper" in seed_hover
+    # Hover cards use the dashboard panel chrome, not the marker color.
+    assert node_trace["hoverlabel"]["bgcolor"] == "#171d25"
 
 
 def test_exporter_dashboard_runtime_script_contracts(
