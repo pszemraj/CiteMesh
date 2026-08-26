@@ -17,6 +17,12 @@ For current usage details, see:
 - Key-aware Semantic Scholar rate limiting: authenticated clients pace at
   1 request/second, anonymous clients stay at 0.5. A one-time INFO notice on
   key-less runs points at the free API key signup.
+- Smarter retry backoff (tenacity): direct REST calls (search,
+  recommendations) now retry with full-jitter exponential backoff floored at
+  the server's `Retry-After` and capped at 60s, instead of sleeping a flat
+  `Retry-After: 2` on every attempt. The library-mediated call wrapper shares
+  the same policy. `citemesh search` help/docs now state plainly that it is
+  remote S2 keyword search for finding seed IDs, not local semantic search.
 - Fixed empty recommendation results for classic seed papers: the S2
   recommendations endpoint's default "recent" candidate pool returns nothing
   for older landmark papers (e.g. arXiv:1706.03762), which silently emptied

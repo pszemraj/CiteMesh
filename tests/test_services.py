@@ -263,7 +263,9 @@ def test_retry_and_backoff_contracts() -> None:
         results = client.search_papers("attention")
 
     assert sleep_mock.call_count == 1
-    assert sleep_mock.call_args_list[0].args[0] == 2.0
+    # Jittered backoff floored at Retry-After (2s), capped by the rate-limit
+    # multiplier for the first retry (2 * retry_delay).
+    assert 2.0 <= sleep_mock.call_args_list[0].args[0] <= 2 * API_CONFIG.retry_delay
     assert len(results) == 1
     assert results[0] == Paper(paper_id="x1", title="A", year=2020, abstract="Abstract")
 
@@ -281,7 +283,8 @@ def test_retry_and_backoff_contracts() -> None:
         results = client.search_papers("transformer")
 
     assert sleep_mock.call_count == 1
-    assert sleep_mock.call_args_list[0].args[0] == API_CONFIG.retry_delay
+    # Full-jitter wait for a non-429 transient failure on the first retry.
+    assert 0.0 <= sleep_mock.call_args_list[0].args[0] <= API_CONFIG.retry_delay
     assert len(results) == 1
     assert results[0].paper_id == "x2"
 
@@ -303,7 +306,8 @@ def test_retry_and_backoff_contracts() -> None:
     assert isinstance(result, Paper)
     assert result.paper_id == "seed"
     assert sleep_mock.call_count == 1
-    assert sleep_mock.call_args_list[0].args[0] == API_CONFIG.retry_delay
+    # Full-jitter wait for a non-429 transient failure on the first retry.
+    assert 0.0 <= sleep_mock.call_args_list[0].args[0] <= API_CONFIG.retry_delay
 
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
@@ -948,6 +952,38 @@ def test_recommendations_fall_back_to_all_cs_pool() -> None:
     client._request_json = MagicMock(return_value={"recommendedPapers": []})
     assert client.get_recommended_papers("seed", limit=5) == []
     assert client._request_json.call_count == 2
+
+
+def test_jittered_backoff_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Backoff escalates exponentially with jitter, floored at Retry-After."""
+    drawn_bounds: list[tuple[float, float]] = []
+
+    def _record_uniform(low: float, high: float) -> float:
+        drawn_bounds.append((low, high))
+        return high  # deterministic: always draw the cap
+
+    monkeypatch.setattr(semantic_module.random, "uniform", _record_uniform)
+
+    # Exponential cap growth: retry_delay * 2^(attempt-1), doubled when
+    # rate-limited, capped at _MAX_BACKOFF_SECONDS.
+    delay = API_CONFIG.retry_delay
+    assert semantic_module._jittered_backoff(1) == delay
+    assert semantic_module._jittered_backoff(2) == delay * 2
+    assert semantic_module._jittered_backoff(1, rate_limited=True) == delay * 2
+    assert semantic_module._jittered_backoff(3, rate_limited=True) == delay * 8
+    assert (
+        semantic_module._jittered_backoff(30, rate_limited=True)
+        == semantic_module._MAX_BACKOFF_SECONDS
+    )
+    assert all(low == 0.0 for low, _high in drawn_bounds)
+
+    # Retry-After floors the wait but never exceeds the global cap.
+    monkeypatch.setattr(semantic_module.random, "uniform", lambda low, high: 0.0)
+    assert semantic_module._jittered_backoff(1, retry_after=7.5) == 7.5
+    assert (
+        semantic_module._jittered_backoff(1, retry_after=999.0)
+        == semantic_module._MAX_BACKOFF_SECONDS
+    )
 
 
 def test_search_raise_on_unavailable_distinguishes_rate_limit() -> None:

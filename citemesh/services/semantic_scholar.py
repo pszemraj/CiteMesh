@@ -8,6 +8,7 @@ import json
 import logging
 import numbers
 import os
+import random
 import threading
 import time
 from pathlib import Path
@@ -17,6 +18,13 @@ from urllib.parse import quote
 import requests
 from semanticscholar import SemanticScholar
 from semanticscholar.SemanticScholarException import ObjectNotFoundException
+from tenacity import (
+    RetryCallState,
+    Retrying,
+    retry_if_exception_type,
+    stop_after_attempt,
+)
+from tenacity.wait import wait_base
 
 from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data import get_cache_dir
@@ -57,6 +65,64 @@ _anonymous_pool_announced = False
 
 class SemanticScholarUnavailableError(RuntimeError):
     """Raised when the Semantic Scholar API stays unreachable after retries."""
+
+
+_MAX_BACKOFF_SECONDS = 60.0
+
+
+def _jittered_backoff(
+    attempt_number: int,
+    *,
+    retry_after: Optional[float] = None,
+    rate_limited: bool = False,
+) -> float:
+    """Compute full-jitter exponential backoff floored at the server's Retry-After.
+
+    Repeated 429s escalate beyond a flat server hint (S2 keeps answering
+    ``Retry-After: 2`` while its shared pool stays saturated), while jitter
+    de-synchronizes concurrent clients.
+
+    :param int attempt_number: 1-based retry attempt number.
+    :param Optional[float] retry_after: Server-provided Retry-After seconds.
+    :param bool rate_limited: Whether the failure was an HTTP 429.
+    :return float: Wait duration in seconds, capped at ``_MAX_BACKOFF_SECONDS``.
+    """
+    multiplier = API_CONFIG.retry_delay * (2.0 if rate_limited else 1.0)
+    cap = min(multiplier * (2.0 ** (attempt_number - 1)), _MAX_BACKOFF_SECONDS)
+    wait = random.uniform(0.0, cap)
+    if retry_after is not None:
+        wait = max(retry_after, wait)
+    return min(wait, _MAX_BACKOFF_SECONDS)
+
+
+class _RetryableRequestError(RuntimeError):
+    """Internal marker for retryable direct-REST failures (HTTP 429)."""
+
+    def __init__(self, message: str, retry_after: Optional[float] = None) -> None:
+        """Create a retryable request error.
+
+        :param str message: Failure description.
+        :param Optional[float] retry_after: Parsed Retry-After header seconds.
+        """
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+class _S2BackoffWait(wait_base):
+    """Tenacity wait strategy applying the shared jittered-backoff policy."""
+
+    def __call__(self, retry_state: RetryCallState) -> float:
+        """Compute the wait for the given retry state.
+
+        :param RetryCallState retry_state: Tenacity retry state.
+        :return float: Wait duration in seconds.
+        """
+        exc = retry_state.outcome.exception() if retry_state.outcome else None
+        return _jittered_backoff(
+            retry_state.attempt_number,
+            retry_after=getattr(exc, "retry_after", None),
+            rate_limited=isinstance(exc, _RetryableRequestError),
+        )
 
 
 def _reference_cache_dir() -> Path:
@@ -339,13 +405,11 @@ class SemanticScholarClient:
         :param int attempt: Zero-based retry attempt index.
         :return float: Delay in seconds before retry.
         """
-        if error:
-            retry_after = self._get_retry_after(error)
-            if retry_after is not None:
-                return retry_after
-        if self._is_rate_limit_error(error) if error else False:
-            return API_CONFIG.retry_delay * (2**attempt) * 2
-        return API_CONFIG.retry_delay * (2**attempt)
+        retry_after = self._get_retry_after(error) if error else None
+        rate_limited = self._is_rate_limit_error(error) if error else False
+        return _jittered_backoff(
+            attempt + 1, retry_after=retry_after, rate_limited=rate_limited
+        )
 
     @staticmethod
     def _get_retry_after(error: Exception) -> Optional[float]:
@@ -709,55 +773,76 @@ class SemanticScholarClient:
         :param str context: Request description used in availability errors.
         :return Optional[Dict[str, Any]]: Parsed JSON payload or ``None`` on failure.
         """
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                response = self._session.get(url, params=params, timeout=self.timeout)
 
-                if response.status_code == 404:
-                    return None
+        def _attempt() -> Optional[Dict[str, Any]]:
+            """Issue one paced request, raising on retryable failures.
 
-                if response.status_code == 429:
-                    retry_after = self._safe_retry_after(response)
-                    logger.warning(
-                        "Rate limited by Semantic Scholar. Waiting %ss before retry.",
-                        retry_after,
-                    )
-                    if attempt < API_CONFIG.max_retries - 1:
-                        time.sleep(retry_after)
-                        continue
-                    if raise_on_unavailable:
-                        raise self._unavailable_error(context, "", rate_limited=True)
-                    return None
+            :return Optional[Dict[str, Any]]: Parsed payload or ``None`` on 404.
+            """
+            self._rate_limit()
+            response = self._session.get(url, params=params, timeout=self.timeout)
+            if response.status_code == 404:
+                return None
+            if response.status_code == 429:
+                raise _RetryableRequestError(
+                    f"HTTP 429 from {url}",
+                    retry_after=self._safe_retry_after(response),
+                )
+            response.raise_for_status()
+            return response.json()
 
-                response.raise_for_status()
-                return response.json()
+        def _log_before_sleep(retry_state: RetryCallState) -> None:
+            """Log the upcoming retry with its computed wait.
 
-            except (requests.RequestException, ValueError) as exc:
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    logger.warning(
-                        "Request failed (attempt %s) for %s: %s. Retrying in %ss",
-                        attempt + 1,
-                        url,
-                        exc,
-                        wait_time,
-                    )
-                    time.sleep(wait_time)
-                else:
-                    if raise_on_unavailable:
-                        raise self._unavailable_error(
-                            context,
-                            f": {exc}",
-                            rate_limited=self._is_rate_limit_error(exc),
-                        ) from exc
-                    logger.error(
-                        "Failed to call %s after %s attempts: %s",
-                        url,
-                        API_CONFIG.max_retries,
-                        exc,
-                    )
-        return None
+            :param RetryCallState retry_state: Tenacity retry state.
+            """
+            exc = retry_state.outcome.exception() if retry_state.outcome else None
+            wait_seconds = (
+                retry_state.next_action.sleep if retry_state.next_action else 0.0
+            )
+            if isinstance(exc, _RetryableRequestError):
+                logger.warning(
+                    "Rate limited by Semantic Scholar. Waiting %.1fs before retry.",
+                    wait_seconds,
+                )
+            else:
+                logger.warning(
+                    "Request failed (attempt %s) for %s: %s. Retrying in %.1fs",
+                    retry_state.attempt_number,
+                    url,
+                    exc,
+                    wait_seconds,
+                )
+
+        retryer = Retrying(
+            stop=stop_after_attempt(API_CONFIG.max_retries),
+            wait=_S2BackoffWait(),
+            retry=retry_if_exception_type(
+                (_RetryableRequestError, requests.RequestException, ValueError)
+            ),
+            before_sleep=_log_before_sleep,
+            sleep=lambda seconds: time.sleep(seconds),
+            reraise=True,
+        )
+
+        try:
+            return retryer(_attempt)
+        except (_RetryableRequestError, requests.RequestException, ValueError) as exc:
+            rate_limited = isinstance(
+                exc, _RetryableRequestError
+            ) or self._is_rate_limit_error(exc)
+            if raise_on_unavailable:
+                detail = "" if isinstance(exc, _RetryableRequestError) else f": {exc}"
+                raise self._unavailable_error(
+                    context, detail, rate_limited=rate_limited
+                ) from exc
+            logger.error(
+                "Failed to call %s after %s attempts: %s",
+                url,
+                API_CONFIG.max_retries,
+                exc,
+            )
+            return None
 
     def get_paper(
         self,

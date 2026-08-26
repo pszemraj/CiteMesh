@@ -25,7 +25,7 @@ citemesh build "<paper-id>" [options]
 Other command groups:
 
 ```bash
-# Search by keyword/title
+# Find seed paper IDs (remote Semantic Scholar keyword search)
 citemesh search "<query>" [--limit N|-n N]
 
 # Cache management commands
@@ -231,6 +231,14 @@ citemesh build "arxiv:2404.08801" \
 citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
 ```
+
+`citemesh search` is remote keyword search on the Semantic Scholar API — a
+convenience for finding seed paper IDs, not a semantic search over your local
+embedding index. It shares the anonymous S2 rate-limit pool (the endpoint most
+prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the
+command reports the rate limit honestly instead of pretending there were no
+results. Local semantic search over built/downloaded indexes is a possible
+future direction.
 
 ## Troubleshooting
 

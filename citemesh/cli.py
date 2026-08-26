@@ -1672,7 +1672,13 @@ User configuration:
     # Search subcommand
     search_parser = subparsers.add_parser(
         "search",
-        help="Search papers by title or keyword",
+        help="Find seed paper IDs via Semantic Scholar keyword search",
+        description=(
+            "Keyword search on the Semantic Scholar API, mainly for finding a "
+            "seed paper ID to pass to `citemesh build`. This queries the remote "
+            "S2 search endpoint (not a local semantic index), which shares an "
+            "anonymous rate-limit pool unless S2_API_KEY is set."
+        ),
         parents=[command_logging_parent],
     )
     search_parser.add_argument("query", type=_non_empty_str, help="Search query")
