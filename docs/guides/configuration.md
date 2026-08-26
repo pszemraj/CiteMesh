@@ -51,7 +51,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 
 ## Supported keys
 
-`[defaults]` — whitelisted build-flag defaults:
+`[defaults]` — whitelisted build-flag defaults (plus `search_mode`, which applies to `citemesh search` instead of `build`):
 
 | Key | Meaning |
 | --- | --- |
@@ -75,6 +75,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `dataset_split` | Default `--dataset-split` |
 | `streaming` | Default `--streaming` toggle |
 | `torch_compile` | Default `--torch-compile` toggle |
+| `search_mode` | Default `citemesh search` mode (`auto`, `local`, `s2`). `auto` searches your local embedding cache when it has vectors and falls back to Semantic Scholar keyword search otherwise. |
 
 `[api]`:
 

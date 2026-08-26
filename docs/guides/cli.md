@@ -25,11 +25,13 @@ citemesh build "<paper-id>" [options]
 Other command groups:
 
 ```bash
-# Find seed paper IDs (remote Semantic Scholar keyword search)
+# Find seed paper IDs (auto: local semantic search when your cache has
+# embeddings, otherwise Semantic Scholar keyword search)
 citemesh search "<query>" [--limit N|-n N]
 
-# Semantic search over your locally cached embeddings (no S2 traffic)
-citemesh search "<query>" --local [--limit N|-n N] [--model M] [--device D]
+# Force a mode: local cache semantic search or S2 keyword search
+citemesh search "<query>" --mode local [--model M] [--device D]
+citemesh search "<query>" --mode s2
 
 # Cache management commands
 citemesh cache scan
@@ -219,9 +221,9 @@ citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
 ```
 
-`citemesh search` has two modes. The default is remote keyword search on the Semantic Scholar API — a convenience for finding seed paper IDs. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results.
+`citemesh search` has two backends selected by `--mode`. Mode `local` is semantic search over the embeddings already persisted in your local cache: candidate vectors accumulate across embedding/hybrid builds (every build grows your searchable library), or the full hydrated corpus in `arxiv-corpus` mode. The query is encoded locally in the model's query prompt space and ranked against every cached vector — no Semantic Scholar traffic, works offline once the model is downloaded. Results include cosine scores and full paper IDs ready for `citemesh build`. Mode `s2` is remote keyword search on the Semantic Scholar API — a convenience for finding seed paper IDs. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results.
 
-`citemesh search "<query>" --local` is semantic search over the embeddings already persisted in your local cache: candidate vectors accumulate across embedding/hybrid builds (every build grows your searchable library), or the full hydrated corpus in `arxiv-corpus` mode. The query is encoded locally in the model's query prompt space and ranked against every cached vector — no Semantic Scholar traffic, works offline once the model is downloaded. Results include cosine scores and full paper IDs ready for `citemesh build`.
+The default mode is `auto`: local search when your cache has embeddings, S2 keyword search otherwise, with a log line saying which backend ran and why. Persist a preference with `citemesh config set defaults.search_mode <auto|local|s2>` (explicit `--mode` still wins). Passing `--model` or `--device` implies local mode. Explicitly requesting `local` (flag or config) with an empty cache is an error with guidance rather than a silent fallback.
 
 Local search targets the same cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. Namespaces are keyed by model and compute dtype: pass `--model` if you build with a non-default model, and note that CPU (float32) and CUDA/MPS (bfloat16) runs use distinct namespaces — search on the same device class you build on.
 

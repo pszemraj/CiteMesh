@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import io
 import logging
 import os
@@ -16,6 +17,7 @@ from citemesh.core.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
     DEVICE_CHOICES,
     EXPORT_CHOICES,
+    SEARCH_MODE_CHOICES,
     SEMANTIC_SOURCE_CHOICES,
     STORAGE_PRECISION_CHOICES,
     STRATEGY_CHOICES,
@@ -223,10 +225,45 @@ def test_config_choice_specs_match_build_parser_choices() -> None:
     assert set(parser_choices["export"]) == set(EXPORT_CHOICES)
 
 
+# Config defaults consumed by non-build commands; `_apply_user_config_defaults`
+# skips them for build args because the build namespace lacks the attribute.
+_NON_BUILD_CONFIG_KEYS = frozenset({"search_mode"})
+
+
 def test_config_default_keys_exist_as_build_dests() -> None:
     args, _, _ = _parsed_build_args(["paper-id"])
     for dest in CONFIG_DEFAULT_KEY_SPECS:
+        if dest in _NON_BUILD_CONFIG_KEYS:
+            assert not hasattr(args, dest), (
+                f"non-build config key '{dest}' unexpectedly collides with a "
+                "build parser dest"
+            )
+            continue
         assert hasattr(args, dest), f"config key '{dest}' is not a build parser dest"
+
+
+def test_search_mode_choices_match_search_parser() -> None:
+    parser, _, _, _ = cli_module._create_parser()
+    subparsers_action = next(
+        action
+        for action in parser._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    search_parser = subparsers_action.choices["search"]
+    mode_action = next(
+        action for action in search_parser._actions if action.dest == "mode"
+    )
+    assert set(mode_action.choices) == set(SEARCH_MODE_CHOICES)
+
+
+def test_search_mode_round_trip_and_validation(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.toml"
+    assert set_config_value("defaults.search_mode", "local", path=config_path) == (
+        "local"
+    )
+    assert load_user_config(config_path).defaults["search_mode"] == "local"
+    with pytest.raises(ConfigValueError, match="defaults.search_mode"):
+        set_config_value("defaults.search_mode", "hybrid", path=config_path)
 
 
 # ---------------------------------------------------------------------------

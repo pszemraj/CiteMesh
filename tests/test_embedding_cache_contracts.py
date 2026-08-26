@@ -547,6 +547,29 @@ def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
     assert results == []
 
 
+def test_embedding_cache_embedding_count_tracks_persisted_rows() -> None:
+    """embedding_count should report 0 for empty namespaces and rows after upserts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="embedding-count")
+        assert cache.embedding_count() == 0
+
+        _set_test_int8_calibration(cache)
+        cache.get_embeddings(
+            {
+                "p1": {"title": "Alpha", "abstract": "First"},
+                "p2": {"title": "Beta", "abstract": "Second"},
+            },
+            LookupEncodeModel(
+                {
+                    "Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32),
+                    "Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32),
+                }
+            ),
+            show_progress=False,
+        )
+        assert cache.embedding_count() == 2
+
+
 def test_embedding_cache_default_text_builder_matches_profile_formatter() -> None:
     """Default cache text builder should match the default profile formatter."""
 

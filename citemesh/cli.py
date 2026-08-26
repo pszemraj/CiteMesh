@@ -26,6 +26,7 @@ from rich.table import Table
 from citemesh._runtime import stderr_isatty, stdin_isatty, stdout_isatty
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
 from citemesh.core.user_config import (
+    SEARCH_MODE_CHOICES,
     USER_CONFIG_FILENAME,
     ConfigFileError,
     ConfigKeyError,
@@ -1672,14 +1673,18 @@ User configuration:
     # Search subcommand
     search_parser = subparsers.add_parser(
         "search",
-        help="Search papers (S2 keyword search, or --local semantic search)",
+        help="Search papers (local semantic index or the Semantic Scholar API)",
         description=(
-            "Default: keyword search on the Semantic Scholar API for finding a "
-            "seed paper ID to pass to `citemesh build` (shares an anonymous "
-            "rate-limit pool unless S2_API_KEY is set). With --local: semantic "
-            "search over the embeddings already persisted in your local cache "
-            "(candidate vectors accumulated across builds, or a hydrated "
-            "corpus) - no Semantic Scholar traffic."
+            "Find papers to pass to `citemesh build`. Mode `local` runs "
+            "semantic search over the embeddings already persisted in your "
+            "local cache (candidate vectors accumulated across builds, or a "
+            "hydrated corpus) with no Semantic Scholar traffic. Mode `s2` "
+            "runs keyword search on the Semantic Scholar API (shares an "
+            "anonymous rate-limit pool unless S2_API_KEY is set). The default "
+            "mode `auto` searches locally when your cache has embeddings and "
+            "falls back to `s2` otherwise, logging which one ran. Persist a "
+            "preference with `citemesh config set defaults.search_mode "
+            "<mode>`."
         ),
         parents=[command_logging_parent],
     )
@@ -1692,11 +1697,12 @@ User configuration:
         help="Maximum results (default: 10)",
     )
     search_parser.add_argument(
-        "--local",
-        action="store_true",
+        "--mode",
+        choices=list(SEARCH_MODE_CHOICES),
+        default=None,
         help=(
-            "Semantically search the local embedding cache instead of the "
-            "Semantic Scholar API"
+            "Search mode (default: config.toml defaults.search_mode, else "
+            "auto: local when cached embeddings exist, s2 otherwise)"
         ),
     )
     search_parser.add_argument(
@@ -1704,15 +1710,16 @@ User configuration:
         "-m",
         default=None,
         help=(
-            "Embedding model for --local search; must match the model used at "
-            "build time (default: config.toml default or built-in default)"
+            "Embedding model for local search (implies --mode local); must "
+            "match the model used at build time (default: config.toml "
+            "default or built-in default)"
         ),
     )
     search_parser.add_argument(
         "--device",
         choices=list(EMBEDDING_DEVICE_CHOICES),
         default=None,
-        help="Compute device for --local query encoding (default: auto)",
+        help="Compute device for local query encoding (implies --mode local)",
     )
     cache_parser = subparsers.add_parser(
         "cache",
@@ -2688,22 +2695,44 @@ def _run_config_command(
     return 1
 
 
-def _run_local_search(
+def _resolve_search_mode(
+    args: argparse.Namespace, user_config: UserConfig
+) -> Tuple[str, str]:
+    """Resolve the effective search mode and where it came from.
+
+    Precedence: explicit ``--mode`` flag > config.toml
+    ``defaults.search_mode`` > built-in ``auto``.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return Tuple[str, str]: ``(mode, origin)`` with origin one of ``flag``,
+        ``config``, ``default``.
+    """
+    if args.mode:
+        return str(args.mode), "flag"
+    configured = user_config.defaults.get("search_mode")
+    if configured:
+        return str(configured), "config"
+    return "auto", "default"
+
+
+def _prepare_local_search_builder(
     args: argparse.Namespace,
     build_parser: argparse.ArgumentParser,
     user_config: UserConfig,
-) -> int:
-    """Run semantic search over the local embedding cache.
+) -> Tuple[EmbeddingGraphBuilder, argparse.Namespace]:
+    """Construct the embedding builder local search runs against.
 
     Mirrors a flagless build's defaults pipeline (config.toml defaults plus
     candidate-mode storage normalization) so the search targets the same cache
-    namespace a default build writes to.
+    namespace a default build writes to; ``--model``/``--device`` override.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
         derive build-equivalent defaults.
     :param UserConfig user_config: Loaded user configuration snapshot.
-    :return int: Process-style exit code.
+    :return Tuple[EmbeddingGraphBuilder, argparse.Namespace]: Builder and the
+        effective build-equivalent defaults namespace.
     """
     defaults = build_parser.parse_args(["local-search-placeholder-seed"])
     _pop_tracked_option_dests(defaults)
@@ -2717,15 +2746,24 @@ def _run_local_search(
     if args.model:
         defaults.model = args.model
     if args.device:
-        try:
-            resolve_embedding_device(args.device)
-        except ValueError as exc:
-            logger.error(str(exc))
-            return 2
         defaults.device = args.device
+    builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
+    return builder, defaults
 
+
+def _render_local_search(
+    args: argparse.Namespace,
+    builder: EmbeddingGraphBuilder,
+    defaults: argparse.Namespace,
+) -> int:
+    """Encode the query, search the local cache, and render ranked results.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :param EmbeddingGraphBuilder builder: Builder targeting the search namespace.
+    :param argparse.Namespace defaults: Effective build-equivalent defaults.
+    :return int: Process-style exit code.
+    """
     try:
-        builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
         results = builder.search_local(args.query, top_k=args.limit)
     except Exception as exc:
         logger.error(
@@ -2738,12 +2776,8 @@ def _run_local_search(
     cache = builder.embedding_cache
     if not results:
         logger.error(
-            "No embeddings in the local cache namespace for model=%s "
-            "semantic-source=%s (cache: %s). Run `citemesh build` with this "
-            "model to accumulate candidate vectors, or hydrate a corpus via "
-            "--semantic-source arxiv-corpus.",
+            "Local search returned no results for model=%s (cache: %s).",
             defaults.model,
-            defaults.semantic_source,
             cache.h5_path,
         )
         return 1
@@ -2784,6 +2818,167 @@ def _run_local_search(
     for i, result in enumerate(results, 1):
         output_console.print(f"[dim]{i}.[/dim] {result.paper_id}")
     return 0
+
+
+def _run_s2_search(args: argparse.Namespace) -> int:
+    """Run keyword search on the Semantic Scholar API and render results.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :return int: Process-style exit code.
+    """
+    try:
+        client = get_client()
+        logger.info(f"Searching for: {args.query}")
+        results = client.search_papers(
+            args.query, limit=args.limit, raise_on_unavailable=True
+        )
+
+        if not results:
+            logger.error("No results found.")
+            return 1
+
+        table = Table(title=f"Search results for '{args.query}'")
+        table.add_column("#", style="dim", width=3)
+        # Keep full IDs copyable for direct use in `citemesh build`.
+        table.add_column("ID", style="cyan", overflow="fold")
+        table.add_column("Title", overflow="fold")
+        table.add_column("Year", justify="right", width=6)
+        table.add_column("Citations", justify="right", width=10)
+        table.add_column("Authors", max_width=30)
+
+        for i, paper in enumerate(results, 1):
+            authors_str = ", ".join(a.name for a in paper.authors[:2])
+            if len(paper.authors) > 2:
+                authors_str += " et al."
+
+            table.add_row(
+                str(i),
+                paper.paper_id,
+                paper.title,
+                str(paper.year) if paper.year is not None else "",
+                f"{paper.citation_count:,}",
+                authors_str,
+            )
+
+        output_console.print(table)
+        output_console.print("\n[dim]Full paper IDs:[/dim]")
+        for i, paper in enumerate(results, 1):
+            output_console.print(f"[dim]{i}.[/dim] {paper.paper_id}")
+        output_console.print(
+            "\n[dim]Use the paper ID with:[/dim] "
+            'citemesh build "<ID>" --strategy recommendation'
+        )
+
+    except SemanticScholarUnavailableError as e:
+        logger.error(str(e))
+        return 1
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        return 1
+    return 0
+
+
+def _run_search_command(
+    args: argparse.Namespace,
+    build_parser: argparse.ArgumentParser,
+    user_config: UserConfig,
+) -> int:
+    """Dispatch `citemesh search` across local and S2 modes.
+
+    Mode ``auto`` prefers the local embedding cache when it has vectors and
+    falls back to the Semantic Scholar API otherwise, logging which one ran.
+    Explicitly requested local mode treats an empty cache as an error.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :param argparse.ArgumentParser build_parser: Build subparser used to
+        derive build-equivalent defaults for local search.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return int: Process-style exit code.
+    """
+    mode, origin = _resolve_search_mode(args, user_config)
+    if args.model or args.device:
+        if args.mode == "s2":
+            logger.error(
+                "--model and --device only apply to local semantic search; "
+                "drop them or use --mode local."
+            )
+            return 2
+        if mode != "local":
+            # Namespace-selecting flags are explicit local intent; they
+            # outrank a config-level s2/auto default.
+            mode, origin = "local", "flag"
+    if args.device:
+        try:
+            resolve_embedding_device(args.device)
+        except ValueError as exc:
+            logger.error(str(exc))
+            return 2
+
+    if mode == "s2":
+        if origin == "config":
+            logger.info(
+                "Searching the Semantic Scholar API (defaults.search_mode = "
+                "'s2' in %s).",
+                user_config.path,
+            )
+        return _run_s2_search(args)
+
+    try:
+        builder, defaults = _prepare_local_search_builder(
+            args, build_parser, user_config
+        )
+        cached_count = builder.embedding_cache.embedding_count()
+    except Exception as exc:
+        if mode == "auto":
+            logger.info(
+                "Local semantic search unavailable (%s); searching the "
+                "Semantic Scholar API instead.",
+                exc,
+            )
+            return _run_s2_search(args)
+        logger.error(
+            "Local search unavailable: %s",
+            exc,
+            exc_info=logging.getLogger().level == logging.DEBUG,
+        )
+        return 1
+
+    if mode == "auto":
+        if cached_count > 0:
+            logger.info(
+                "Searching %s locally cached embeddings (model=%s). "
+                "Use --mode s2 for Semantic Scholar keyword search.",
+                f"{cached_count:,}",
+                defaults.model,
+            )
+            return _render_local_search(args, builder, defaults)
+        logger.info(
+            "Local embedding cache is empty; searching the Semantic Scholar "
+            "API instead. Local semantic search activates once your builds "
+            "have embedded papers."
+        )
+        return _run_s2_search(args)
+
+    # Explicit local mode: an empty cache is an error, not a fallback.
+    if cached_count == 0:
+        requested_via = (
+            "--mode local"
+            if origin == "flag"
+            else f"defaults.search_mode in {user_config.path}"
+        )
+        logger.error(
+            "Local search was requested via %s, but the local embedding cache "
+            "has no vectors for model=%s semantic-source=%s (cache: %s). "
+            "Local search covers papers your builds have already embedded - "
+            "run `citemesh build` with the embedding or hybrid strategy to "
+            "populate it, or use --mode s2 for keyword search.",
+            requested_via,
+            defaults.model,
+            defaults.semantic_source,
+            builder.embedding_cache.h5_path,
+        )
+        return 1
+    return _render_local_search(args, builder, defaults)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -3028,60 +3223,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
     elif args.command == "search":
-        if not args.local and (args.model or args.device):
-            logger.error("--model and --device require --local.")
-            return 2
-        if args.local:
-            return _run_local_search(args, build_parser, user_config)
-        try:
-            client = get_client()
-            logger.info(f"Searching for: {args.query}")
-            results = client.search_papers(
-                args.query, limit=args.limit, raise_on_unavailable=True
-            )
-
-            if not results:
-                logger.error("No results found.")
-                return 1
-
-            table = Table(title=f"Search results for '{args.query}'")
-            table.add_column("#", style="dim", width=3)
-            # Keep full IDs copyable for direct use in `citemesh build`.
-            table.add_column("ID", style="cyan", overflow="fold")
-            table.add_column("Title", overflow="fold")
-            table.add_column("Year", justify="right", width=6)
-            table.add_column("Citations", justify="right", width=10)
-            table.add_column("Authors", max_width=30)
-
-            for i, paper in enumerate(results, 1):
-                authors_str = ", ".join(a.name for a in paper.authors[:2])
-                if len(paper.authors) > 2:
-                    authors_str += " et al."
-
-                table.add_row(
-                    str(i),
-                    paper.paper_id,
-                    paper.title,
-                    str(paper.year) if paper.year is not None else "",
-                    f"{paper.citation_count:,}",
-                    authors_str,
-                )
-
-            output_console.print(table)
-            output_console.print("\n[dim]Full paper IDs:[/dim]")
-            for i, paper in enumerate(results, 1):
-                output_console.print(f"[dim]{i}.[/dim] {paper.paper_id}")
-            output_console.print(
-                "\n[dim]Use the paper ID with:[/dim] "
-                'citemesh build "<ID>" --strategy recommendation'
-            )
-
-        except SemanticScholarUnavailableError as e:
-            logger.error(str(e))
-            return 1
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return 1
+        return _run_search_command(args, build_parser, user_config)
     elif args.command == "cache":
         if args.cache_command == "scan":
             exit_code = _scan_cache_directory()

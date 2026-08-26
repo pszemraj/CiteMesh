@@ -46,6 +46,7 @@ THEME_CHOICES: Tuple[str, ...] = ("light", "dark", "solarized", "auto")
 DEVICE_CHOICES: Tuple[str, ...] = ("auto", "cuda", "mps", "cpu")
 SEMANTIC_SOURCE_CHOICES: Tuple[str, ...] = ("candidates", "arxiv-corpus")
 STORAGE_PRECISION_CHOICES: Tuple[str, ...] = ("int8", "float16", "float32")
+SEARCH_MODE_CHOICES: Tuple[str, ...] = ("auto", "local", "s2")
 EXPORT_CHOICES: Tuple[str, ...] = (
     "png",
     "html",
@@ -213,6 +214,12 @@ CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigKeySpec] = {
     "dataset_split": ConfigKeySpec(_cast_str, "Default --dataset-split value"),
     "streaming": ConfigKeySpec(_cast_bool, "Default --streaming toggle"),
     "torch_compile": ConfigKeySpec(_cast_bool, "Default --torch-compile toggle"),
+    # Search-command default (not a build flag): mode for `citemesh search`.
+    "search_mode": ConfigKeySpec(
+        _choice_caster(SEARCH_MODE_CHOICES),
+        "Default `citemesh search` mode (auto = local when cached embeddings "
+        "exist, else s2)",
+    ),
 }
 
 CONFIG_API_KEY_SPECS: Dict[str, ConfigKeySpec] = {

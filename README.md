@@ -103,7 +103,7 @@ CiteMesh works without credentials using Semantic Scholar's shared anonymous poo
 - Local embeddings with first-class device support: CUDA, Apple Silicon (MPS, bf16), CPU.
 - Multi-format outputs with one shared run contract across static, interactive, and structured exports.
 - Persistent user-level caching for embeddings and reference expansion; caches are portable across machines at matching compute dtype.
-- `citemesh search --local`: offline semantic search over every paper you've already embedded — your builds accumulate into a searchable personal library.
+- Mode-aware `citemesh search`: offline semantic search over every paper you've already embedded — your builds accumulate into a searchable personal library — used automatically when available, with Semantic Scholar keyword search as the fallback (`--mode local|s2|auto`).
 - Persistent personal defaults via `citemesh config` (`config.toml`).
 - Typed, modular internals that are straightforward to extend.
 

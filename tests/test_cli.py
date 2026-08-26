@@ -30,6 +30,7 @@ from citemesh.cli import (
     resolve_output_paths,
 )
 from citemesh.core import Author, Paper
+from citemesh.core.user_config import UserConfig
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE
 from citemesh.strategies.hybrid import (
@@ -468,41 +469,60 @@ def test_search_command_prints_results_to_stdout(
     assert long_paper_id in result.stdout
 
 
-def test_search_local_flags_require_local(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--model/--device on search are gated behind --local."""
+def _fake_local_search_builder(
+    *, cached_count: int, results: list[Any] | None = None
+) -> MagicMock:
+    """Build a fake EmbeddingGraphBuilder for local-search CLI tests."""
+    fake_builder = MagicMock()
+    fake_builder.search_local.return_value = list(results or [])
+    fake_builder.embedding_cache = SimpleNamespace(
+        embedding_count=lambda: cached_count,
+        last_search_total_embeddings=cached_count,
+        h5_path=Path("namespace.h5"),
+    )
+    return fake_builder
+
+
+_FAKE_LOCAL_RESULT = SimpleNamespace(
+    paper_id="feedfacefeedfacefeedfacefeedfacefeedface",
+    score=0.876,
+    metadata={
+        "title": "Cached Paper",
+        "year": 2024,
+        "authors": ["Ada Lovelace", "Alan Turing", "Grace Hopper"],
+    },
+)
+
+
+def test_search_mode_s2_rejects_local_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--model/--device are meaningless for explicit S2 keyword search."""
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
-    result = run_cli_command(["search", "attention", "--model", "some-model"])
-    assert result.returncode == 2
-    assert "--model and --device require --local" in str(error_mock.call_args)
-
-
-def test_search_local_prints_cached_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--local search renders cached results and mirrors flagless build defaults."""
-    long_paper_id = "feedfacefeedfacefeedfacefeedfacefeedface"
-    fake_result = SimpleNamespace(
-        paper_id=long_paper_id,
-        score=0.876,
-        metadata={
-            "title": "Cached Paper",
-            "year": 2024,
-            "authors": ["Ada Lovelace", "Alan Turing", "Grace Hopper"],
-        },
+    result = run_cli_command(
+        ["search", "attention", "--mode", "s2", "--model", "some-model"]
     )
-    fake_builder = MagicMock()
-    fake_builder.search_local.return_value = [fake_result]
-    fake_builder.embedding_cache = SimpleNamespace(
-        last_search_total_embeddings=42, h5_path=Path("unused.h5")
+    assert result.returncode == 2
+    assert "--model and --device only apply to local semantic search" in str(
+        error_mock.call_args
+    )
+
+
+def test_search_mode_local_prints_cached_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--mode local renders cached results and mirrors flagless build defaults."""
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
     builder_factory = MagicMock(return_value=fake_builder)
     monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
 
-    result = run_cli_command(["search", "cached topic", "--local", "-n", "1"])
+    result = run_cli_command(["search", "cached topic", "--mode", "local", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     # Rich folds table cells at console width; compare on whitespace-normalized text.
     plain_stdout = " ".join(result.stdout.split())
     assert "Local semantic search for 'cached topic'" in plain_stdout
-    assert long_paper_id in plain_stdout
+    assert _FAKE_LOCAL_RESULT.paper_id in plain_stdout
     assert "0.876" in plain_stdout
     assert "Ada Lovelace" in plain_stdout
     assert "Searched 42 locally cached embeddings" in plain_stdout
@@ -516,24 +536,119 @@ def test_search_local_prints_cached_results(monkeypatch: pytest.MonkeyPatch) -> 
     assert builder_kwargs["storage_precision"] == "float32"
 
 
-def test_search_local_empty_namespace_fails_with_guidance(
+def test_search_model_flag_implies_local_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Empty local namespace should fail with build/hydrate guidance."""
-    error_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "error", error_mock)
-    fake_builder = MagicMock()
-    fake_builder.search_local.return_value = []
-    fake_builder.embedding_cache = SimpleNamespace(
-        last_search_total_embeddings=0, h5_path=Path("namespace.h5")
+    """--model without --mode selects local search for that model namespace."""
+    fake_builder = _fake_local_search_builder(
+        cached_count=7, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+    client_factory = MagicMock()
+    monkeypatch.setattr(cli_module, "get_client", client_factory)
+
+    result = run_cli_command(["search", "cached topic", "--model", "custom/model"])
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "Local semantic search for 'cached topic'" in " ".join(result.stdout.split())
+    assert builder_factory.call_args.kwargs["model_name"] == "custom/model"
+    client_factory.assert_not_called()
+
+
+def test_search_auto_uses_local_when_cache_populated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (auto) mode prefers local search and says so when vectors exist."""
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
     monkeypatch.setattr(
         cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
+    client_factory = MagicMock()
+    monkeypatch.setattr(cli_module, "get_client", client_factory)
+    info_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
 
-    result = run_cli_command(["search", "anything", "--local"])
+    result = run_cli_command(["search", "cached topic", "-n", "1"])
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "Local semantic search for 'cached topic'" in " ".join(result.stdout.split())
+    notices = str(info_mock.call_args_list)
+    assert "locally cached embeddings" in notices
+    assert "--mode s2" in notices
+    client_factory.assert_not_called()
+
+
+def test_search_auto_falls_back_to_s2_when_cache_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (auto) mode falls back to S2 keyword search with a notice."""
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    mock_client = MagicMock()
+    mock_client.search_papers.return_value = [
+        Paper(
+            paper_id="0123456789abcdef0123456789abcdef01234567",
+            title="Attention Is All You Need",
+            year=2017,
+            authors=[Author(name="Ashish Vaswani")],
+            citation_count=12345,
+            abstract="Transformer model paper",
+        )
+    ]
+    monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+    info_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+
+    result = run_cli_command(["search", "attention", "--limit", "1"])
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "Search results for 'attention'" in result.stdout
+    assert "searching the Semantic Scholar API instead" in str(info_mock.call_args_list)
+    fake_builder.search_local.assert_not_called()
+
+
+def test_search_mode_local_empty_cache_fails_with_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit local mode treats an empty cache as an error with guidance."""
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+
+    result = run_cli_command(["search", "anything", "--mode", "local"])
     assert result.returncode == 1
-    assert "No embeddings in the local cache namespace" in str(error_mock.call_args)
+    message = str(error_mock.call_args)
+    assert "Local search was requested via" in message
+    assert "--mode local" in message
+    assert "has no vectors" in message
+    fake_builder.search_local.assert_not_called()
+
+
+def test_search_mode_from_config_local_empty_cache_cites_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Config-driven local mode errors on an empty cache and cites config.toml."""
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"search_mode": "local"}
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+
+    result = run_cli_command(["search", "anything"])
+    assert result.returncode == 1
+    message = str(error_mock.call_args)
+    assert "defaults.search_mode" in message
+    assert "config.toml" in message
 
 
 def test_invalid_paper_id_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:

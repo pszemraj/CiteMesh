@@ -808,6 +808,21 @@ class EmbeddingCache:
             race_reused=race_reused_count,
         )
 
+    def embedding_count(self) -> int:
+        """Return the number of embeddings persisted in this cache namespace.
+
+        Cheap availability probe (no model load, no SQLite access) used to
+        decide whether local semantic search has anything to rank.
+
+        :return int: Persisted embedding row count (``0`` for a missing or
+            empty cache).
+        """
+        if not self.h5_path.exists():
+            return 0
+        with self._cache_lock(), h5py.File(self.h5_path, "r") as h5:
+            dataset = self._get_embeddings_dataset(h5)
+            return int(dataset.shape[0]) if dataset is not None else 0
+
     def search(
         self,
         query_embedding: np.ndarray,
