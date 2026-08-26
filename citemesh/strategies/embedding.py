@@ -41,6 +41,7 @@ from citemesh.data import (
     get_embedding_model_profile,
     validate_compression_filter,
 )
+from citemesh.data.embedding_cache import CacheSearchResult
 from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.paper_ids import external_ids_from_canonical_paper_id, normalize_paper_id
 from citemesh.services import get_client
@@ -2027,6 +2028,34 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             batch_size=self.encode_batch_size,
             show_progress=False,
             text_builder=self.model_profile.format_document,
+        )
+
+    def search_local(self, query: str, top_k: int) -> List[CacheSearchResult]:
+        """Semantically search this builder's persistent embedding cache.
+
+        Encodes the free-text query in the model's query prompt space and
+        ranks it against every embedding already persisted in the cache
+        namespace (candidate-mode vectors accumulated across builds, or a
+        hydrated corpus). Purely local except for the one-time model download.
+
+        :param str query: Free-text search query.
+        :param int top_k: Number of results to return.
+        :return List[CacheSearchResult]: Ranked results with cached metadata.
+        :raises ValueError: If the query is empty or ``top_k`` is below 1.
+        """
+        normalized_query = str(query).strip()
+        if not normalized_query:
+            raise ValueError("query must not be empty")
+        if int(top_k) < 1:
+            raise ValueError("top_k must be at least 1")
+        self._load_model()
+        query_text = self.model_profile.format_query(normalized_query, {})
+        query_embedding = self._encode_texts([query_text])[0]
+        return self.embedding_cache.search(
+            query_embedding=np.asarray(query_embedding, dtype=np.float32),
+            top_k=int(top_k),
+            binary_prefilter=self.binary_prefilter,
+            binary_rescore_multiplier=self.binary_rescore_multiplier,
         )
 
     def _format_seed_for_embedding(

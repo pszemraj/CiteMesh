@@ -1672,12 +1672,14 @@ User configuration:
     # Search subcommand
     search_parser = subparsers.add_parser(
         "search",
-        help="Find seed paper IDs via Semantic Scholar keyword search",
+        help="Search papers (S2 keyword search, or --local semantic search)",
         description=(
-            "Keyword search on the Semantic Scholar API, mainly for finding a "
-            "seed paper ID to pass to `citemesh build`. This queries the remote "
-            "S2 search endpoint (not a local semantic index), which shares an "
-            "anonymous rate-limit pool unless S2_API_KEY is set."
+            "Default: keyword search on the Semantic Scholar API for finding a "
+            "seed paper ID to pass to `citemesh build` (shares an anonymous "
+            "rate-limit pool unless S2_API_KEY is set). With --local: semantic "
+            "search over the embeddings already persisted in your local cache "
+            "(candidate vectors accumulated across builds, or a hydrated "
+            "corpus) - no Semantic Scholar traffic."
         ),
         parents=[command_logging_parent],
     )
@@ -1688,6 +1690,29 @@ User configuration:
         type=_positive_int,
         default=10,
         help="Maximum results (default: 10)",
+    )
+    search_parser.add_argument(
+        "--local",
+        action="store_true",
+        help=(
+            "Semantically search the local embedding cache instead of the "
+            "Semantic Scholar API"
+        ),
+    )
+    search_parser.add_argument(
+        "--model",
+        "-m",
+        default=None,
+        help=(
+            "Embedding model for --local search; must match the model used at "
+            "build time (default: config.toml default or built-in default)"
+        ),
+    )
+    search_parser.add_argument(
+        "--device",
+        choices=list(EMBEDDING_DEVICE_CHOICES),
+        default=None,
+        help="Compute device for --local query encoding (default: auto)",
     )
     cache_parser = subparsers.add_parser(
         "cache",
@@ -2663,6 +2688,104 @@ def _run_config_command(
     return 1
 
 
+def _run_local_search(
+    args: argparse.Namespace,
+    build_parser: argparse.ArgumentParser,
+    user_config: UserConfig,
+) -> int:
+    """Run semantic search over the local embedding cache.
+
+    Mirrors a flagless build's defaults pipeline (config.toml defaults plus
+    candidate-mode storage normalization) so the search targets the same cache
+    namespace a default build writes to.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :param argparse.ArgumentParser build_parser: Build subparser used to
+        derive build-equivalent defaults.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return int: Process-style exit code.
+    """
+    defaults = build_parser.parse_args(["local-search-placeholder-seed"])
+    _pop_tracked_option_dests(defaults)
+    defaults.strategy = "embedding"
+    config_default_dests = _apply_user_config_defaults(
+        defaults, frozenset(), user_config
+    )
+    _validate_build_cli_contract(
+        defaults, build_parser, frozenset(), config_defaults=config_default_dests
+    )
+    if args.model:
+        defaults.model = args.model
+    if args.device:
+        try:
+            resolve_embedding_device(args.device)
+        except ValueError as exc:
+            logger.error(str(exc))
+            return 2
+        defaults.device = args.device
+
+    try:
+        builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
+        results = builder.search_local(args.query, top_k=args.limit)
+    except Exception as exc:
+        logger.error(
+            "Local search failed: %s",
+            exc,
+            exc_info=logging.getLogger().level == logging.DEBUG,
+        )
+        return 1
+
+    cache = builder.embedding_cache
+    if not results:
+        logger.error(
+            "No embeddings in the local cache namespace for model=%s "
+            "semantic-source=%s (cache: %s). Run `citemesh build` with this "
+            "model to accumulate candidate vectors, or hydrate a corpus via "
+            "--semantic-source arxiv-corpus.",
+            defaults.model,
+            defaults.semantic_source,
+            cache.h5_path,
+        )
+        return 1
+
+    table = Table(title=f"Local semantic search for '{args.query}'")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Score", justify="right", width=6)
+    # Keep full IDs copyable for direct use in `citemesh build`.
+    table.add_column("ID", style="cyan", overflow="fold")
+    table.add_column("Title", overflow="fold")
+    table.add_column("Year", justify="right", width=6)
+    table.add_column("Authors", max_width=30)
+
+    for i, result in enumerate(results, 1):
+        metadata = result.metadata or {}
+        authors = [str(name) for name in (metadata.get("authors") or [])]
+        authors_str = ", ".join(authors[:2])
+        if len(authors) > 2:
+            authors_str += " et al."
+        year_value = metadata.get("year")
+        table.add_row(
+            str(i),
+            f"{float(result.score):.3f}",
+            str(result.paper_id),
+            str(metadata.get("title") or ""),
+            str(year_value) if year_value is not None else "",
+            authors_str,
+        )
+
+    output_console.print(table)
+    total = getattr(cache, "last_search_total_embeddings", None)
+    if total is not None:
+        output_console.print(
+            f"[dim]Searched {int(total):,} locally cached embeddings "
+            f"(model={defaults.model}, source={defaults.semantic_source}).[/dim]"
+        )
+    output_console.print("\n[dim]Full paper IDs:[/dim]")
+    for i, result in enumerate(results, 1):
+        output_console.print(f"[dim]{i}.[/dim] {result.paper_id}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Main CLI entry point.
 
@@ -2905,6 +3028,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
     elif args.command == "search":
+        if not args.local and (args.model or args.device):
+            logger.error("--model and --device require --local.")
+            return 2
+        if args.local:
+            return _run_local_search(args, build_parser, user_config)
         try:
             client = get_client()
             logger.info(f"Searching for: {args.query}")

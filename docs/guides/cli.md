@@ -28,6 +28,9 @@ Other command groups:
 # Find seed paper IDs (remote Semantic Scholar keyword search)
 citemesh search "<query>" [--limit N|-n N]
 
+# Semantic search over your locally cached embeddings (no S2 traffic)
+citemesh search "<query>" --local [--limit N|-n N] [--model M] [--device D]
+
 # Cache management commands
 citemesh cache scan
 citemesh cache scan --log-level debug
@@ -216,7 +219,11 @@ citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
 ```
 
-`citemesh search` is remote keyword search on the Semantic Scholar API — a convenience for finding seed paper IDs, not a semantic search over your local embedding index. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results. Local semantic search over built/downloaded indexes is a possible future direction.
+`citemesh search` has two modes. The default is remote keyword search on the Semantic Scholar API — a convenience for finding seed paper IDs. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results.
+
+`citemesh search "<query>" --local` is semantic search over the embeddings already persisted in your local cache: candidate vectors accumulate across embedding/hybrid builds (every build grows your searchable library), or the full hydrated corpus in `arxiv-corpus` mode. The query is encoded locally in the model's query prompt space and ranked against every cached vector — no Semantic Scholar traffic, works offline once the model is downloaded. Results include cosine scores and full paper IDs ready for `citemesh build`.
+
+Local search targets the same cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. Namespaces are keyed by model and compute dtype: pass `--model` if you build with a non-default model, and note that CPU (float32) and CUDA/MPS (bfloat16) runs use distinct namespaces — search on the same device class you build on.
 
 ## Troubleshooting
 

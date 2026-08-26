@@ -468,6 +468,74 @@ def test_search_command_prints_results_to_stdout(
     assert long_paper_id in result.stdout
 
 
+def test_search_local_flags_require_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--model/--device on search are gated behind --local."""
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    result = run_cli_command(["search", "attention", "--model", "some-model"])
+    assert result.returncode == 2
+    assert "--model and --device require --local" in str(error_mock.call_args)
+
+
+def test_search_local_prints_cached_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--local search renders cached results and mirrors flagless build defaults."""
+    long_paper_id = "feedfacefeedfacefeedfacefeedfacefeedface"
+    fake_result = SimpleNamespace(
+        paper_id=long_paper_id,
+        score=0.876,
+        metadata={
+            "title": "Cached Paper",
+            "year": 2024,
+            "authors": ["Ada Lovelace", "Alan Turing", "Grace Hopper"],
+        },
+    )
+    fake_builder = MagicMock()
+    fake_builder.search_local.return_value = [fake_result]
+    fake_builder.embedding_cache = SimpleNamespace(
+        last_search_total_embeddings=42, h5_path=Path("unused.h5")
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+
+    result = run_cli_command(["search", "cached topic", "--local", "-n", "1"])
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    # Rich folds table cells at console width; compare on whitespace-normalized text.
+    plain_stdout = " ".join(result.stdout.split())
+    assert "Local semantic search for 'cached topic'" in plain_stdout
+    assert long_paper_id in plain_stdout
+    assert "0.876" in plain_stdout
+    assert "Ada Lovelace" in plain_stdout
+    assert "Searched 42 locally cached embeddings" in plain_stdout
+    fake_builder.search_local.assert_called_once_with("cached topic", top_k=1)
+
+    # Namespace parity with a flagless build: candidates mode with the int8
+    # default normalized to float32 storage.
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["model_name"] == DEFAULT_EMBEDDING_MODEL_NAME
+    assert builder_kwargs["semantic_source"] == "candidates"
+    assert builder_kwargs["storage_precision"] == "float32"
+
+
+def test_search_local_empty_namespace_fails_with_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty local namespace should fail with build/hydrate guidance."""
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    fake_builder = MagicMock()
+    fake_builder.search_local.return_value = []
+    fake_builder.embedding_cache = SimpleNamespace(
+        last_search_total_embeddings=0, h5_path=Path("namespace.h5")
+    )
+    monkeypatch.setattr(
+        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+
+    result = run_cli_command(["search", "anything", "--local"])
+    assert result.returncode == 1
+    assert "No embeddings in the local cache namespace" in str(error_mock.call_args)
+
+
 def test_invalid_paper_id_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
     """Invalid build errors should produce a clean non-zero exit."""
     error_mock = MagicMock()
