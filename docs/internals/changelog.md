@@ -60,6 +60,7 @@ Notable changes from the early script-based prototypes to the current package la
 - Added adaptive metadata callout contrast based on active theme.
 - Switched node coloring to continuous gradients for consistent year-based styling.
 - Restricted dashboard collection bundle payload reads to manifest paths that stay under the collection root.
+- HTML exports (dashboard, Plotly, pyvis) now carry a `darkreader-lock` meta tag plus a transparent-overlay CSS guard: the Dark Reader browser extension repaints Plotly's transparent overlay SVGs with an opaque background, which hid the entire dashboard graph. Verified live in Chrome with Dark Reader installed — the lock disengages the extension and the graph renders in the native theme. Also fixed the paper-count label pluralization ("1 paper").
 
 ## Graph Rendering
 

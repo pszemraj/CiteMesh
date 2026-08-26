@@ -98,6 +98,33 @@ def _ordered_attrs(attrs: Dict[str, object]) -> Dict[str, object]:
     return {key: attrs[key] for key in sorted(attrs, key=str)}
 
 
+DARKREADER_LOCK_META = '<meta name="darkreader-lock" />'
+
+
+def _inject_darkreader_lock(path: Path) -> None:
+    """Insert the Dark Reader opt-out meta tag into a written HTML export.
+
+    CiteMesh HTML exports ship their own tuned themes; Dark Reader re-theming
+    breaks them outright (it paints Plotly's transparent overlay SVGs with an
+    opaque background, hiding the entire graph). The ``darkreader-lock`` meta
+    tag tells the extension to leave the page untouched.
+
+    :param Path path: HTML file to rewrite in place (no-op when it has no
+        ``<head>`` tag or already carries the lock).
+    :return None: Rewrites the file in place.
+    """
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    if "darkreader-lock" in content or "<head>" not in content:
+        return
+    path.write_text(
+        content.replace("<head>", f"<head>{DARKREADER_LOCK_META}", 1),
+        encoding="utf-8",
+    )
+
+
 class GraphExporter:
     """Unified interface for exporting graphs in multiple formats."""
 
@@ -389,6 +416,7 @@ class GraphExporter:
             net.add_edge(u, v, value=max(0.1, weight * 5))
 
         net.save_graph(str(path))
+        _inject_darkreader_lock(path)
 
     def to_plotly_html(self, path: Path, theme: Optional[str] = None) -> None:
         """Create Plotly interactive visualization.
@@ -414,6 +442,7 @@ class GraphExporter:
                 "Deterministic Plotly export requires write_html(div_id=...). "
                 "Upgrade plotly to a version that supports div_id."
             ) from exc
+        _inject_darkreader_lock(path)
 
     def to_dashboard_html(self, path: Path, theme: Optional[str] = None) -> None:
         """Create a standalone Plotly-backed research dashboard HTML export.
@@ -1255,6 +1284,7 @@ class GraphExporter:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="darkreader-lock" />
   <title>CiteMesh Dashboard</title>
   <style>
     :root {
@@ -1270,6 +1300,9 @@ class GraphExporter:
       --seed-ring: #d66cbf;
     }
     * { box-sizing: border-box; }
+    /* Plotly overlay SVGs must stay transparent; dark-mode extensions that
+       repaint them opaque would otherwise hide the whole graph. */
+    .js-plotly-plot svg.main-svg { background: transparent !important; }
     html, body {
       margin: 0;
       height: 100%;
@@ -3085,7 +3118,7 @@ class GraphExporter:
 
     function renderList() {
       const listNodes = filteredNodes();
-      controls.count.textContent = `${listNodes.length.toLocaleString()} papers`;
+      controls.count.textContent = `${listNodes.length.toLocaleString()} ${listNodes.length === 1 ? "paper" : "papers"}`;
       controls.list.innerHTML = "";
       state.visibleIds = new Set(listNodes.map((node) => node.id));
       if (state.selectedId && nodeById.has(state.selectedId)) {

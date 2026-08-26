@@ -429,6 +429,23 @@ def _extract_inline_script_bodies(html_text: str) -> list[str]:
     return re.findall(r"<script>(.*?)</script>", html_text, flags=re.DOTALL)
 
 
+def test_inject_darkreader_lock_is_idempotent_and_head_gated(tmp_path: Path) -> None:
+    """HTML exports get exactly one Dark Reader lock tag; headless files stay put."""
+    from citemesh.visualization.export import _inject_darkreader_lock
+
+    page = tmp_path / "page.html"
+    page.write_text("<html><head><title>x</title></head></html>", encoding="utf-8")
+    _inject_darkreader_lock(page)
+    assert page.read_text(encoding="utf-8").count("darkreader-lock") == 1
+    _inject_darkreader_lock(page)
+    assert page.read_text(encoding="utf-8").count("darkreader-lock") == 1
+
+    fragment = tmp_path / "fragment.html"
+    fragment.write_text("<div>no head</div>", encoding="utf-8")
+    _inject_darkreader_lock(fragment)
+    assert "darkreader-lock" not in fragment.read_text(encoding="utf-8")
+
+
 def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     """Dashboard export should render tri-pane shell and derived payload fields."""
     pytest.importorskip("plotly")
@@ -471,6 +488,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert out_path.exists()
     rendered = out_path.read_text()
     for token in [
+        '<meta name="darkreader-lock" />',
         'id="global-nav"',
         'id="filters-toggle"',
         'id="detail-why-lines"',
