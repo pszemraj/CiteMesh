@@ -23,8 +23,7 @@ When `--export all` is used, CiteMesh writes:
 - `<strategy>.graphml` (exchange format for Gephi/Cytoscape)
 - `<strategy>.config.json` (run config + metadata sidecar)
 
-For single-export runs, only the requested format is written.
-`*.config.json` is still written as the run sidecar.
+For single-export runs, only the requested format is written. `*.config.json` is still written as the run sidecar.
 
 ## Output Location
 
@@ -44,12 +43,8 @@ Canonical path-normalization rules:
   - if `--output` ends with a different known export suffix, that suffix is replaced
   - if `--output` has no known export suffix, the target suffix is appended
 - multi-export run (`--export all` or multiple formats) with explicit `--output`:
-  - if `dashboard` is among the selected formats and `--output` ends with
-    `.dashboard.html`, the dashboard stays a standalone file at that exact path,
-    collection mode is disabled, and sibling exports use the stripped base with
-    their own suffixes (for example `report.json`, `report.csv`, `report.config.json`)
-  - if `--output` ends with a known export suffix (for example `out.png`), that suffix
-    is stripped and the remainder is treated as directory base
+  - if `dashboard` is among the selected formats and `--output` ends with `.dashboard.html`, the dashboard stays a standalone file at that exact path, collection mode is disabled, and sibling exports use the stripped base with their own suffixes (for example `report.json`, `report.csv`, `report.config.json`)
+  - if `--output` ends with a known export suffix (for example `out.png`), that suffix is stripped and the remainder is treated as directory base
   - if `--output` has no known suffix, it is treated directly as directory base
   - each format is written as `<directory-base>/<strategy>.<ext>`
   - if `dashboard` is among the selected formats, the shared shell is written as `<directory-base>/dashboard.html`, the collection index as `<directory-base>/dashboard.manifest.json`, the shell embeds the currently available saved-result payloads from that collection, and the run-specific data/config artifacts are written under `<directory-base>/<slug>-<hash>/`
@@ -57,17 +52,10 @@ Canonical path-normalization rules:
 
 Examples:
 
-- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
-  writes `out/dashboard.html`, `out/dashboard.manifest.json`,
-  `out/<slug>-<hash>/hybrid.png`, `out/<slug>-<hash>/hybrid.html`,
-  `out/<slug>-<hash>/hybrid.plotly.html`, `out/<slug>-<hash>/hybrid.json`,
-  `out/<slug>-<hash>/hybrid.graphml`, `out/<slug>-<hash>/hybrid.config.json`
-- `citemesh build "<paper-id>" --strategy citation --export json -o report.graphml`
-  writes `report.json`
-- `citemesh build "<paper-id>" --strategy recommendation --export dashboard -o report.dashboard.html`
-  writes the standalone dashboard file `report.dashboard.html`
-- `citemesh build "<paper-id>" --strategy recommendation --export dashboard --export json -o report.dashboard.html`
-  writes `report.dashboard.html`, `report.json`, and `report.config.json`
+- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png` writes `out/dashboard.html`, `out/dashboard.manifest.json`, `out/<slug>-<hash>/hybrid.png`, `out/<slug>-<hash>/hybrid.html`, `out/<slug>-<hash>/hybrid.plotly.html`, `out/<slug>-<hash>/hybrid.json`, `out/<slug>-<hash>/hybrid.graphml`, `out/<slug>-<hash>/hybrid.config.json`
+- `citemesh build "<paper-id>" --strategy citation --export json -o report.graphml` writes `report.json`
+- `citemesh build "<paper-id>" --strategy recommendation --export dashboard -o report.dashboard.html` writes the standalone dashboard file `report.dashboard.html`
+- `citemesh build "<paper-id>" --strategy recommendation --export dashboard --export json -o report.dashboard.html` writes `report.dashboard.html`, `report.json`, and `report.config.json`
 
 ## JSON vs Sidecar
 
@@ -79,8 +67,7 @@ Examples:
 Sidecar path contract:
 
 - for strategy-named outputs, sidecar is `<strategy>.config.json` in the same directory
-- for explicit single-file outputs, sidecar uses the resolved output stem
-  (for example `report.json` -> `report.config.json`)
+- for explicit single-file outputs, sidecar uses the resolved output stem (for example `report.json` -> `report.config.json`)
 
 ### Graph JSON (`<strategy>.json`)
 
@@ -92,8 +79,7 @@ Top-level fields:
 - `nodes` — enriched per-paper objects (see below)
 - `edges` (`source`, `target`, `weight`, plus readable source/target title/label fields)
 
-`source`/`target` are canonical node IDs for unambiguous graph processing.
-The extra `*_title` and `*_label` fields are provided for readable inspection.
+`source`/`target` are canonical node IDs for unambiguous graph processing. The extra `*_title` and `*_label` fields are provided for readable inspection.
 
 Each node includes:
 
@@ -102,31 +88,19 @@ Each node includes:
 - external: `links` (arXiv abs/pdf URLs, DOI URL, Semantic Scholar URL)
 - `bibtex` (deterministic BibTeX entry)
 
-The JSON and dashboard formats share the same enriched node schema. When a
-precomputed/shared layout already exists (for example because the same run also
-exports `png`, `plotly`, or `dashboard`), the JSON payload also carries
-dashboard render metadata (`dashboard.meta.plotly_*`) so current-version
-CiteMesh JSON files can be loaded back into the dashboard via the
-**Load Results** button without losing graph geometry. JSON-only exports omit
-those geometry arrays to avoid unnecessary layout work during data-only runs.
+The JSON and dashboard formats share the same enriched node schema. When a precomputed/shared layout already exists (for example because the same run also exports `png`, `plotly`, or `dashboard`), the JSON payload also carries dashboard render metadata (`dashboard.meta.plotly_*`) so current-version CiteMesh JSON files can be loaded back into the dashboard via the **Load Results** button without losing graph geometry. JSON-only exports omit those geometry arrays to avoid unnecessary layout work during data-only runs.
 
 ### CSV (`<strategy>.csv`)
 
-Flat table with one row per paper. Columns: `id`, `title`, `year`, `authors`
-(semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`,
-`categories` (semicolon-separated), `is_seed`, `provenance`, `seed_relation`,
-`seed_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
+Flat table with one row per paper. Columns: `id`, `title`, `year`, `authors` (semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`, `categories` (semicolon-separated), `is_seed`, `provenance`, `seed_relation`, `seed_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
 
 ### BibTeX (`<strategy>.bib`)
 
-Combined BibTeX entries for all papers in the graph, one `@article` per paper.
-Ready for direct import into reference managers or LaTeX projects.
+Combined BibTeX entries for all papers in the graph, one `@article` per paper. Ready for direct import into reference managers or LaTeX projects.
 
 ### Dashboard HTML
 
-The dashboard shell (`dashboard.html` in collection mode, or
-`<name>.dashboard.html` for explicit standalone output) is a tri-pane research
-interface with embedded Plotly graph, paper list, and detail panel.
+The dashboard shell (`dashboard.html` in collection mode, or `<name>.dashboard.html` for explicit standalone output) is a tri-pane research interface with embedded Plotly graph, paper list, and detail panel.
 
 **Toolbar data actions:**
 
@@ -136,11 +110,7 @@ interface with embedded Plotly graph, paper list, and detail panel.
 - **Saved Results selector** — switches between JSON payload slots already tracked in the collection shell, with no extra file picking
 - **Load Results** — file picker that accepts current-version CiteMesh JSON files plus current-version dashboard HTML exports. Current-version JSON keeps stored graph geometry when that geometry was exported. Older dashboard HTML exports are not supported; re-export them from the current code if you still need dashboard import. If you need JSON round-tripping through the dashboard, export JSON alongside a layout-based format such as `dashboard` or `plotly`.
 
-In collection mode, this means you can keep one `dashboard.html` open and move
-between saved result slots from the built-in selector, or load any other
-compatible JSON payload manually, rather than opening a separate dashboard HTML
-file for each paper. Re-running the same seed with the same strategy refreshes
-that slot instead of adding another selector entry.
+In collection mode, this means you can keep one `dashboard.html` open and move between saved result slots from the built-in selector, or load any other compatible JSON payload manually, rather than opening a separate dashboard HTML file for each paper. Re-running the same seed with the same strategy refreshes that slot instead of adding another selector entry.
 
 ### Sidecar (`<strategy>.config.json`)
 
@@ -153,23 +123,17 @@ Top-level fields:
 
 `build` includes strategy-specific sections:
 
-- `citation` for reference/citation collection knobs that affected the run.
-  Recommendation sidecars include only shared reference-hydration settings, while
-  citation and hybrid sidecars also include citation-expansion budgets.
+- `citation` for reference/citation collection knobs that affected the run. Recommendation sidecars include only shared reference-hydration settings, while citation and hybrid sidecars also include citation-expansion budgets.
 - `hybrid` for resolved `max_semantic`.
-- `embedding` for embedding/hybrid semantic settings, including the requested
-  `device` token.
+- `embedding` for embedding/hybrid semantic settings, including the requested `device` token.
 
 `metadata` includes:
 
 - common run metadata (`paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`)
 - strategy score semantics (`score_contract`)
-- embedding/hybrid runtime retrieval metadata when available, including
-  `effective_device` and `effective_compute_dtype` (the device and dtype the
-  encoder actually ran with)
+- embedding/hybrid runtime retrieval metadata when available, including `effective_device` and `effective_compute_dtype` (the device and dtype the encoder actually ran with)
 
-See embedding metadata term definitions in
-[Embedding Runtime](embedding-runtime.md).
+See embedding metadata term definitions in [Embedding Runtime](embedding-runtime.md).
 
 ## Determinism Notes
 

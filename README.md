@@ -24,7 +24,7 @@ The CLI defaults to the `recommendation` strategy for the fastest topical pass. 
 | Outputs | PNG, interactive HTML/Plotly, self-contained dashboard, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
 | Automation | Scriptable CLI with deterministic exports and JSON sidecars | Manual browsing |
 
-By default the embedding and hybrid strategies are **corpus-free**: they embed only the seed's Semantic Scholar neighbors (references/citations/ recommendations), so a laptop builds a graph in seconds — no multi-gigabyte corpus download required. An opt-in local arXiv corpus mode (`--semantic-source arxiv-corpus`) is available for corpus-scale retrieval.
+By default the embedding and hybrid strategies are **corpus-free**: they embed only the seed's Semantic Scholar neighbors (references/citations/recommendations), so a laptop builds a graph in seconds — no multi-gigabyte corpus download required. An opt-in local arXiv corpus mode (`--semantic-source arxiv-corpus`) is available for corpus-scale retrieval.
 
 ## Project Status
 
