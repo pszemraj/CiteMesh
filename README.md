@@ -11,8 +11,7 @@ Start from one paper you already know, then quickly discover:
 - newer papers that are genuinely related to that paper's core topic
 - older, high-quality foundational papers that matter for understanding the same area
 
-The CLI defaults to the `recommendation` strategy for the fastest topical pass.
-Use `--strategy hybrid` when you want the tuned citation-plus-semantic workflow for this discovery pattern.
+The CLI defaults to the `recommendation` strategy for the fastest topical pass. Use `--strategy hybrid` when you want the tuned citation-plus-semantic workflow for this discovery pattern.
 
 ## Why CiteMesh (vs. reference tool and similar tools)
 
@@ -25,19 +24,11 @@ Use `--strategy hybrid` when you want the tuned citation-plus-semantic workflow 
 | Outputs | PNG, interactive HTML/Plotly, self-contained dashboard, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
 | Automation | Scriptable CLI with deterministic exports and JSON sidecars | Manual browsing |
 
-By default the embedding and hybrid strategies are **corpus-free**: they embed
-only the seed's Semantic Scholar neighbors (references/citations/
-recommendations), so a laptop builds a graph in seconds — no multi-gigabyte
-corpus download required. An opt-in local arXiv corpus mode
-(`--semantic-source arxiv-corpus`) is available for corpus-scale retrieval.
+By default the embedding and hybrid strategies are **corpus-free**: they embed only the seed's Semantic Scholar neighbors (references/citations/ recommendations), so a laptop builds a graph in seconds — no multi-gigabyte corpus download required. An opt-in local arXiv corpus mode (`--semantic-source arxiv-corpus`) is available for corpus-scale retrieval.
 
 ## Project Status
 
-Public beta, pre-1.0. CiteMesh optimizes for discovery quality, correctness,
-and simple internals over backward compatibility: export formats, cache
-layouts, and defaults may change between revisions unless explicitly
-documented otherwise. macOS (Apple Silicon, MPS), Linux, and Windows are
-supported; CI covers Linux and macOS.
+Public beta, pre-1.0. CiteMesh optimizes for discovery quality, correctness, and simple internals over backward compatibility: export formats, cache layouts, and defaults may change between revisions unless explicitly documented otherwise. macOS (Apple Silicon, MPS), Linux, and Windows are supported; CI covers Linux and macOS.
 
 ## Documentation
 
@@ -79,9 +70,7 @@ pip install -e ".[viz]"
 pip install -e ".[all]"
 ```
 
-On macOS the `embeddings` extra requires torch >= 2.13 (installed
-automatically) and runs on the MPS backend with bfloat16 by default; see
-[Embedding Runtime](docs/reference/embedding-runtime.md).
+On macOS the `embeddings` extra requires torch >= 2.13 (installed automatically) and runs on the MPS backend with bfloat16 by default; see [Embedding Runtime](docs/reference/embedding-runtime.md).
 
 ### Run One Graph
 
@@ -98,9 +87,7 @@ For command syntax and operational details, use:
 
 ### Semantic Scholar API key (recommended)
 
-CiteMesh works without credentials using Semantic Scholar's shared anonymous
-pool, but that pool is small and 429 rate-limit errors are common. A free API
-key gives you a dedicated 1 request/second budget:
+CiteMesh works without credentials using Semantic Scholar's shared anonymous pool, but that pool is small and 429 rate-limit errors are common. A free API key gives you a dedicated 1 request/second budget:
 
 1. Request a key at <https://www.semanticscholar.org/product/api>
 2. Provide it via the environment (`export S2_API_KEY=...`) or persist it:
@@ -121,8 +108,7 @@ key gives you a dedicated 1 request/second budget:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and feature requests are
-welcome via [issues](https://github.com/pszemraj/CiteMesh/issues).
+See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and feature requests are welcome via [issues](https://github.com/pszemraj/CiteMesh/issues).
 
 ## License
 

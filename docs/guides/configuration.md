@@ -6,9 +6,7 @@ CiteMesh stores durable personal defaults in a TOML file at the cache root:
 <cache_root>/config.toml       # default: ~/.cache/citemesh/config.toml
 ```
 
-Use it for preferences you would otherwise repeat on every invocation — for
-example always using corpus-backed semantic sourcing, a preferred theme, or a
-Semantic Scholar API key.
+Use it for preferences you would otherwise repeat on every invocation — for example always using corpus-backed semantic sourcing, a preferred theme, or a Semantic Scholar API key.
 
 Related docs:
 
@@ -27,17 +25,11 @@ Effective values resolve in this order (first match wins):
 
 Config values behave like personal built-in defaults, not like explicit flags:
 
-- They never trigger "unsupported option for strategy" errors. Setting
-  `defaults.device` does not break `--strategy citation` runs; the value is
-  simply unused there.
-- They outrank tuned implicit defaults (for example the hybrid strategy's
-  implicit citation/reference budgets).
-- Explicit corpus-only CLI flags (for example `--corpus-size`) still imply
-  `--semantic-source arxiv-corpus`, overriding a configured
-  `defaults.semantic_source = "candidates"` for that run.
+- They never trigger "unsupported option for strategy" errors. Setting `defaults.device` does not break `--strategy citation` runs; the value is simply unused there.
+- They outrank tuned implicit defaults (for example the hybrid strategy's implicit citation/reference budgets).
+- Explicit corpus-only CLI flags (for example `--corpus-size`) still imply `--semantic-source arxiv-corpus`, overriding a configured `defaults.semantic_source = "candidates"` for that run.
 
-When config defaults are applied to a build, CiteMesh logs one INFO line
-listing the applied keys and the config file path.
+When config defaults are applied to a build, CiteMesh logs one INFO line listing the applied keys and the config file path.
 
 ## Commands
 
@@ -55,11 +47,7 @@ Value forms for `config set`:
 - Export lists: comma-separated, e.g. `citemesh config set defaults.export json,dashboard`
 - Everything else: plain strings/integers
 
-Invalid keys and values are rejected at `set` time with the list of valid
-options. Invalid entries hand-edited into the file are ignored with a warning
-at load time, so a bad config never blocks CLI usage. Unknown keys already in
-the file are preserved when CiteMesh rewrites it (comments are not — the TOML
-round-trip is value-level).
+Invalid keys and values are rejected at `set` time with the list of valid options. Invalid entries hand-edited into the file are ignored with a warning at load time, so a bad config never blocks CLI usage. Unknown keys already in the file are preserved when CiteMesh rewrites it (comments are not — the TOML round-trip is value-level).
 
 ## Supported keys
 
@@ -110,5 +98,4 @@ s2_api_key = "your-key-here"
 
 - The file lives at the cache root, so `CITEMESH_CACHE_DIR` moves it too.
 - `citemesh cache clear` deletes cached payloads but **never** `config.toml`.
-- To reset configuration, delete the file (`rm "$(citemesh config path)"`) or
-  `citemesh config unset` individual keys.
+- To reset configuration, delete the file (`rm "$(citemesh config path)"`) or `citemesh config unset` individual keys.

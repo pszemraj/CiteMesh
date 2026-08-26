@@ -49,12 +49,9 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 ### Strategy Implementations
 
-- `citation.py`, `recommendation.py`, `embedding.py`, and `hybrid.py` implement
-  `GraphBuilderStrategy`.
-- Strategies may emit collection summaries through `_set_collection_summary` for
-  consistent logging.
-- Selection guidance, tradeoffs, and user-facing strategy behavior are covered in
-  [Guides: Strategies](../guides/strategies.md).
+- `citation.py`, `recommendation.py`, `embedding.py`, and `hybrid.py` implement `GraphBuilderStrategy`.
+- Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
+- Selection guidance, tradeoffs, and user-facing strategy behavior are covered in [Guides: Strategies](../guides/strategies.md).
 
 ### `citemesh/core/models.py`
 
@@ -65,12 +62,8 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 ### `citemesh/core/user_config.py`
 
 - Loads, validates, and rewrites the persistent `config.toml` at the cache root.
-- Whitelists `[defaults]` build-flag keys and `[api] s2_api_key` with per-key
-  casters; invalid entries are ignored with warnings so a bad config never
-  blocks CLI usage.
-- The CLI applies these values post-parse for options not explicitly provided
-  (precedence: CLI flag > environment > config.toml > built-in default); see
-  [Guides: User Configuration](../guides/configuration.md).
+- Whitelists `[defaults]` build-flag keys and `[api] s2_api_key` with per-key casters; invalid entries are ignored with warnings so a bad config never blocks CLI usage.
+- The CLI applies these values post-parse for options not explicitly provided (precedence: CLI flag > environment > config.toml > built-in default); see [Guides: User Configuration](../guides/configuration.md).
 
 ### Visualization (`citemesh/visualization/render.py`)
 
@@ -88,8 +81,7 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 - `GraphExporter` writes interactive and structured output formats from one graph object.
 - Reuses computed layout and style values for cross-format consistency.
 - Normalizes node attributes for serializer compatibility (for example GraphML-safe fields).
-- Artifact-level format details and sidecar schema are documented in
-  [Output Artifacts](../reference/output-artifacts.md).
+- Artifact-level format details and sidecar schema are documented in [Output Artifacts](../reference/output-artifacts.md).
 
 ### Caching Support
 
@@ -120,5 +112,4 @@ On-disk layout and invalidation behavior are documented in [Caching & Data](../g
 - **Add themes**: extend `THEMES` definitions and renderer/export color lookups.
 - **Add corpus source**: adapt embedding-corpus loading while preserving shared cache/graph contracts.
 
-The user-facing workflow stays stable while ranking, similarity, visualization,
-and data-source internals evolve behind the strategy/export interfaces.
+The user-facing workflow stays stable while ranking, similarity, visualization, and data-source internals evolve behind the strategy/export interfaces.

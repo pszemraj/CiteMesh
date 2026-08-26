@@ -19,8 +19,7 @@ Fallback behavior:
 - The fallback chain is used only for default-revision loads (no explicit `--model-revision`).
 - If `--model-revision` is set, fallback retries are disabled to preserve deterministic revision pinning.
 - If all candidates fail, CiteMesh raises a runtime error with per-candidate failure summaries.
-- When fallback succeeds, cache fingerprint checks follow the active loaded checkpoint
-  identity (not just the originally requested model token).
+- When fallback succeeds, cache fingerprint checks follow the active loaded checkpoint identity (not just the originally requested model token).
 
 ## EmbeddingGemma Profile Mapping
 
@@ -32,18 +31,13 @@ Fallback behavior:
 CiteMesh resolves an explicit compute device before loading any embedding model:
 
 - `--device auto` (default) prefers `cuda`, then `mps` (Apple Silicon Metal), then `cpu`.
-- An explicit `--device cuda` or `--device mps` on a host where that backend is
-  unavailable fails fast with a parser error — CiteMesh never silently downgrades
-  an explicit accelerator request to CPU.
-- The resolved device is passed directly to `SentenceTransformer(device=...)` and
-  drives every precision, attention, TF32, and compile decision below.
-- The effective device and compute dtype are recorded in the run's export
-  metadata (`effective_device`, `effective_compute_dtype`) and config sidecar.
+- An explicit `--device cuda` or `--device mps` on a host where that backend is unavailable fails fast with a parser error — CiteMesh never silently downgrades an explicit accelerator request to CPU.
+- The resolved device is passed directly to `SentenceTransformer(device=...)` and drives every precision, attention, TF32, and compile decision below.
+- The effective device and compute dtype are recorded in the run's export metadata (`effective_device`, `effective_compute_dtype`) and config sidecar.
 
 ## Precision and Compile Policy
 
-Per-device precision matrix (EmbeddingGemma is the default profile; a
-"float16-safe" profile is any model whose profile marks float16 as supported):
+Per-device precision matrix (EmbeddingGemma is the default profile; a "float16-safe" profile is any model whose profile marks float16 as supported):
 
 | Device | EmbeddingGemma | float16-safe profiles | Autocast |
 | --- | --- | --- | --- |
@@ -53,42 +47,25 @@ Per-device precision matrix (EmbeddingGemma is the default profile; a
 
 Notes:
 
-- On MPS, bf16 weights provide the memory/speed win; autocast stays off because
-  MPS autocast op coverage is narrower than CUDA's and the encode path does not
-  need the fp32-promotion safety net. Enabling it later is a one-token change in
-  the model profile (`autocast_devices`).
-- bf16-on-MPS requires torch >= 2.13 (the floor verified on Apple Silicon). On
-  older torch the runtime logs a warning and falls back to float16 when the
-  profile allows it, else float32.
+- On MPS, bf16 weights provide the memory/speed win; autocast stays off because MPS autocast op coverage is narrower than CUDA's and the encode path does not need the fp32-promotion safety net. Enabling it later is a one-token change in the model profile (`autocast_devices`).
+- bf16-on-MPS requires torch >= 2.13 (the floor verified on Apple Silicon). On older torch the runtime logs a warning and falls back to float16 when the profile allows it, else float32.
 - CPU stays float32: reduced precision on CPU is slower, not faster.
-- Attention implementation: `sdpa` on CUDA and MPS (`flash_attention_2` only via
-  model-profile opt-in plus an importable `flash_attn`, CUDA-only); CPU leaves
-  the transformers default. `flash_attn` is never probed off-CUDA.
+- Attention implementation: `sdpa` on CUDA and MPS (`flash_attention_2` only via model-profile opt-in plus an importable `flash_attn`, CUDA-only); CPU leaves the transformers default. `flash_attn` is never probed off-CUDA.
 - CiteMesh does not select OpenVINO or ONNX backends on top of torch.
-- On Ampere+ CUDA devices in eager mode, TF32 is enabled with the new API:
-  `torch.backends.fp32_precision = "tf32"`. TF32 configuration is skipped
-  entirely for non-CUDA devices, including `--device cpu` on a CUDA host.
+- On Ampere+ CUDA devices in eager mode, TF32 is enabled with the new API: `torch.backends.fp32_precision = "tf32"`. TF32 configuration is skipped entirely for non-CUDA devices, including `--device cpu` on a CUDA host.
 
 Compile policy:
 
 - `torch.compile` is best-effort, profile-gated, and disabled by default.
-- Compile is only attempted on `cuda` and `mps`. On CPU it is declined: Inductor
-  warm-up for a short-lived CLI run has no payoff.
+- Compile is only attempted on `cuda` and `mps`. On CPU it is declined: Inductor warm-up for a short-lived CLI run has no payoff.
 - Inductor-on-Metal (`mps`) is experimental; failures fall back to eager.
 - Enable it explicitly when you want to pay the warm-up cost for a warm-cache or longer-lived run.
 - On cold-cache runs that must hydrate embeddings, compile is deferred for that run to avoid Inductor compile/recompile overhead during long corpus hydration.
-- Legacy note: on torch `2.9`/`2.10` with compile enabled, the runtime uses
-  `torch.set_float32_matmul_precision("high")` instead of the
-  `fp32_precision` API to avoid a release-branch Inductor mixed-API conflict.
-  Later torch releases use the modern API directly.
+- Legacy note: on torch `2.9`/`2.10` with compile enabled, the runtime uses `torch.set_float32_matmul_precision("high")` instead of the `fp32_precision` API to avoid a release-branch Inductor mixed-API conflict. Later torch releases use the modern API directly.
 
 ## Cache Portability Across Devices
 
-The embedding cache namespace tracks the *compute dtype*, not the device. A
-cache hydrated with bf16 on a CUDA box and one hydrated with bf16 on MPS share
-a byte-identical namespace: you can warm the cache on a GPU host, copy the
-cache directory to a Mac, and get full cache hits. CPU (float32) caches live in
-a separate, deliberately conservative namespace.
+The embedding cache namespace tracks the *compute dtype*, not the device. A cache hydrated with bf16 on a CUDA box and one hydrated with bf16 on MPS share a byte-identical namespace: you can warm the cache on a GPU host, copy the cache directory to a Mac, and get full cache hits. CPU (float32) caches live in a separate, deliberately conservative namespace.
 
 ## Int8 Retrieval Pipeline
 
@@ -111,9 +88,7 @@ Interpretation:
 
 ## Dependency Floor
 
-- Embedding workflows require `torch>=2.9.0` on Linux/Windows and
-  `torch>=2.13.0` on macOS (plus `sentence-transformers` and `datasets`).
-  The macOS floor matches the torch release verified for MPS bf16 execution.
+- Embedding workflows require `torch>=2.9.0` on Linux/Windows and `torch>=2.13.0` on macOS (plus `sentence-transformers` and `datasets`). The macOS floor matches the torch release verified for MPS bf16 execution.
 
 ## Implementation References
 

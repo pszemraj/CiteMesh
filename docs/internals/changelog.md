@@ -1,7 +1,6 @@
 # Changelog & Key Improvements
 
-Notable changes from the early script-based prototypes to the current package layout.
-For current usage details, see:
+Notable changes from the early script-based prototypes to the current package layout. For current usage details, see:
 
 - [CLI Usage](../guides/cli.md)
 - [Caching & Data](../guides/caching.md)
@@ -11,97 +10,40 @@ For current usage details, see:
 
 ## Public Release Readiness
 
-- Added GitHub Actions CI: ruff lint/format, test matrix (Ubuntu + macOS ×
-  Python 3.10/3.13, CPU torch), and a no-extras install smoke that locks in
-  the lazy-import contract for the core CLI.
-- Key-aware Semantic Scholar rate limiting: authenticated clients pace at
-  1 request/second, anonymous clients stay at 0.5. A one-time INFO notice on
-  key-less runs points at the free API key signup.
-- Smarter retry backoff (tenacity): direct REST calls (search,
-  recommendations) now retry with full-jitter exponential backoff floored at
-  the server's `Retry-After` and capped at 60s, instead of sleeping a flat
-  `Retry-After: 2` on every attempt. The library-mediated call wrapper shares
-  the same policy. `citemesh search` help/docs now state plainly that it is
-  remote S2 keyword search for finding seed IDs, not local semantic search.
-- Fixed empty recommendation results for classic seed papers: the S2
-  recommendations endpoint's default "recent" candidate pool returns nothing
-  for older landmark papers (e.g. arXiv:1706.03762), which silently emptied
-  the recommendation strategy and the hybrid/embedding candidate pools.
-  CiteMesh now retries the broader `all-cs` pool when the default pool comes
-  back empty.
-- Seed-paper fetch failures now distinguish "identifier unknown to Semantic
-  Scholar" (`ValueError`) from "API rate-limited/unreachable after retries"
-  (`SemanticScholarUnavailableError`) for citation/recommendation seeds.
-- Paper search gets the same treatment: `citemesh search` and free-text query
-  seeds no longer report "No results found" when the search API was actually
-  rate-limited or unreachable — exhausted retries now surface as a
-  `SemanticScholarUnavailableError` with the free-key pointer.
-- Rewrote the README for public beta (reference tool comparison, macOS/MPS
-  support statement, S2 key guidance) and added CONTRIBUTING.md, AGENTS.md,
-  and issue/PR templates.
-- Narrowed the root `.gitignore` `*.yaml` rule so workflow files are
-  trackable.
+- Added GitHub Actions CI: ruff lint/format, test matrix (Ubuntu + macOS × Python 3.10/3.13, CPU torch), and a no-extras install smoke that locks in the lazy-import contract for the core CLI.
+- Key-aware Semantic Scholar rate limiting: authenticated clients pace at 1 request/second, anonymous clients stay at 0.5. A one-time INFO notice on key-less runs points at the free API key signup.
+- Smarter retry backoff (tenacity): direct REST calls (search, recommendations) now retry with full-jitter exponential backoff floored at the server's `Retry-After` and capped at 60s, instead of sleeping a flat `Retry-After: 2` on every attempt. The library-mediated call wrapper shares the same policy. `citemesh search` help/docs now state plainly that it is remote S2 keyword search for finding seed IDs, not local semantic search.
+- Fixed empty recommendation results for classic seed papers: the S2 recommendations endpoint's default "recent" candidate pool returns nothing for older landmark papers (e.g. arXiv:1706.03762), which silently emptied the recommendation strategy and the hybrid/embedding candidate pools. CiteMesh now retries the broader `all-cs` pool when the default pool comes back empty.
+- Seed-paper fetch failures now distinguish "identifier unknown to Semantic Scholar" (`ValueError`) from "API rate-limited/unreachable after retries" (`SemanticScholarUnavailableError`) for citation/recommendation seeds.
+- Paper search gets the same treatment: `citemesh search` and free-text query seeds no longer report "No results found" when the search API was actually rate-limited or unreachable — exhausted retries now surface as a `SemanticScholarUnavailableError` with the free-key pointer.
+- Rewrote the README for public beta (reference tool comparison, macOS/MPS support statement, S2 key guidance) and added CONTRIBUTING.md, AGENTS.md, and issue/PR templates.
+- Narrowed the root `.gitignore` `*.yaml` rule so workflow files are trackable.
 
 ## User Configuration
 
-- Added a persistent user config system: `config.toml` at the cache root plus
-  a `citemesh config` subcommand (`list`/`get`/`set`/`unset`/`path`). A
-  whitelisted `[defaults]` table overrides built-in defaults for most build
-  flags (for example `semantic_source = "arxiv-corpus"` to restore the corpus
-  default), and `[api] s2_api_key` supplies a Semantic Scholar key when the
-  `S2_API_KEY` environment variable is absent. Precedence: explicit CLI flag >
-  environment variable > config.toml > built-in default.
-- Config-supplied defaults outrank tuned implicit defaults (hybrid budget
-  knobs) but never count as explicit flags for strategy gating or corpus-mode
-  implication, so a global default cannot break unrelated strategies.
-- Unified the macOS cache root with Linux: `~/.cache/citemesh`
-  (HuggingFace-style) instead of `~/Library/Caches/citemesh` (pre-release
-  breaking change; `citemesh cache scan` hints when the legacy directory still
-  exists).
-- `citemesh cache clear` now preserves `config.toml` while deleting cache
-  payloads.
+- Added a persistent user config system: `config.toml` at the cache root plus a `citemesh config` subcommand (`list`/`get`/`set`/`unset`/`path`). A whitelisted `[defaults]` table overrides built-in defaults for most build flags (for example `semantic_source = "arxiv-corpus"` to restore the corpus default), and `[api] s2_api_key` supplies a Semantic Scholar key when the `S2_API_KEY` environment variable is absent. Precedence: explicit CLI flag > environment variable > config.toml > built-in default.
+- Config-supplied defaults outrank tuned implicit defaults (hybrid budget knobs) but never count as explicit flags for strategy gating or corpus-mode implication, so a global default cannot break unrelated strategies.
+- Unified the macOS cache root with Linux: `~/.cache/citemesh` (HuggingFace-style) instead of `~/Library/Caches/citemesh` (pre-release breaking change; `citemesh cache scan` hints when the legacy directory still exists).
+- `citemesh cache clear` now preserves `config.toml` while deleting cache payloads.
 
 ## Semantic Sources
 
-- Candidate-only ("corpus-free") semantic sourcing is now the DEFAULT for the
-  embedding and hybrid strategies (`--semantic-source candidates`): candidates
-  come from S2 seed neighbors (references/citations/recommendations, capped by
-  `--candidate-pool-size`) and only those abstracts are embedded locally, with
-  vectors persisted incrementally in a candidate-scoped cache namespace.
-- The arXiv corpus path remains available via `--semantic-source arxiv-corpus`;
-  corpus-only flags imply it when `--semantic-source` is omitted, so existing
-  invocations keep working.
-- Candidate mode stores embeddings as float32 (int8 calibration is computed
-  during corpus hydration only); explicit `--storage-precision int8` now
-  requires `arxiv-corpus`.
-- Hybrid candidate rerank vectors now persist through the embedding cache in
-  candidate mode instead of being re-encoded every run (corpus mode keeps the
-  in-memory path so corpus row counts stay undistorted).
-- Capped corpus hydration now warns that it takes the first `--corpus-size`
-  rows of the split (typically the oldest arXiv records) and that interrupted
-  capped hydrations restart from zero; a newest-slice policy and capped-resume
-  support remain open follow-ups.
+- Candidate-only ("corpus-free") semantic sourcing is now the DEFAULT for the embedding and hybrid strategies (`--semantic-source candidates`): candidates come from S2 seed neighbors (references/citations/recommendations, capped by `--candidate-pool-size`) and only those abstracts are embedded locally, with vectors persisted incrementally in a candidate-scoped cache namespace.
+- The arXiv corpus path remains available via `--semantic-source arxiv-corpus`; corpus-only flags imply it when `--semantic-source` is omitted, so existing invocations keep working.
+- Candidate mode stores embeddings as float32 (int8 calibration is computed during corpus hydration only); explicit `--storage-precision int8` now requires `arxiv-corpus`.
+- Hybrid candidate rerank vectors now persist through the embedding cache in candidate mode instead of being re-encoded every run (corpus mode keeps the in-memory path so corpus row counts stay undistorted).
+- Capped corpus hydration now warns that it takes the first `--corpus-size` rows of the split (typically the oldest arXiv records) and that interrupted capped hydrations restart from zero; a newest-slice policy and capped-resume support remain open follow-ups.
 - The `datasets` dependency is now only required for `arxiv-corpus` mode.
 
 ## Runtime & Devices
 
-- Added explicit device resolution with a `--device {auto,cuda,mps,cpu}` flag for
-  embedding/hybrid strategies: `auto` prefers CUDA, then MPS (Apple Silicon),
-  then CPU; explicit unavailable devices fail fast at parse time.
-- Added first-class MPS support: EmbeddingGemma loads bf16 weights on MPS
-  (torch >= 2.13) with `sdpa` attention and autocast off; float16-safe profiles
-  run fp16. CPU stays float32.
-- Cache namespaces track compute dtype (not device), so bf16 caches built on
-  CUDA and MPS interoperate; warm-on-GPU-then-copy-to-Mac now works.
-- TF32 configuration is now gated on the resolved device: `--device cpu` on a
-  CUDA host no longer flips global TF32 backend state (bug fix).
-- `--torch-compile` is now declined on CPU (pure warm-up cost for CLI runs) and
-  marked experimental on MPS (Inductor/Metal, eager fallback on failure).
-- Split the torch dependency floor by platform: `>=2.9` on Linux/Windows,
-  `>=2.13` on macOS. Declared the previously transitive `huggingface_hub`
-  dependency explicitly.
-- Pinned a headless matplotlib backend (`Agg`) for static exports unless
-  `MPLBACKEND` is set, avoiding the main-thread-only MacOSX GUI backend.
+- Added explicit device resolution with a `--device {auto,cuda,mps,cpu}` flag for embedding/hybrid strategies: `auto` prefers CUDA, then MPS (Apple Silicon), then CPU; explicit unavailable devices fail fast at parse time.
+- Added first-class MPS support: EmbeddingGemma loads bf16 weights on MPS (torch >= 2.13) with `sdpa` attention and autocast off; float16-safe profiles run fp16. CPU stays float32.
+- Cache namespaces track compute dtype (not device), so bf16 caches built on CUDA and MPS interoperate; warm-on-GPU-then-copy-to-Mac now works.
+- TF32 configuration is now gated on the resolved device: `--device cpu` on a CUDA host no longer flips global TF32 backend state (bug fix).
+- `--torch-compile` is now declined on CPU (pure warm-up cost for CLI runs) and marked experimental on MPS (Inductor/Metal, eager fallback on failure).
+- Split the torch dependency floor by platform: `>=2.9` on Linux/Windows, `>=2.13` on macOS. Declared the previously transitive `huggingface_hub` dependency explicitly.
+- Pinned a headless matplotlib backend (`Agg`) for static exports unless `MPLBACKEND` is set, avoiding the main-thread-only MacOSX GUI backend.
 
 ## Breaking Changes
 

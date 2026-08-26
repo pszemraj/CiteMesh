@@ -42,15 +42,9 @@ citemesh config unset defaults.semantic_source
 citemesh config path
 ```
 
-For cache path/layout/hydration details, see [Caching & Data](caching.md).
-In non-interactive shells, `citemesh cache clear` requires `--yes`.
-`citemesh cache clear` never deletes `config.toml`.
-In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--overwrite-cache`.
+For cache path/layout/hydration details, see [Caching & Data](caching.md). In non-interactive shells, `citemesh cache clear` requires `--yes`. `citemesh cache clear` never deletes `config.toml`. In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--overwrite-cache`.
 
-Persistent defaults for most build flags can be stored with `citemesh config`;
-precedence is explicit CLI flag > environment variable > `config.toml` >
-built-in default. Keys, value forms, and precedence subtleties are documented
-in [User Configuration](configuration.md).
+Persistent defaults for most build flags can be stored with `citemesh config`; precedence is explicit CLI flag > environment variable > `config.toml` > built-in default. Keys, value forms, and precedence subtleties are documented in [User Configuration](configuration.md).
 
 ## Accepted Identifiers
 
@@ -80,14 +74,11 @@ in [User Configuration](configuration.md).
 | `--log-width` | Rich console wrap width in columns (`0` uses terminal width on TTYs and a stable redirected fallback) | `0` |
 | `--log-file` | Optional plain-text log file path (overwrites existing file) | disabled |
 
-Output-path normalization, file naming, and sidecar placement are defined in
-[Output Artifacts](../reference/output-artifacts.md).
+Output-path normalization, file naming, and sidecar placement are defined in [Output Artifacts](../reference/output-artifacts.md).
 
-`--log-level`, `--log-width`, and `--log-file` are shared command options and are accepted for
-`build`, `search`, `cache`, and `config` command trees (including `cache scan` / `cache clear`).
+`--log-level`, `--log-width`, and `--log-file` are shared command options and are accepted for `build`, `search`, `cache`, and `config` command trees (including `cache scan` / `cache clear`).
 
-`--seed` controls shared layout generation for `png`, `plotly`, and `dashboard` exports. Pyvis
-`html` exports use vis.js browser physics and do not consume this precomputed layout.
+`--seed` controls shared layout generation for `png`, `plotly`, and `dashboard` exports. Pyvis `html` exports use vis.js browser physics and do not consume this precomputed layout.
 
 Numeric validation:
 
@@ -103,9 +94,7 @@ Numeric validation:
 
 Strategy behavior and tradeoffs are described in [Strategies Guide](strategies.md). Flag contracts are listed here.
 
-Build command options are strategy-scoped. If you pass a flag that is not supported
-for the selected `--strategy`, CiteMesh exits with a CLI error instead of silently
-ignoring it.
+Build command options are strategy-scoped. If you pass a flag that is not supported for the selected `--strategy`, CiteMesh exits with a CLI error instead of silently ignoring it.
 
 ### Cross-Strategy Behavior
 
@@ -168,9 +157,7 @@ ignoring it.
   - `--max-papers`: `45`
   - `--max-citations`: `45`
   - `--max-references`: `12`
-- `--max-semantic`: maximum non-seed semantic neighbors to add after hybrid reranking.
-  Valid values are `0` through `max-papers - 1`.
-  If omitted, hybrid defaults to `min(20, max-papers - 1)`.
+- `--max-semantic`: maximum non-seed semantic neighbors to add after hybrid reranking. Valid values are `0` through `max-papers - 1`. If omitted, hybrid defaults to `min(20, max-papers - 1)`.
 - Hybrid adjudication policy:
   - fetches full citation candidates up to `max_references + max_citations`
   - fetches semantic candidates (expanded pool) and merges duplicates
@@ -182,12 +169,9 @@ ignoring it.
 
 ## Export Formats
 
-Accepted `--export` values are `png`, `html`, `plotly`, `dashboard`, `json`,
-`csv`, `bibtex`, `graphml`, and `all`.
+Accepted `--export` values are `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, and `all`.
 
-Format-specific files, dashboard collection behavior, `*.config.json` sidecars,
-and determinism notes are covered in
-[Output Artifacts](../reference/output-artifacts.md).
+Format-specific files, dashboard collection behavior, `*.config.json` sidecars, and determinism notes are covered in [Output Artifacts](../reference/output-artifacts.md).
 
 Interactive exports require viz dependencies. The `recommended` extra already includes them; otherwise install `viz` explicitly:
 
@@ -232,13 +216,7 @@ citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
 ```
 
-`citemesh search` is remote keyword search on the Semantic Scholar API — a
-convenience for finding seed paper IDs, not a semantic search over your local
-embedding index. It shares the anonymous S2 rate-limit pool (the endpoint most
-prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the
-command reports the rate limit honestly instead of pretending there were no
-results. Local semantic search over built/downloaded indexes is a possible
-future direction.
+`citemesh search` is remote keyword search on the Semantic Scholar API — a convenience for finding seed paper IDs, not a semantic search over your local embedding index. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results. Local semantic search over built/downloaded indexes is a possible future direction.
 
 ## Troubleshooting
 
