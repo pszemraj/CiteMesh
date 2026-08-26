@@ -38,7 +38,7 @@ Related docs:
 Two semantic sources, selected with `--semantic-source`:
 
 - `candidates` (default): fetches the seed's Semantic Scholar neighbors (references, citations, and recommendations, up to `--candidate-pool-size`), embeds only those abstracts locally, and ranks them by cosine similarity to the seed. Fast (seconds after the one-time model download), covers all venues S2 indexes, and needs no corpus download. Candidate vectors persist incrementally in a candidate-scoped cache namespace.
-- `arxiv-corpus` (opt-in): hydrates a local arXiv abstract corpus from HuggingFace and searches it. This can surface papers with no citation path to the seed, but cold hydration encodes the full corpus cap and is only practical on strong accelerators. Note: a capped hydration takes the FIRST `--corpus-size` rows of the split, which for arXiv snapshots is typically the oldest records — prefer `--all-corpus` (resumable) when you opt into corpus mode. Requires the `datasets` dependency.
+- `arxiv-corpus` (opt-in): hydrates a local arXiv abstract corpus from HuggingFace and searches it. This can surface papers with no citation path to the seed, but cold hydration encodes the full corpus cap and is only practical on strong accelerators for large caps. A capped hydration selects the `--corpus-size` most recently submitted papers, ranked by the submission date encoded in each arXiv ID (snapshot row order does not track submission time); use `--all-corpus` (resumable) for full coverage. Requires the `datasets` dependency.
 
 Providing corpus flags (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--streaming`) without `--semantic-source` implies `arxiv-corpus` for backwards compatibility.
 

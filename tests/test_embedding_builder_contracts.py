@@ -1194,7 +1194,9 @@ def test_metadata_and_streaming_loader_contracts(
         "librarian-bots/arxiv-metadata-snapshot",
         "CShorten/ML-ArXiv-Papers",
     ]
-    assert load_calls[0][1] == "train[:5]"
+    # Capped hydration loads the full split; newest-N selection happens by
+    # arXiv ID chronology after load, not via positional split slicing.
+    assert load_calls[0][1] == "train"
     assert len(list(dataset)) == 1
 
     load_calls.clear()
@@ -1238,6 +1240,99 @@ def test_metadata_and_streaming_loader_contracts(
             use_streaming=True,
             client=MagicMock(),
         )
+
+
+def test_arxiv_id_chronology_key_parses_both_styles() -> None:
+    """Submission chronology must parse new-style, old-style, and prefixed IDs."""
+    key = embedding_module._arxiv_id_chronology_key
+    assert key("2508.01234") == (2025, 8, 1234)
+    assert key("2508.01234v2") == (2025, 8, 1234)
+    assert key("arXiv:1706.03762") == (2017, 6, 3762)
+    assert key("0704.0001") == (2007, 4, 1)
+    assert key("solv-int/9912015") == (1999, 12, 15)
+    assert key("math.GT/0309136") == (2003, 9, 136)
+    assert key("hep-th/0504010v3") == (2005, 4, 10)
+    assert key("fallback-paper") is None
+    assert key("") is None
+    assert key(None) is None
+
+
+def test_capped_hydration_selects_newest_rows_by_arxiv_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Capped hydration must rank by ID chronology, not dataset row order."""
+    # Mirror the real snapshot shape: newest update_date first (including a
+    # recently revised OLD paper at row 0), pre-2007 ID block at the tail.
+    records = [
+        {"id": "1203.0127", "title": "Revised old paper", "abstract": "A."},
+        {"id": "2608.01234", "title": "Newest submission", "abstract": "A."},
+        {"id": "2607.00042", "title": "Recent submission", "abstract": "A."},
+        {"id": "2412.05000", "title": "Late 2024 submission", "abstract": "A."},
+        {"id": "hep-th/0504010", "title": "Old-style paper", "abstract": "A."},
+        {"id": "solv-int/9912015", "title": "Tail 1999 paper", "abstract": "A."},
+    ]
+
+    fake_datasets = types.ModuleType("datasets")
+    fake_datasets.load_dataset = lambda name, split, streaming=False: iter(records)
+    monkeypatch.setattr(
+        embedding_module, "_import_datasets_module", lambda: fake_datasets
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, use_streaming=True, corpus_size=3, client=MagicMock()
+    )
+    _, dataset = builder._load_dataset_for_hydration(use_streaming=True)
+    assert [record["title"] for record in dataset] == [
+        "Late 2024 submission",
+        "Recent submission",
+        "Newest submission",
+    ]
+
+    # Sources without parseable arXiv IDs keep the head of the split.
+    no_id_records = [
+        {"id": f"paper-{idx}", "title": f"Paper {idx}", "abstract": "A."}
+        for idx in range(5)
+    ]
+    fake_datasets.load_dataset = lambda name, split, streaming=False: iter(
+        no_id_records
+    )
+    _, dataset = builder._load_dataset_for_hydration(use_streaming=True)
+    assert [record["title"] for record in dataset] == ["Paper 0", "Paper 1", "Paper 2"]
+
+
+def test_select_newest_corpus_rows_uses_dataset_id_column() -> None:
+    """Arrow-style datasets select newest rows via the id column, not full records."""
+
+    class _FakeArrowDataset:
+        """Minimal Dataset stand-in exposing column_names/select/__getitem__."""
+
+        column_names = ["id", "title", "abstract"]
+
+        def __init__(self, rows: list[dict[str, Any]]) -> None:
+            self.rows = rows
+            self.selected_indices: list[int] | None = None
+
+        def __getitem__(self, column: str) -> list[Any]:
+            return [row[column] for row in self.rows]
+
+        def select(self, indices: list[int]) -> list[dict[str, Any]]:
+            self.selected_indices = list(indices)
+            return [self.rows[idx] for idx in indices]
+
+    rows = [
+        {"id": "2601.00001", "title": "Jan 2026", "abstract": "A."},
+        {"id": "9107.00001", "title": "Century-pivoted to 1991", "abstract": "A."},
+        {"id": "astro-ph/9204001", "title": "April 1992", "abstract": "A."},
+        {"id": "2603.00001", "title": "Mar 2026", "abstract": "A."},
+        {"id": "not-an-id", "title": "Skipped", "abstract": "A."},
+    ]
+    fake_dataset = _FakeArrowDataset(rows)
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, use_streaming=False, corpus_size=2, client=MagicMock()
+    )
+    selected = builder._select_newest_corpus_rows(fake_dataset, "fake/source")
+    assert fake_dataset.selected_indices == [0, 3]
+    assert [row["title"] for row in selected] == ["Jan 2026", "Mar 2026"]
 
 
 def test_collect_papers_query_seed_and_warm_cache_contracts(

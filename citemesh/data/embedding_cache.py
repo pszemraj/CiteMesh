@@ -128,10 +128,14 @@ def _metadata_table_create_sql() -> str:
 def _corpus_size_token(corpus_size: Optional[int]) -> str:
     """Convert optional corpus size into stable metadata token.
 
+    Capped tokens carry the slice policy (``newest:N``) so caches hydrated
+    under the legacy head-slice policy (bare ``N``) fail ``is_hydrated`` and
+    rehydrate instead of silently serving the oldest records.
+
     :param Optional[int] corpus_size: Optional corpus-size cap.
     :return str: Tokenized corpus-size value.
     """
-    return "all" if corpus_size is None else str(int(corpus_size))
+    return "all" if corpus_size is None else f"newest:{int(corpus_size)}"
 
 
 def _safe_json_list(value: Any) -> str:

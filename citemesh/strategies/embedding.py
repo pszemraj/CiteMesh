@@ -7,6 +7,7 @@ to find conceptually similar papers without relying on citations.
 
 from __future__ import annotations
 
+import heapq
 import importlib.util
 import logging
 import random
@@ -360,6 +361,67 @@ def _parse_year(paper: Dict[str, Any]) -> Optional[int]:
             pass
 
     return None
+
+
+_NEW_STYLE_ARXIV_ID_RE = re.compile(r"^(\d{2})(\d{2})\.(\d{4,5})(?:v\d+)?$")
+_OLD_STYLE_ARXIV_ID_RE = re.compile(
+    r"^[a-z][a-z-]*(?:\.[a-z]{2})?/(\d{2})(\d{2})(\d{3})(?:v\d+)?$"
+)
+
+
+def _arxiv_id_chronology_key(raw_id: Any) -> Optional[Tuple[int, int, int]]:
+    """Return a sortable submission-chronology key for an arXiv identifier.
+
+    Both identifier styles encode the submission year/month: new-style
+    ``YYMM.NNNNN`` and old-style ``archive/YYMMNNN``. Snapshot row order and
+    ``update_date`` do not track submission time (revisions bump old papers),
+    so this key is the only reliable "newest papers" ordering.
+
+    :param Any raw_id: Raw identifier value from a dataset record.
+    :return Optional[Tuple[int, int, int]]: ``(year, month, sequence)`` or
+        ``None`` when the identifier is not a parseable arXiv ID.
+    """
+    text = str(raw_id or "").strip().lower()
+    if text.startswith("arxiv:"):
+        text = text[len("arxiv:") :]
+    match = _NEW_STYLE_ARXIV_ID_RE.match(text) or _OLD_STYLE_ARXIV_ID_RE.match(text)
+    if match is None:
+        return None
+    year_token, month, sequence = (int(group) for group in match.groups())
+    # arXiv started in 1991; two-digit years wrap at the century boundary.
+    year = 1900 + year_token if year_token >= 91 else 2000 + year_token
+    return (year, month, sequence)
+
+
+def _newest_records_by_arxiv_id(
+    records: Iterable[Dict[str, Any]], limit: int
+) -> List[Dict[str, Any]]:
+    """Select the ``limit`` most recently submitted records in one bounded pass.
+
+    Records without parseable arXiv IDs are excluded from selection; when no
+    record parses at all, the head of the iterable is returned unchanged so
+    hydration still produces a deterministic capped corpus.
+
+    :param Iterable[Dict[str, Any]] records: Dataset records to scan.
+    :param int limit: Number of newest records to keep.
+    :return List[Dict[str, Any]]: Selected records in chronological order.
+    """
+    heap: List[Tuple[Tuple[int, int, int], int, Dict[str, Any]]] = []
+    head_fallback: List[Dict[str, Any]] = []
+    for order, record in enumerate(records):
+        key = _arxiv_id_chronology_key((record or {}).get("id"))
+        if key is None:
+            if len(head_fallback) < limit:
+                head_fallback.append(record)
+            continue
+        entry = (key, order, record)
+        if len(heap) < limit:
+            heapq.heappush(heap, entry)
+        elif entry[:2] > heap[0][:2]:
+            heapq.heapreplace(heap, entry)
+    if not heap:
+        return head_fallback
+    return [record for _, _, record in sorted(heap, key=lambda entry: entry[:2])]
 
 
 def _parse_authors(authors_data: Any) -> List[str]:
@@ -2253,11 +2315,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             use_streaming,
         )
         if self.corpus_size is not None and ":" not in str(self.dataset_split):
-            logger.warning(
-                "Capped corpus hydration takes the FIRST %d rows of the split; "
-                "for arXiv snapshot datasets these are typically the oldest "
-                "records. Prefer the default --semantic-source candidates for "
-                "seed-relevant results, or --all-corpus for full coverage.",
+            logger.info(
+                "Capped corpus hydration selects the %d most recently "
+                "submitted papers (by arXiv ID chronology). Use --all-corpus "
+                "for full coverage or an explicit --dataset-split slice for "
+                "a custom positional window.",
                 int(self.corpus_size),
             )
         retained_fingerprint = (
@@ -2661,6 +2723,91 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         stats = self.embedding_cache.payload_stats()
         return max(int(stats.sqlite_rows), int(stats.embedding_rows))
 
+    def _select_newest_corpus_rows(
+        self, dataset: Iterable[Dict[str, Any]], dataset_source: str
+    ) -> Iterable[Dict[str, Any]]:
+        """Select the ``corpus_size`` most recently submitted rows by arXiv ID.
+
+        Snapshot datasets are not ordered by submission time (the arXiv
+        snapshot ships newest-``update_date`` first, with pre-2007 IDs at the
+        tail), so positional slicing cannot express "newest papers". Rows are
+        instead ranked by the submission chronology encoded in their arXiv
+        IDs. Sources without parseable IDs fall back to the head of the split
+        with a warning.
+
+        :param Iterable[Dict[str, Any]] dataset: Loaded dataset or record stream.
+        :param str dataset_source: Dataset source identifier (for logging).
+        :return Iterable[Dict[str, Any]]: Selected rows (or the original
+            iterable when no arXiv IDs are parseable).
+        """
+        limit = int(self.corpus_size)
+        column_names = getattr(dataset, "column_names", None)
+        if column_names is not None and hasattr(dataset, "select"):
+            if "id" not in column_names:
+                logger.warning(
+                    "Dataset %s has no 'id' column; capped hydration takes "
+                    "the first %d rows instead of the newest.",
+                    dataset_source,
+                    limit,
+                )
+                return dataset
+            heap: List[Tuple[Tuple[int, int, int], int]] = []
+            for idx, raw_id in enumerate(dataset["id"]):
+                key = _arxiv_id_chronology_key(raw_id)
+                if key is None:
+                    continue
+                entry = (key, idx)
+                if len(heap) < limit:
+                    heapq.heappush(heap, entry)
+                elif entry > heap[0]:
+                    heapq.heapreplace(heap, entry)
+            if not heap:
+                logger.warning(
+                    "No parseable arXiv IDs in %s; capped hydration takes "
+                    "the first %d rows instead of the newest.",
+                    dataset_source,
+                    limit,
+                )
+                return dataset
+            oldest_key, _ = min(heap)
+            newest_key, _ = max(heap)
+            logger.info(
+                "Selected the %d most recently submitted rows from %s by "
+                "arXiv ID chronology (submission window %04d-%02d..%04d-%02d).",
+                len(heap),
+                dataset_source,
+                oldest_key[0],
+                oldest_key[1],
+                newest_key[0],
+                newest_key[1],
+            )
+            return dataset.select(sorted(idx for _, idx in heap))
+
+        selected = _newest_records_by_arxiv_id(dataset, limit)
+        boundary_keys = [
+            _arxiv_id_chronology_key(record.get("id"))
+            for record in (selected[:1] + selected[-1:])
+        ]
+        if selected and boundary_keys[0] is None:
+            logger.warning(
+                "No parseable arXiv IDs in %s; capped hydration takes the "
+                "first %d rows instead of the newest.",
+                dataset_source,
+                limit,
+            )
+        elif selected:
+            logger.info(
+                "Selected the %d most recently submitted rows from %s by "
+                "arXiv ID chronology (submission window %04d-%02d..%04d-%02d).",
+                len(selected),
+                dataset_source,
+                boundary_keys[0][0],
+                boundary_keys[0][1],
+                boundary_keys[-1][0],
+                boundary_keys[-1][1],
+            )
+        return selected
+
     def _resolve_dataset_split_row_count(self, dataset_source: str) -> Optional[int]:
         """Resolve dataset split row count from HuggingFace metadata when available.
 
@@ -2967,12 +3114,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 and parsed_row_offset > 0
             ):
                 split_for_load = f"{split_for_load}[{parsed_row_offset}:]"
-            elif (
-                not use_streaming
-                and self.corpus_size is not None
-                and ":" not in split_for_load
-            ):
-                split_for_load = f"{split_for_load}[:{int(self.corpus_size)}]"
             try:
                 dataset = load_dataset(
                     dataset_name,
@@ -2996,6 +3137,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     else parsed_row_offset + parsed_row_limit
                 )
                 dataset = islice(dataset, parsed_row_offset, stop_idx)
+            elif (
+                self.corpus_size is not None
+                and parsed_row_limit is None
+                and parsed_row_offset == 0
+                and ":" not in str(self.dataset_split)
+            ):
+                # Newest-first capped hydration: snapshot row order does not
+                # track submission time, so select by arXiv ID chronology.
+                dataset = self._select_newest_corpus_rows(dataset, dataset_name)
             logger.debug(
                 "Hydration dataset selected: %s (split=%s, streaming=%s, row_limit=%s, row_offset=%s).",
                 dataset_name,

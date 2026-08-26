@@ -1471,8 +1471,8 @@ User configuration:
         type=_positive_int,
         default=50000,
         help=(
-            "Maximum papers to load from corpus "
-            "(default: 50000; use --all-corpus to remove cap)"
+            "Maximum papers to load from corpus, selecting the most recently "
+            "submitted (default: 50000; use --all-corpus to remove cap)"
         ),
     )
 

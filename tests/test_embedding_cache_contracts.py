@@ -31,6 +31,7 @@ from citemesh.data.embedding_cache import (
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
     EmbeddingCacheUpsertStats,
+    _corpus_size_token,
     _resolve_cache_lock_timeout_seconds,
 )
 from citemesh.data.model_profiles import get_embedding_model_profile
@@ -545,6 +546,44 @@ def test_embedding_cache_search_returns_empty_when_h5_is_missing() -> None:
         )
 
     assert results == []
+
+
+def test_corpus_size_token_encodes_newest_slice_policy() -> None:
+    """Capped tokens carry the slice policy so legacy head-slice caches rehydrate."""
+    assert _corpus_size_token(None) == "all"
+    assert _corpus_size_token(1000) == "newest:1000"
+
+
+def test_legacy_head_slice_hydration_metadata_fails_is_hydrated() -> None:
+    """Caches hydrated under the head-slice policy must not pass is_hydrated."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="newest-slice-migration")
+        _set_test_int8_calibration(cache)
+        cache.get_embeddings(
+            {
+                "p1": {"title": "Alpha", "abstract": "First"},
+                "p2": {"title": "Beta", "abstract": "Second"},
+            },
+            LookupEncodeModel(
+                {
+                    "Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32),
+                    "Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32),
+                }
+            ),
+            show_progress=False,
+        )
+        cache.mark_hydrated(
+            dataset_source="fake/source",
+            dataset_split="train",
+            corpus_size=2,
+            complete=True,
+        )
+        assert cache.is_hydrated("train", 2, dataset_source="fake/source")
+
+        # Simulate a cache hydrated before the newest-slice policy landed.
+        with cache._connect_db() as conn:
+            cache._set_cache_metadata(conn, HYDRATION_CORPUS_SIZE_KEY, "2")
+        assert not cache.is_hydrated("train", 2, dataset_source="fake/source")
 
 
 def test_embedding_cache_embedding_count_tracks_persisted_rows() -> None:
@@ -1367,7 +1406,7 @@ def test_embedding_cache_clear_logs_cached_hydration_scope(
         cache.clear(reason="scope test")
 
     assert any(
-        "cached_split=train, cached_corpus=50000, "
+        "cached_split=train, cached_corpus=newest:50000, "
         "cached_source=librarian-bots/arxiv-metadata-snapshot" in record.message
         for record in caplog.records
     )
