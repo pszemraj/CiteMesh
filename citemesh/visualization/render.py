@@ -43,6 +43,8 @@ COMMUNITY_SEPARATION_BASE = 0.92
 COMMUNITY_SEPARATION_STEP = 0.06
 COMMUNITY_SEPARATION_MAX_EXTRA = 0.32
 COMMUNITY_ANCHOR_MAX_RADIUS = 0.69
+COMMUNITY_SCAFFOLD_WEIGHT = 0.15
+MAX_STATIC_NON_SEED_LABELS = 12
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -189,14 +191,22 @@ def _spread_layout_by_communities(
         else:
             community_graph.add_edge(left_idx, right_idx, weight=weight)
 
-    if community_graph.number_of_edges() == 0:
-        ordered_cluster_ids = sorted(community_graph.nodes())
-        for idx, cluster_id in enumerate(ordered_cluster_ids):
-            next_cluster = ordered_cluster_ids[(idx + 1) % len(ordered_cluster_ids)]
-            if cluster_id != next_cluster and not community_graph.has_edge(
-                cluster_id, next_cluster
-            ):
-                community_graph.add_edge(cluster_id, next_cluster, weight=1.0)
+    component_groups = [
+        sorted(component) for component in nx.connected_components(community_graph)
+    ]
+    component_groups.sort(
+        key=lambda members: (0 if 0 in members else 1, tuple(members))
+    )
+    if len(component_groups) > 1:
+        # Spring layout otherwise lets isolated community groups drift to arbitrary
+        # extremes, which can collapse the useful graph area after normalization.
+        hub_cluster = component_groups[0][0]
+        for component in component_groups[1:]:
+            community_graph.add_edge(
+                hub_cluster,
+                component[0],
+                weight=COMMUNITY_SCAFFOLD_WEIGHT,
+            )
 
     anchor_positions = nx.spring_layout(
         community_graph,
@@ -327,6 +337,36 @@ def _normalize_layout_positions(
     return {
         key: np.array([float(normalized[idx, 0]), float(normalized[idx, 1])])
         for idx, key in enumerate(keys)
+    }
+
+
+def _orient_layout_horizontally(
+    pos: Dict[Hashable, np.ndarray],
+) -> Dict[Hashable, np.ndarray]:
+    """Rotate a portrait-oriented layout to use the landscape export viewport.
+
+    :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
+    :return Dict[Hashable, np.ndarray]: Copied positions with the longer axis horizontal.
+    """
+    if not pos:
+        return {}
+
+    coords = np.array(list(pos.values()), dtype=float)
+    if coords.ndim != 2 or coords.shape[1] != 2:
+        return {
+            node: np.asarray(position, dtype=float).copy()
+            for node, position in pos.items()
+        }
+
+    span_x, span_y = np.ptp(coords, axis=0)
+    if float(span_y) <= float(span_x):
+        return {
+            node: np.asarray(position, dtype=float).copy()
+            for node, position in pos.items()
+        }
+    return {
+        node: np.array([float(position[1]), -float(position[0])])
+        for node, position in pos.items()
     }
 
 
@@ -549,7 +589,7 @@ def compute_layout(
     for node in sorted(pos, key=str):
         pos[node] += rng.normal(0, VIZ_CONFIG.perturbation_std, 2)
 
-    return pos
+    return _orient_layout_horizontally(pos)
 
 
 def draw_edges(
@@ -670,6 +710,10 @@ def draw_labels(
     )
 
     placed: List[np.ndarray] = []
+    label_bounds: List[Any] = []
+    non_seed_label_count = 0
+    ax.figure.canvas.draw()
+    renderer = ax.figure.canvas.get_renderer()
     for node in candidate_nodes:
         p = pos[node]
 
@@ -701,10 +745,17 @@ def draw_labels(
             fontsize = VIZ_CONFIG.font_size
             xytext = (0, -3)
             vertical_alignment = "top"
-            label_bbox = None
+            label_bbox = dict(
+                boxstyle="round,pad=0.1",
+                facecolor=theme.background,
+                alpha=0.68,
+                linewidth=0,
+            )
 
         fontweight = "bold" if is_seed else VIZ_CONFIG.font_weight
         if not is_seed:
+            if non_seed_label_count >= MAX_STATIC_NON_SEED_LABELS:
+                continue
             node_size = size_map.get(node, float(VIZ_CONFIG.min_size))
             scaled = min(
                 max(node_size / max(float(VIZ_CONFIG.seed_size), 1.0), 0.0), 1.0
@@ -720,7 +771,7 @@ def draw_labels(
             ):
                 continue
 
-        ax.annotate(
+        annotation = ax.annotate(
             label,
             xy=p,
             xytext=xytext,
@@ -732,7 +783,14 @@ def draw_labels(
             color=theme.text_color,
             bbox=label_bbox,
         )
+        bounds = annotation.get_window_extent(renderer).expanded(1.06, 1.16)
+        if not is_seed and any(bounds.overlaps(previous) for previous in label_bounds):
+            annotation.remove()
+            continue
+        label_bounds.append(bounds)
         placed.append(np.asarray(p, dtype=float))
+        if not is_seed:
+            non_seed_label_count += 1
 
 
 def visualize_graph(
@@ -784,6 +842,8 @@ def visualize_graph(
     ax.axis("off")
     fig.patch.set_facecolor(theme.background)
     ax.set_facecolor(theme.background)
+    ax.set_xlim(-1.05, 1.05)
+    ax.set_ylim(-1.05, 1.05)
 
     # Draw graph components
     draw_edges(ax, graph, pos, theme)
@@ -808,8 +868,6 @@ def visualize_graph(
     if metadata:
         add_metadata_box(ax, metadata, pos, theme)
 
-    ax.set_xlim(-1.05, 1.05)
-    ax.set_ylim(-1.05, 1.05)
     fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.02)
 
     # Save figure

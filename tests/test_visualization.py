@@ -25,10 +25,14 @@ from citemesh.visualization.export import (
 )
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
+    MAX_STATIC_NON_SEED_LABELS,
     _normalize_layout_positions,
+    _orient_layout_horizontally,
+    _spread_layout_by_communities,
     compute_layout,
     compute_node_colors,
     compute_node_sizes,
+    draw_labels,
     visualize_graph,
 )
 from citemesh.visualization.themes import get_theme
@@ -916,6 +920,100 @@ def test_visualize_graph_metadata_overlay_is_compact(
     assert "Embedding" not in text
 
 
+def test_static_labels_are_capped_by_citation_priority() -> None:
+    """Dense static plots should label only the highest-priority non-seed papers."""
+    import matplotlib.pyplot as plt
+
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="Seed Paper",
+        year=2025,
+        authors=["Seed Author"],
+        citation_count=0,
+        is_seed=True,
+    )
+    positions: dict[str, np.ndarray] = {"seed": np.array([0.95, 1.08])}
+    for index in range(20):
+        node_id = f"paper-{index:02d}"
+        graph.add_node(
+            node_id,
+            title=f"Paper {index}",
+            year=2000 + index,
+            authors=[f"Author {index}"],
+            citation_count=index,
+            is_seed=False,
+        )
+        positions[node_id] = np.array(
+            [0.1 + 0.27 * float(index % 4), 0.1 + 0.18 * float(index // 4)]
+        )
+
+    figure, axis = plt.subplots()
+    axis.set_xlim(0.0, 1.1)
+    axis.set_ylim(0.0, 1.2)
+    draw_labels(
+        axis,
+        graph,
+        positions,
+        "seed",
+        get_theme("light"),
+        sizes=compute_node_sizes(graph),
+    )
+
+    labels = {text.get_text() for text in axis.texts}
+    assert len(labels) == MAX_STATIC_NON_SEED_LABELS + 1
+    assert "Seed Paper" in labels
+    assert "19, 2019" in labels
+    assert "0, 2000" not in labels
+    plt.close(figure)
+
+
+def test_static_labels_suppress_overlapping_text_bounds() -> None:
+    """Static labels should not overlap even when node centers clear the distance gate."""
+    import matplotlib.pyplot as plt
+
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="Seed Paper",
+        year=2025,
+        authors=["Seed Author"],
+        citation_count=100,
+        is_seed=True,
+    )
+    for node_id, citations in [("left", 20), ("right", 10)]:
+        graph.add_node(
+            node_id,
+            title=node_id.title(),
+            year=2024,
+            authors=["Extraordinarilylongsurname"],
+            citation_count=citations,
+            is_seed=False,
+        )
+
+    positions = {
+        "seed": np.array([0.1, 0.1]),
+        "left": np.array([0.45, 0.5]),
+        "right": np.array([0.55, 0.5]),
+    }
+    figure, axis = plt.subplots()
+    axis.set_xlim(0.0, 1.0)
+    axis.set_ylim(0.0, 1.0)
+    draw_labels(
+        axis,
+        graph,
+        positions,
+        "seed",
+        get_theme("light"),
+        sizes=[100.0, 100.0, 100.0],
+    )
+
+    labels = {text.get_text() for text in axis.texts}
+    assert "Seed Paper" in labels
+    assert sum(label.startswith("Extraordinarilylongsurname") for label in labels) == 1
+    plt.close(figure)
+
+
 def test_missing_year_visual_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1130,6 +1228,54 @@ def test_layout_applies_community_separation_offsets(
     left_center = np.mean([pos["a1"], pos["a2"]], axis=0)
     right_center = np.mean([pos["b1"], pos["b2"]], axis=0)
     assert left_center[0] < right_center[0]
+
+
+def test_community_anchor_graph_connects_isolated_groups(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Community anchors should scaffold partially disconnected groups."""
+    graph = nx.Graph()
+    graph.add_nodes_from(["a", "b", "c"])
+    graph.add_edge("a", "b", weight=0.8)
+    communities = [["a"], ["b"], ["c"]]
+    captured: dict[str, bool] = {}
+
+    def capture_spring_layout(
+        layout_graph: nx.Graph, **_kwargs: Any
+    ) -> dict[int, np.ndarray]:
+        """Capture connectivity and return deterministic anchor coordinates."""
+        captured["connected"] = nx.is_connected(layout_graph)
+        return {
+            node: np.array([float(node), 0.0], dtype=np.float64)
+            for node in layout_graph.nodes()
+        }
+
+    monkeypatch.setattr(
+        "citemesh.visualization.render.nx.spring_layout", capture_spring_layout
+    )
+    _spread_layout_by_communities(
+        {node: np.array([0.0, 0.0]) for node in graph.nodes()},
+        graph,
+        communities,
+        layout_seed=42,
+    )
+
+    assert captured["connected"] is True
+
+
+def test_portrait_layout_is_rotated_for_landscape_exports() -> None:
+    """Layout orientation should place its longer extent on the horizontal axis."""
+    oriented = _orient_layout_horizontally(
+        {
+            "a": np.array([0.0, -2.0]),
+            "b": np.array([0.5, 0.0]),
+            "c": np.array([0.0, 2.0]),
+        }
+    )
+    coords = np.array(list(oriented.values()), dtype=float)
+    span_x, span_y = np.ptp(coords, axis=0)
+
+    assert span_x > span_y
 
 
 def test_get_theme_auto_detection_and_unknown_default(
