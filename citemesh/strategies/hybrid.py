@@ -642,7 +642,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 pool = fetch_candidate_pool(
                     self.client,
                     seed_paper,
-                    max_recommendations=self._semantic_candidate_cap,
+                    max_recommendations=min(
+                        self._semantic_candidate_cap,
+                        self.embedding_builder.candidate_pool_size,
+                    ),
                 )
                 semantic_papers = pool.papers
         except Exception as exc:

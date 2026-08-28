@@ -1163,7 +1163,12 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
     client = MagicMock()
     client.get_recommended_papers.return_value = [_paper("rec1"), _paper("rec2")]
 
-    builder = HybridGraphBuilder(max_papers=6, max_semantic=2, client=client)
+    builder = HybridGraphBuilder(
+        max_papers=6,
+        max_semantic=2,
+        candidate_pool_size=1,
+        client=client,
+    )
     assert builder.semantic_source == "candidates"
     assert builder.embedding_builder is not None
 
@@ -1197,7 +1202,7 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
     papers = builder.collect_papers("seed")
 
     assert "seed" in papers
-    assert client.get_recommended_papers.called
+    client.get_recommended_papers.assert_called_once_with("seed", limit=1)
     semantic_added = [
         paper_id
         for paper_id, source in builder.paper_sources.items()
