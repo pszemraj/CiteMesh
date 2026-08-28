@@ -2080,6 +2080,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not papers:
             return {}
         self._load_model()
+        self._ensure_cache_model_fingerprint()
         metadata_map = {
             paper_id: paper_embedding_metadata(paper)
             for paper_id, paper in papers.items()
@@ -2111,6 +2112,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if int(top_k) < 1:
             raise ValueError("top_k must be at least 1")
         self._load_model()
+        self._ensure_cache_model_fingerprint()
         query_text = self.model_profile.format_query(normalized_query, {})
         query_embedding = self._encode_texts([query_text])[0]
         return self.embedding_cache.search(

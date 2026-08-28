@@ -1096,6 +1096,12 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
     monkeypatch.setattr(builder, "_ensure_cache_hydrated", _raise_hydration)
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+    fingerprint_checks: list[str] = []
+    monkeypatch.setattr(
+        builder,
+        "_ensure_cache_model_fingerprint",
+        lambda: fingerprint_checks.append("first"),
+    )
     builder.model = SeededRandomEncodeModel(embedding_dim=4)
 
     papers = builder.collect_papers("seed")
@@ -1114,9 +1120,38 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
 
     second = EmbeddingGraphBuilder(max_papers=4, client=client)
     monkeypatch.setattr(second, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        second,
+        "_ensure_cache_model_fingerprint",
+        lambda: fingerprint_checks.append("second"),
+    )
     second.model = _RaisingModel()
     cached = second.embed_papers({paper_id: papers[paper_id] for paper_id in non_seed})
     assert sorted(cached) == sorted(non_seed)
+    assert fingerprint_checks == ["first", "second"]
+
+
+def test_embedding_local_search_validates_cache_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local search should validate model identity before reading cached vectors."""
+    from tests._helpers import SeededRandomEncodeModel
+
+    builder = EmbeddingGraphBuilder(max_papers=4, client=MagicMock())
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    builder.model = SeededRandomEncodeModel(embedding_dim=4)
+    cache_events: list[str] = []
+    monkeypatch.setattr(
+        builder,
+        "_ensure_cache_model_fingerprint",
+        lambda: cache_events.append("fingerprint"),
+    )
+    builder.embedding_cache.search = MagicMock(
+        side_effect=lambda **_kwargs: cache_events.append("search") or []
+    )
+
+    assert builder.search_local("cached topic", top_k=2) == []
+    assert cache_events == ["fingerprint", "search"]
 
 
 def test_hybrid_candidate_mode_uses_recommendations_not_corpus(

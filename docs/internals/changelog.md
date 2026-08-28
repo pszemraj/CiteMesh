@@ -106,7 +106,7 @@ Notable changes from the early script-based prototypes to the current package la
 - **Embedding**: changed default checkpoint to `unsloth/embeddinggemma-300m` (ungated) and added automatic fallback to `google/embeddinggemma-300m` for default-revision loads.
 - **Embedding**: citation-count enrichment logs now show bounded target counts and render a visible progress bar on TTY runs.
 - **Embedding**: citation-count enrichment now batches Semantic Scholar paper lookups before falling back to single-paper retries for unresolved IDs.
-- **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection, preventing stale cross-checkpoint reuse in shared namespaces.
+- **Embedding**: cache fingerprint enforcement now follows the runtime-active checkpoint identity after model fallback selection and runs before corpus, candidate, and local-search cache access, preventing stale cross-checkpoint reuse in shared namespaces.
 - **Embedding/Hybrid**: semantic enrichment reuses the citation branch seed metadata when available, avoiding a second Semantic Scholar fetch for the same seed paper during hybrid runs.
 - **Hybrid**: moved from citation-first semantic add-on behavior to merged citation+semantic candidate reranking with semantic-only cap enforcement.
 - **Hybrid**: default depth targets were raised to `25/25/25` (references/citations/semantic cap) after the February 2026 sweep to improve foundational-paper recovery while keeping recent-paper quality high.
