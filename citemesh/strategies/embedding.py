@@ -1555,6 +1555,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
         if not self.model_profile.compile_inner_transformer:
             return False
+        if self.semantic_source != "arxiv-corpus":
+            return False
         try:
             return not self._cache_hydrated_for_active_spec()
         except Exception:

@@ -607,6 +607,7 @@ def test_embedding_compile_is_deferred_when_cache_not_hydrated(
     builder = EmbeddingGraphBuilder(
         max_papers=1,
         enable_torch_compile=True,
+        semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
     monkeypatch.setattr(builder, "_cache_hydrated_for_active_spec", lambda: False)
@@ -619,6 +620,37 @@ def test_embedding_compile_is_deferred_when_cache_not_hydrated(
     assert builder._compile_status_reason is not None
     assert "deferred while hydrating cache" in builder._compile_status_reason
     assert fake_torch._compile_calls == []  # type: ignore[attr-defined]
+
+
+def test_embedding_compile_does_not_wait_for_candidate_cache_hydration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate mode should compile without corpus hydration metadata."""
+    _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        compile_behavior="tagged",
+        torch_version="2.10.0",
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        enable_torch_compile=True,
+        semantic_source="candidates",
+        client=MagicMock(),
+    )
+    hydration_probe = MagicMock(
+        side_effect=AssertionError("candidate mode must not inspect corpus hydration")
+    )
+    monkeypatch.setattr(builder, "_cache_hydrated_for_active_spec", hydration_probe)
+
+    builder._load_model()
+
+    assert builder._inner_model_compiled is True
+    assert fake_torch._compile_calls  # type: ignore[attr-defined]
+    hydration_probe.assert_not_called()
 
 
 def test_embedding_default_model_loads_with_fallback_chain(
