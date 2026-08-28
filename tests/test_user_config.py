@@ -292,6 +292,31 @@ def test_explicit_cli_flag_wins_over_config_default() -> None:
     assert args.theme == "solarized"
 
 
+def test_explicit_no_streaming_wins_over_enabled_config_default() -> None:
+    """The negative streaming flag should override a persisted enabled default."""
+    args, provided, build_parser = _parsed_build_args(
+        [
+            "paper-id",
+            "--strategy",
+            "embedding",
+            "--no-streaming",
+            "--dataset-split",
+            "train[:5%]",
+        ]
+    )
+    config = UserConfig(path=Path("unused"), defaults={"streaming": True})
+
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    cli_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied
+    )
+
+    assert "streaming" in provided
+    assert "streaming" not in applied
+    assert args.streaming is False
+    assert args.semantic_source == "arxiv-corpus"
+
+
 def test_config_default_outranks_hybrid_implicit_defaults() -> None:
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "hybrid"]

@@ -484,7 +484,7 @@ _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "all_corpus": ["--all-corpus"],
     "top_k": ["--top-k", "-k"],
     "truncate_dim": ["--truncate-dim"],
-    "streaming": ["--streaming"],
+    "streaming": ["--streaming", "--no-streaming"],
     "force_rebuild_cache": ["--force-rebuild-cache"],
     "overwrite_cache": ["--overwrite-cache"],
     "cache_overwrite_reason": ["--cache-overwrite-reason"],
@@ -1500,11 +1500,20 @@ User configuration:
         ),
     )
 
-    embedding_group.add_argument(
+    streaming_group = embedding_group.add_mutually_exclusive_group()
+    streaming_group.add_argument(
         "--streaming",
+        dest="streaming",
         action="store_true",
         help="Stream HuggingFace dataset instead of loading it into memory (requires non-sliced --dataset-split)",
     )
+    streaming_group.add_argument(
+        "--no-streaming",
+        dest="streaming",
+        action="store_false",
+        help="Load cached HuggingFace dataset shards instead of streaming them.",
+    )
+    build_parser.set_defaults(streaming=False)
 
     embedding_group.add_argument(
         "--force-rebuild-cache",

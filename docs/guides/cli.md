@@ -135,7 +135,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
 - `--truncate-dim`: optional embedding output-dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
-- `--streaming`: stream HuggingFace dataset instead of loading cached shards. Streaming requires a non-sliced split (for example `train`).
+- `--streaming` / `--no-streaming`: stream the HuggingFace dataset or load cached shards. Streaming requires a non-sliced split (for example `train`); the negative form overrides an enabled `defaults.streaming` config value for one run.
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)
 - `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows)
 - `--cache-overwrite-reason`: optional rationale string logged when `--force-rebuild-cache` clears embedding cache state
@@ -157,7 +157,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 ### Hybrid Strategy
 
 - Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
-- Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--storage-precision`, `--device`, binary prefilter/rescore flags, calibration/compression flags).
+- Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`/`--no-streaming`, `--storage-precision`, `--device`, binary prefilter/rescore flags, calibration/compression flags).
 - When omitted, hybrid applies tuned seed-discovery defaults for collection depth:
   - `--max-papers`: `45`
   - `--max-citations`: `45`

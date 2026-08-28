@@ -73,7 +73,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `truncate_dim` | Default `--truncate-dim` |
 | `corpus_size` | Default `--corpus-size` |
 | `dataset_split` | Default `--dataset-split` |
-| `streaming` | Default `--streaming` toggle |
+| `streaming` | Default `--streaming` / `--no-streaming` toggle |
 | `torch_compile` | Default `--torch-compile` toggle |
 | `search_mode` | Default `citemesh search` mode (`auto`, `local`, `s2`). `auto` searches your local embedding cache when it has vectors and falls back to Semantic Scholar keyword search otherwise. |
 

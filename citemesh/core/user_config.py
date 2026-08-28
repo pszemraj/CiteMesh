@@ -212,7 +212,7 @@ CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigKeySpec] = {
     "truncate_dim": ConfigKeySpec(_int_caster(1), "Default --truncate-dim value"),
     "corpus_size": ConfigKeySpec(_int_caster(1), "Default --corpus-size value"),
     "dataset_split": ConfigKeySpec(_cast_str, "Default --dataset-split value"),
-    "streaming": ConfigKeySpec(_cast_bool, "Default --streaming toggle"),
+    "streaming": ConfigKeySpec(_cast_bool, "Default --streaming/--no-streaming toggle"),
     "torch_compile": ConfigKeySpec(_cast_bool, "Default --torch-compile toggle"),
     # Search-command default (not a build flag): mode for `citemesh search`.
     "search_mode": ConfigKeySpec(
