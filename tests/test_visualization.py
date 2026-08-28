@@ -28,6 +28,7 @@ from citemesh.visualization.render import (
     MAX_STATIC_NON_SEED_LABELS,
     _normalize_layout_positions,
     _orient_layout_horizontally,
+    _pack_disconnected_components,
     _spread_layout_by_communities,
     compute_layout,
     compute_node_colors,
@@ -1275,6 +1276,32 @@ def test_portrait_layout_is_rotated_for_landscape_exports() -> None:
     coords = np.array(list(oriented.values()), dtype=float)
     span_x, span_y = np.ptp(coords, axis=0)
 
+    assert span_x > span_y
+
+
+def test_disconnected_components_are_packed_by_node_count() -> None:
+    """Larger components should receive more layout width than small islands."""
+    graph = nx.Graph()
+    main_nodes = [f"main-{index}" for index in range(6)]
+    island_nodes = ["island-a", "island-b"]
+    graph.add_edges_from(zip(main_nodes, main_nodes[1:]))
+    graph.add_edge(*island_nodes)
+    positions = {
+        **{
+            node: np.array([float(index % 3), float(index // 3)])
+            for index, node in enumerate(main_nodes)
+        },
+        "island-a": np.array([100.0, -1.0]),
+        "island-b": np.array([100.0, 1.0]),
+    }
+
+    packed = _pack_disconnected_components(positions, graph)
+    main_x = [float(packed[node][0]) for node in main_nodes]
+    island_x = [float(packed[node][0]) for node in island_nodes]
+    coords = np.array(list(packed.values()), dtype=float)
+    span_x, span_y = np.ptp(coords, axis=0)
+
+    assert max(main_x) - min(main_x) > max(island_x) - min(island_x)
     assert span_x > span_y
 
 

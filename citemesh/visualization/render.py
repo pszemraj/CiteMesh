@@ -45,6 +45,8 @@ COMMUNITY_SEPARATION_MAX_EXTRA = 0.32
 COMMUNITY_ANCHOR_MAX_RADIUS = 0.69
 COMMUNITY_SCAFFOLD_WEIGHT = 0.15
 MAX_STATIC_NON_SEED_LABELS = 12
+DISCONNECTED_COMPONENT_GAP = 0.18
+DISCONNECTED_COMPONENT_MIN_SCALE = 0.32
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -370,6 +372,70 @@ def _orient_layout_horizontally(
     }
 
 
+def _pack_disconnected_components(
+    pos: Dict[Hashable, np.ndarray], graph: nx.Graph
+) -> Dict[Hashable, np.ndarray]:
+    """Pack disconnected components horizontally in proportion to node count.
+
+    :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
+    :param nx.Graph graph: Graph defining connected-component membership.
+    :return Dict[Hashable, np.ndarray]: Size-aware packed component positions.
+    """
+    if not pos or graph.number_of_nodes() == 0:
+        return {}
+
+    components = [
+        sorted(component, key=str) for component in nx.connected_components(graph)
+    ]
+    if len(components) < 2:
+        return {
+            node: np.asarray(position, dtype=float).copy()
+            for node, position in pos.items()
+        }
+
+    components.sort(key=lambda members: (len(members), tuple(map(str, members))))
+    largest_size = max(len(component) for component in components)
+    packed: Dict[Hashable, np.ndarray] = {}
+    cursor_x = 0.0
+
+    for component in components:
+        component_pos = {
+            node: np.asarray(pos[node], dtype=float)
+            for node in component
+            if node in pos
+        }
+        normalized = _orient_layout_horizontally(
+            _normalize_layout_positions(component_pos)
+        )
+        scale = max(
+            DISCONNECTED_COMPONENT_MIN_SCALE,
+            math.sqrt(float(len(component)) / float(largest_size)),
+        )
+        scaled = {
+            node: np.asarray(position, dtype=float) * scale
+            for node, position in normalized.items()
+        }
+        xs = [float(position[0]) for position in scaled.values()]
+        min_x = min(xs, default=0.0)
+        max_x = max(xs, default=0.0)
+        allocated_width = max(max_x - min_x, 0.18 * scale)
+        target_center_x = cursor_x + allocated_width * 0.5
+        current_center_x = (min_x + max_x) * 0.5
+        offset_x = target_center_x - current_center_x
+        for node, position in scaled.items():
+            packed[node] = np.array(
+                [float(position[0]) + offset_x, float(position[1])],
+                dtype=float,
+            )
+        cursor_x += allocated_width + DISCONNECTED_COMPONENT_GAP
+
+    if not packed:
+        return {}
+    packed_coords = np.array(list(packed.values()), dtype=float)
+    bounds_center = (packed_coords.min(axis=0) + packed_coords.max(axis=0)) * 0.5
+    return {node: position - bounds_center for node, position in packed.items()}
+
+
 def add_metadata_box(
     ax: plt.Axes,
     metadata: Dict[str, Any],
@@ -589,7 +655,8 @@ def compute_layout(
     for node in sorted(pos, key=str):
         pos[node] += rng.normal(0, VIZ_CONFIG.perturbation_std, 2)
 
-    return _orient_layout_horizontally(pos)
+    packed = _pack_disconnected_components(pos, canonical_graph)
+    return _orient_layout_horizontally(packed)
 
 
 def draw_edges(
