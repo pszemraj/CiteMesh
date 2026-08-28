@@ -26,6 +26,7 @@ from citemesh.visualization.export import (
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
     MAX_STATIC_NON_SEED_LABELS,
+    _layout_viewport_limits,
     _normalize_layout_positions,
     _orient_layout_horizontally,
     _pack_disconnected_components,
@@ -1303,6 +1304,24 @@ def test_disconnected_components_are_packed_by_node_count() -> None:
 
     assert max(main_x) - min(main_x) > max(island_x) - min(island_x)
     assert span_x > span_y
+
+
+def test_static_viewport_limits_fill_landscape_canvas() -> None:
+    """Static viewport limits should crop whitespace while preserving equal scale."""
+    positions = {
+        "left": np.array([-0.9, -0.2]),
+        "middle": np.array([0.0, 0.1]),
+        "right": np.array([0.9, 0.2]),
+    }
+
+    x_limits, y_limits = _layout_viewport_limits(positions, viewport_aspect=1.75)
+
+    range_x = x_limits[1] - x_limits[0]
+    range_y = y_limits[1] - y_limits[0]
+    assert range_x / range_y == pytest.approx(1.75)
+    assert range_y < 2.1
+    assert all(x_limits[0] < point[0] < x_limits[1] for point in positions.values())
+    assert all(y_limits[0] < point[1] < y_limits[1] for point in positions.values())
 
 
 def test_get_theme_auto_detection_and_unknown_default(

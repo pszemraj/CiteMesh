@@ -96,7 +96,7 @@ class VisualizationConfig:
     """Configuration for graph visualization."""
 
     # Figure settings
-    figure_size: Tuple[int, int] = (12, 10)
+    figure_size: Tuple[int, int] = (14, 8)
     dpi: int = 150
 
     # Node size parameters (in square pixels)

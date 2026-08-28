@@ -74,7 +74,7 @@ Notable changes from the early script-based prototypes to the current package la
 ## Graph Rendering
 
 - Unified layout-oriented rendering pipeline across outputs.
-- Static layouts now scaffold and size-pack disconnected groups, orient their longer extent horizontally, cap non-seed labels by citation priority, and suppress renderer-measured text overlaps so dense PNG exports use the canvas and remain legible.
+- Static layouts now scaffold and size-pack disconnected groups, orient their longer extent horizontally, cap non-seed labels by citation priority, suppress renderer-measured text overlaps, and fit a landscape viewport to the graph so dense PNG exports use the canvas and remain legible.
 - Added normalized edge opacity/width scaling for weight readability.
 - Routed integration-test outputs to temporary paths to reduce fixture confusion.
 - Canonicalized node/edge ordering and deterministic tie-breaks for stable layout artifacts.

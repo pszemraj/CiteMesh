@@ -47,6 +47,8 @@ COMMUNITY_SCAFFOLD_WEIGHT = 0.15
 MAX_STATIC_NON_SEED_LABELS = 12
 DISCONNECTED_COMPONENT_GAP = 0.18
 DISCONNECTED_COMPONENT_MIN_SCALE = 0.32
+STATIC_VIEWPORT_MARGIN_RATIO = 0.08
+STATIC_VIEWPORT_MIN_MARGIN = 0.1
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -370,6 +372,47 @@ def _orient_layout_horizontally(
         node: np.array([float(position[1]), -float(position[0])])
         for node, position in pos.items()
     }
+
+
+def _layout_viewport_limits(
+    pos: Dict[Hashable, np.ndarray], viewport_aspect: float
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Fit equal-scale plot limits to the graph and export viewport.
+
+    :param Dict[Hashable, np.ndarray] pos: Normalized node positions.
+    :param float viewport_aspect: Physical width-to-height ratio of the axes.
+    :return Tuple[Tuple[float, float], Tuple[float, float]]: X and Y axis limits.
+    """
+    if not pos:
+        return (-1.05, 1.05), (-1.05, 1.05)
+
+    coords = np.array(list(pos.values()), dtype=float)
+    min_xy = coords.min(axis=0)
+    max_xy = coords.max(axis=0)
+    center_xy = (min_xy + max_xy) * 0.5
+    span_x, span_y = max_xy - min_xy
+    margin_x = max(
+        float(span_x) * STATIC_VIEWPORT_MARGIN_RATIO,
+        STATIC_VIEWPORT_MIN_MARGIN,
+    )
+    margin_y = max(
+        float(span_y) * STATIC_VIEWPORT_MARGIN_RATIO,
+        STATIC_VIEWPORT_MIN_MARGIN,
+    )
+    range_x = max(float(span_x) + 2.0 * margin_x, 2.0 * STATIC_VIEWPORT_MIN_MARGIN)
+    range_y = max(float(span_y) + 2.0 * margin_y, 2.0 * STATIC_VIEWPORT_MIN_MARGIN)
+    safe_aspect = max(float(viewport_aspect), 1e-6)
+
+    if range_x / range_y < safe_aspect:
+        range_x = range_y * safe_aspect
+    else:
+        range_y = range_x / safe_aspect
+
+    center_x, center_y = float(center_xy[0]), float(center_xy[1])
+    return (
+        (center_x - range_x * 0.5, center_x + range_x * 0.5),
+        (center_y - range_y * 0.5, center_y + range_y * 0.5),
+    )
 
 
 def _pack_disconnected_components(
@@ -905,12 +948,19 @@ def visualize_graph(
 
     # Create figure
     fig, ax = plt.subplots(figsize=VIZ_CONFIG.figure_size, facecolor=theme.background)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.02)
     ax.set_aspect("equal")
     ax.axis("off")
     fig.patch.set_facecolor(theme.background)
     ax.set_facecolor(theme.background)
-    ax.set_xlim(-1.05, 1.05)
-    ax.set_ylim(-1.05, 1.05)
+    axes_box = ax.get_position(original=True)
+    figure_width, figure_height = fig.get_size_inches()
+    viewport_aspect = (figure_width * axes_box.width) / (
+        figure_height * axes_box.height
+    )
+    x_limits, y_limits = _layout_viewport_limits(pos, viewport_aspect)
+    ax.set_xlim(*x_limits)
+    ax.set_ylim(*y_limits)
 
     # Draw graph components
     draw_edges(ax, graph, pos, theme)
@@ -934,8 +984,6 @@ def visualize_graph(
     # Add metadata annotation if requested **after** title so we can reference it
     if metadata:
         add_metadata_box(ax, metadata, pos, theme)
-
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.02)
 
     # Save figure
     plt.savefig(
