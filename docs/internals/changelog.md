@@ -75,6 +75,7 @@ Notable changes from the early script-based prototypes to the current package la
 
 - Unified layout-oriented rendering pipeline across outputs.
 - Static layouts now scaffold and size-pack disconnected groups, orient their longer extent horizontally, cap non-seed labels by citation priority, suppress renderer-measured text overlaps, and fit a landscape viewport to the graph so dense PNG exports use the canvas and remain legible.
+- Dashboard graphs now use spatially distributed priority labels, larger nodes, tighter plot bounds, quieter background edges, and collapsed-by-default filters so dense interactive exports remain readable in three-pane browser layouts.
 - Added normalized edge opacity/width scaling for weight readability.
 - Routed integration-test outputs to temporary paths to reduce fixture confusion.
 - Canonicalized node/edge ordering and deterministic tie-breaks for stable layout artifacts.

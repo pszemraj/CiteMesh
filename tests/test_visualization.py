@@ -17,11 +17,16 @@ from citemesh.core import Author, Paper
 from citemesh.data.model_profiles import get_embedding_model_profile
 from citemesh.visualization import export as export_module
 from citemesh.visualization.export import (
+    DASHBOARD_AXIS_MIN_PADDING,
+    DASHBOARD_LABEL_CAP,
+    DASHBOARD_LABEL_MIN_DISTANCE,
+    DASHBOARD_MAX_NODE_DIAMETER,
     GRAPHML_DETERMINISM_POLICY_STRICT,
     GRAPHML_LAYOUT_METADATA_KEY,
     GRAPHML_LAYOUT_VERSION_KEY,
     GraphExporter,
     _graphml_determinism_policy,
+    _select_dashboard_label_nodes,
 )
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
@@ -565,6 +570,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         '<meta name="color-scheme" content="',
         "color-scheme: ",
         'id="global-nav"',
+        '<header id="dashboard-toolbar" class="collapsed">',
         'id="filters-toggle"',
         'id="detail-why-lines"',
         'id="dashboard-root"',
@@ -643,7 +649,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert edge_shape["type"] == "path"
     assert " Q " in edge_shape["path"]
     # Single edge -> tie-normalized strength 0.5 -> midpoint of the visual range.
-    assert edge_shape["line"]["width"] == pytest.approx(0.7 + 2.1 * 0.5)
+    assert edge_shape["line"]["width"] == pytest.approx(0.45 + 1.2 * 0.5)
     halo_trace = next(
         trace for trace in figure["data"] if trace.get("name") == "selection-halo"
     )
@@ -658,12 +664,28 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert neighborhood_trace["mode"] == "lines"
     assert neighborhood_trace["x"] == []
     assert neighborhood_trace["y"] == []
+    assert neighborhood_trace["line"]["width"] == pytest.approx(2.0)
     marker = node_trace["marker"]
     assert marker["showscale"] is False
     assert marker["sizemode"] == "area"
     assert marker["sizeref"] > 0
+    assert marker["sizemin"] == 4
+    rendered_max_diameter = (2.0 * max(marker["size"]) / marker["sizeref"]) ** 0.5
+    assert rendered_max_diameter == pytest.approx(DASHBOARD_MAX_NODE_DIAMETER)
     assert max(marker["line"]["width"]) >= 4
     assert min(marker["line"]["width"]) == 0
+    node_x = node_trace["x"]
+    node_y = node_trace["y"]
+    x_span = max(node_x) - min(node_x)
+    y_span = max(node_y) - min(node_y)
+    expected_x_pad = max(DASHBOARD_AXIS_MIN_PADDING, x_span * 0.08)
+    expected_y_pad = max(DASHBOARD_AXIS_MIN_PADDING, y_span * 0.08)
+    assert figure["layout"]["xaxis"]["range"] == pytest.approx(
+        [min(node_x) - expected_x_pad, max(node_x) + expected_x_pad]
+    )
+    assert figure["layout"]["yaxis"]["range"] == pytest.approx(
+        [min(node_y) - expected_y_pad, max(node_y) + expected_y_pad]
+    )
     related_hover = node_trace["hovertext"][0]
     seed_hover = node_trace["hovertext"][1]
     assert "Related Journal" in related_hover
@@ -701,7 +723,37 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert "new DOMParser()" in runtime_script
     assert "function parseImportedPayloadFromText" in runtime_script
     assert "function hasCompleteDashboardGeometry" in runtime_script
+    assert "function selectDashboardLabelIds" in runtime_script
+    assert "function dashboardNodeLabel" in runtime_script
+    assert "setControlsCollapsed(true);" in runtime_script
     assert "escapeRegExp" not in runtime_script
+
+
+def test_dashboard_labels_balance_priority_and_spacing() -> None:
+    """Dashboard labels should favor prominent nodes without crowding the seed."""
+    graph = nx.Graph()
+    graph.add_node("seed", is_seed=True, citation_count=10, year=2020)
+    graph.add_node("crowded", citation_count=100, year=2024)
+    graph.add_node("far-high", citation_count=90, year=2023)
+    graph.add_node("far-low", citation_count=5, year=2022)
+    positions = {
+        "seed": (0.0, 0.0),
+        "crowded": (DASHBOARD_LABEL_MIN_DISTANCE * 0.5, 0.0),
+        "far-high": (0.5, 0.0),
+        "far-low": (-0.5, 0.0),
+    }
+
+    selected = _select_dashboard_label_nodes(
+        graph,
+        list(graph.nodes),
+        positions,
+    )
+
+    assert "seed" in selected
+    assert "crowded" not in selected
+    assert "far-high" in selected
+    assert "far-low" in selected
+    assert len(selected) <= DASHBOARD_LABEL_CAP
 
 
 def test_exporter_dashboard_missing_plotly_dependency(

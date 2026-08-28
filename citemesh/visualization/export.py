@@ -42,6 +42,10 @@ GRAPHML_DETERMINISM_POLICY_BEST_EFFORT = "best_effort_sorted_nodes_edges"
 _GRAPHML_BEST_EFFORT_MIN_VERSION = (2, 8)
 GRAPHML_LAYOUT_METADATA_KEY = "citemesh_graphml_determinism"
 GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
+DASHBOARD_AXIS_MIN_PADDING = 0.14
+DASHBOARD_LABEL_CAP = 8
+DASHBOARD_LABEL_MIN_DISTANCE = 0.18
+DASHBOARD_MAX_NODE_DIAMETER = 58.0
 
 
 def _load_pyvis_network_class() -> Any:
@@ -166,6 +170,56 @@ def _edge_strength_scale(weights: list[float]) -> list[float]:
     if span <= 1e-9:
         return [0.5 for _ in weights]
     return [(weight - w_min) / span for weight in weights]
+
+
+def _select_dashboard_label_nodes(
+    graph: nx.Graph,
+    node_ids: list[Hashable],
+    pos: Dict[Hashable, Iterable[float]],
+) -> set[Hashable]:
+    """Select prominent dashboard labels without crowding one graph region.
+
+    :param nx.Graph graph: Graph containing node ranking attributes.
+    :param list[Hashable] node_ids: Deterministically ordered node identifiers.
+    :param Dict[Hashable, Iterable[float]] pos: Normalized node positions.
+    :return set[Hashable]: Node identifiers whose labels should remain visible.
+    """
+
+    def _rank(node_id: Hashable) -> tuple[int, int, int, str]:
+        """Build a stable seed/citation/year priority tuple.
+
+        :param Hashable node_id: Candidate node identifier.
+        :return tuple[int, int, int, str]: Sort key for label priority.
+        """
+        attrs = graph.nodes[node_id]
+        try:
+            citations = max(int(attrs.get("citation_count", 0) or 0), 0)
+        except (TypeError, ValueError):
+            citations = 0
+        try:
+            year = max(int(attrs.get("year", 0) or 0), 0)
+        except (TypeError, ValueError):
+            year = 0
+        return (
+            0 if bool(attrs.get("is_seed", False)) else 1,
+            -citations,
+            -year,
+            str(node_id),
+        )
+
+    selected: list[Hashable] = []
+    for node_id in sorted(node_ids, key=_rank):
+        coords = tuple(float(value) for value in pos[node_id])
+        if not bool(graph.nodes[node_id].get("is_seed", False)) and any(
+            math.dist(coords, tuple(float(value) for value in pos[other]))
+            < DASHBOARD_LABEL_MIN_DISTANCE
+            for other in selected
+        ):
+            continue
+        selected.append(node_id)
+        if len(selected) >= DASHBOARD_LABEL_CAP:
+            break
+    return set(selected)
 
 
 def _inject_darkreader_lock(path: Path, color_scheme: str = "light") -> None:
@@ -621,9 +675,9 @@ class GraphExporter:
                         "path": f"M {x0f},{y0f} Q {cx},{cy} {x1f},{y1f}",
                         "line": {
                             "color": _rgb_tuple_to_rgba(
-                                theme_obj.edge_color, 0.16 + 0.54 * strength
+                                theme_obj.edge_color, 0.07 + 0.25 * strength
                             ),
-                            "width": 0.7 + 2.1 * strength,
+                            "width": 0.45 + 1.2 * strength,
                         },
                         "layer": "below",
                     }
@@ -652,7 +706,11 @@ class GraphExporter:
         node_y = [float(pos[node][1]) for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
         max_node_size = max(node_sizes) if node_sizes else 1.0
-        marker_sizeref = max(2.0 * max_node_size / (45.0**2), 1e-6)
+        target_node_diameter = DASHBOARD_MAX_NODE_DIAMETER if for_dashboard else 45.0
+        marker_sizeref = max(
+            2.0 * max_node_size / (target_node_diameter**2),
+            1e-6,
+        )
         node_years, year_min, year_max = self._plotly_year_scale(node_ids)
         base_labels = [
             self.graph.nodes[node].get("paper").label
@@ -661,17 +719,7 @@ class GraphExporter:
             for node in node_ids
         ]
         if for_dashboard:
-            ranked_label_nodes = sorted(
-                node_ids,
-                key=lambda node_id: (
-                    0 if bool(self.graph.nodes[node_id].get("is_seed", False)) else 1,
-                    -int(self.graph.nodes[node_id].get("citation_count", 0) or 0),
-                    self._coerce_year(self.graph.nodes[node_id].get("year")) * -1,
-                    str(node_id),
-                ),
-            )
-            label_cap = min(14, len(ranked_label_nodes))
-            label_nodes = set(ranked_label_nodes[:label_cap])
+            label_nodes = _select_dashboard_label_nodes(self.graph, node_ids, pos)
             node_labels = [
                 str(base_labels[idx]) if node_id in label_nodes else ""
                 for idx, node_id in enumerate(node_ids)
@@ -680,7 +728,7 @@ class GraphExporter:
             # Keep one marker trace so point indices stay stable for hover/click sync;
             # use a muted shared text alpha instead of per-point text styling.
             text_font = dict(
-                size=10, color=_rgb_tuple_to_rgba(theme_obj.text_color, 0.62)
+                size=10, color=_rgb_tuple_to_rgba(theme_obj.text_color, 0.72)
             )
             color_scale: object = [
                 [0.0, _rgb_tuple_to_hex(theme_obj.node_color_old)],
@@ -770,7 +818,7 @@ class GraphExporter:
                 size=node_sizes,
                 sizemode="area",
                 sizeref=marker_sizeref,
-                sizemin=3,
+                sizemin=4 if for_dashboard else 3,
                 color=node_years,
                 cmin=year_min,
                 cmax=year_max,
@@ -817,7 +865,7 @@ class GraphExporter:
                     opacity=0.96,
                     sizemode="area",
                     sizeref=marker_sizeref,
-                    sizemin=3,
+                    sizemin=4,
                 ),
             )
             neighborhood_trace = go.Scatter(
@@ -828,8 +876,8 @@ class GraphExporter:
                 hoverinfo="none",
                 showlegend=False,
                 line=dict(
-                    width=1.4,
-                    color=_rgb_tuple_to_rgba(theme_obj.seed_color, 0.54),
+                    width=2.0,
+                    color=_rgb_tuple_to_rgba(theme_obj.seed_color, 0.78),
                 ),
                 opacity=0.98,
             )
@@ -851,8 +899,8 @@ class GraphExporter:
             y_max = max(node_y)
             x_span = max(x_max - x_min, 1e-6)
             y_span = max(y_max - y_min, 1e-6)
-            x_pad = max(0.28, x_span * 0.08)
-            y_pad = max(0.28, y_span * 0.08)
+            x_pad = max(DASHBOARD_AXIS_MIN_PADDING, x_span * 0.08)
+            y_pad = max(DASHBOARD_AXIS_MIN_PADDING, y_span * 0.08)
             layout_kwargs["xaxis"].update(
                 {"autorange": False, "range": [x_min - x_pad, x_max + x_pad]}
             )
@@ -1382,6 +1430,9 @@ class GraphExporter:
             "__GRAPH_BG__": theme_obj.background,
             "__NODE_COLOR_OLD__": _rgb_tuple_to_hex(theme_obj.node_color_old),
             "__NODE_COLOR_NEW__": _rgb_tuple_to_hex(theme_obj.node_color_new),
+            "__DASHBOARD_AXIS_MIN_PADDING__": str(DASHBOARD_AXIS_MIN_PADDING),
+            "__DASHBOARD_LABEL_CAP__": str(DASHBOARD_LABEL_CAP),
+            "__DASHBOARD_LABEL_MIN_DISTANCE__": str(DASHBOARD_LABEL_MIN_DISTANCE),
             "__PLOTLY_JS__": plotly_js,
             "__PAYLOAD_JSON__": payload_json,
             "__FIGURE_JSON__": figure_json,
@@ -1971,7 +2022,7 @@ class GraphExporter:
   </style>
 </head>
 <body>
-  <header id="dashboard-toolbar">
+  <header id="dashboard-toolbar" class="collapsed">
     <div id="global-nav">
       <div id="scope-nav" class="nav-group">
         <button class="nav-btn" data-scope="prior" type="button">Prior works</button>
@@ -1979,7 +2030,7 @@ class GraphExporter:
       </div>
       <div class="nav-group">
         <button id="list-view-btn" class="nav-btn active" type="button">List view</button>
-        <button id="filters-toggle" class="nav-btn active" type="button">Filters</button>
+        <button id="filters-toggle" class="nav-btn" type="button">Filters</button>
         <button id="more-btn" class="nav-btn" type="button">More</button>
       </div>
       <div class="nav-group">
@@ -2152,6 +2203,59 @@ class GraphExporter:
       return stableHash(`${String(leftId || "")}|${String(rightId || "")}`) % 2 === 0 ? 1 : -1;
     }
 
+    function selectDashboardLabelIds(order, nodeById, xPairs, yPairs) {
+      const rankedIds = order.slice().sort((leftId, rightId) => {
+        const left = nodeById.get(leftId) || {};
+        const right = nodeById.get(rightId) || {};
+        if (!!left.is_seed !== !!right.is_seed) {
+          return left.is_seed ? -1 : 1;
+        }
+        const citationDelta =
+          Number(right.citation_count || 0) - Number(left.citation_count || 0);
+        if (citationDelta !== 0) {
+          return citationDelta;
+        }
+        const leftYear = Number.isFinite(Number(left.year)) ? Number(left.year) : -1;
+        const rightYear = Number.isFinite(Number(right.year)) ? Number(right.year) : -1;
+        if (leftYear !== rightYear) {
+          return rightYear - leftYear;
+        }
+        return String(leftId).localeCompare(String(rightId));
+      });
+      const indexById = new Map(order.map((nodeId, idx) => [nodeId, idx]));
+      const selectedIds = [];
+      for (const nodeId of rankedIds) {
+        const node = nodeById.get(nodeId) || {};
+        const nodeIdx = indexById.get(nodeId);
+        const isCrowded = !node.is_seed && selectedIds.some((selectedId) => {
+          const selectedIdx = indexById.get(selectedId);
+          return Math.hypot(
+            Number(xPairs[nodeIdx] || 0) - Number(xPairs[selectedIdx] || 0),
+            Number(yPairs[nodeIdx] || 0) - Number(yPairs[selectedIdx] || 0)
+          ) < __DASHBOARD_LABEL_MIN_DISTANCE__;
+        });
+        if (isCrowded) {
+          continue;
+        }
+        selectedIds.push(nodeId);
+        if (selectedIds.length >= __DASHBOARD_LABEL_CAP__) {
+          break;
+        }
+      }
+      return new Set(selectedIds);
+    }
+
+    function dashboardNodeLabel(node, nodeId) {
+      const authors = Array.isArray(node.authors) ? node.authors : [];
+      const firstAuthor = String(authors[0] || "").trim();
+      if (firstAuthor) {
+        const surname = firstAuthor.split(/\\s+/).pop();
+        return `${surname}, ${node.year || "n.d."}`;
+      }
+      const title = String(node.title || nodeId || "Unknown");
+      return title.length <= 26 ? title : `${title.slice(0, 23)}...`;
+    }
+
     function currentSeedRingColor() {
       const styles = getComputedStyle(document.documentElement);
       const color = String(styles.getPropertyValue("--seed-ring") || "").trim();
@@ -2262,29 +2366,12 @@ class GraphExporter:
       const yearMax = Number(nextYearRange.max || 0);
       const safeYearMin = Number.isFinite(yearMin) ? yearMin : 0;
       const safeYearMax = Number.isFinite(yearMax) ? yearMax : safeYearMin;
-      const labelRanking = order
-        .map((nodeId) => nextNodeById.get(nodeId))
-        .filter(Boolean)
-        .sort((leftNode, rightNode) => {
-          const left = leftNode || {};
-          const right = rightNode || {};
-          if (!!left.is_seed !== !!right.is_seed) {
-            return left.is_seed ? -1 : 1;
-          }
-          const citationDelta =
-            Number(right.citation_count || 0) - Number(left.citation_count || 0);
-          if (citationDelta !== 0) {
-            return citationDelta;
-          }
-          const leftYear = Number.isFinite(Number(left.year)) ? Number(left.year) : -1;
-          const rightYear = Number.isFinite(Number(right.year)) ? Number(right.year) : -1;
-          if (leftYear !== rightYear) {
-            return rightYear - leftYear;
-          }
-          return String(left.id || "").localeCompare(String(right.id || ""));
-        })
-        .slice(0, Math.min(14, order.length));
-      const labelIds = new Set(labelRanking.map((node) => String(node.id || "")));
+      const labelIds = selectDashboardLabelIds(
+        order,
+        nextNodeById,
+        xPairs,
+        yPairs
+      );
       const seedId = String(meta.seed_id || "");
       const seedRingColor = currentSeedRingColor();
 
@@ -2296,7 +2383,7 @@ class GraphExporter:
       for (let idx = 0; idx < order.length; idx += 1) {
         const nodeId = order[idx];
         const node = nextNodeById.get(nodeId) || {};
-        const label = labelIds.has(nodeId) ? String(node.title || nodeId) : "";
+        const label = labelIds.has(nodeId) ? dashboardNodeLabel(node, nodeId) : "";
         nodeTexts.push(label);
         const authors = Array.isArray(node.authors) && node.authors.length
           ? node.authors.slice(0, 3).join(", ")
@@ -2325,8 +2412,8 @@ class GraphExporter:
       const yMax = Math.max(...yPairs);
       const xSpan = Math.max(xMax - xMin, 1e-6);
       const ySpan = Math.max(yMax - yMin, 1e-6);
-      const xPad = Math.max(0.28, xSpan * 0.08);
-      const yPad = Math.max(0.28, ySpan * 0.08);
+      const xPad = Math.max(__DASHBOARD_AXIS_MIN_PADDING__, xSpan * 0.08);
+      const yPad = Math.max(__DASHBOARD_AXIS_MIN_PADDING__, ySpan * 0.08);
       const baseShapeColor =
         (((templateLayout.shapes || [])[0] || {}).line || {}).color
         || "rgba(127, 143, 163, 0.24)";
@@ -3627,7 +3714,7 @@ class GraphExporter:
         });
       });
 
-      setControlsCollapsed(false);
+      setControlsCollapsed(true);
       populateCollectionSelector();
       updateYearPlaceholders();
       updateSavedUi();
