@@ -2309,6 +2309,98 @@ def _embedding_cache_directory_stats() -> tuple[Path, int, int]:
     return embedding_cache_dir, files, size_bytes
 
 
+def _confirm_destructive_cache_action(
+    *,
+    root: Path,
+    total_files: int,
+    total_bytes: int,
+    confirmed: bool,
+    operation: str,
+    reason: Optional[str],
+) -> bool:
+    """Apply the shared warning, non-TTY, rationale, and prompt workflow.
+
+    :param Path root: Cache path affected by the operation.
+    :param int total_files: Files present under ``root``.
+    :param int total_bytes: Bytes present under ``root``.
+    :param bool confirmed: Whether the operation was explicitly acknowledged.
+    :param str operation: ``rebuild`` or ``clear`` action selector.
+    :param Optional[str] reason: Optional operator rationale.
+    :return bool: ``True`` when the destructive action may proceed.
+    """
+    if operation == "rebuild":
+        confirmation_flag = "--overwrite-cache"
+        operation_label = "embedding cache rebuild"
+        reason_label = "Cache overwrite"
+        non_interactive_error = (
+            "Refusing --force-rebuild-cache in non-interactive mode without "
+            "--overwrite-cache. Re-run with --overwrite-cache to proceed."
+        )
+        prompt = "Proceed with embedding cache overwrite? [y/N]: "
+        large_cache_detail = "Clearing may require long rehydration."
+        eof_action = "build"
+    elif operation == "clear":
+        confirmation_flag = "--yes"
+        operation_label = reason_label = "Cache clear"
+        non_interactive_error = (
+            "Refusing to clear cache in non-interactive mode without --yes. "
+            "Re-run with: citemesh cache clear --yes"
+        )
+        prompt = f"Delete CiteMesh cache directory '{root}'? [y/N]: "
+        large_cache_detail = "Deletion is immediate and irreversible."
+        eof_action = "cache clear"
+    else:
+        raise ValueError(f"Unsupported destructive cache operation: {operation}")
+
+    total_size_label = format_bytes(total_bytes)
+    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
+    threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+    normalized_reason = _normalized_cache_reason(reason)
+
+    if confirmed:
+        logger.warning(
+            "%s acknowledged destructive %s (root=%s files=%d size=%s).",
+            confirmation_flag,
+            operation_label,
+            root,
+            total_files,
+            total_size_label,
+        )
+    elif not stdin_isatty():
+        logger.error(non_interactive_error)
+        return False
+    else:
+        logger.warning("%s requires explicit confirmation.", operation_label)
+        logger.warning(
+            "Cache snapshot: root=%s files=%d size=%s.",
+            root,
+            total_files,
+            total_size_label,
+        )
+
+    if large_cache:
+        logger.warning(
+            "Large cache warning: %s >= %s. %s",
+            total_size_label,
+            threshold_label,
+            large_cache_detail,
+        )
+    if normalized_reason:
+        logger.warning("%s rationale: %s", reason_label, normalized_reason)
+    if confirmed:
+        return True
+    logger.warning(
+        "Use %s to bypass this prompt in scripted/non-interactive workflows.",
+        confirmation_flag,
+    )
+    try:
+        response = input(prompt).strip().lower()
+    except EOFError:
+        logger.error("No confirmation input received; %s aborted.", eof_action)
+        return False
+    return response in {"y", "yes"}
+
+
 def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
     """Confirm destructive embedding namespace rebuild requested by CLI flags.
 
@@ -2323,66 +2415,14 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
         return True
 
     embedding_cache_dir, total_files, total_bytes = _embedding_cache_directory_stats()
-    total_size_label = format_bytes(total_bytes)
-    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
-    large_threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
-    overwrite_reason = _normalized_cache_reason(
-        getattr(args, "cache_overwrite_reason", None)
+    return _confirm_destructive_cache_action(
+        root=embedding_cache_dir,
+        total_files=total_files,
+        total_bytes=total_bytes,
+        confirmed=bool(args.overwrite_cache),
+        operation="rebuild",
+        reason=getattr(args, "cache_overwrite_reason", None),
     )
-
-    if bool(args.overwrite_cache):
-        logger.warning(
-            "--overwrite-cache acknowledged destructive rebuild "
-            "(embedding cache dir=%s files=%d size=%s).",
-            embedding_cache_dir,
-            total_files,
-            total_size_label,
-        )
-        if large_cache:
-            logger.warning(
-                "Large embedding cache footprint detected (%s >= %s).",
-                total_size_label,
-                large_threshold_label,
-            )
-        if overwrite_reason:
-            logger.warning("Cache overwrite rationale: %s", overwrite_reason)
-        return True
-
-    if not stdin_isatty():
-        logger.error(
-            "Refusing --force-rebuild-cache in non-interactive mode without "
-            "--overwrite-cache. Re-run with --overwrite-cache to proceed."
-        )
-        return False
-
-    logger.warning(
-        "--force-rebuild-cache will clear the active embedding cache namespace before this run."
-    )
-    logger.warning(
-        "Embedding cache directory snapshot: root=%s files=%d size=%s.",
-        embedding_cache_dir,
-        total_files,
-        total_size_label,
-    )
-    if large_cache:
-        logger.warning(
-            "Large cache warning: %s >= %s. Clearing may require long rehydration.",
-            total_size_label,
-            large_threshold_label,
-        )
-    if overwrite_reason:
-        logger.warning("Cache overwrite rationale: %s", overwrite_reason)
-    logger.warning(
-        "Use --overwrite-cache to bypass this prompt in scripted/non-interactive workflows."
-    )
-    try:
-        response = (
-            input("Proceed with embedding cache overwrite? [y/N]: ").strip().lower()
-        )
-    except EOFError:
-        logger.error("No confirmation input received; build aborted.")
-        return False
-    return response in {"y", "yes"}
 
 
 def _confirmed_cache_clear(
@@ -2396,56 +2436,14 @@ def _confirmed_cache_clear(
     :return bool: ``True`` if cache deletion should proceed.
     """
     total_files, total_bytes = _scan_path_stats(cache_root)
-    total_size_label = format_bytes(total_bytes)
-    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
-    large_threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
-    normalized_reason = _normalized_cache_reason(clear_reason)
-
-    if assume_yes:
-        logger.warning(
-            "--yes acknowledged destructive cache clear (root=%s files=%d size=%s).",
-            cache_root,
-            total_files,
-            total_size_label,
-        )
-        if large_cache:
-            logger.warning(
-                "Large cache warning: %s >= %s.",
-                total_size_label,
-                large_threshold_label,
-            )
-        if normalized_reason:
-            logger.warning("Cache clear rationale: %s", normalized_reason)
-        return True
-
-    if not stdin_isatty():
-        logger.error(
-            "Refusing to clear cache in non-interactive mode without --yes. "
-            "Re-run with: citemesh cache clear --yes"
-        )
-        return False
-
-    logger.warning(
-        "Cache directory snapshot: root=%s files=%d size=%s.",
-        cache_root,
-        total_files,
-        total_size_label,
+    return _confirm_destructive_cache_action(
+        root=cache_root,
+        total_files=total_files,
+        total_bytes=total_bytes,
+        confirmed=assume_yes,
+        operation="clear",
+        reason=clear_reason,
     )
-    if large_cache:
-        logger.warning(
-            "Large cache warning: %s >= %s. Deletion is immediate and irreversible.",
-            total_size_label,
-            large_threshold_label,
-        )
-    if normalized_reason:
-        logger.warning("Cache clear rationale: %s", normalized_reason)
-    prompt = f"Delete CiteMesh cache directory '{cache_root}'? [y/N]: "
-    try:
-        response = input(prompt).strip().lower()
-    except EOFError:
-        logger.error("No confirmation input received; cache clear aborted.")
-        return False
-    return response in {"y", "yes"}
 
 
 def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> int:
