@@ -132,38 +132,24 @@ def _transformers_auto_dtype_key() -> str:
     return "dtype" if major >= 5 else "torch_dtype"
 
 
-def _cuda_available(torch: Any) -> bool:
-    """Return whether a CUDA device is usable in the current runtime.
+def _accelerator_available(torch: Any, backend: str) -> bool:
+    """Return whether a torch accelerator backend is usable.
 
     :param Any torch: Imported ``torch`` module object.
-    :return bool: ``True`` when CUDA reports at least one usable device.
+    :param str backend: Accelerator token (``cuda`` or ``mps``).
+    :return bool: ``True`` when the backend reports as available.
     """
-    cuda_module = getattr(torch, "cuda", None)
-    cuda_available = getattr(cuda_module, "is_available", None)
-    if not callable(cuda_available):
+    owner = torch if backend == "cuda" else getattr(torch, "backends", None)
+    backend_module = getattr(owner, backend, None)
+    is_available = getattr(backend_module, "is_available", None)
+    if not callable(is_available):
         return False
     try:
-        return bool(cuda_available())
-    except Exception:
-        return False
-
-
-def _mps_available(torch: Any) -> bool:
-    """Return whether the MPS (Apple Metal) backend is usable in this runtime.
-
-    :param Any torch: Imported ``torch`` module object.
-    :return bool: ``True`` when MPS reports as available; ``False`` on any probe
-        failure (missing backend attribute, sandboxed Metal access, etc.).
-    """
-    backends = getattr(torch, "backends", None)
-    mps_module = getattr(backends, "mps", None)
-    mps_available = getattr(mps_module, "is_available", None)
-    if not callable(mps_available):
-        return False
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return bool(mps_available())
+        if backend == "mps":
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return bool(is_available())
+        return bool(is_available())
     except Exception:
         return False
 
@@ -195,16 +181,16 @@ def resolve_embedding_device(requested: Optional[str]) -> str:
         ) from None
 
     if normalized == "auto":
-        if _cuda_available(torch):
+        if _accelerator_available(torch, "cuda"):
             return "cuda"
-        if _mps_available(torch):
+        if _accelerator_available(torch, "mps"):
             return "mps"
         return "cpu"
-    if normalized == "cuda" and not _cuda_available(torch):
+    if normalized == "cuda" and not _accelerator_available(torch, "cuda"):
         raise ValueError(
             "device='cuda' was requested but CUDA is not available in this runtime."
         )
-    if normalized == "mps" and not _mps_available(torch):
+    if normalized == "mps" and not _accelerator_available(torch, "mps"):
         raise ValueError(
             "device='mps' was requested but the MPS backend is not available "
             "in this runtime."
@@ -861,7 +847,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self.truncate_dim is not None:
             parts.append(f"truncate_dim={self.truncate_dim}")
         parts.append(f"storage_precision={self.storage_precision}")
-        parts.append(f"binary_prefilter={int(self._cache_binary_prefilter_enabled())}")
+        parts.append(f"binary_prefilter={int(self.binary_prefilter)}")
         if self.storage_precision == "int8":
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
         parts.append(f"source_dtype={self._source_dtype_hint}")
@@ -906,16 +892,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
         )
         return sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-    def _cache_binary_prefilter_enabled(self) -> bool:
-        """Return whether binary-prefilter behavior is active for this cache namespace.
-
-        Only int8 caches can use binary-prefilter indexing, so non-int8 precisions
-        always map to ``False`` regardless of the configured flag.
-
-        :return bool: Effective binary-prefilter state for cache partitioning.
-        """
-        return self.binary_prefilter
 
     def _resolve_attention_implementation_hint(self) -> Optional[str]:
         """Resolve preferred attention implementation for the resolved device.
@@ -1112,6 +1088,28 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         return (self.model_revision or "main").strip() or "main"
 
+    @staticmethod
+    def _resolve_local_hf_snapshot_path(
+        model_id: str, requested_revision: str
+    ) -> Optional[Path]:
+        """Resolve an existing Hugging Face snapshot without network access.
+
+        :param str model_id: Hugging Face repository ID.
+        :param str requested_revision: Requested model revision token.
+        :return Optional[Path]: Resolved local snapshot directory, if available.
+        """
+        try:
+            snapshot_download = _import_huggingface_hub_module().snapshot_download
+            return Path(
+                snapshot_download(
+                    repo_id=model_id,
+                    revision=requested_revision,
+                    local_files_only=True,
+                )
+            ).resolve()
+        except Exception:
+            return None
+
     def _resolve_local_hf_snapshot_sha(
         self, model_id: str, requested_revision: str
     ) -> Optional[str]:
@@ -1121,23 +1119,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param str requested_revision: Requested model revision token.
         :return Optional[str]: Locally resolved snapshot SHA, if available.
         """
-        try:
-            snapshot_download = _import_huggingface_hub_module().snapshot_download
-        except Exception:
+        snapshot_path = self._resolve_local_hf_snapshot_path(
+            model_id, requested_revision
+        )
+        if snapshot_path is None:
             return None
 
-        try:
-            snapshot_path = Path(
-                snapshot_download(
-                    repo_id=model_id,
-                    revision=requested_revision,
-                    local_files_only=True,
-                )
-            )
-        except Exception:
-            return None
-
-        parts = snapshot_path.resolve().parts
+        parts = snapshot_path.parts
         for idx, part in enumerate(parts):
             if part != "snapshots":
                 continue
@@ -1178,20 +1166,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param str requested_revision: Requested model revision token.
         :return Optional[str]: Deterministic local artifact fingerprint if available.
         """
-        try:
-            snapshot_download = _import_huggingface_hub_module().snapshot_download
-        except Exception:
-            return None
-
-        try:
-            snapshot_path = Path(
-                snapshot_download(
-                    repo_id=model_id,
-                    revision=requested_revision,
-                    local_files_only=True,
-                )
-            ).resolve()
-        except Exception:
+        snapshot_path = self._resolve_local_hf_snapshot_path(
+            model_id, requested_revision
+        )
+        if snapshot_path is None:
             return None
 
         config_path = snapshot_path / "config.json"
@@ -1284,101 +1262,64 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         has_cached_payload = self.embedding_cache.has_cached_payload()
         cached_fingerprint = self.embedding_cache.get_model_fingerprint()
 
-        if has_cached_payload:
-            try:
-                model_fingerprint = self._resolve_model_fingerprint()
-            except Exception as exc:
-                fallback_fingerprint = self._offline_model_fingerprint_fallback()
-                if self._cached_fingerprint_compatible_with_requested_identity(
+        try:
+            model_fingerprint = self._resolve_model_fingerprint()
+        except Exception as exc:
+            model_fingerprint = self._offline_model_fingerprint_fallback()
+            if (
+                has_cached_payload
+                and self._cached_fingerprint_compatible_with_requested_identity(
                     cached_fingerprint
-                ):
-                    self._resolved_model_fingerprint = str(cached_fingerprint)
-                    logger.warning(
-                        "Could not resolve Hugging Face model fingerprint for %s while "
-                        "reuse checks are active. Reusing compatible cached fingerprint %s.",
-                        self.model_name,
-                        cached_fingerprint,
-                    )
-                    logger.debug(
-                        "Skipping model-fingerprint enforcement due resolution failure: %s",
-                        exc,
-                    )
-                    return
-                if cached_fingerprint:
-                    logger.warning(
-                        "Could not resolve Hugging Face model fingerprint for %s and "
-                        "cached fingerprint %s is incompatible with requested identity %s. "
-                        "Clearing namespace cache to avoid stale embedding reuse.",
-                        self.model_name,
-                        cached_fingerprint,
-                        fallback_fingerprint,
-                    )
-                    self._clear_embedding_cache(
-                        "cached fingerprint incompatible with requested identity "
-                        f"(cached={cached_fingerprint}, requested={fallback_fingerprint})"
-                    )
-                    self.embedding_cache.set_model_fingerprint(fallback_fingerprint)
-                    self._resolved_model_fingerprint = fallback_fingerprint
-                    logger.debug(
-                        "Skipping model-fingerprint enforcement due resolution failure: %s",
-                        exc,
-                    )
-                    return
-                self._resolved_model_fingerprint = fallback_fingerprint
+                )
+            ):
+                self._resolved_model_fingerprint = str(cached_fingerprint)
                 logger.warning(
-                    "Could not resolve Hugging Face model fingerprint for %s with no "
-                    "stored fingerprint. Reusing cached payload with fallback identity %s "
-                    "and recording this assumption for future offline checks.",
+                    "Could not resolve Hugging Face model fingerprint for %s while "
+                    "reuse checks are active. Reusing compatible cached fingerprint %s.",
                     self.model_name,
-                    fallback_fingerprint,
+                    cached_fingerprint,
                 )
                 logger.debug(
                     "Skipping model-fingerprint enforcement due resolution failure: %s",
                     exc,
                 )
-                self.embedding_cache.set_model_fingerprint(fallback_fingerprint)
                 return
 
-            if (
-                cached_fingerprint is not None
-                and cached_fingerprint != model_fingerprint
-            ):
+            if has_cached_payload and cached_fingerprint:
                 logger.warning(
-                    "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
-                    "Clearing namespace cache.",
-                    cached_fingerprint or "missing",
+                    "Could not resolve Hugging Face model fingerprint for %s and "
+                    "cached fingerprint %s is incompatible with requested identity %s. "
+                    "Clearing namespace cache to avoid stale embedding reuse.",
+                    self.model_name,
+                    cached_fingerprint,
                     model_fingerprint,
                 )
                 self._clear_embedding_cache(
-                    "model fingerprint mismatch "
-                    f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint})"
+                    "cached fingerprint incompatible with requested identity "
+                    f"(cached={cached_fingerprint}, requested={model_fingerprint})"
                 )
-                self._resolved_model_fingerprint = model_fingerprint
-                self.embedding_cache.set_model_fingerprint(model_fingerprint)
-                return
-            if cached_fingerprint is None:
-                self.embedding_cache.set_model_fingerprint(model_fingerprint)
-
-            self._resolved_model_fingerprint = model_fingerprint
-            return
-
-        try:
-            model_fingerprint = self._resolve_model_fingerprint()
-        except Exception as exc:
-            fallback_fingerprint = self._offline_model_fingerprint_fallback()
-            self._resolved_model_fingerprint = fallback_fingerprint
-            logger.warning(
-                "Could not resolve Hugging Face model fingerprint for %s while "
-                "initializing cache metadata. Using fallback identity %s for "
-                "offline initialization.",
-                self.model_name,
-                fallback_fingerprint,
-            )
+            elif has_cached_payload:
+                logger.warning(
+                    "Could not resolve Hugging Face model fingerprint for %s with no "
+                    "stored fingerprint. Reusing cached payload with fallback identity %s "
+                    "and recording this assumption for future offline checks.",
+                    self.model_name,
+                    model_fingerprint,
+                )
+            else:
+                logger.warning(
+                    "Could not resolve Hugging Face model fingerprint for %s while "
+                    "initializing cache metadata. Using fallback identity %s for "
+                    "offline initialization.",
+                    self.model_name,
+                    model_fingerprint,
+                )
             logger.debug(
                 "Skipping model-fingerprint enforcement due resolution failure: %s",
                 exc,
             )
-            self.embedding_cache.set_model_fingerprint(fallback_fingerprint)
+            self._resolved_model_fingerprint = model_fingerprint
+            self.embedding_cache.set_model_fingerprint(model_fingerprint)
             return
 
         if cached_fingerprint is not None and cached_fingerprint != model_fingerprint:
@@ -1388,11 +1329,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 cached_fingerprint or "missing",
                 model_fingerprint,
             )
-            # Metadata-only mismatches do not indicate payload corruption here.
-            # Keep existing hydration metadata only when payload is absent and proceed
-            # with refreshed model identity.
+            if has_cached_payload:
+                self._clear_embedding_cache(
+                    "model fingerprint mismatch "
+                    f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint})"
+                )
         self._resolved_model_fingerprint = model_fingerprint
-        self.embedding_cache.set_model_fingerprint(model_fingerprint)
+        if not has_cached_payload or cached_fingerprint != model_fingerprint:
+            self.embedding_cache.set_model_fingerprint(model_fingerprint)
 
     def _log_dimension_policy(self) -> None:
         """Emit one-time debug log for active embedding dimensionality."""
@@ -1434,31 +1378,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             self._dim_logged = True
 
-    def _effective_embedding_dim(self) -> Optional[int]:
-        """Return effective embedding dimension used by this builder.
-
-        :return Optional[int]: Active embedding dimension, or ``None`` for full model output.
-        """
-        if self.truncate_dim is not None:
-            return self.truncate_dim
-        available_dims = self.model_profile.available_truncate_dims
-        if available_dims:
-            return available_dims[0]
-        return None
-
-    def _reset_precision_runtime(self) -> None:
-        """Clear runtime precision/autocast state."""
-        self._autocast_dtype = None
-        self._autocast_device_type = None
-        self._autocast_enabled = False
-        self._encode_model = None
-
     def _resolve_model_kwargs(self) -> Dict[str, Any]:
         """Compute SentenceTransformer kwargs and configure autocast policy.
 
         :return Dict[str, Any]: ``SentenceTransformer`` constructor kwargs.
         """
-        self._reset_precision_runtime()
+        self._autocast_dtype = None
+        self._autocast_device_type = None
+        self._autocast_enabled = False
+        self._encode_model = None
         model_kwargs: Dict[str, Any] = {_transformers_auto_dtype_key(): "auto"}
         if self._attention_implementation_hint is not None:
             model_kwargs["attn_implementation"] = self._attention_implementation_hint
@@ -1579,19 +1507,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 candidates.append(fallback_model)
         return tuple(candidates)
 
-    @staticmethod
-    def _model_load_error_summary(
-        errors: List[Tuple[str, Exception]],
-    ) -> str:
-        """Build compact model-load failure summary.
-
-        :param List[Tuple[str, Exception]] errors: Ordered candidate failures.
-        :return str: Readable failure summary for exception messages.
-        """
-        return "; ".join(
-            f"{model_id}: {type(exc).__name__}: {exc}" for model_id, exc in errors
-        )
-
     def _cache_hydrated_for_active_spec(self) -> bool:
         """Return whether cache is hydrated for active split/corpus selection.
 
@@ -1657,7 +1572,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                             exc,
                         )
                         continue
-                    summary = self._model_load_error_summary(model_errors)
+                    summary = "; ".join(
+                        f"{model_id}: {type(error).__name__}: {error}"
+                        for model_id, error in model_errors
+                    )
                     raise RuntimeError(
                         "Could not load embedding model from candidate chain "
                         f"{load_candidates}: {summary}"
@@ -1807,7 +1725,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self._runtime_summary_logged:
             return
 
-        selected_dim = self._effective_embedding_dim()
+        selected_dim = self.truncate_dim
+        if selected_dim is None and self.model_profile.available_truncate_dims:
+            selected_dim = self.model_profile.available_truncate_dims[0]
         dim_label = "full" if selected_dim is None else f"{selected_dim}d"
         compute_dtype_label = self._source_dtype_hint
         if self._autocast_enabled:
@@ -2551,7 +2471,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             use_streaming=use_streaming,
             dataset_source=source,
         )
-        resume_result = self._hydrate_exact_hydration_source_slice_with_progress(
+        resume_result = self._hydrate_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
             row_limit=row_limit,
@@ -2666,47 +2586,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         row_offset: Optional[int] = None,
         existing_paper_ids: Optional[Set[str]] = None,
         max_new_records: Optional[int] = None,
-    ) -> int:
-        """Load and hydrate an exact-source dataset slice.
-
-        :param bool use_streaming: Whether to load a streaming dataset iterator.
-        :param str source: Previously recorded dataset source to load.
-        :param Optional[int] progress_total: Expected row count for progress display.
-        :param str progress_label: Progress-bar description label.
-        :param str operation: Caller-facing operation name for mismatch errors.
-        :param Optional[int] row_limit: Optional number of rows to load.
-        :param Optional[int] row_offset: Optional source row offset.
-        :param Optional[Set[str]] existing_paper_ids: IDs to skip during reconciliation.
-        :param Optional[int] max_new_records: Optional cap on newly hydrated records.
-        :return int: Number of records routed into cache batching.
-        """
-        result = self._hydrate_exact_hydration_source_slice_with_progress(
-            use_streaming=use_streaming,
-            source=source,
-            progress_total=progress_total,
-            progress_label=progress_label,
-            operation=operation,
-            row_limit=row_limit,
-            row_offset=row_offset,
-            existing_paper_ids=existing_paper_ids,
-            max_new_records=max_new_records,
-        )
-        return result.hydrated_records
-
-    def _hydrate_exact_hydration_source_slice_with_progress(
-        self,
-        *,
-        use_streaming: bool,
-        source: str,
-        progress_total: Optional[int],
-        progress_label: str,
-        operation: str,
-        row_limit: Optional[int] = None,
-        row_offset: Optional[int] = None,
-        existing_paper_ids: Optional[Set[str]] = None,
-        max_new_records: Optional[int] = None,
     ) -> _HydrationSourceSliceResult:
-        """Load an exact-source slice and report both cache and source progress.
+        """Load an exact-source slice and report cache and source progress.
 
         Exceptions from source iteration or cache writes propagate before a
         result is returned, so callers cannot mistake a failed pass for clean EOF.
@@ -2886,16 +2767,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             dataset_source,
             self.calibration_sample_size,
         )
-        calibration_source, calibration_dataset = self._load_dataset_for_hydration(
+        calibration_dataset = self._load_exact_hydration_source_slice(
             use_streaming=use_streaming,
-            preferred_dataset_source=dataset_source,
-            allow_source_fallback=False,
+            source=dataset_source,
+            operation="Calibration prepass",
         )
-        if calibration_source != dataset_source:
-            raise RuntimeError(
-                "Calibration prepass resolved unexpected dataset source "
-                f"{calibration_source!r} (expected {dataset_source!r})."
-            )
 
         calibration_records = self._sample_calibration_records(
             calibration_dataset,
@@ -3005,7 +2881,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         limit = int(self.corpus_size)
         column_names = getattr(dataset, "column_names", None)
-        if column_names is not None and hasattr(dataset, "select"):
+        select_by_index = column_names is not None and hasattr(dataset, "select")
+        if select_by_index:
             if "id" not in column_names:
                 logger.warning(
                     "Dataset %s has no 'id' column; capped hydration takes "
@@ -3014,50 +2891,30 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     limit,
                 )
                 return dataset
-            heap: List[Tuple[Tuple[int, int, int], int]] = []
-            for idx, raw_id in enumerate(dataset["id"]):
-                key = _arxiv_id_chronology_key(raw_id)
-                if key is None:
-                    continue
-                entry = (key, idx)
-                if len(heap) < limit:
-                    heapq.heappush(heap, entry)
-                elif entry > heap[0]:
-                    heapq.heapreplace(heap, entry)
-            if not heap:
-                logger.warning(
-                    "No parseable arXiv IDs in %s; capped hydration takes "
-                    "the first %d rows instead of the newest.",
-                    dataset_source,
-                    limit,
-                )
-                return dataset
-            oldest_key, _ = min(heap)
-            newest_key, _ = max(heap)
-            logger.info(
-                "Selected the %d most recently submitted rows from %s by "
-                "arXiv ID chronology (submission window %04d-%02d..%04d-%02d).",
-                len(heap),
-                dataset_source,
-                oldest_key[0],
-                oldest_key[1],
-                newest_key[0],
-                newest_key[1],
+            selected = _newest_records_by_arxiv_id(
+                (
+                    {"id": raw_id, "source_index": idx}
+                    for idx, raw_id in enumerate(dataset["id"])
+                ),
+                limit,
             )
-            return dataset.select(sorted(idx for _, idx in heap))
+        else:
+            selected = _newest_records_by_arxiv_id(dataset, limit)
 
-        selected = _newest_records_by_arxiv_id(dataset, limit)
         boundary_keys = [
             _arxiv_id_chronology_key(record.get("id"))
             for record in (selected[:1] + selected[-1:])
         ]
-        if selected and boundary_keys[0] is None:
+        if (select_by_index and not selected) or (
+            selected and boundary_keys[0] is None
+        ):
             logger.warning(
                 "No parseable arXiv IDs in %s; capped hydration takes the "
                 "first %d rows instead of the newest.",
                 dataset_source,
                 limit,
             )
+            return dataset if select_by_index else selected
         elif selected:
             logger.info(
                 "Selected the %d most recently submitted rows from %s by "
@@ -3068,6 +2925,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 boundary_keys[0][1],
                 boundary_keys[-1][0],
                 boundary_keys[-1][1],
+            )
+        if select_by_index:
+            return dataset.select(
+                sorted(int(record["source_index"]) for record in selected)
             )
         return selected
 
@@ -3192,63 +3053,73 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             progress_total=delta_rows,
             progress_label=f"Refreshing {source}",
             operation="Incremental refresh",
-        )
+        ).hydrated_records
         updated_rows = self._cached_payload_row_count()
-        head_reconciled_records = 0
-        full_reconciled_records = 0
+        reconciled_records = [0, 0]
 
         if updated_rows < upstream_rows:
-            remaining_rows = upstream_rows - updated_rows
-            logger.warning(
-                "Tail delta refresh left %d unresolved rows for %s/%s "
-                "(cache_rows=%d, upstream=%d). Running head-slice missing-ID reconciliation.",
-                remaining_rows,
-                source,
-                self.dataset_split,
-                updated_rows,
-                upstream_rows,
-            )
             cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
-            head_reconciled_records = self._hydrate_exact_hydration_source_slice(
-                use_streaming=use_streaming,
-                source=source,
-                row_limit=delta_rows,
-                row_offset=0,
-                progress_total=delta_rows,
-                progress_label=f"Reconciling head {source}",
-                operation="Head-slice reconciliation",
-                existing_paper_ids=cached_paper_ids,
-                max_new_records=remaining_rows,
+            reconciliation_passes = (
+                (
+                    "Head-slice reconciliation",
+                    delta_rows,
+                    0,
+                    delta_rows,
+                    "head",
+                ),
+                (
+                    "Full-split reconciliation",
+                    None,
+                    None,
+                    upstream_rows,
+                    "full",
+                ),
             )
-            updated_rows = self._cached_payload_row_count()
-            if updated_rows < upstream_rows:
+            previous_operation = "Tail delta refresh"
+            for pass_index, (
+                operation,
+                row_limit,
+                row_offset,
+                progress_total,
+                progress_scope,
+            ) in enumerate(reconciliation_passes):
+                if updated_rows >= upstream_rows:
+                    break
                 remaining_rows = upstream_rows - updated_rows
                 logger.warning(
-                    "Head-slice reconciliation left %d unresolved rows for %s/%s "
-                    "(cache_rows=%d, upstream=%d). Running full-split missing-ID reconciliation.",
+                    "%s left %d unresolved rows for %s/%s "
+                    "(cache_rows=%d, upstream=%d). Running %s.",
+                    previous_operation,
                     remaining_rows,
                     source,
                     self.dataset_split,
                     updated_rows,
                     upstream_rows,
+                    operation.lower().replace(
+                        "reconciliation", "missing-ID reconciliation"
+                    ),
                 )
-                full_reconciled_records = self._hydrate_exact_hydration_source_slice(
-                    use_streaming=use_streaming,
-                    source=source,
-                    progress_total=upstream_rows,
-                    progress_label=f"Reconciling full {source}",
-                    operation="Full-split reconciliation",
-                    existing_paper_ids=cached_paper_ids,
-                    max_new_records=None,
+                reconciled_records[pass_index] = (
+                    self._hydrate_exact_hydration_source_slice(
+                        use_streaming=use_streaming,
+                        source=source,
+                        row_limit=row_limit,
+                        row_offset=row_offset,
+                        progress_total=progress_total,
+                        progress_label=f"Reconciling {progress_scope} {source}",
+                        operation=operation,
+                        existing_paper_ids=cached_paper_ids,
+                        max_new_records=(remaining_rows if pass_index == 0 else None),
+                    ).hydrated_records
                 )
                 updated_rows = self._cached_payload_row_count()
+                previous_operation = operation
 
         logger.info(
             "Incremental refresh processed tail=%d head=%d full=%d rows "
             "for %s/%s (cache_rows=%d, upstream_rows=%d).",
             tail_refreshed_records,
-            head_reconciled_records,
-            full_reconciled_records,
+            *reconciled_records,
             source,
             self.dataset_split,
             updated_rows,
@@ -3328,23 +3199,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if (
                 not use_streaming
                 and ":" not in split_for_load
-                and parsed_row_limit is not None
-                and parsed_row_offset > 0
+                and (parsed_row_limit is not None or parsed_row_offset > 0)
             ):
-                stop_idx = parsed_row_offset + parsed_row_limit
-                split_for_load = f"{split_for_load}[{parsed_row_offset}:{stop_idx}]"
-            elif (
-                not use_streaming
-                and ":" not in split_for_load
-                and parsed_row_limit is not None
-            ):
-                split_for_load = f"{split_for_load}[:{parsed_row_limit}]"
-            elif (
-                not use_streaming
-                and ":" not in split_for_load
-                and parsed_row_offset > 0
-            ):
-                split_for_load = f"{split_for_load}[{parsed_row_offset}:]"
+                start_idx = str(parsed_row_offset) if parsed_row_offset else ""
+                stop_idx = (
+                    ""
+                    if parsed_row_limit is None
+                    else str(parsed_row_offset + parsed_row_limit)
+                )
+                split_for_load = f"{split_for_load}[{start_idx}:{stop_idx}]"
             try:
                 dataset = load_dataset(
                     dataset_name,
