@@ -7,6 +7,7 @@ providing a single interface to all graph building strategies.
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -78,7 +79,7 @@ DEFAULT_LOG_WIDTH = 0
 REDIRECTED_LOG_WIDTH = 140
 LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
-DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS = 60.0
+DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS = 60.0
 
 
 def _resolve_console_width(log_width: int, *, interactive: bool) -> Optional[int]:
@@ -409,7 +410,12 @@ _EXPORTER_METHOD: Dict[str, str] = {
 }
 _THEME_AWARE_FORMATS: frozenset = frozenset({"html", "plotly", "dashboard"})
 DASHBOARD_COLLECTION_FILENAME = "dashboard.html"
-DASHBOARD_MANIFEST_FILENAME = "dashboard.manifest.json"
+DASHBOARD_PACKAGE_FILENAME = "dashboard.citemesh.json"
+DASHBOARD_PACKAGE_KIND = "citemesh-dashboard-collection"
+DASHBOARD_PACKAGE_SCHEMA_VERSION = 1
+DASHBOARD_GRAPH_KIND = "citemesh-graph"
+DASHBOARD_GRAPH_SCHEMA_VERSION = 1
+LEGACY_DASHBOARD_MANIFEST_FILENAME = "dashboard.manifest.json"
 # Verify dispatch coverage at import time — a new EXPORT_FORMATS entry without
 # a dispatch mapping will fail fast here rather than silently skip at runtime.
 assert set(_EXPORTER_METHOD) | {"png"} == set(EXPORT_FORMATS), (
@@ -1351,7 +1357,7 @@ User configuration:
             "Output file path for single export, or output/collection root for "
             "multi-export runs. With dashboard export, an explicit "
             "*.dashboard.html path keeps standalone mode; otherwise CiteMesh "
-            "writes dashboard.html + dashboard.manifest.json under the output root."
+            "writes dashboard.html + dashboard.citemesh.json under the output root."
         ),
     )
 
@@ -1363,9 +1369,9 @@ User configuration:
         default=None,
         help=(
             "Export format; repeat for multiple (default: png). Dashboard export "
-            "normally uses collection mode (shared dashboard.html + manifest + "
-            "per-run JSON/config artifacts). Use -o <name>.dashboard.html for a "
-            "standalone one-file dashboard."
+            "normally uses collection mode (shared dashboard.html + one portable "
+            "dashboard.citemesh.json package). Use -o <name>.dashboard.html for "
+            "a standalone one-file dashboard."
         ),
     )
 
@@ -1939,18 +1945,13 @@ def _resolve_dashboard_collection_root(
     :param bool explicit_output: Whether ``--output`` was provided.
     :return Path: Collection root directory containing shared dashboard shell.
     """
-    if explicit_output:
-        base_str = str(base_output_path)
-        stripped_base = _strip_known_export_suffix(base_str)
-        if stripped_base != base_str:
-            return Path(stripped_base)
-        return base_output_path
-
-    parent = base_output_path.parent
-    grandparent = parent.parent
-    if str(grandparent) and grandparent != Path("."):
-        return grandparent
-    return parent
+    if not explicit_output:
+        return Path("out")
+    base_str = str(base_output_path)
+    stripped_base = _strip_known_export_suffix(base_str)
+    if stripped_base != base_str:
+        return Path(stripped_base)
+    return base_output_path
 
 
 def resolve_dashboard_collection_outputs(
@@ -1962,11 +1963,11 @@ def resolve_dashboard_collection_outputs(
     graph: nx.Graph,
     seed_id: str,
 ) -> tuple[Dict[str, Path], Path]:
-    """Resolve shared-dashboard output paths plus per-run result artifact paths.
+    """Resolve shared-dashboard and explicitly requested result artifact paths.
 
-    The dashboard shell lives at the collection root, while each build run writes
-    its JSON/config and any other requested artifacts into a unique seed-specific
-    result directory beneath that root.
+    Dashboard state lives in one collection package at the collection root. A
+    seed-specific result directory is created only when the caller explicitly
+    requests another per-result export format.
 
     :param Path base_output_path: User-provided or generated base output path.
     :param List[str] selected_formats: Requested export formats.
@@ -1974,29 +1975,29 @@ def resolve_dashboard_collection_outputs(
     :param str strategy: Active strategy name.
     :param nx.Graph graph: Built graph used for run-specific output naming.
     :param str seed_id: Seed node identifier.
-    :return tuple[Dict[str, Path], Path]: Resolved output paths and manifest path.
+    :return tuple[Dict[str, Path], Path]: Resolved output paths and package path.
     """
     collection_root = _resolve_dashboard_collection_root(
         base_output_path,
         explicit_output=explicit_output,
     )
-    run_base_output_path = generate_output_path(
-        graph,
-        seed_id,
-        output_dir=collection_root,
-        strategy=strategy,
-    )
     run_formats = [fmt for fmt in selected_formats if fmt != "dashboard"]
-    if "json" not in run_formats:
-        run_formats.append("json")
-    output_paths = resolve_output_paths(
-        base_output_path=run_base_output_path,
-        selected_formats=run_formats,
-        explicit_output=False,
-        strategy=strategy,
-    )
+    output_paths: Dict[str, Path] = {}
+    if run_formats:
+        run_base_output_path = generate_output_path(
+            graph,
+            seed_id,
+            output_dir=collection_root,
+            strategy=strategy,
+        )
+        output_paths = resolve_output_paths(
+            base_output_path=run_base_output_path,
+            selected_formats=run_formats,
+            explicit_output=False,
+            strategy=strategy,
+        )
     output_paths["dashboard"] = collection_root / DASHBOARD_COLLECTION_FILENAME
-    return output_paths, collection_root / DASHBOARD_MANIFEST_FILENAME
+    return output_paths, collection_root / DASHBOARD_PACKAGE_FILENAME
 
 
 def _strip_known_export_suffix(filename: str) -> str:
@@ -2029,107 +2030,416 @@ def resolve_graph_config_path(output_paths: Dict[str, Path], strategy: str) -> P
     return anchor_path.parent / f"{stem}.config.json"
 
 
-def _relative_output_path(path: Path, root: Path) -> str:
-    """Resolve a stable manifest path relative to a collection root when possible.
+class DashboardPackageError(ValueError):
+    """Raised when an existing dashboard package violates its format contract."""
 
-    :param Path path: Absolute or relative artifact path.
-    :param Path root: Collection root directory.
-    :return str: Relative path when possible, else normalized string form.
+
+def _dashboard_package_lock_path(package_path: Path) -> Path:
+    """Return a cache-scoped lock path for a dashboard package.
+
+    Keeping coordination locks in the CiteMesh cache ensures a dashboard-only
+    collection contains exactly its viewer and portable data package.
+
+    :param Path package_path: Dashboard package path being coordinated.
+    :return Path: Stable cache-local lock path derived from the resolved target.
+    """
+    resolved_token = str(package_path.expanduser().resolve())
+    digest = hashlib.sha256(resolved_token.encode("utf-8")).hexdigest()
+    return get_cache_dir("locks", "dashboard-packages") / f"{digest}.lock"
+
+
+def _read_json_object(path: Path, *, label: str) -> Dict[str, Any]:
+    """Read one UTF-8 JSON object with a context-rich package error.
+
+    :param Path path: JSON file to read.
+    :param str label: Human-readable artifact label for errors.
+    :return Dict[str, Any]: Parsed JSON object.
+    :raises DashboardPackageError: If the file is unreadable, malformed, or not an object.
     """
     try:
-        return str(path.relative_to(root))
-    except ValueError:
-        return str(path)
+        raw_text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DashboardPackageError(f"Could not read {label} at {path}: {exc}") from exc
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise DashboardPackageError(f"Malformed {label} at {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DashboardPackageError(
+            f"{label.capitalize()} at {path} must be a JSON object."
+        )
+    return payload
 
 
-def update_dashboard_manifest(
-    manifest_path: Path,
-    *,
-    collection_root: Path,
-    graph: nx.Graph,
-    seed_id: str,
-    strategy: str,
-    json_path: Path,
-    config_path: Path,
-    metadata: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Create or update shared dashboard manifest for collection-style outputs.
+def _validated_non_negative_count(raw: object, *, field: str) -> int:
+    """Validate a non-negative integer package summary count.
 
-    Dashboard collections intentionally keep one manifest slot per
-    ``(strategy, seed_id)`` pair. Re-running the same seed/strategy refreshes
-    that slot because the per-run JSON/config artifact paths are also stable for
-    a given seed title and identifier.
-
-    :param Path manifest_path: Manifest JSON path to write.
-    :param Path collection_root: Shared dashboard collection root directory.
-    :param nx.Graph graph: Built graph used for seed metadata.
-    :param str seed_id: Seed node identifier.
-    :param str strategy: Active strategy name.
-    :param Path json_path: Per-run JSON payload path.
-    :param Path config_path: Per-run config sidecar path.
-    :param Dict[str, Any] metadata: Export metadata payload for summary fields.
-    :return Dict[str, Any]: Manifest payload written to disk.
+    :param object raw: Candidate count value.
+    :param str field: Field label for validation errors.
+    :return int: Validated count.
+    :raises DashboardPackageError: If ``raw`` is not a non-negative integer.
     """
-    seed_title = str(graph.nodes[seed_id].get("title", seed_id))
-    result_id = f"{strategy}:{seed_id}"
-    entry = {
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise DashboardPackageError(
+            f"Dashboard package {field} must be a non-negative integer."
+        )
+    return raw
+
+
+def _validated_dashboard_token(raw: object, *, field: str) -> str:
+    """Validate a non-empty dashboard identity token without hidden whitespace.
+
+    :param object raw: Candidate seed, strategy, node, or edge token.
+    :param str field: Field label for validation errors.
+    :return str: Canonical token.
+    :raises DashboardPackageError: If the token is empty or padded with whitespace.
+    """
+    token = str(raw or "")
+    if not token or token != token.strip():
+        raise DashboardPackageError(
+            f"Dashboard package {field} must be a non-empty canonical token."
+        )
+    return token
+
+
+def _validate_dashboard_graph_payload(
+    raw_payload: object, *, result_id: str
+) -> Dict[str, Any]:
+    """Validate one canonical graph payload embedded in a dashboard package.
+
+    :param object raw_payload: Candidate graph payload.
+    :param str result_id: Owning result identifier for contextual errors.
+    :return Dict[str, Any]: Shallow normalized graph payload copy.
+    :raises DashboardPackageError: If the graph payload contract is invalid.
+    """
+    if not isinstance(raw_payload, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} payload must be an object."
+        )
+    if raw_payload.get("kind") != DASHBOARD_GRAPH_KIND:
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has unsupported graph kind."
+        )
+    graph_schema = raw_payload.get("schema_version")
+    if type(graph_schema) is not int or graph_schema != DASHBOARD_GRAPH_SCHEMA_VERSION:
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has unsupported graph schema "
+            f"version {graph_schema!r}."
+        )
+    seed_id = _validated_dashboard_token(
+        raw_payload.get("seed_id"), field=f"result {result_id!r} payload seed_id"
+    )
+    meta = raw_payload.get("meta")
+    summary = raw_payload.get("summary")
+    if not isinstance(meta, dict) or not isinstance(summary, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has incomplete graph metadata."
+        )
+    payload_strategy = _validated_dashboard_token(
+        meta.get("strategy"), field=f"result {result_id!r} payload strategy"
+    )
+    nodes = raw_payload.get("nodes")
+    edges = raw_payload.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} nodes and edges must be arrays."
+        )
+    node_count = _validated_non_negative_count(
+        summary.get("nodes"), field=f"result {result_id!r} payload summary.nodes"
+    )
+    edge_count = _validated_non_negative_count(
+        summary.get("edges"), field=f"result {result_id!r} payload summary.edges"
+    )
+    if node_count != len(nodes) or edge_count != len(edges):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} summary does not match its "
+            "node and edge arrays."
+        )
+    node_ids: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise DashboardPackageError(
+                f"Dashboard package result {result_id!r} nodes must be objects."
+            )
+        node_id = _validated_dashboard_token(
+            node.get("id"), field=f"result {result_id!r} node ID"
+        )
+        node_ids.append(node_id)
+    node_id_set = set(node_ids)
+    if len(node_id_set) != len(node_ids) or seed_id not in node_id_set:
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} requires unique node IDs "
+            "including its seed."
+        )
+    for edge in edges:
+        if not isinstance(edge, dict):
+            raise DashboardPackageError(
+                f"Dashboard package result {result_id!r} edges must be objects."
+            )
+        source_id = _validated_dashboard_token(
+            edge.get("source"), field=f"result {result_id!r} edge source"
+        )
+        target_id = _validated_dashboard_token(
+            edge.get("target"), field=f"result {result_id!r} edge target"
+        )
+        if source_id not in node_id_set or target_id not in node_id_set:
+            raise DashboardPackageError(
+                f"Dashboard package result {result_id!r} has an edge with an "
+                "unknown endpoint."
+            )
+
+    dashboard = raw_payload.get("dashboard")
+    dashboard_meta = dashboard.get("meta") if isinstance(dashboard, dict) else None
+    if not isinstance(dashboard_meta, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} is missing dashboard geometry."
+        )
+    dashboard_seed_id = _validated_dashboard_token(
+        dashboard_meta.get("seed_id"),
+        field=f"result {result_id!r} dashboard seed_id",
+    )
+    dashboard_strategy = _validated_dashboard_token(
+        dashboard_meta.get("strategy"),
+        field=f"result {result_id!r} dashboard strategy",
+    )
+    dashboard_summary = dashboard_meta.get("summary")
+    dashboard_node_count = (
+        _validated_non_negative_count(
+            dashboard_summary.get("nodes"),
+            field=f"result {result_id!r} dashboard summary.nodes",
+        )
+        if isinstance(dashboard_summary, dict)
+        else None
+    )
+    dashboard_edge_count = (
+        _validated_non_negative_count(
+            dashboard_summary.get("edges"),
+            field=f"result {result_id!r} dashboard summary.edges",
+        )
+        if isinstance(dashboard_summary, dict)
+        else None
+    )
+    if (
+        dashboard_seed_id != seed_id
+        or dashboard_strategy != payload_strategy
+        or dashboard_node_count != node_count
+        or dashboard_edge_count != edge_count
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has inconsistent dashboard metadata."
+        )
+    raw_order = dashboard_meta.get("plotly_node_order")
+    raw_positions = dashboard_meta.get("plotly_positions")
+    raw_sizes = dashboard_meta.get("plotly_node_sizes")
+    if not all(
+        isinstance(value, list) for value in (raw_order, raw_positions, raw_sizes)
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has incomplete dashboard geometry."
+        )
+    geometry_order = [
+        _validated_dashboard_token(
+            node_id, field=f"result {result_id!r} geometry node ID"
+        )
+        for node_id in raw_order
+    ]
+    if (
+        len(geometry_order) != len(node_ids)
+        or len(set(geometry_order)) != len(geometry_order)
+        or set(geometry_order) != node_id_set
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} geometry must cover each node exactly once."
+        )
+    if len(raw_positions) != len(node_ids) or len(raw_sizes) != len(node_ids):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} geometry arrays must align with its nodes."
+        )
+    for position in raw_positions:
+        if (
+            not isinstance(position, list)
+            or len(position) != 2
+            or any(
+                isinstance(coordinate, bool)
+                or not isinstance(coordinate, (int, float))
+                or not math.isfinite(float(coordinate))
+                for coordinate in position
+            )
+        ):
+            raise DashboardPackageError(
+                f"Dashboard package result {result_id!r} has an invalid layout position."
+            )
+    if any(
+        isinstance(size, bool)
+        or not isinstance(size, (int, float))
+        or not math.isfinite(float(size))
+        or float(size) <= 0.0
+        for size in raw_sizes
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has invalid node sizes."
+        )
+    return dict(raw_payload)
+
+
+def _validate_dashboard_result_entry(raw_entry: object) -> Dict[str, Any]:
+    """Validate and normalize one dashboard collection result entry.
+
+    :param object raw_entry: Candidate result entry.
+    :return Dict[str, Any]: Normalized result entry.
+    :raises DashboardPackageError: If required descriptor or payload fields are invalid.
+    """
+    if not isinstance(raw_entry, dict):
+        raise DashboardPackageError("Dashboard package result entries must be objects.")
+    result_id = str(raw_entry.get("result_id") or "").strip()
+    seed_id = str(raw_entry.get("seed_id") or "").strip()
+    strategy = str(raw_entry.get("strategy") or "").strip()
+    title = str(raw_entry.get("title") or "").strip()
+    updated_at = str(raw_entry.get("updated_at") or "").strip()
+    if not all((result_id, seed_id, strategy, title, updated_at)):
+        raise DashboardPackageError(
+            "Dashboard package result entries require result_id, seed_id, title, "
+            "strategy, and updated_at."
+        )
+    expected_result_id = f"{strategy}:{seed_id}"
+    if result_id != expected_result_id:
+        raise DashboardPackageError(
+            f"Dashboard package result_id {result_id!r} does not match "
+            f"{expected_result_id!r}."
+        )
+
+    summary = raw_entry.get("summary")
+    if not isinstance(summary, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} summary must be an object."
+        )
+    normalized_summary = {
+        "nodes": _validated_non_negative_count(
+            summary.get("nodes"), field=f"result {result_id!r} summary.nodes"
+        ),
+        "edges": _validated_non_negative_count(
+            summary.get("edges"), field=f"result {result_id!r} summary.edges"
+        ),
+    }
+    payload = _validate_dashboard_graph_payload(
+        raw_entry.get("payload"), result_id=result_id
+    )
+    payload_meta = payload["meta"]
+    payload_summary = payload["summary"]
+    if (
+        str(payload.get("seed_id") or "").strip() != seed_id
+        or str(payload_meta.get("strategy") or "").strip() != strategy
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} descriptor does not match its payload."
+        )
+    if normalized_summary != {
+        "nodes": payload_summary.get("nodes"),
+        "edges": payload_summary.get("edges"),
+    }:
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} summary does not match its payload."
+        )
+    build = raw_entry.get("build", {})
+    if not isinstance(build, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} build settings must be an object."
+        )
+    return {
         "result_id": result_id,
         "seed_id": seed_id,
-        "title": seed_title,
+        "title": title,
         "strategy": strategy,
-        "summary": {
-            "nodes": int(metadata.get("nodes", 0) or 0),
-            "edges": int(metadata.get("edges", 0) or 0),
-        },
-        "json_path": _relative_output_path(json_path, collection_root),
-        "config_path": _relative_output_path(config_path, collection_root),
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "summary": normalized_summary,
+        "updated_at": updated_at,
+        "payload": payload,
+        "build": dict(build),
     }
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = manifest_path.with_name(f".{manifest_path.name}.lock")
-    lock = FileLock(str(lock_path), timeout=DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS)
-    try:
-        with lock:
-            results: list[Dict[str, Any]] = []
-            if manifest_path.exists():
-                try:
-                    existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    existing = {}
-                if isinstance(existing, dict) and isinstance(
-                    existing.get("results"), list
-                ):
-                    results = [
-                        item for item in existing["results"] if isinstance(item, dict)
-                    ]
-
-            filtered = [item for item in results if item.get("result_id") != result_id]
-            manifest_payload = {
-                "schema_version": 1,
-                "results": [entry, *filtered],
-            }
-            atomic_write_json(manifest_path, manifest_payload, indent=2)
-            return manifest_payload
-    except Timeout as exc:
-        raise RuntimeError(
-            "Timed out waiting for dashboard manifest lock "
-            f"at {lock_path} after {DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS:.1f}s."
-        ) from exc
 
 
-def _resolve_collection_payload_path(
-    collection_root: Path, json_rel_path: str
-) -> Optional[Path]:
-    """Resolve a manifest JSON payload path confined to the collection root.
+def _validate_dashboard_package(raw_package: object) -> Dict[str, Any]:
+    """Validate a dashboard collection package and deterministically deduplicate it.
 
-    :param Path collection_root: Shared dashboard collection directory.
-    :param str json_rel_path: Manifest-provided JSON payload path.
-    :return Optional[Path]: Resolved payload path, or ``None`` when invalid.
+    When duplicate result identifiers are present, the first entry wins. Package
+    upserts always place the newest entry first, so this also repairs duplicate
+    state deterministically without inventing another recency policy.
+
+    :param object raw_package: Candidate package object.
+    :return Dict[str, Any]: Canonical package object.
+    :raises DashboardPackageError: If the top-level or entry contract is invalid.
     """
-    candidate = Path(json_rel_path)
-    if candidate.is_absolute():
-        return None
+    if not isinstance(raw_package, dict):
+        raise DashboardPackageError("Dashboard package must be a JSON object.")
+    if raw_package.get("kind") != DASHBOARD_PACKAGE_KIND:
+        raise DashboardPackageError(
+            f"Unsupported dashboard package kind {raw_package.get('kind')!r}."
+        )
+    schema_version = raw_package.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != DASHBOARD_PACKAGE_SCHEMA_VERSION
+    ):
+        raise DashboardPackageError(
+            f"Unsupported dashboard package schema version {schema_version!r}."
+        )
+    raw_results = raw_package.get("results")
+    if not isinstance(raw_results, list):
+        raise DashboardPackageError("Dashboard package results must be an array.")
 
+    results: list[Dict[str, Any]] = []
+    seen_result_ids: set[str] = set()
+    for raw_entry in raw_results:
+        entry = _validate_dashboard_result_entry(raw_entry)
+        result_id = entry["result_id"]
+        if result_id in seen_result_ids:
+            continue
+        seen_result_ids.add(result_id)
+        results.append(entry)
+
+    raw_current_result_id = raw_package.get("current_result_id")
+    current_result_id = (
+        str(raw_current_result_id).strip()
+        if raw_current_result_id is not None
+        else None
+    )
+    if current_result_id == "":
+        current_result_id = None
+    if current_result_id is not None and current_result_id not in seen_result_ids:
+        raise DashboardPackageError(
+            "Dashboard package current_result_id does not reference a package result."
+        )
+    return {
+        "kind": DASHBOARD_PACKAGE_KIND,
+        "schema_version": DASHBOARD_PACKAGE_SCHEMA_VERSION,
+        "current_result_id": current_result_id,
+        "results": results,
+    }
+
+
+def load_dashboard_package(package_path: Path) -> Dict[str, Any]:
+    """Load and strictly validate an existing dashboard collection package.
+
+    :param Path package_path: Package file to load.
+    :return Dict[str, Any]: Canonical validated package.
+    :raises DashboardPackageError: If the package cannot be decoded or validated.
+    """
+    return _validate_dashboard_package(
+        _read_json_object(package_path, label="dashboard package")
+    )
+
+
+def _resolve_collection_artifact_path(
+    collection_root: Path, relative_path: object
+) -> Optional[Path]:
+    """Resolve a legacy manifest artifact path confined to its collection root.
+
+    :param Path collection_root: Legacy collection directory.
+    :param object relative_path: Manifest-provided relative artifact path.
+    :return Optional[Path]: Confined resolved path, or ``None`` when unsafe.
+    """
+    candidate = Path(str(relative_path or "").strip())
+    if not str(candidate) or candidate.is_absolute():
+        return None
     resolved_root = collection_root.resolve()
     resolved_candidate = (resolved_root / candidate).resolve()
     try:
@@ -2139,49 +2449,192 @@ def _resolve_collection_payload_path(
     return resolved_candidate
 
 
-def build_dashboard_collection_bundle(
-    manifest_path: Path,
-    *,
-    current_result_id: str,
-) -> Dict[str, Any]:
-    """Load manifest entries plus embedded JSON payloads for shared dashboard UX.
+def _load_legacy_dashboard_results(collection_root: Path) -> list[Dict[str, Any]]:
+    """Load valid entries from a legacy manifest without modifying legacy files.
 
-    :param Path manifest_path: Manifest JSON path for the collection.
-    :param str current_result_id: Result identifier for the graph just built.
-    :return Dict[str, Any]: Embedded dashboard collection bundle.
+    Invalid legacy entries are reported and skipped. Their source files remain
+    untouched, allowing manual recovery while safe entries migrate forward.
+
+    :param Path collection_root: Collection directory containing a legacy manifest.
+    :return list[Dict[str, Any]]: Valid normalized package entries in manifest order.
     """
-    collection_root = manifest_path.parent
+    manifest_path = collection_root / LEGACY_DASHBOARD_MANIFEST_FILENAME
+    if not manifest_path.exists():
+        return []
     try:
-        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        manifest_payload = {}
+        manifest = _read_json_object(manifest_path, label="legacy dashboard manifest")
+    except DashboardPackageError as exc:
+        logger.warning("Skipping invalid legacy dashboard manifest: %s", exc)
+        return []
+    if manifest.get("schema_version") != 1 or not isinstance(
+        manifest.get("results"), list
+    ):
+        logger.warning(
+            "Skipping unsupported legacy dashboard manifest at %s.", manifest_path
+        )
+        return []
 
-    raw_results = (
-        manifest_payload.get("results") if isinstance(manifest_payload, dict) else []
-    )
-    results = [entry for entry in raw_results if isinstance(entry, dict)]
-    payloads: Dict[str, Any] = {}
-    for entry in results:
-        result_id = str(entry.get("result_id") or "").strip()
-        json_rel_path = str(entry.get("json_path") or "").strip()
-        if not result_id or not json_rel_path:
+    results: list[Dict[str, Any]] = []
+    seen_result_ids: set[str] = set()
+    for index, raw_entry in enumerate(manifest["results"]):
+        if not isinstance(raw_entry, dict):
+            logger.warning(
+                "Skipping invalid legacy dashboard result at index %d.", index
+            )
             continue
-        payload_path = _resolve_collection_payload_path(collection_root, json_rel_path)
-        if payload_path is None:
+        json_path = _resolve_collection_artifact_path(
+            collection_root, raw_entry.get("json_path")
+        )
+        config_path = _resolve_collection_artifact_path(
+            collection_root, raw_entry.get("config_path")
+        )
+        if json_path is None or config_path is None:
+            logger.warning(
+                "Skipping legacy dashboard result %r with an unsafe artifact path.",
+                raw_entry.get("result_id"),
+            )
             continue
         try:
-            payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            graph_payload = _read_json_object(json_path, label="legacy graph payload")
+            config_payload = _read_json_object(config_path, label="legacy graph config")
+            graph_payload = dict(graph_payload)
+            graph_payload.setdefault("kind", DASHBOARD_GRAPH_KIND)
+            graph_payload.setdefault("schema_version", DASHBOARD_GRAPH_SCHEMA_VERSION)
+            build = config_payload.get("build", {})
+            summary = graph_payload.get("summary", raw_entry.get("summary"))
+            candidate = _validate_dashboard_result_entry(
+                {
+                    "result_id": raw_entry.get("result_id"),
+                    "seed_id": raw_entry.get("seed_id"),
+                    "title": raw_entry.get("title"),
+                    "strategy": raw_entry.get("strategy"),
+                    "summary": summary,
+                    "updated_at": raw_entry.get("updated_at"),
+                    "payload": graph_payload,
+                    "build": build,
+                }
+            )
+        except DashboardPackageError as exc:
+            logger.warning(
+                "Skipping invalid legacy dashboard result %r: %s",
+                raw_entry.get("result_id"),
+                exc,
+            )
             continue
-        if not isinstance(payload, dict):
+        result_id = candidate["result_id"]
+        if result_id in seen_result_ids:
             continue
-        payloads[result_id] = payload
+        seen_result_ids.add(result_id)
+        results.append(candidate)
+    return results
 
-    return {
-        "current_result_id": current_result_id,
-        "results": results,
-        "payloads": payloads,
+
+def update_dashboard_package(
+    package_path: Path,
+    *,
+    graph: nx.Graph,
+    seed_id: str,
+    strategy: str,
+    payload: Dict[str, Any],
+    build: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Atomically create or update a portable dashboard collection package.
+
+    One slot is retained per ``(strategy, seed_id)`` pair. The package lock covers
+    existing-package validation, optional legacy migration, merge, and atomic
+    replacement so concurrent builds cannot lose each other's results.
+
+    :param Path package_path: Portable collection package path.
+    :param nx.Graph graph: Built graph used for seed metadata.
+    :param str seed_id: Seed node identifier.
+    :param str strategy: Active strategy name.
+    :param Dict[str, Any] payload: Canonical graph payload from the exporter.
+    :param Dict[str, Any] build: Portable resolved build settings.
+    :return Dict[str, Any]: Canonical package written to disk.
+    :raises DashboardPackageError: If an existing package is invalid or unsupported.
+    """
+    seed_title = str(graph.nodes[seed_id].get("title") or seed_id)
+    result_id = f"{strategy}:{seed_id}"
+    validated_payload = _validate_dashboard_graph_payload(payload, result_id=result_id)
+    payload_summary = validated_payload["summary"]
+    entry = {
+        "result_id": result_id,
+        "seed_id": seed_id,
+        "title": seed_title,
+        "strategy": strategy,
+        "summary": {
+            "nodes": payload_summary["nodes"],
+            "edges": payload_summary["edges"],
+        },
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "payload": validated_payload,
+        "build": dict(build),
     }
+    entry = _validate_dashboard_result_entry(entry)
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _dashboard_package_lock_path(package_path)
+    lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)
+    try:
+        with lock:
+            if package_path.exists():
+                existing_package = load_dashboard_package(package_path)
+                existing_results = existing_package["results"]
+            else:
+                existing_results = _load_legacy_dashboard_results(package_path.parent)
+            filtered = [
+                item for item in existing_results if item.get("result_id") != result_id
+            ]
+            package = _validate_dashboard_package(
+                {
+                    "kind": DASHBOARD_PACKAGE_KIND,
+                    "schema_version": DASHBOARD_PACKAGE_SCHEMA_VERSION,
+                    "current_result_id": result_id,
+                    "results": [entry, *filtered],
+                }
+            )
+            atomic_write_json(package_path, package, indent=2)
+            return package
+    except Timeout as exc:
+        raise RuntimeError(
+            "Timed out waiting for dashboard package lock "
+            f"at {lock_path} after {DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS:.1f}s."
+        ) from exc
+
+
+def render_dashboard_collection_snapshot(
+    package_path: Path,
+    *,
+    dashboard_path: Path,
+    exporter: Any,
+    metadata: Dict[str, Any],
+    theme: str,
+) -> Dict[str, Any]:
+    """Render an atomic dashboard snapshot from the latest locked package state.
+
+    The package and its embedded HTML snapshot must be serialized by the same
+    lock. Otherwise two successful builds can write their HTML snapshots out of
+    order even though their package upserts were individually atomic.
+
+    :param Path package_path: Authoritative dashboard collection package.
+    :param Path dashboard_path: HTML viewer path to refresh.
+    :param Any exporter: Graph exporter for the build's current graph.
+    :param Dict[str, Any] metadata: Mutable exporter metadata mapping.
+    :param str theme: Requested dashboard theme.
+    :return Dict[str, Any]: Latest package embedded in the rendered viewer.
+    """
+    lock_path = _dashboard_package_lock_path(package_path)
+    lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)
+    try:
+        with lock:
+            package = load_dashboard_package(package_path)
+            metadata["dashboard_collection"] = package
+            exporter.to_dashboard_html(dashboard_path, theme=theme)
+            return package
+    except Timeout as exc:
+        raise RuntimeError(
+            "Timed out waiting to refresh dashboard snapshot "
+            f"at {lock_path} after {DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS:.1f}s."
+        ) from exc
 
 
 def _drop_none_values(value: Any) -> Any:
@@ -3049,6 +3502,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_defaults=config_default_dests,
         )
         try:
+            raw_exports = args.export or ["png"]
+            if "all" in raw_exports:
+                selected_formats = list(EXPORT_FORMATS)
+            else:
+                selected_formats = list(dict.fromkeys(raw_exports))
+
+            explicit_output = bool(args.output)
+            requested_base_output_path = Path(args.output or "out")
+            standalone_dashboard = _is_standalone_dashboard_output(
+                base_output_path=requested_base_output_path,
+                selected_formats=selected_formats,
+                explicit_output=explicit_output,
+            )
+            dashboard_collection_mode = (
+                "dashboard" in selected_formats and not standalone_dashboard
+            )
+            preflight_package_path: Optional[Path] = None
+            if dashboard_collection_mode:
+                collection_root = _resolve_dashboard_collection_root(
+                    requested_base_output_path,
+                    explicit_output=explicit_output,
+                )
+                preflight_package_path = collection_root / DASHBOARD_PACKAGE_FILENAME
+                if preflight_package_path.exists():
+                    load_dashboard_package(preflight_package_path)
+
             if not _confirm_force_rebuild_cache(args):
                 logger.info("Build aborted.")
                 return 1
@@ -3059,55 +3538,60 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args, args.strategy, validate_contract=False
             )
 
-            # Determine output paths
             if args.output:
                 base_output_path = Path(args.output)
+            elif dashboard_collection_mode:
+                # Collection planning knows the canonical default root. Avoid the
+                # seed-directory side effect of generate_output_path for a
+                # dashboard-only build.
+                base_output_path = Path("out")
             else:
                 base_output_path = generate_output_path(
                     graph, seed_id, strategy=args.strategy
                 )
 
-            raw_exports = args.export or ["png"]
-            if "all" in raw_exports:
-                selected_formats = list(EXPORT_FORMATS)
-            else:
-                selected_formats = list(dict.fromkeys(raw_exports))
-            dashboard_manifest_path: Optional[Path] = None
-            if "dashboard" in selected_formats and not _is_standalone_dashboard_output(
-                base_output_path=base_output_path,
-                selected_formats=selected_formats,
-                explicit_output=bool(args.output),
-            ):
-                output_paths, dashboard_manifest_path = (
+            dashboard_package_path: Optional[Path] = None
+            if dashboard_collection_mode:
+                output_paths, dashboard_package_path = (
                     resolve_dashboard_collection_outputs(
                         base_output_path=base_output_path,
                         selected_formats=selected_formats,
-                        explicit_output=bool(args.output),
+                        explicit_output=explicit_output,
                         strategy=args.strategy,
                         graph=graph,
                         seed_id=seed_id,
                     )
                 )
+                if dashboard_package_path != preflight_package_path:
+                    raise RuntimeError(
+                        "Dashboard package planning changed after graph construction."
+                    )
             else:
                 output_paths = resolve_output_paths(
                     base_output_path=base_output_path,
                     selected_formats=selected_formats,
-                    explicit_output=bool(args.output),
+                    explicit_output=explicit_output,
                     strategy=args.strategy,
                 )
-            if dashboard_manifest_path is not None:
+            if dashboard_package_path is not None:
+                per_result_paths = [
+                    path for fmt, path in output_paths.items() if fmt != "dashboard"
+                ]
                 run_artifact_root = (
-                    output_paths["json"].parent
-                    if "json" in output_paths
-                    else next(iter(output_paths.values())).parent
+                    per_result_paths[0].parent
+                    if per_result_paths
+                    else dashboard_package_path.parent
                 )
                 logger.info(
-                    "Dashboard collection mode: shell=%s manifest=%s run_artifacts=%s.",
+                    "Dashboard collection mode: shell=%s package=%s run_artifacts=%s.",
                     output_paths["dashboard"],
-                    dashboard_manifest_path,
+                    dashboard_package_path,
                     run_artifact_root,
                 )
-            for parent in {path.parent for path in output_paths.values()}:
+            planned_paths = list(output_paths.values())
+            if dashboard_package_path is not None:
+                planned_paths.append(dashboard_package_path)
+            for parent in {path.parent for path in planned_paths}:
                 if parent and not parent.exists():
                     parent.mkdir(parents=True, exist_ok=True)
 
@@ -3169,9 +3653,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for fmt, method_name in _EXPORTER_METHOD.items():
                 if fmt not in output_paths:
                     continue
-                if fmt == "dashboard" and dashboard_manifest_path is not None:
-                    # Shared dashboards are rendered after the manifest update so the
-                    # shell can embed the current collection bundle for offline reuse.
+                if fmt == "dashboard" and dashboard_package_path is not None:
+                    # Shared dashboards are rendered after the package update so the
+                    # shell can embed the current collection for offline reuse.
                     continue
                 method = getattr(exporter, method_name)
                 if fmt in _THEME_AWARE_FORMATS:
@@ -3179,50 +3663,65 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     method(output_paths[fmt])
 
-            graph_config_path = resolve_graph_config_path(
-                output_paths=output_paths,
-                strategy=args.strategy,
-            )
+            config_output_paths = dict(output_paths)
+            if dashboard_package_path is not None:
+                config_output_paths["dashboard_package"] = dashboard_package_path
             graph_config_payload = _build_graph_config_payload(
                 cli_args=args,
                 seed_id=seed_id,
                 metadata=metadata,
                 selected_formats=selected_formats,
-                output_paths=output_paths,
+                output_paths=config_output_paths,
             )
-            graph_config_path.write_text(
-                json.dumps(graph_config_payload, indent=2, sort_keys=True),
-                encoding="utf-8",
+            per_result_exports = [fmt for fmt in output_paths if fmt != "dashboard"]
+            standalone_dashboard_only = standalone_dashboard and selected_formats == [
+                "dashboard"
+            ]
+            write_config_sidecar = not standalone_dashboard_only and (
+                dashboard_package_path is None or bool(per_result_exports)
             )
-            if (
-                dashboard_manifest_path is not None
-                and "json" in output_paths
-                and output_paths["json"].exists()
-            ):
-                manifest_payload = update_dashboard_manifest(
-                    dashboard_manifest_path,
-                    collection_root=dashboard_manifest_path.parent,
+            graph_config_path: Optional[Path] = None
+            if write_config_sidecar:
+                graph_config_path = resolve_graph_config_path(
+                    output_paths=output_paths,
+                    strategy=args.strategy,
+                )
+                atomic_write_json(graph_config_path, graph_config_payload, indent=2)
+
+            if dashboard_package_path is not None:
+                update_dashboard_package(
+                    dashboard_package_path,
                     graph=graph,
                     seed_id=seed_id,
                     strategy=args.strategy,
-                    json_path=output_paths["json"],
-                    config_path=graph_config_path,
-                    metadata=metadata,
+                    payload=exporter.graph_payload(),
+                    build=dict(graph_config_payload.get("build", {})),
                 )
-                metadata["dashboard_collection"] = build_dashboard_collection_bundle(
-                    dashboard_manifest_path,
-                    current_result_id=str(
-                        manifest_payload["results"][0].get(
-                            "result_id", f"{args.strategy}:{seed_id}"
-                        )
-                    ),
-                )
-                exporter.to_dashboard_html(output_paths["dashboard"], theme=args.theme)
+                try:
+                    render_dashboard_collection_snapshot(
+                        dashboard_package_path,
+                        dashboard_path=output_paths["dashboard"],
+                        exporter=exporter,
+                        metadata=metadata,
+                        theme=args.theme,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Dashboard data was saved safely at %s, but the viewer "
+                        "refresh failed: %s. Recover by opening an existing "
+                        "dashboard.html, choosing Add Results, and selecting this "
+                        "package, or rerun after fixing the renderer.",
+                        dashboard_package_path,
+                        exc,
+                        exc_info=logging.getLogger().level == logging.DEBUG,
+                    )
+                    return 1
 
             artifact_paths = dict(output_paths)
-            artifact_paths["config"] = graph_config_path
-            if dashboard_manifest_path is not None:
-                artifact_paths["dashboard_manifest"] = dashboard_manifest_path
+            if graph_config_path is not None:
+                artifact_paths["config"] = graph_config_path
+            if dashboard_package_path is not None:
+                artifact_paths["dashboard_package"] = dashboard_package_path
             saved_artifact_count = len(artifact_paths)
             output_dirs = sorted({str(path.parent) for path in artifact_paths.values()})
             if saved_artifact_count:
@@ -3246,6 +3745,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 graph.number_of_edges(),
             )
 
+        except DashboardPackageError as e:
+            logger.error(
+                "Failed to prepare dashboard collection: %s",
+                e,
+                exc_info=logging.getLogger().level == logging.DEBUG,
+            )
+            return 1
         except Exception as e:
             logger.error(
                 "Failed to build graph: %s",

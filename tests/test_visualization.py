@@ -35,6 +35,7 @@ from citemesh.visualization.export import (
     GraphExporter,
     _graphml_determinism_policy,
     _select_dashboard_label_nodes,
+    _stable_curve_direction,
 )
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
@@ -208,6 +209,9 @@ def test_exporter_serialization_contracts_and_determinism(
     exporter.to_graphml(graphml_again_path)
 
     payload = json.loads(json_path.read_text())
+    assert payload["kind"] == "citemesh-graph"
+    assert payload["schema_version"] == 1
+    assert exporter.graph_payload() == payload
     assert payload["seed_id"] == seed_id
     assert "metadata" not in payload
     assert payload["summary"] == {"nodes": 2, "edges": 1}
@@ -487,6 +491,38 @@ def test_edge_strength_scale_normalizes_within_graph() -> None:
     assert scaled[2] == pytest.approx(1.0)
 
 
+def test_atomic_dashboard_write_preserves_previous_viewer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed final replace must leave the previous dashboard intact."""
+    destination = tmp_path / "dashboard.html"
+    destination.write_text("previous viewer", encoding="utf-8")
+
+    def fail_replace(source: object, target: object) -> None:
+        """Simulate an operating-system replace failure.
+
+        :param object source: Ignored temporary path.
+        :param object target: Ignored destination path.
+        :return None: Always raises.
+        """
+        del source, target
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(export_module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        export_module._atomic_write_text(destination, "new viewer")
+
+    assert destination.read_text(encoding="utf-8") == "previous viewer"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+def test_dashboard_curve_direction_is_endpoint_order_independent() -> None:
+    """Python and browser rerenders must curve an undirected edge identically."""
+    assert _stable_curve_direction("related", "seed") == 1.0
+    assert _stable_curve_direction("seed", "related") == 1.0
+
+
 def test_plotly_hover_text_wraps_long_titles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -541,33 +577,27 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     exporter = GraphExporter(
         graph,
         seed_id,
-        metadata={
-            "strategy": "hybrid",
-            "dashboard_collection": {
-                "current_result_id": "hybrid:seed",
-                "results": [
-                    {
-                        "result_id": "hybrid:seed",
-                        "seed_id": "seed",
-                        "title": "Seed Paper",
-                        "strategy": "hybrid",
-                        "summary": {"nodes": 2, "edges": 1},
-                    }
-                ],
-                "payloads": {
-                    "hybrid:seed": {
-                        "seed_id": "seed",
-                        "meta": {"strategy": "hybrid"},
-                        "summary": {"nodes": 2, "edges": 1},
-                        "nodes": [],
-                        "edges": [],
-                        "dashboard": {"meta": {}},
-                    }
-                },
-            },
-        },
+        metadata={"strategy": "hybrid"},
         layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
     )
+    graph_payload = exporter.graph_payload()
+    exporter.metadata["dashboard_collection"] = {
+        "kind": "citemesh-dashboard-collection",
+        "schema_version": 1,
+        "current_result_id": "hybrid:seed",
+        "results": [
+            {
+                "result_id": "hybrid:seed",
+                "seed_id": "seed",
+                "title": "Seed Paper",
+                "strategy": "hybrid",
+                "summary": {"nodes": 2, "edges": 1},
+                "updated_at": "2026-08-29T12:00:00",
+                "payload": graph_payload,
+                "build": {"max_papers": 2},
+            }
+        ],
+    }
     out_path = tmp_path / "graph.dashboard.html"
     exporter.to_dashboard_html(out_path, theme="dark")
 
@@ -591,6 +621,12 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="result-select"',
         'id="dashboard-status"',
         'accept=".json,.html"',
+        'id="export-collection-btn"',
+        'id="add-results-btn"',
+        'id="add-results-input"',
+        "multiple",
+        "Add Results…",
+        "Export Collection",
         'id="saved-filter"',
         'id="export-saved-bib-btn"',
         'id="copy-saved-links-btn"',
@@ -648,14 +684,20 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     collection = _extract_dashboard_script_json(
         rendered, "citemesh-dashboard-collection"
     )
+    assert collection["kind"] == "citemesh-dashboard-collection"
+    assert collection["schema_version"] == 1
     assert collection["current_result_id"] == "hybrid:seed"
     assert collection["results"][0]["title"] == "Seed Paper"
-    assert "hybrid:seed" in collection["payloads"]
+    assert collection["results"][0]["build"] == {"max_papers": 2}
+    assert "payload" in collection["results"][0]
+    assert "payloads" not in collection
 
     figure = _extract_dashboard_script_json(rendered, "citemesh-dashboard-figure")
     assert len(figure["data"]) == 3
     assert len(figure["layout"].get("shapes", [])) == 1
-    assert figure["layout"]["uirevision"] == "citemesh-dashboard-static-layout-v1"
+    assert figure["layout"]["uirevision"] == (
+        "citemesh-dashboard-static-layout-v1:hybrid:seed"
+    )
     assert figure["layout"]["xaxis"]["autorange"] is False
     assert figure["layout"]["yaxis"]["autorange"] is False
     assert figure["layout"]["margin"]["b"] == DASHBOARD_FOOTER_MARGIN
@@ -715,6 +757,39 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert node_trace["hoverlabel"]["bgcolor"] == "#171d25"
 
 
+def test_exporter_does_not_relabel_legacy_collection_metadata() -> None:
+    """Legacy descriptor/payload bundles must remain visibly unversioned."""
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "hybrid"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    legacy_payload = exporter.graph_payload()
+    legacy_payload.pop("kind")
+    legacy_payload.pop("schema_version")
+    exporter.metadata["dashboard_collection"] = {
+        "current_result_id": "hybrid:seed",
+        "results": [
+            {
+                "result_id": "hybrid:seed",
+                "seed_id": "seed",
+                "title": "Seed Paper",
+                "strategy": "hybrid",
+                "summary": {"nodes": 2, "edges": 1},
+            }
+        ],
+        "payloads": {"hybrid:seed": legacy_payload},
+    }
+
+    bundle = exporter._dashboard_collection_bundle()
+
+    assert "kind" not in bundle
+    assert "schema_version" not in bundle
+    assert bundle["results"][0]["payload"] == legacy_payload
+
+
 def test_exporter_dashboard_runtime_script_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -740,13 +815,69 @@ def test_exporter_dashboard_runtime_script_contracts(
 
     runtime_script = runtime_scripts[-1]
     assert "new DOMParser()" in runtime_script
-    assert "function parseImportedPayloadFromText" in runtime_script
+    assert "function parseImportedResultSetFromText" in runtime_script
+    assert "const packageCurrentResultId = String(" in runtime_script
+    assert "function normalizeCollectionPackage" in runtime_script
+    assert "function collectionEntryFromGraphPayload" in runtime_script
+    assert "function isNonNegativeInteger" in runtime_script
+    assert (
+        "Versioned graph results require canonical top-level seed_id" in runtime_script
+    )
+    assert (
+        "Versioned graph node IDs cannot contain surrounding whitespace"
+        in runtime_script
+    )
+    assert "Versioned graph dashboard metadata must match" in runtime_script
+    assert "const positionsAreFinite = positions.every" in runtime_script
+    assert "const sizesAreFinite = sizes.every" in runtime_script
+    assert "if (isVersionedCollection)" in runtime_script
+    assert "function upsertCollectionEntries" in runtime_script
+    assert (
+        "targetCollection.results = incomingUnique.concat(retained);" in runtime_script
+    )
+    assert "function portableCollectionPackage" in runtime_script
+    assert (
+        "const initialResultId = currentResultIdForPayload(payload);" in runtime_script
+    )
+    assert "collectionResultId !== initialResultId" in runtime_script
+    assert "loadCollectionResult(collectionResultId)" in runtime_script
+    assert "updated_at: entry.updated_at || new Date().toISOString()" in runtime_script
+    assert "build: isObjectRecord(entry.build) ? entry.build : {}" in runtime_script
+    assert "const duplicateIndex = normalized.results.findIndex" in runtime_script
+    assert (
+        "Graph result summary does not match its node and edge arrays."
+        in runtime_script
+    )
+    assert "function safeExternalUrl" in runtime_script
+    assert (
+        'parsed.protocol === "https:" || parsed.protocol === "http:"' in runtime_script
+    )
+    assert (
+        "Unsupported citemesh-dashboard-collection schema version" not in runtime_script
+    )
+    assert "Unsupported ${COLLECTION_KIND} schema version" in runtime_script
+    assert "Collection package must contain a results array." in runtime_script
+    assert "Array.from((event.target && event.target.files) || [])" in runtime_script
+    assert (
+        'unique ${uniqueGraphCount === 1 ? "graph" : "graphs"} in this session'
+        in runtime_script
+    )
+    assert 'document.getElementById("export-collection-btn")' in runtime_script
+    assert "alert(" not in runtime_script
     assert "function hasCompleteDashboardGeometry" in runtime_script
     assert "function selectDashboardLabelIds" in runtime_script
     assert "function dashboardNodeLabel" in runtime_script
     assert "function dashboardHoverText" in runtime_script
     assert "hoverTexts.push(dashboardHoverText(node, nodeId));" in runtime_script
     assert "function normalizeDashboardEdgeStrengths" in runtime_script
+    assert "const [keyLeft, keyRight]" in runtime_script
+    assert "const nextMarkerSizeRef = Math.max" in runtime_script
+    assert "sizeref: nextMarkerSizeRef" in runtime_script
+    assert "const missingYear = (safeYearMin + safeYearMax) / 2.0;" in runtime_script
+    assert ": missingYear;" in runtime_script
+    assert (
+        "citemesh-dashboard-static-layout-v1:${String(meta.strategy" in runtime_script
+    )
     assert (
         f"const xPad = Math.max({DASHBOARD_AXIS_X_PADDING}, xSpan * 0.1);"
         in runtime_script

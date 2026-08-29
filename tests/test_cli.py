@@ -11,6 +11,7 @@ import runpy
 import shlex
 import tempfile
 import threading
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,12 +23,18 @@ import pytest
 
 from citemesh import cli as cli_module
 from citemesh.cli import (
+    DASHBOARD_PACKAGE_FILENAME,
+    DASHBOARD_PACKAGE_KIND,
+    DASHBOARD_PACKAGE_SCHEMA_VERSION,
+    DashboardPackageError,
     _is_standalone_dashboard_output,
-    build_dashboard_collection_bundle,
     canonicalize_paper_id_for_metadata,
+    load_dashboard_package,
+    render_dashboard_collection_snapshot,
     resolve_dashboard_collection_outputs,
     resolve_graph_config_path,
     resolve_output_paths,
+    update_dashboard_package,
 )
 from citemesh.core import Author, Paper
 from citemesh.core.user_config import UserConfig
@@ -118,10 +125,13 @@ def _make_exporter_stub(
         "to_bibtex": "@article{test,}\n",
     }
 
-    def _factory(*_args: object, **kwargs: object) -> SimpleNamespace:
+    def _factory(*factory_args: object, **kwargs: object) -> SimpleNamespace:
         captured_data["kwargs"] = kwargs
         captured_data["metadata"] = kwargs.get("metadata")
         captured_data["layout"] = kwargs.get("layout")
+        graph = factory_args[0]
+        seed_id = str(factory_args[1])
+        assert isinstance(graph, nx.Graph)
 
         def _write_payload(
             path: Path,
@@ -133,7 +143,16 @@ def _make_exporter_stub(
             if method_name in requested_methods:
                 path.write_text(payloads[method_name], encoding="utf-8")
 
-        return SimpleNamespace(
+        def _graph_payload() -> dict[str, object]:
+            metadata = kwargs.get("metadata")
+            strategy = (
+                str(metadata.get("strategy") or "")
+                if isinstance(metadata, dict)
+                else ""
+            )
+            return _dashboard_graph_payload(graph, seed_id, strategy)
+
+        namespace = {
             **{
                 method_name: (
                     lambda path, *args, _method=method_name, **kwargs: _write_payload(
@@ -144,10 +163,56 @@ def _make_exporter_stub(
                     )
                 )
                 for method_name in payloads
-            }
-        )
+            },
+            "graph_payload": _graph_payload,
+        }
+        return SimpleNamespace(**namespace)
 
     return _factory
+
+
+def _dashboard_graph_payload(
+    graph: nx.Graph, seed_id: str, strategy: str
+) -> dict[str, object]:
+    """Build a minimal canonical graph payload for package-focused CLI tests.
+
+    :param nx.Graph graph: Source graph.
+    :param str seed_id: Seed node identifier.
+    :param str strategy: Strategy descriptor.
+    :return dict[str, object]: Canonical graph payload accepted by package helpers.
+    """
+    node_ids = [str(node_id) for node_id in graph.nodes]
+    return {
+        "kind": "citemesh-graph",
+        "schema_version": 1,
+        "seed_id": seed_id,
+        "meta": {"strategy": strategy},
+        "summary": {
+            "nodes": graph.number_of_nodes(),
+            "edges": graph.number_of_edges(),
+        },
+        "nodes": [{"id": node_id} for node_id in node_ids],
+        "dashboard": {
+            "meta": {
+                "seed_id": seed_id,
+                "strategy": strategy,
+                "summary": {
+                    "nodes": graph.number_of_nodes(),
+                    "edges": graph.number_of_edges(),
+                },
+                "plotly_node_order": node_ids,
+                "plotly_positions": [
+                    [float(index), float(index % 2)]
+                    for index, _node_id in enumerate(node_ids)
+                ],
+                "plotly_node_sizes": [8.0 for _node_id in node_ids],
+            }
+        },
+        "edges": [
+            {"source": str(left), "target": str(right), "weight": 0.0}
+            for left, right in graph.edges
+        ],
+    }
 
 
 def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
@@ -1196,7 +1261,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dashboard exports should use shared shell + per-run collection artifacts."""
+    """Dashboard-only collections should contain exactly one shell and package."""
     graph = build_seed_graph("seed")
     monkeypatch.setattr(
         cli_module,
@@ -1210,7 +1275,7 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "GraphExporter",
         _make_exporter_stub(
             captured,
-            methods=("to_dashboard_html", "to_json"),
+            methods=("to_dashboard_html",),
         ),
     )
 
@@ -1228,22 +1293,21 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
                 str(output),
             ],
         )
-        run_dir = generate_output_path(
-            graph,
-            seed_id="seed",
-            output_dir=output,
-            strategy="recommendation",
-        ).parent
-        assert (output / "dashboard.html").exists()
-        assert (output / "dashboard.manifest.json").exists()
-        assert (run_dir / "recommendation.json").exists()
-        assert (run_dir / "recommendation.config.json").exists()
-        collection_bundle = captured["metadata"]["dashboard_collection"]
-        assert collection_bundle["current_result_id"] == "recommendation:seed"
-        assert collection_bundle["results"][0]["json_path"].endswith(
-            "recommendation.json"
-        )
-        assert "recommendation:seed" in collection_bundle["payloads"]
+        assert {path.name for path in output.iterdir()} == {
+            "dashboard.html",
+            DASHBOARD_PACKAGE_FILENAME,
+        }
+        package = load_dashboard_package(output / DASHBOARD_PACKAGE_FILENAME)
+        assert package["kind"] == DASHBOARD_PACKAGE_KIND
+        assert package["schema_version"] == DASHBOARD_PACKAGE_SCHEMA_VERSION
+        assert package["current_result_id"] == "recommendation:seed"
+        assert [entry["result_id"] for entry in package["results"]] == [
+            "recommendation:seed"
+        ]
+        entry = package["results"][0]
+        assert entry["payload"]["seed_id"] == "seed"
+        assert entry["build"]["strategy"] == "recommendation"
+        assert captured["metadata"]["dashboard_collection"] == package
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
     captured.clear()
@@ -1284,7 +1348,7 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
             strategy="recommendation",
         ).parent
         assert (output_dir / "dashboard.html").exists()
-        assert (output_dir / "dashboard.manifest.json").exists()
+        assert (output_dir / DASHBOARD_PACKAGE_FILENAME).exists()
         assert not (run_dir / "recommendation.dashboard.html").exists()
         assert (run_dir / "recommendation.csv").exists()
         assert (run_dir / "recommendation.bib").exists()
@@ -1292,15 +1356,56 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         assert len(config_files) == 1
         config_payload = json.loads(config_files[0].read_text())
         assert "dashboard" in config_payload["outputs"]
+        assert config_payload["outputs"]["dashboard_package"].endswith(
+            DASHBOARD_PACKAGE_FILENAME
+        )
         assert "csv" in config_payload["outputs"]
         assert "bibtex" in config_payload["outputs"]
+        assert (output_dir / DASHBOARD_PACKAGE_FILENAME).exists()
+        assert not (output_dir / "dashboard.manifest.json").exists()
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
-def test_dashboard_collection_manifest_tracks_multiple_runs(
+def test_dashboard_default_collection_avoids_seed_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The default dashboard root should contain only its shell and package."""
+    graph = build_seed_graph("seed")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        _make_exporter_stub({}, methods=("to_dashboard_html",)),
+    )
+
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "dashboard",
+        ]
+    )
+
+    output_root = tmp_path / "out"
+    assert result.returncode == 0, result.stderr
+    assert {path.name for path in output_root.iterdir()} == {
+        "dashboard.html",
+        DASHBOARD_PACKAGE_FILENAME,
+    }
+
+
+def test_dashboard_package_tracks_multiple_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Shared dashboard collections should retain multiple run payload entries."""
+    """One portable dashboard package should retain multiple result payloads."""
     first_graph = build_seed_graph("seed-a")
     first_graph.nodes["seed-a"]["title"] = "First Seed"
     second_graph = build_seed_graph("seed-b")
@@ -1317,7 +1422,7 @@ def test_dashboard_collection_manifest_tracks_multiple_runs(
         "GraphExporter",
         _make_exporter_stub(
             captured,
-            methods=("to_dashboard_html", "to_json"),
+            methods=("to_dashboard_html",),
         ),
     )
 
@@ -1348,31 +1453,18 @@ def test_dashboard_collection_manifest_tracks_multiple_runs(
             ],
         )
 
-        manifest_payload = json.loads(
-            (output_dir / "dashboard.manifest.json").read_text()
-        )
-        assert len(manifest_payload["results"]) == 2
-        json_paths = {entry["json_path"] for entry in manifest_payload["results"]}
-        assert len(json_paths) == 2
-        first_run_dir = generate_output_path(
-            first_graph,
-            seed_id="seed-a",
-            output_dir=output_dir,
-            strategy="recommendation",
-        ).parent
-        second_run_dir = generate_output_path(
-            second_graph,
-            seed_id="seed-b",
-            output_dir=output_dir,
-            strategy="recommendation",
-        ).parent
+        package = load_dashboard_package(output_dir / DASHBOARD_PACKAGE_FILENAME)
         assert (output_dir / "dashboard.html").exists()
-        assert (first_run_dir / "recommendation.json").exists()
-        assert (second_run_dir / "recommendation.json").exists()
+        assert package["current_result_id"] == "recommendation:seed-b"
+        assert [entry["result_id"] for entry in package["results"]] == [
+            "recommendation:seed-b",
+            "recommendation:seed-a",
+        ]
+        assert not any(path.is_dir() for path in output_dir.iterdir())
         collection_bundle = captured["metadata"]["dashboard_collection"]
         assert collection_bundle["current_result_id"] == "recommendation:seed-b"
         assert len(collection_bundle["results"]) == 2
-        assert set(collection_bundle["payloads"]) == {
+        assert {entry["result_id"] for entry in collection_bundle["results"]} == {
             "recommendation:seed-a",
             "recommendation:seed-b",
         }
@@ -1381,7 +1473,7 @@ def test_dashboard_collection_manifest_tracks_multiple_runs(
     assert second_result.returncode == 0
 
 
-def test_dashboard_collection_manifest_refreshes_same_seed_strategy_slot(
+def test_dashboard_package_refreshes_same_seed_strategy_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Re-running the same seed/strategy should refresh the existing selector slot."""
@@ -1408,7 +1500,7 @@ def test_dashboard_collection_manifest_refreshes_same_seed_strategy_slot(
         "GraphExporter",
         _make_exporter_stub(
             captured,
-            methods=("to_dashboard_html", "to_json"),
+            methods=("to_dashboard_html",),
         ),
     )
 
@@ -1439,13 +1531,12 @@ def test_dashboard_collection_manifest_refreshes_same_seed_strategy_slot(
             ],
         )
 
-        manifest_payload = json.loads(
-            (output_dir / "dashboard.manifest.json").read_text()
-        )
-        assert len(manifest_payload["results"]) == 1
-        entry = manifest_payload["results"][0]
+        package = load_dashboard_package(output_dir / DASHBOARD_PACKAGE_FILENAME)
+        assert len(package["results"]) == 1
+        entry = package["results"][0]
         assert entry["result_id"] == "recommendation:seed"
         assert entry["summary"] == {"nodes": 2, "edges": 1}
+        assert entry["payload"]["summary"] == {"nodes": 2, "edges": 1}
         collection_bundle = captured["metadata"]["dashboard_collection"]
         assert collection_bundle["current_result_id"] == "recommendation:seed"
         assert len(collection_bundle["results"]) == 1
@@ -1454,12 +1545,50 @@ def test_dashboard_collection_manifest_refreshes_same_seed_strategy_slot(
     assert second_result.returncode == 0
 
 
-def test_dashboard_collection_manifest_serializes_concurrent_updates(
+def test_dashboard_package_deduplicates_existing_slots_deterministically(
+    tmp_path: Path,
+) -> None:
+    """The first existing duplicate should win when a later result is upserted."""
+    package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
+    first_graph = build_seed_graph("seed-a")
+    first_graph.nodes["seed-a"]["title"] = "First Copy"
+    initial = update_dashboard_package(
+        package_path,
+        graph=first_graph,
+        seed_id="seed-a",
+        strategy="recommendation",
+        payload=_dashboard_graph_payload(first_graph, "seed-a", "recommendation"),
+        build={"strategy": "recommendation"},
+    )
+    duplicate = dict(initial["results"][0])
+    duplicate["title"] = "Ignored Duplicate"
+    package_path.write_text(
+        json.dumps({**initial, "results": [initial["results"][0], duplicate]}),
+        encoding="utf-8",
+    )
+    second_graph = build_seed_graph("seed-b")
+
+    updated = update_dashboard_package(
+        package_path,
+        graph=second_graph,
+        seed_id="seed-b",
+        strategy="recommendation",
+        payload=_dashboard_graph_payload(second_graph, "seed-b", "recommendation"),
+        build={"strategy": "recommendation"},
+    )
+
+    assert [entry["result_id"] for entry in updated["results"]] == [
+        "recommendation:seed-b",
+        "recommendation:seed-a",
+    ]
+    assert updated["results"][1]["title"] == "First Copy"
+
+
+def test_dashboard_package_serializes_concurrent_updates(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Manifest updates should hold a shared lock across read/merge/write."""
-    manifest_path = tmp_path / "dashboard.manifest.json"
-    collection_root = tmp_path
+    """Package updates should hold one lock across read, merge, and atomic write."""
+    package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
     first_graph = build_seed_graph("seed-a")
     second_graph = build_seed_graph("seed-b")
     first_graph.nodes["seed-a"]["title"] = "First Seed"
@@ -1492,18 +1621,13 @@ def test_dashboard_collection_manifest_serializes_concurrent_updates(
 
     def worker(graph: nx.Graph, seed_id: str) -> None:
         try:
-            cli_module.update_dashboard_manifest(
-                manifest_path,
-                collection_root=collection_root,
+            update_dashboard_package(
+                package_path,
                 graph=graph,
                 seed_id=seed_id,
                 strategy="recommendation",
-                json_path=collection_root / seed_id / "recommendation.json",
-                config_path=collection_root / seed_id / "recommendation.config.json",
-                metadata={
-                    "nodes": graph.number_of_nodes(),
-                    "edges": graph.number_of_edges(),
-                },
+                payload=_dashboard_graph_payload(graph, seed_id, "recommendation"),
+                build={"strategy": "recommendation"},
             )
         except BaseException as exc:  # pragma: no cover - surfaced below
             errors.append(exc)
@@ -1515,7 +1639,7 @@ def test_dashboard_collection_manifest_serializes_concurrent_updates(
     assert first_write_started.wait(timeout=5), "first write never started"
     second_thread.start()
     assert not second_write_started.wait(timeout=0.25), (
-        "second update reached write path before first released manifest lock"
+        "second update reached write path before first released package lock"
     )
 
     allow_first_write.set()
@@ -1526,18 +1650,23 @@ def test_dashboard_collection_manifest_serializes_concurrent_updates(
     assert not second_thread.is_alive()
     assert not errors
 
-    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert {entry["result_id"] for entry in manifest_payload["results"]} == {
+    package = load_dashboard_package(package_path)
+    assert {entry["result_id"] for entry in package["results"]} == {
         "recommendation:seed-a",
         "recommendation:seed-b",
     }
 
 
 @pytest.mark.parametrize(
-    ("extra_exports", "exporter_methods", "expected_extra_outputs"),
+    (
+        "extra_exports",
+        "exporter_methods",
+        "expected_extra_outputs",
+        "expects_config",
+    ),
     [
-        ([], ("to_dashboard_html",), []),
-        (["json"], ("to_dashboard_html", "to_json"), ["report.json"]),
+        ([], ("to_dashboard_html",), [], False),
+        (["json"], ("to_dashboard_html", "to_json"), ["report.json"], True),
     ],
 )
 def test_dashboard_standalone_export_preserves_explicit_single_file(
@@ -1545,6 +1674,7 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
     extra_exports: list[str],
     exporter_methods: tuple[str, ...],
     expected_extra_outputs: list[str],
+    expects_config: bool,
 ) -> None:
     """Explicit dashboard filenames should bypass collection mode."""
     graph = build_seed_graph("seed")
@@ -1579,167 +1709,439 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
         command.extend(["-o", str(output_file)])
         result = run_cli_command(command)
         assert output_file.exists()
-        assert (output_file.parent / "report.config.json").exists()
+        assert (output_file.parent / "report.config.json").exists() is expects_config
         for expected_output in expected_extra_outputs:
             assert (output_file.parent / expected_output).exists()
         assert not (collection_root / "dashboard.html").exists()
         assert not (collection_root / "dashboard.manifest.json").exists()
+        assert not (collection_root / DASHBOARD_PACKAGE_FILENAME).exists()
         assert not (output_file.parent / "recommendation.json").exists()
         assert "dashboard_collection" not in captured["metadata"]
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
-def test_dashboard_collection_helpers_cover_resolver_and_bundle_loading() -> None:
-    """Collection helpers should imply JSON and skip invalid embedded payloads."""
+def test_dashboard_collection_resolver_avoids_implicit_result_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Dashboard-only planning should resolve one shell and one package."""
     graph = nx.Graph()
     graph.add_node("seed", title="Seed Title")
     assert _is_standalone_dashboard_output(
-        Path("reports/example.dashboard.html"),
-        ["dashboard"],
-        True,
+        Path("reports/example.dashboard.html"), ["dashboard"], True
     )
     assert _is_standalone_dashboard_output(
-        Path("reports/example.dashboard.html"),
-        ["dashboard", "json"],
-        True,
+        Path("reports/example.dashboard.html"), ["dashboard", "json"], True
     )
     assert not _is_standalone_dashboard_output(
-        Path("reports/session"),
-        ["dashboard"],
-        True,
+        Path("reports/session"), ["dashboard"], True
     )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = Path(tmpdir)
-        output_paths, manifest_path = resolve_dashboard_collection_outputs(
-            base_output_path=root / "session",
-            selected_formats=["dashboard"],
-            explicit_output=True,
-            strategy="recommendation",
+    root = tmp_path / "reports" / "session"
+    output_paths, package_path = resolve_dashboard_collection_outputs(
+        base_output_path=root,
+        selected_formats=["dashboard"],
+        explicit_output=True,
+        strategy="recommendation",
+        graph=graph,
+        seed_id="seed",
+    )
+    assert output_paths == {"dashboard": root / "dashboard.html"}
+    assert package_path == root / DASHBOARD_PACKAGE_FILENAME
+
+    output_paths, package_path = resolve_dashboard_collection_outputs(
+        base_output_path=root,
+        selected_formats=["dashboard", "json"],
+        explicit_output=True,
+        strategy="recommendation",
+        graph=graph,
+        seed_id="seed",
+    )
+    assert output_paths["json"].parent.parent == root
+    assert output_paths["json"].parent.name.startswith("seed-title-")
+    assert output_paths["json"].name == "recommendation.json"
+    assert package_path == root / DASHBOARD_PACKAGE_FILENAME
+
+
+@pytest.mark.parametrize(
+    "existing_bytes",
+    [
+        b"{not-json",
+        b"\xff",
+        json.dumps(
+            {
+                "kind": DASHBOARD_PACKAGE_KIND,
+                "schema_version": 999,
+                "current_result_id": None,
+                "results": [],
+            }
+        ).encode("utf-8"),
+    ],
+    ids=["malformed-json", "invalid-utf8", "unsupported-schema"],
+)
+def test_dashboard_package_existing_errors_fail_closed(
+    tmp_path: Path, existing_bytes: bytes
+) -> None:
+    """Invalid existing packages must remain byte-for-byte untouched."""
+    package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
+    package_path.write_bytes(existing_bytes)
+    graph = build_seed_graph("seed")
+
+    with pytest.raises(DashboardPackageError):
+        update_dashboard_package(
+            package_path,
             graph=graph,
             seed_id="seed",
-        )
-        assert output_paths["dashboard"] == root / "session" / "dashboard.html"
-        assert output_paths["json"].parent.parent == root / "session"
-        assert output_paths["json"].parent.name.startswith("seed-title-")
-        assert output_paths["json"].name == "recommendation.json"
-        assert manifest_path == root / "session" / "dashboard.manifest.json"
-
-        valid_path = root / "seed-a" / "recommendation.json"
-        valid_path.parent.mkdir(parents=True, exist_ok=True)
-        valid_path.write_text(
-            json.dumps(
-                {
-                    "seed_id": "seed-a",
-                    "meta": {"strategy": "recommendation"},
-                    "summary": {"nodes": 1, "edges": 0},
-                    "nodes": [],
-                    "edges": [],
-                    "dashboard": {"meta": {}},
-                }
-            ),
-            encoding="utf-8",
-        )
-        broken_path = root / "seed-b" / "recommendation.json"
-        broken_path.parent.mkdir(parents=True, exist_ok=True)
-        broken_path.write_text("{not-json", encoding="utf-8")
-        manifest_path = root / "dashboard.manifest.json"
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "results": [
-                        {
-                            "result_id": "recommendation:seed-a",
-                            "seed_id": "seed-a",
-                            "title": "Seed A",
-                            "strategy": "recommendation",
-                            "summary": {"nodes": 1, "edges": 0},
-                            "json_path": "seed-a/recommendation.json",
-                        },
-                        {
-                            "result_id": "recommendation:seed-b",
-                            "seed_id": "seed-b",
-                            "title": "Seed B",
-                            "strategy": "recommendation",
-                            "summary": {"nodes": 1, "edges": 0},
-                            "json_path": "seed-b/recommendation.json",
-                        },
-                        {
-                            "result_id": "recommendation:seed-c",
-                            "seed_id": "seed-c",
-                            "title": "Seed C",
-                            "strategy": "recommendation",
-                            "summary": {"nodes": 1, "edges": 0},
-                            "json_path": "seed-c/recommendation.json",
-                        },
-                    ],
-                }
-            ),
-            encoding="utf-8",
+            strategy="recommendation",
+            payload=_dashboard_graph_payload(graph, "seed", "recommendation"),
+            build={"strategy": "recommendation"},
         )
 
-        bundle = build_dashboard_collection_bundle(
-            manifest_path,
-            current_result_id="recommendation:seed-c",
+    assert package_path.read_bytes() == existing_bytes
+
+
+def test_dashboard_build_preflights_invalid_package_before_writing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An incompatible collection must block all new dashboard artifacts."""
+    output_root = tmp_path / "collection"
+    output_root.mkdir()
+    package_path = output_root / DASHBOARD_PACKAGE_FILENAME
+    package_path.write_text(
+        json.dumps(
+            {
+                "kind": DASHBOARD_PACKAGE_KIND,
+                "schema_version": 999,
+                "current_result_id": None,
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_package = package_path.read_bytes()
+    build_graph = MagicMock(
+        side_effect=AssertionError("graph construction must not run before preflight")
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        build_graph,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        _make_exporter_stub({}, methods=("to_dashboard_html", "to_json")),
+    )
+
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "dashboard",
+            "--export",
+            "json",
+            "--output",
+            str(output_root),
+        ]
+    )
+
+    assert result.returncode == 1
+    build_graph.assert_not_called()
+    assert package_path.read_bytes() == original_package
+    assert not (output_root / "dashboard.html").exists()
+    assert list(output_root.iterdir()) == [package_path]
+
+
+def test_dashboard_package_rejects_graph_summary_drift(tmp_path: Path) -> None:
+    """Package summaries must describe the arrays they accompany."""
+    package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
+    graph = build_seed_graph("seed")
+    package = update_dashboard_package(
+        package_path,
+        graph=graph,
+        seed_id="seed",
+        strategy="recommendation",
+        payload=_dashboard_graph_payload(graph, "seed", "recommendation"),
+        build={"strategy": "recommendation"},
+    )
+    package["results"][0]["payload"]["summary"]["nodes"] = 999
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+
+    with pytest.raises(DashboardPackageError, match="node and edge arrays"):
+        load_dashboard_package(package_path)
+
+
+@pytest.mark.parametrize(
+    ("mutate_payload", "error_match"),
+    [
+        (
+            lambda payload: payload.pop("dashboard"),
+            "missing dashboard geometry",
+        ),
+        (
+            lambda payload: payload["dashboard"]["meta"][
+                "plotly_positions"
+            ].__setitem__(0, [float("nan"), 0.0]),
+            "invalid layout position",
+        ),
+        (
+            lambda payload: payload["dashboard"]["meta"][
+                "plotly_node_sizes"
+            ].__setitem__(0, 0.0),
+            "invalid node sizes",
+        ),
+    ],
+    ids=["missing", "non-finite-position", "non-positive-size"],
+)
+def test_dashboard_package_rejects_unrenderable_geometry(
+    tmp_path: Path,
+    mutate_payload: Callable[[dict[str, Any]], object],
+    error_match: str,
+) -> None:
+    """Collection payloads must contain complete, finite render geometry."""
+    graph = build_seed_graph("seed")
+    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
+    mutate_payload(payload)
+
+    with pytest.raises(DashboardPackageError, match=error_match):
+        update_dashboard_package(
+            tmp_path / DASHBOARD_PACKAGE_FILENAME,
+            graph=graph,
+            seed_id="seed",
+            strategy="recommendation",
+            payload=payload,
+            build={"strategy": "recommendation"},
         )
 
-    assert bundle["current_result_id"] == "recommendation:seed-c"
-    assert len(bundle["results"]) == 3
-    assert set(bundle["payloads"]) == {"recommendation:seed-a"}
 
+def test_dashboard_package_rejects_padded_identity_tokens(tmp_path: Path) -> None:
+    """Versioned graph identities must not rely on reader-specific trimming."""
+    graph = build_seed_graph("seed")
+    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
+    payload["seed_id"] = " seed "
 
-def test_build_dashboard_collection_bundle_rejects_escaping_payload_paths() -> None:
-    """Collection bundles should ignore manifest payload paths outside the root."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_root = Path(tmpdir)
-        root = tmp_root / "collection"
-        root.mkdir(parents=True, exist_ok=True)
-
-        valid_path = root / "seed-a" / "recommendation.json"
-        valid_path.parent.mkdir(parents=True, exist_ok=True)
-        valid_path.write_text(
-            json.dumps({"result_id": "recommendation:seed-a", "safe": True}),
-            encoding="utf-8",
+    with pytest.raises(DashboardPackageError, match="canonical token"):
+        update_dashboard_package(
+            tmp_path / DASHBOARD_PACKAGE_FILENAME,
+            graph=graph,
+            seed_id="seed",
+            strategy="recommendation",
+            payload=payload,
+            build={"strategy": "recommendation"},
         )
 
-        outside_path = tmp_root / "outside.json"
-        outside_path.write_text(
-            json.dumps({"result_id": "outside", "leaked": True}),
-            encoding="utf-8",
+
+def test_dashboard_package_rejects_mismatched_dashboard_metadata(
+    tmp_path: Path,
+) -> None:
+    """Duplicated dashboard identity metadata must agree with canonical fields."""
+    graph = build_seed_graph("seed")
+    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
+    payload["dashboard"]["meta"]["strategy"] = "embedding"
+
+    with pytest.raises(DashboardPackageError, match="inconsistent dashboard metadata"):
+        update_dashboard_package(
+            tmp_path / DASHBOARD_PACKAGE_FILENAME,
+            graph=graph,
+            seed_id="seed",
+            strategy="recommendation",
+            payload=payload,
+            build={"strategy": "recommendation"},
         )
 
-        manifest_path = root / "dashboard.manifest.json"
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "results": [
-                        {
-                            "result_id": "recommendation:seed-a",
-                            "json_path": "seed-a/recommendation.json",
-                        },
-                        {
-                            "result_id": "recommendation:seed-b",
-                            "json_path": "../outside.json",
-                        },
-                        {
-                            "result_id": "recommendation:seed-c",
-                            "json_path": str(outside_path),
-                        },
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
 
-        bundle = build_dashboard_collection_bundle(
-            manifest_path,
-            current_result_id="recommendation:seed-a",
-        )
+def test_dashboard_snapshot_rereads_latest_package_under_shared_lock(
+    tmp_path: Path,
+) -> None:
+    """HTML refresh should embed the latest package, not an earlier upsert result."""
+    package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
+    first_graph = build_seed_graph("seed-a")
+    first_package = update_dashboard_package(
+        package_path,
+        graph=first_graph,
+        seed_id="seed-a",
+        strategy="recommendation",
+        payload=_dashboard_graph_payload(first_graph, "seed-a", "recommendation"),
+        build={"strategy": "recommendation"},
+    )
+    second_graph = build_seed_graph("seed-b")
+    update_dashboard_package(
+        package_path,
+        graph=second_graph,
+        seed_id="seed-b",
+        strategy="recommendation",
+        payload=_dashboard_graph_payload(second_graph, "seed-b", "recommendation"),
+        build={"strategy": "recommendation"},
+    )
+    metadata: dict[str, object] = {"dashboard_collection": first_package}
+    dashboard_path = tmp_path / "dashboard.html"
 
-    assert set(bundle["payloads"]) == {"recommendation:seed-a"}
+    class SnapshotExporter:
+        """Serialize the package visible through the shared metadata mapping."""
+
+        def to_dashboard_html(self, path: Path, *, theme: str) -> None:
+            """Write the captured package as a lightweight HTML surrogate.
+
+            :param Path path: Snapshot destination.
+            :param str theme: Theme token supplied by the CLI helper.
+            :return None: Writes the captured metadata payload.
+            """
+            assert theme == "dark"
+            path.write_text(json.dumps(metadata["dashboard_collection"]))
+
+    latest = render_dashboard_collection_snapshot(
+        package_path,
+        dashboard_path=dashboard_path,
+        exporter=SnapshotExporter(),
+        metadata=metadata,
+        theme="dark",
+    )
+
+    assert len(latest["results"]) == 2
+    assert json.loads(dashboard_path.read_text()) == latest
+
+
+def test_dashboard_render_failure_preserves_package_and_reports_recovery(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A viewer failure must not imply that the completed graph build was lost."""
+    graph = build_seed_graph("seed")
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **_kwargs: (graph, "seed"),
+    )
+    base_factory = _make_exporter_stub({}, methods=("to_dashboard_html",))
+
+    def failing_exporter(*args: object, **kwargs: object) -> SimpleNamespace:
+        """Return an exporter whose final viewer write fails.
+
+        :param object args: GraphExporter positional arguments.
+        :param object kwargs: GraphExporter keyword arguments.
+        :return SimpleNamespace: Exporter stub with a failing dashboard writer.
+        """
+        exporter = base_factory(*args, **kwargs)
+
+        def fail_dashboard(*_args: object, **_kwargs: object) -> None:
+            """Simulate a renderer failure after package persistence.
+
+            :param object _args: Ignored dashboard writer positional arguments.
+            :param object _kwargs: Ignored dashboard writer keyword arguments.
+            :return None: Always raises.
+            """
+            raise RuntimeError("plot renderer unavailable")
+
+        exporter.to_dashboard_html = fail_dashboard
+        return exporter
+
+    monkeypatch.setattr(cli_module, "GraphExporter", failing_exporter)
+    error_log = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_log)
+    output_root = tmp_path / "collection"
+    output_root.mkdir()
+    dashboard_path = output_root / "dashboard.html"
+    original_dashboard = b"<html>previous working viewer</html>"
+    dashboard_path.write_bytes(original_dashboard)
+
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "dashboard",
+            "--output",
+            str(output_root),
+        ]
+    )
+
+    package_path = output_root / DASHBOARD_PACKAGE_FILENAME
+    assert result.returncode == 1
+    assert len(load_dashboard_package(package_path)["results"]) == 1
+    assert dashboard_path.read_bytes() == original_dashboard
+    messages = [
+        str(call.args[0]) % tuple(call.args[1:]) for call in error_log.call_args_list
+    ]
+    assert any("Dashboard data was saved safely" in message for message in messages)
+    assert any("Add Results" in message for message in messages)
+
+
+def test_dashboard_package_migrates_safe_legacy_results_non_destructively(
+    tmp_path: Path,
+) -> None:
+    """A valid legacy manifest should migrate confined payload/config artifacts."""
+    root = tmp_path / "collection"
+    legacy_dir = root / "legacy-seed"
+    legacy_dir.mkdir(parents=True)
+    legacy_graph = build_seed_graph("legacy")
+    legacy_payload_path = legacy_dir / "recommendation.json"
+    legacy_config_path = legacy_dir / "recommendation.config.json"
+    legacy_payload = _dashboard_graph_payload(legacy_graph, "legacy", "recommendation")
+    legacy_payload.pop("kind")
+    legacy_payload.pop("schema_version")
+    legacy_payload_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    legacy_config_path.write_text(
+        json.dumps({"schema_version": 1, "build": {"max_papers": 17}}),
+        encoding="utf-8",
+    )
+    outside_payload = tmp_path / "outside.json"
+    outside_config = tmp_path / "outside.config.json"
+    outside_payload.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    outside_config.write_text(json.dumps({"build": {}}), encoding="utf-8")
+    manifest_path = root / "dashboard.manifest.json"
+    manifest_payload = {
+        "schema_version": 1,
+        "results": [
+            {
+                "result_id": "recommendation:legacy",
+                "seed_id": "legacy",
+                "title": "Legacy Seed",
+                "strategy": "recommendation",
+                "summary": legacy_payload["summary"],
+                "json_path": "legacy-seed/recommendation.json",
+                "config_path": "legacy-seed/recommendation.config.json",
+                "updated_at": "2026-01-01T00:00:00",
+            },
+            {
+                "result_id": "recommendation:outside",
+                "seed_id": "outside",
+                "title": "Unsafe Result",
+                "strategy": "recommendation",
+                "summary": legacy_payload["summary"],
+                "json_path": "../outside.json",
+                "config_path": "../outside.config.json",
+                "updated_at": "2026-01-01T00:00:00",
+            },
+        ],
+    }
+    manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    original_manifest = manifest_path.read_bytes()
+    original_graph = legacy_payload_path.read_bytes()
+    current_graph = build_seed_graph("current")
+
+    package = update_dashboard_package(
+        root / DASHBOARD_PACKAGE_FILENAME,
+        graph=current_graph,
+        seed_id="current",
+        strategy="hybrid",
+        payload=_dashboard_graph_payload(current_graph, "current", "hybrid"),
+        build={"strategy": "hybrid"},
+    )
+
+    assert [entry["result_id"] for entry in package["results"]] == [
+        "hybrid:current",
+        "recommendation:legacy",
+    ]
+    migrated = package["results"][1]
+    assert migrated["payload"]["kind"] == "citemesh-graph"
+    assert migrated["payload"]["schema_version"] == 1
+    assert migrated["build"] == {"max_papers": 17}
+    assert manifest_path.read_bytes() == original_manifest
+    assert legacy_payload_path.read_bytes() == original_graph
 
 
 def test_dashboard_collection_mode_logs_side_effects(
@@ -1759,7 +2161,7 @@ def test_dashboard_collection_mode_logs_side_effects(
         "GraphExporter",
         _make_exporter_stub(
             {},
-            methods=("to_dashboard_html", "to_json"),
+            methods=("to_dashboard_html",),
         ),
     )
 
@@ -2421,7 +2823,7 @@ def test_build_help_discloses_dashboard_collection_mode_contracts() -> None:
     result = run_cli_command(["build", "--help"])
     assert result.returncode == 0
     lowered = result.stdout.lower()
-    for token in ["dashboard.html", "dashboard.manifest.json", ".dashboard.html"]:
+    for token in ["dashboard.html", DASHBOARD_PACKAGE_FILENAME, ".dashboard.html"]:
         assert token in lowered
 
 

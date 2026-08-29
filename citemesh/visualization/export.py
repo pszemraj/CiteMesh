@@ -14,7 +14,9 @@ import io
 import json
 import logging
 import math
+import os
 import re
+import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
@@ -48,6 +50,34 @@ DASHBOARD_FOOTER_MARGIN = 78
 DASHBOARD_LABEL_CAP = 8
 DASHBOARD_LABEL_MIN_DISTANCE = 0.18
 DASHBOARD_MAX_NODE_DIAMETER = 58.0
+GRAPH_PAYLOAD_KIND = "citemesh-graph"
+GRAPH_PAYLOAD_SCHEMA_VERSION = 1
+DASHBOARD_COLLECTION_KIND = "citemesh-dashboard-collection"
+DASHBOARD_COLLECTION_SCHEMA_VERSION = 1
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomically replace a UTF-8 text artifact from the destination directory.
+
+    :param Path path: Destination file path.
+    :param str content: Complete text content to write.
+    :return None: Writes and atomically replaces ``path``.
+    """
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=str(destination.parent),
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+        os.replace(temporary_path, destination)
+    except BaseException:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def _load_pyvis_network_class() -> Any:
@@ -172,6 +202,20 @@ def _edge_strength_scale(weights: list[float]) -> list[float]:
     if span <= 1e-9:
         return [0.5 for _ in weights]
     return [(weight - w_min) / span for weight in weights]
+
+
+def _stable_curve_direction(left_id: object, right_id: object) -> float:
+    """Return a portable deterministic curve direction for one undirected edge.
+
+    :param object left_id: First edge endpoint.
+    :param object right_id: Second edge endpoint.
+    :return float: ``1.0`` or ``-1.0`` using the dashboard's 32-bit hash.
+    """
+    key_left, key_right = sorted((str(left_id), str(right_id)))
+    digest = 0
+    for character in f"{key_left}|{key_right}":
+        digest = ((digest * 33) + ord(character)) & 0xFFFFFFFF
+    return 1.0 if digest % 2 == 0 else -1.0
 
 
 def _select_dashboard_label_nodes(
@@ -310,11 +354,10 @@ class GraphExporter:
     # ------------------------------------------------------------------
     # Public export methods
 
-    def to_json(self, path: Path) -> None:
-        """Export enriched graph data JSON with analysis fields.
+    def graph_payload(self) -> Dict[str, Any]:
+        """Build the canonical versioned graph payload shared by JSON consumers.
 
-        Includes provenance, seed relevance scores, external links, and
-        BibTeX entries — the same rich fields available in the dashboard.
+        :return Dict[str, Any]: Portable CiteMesh graph payload with dashboard data.
         """
         enriched = self._enriched_nodes()
         sorted_edges = self._sorted_edges()
@@ -326,7 +369,9 @@ class GraphExporter:
             sorted_edges=sorted_edges,
             include_plotly_geometry=self._layout is not None,
         )
-        data = {
+        return {
+            "kind": GRAPH_PAYLOAD_KIND,
+            "schema_version": GRAPH_PAYLOAD_SCHEMA_VERSION,
             "seed_id": str(self.seed_id),
             "meta": {
                 "strategy": dashboard_meta["strategy"],
@@ -350,7 +395,17 @@ class GraphExporter:
                 for u, v, edge_data in sorted_edges
             ],
         }
-        Path(path).write_text(json.dumps(data, sort_keys=True, indent=2))
+
+    def to_json(self, path: Path) -> None:
+        """Export the canonical enriched graph payload as atomic UTF-8 JSON.
+
+        :param Path path: Destination JSON path.
+        :return None: Writes the graph payload to disk.
+        """
+        _atomic_write_text(
+            path,
+            json.dumps(self.graph_payload(), sort_keys=True, indent=2),
+        )
 
     def to_csv(self, path: Path) -> None:
         """Export flat CSV table with one row per paper.
@@ -617,7 +672,7 @@ class GraphExporter:
             figure_json=figure_json,
             collection_json=collection_json,
         )
-        Path(path).write_text(html_output, encoding="utf-8")
+        _atomic_write_text(path, html_output)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -664,11 +719,7 @@ class GraphExporter:
                 mid_y = (y0f + y1f) / 2.0
                 dx = x1f - x0f
                 dy = y1f - y0f
-                key_left, key_right = sorted((str(u), str(v)))
-                direction_digest = hashlib.sha1(
-                    f"{key_left}|{key_right}".encode("utf-8")
-                ).hexdigest()
-                direction = -1.0 if int(direction_digest[:2], 16) % 2 else 1.0
+                direction = _stable_curve_direction(u, v)
                 cx = mid_x - dy * curvature * direction
                 cy = mid_y + dx * curvature * direction
                 layout_shapes.append(
@@ -918,8 +969,11 @@ class GraphExporter:
             layout_kwargs["yaxis"].update(
                 {"autorange": False, "range": [y_min - y_pad, y_max + y_pad]}
             )
-            # Keep Plotly restyle updates from re-autoscaling and shifting node positions.
-            layout_kwargs["uirevision"] = "citemesh-dashboard-static-layout-v1"
+            # Preserve view state within one result without carrying its viewport
+            # into a different seed graph.
+            layout_kwargs["uirevision"] = (
+                f"citemesh-dashboard-static-layout-v1:{self._strategy()}:{self.seed_id}"
+            )
         if for_dashboard and layout_shapes:
             layout_kwargs["shapes"] = layout_shapes
         if title_prefix is not None:
@@ -1103,36 +1157,74 @@ class GraphExporter:
 
         :return Dict[str, Any]: Collection result descriptors and embedded payloads.
         """
+        empty_bundle: Dict[str, Any] = {
+            "kind": DASHBOARD_COLLECTION_KIND,
+            "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
+            "current_result_id": None,
+            "results": [],
+        }
         raw_bundle = self.metadata.get("dashboard_collection")
         if not isinstance(raw_bundle, dict):
-            return {"current_result_id": None, "results": [], "payloads": {}}
+            return empty_bundle
 
         raw_results = raw_bundle.get("results")
         raw_payloads = raw_bundle.get("payloads")
-        results = (
-            [entry for entry in raw_results if isinstance(entry, dict)]
-            if isinstance(raw_results, list)
-            else []
-        )
-        payloads = (
-            {
-                str(result_id): payload
-                for result_id, payload in raw_payloads.items()
-                if isinstance(result_id, str) and isinstance(payload, dict)
-            }
-            if isinstance(raw_payloads, dict)
-            else {}
-        )
+        legacy_payloads = raw_payloads if isinstance(raw_payloads, dict) else {}
+        results: list[Dict[str, Any]] = []
+        if isinstance(raw_results, list):
+            for raw_entry in raw_results:
+                if not isinstance(raw_entry, dict):
+                    continue
+                result_id = str(raw_entry.get("result_id") or "").strip()
+                payload = raw_entry.get("payload")
+                if not isinstance(payload, dict):
+                    payload = legacy_payloads.get(result_id)
+                if not result_id or not isinstance(payload, dict):
+                    continue
+                entry: Dict[str, Any] = {
+                    key: raw_entry[key]
+                    for key in (
+                        "result_id",
+                        "seed_id",
+                        "title",
+                        "strategy",
+                        "summary",
+                        "updated_at",
+                    )
+                    if key in raw_entry
+                }
+                entry["result_id"] = result_id
+                entry["payload"] = payload
+                build = raw_entry.get("build")
+                if isinstance(build, dict):
+                    entry["build"] = build
+                results.append(entry)
         current_result_id = raw_bundle.get("current_result_id")
-        return {
+        bundle: Dict[str, Any] = {
             "current_result_id": (
                 str(current_result_id).strip()
                 if current_result_id is not None
                 else None
             ),
             "results": results,
-            "payloads": payloads,
         }
+        declared_kind = str(raw_bundle.get("kind") or "").strip()
+        if declared_kind:
+            if (
+                declared_kind != DASHBOARD_COLLECTION_KIND
+                or raw_bundle.get("schema_version")
+                != DASHBOARD_COLLECTION_SCHEMA_VERSION
+            ):
+                raise ValueError(
+                    "Unsupported dashboard collection metadata kind or schema version."
+                )
+            bundle.update(
+                {
+                    "kind": DASHBOARD_COLLECTION_KIND,
+                    "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
+                }
+            )
+        return bundle
 
     def _default_provenance(self, *, strategy: str) -> str:
         """Resolve default provenance class for non-hybrid strategies.
@@ -1447,6 +1539,7 @@ class GraphExporter:
             "__DASHBOARD_AXIS_X_PADDING__": str(DASHBOARD_AXIS_X_PADDING),
             "__DASHBOARD_LABEL_CAP__": str(DASHBOARD_LABEL_CAP),
             "__DASHBOARD_LABEL_MIN_DISTANCE__": str(DASHBOARD_LABEL_MIN_DISTANCE),
+            "__DASHBOARD_MAX_NODE_DIAMETER__": str(DASHBOARD_MAX_NODE_DIAMETER),
             "__PLOTLY_JS__": plotly_js,
             "__PAYLOAD_JSON__": payload_json,
             "__FIGURE_JSON__": figure_json,
@@ -2074,13 +2167,14 @@ class GraphExporter:
         <button id="export-bib-btn" class="nav-btn" type="button">All BibTeX</button>
         <button id="export-saved-bib-btn" class="nav-btn" type="button" style="display:none">Saved BibTeX</button>
         <button id="copy-saved-links-btn" class="nav-btn" type="button" style="display:none" title="Copy a markdown list of saved papers with links">Copy Saved Links</button>
-        <button id="load-json-btn" class="nav-btn" type="button">Load Results</button>
-        <input id="load-json-input" type="file" accept=".json,.html" style="display:none" />
+        <button id="export-collection-btn" class="nav-btn" type="button">Export Collection</button>
+        <button id="add-results-btn" class="nav-btn" type="button">Add Results…</button>
+        <input id="add-results-input" type="file" accept=".json,.html" multiple style="display:none" />
       </div>
       <div class="nav-group">
-        <label class="visually-hidden" for="result-select">Saved result</label>
-        <select id="result-select" title="Switch saved result">
-          <option value="">Current result</option>
+        <label class="visually-hidden" for="result-select">Graph in result set</label>
+        <select id="result-select" title="Switch graph in result set">
+          <option value="" disabled>Current graph</option>
         </select>
       </div>
     </div>
@@ -2169,12 +2263,30 @@ class GraphExporter:
   <script id="citemesh-dashboard-figure" type="application/json">__FIGURE_JSON__</script>
   <script id="citemesh-dashboard-collection" type="application/json">__COLLECTION_JSON__</script>
   <script>
+    const GRAPH_PAYLOAD_KIND = "citemesh-graph";
+    const GRAPH_PAYLOAD_SCHEMA_VERSION = 1;
+    const COLLECTION_KIND = "citemesh-dashboard-collection";
+    const COLLECTION_SCHEMA_VERSION = 1;
     let payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
     const baseFigureTemplate = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
     let figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
     // Embed the collection bundle directly in the shell so saved-result browsing
     // still works when the dashboard is opened from the local filesystem.
-    const collectionBundle = JSON.parse(document.getElementById("citemesh-dashboard-collection").textContent);
+    const embeddedCollectionBundle = JSON.parse(
+      document.getElementById("citemesh-dashboard-collection").textContent
+    );
+    let collectionBundle = normalizeCollectionPackage(
+      embeddedCollectionBundle,
+      "this dashboard",
+      true
+    );
+    const initialEntry = collectionEntryFromGraphPayload(payload, "Current graph", true);
+    if (!collectionBundle.results.some((entry) => entry.result_id === initialEntry.result_id)) {
+      collectionBundle.results.unshift(initialEntry);
+    }
+    if (!collectionBundle.current_result_id) {
+      collectionBundle.current_result_id = initialEntry.result_id;
+    }
     const graphDiv = document.getElementById("__PLOTLY_DIV_ID__");
     const plotConfig = {
       displaylogo: false,
@@ -2235,7 +2347,8 @@ class GraphExporter:
     }
 
     function stableCurveDirection(leftId, rightId) {
-      return stableHash(`${String(leftId || "")}|${String(rightId || "")}`) % 2 === 0 ? 1 : -1;
+      const [keyLeft, keyRight] = [String(leftId || ""), String(rightId || "")].sort();
+      return stableHash(`${keyLeft}|${keyRight}`) % 2 === 0 ? 1 : -1;
     }
 
     function selectDashboardLabelIds(order, nodeById, xPairs, yPairs) {
@@ -2387,38 +2500,85 @@ class GraphExporter:
       return lines.join("<br>");
     }
 
-    function extractEmbeddedScriptJson(text, scriptId) {
+    function embeddedScriptJson(parsedDocument, scriptId, required) {
       // Parse imported dashboard HTML as a document instead of regex-matching script
       // tags. This avoids brittle parsing and keeps the inline runtime free of raw
       // script-closing sequences that would terminate the surrounding HTML script tag.
-      const parsedDocument = new DOMParser().parseFromString(
-        String(text || ""),
-        "text/html"
-      );
       const scriptElement = parsedDocument.getElementById(String(scriptId || ""));
       const isJsonScript =
         scriptElement &&
         String(scriptElement.tagName || "").toLowerCase() === "script" &&
         String(scriptElement.getAttribute("type") || "").toLowerCase() === "application/json";
       if (!isJsonScript) {
+        if (!required) {
+          return null;
+        }
         throw new Error(`Imported dashboard file is missing ${scriptId}.`);
       }
       const rawJson = String(scriptElement.textContent || "").trim();
       if (!rawJson) {
+        if (!required) {
+          return null;
+        }
         throw new Error(`Imported dashboard file is missing ${scriptId}.`);
       }
       return JSON.parse(rawJson);
     }
 
-    function parseImportedPayloadFromText(fileText, filename) {
+    function extractEmbeddedScriptJson(text, scriptId) {
+      const parsedDocument = new DOMParser().parseFromString(
+        String(text || ""),
+        "text/html"
+      );
+      return embeddedScriptJson(parsedDocument, scriptId, true);
+    }
+
+    function parseImportedResultSetFromText(fileText, filename) {
       const text = String(fileText || "");
       const lowerName = String(filename || "").toLowerCase();
       const looksLikeDashboardHtml =
         lowerName.endsWith(".html") || text.includes('id="citemesh-dashboard-data"');
-      if (!looksLikeDashboardHtml) {
-        return JSON.parse(text);
+      if (looksLikeDashboardHtml) {
+        const parsedDocument = new DOMParser().parseFromString(text, "text/html");
+        const importedGraph = embeddedScriptJson(
+          parsedDocument,
+          "citemesh-dashboard-data",
+          true
+        );
+        const importedCollection = embeddedScriptJson(
+          parsedDocument,
+          "citemesh-dashboard-collection",
+          false
+        );
+        const resultSet = importedCollection
+          ? normalizeCollectionPackage(importedCollection, filename, true)
+          : emptyCollectionPackage();
+        const packageCurrentResultId = String(
+          (importedCollection && importedCollection.current_result_id) || ""
+        ).trim();
+        const currentEntry = collectionEntryFromGraphPayload(
+          importedGraph,
+          filename,
+          true
+        );
+        if (!resultSet.results.some((entry) => entry.result_id === currentEntry.result_id)) {
+          resultSet.results.push(currentEntry);
+        }
+        if (!packageCurrentResultId) {
+          resultSet.current_result_id = currentEntry.result_id;
+        }
+        return resultSet;
       }
-      return extractEmbeddedScriptJson(text, "citemesh-dashboard-data");
+
+      const imported = JSON.parse(text);
+      if (imported && imported.kind === COLLECTION_KIND) {
+        return normalizeCollectionPackage(imported, filename, false);
+      }
+      const entry = collectionEntryFromGraphPayload(imported, filename, true);
+      const resultSet = emptyCollectionPackage();
+      resultSet.current_result_id = entry.result_id;
+      resultSet.results.push(entry);
+      return resultSet;
     }
 
     function hasCompleteDashboardGeometry(meta) {
@@ -2429,10 +2589,26 @@ class GraphExporter:
         ? meta.plotly_node_order.map((nodeId) => String(nodeId || ""))
         : [];
       const positions = Array.isArray(meta.plotly_positions) ? meta.plotly_positions : [];
-      if (!order.length || positions.length !== order.length) {
+      const sizes = Array.isArray(meta.plotly_node_sizes) ? meta.plotly_node_sizes : [];
+      if (
+        !order.length
+        || order.some((nodeId) => !nodeId)
+        || order.some((nodeId) => nodeId !== nodeId.trim())
+        || new Set(order).size !== order.length
+        || positions.length !== order.length
+        || sizes.length !== order.length
+      ) {
         return false;
       }
-      return true;
+      const positionsAreFinite = positions.every((position) => (
+        Array.isArray(position)
+        && position.length === 2
+        && position.every((coordinate) => Number.isFinite(coordinate))
+      ));
+      const sizesAreFinite = sizes.every(
+        (size) => Number.isFinite(size) && size > 0
+      );
+      return positionsAreFinite && sizesAreFinite;
     }
 
     function buildFigureSpecFromPayload(nextPayload) {
@@ -2442,6 +2618,13 @@ class GraphExporter:
         : [];
       const positions = Array.isArray(meta.plotly_positions) ? meta.plotly_positions : [];
       const alignedNodeSizes = normalizeArray(meta.plotly_node_sizes, order.length, 8);
+      const maxAlignedNodeSize = alignedNodeSizes.length
+        ? Math.max(...alignedNodeSizes)
+        : 1.0;
+      const nextMarkerSizeRef = Math.max(
+        (2.0 * maxAlignedNodeSize) / (__DASHBOARD_MAX_NODE_DIAMETER__ ** 2),
+        1e-6
+      );
       if (!order.length || positions.length !== order.length) {
         throw new Error(
           "JSON is missing dashboard layout positions. Re-export results with a newer CiteMesh build."
@@ -2490,7 +2673,11 @@ class GraphExporter:
       const yearMin = Number(nextYearRange.min || 0);
       const yearMax = Number(nextYearRange.max || 0);
       const safeYearMin = Number.isFinite(yearMin) ? yearMin : 0;
-      const safeYearMax = Number.isFinite(yearMax) ? yearMax : safeYearMin;
+      const rawSafeYearMax = Number.isFinite(yearMax) ? yearMax : safeYearMin;
+      const safeYearMax = rawSafeYearMax > safeYearMin
+        ? rawSafeYearMax
+        : safeYearMin + 1.0;
+      const missingYear = (safeYearMin + safeYearMax) / 2.0;
       const labelIds = selectDashboardLabelIds(
         order,
         nextNodeById,
@@ -2513,7 +2700,7 @@ class GraphExporter:
         nodeTexts.push(label);
         const nodeYear = Number.isFinite(Number(node.year)) && Number(node.year) > 0
           ? Number(node.year)
-          : safeYearMin;
+          : missingYear;
         nodeYears.push(nodeYear);
         hoverTexts.push(dashboardHoverText(node, nodeId));
         if (node.is_seed) {
@@ -2573,6 +2760,7 @@ class GraphExporter:
       nodeTrace.hovertext = hoverTexts;
       nodeTrace.marker = Object.assign({}, templateMarker, {
         size: alignedNodeSizes,
+        sizeref: nextMarkerSizeRef,
         color: nodeYears,
         cmin: safeYearMin,
         cmax: safeYearMax,
@@ -2590,6 +2778,7 @@ class GraphExporter:
         haloTrace.y = seedIdx >= 0 ? [yPairs[seedIdx]] : [];
         haloTrace.marker = Object.assign({}, haloTrace.marker || {}, {
           size: seedIdx >= 0 ? [alignedNodeSizes[seedIdx] * 2.05] : [],
+          sizeref: nextMarkerSizeRef,
           color: seedIdx >= 0 ? [colorWithAlpha(seedRingColor, 0.26)] : [],
         });
         nextTraceSpecs[nextHaloTraceIndex] = haloTrace;
@@ -2612,7 +2801,7 @@ class GraphExporter:
         range: [yMin - yPad, yMax + yPad],
       });
       layout.shapes = edgeShapes;
-      layout.uirevision = "citemesh-dashboard-static-layout-v1";
+      layout.uirevision = `citemesh-dashboard-static-layout-v1:${String(meta.strategy || "")}:${String(meta.seed_id || "")}`;
 
       template.data = nextTraceSpecs;
       template.layout = layout;
@@ -2966,19 +3155,38 @@ class GraphExporter:
       return selected;
     }
 
+    function safeExternalUrl(value) {
+      const candidate = String(value || "").trim();
+      if (!candidate) {
+        return "";
+      }
+      try {
+        const parsed = new URL(candidate);
+        return parsed.protocol === "https:" || parsed.protocol === "http:"
+          ? parsed.href
+          : "";
+      } catch (err) {
+        return "";
+      }
+    }
+
     function detailLinkEntries(links) {
       const entries = [];
-      if (links && links.arxiv_pdf) {
-        entries.push({ kind: "pdf", title: "Open PDF", href: links.arxiv_pdf });
+      const pdfUrl = safeExternalUrl(links && links.arxiv_pdf);
+      const arxivUrl = safeExternalUrl(links && links.arxiv_abs);
+      const doiUrl = safeExternalUrl(links && links.doi);
+      const semanticScholarUrl = safeExternalUrl(links && links.semantic_scholar);
+      if (pdfUrl) {
+        entries.push({ kind: "pdf", title: "Open PDF", href: pdfUrl });
       }
-      if (links && links.arxiv_abs) {
-        entries.push({ kind: "arxiv", title: "Open arXiv page", href: links.arxiv_abs });
+      if (arxivUrl) {
+        entries.push({ kind: "arxiv", title: "Open arXiv page", href: arxivUrl });
       }
-      if (links && links.doi) {
-        entries.push({ kind: "doi", title: "Open DOI", href: links.doi });
+      if (doiUrl) {
+        entries.push({ kind: "doi", title: "Open DOI", href: doiUrl });
       }
-      if (links && links.semantic_scholar) {
-        entries.push({ kind: "s2", title: "Open Semantic Scholar", href: links.semantic_scholar });
+      if (semanticScholarUrl) {
+        entries.push({ kind: "s2", title: "Open Semantic Scholar", href: semanticScholarUrl });
       }
       return entries;
     }
@@ -3039,42 +3247,66 @@ class GraphExporter:
       return String(node.title || node.id || nodeId);
     }
 
-    function buildPortableJsonPayload() {
-      const summary = (payload.meta && payload.meta.summary) || {
-        nodes: Array.isArray(payload.nodes) ? payload.nodes.length : 0,
-        edges: Array.isArray(payload.edges) ? payload.edges.length : 0,
+    function portableGraphPayload(nextPayload) {
+      const nextNodes = Array.isArray(nextPayload.nodes) ? nextPayload.nodes : [];
+      const nextEdges = Array.isArray(nextPayload.edges) ? nextPayload.edges : [];
+      const nextMeta = (nextPayload && nextPayload.meta) || {};
+      const nextNodeById = new Map(
+        nextNodes.map((node) => [String(node.id || ""), node])
+      );
+      const portableNodeLabel = (nodeId) => {
+        const node = nextNodeById.get(String(nodeId || ""));
+        if (!node) {
+          return String(nodeId || "");
+        }
+        if (Array.isArray(node.authors) && node.authors.length) {
+          const surname = String(node.authors[0]).split(" ").filter(Boolean).slice(-1)[0] || "Unknown";
+          const year = hasYear(node) ? String(node.year) : "n.d.";
+          return `${surname}, ${year}`;
+        }
+        return String(node.title || node.id || nodeId);
       };
-      const dashboardMeta = Object.assign({}, (payload.meta || {}), {
+      const summary = {
+        nodes: nextNodes.length,
+        edges: nextEdges.length,
+      };
+      const dashboardMeta = Object.assign({}, nextMeta, {
         summary,
       });
-      const edges = (payload.edges || []).map((edge) => {
+      const edges = nextEdges.map((edge) => {
         const sourceId = String(edge.source || "");
         const targetId = String(edge.target || "");
-        const sourceNode = nodeById.get(sourceId);
-        const targetNode = nodeById.get(targetId);
+        const sourceNode = nextNodeById.get(sourceId);
+        const targetNode = nextNodeById.get(targetId);
         return {
           source: sourceId,
           target: targetId,
           source_title: sourceNode ? String(sourceNode.title || sourceId) : sourceId,
           target_title: targetNode ? String(targetNode.title || targetId) : targetId,
-          source_label: compactNodeLabel(sourceId),
-          target_label: compactNodeLabel(targetId),
+          source_label: portableNodeLabel(sourceId),
+          target_label: portableNodeLabel(targetId),
           weight: Number(edge.weight || 0),
         };
       });
       return {
-        seed_id: (payload.meta && payload.meta.seed_id) || "",
+        kind: GRAPH_PAYLOAD_KIND,
+        schema_version: GRAPH_PAYLOAD_SCHEMA_VERSION,
+        seed_id: nextMeta.seed_id || "",
         meta: {
-          strategy: (payload.meta && payload.meta.strategy) || "",
-          year_range: (payload.meta && payload.meta.year_range) || {},
+          strategy: nextMeta.strategy || "",
+          year_range: nextMeta.year_range || {},
         },
         summary,
         dashboard: {
           meta: dashboardMeta,
         },
-        nodes: payload.nodes || [],
+        nodes: nextNodes,
         edges,
       };
+    }
+
+    function buildPortableJsonPayload() {
+      return portableGraphPayload(payload);
     }
 
     function currentResultIdForPayload(nextPayload) {
@@ -3087,8 +3319,347 @@ class GraphExporter:
       return `${strategy}:${seedId}`;
     }
 
+    function emptyCollectionPackage() {
+      return {
+        kind: COLLECTION_KIND,
+        schema_version: COLLECTION_SCHEMA_VERSION,
+        current_result_id: null,
+        results: [],
+      };
+    }
+
+    function isObjectRecord(value) {
+      return !!value && typeof value === "object" && !Array.isArray(value);
+    }
+
+    function isNonNegativeInteger(value) {
+      return Number.isInteger(value) && value >= 0;
+    }
+
+    function normalizeImportedDashboardPayload(imported, label, allowLegacy) {
+      if (!isObjectRecord(imported)) {
+        throw new Error("Expected a CiteMesh graph object.");
+      }
+      const declaredKind = String(imported.kind || "");
+      if (declaredKind) {
+        if (declaredKind !== GRAPH_PAYLOAD_KIND) {
+          throw new Error(`Unsupported result kind: ${declaredKind}.`);
+        }
+        if (imported.schema_version !== GRAPH_PAYLOAD_SCHEMA_VERSION) {
+          throw new Error(
+            `Unsupported ${GRAPH_PAYLOAD_KIND} schema version: ${String(imported.schema_version)}.`
+          );
+        }
+      } else if (!allowLegacy) {
+        throw new Error(`Result payload is missing kind=${GRAPH_PAYLOAD_KIND}.`);
+      }
+
+      if (!Array.isArray(imported.nodes) || !imported.nodes.length) {
+        throw new Error("No nodes found in graph results.");
+      }
+      if (!Array.isArray(imported.edges)) {
+        throw new Error("Graph results must contain an edges array.");
+      }
+      const importedNodes = imported.nodes;
+      const importedEdges = imported.edges;
+      const nodeIds = importedNodes.map((node) => String((node && node.id) || ""));
+      if (nodeIds.some((nodeId) => !nodeId) || new Set(nodeIds).size !== nodeIds.length) {
+        throw new Error("Graph result nodes must have unique, non-empty IDs.");
+      }
+      if (declaredKind && nodeIds.some((nodeId) => nodeId !== nodeId.trim())) {
+        throw new Error("Versioned graph node IDs cannot contain surrounding whitespace.");
+      }
+      const nodeIdSet = new Set(nodeIds);
+      if (importedEdges.some((edge) => (
+        !isObjectRecord(edge)
+        || !nodeIdSet.has(String(edge.source || ""))
+        || !nodeIdSet.has(String(edge.target || ""))
+      ))) {
+        throw new Error("Graph result edges must reference included node IDs.");
+      }
+      if (declaredKind && importedEdges.some((edge) => (
+        String(edge.source || "") !== String(edge.source || "").trim()
+        || String(edge.target || "") !== String(edge.target || "").trim()
+      ))) {
+        throw new Error("Versioned graph edge IDs cannot contain surrounding whitespace.");
+      }
+      if (declaredKind) {
+        if (!isObjectRecord(imported.summary)) {
+          throw new Error("Versioned graph results must contain a summary object.");
+        }
+        if (
+          !isNonNegativeInteger(imported.summary.nodes)
+          || !isNonNegativeInteger(imported.summary.edges)
+          || imported.summary.nodes !== importedNodes.length
+          || imported.summary.edges !== importedEdges.length
+        ) {
+          throw new Error("Graph result summary does not match its node and edge arrays.");
+        }
+      }
+      const importedDashboardMeta =
+        imported && imported.dashboard && imported.dashboard.meta
+          ? imported.dashboard.meta
+          : {};
+      const importedMeta =
+        imported && imported.meta && typeof imported.meta === "object"
+          ? imported.meta
+          : {};
+      const declaredSeedId = String(imported.seed_id || "");
+      const declaredStrategy = String(importedMeta.strategy || "");
+      if (declaredKind && (
+        !declaredSeedId
+        || declaredSeedId !== declaredSeedId.trim()
+        || !isObjectRecord(imported.meta)
+        || !declaredStrategy
+        || declaredStrategy !== declaredStrategy.trim()
+      )) {
+        throw new Error(
+          "Versioned graph results require canonical top-level seed_id and meta.strategy."
+        );
+      }
+      if (declaredKind && (
+        !isObjectRecord(importedDashboardMeta)
+        || String(importedDashboardMeta.seed_id || "") !== declaredSeedId
+        || String(importedDashboardMeta.strategy || "") !== declaredStrategy
+        || !isObjectRecord(importedDashboardMeta.summary)
+        || importedDashboardMeta.summary.nodes !== importedNodes.length
+        || importedDashboardMeta.summary.edges !== importedEdges.length
+      )) {
+        throw new Error(
+          "Versioned graph dashboard metadata must match its top-level identity and summary."
+        );
+      }
+      const seedId = String(
+        declaredSeedId
+        || importedDashboardMeta.seed_id
+        || importedMeta.seed_id
+        || ((importedNodes.find((node) => !!(node && node.is_seed)) || {}).id || "")
+      );
+      const strategy = declaredKind
+        ? declaredStrategy
+        : String(importedDashboardMeta.strategy || importedMeta.strategy || "");
+      if (!seedId || !nodeIds.includes(seedId)) {
+        throw new Error("Graph results must identify a seed node present in nodes.");
+      }
+      if (!strategy) {
+        throw new Error("Graph results must identify the build strategy.");
+      }
+      const baseMeta = {
+        seed_id: seedId,
+        strategy,
+        theme: String(
+          (payload.meta && payload.meta.theme)
+          || importedDashboardMeta.theme
+          || importedMeta.theme
+          || "light"
+        ),
+        summary: {
+          nodes: importedNodes.length,
+          edges: importedEdges.length,
+        },
+        year_range: importedDashboardMeta.year_range || importedMeta.year_range || {},
+        plotly_node_order:
+          importedDashboardMeta.plotly_node_order || importedMeta.plotly_node_order || [],
+        plotly_positions:
+          importedDashboardMeta.plotly_positions || importedMeta.plotly_positions || [],
+        plotly_node_sizes:
+          importedDashboardMeta.plotly_node_sizes || importedMeta.plotly_node_sizes || [],
+      };
+      if (!hasCompleteDashboardGeometry(baseMeta)) {
+        throw new Error(
+          `Imported results from ${String(label || "the selected file")} are missing stored dashboard geometry. Export dashboard-compatible CiteMesh results first.`
+        );
+      }
+      const geometryOrder = baseMeta.plotly_node_order.map((nodeId) => String(nodeId || ""));
+      if (
+        geometryOrder.length !== nodeIds.length
+        || new Set(geometryOrder).size !== geometryOrder.length
+        || geometryOrder.some((nodeId) => !nodeIds.includes(nodeId))
+      ) {
+        throw new Error("Dashboard geometry must cover each graph node exactly once.");
+      }
+
+      return {
+        payload: {
+          meta: baseMeta,
+          nodes: importedNodes,
+          edges: imported.edges,
+        },
+      };
+    }
+
+    function collectionEntryFromGraphPayload(imported, label, allowLegacy) {
+      const normalized = normalizeImportedDashboardPayload(imported, label, allowLegacy);
+      const normalizedPayload = normalized.payload;
+      const resultId = currentResultIdForPayload(normalizedPayload);
+      if (!resultId) {
+        throw new Error("Graph results do not provide a stable strategy and seed ID.");
+      }
+      const seedId = String(normalizedPayload.meta.seed_id || "");
+      const seedNode = normalizedPayload.nodes.find(
+        (node) => String((node && node.id) || "") === seedId
+      );
+      return {
+        result_id: resultId,
+        seed_id: seedId,
+        title: String((seedNode && seedNode.title) || seedId || label || "Graph result"),
+        strategy: String(normalizedPayload.meta.strategy || ""),
+        summary: {
+          nodes: normalizedPayload.nodes.length,
+          edges: normalizedPayload.edges.length,
+        },
+        payload: normalizedPayload,
+        updated_at: new Date().toISOString(),
+        build: {},
+      };
+    }
+
+    function normalizeCollectionPackage(imported, label, allowLegacy) {
+      if (!isObjectRecord(imported)) {
+        throw new Error("Expected a CiteMesh dashboard collection object.");
+      }
+      const declaredKind = String(imported.kind || "");
+      const isVersionedCollection = declaredKind === COLLECTION_KIND;
+      if (declaredKind && !isVersionedCollection) {
+        throw new Error(`Unsupported collection kind: ${declaredKind}.`);
+      }
+      if (isVersionedCollection && imported.schema_version !== COLLECTION_SCHEMA_VERSION) {
+        throw new Error(
+          `Unsupported ${COLLECTION_KIND} schema version: ${String(imported.schema_version)}.`
+        );
+      }
+      if (!isVersionedCollection && !allowLegacy) {
+        throw new Error(`Collection package is missing kind=${COLLECTION_KIND}.`);
+      }
+      if (!Array.isArray(imported.results)) {
+        throw new Error("Collection package must contain a results array.");
+      }
+
+      const normalized = emptyCollectionPackage();
+      const legacyPayloads = isObjectRecord(imported.payloads) ? imported.payloads : {};
+      imported.results.forEach((rawEntry, index) => {
+        if (!isObjectRecord(rawEntry)) {
+          throw new Error(`Collection result ${index + 1} must be an object.`);
+        }
+        const declaredResultId = String(rawEntry.result_id || "").trim();
+        const rawPayload = isObjectRecord(rawEntry.payload)
+          ? rawEntry.payload
+          : legacyPayloads[declaredResultId];
+        if (!isObjectRecord(rawPayload)) {
+          throw new Error(`Collection result ${index + 1} is missing its graph payload.`);
+        }
+        const normalizedEntry = collectionEntryFromGraphPayload(
+          rawPayload,
+          `${label || "collection"} result ${index + 1}`,
+          allowLegacy
+        );
+        if (declaredResultId && declaredResultId !== normalizedEntry.result_id) {
+          throw new Error(
+            `Collection result ${index + 1} ID does not match its graph strategy and seed.`
+          );
+        }
+        if (!declaredResultId && isVersionedCollection) {
+          throw new Error(`Collection result ${index + 1} is missing result_id.`);
+        }
+        if (isVersionedCollection) {
+          if (!String(rawEntry.title || "").trim()) {
+            throw new Error(`Collection result ${index + 1} is missing title.`);
+          }
+          if (!String(rawEntry.updated_at || "").trim()) {
+            throw new Error(`Collection result ${index + 1} is missing updated_at.`);
+          }
+          if (!isObjectRecord(rawEntry.summary)) {
+            throw new Error(`Collection result ${index + 1} is missing summary.`);
+          }
+          if (
+            !isNonNegativeInteger(rawEntry.summary.nodes)
+            || !isNonNegativeInteger(rawEntry.summary.edges)
+            || rawEntry.summary.nodes !== normalizedEntry.summary.nodes
+            || rawEntry.summary.edges !== normalizedEntry.summary.edges
+          ) {
+            throw new Error(`Collection result ${index + 1} has an inconsistent summary.`);
+          }
+          if (!isObjectRecord(rawEntry.build)) {
+            throw new Error(`Collection result ${index + 1} is missing build metadata.`);
+          }
+        }
+        for (const field of ["seed_id", "strategy"]) {
+          if (
+            rawEntry[field] !== undefined
+            && String(rawEntry[field]) !== String(normalizedEntry[field])
+          ) {
+            throw new Error(`Collection result ${index + 1} has inconsistent ${field}.`);
+          }
+        }
+        if (rawEntry.title !== undefined) {
+          normalizedEntry.title = String(rawEntry.title || normalizedEntry.title);
+        }
+        if (rawEntry.updated_at !== undefined) {
+          normalizedEntry.updated_at = String(rawEntry.updated_at || "");
+        }
+        if (rawEntry.build !== undefined) {
+          if (!isObjectRecord(rawEntry.build)) {
+            throw new Error(`Collection result ${index + 1} build metadata must be an object.`);
+          }
+          normalizedEntry.build = rawEntry.build;
+        }
+        const duplicateIndex = normalized.results.findIndex(
+          (entry) => entry.result_id === normalizedEntry.result_id
+        );
+        if (duplicateIndex < 0) {
+          normalized.results.push(normalizedEntry);
+        }
+      });
+
+      const currentId = String(imported.current_result_id || "").trim();
+      if (currentId && !normalized.results.some((entry) => entry.result_id === currentId)) {
+        throw new Error("Collection current_result_id does not name an included result.");
+      }
+      normalized.current_result_id = currentId || (
+        normalized.results.length ? normalized.results[0].result_id : null
+      );
+      return normalized;
+    }
+
+    function upsertCollectionEntries(targetCollection, incomingEntries) {
+      const incomingUnique = [];
+      const incomingIds = new Set();
+      incomingEntries.forEach((incomingEntry) => {
+        const resultId = String(incomingEntry.result_id || "");
+        if (resultId && !incomingIds.has(resultId)) {
+          incomingIds.add(resultId);
+          incomingUnique.push(incomingEntry);
+        }
+      });
+      const retained = targetCollection.results.filter(
+        (entry) => !incomingIds.has(String(entry.result_id || ""))
+      );
+      targetCollection.results = incomingUnique.concat(retained);
+    }
+
+    function portableCollectionPackage() {
+      return {
+        kind: COLLECTION_KIND,
+        schema_version: COLLECTION_SCHEMA_VERSION,
+        current_result_id: collectionResultId || currentResultIdForPayload(payload),
+        results: collectionEntries().map((entry) => {
+          const portableEntry = {
+            result_id: entry.result_id,
+            seed_id: entry.seed_id,
+            title: entry.title,
+            strategy: entry.strategy,
+            summary: entry.summary,
+            payload: portableGraphPayload(entry.payload),
+            updated_at: entry.updated_at || new Date().toISOString(),
+            build: isObjectRecord(entry.build) ? entry.build : {},
+          };
+          return portableEntry;
+        }),
+      };
+    }
+
     function collectionEntryLabel(entry) {
-      const title = String(entry.title || entry.seed_id || entry.result_id || "Saved result");
+      const title = String(entry.title || entry.seed_id || entry.result_id || "Graph result");
       const strategy = String(entry.strategy || "");
       const summary = entry.summary || {};
       const nodeCount = Number(summary.nodes || 0);
@@ -3111,7 +3682,8 @@ class GraphExporter:
       select.innerHTML = "";
       const placeholder = document.createElement("option");
       placeholder.value = "";
-      placeholder.textContent = results.length ? "Saved results" : "Current result only";
+      placeholder.textContent = "Select a graph";
+      placeholder.disabled = true;
       select.appendChild(placeholder);
 
       results.forEach((entry) => {
@@ -3144,77 +3716,13 @@ class GraphExporter:
       controls.yearMax.placeholder = `Year max (${maxYear})`;
     }
 
-    function normalizeImportedDashboardPayload(imported, label) {
-      const importedNodes = Array.isArray(imported.nodes) ? imported.nodes : [];
-      if (!importedNodes.length) {
-        throw new Error("No nodes found in JSON file.");
-      }
-      const importedDashboardMeta =
-        imported && imported.dashboard && imported.dashboard.meta
-          ? imported.dashboard.meta
-          : {};
-      const importedMeta =
-        imported && imported.meta && typeof imported.meta === "object"
-          ? imported.meta
-          : {};
-      const baseMeta = {
-        seed_id: String(
-          imported.seed_id
-          || importedDashboardMeta.seed_id
-          || importedMeta.seed_id
-          || ((importedNodes.find((node) => !!(node && node.is_seed)) || {}).id || "")
-        ),
-        strategy: String(importedDashboardMeta.strategy || importedMeta.strategy || ""),
-        theme: String(
-          (payload.meta && payload.meta.theme)
-          || importedDashboardMeta.theme
-          || importedMeta.theme
-          || "light"
-        ),
-        summary: imported.summary || importedDashboardMeta.summary || importedMeta.summary || {
-          nodes: importedNodes.length,
-          edges: Array.isArray(imported.edges) ? imported.edges.length : 0,
-        },
-        year_range: importedDashboardMeta.year_range || importedMeta.year_range || {},
-        plotly_node_order:
-          importedDashboardMeta.plotly_node_order || importedMeta.plotly_node_order || [],
-        plotly_positions:
-          importedDashboardMeta.plotly_positions || importedMeta.plotly_positions || [],
-        plotly_node_sizes:
-          importedDashboardMeta.plotly_node_sizes || importedMeta.plotly_node_sizes || [],
-      };
-      if (!hasCompleteDashboardGeometry(baseMeta)) {
-        throw new Error(
-          `Imported results from ${String(label || "the selected file")} are missing stored dashboard geometry. Only current CiteMesh dashboard exports are supported.`
-        );
-      }
-
-      return {
-        payload: {
-          meta: baseMeta,
-          nodes: importedNodes,
-          edges: Array.isArray(imported.edges) ? imported.edges : [],
-        },
-        warningMessage: "",
-        warningTone: "warning",
-      };
-    }
-
     function applyImportedPayload(imported, label) {
-      const normalizedImport = normalizeImportedDashboardPayload(imported, label);
+      const normalizedImport = normalizeImportedDashboardPayload(imported, label, true);
       const nextPayload = normalizedImport.payload;
       const nextFigureSpec = buildFigureSpecFromPayload(nextPayload);
       payload = nextPayload;
       figureSpec = nextFigureSpec;
-      if (normalizedImport.warningMessage) {
-        setDashboardStatus(
-          normalizedImport.warningMessage,
-          normalizedImport.warningTone
-        );
-        console.warn(normalizedImport.warningMessage);
-      } else {
-        clearDashboardStatus();
-      }
+      clearDashboardStatus();
       collectionResultId = currentResultIdForPayload(nextPayload);
       rebuildDerivedData();
       refreshSavedState();
@@ -3262,20 +3770,21 @@ class GraphExporter:
       if (!normalizedId) {
         return Promise.resolve();
       }
-      const payloads = collectionBundle && collectionBundle.payloads ? collectionBundle.payloads : {};
-      const nextPayload = payloads[normalizedId];
-      if (!nextPayload) {
-        alert("Saved result payload is not embedded in this dashboard shell. Rebuild the collection or use Load Results.");
-        return Promise.resolve();
-      }
       const entry = collectionEntries().find(
         (candidate) => String(candidate.result_id || "") === normalizedId
       );
+      if (!entry || !entry.payload) {
+        setDashboardStatus(
+          "That graph is unavailable in the current result set. Add its package again.",
+          "warning"
+        );
+        return Promise.resolve();
+      }
       collectionResultId = normalizedId;
       clearDashboardStatus();
       return applyImportedPayload(
-        nextPayload,
-        entry ? collectionEntryLabel(entry) : normalizedId
+        entry.payload,
+        collectionEntryLabel(entry)
       );
     }
 
@@ -3733,9 +4242,9 @@ class GraphExporter:
       controls.moreBtn.addEventListener("click", () => {
         const focusId = state.selectedId || ((payload.meta && payload.meta.seed_id) || null);
         const focusNode = focusId ? nodeById.get(focusId) : null;
-        const target = focusNode && focusNode.links && focusNode.links.semantic_scholar
-          ? focusNode.links.semantic_scholar
-          : null;
+        const target = safeExternalUrl(
+          focusNode && focusNode.links && focusNode.links.semantic_scholar
+        );
         if (target) {
           window.open(target, "_blank", "noopener,noreferrer");
         }
@@ -3763,6 +4272,19 @@ class GraphExporter:
       document.getElementById("export-json-btn").addEventListener("click", () => {
         const exportPayload = buildPortableJsonPayload();
         downloadBlob(JSON.stringify(exportPayload, null, 2), seedSlug() + ".json", "application/json");
+      });
+
+      document.getElementById("export-collection-btn").addEventListener("click", () => {
+        const exportPayload = portableCollectionPackage();
+        downloadBlob(
+          JSON.stringify(exportPayload, null, 2),
+          "dashboard.citemesh.json",
+          "application/json"
+        );
+        setDashboardStatus(
+          `Exported ${exportPayload.results.length} ${exportPayload.results.length === 1 ? "graph" : "graphs"} as one collection package.`,
+          "info"
+        );
       });
 
       document.getElementById("export-csv-btn").addEventListener("click", () => {
@@ -3796,7 +4318,9 @@ class GraphExporter:
       controls.copySavedBtn.addEventListener("click", () => {
         const lines = savedNodes().map((n) => {
           const links = n.links || {};
-          const href = links.arxiv_abs || links.doi || links.semantic_scholar || "";
+          const href = safeExternalUrl(
+            links.arxiv_abs || links.doi || links.semantic_scholar
+          );
           const yearText = hasYear(n) ? ` (${n.year})` : "";
           const title = String(n.title || n.id);
           return href ? `- [${title}](${href})${yearText}` : `- ${title}${yearText}`;
@@ -3818,22 +4342,71 @@ class GraphExporter:
         renderList();
       });
 
-      const loadInput = document.getElementById("load-json-input");
-      document.getElementById("load-json-btn").addEventListener("click", () => { loadInput.click(); });
-      loadInput.addEventListener("change", (event) => {
-        const file = event.target.files && event.target.files[0];
-        if (!file) return;
-        const reader = new FileReader();
-        reader.onload = (e) => {
+      function readFileText(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (event) => resolve(String(event.target.result || ""));
+          reader.onerror = () => reject(
+            new Error(reader.error ? reader.error.message : "Browser could not read the file.")
+          );
+          reader.readAsText(file);
+        });
+      }
+
+      async function addResultFiles(files) {
+        let importedCount = 0;
+        let desiredResultId = null;
+        const failures = [];
+        for (const file of files) {
           try {
-            const imported = parseImportedPayloadFromText(e.target.result, file.name);
-            applyImportedPayload(imported, file.name).catch((err) => {
-              alert("Failed to load graph view from imported results: " + err.message);
-            });
-          } catch (err) { alert("Failed to parse imported results: " + err.message); }
-        };
-        reader.readAsText(file);
-        loadInput.value = "";
+            const fileText = await readFileText(file);
+            const importedCollection = parseImportedResultSetFromText(fileText, file.name);
+            upsertCollectionEntries(collectionBundle, importedCollection.results);
+            importedCount += importedCollection.results.length;
+            desiredResultId = importedCollection.current_result_id || desiredResultId;
+          } catch (err) {
+            failures.push(`${file.name}: ${err.message}`);
+          }
+        }
+
+        if (importedCount > 0) {
+          const nextResultId = desiredResultId || collectionBundle.results[0].result_id;
+          collectionBundle.current_result_id = nextResultId;
+          collectionResultId = nextResultId;
+          populateCollectionSelector();
+          try {
+            await loadCollectionResult(nextResultId);
+          } catch (err) {
+            failures.push(`Display: ${err.message}`);
+          }
+        }
+
+        const uniqueGraphCount = collectionBundle.results.length;
+        const importedMessage = importedCount > 0
+          ? `Merged ${importedCount} ${importedCount === 1 ? "graph entry" : "graph entries"}; ${uniqueGraphCount} unique ${uniqueGraphCount === 1 ? "graph" : "graphs"} in this session.`
+          : "No graphs were added.";
+        const failureMessage = failures.length
+          ? ` Skipped ${failures.length} ${failures.length === 1 ? "file" : "files"}: ${failures.join(" | ")}`
+          : "";
+        setDashboardStatus(
+          importedMessage + failureMessage,
+          failures.length ? "warning" : "info"
+        );
+      }
+
+      const addResultsInput = document.getElementById("add-results-input");
+      document.getElementById("add-results-btn").addEventListener("click", () => {
+        addResultsInput.click();
+      });
+      addResultsInput.addEventListener("change", (event) => {
+        const files = Array.from((event.target && event.target.files) || []);
+        addResultsInput.value = "";
+        if (!files.length) {
+          return;
+        }
+        addResultFiles(files).catch((err) => {
+          setDashboardStatus("Failed to add results: " + err.message, "warning");
+        });
       });
       controls.resultSelect.addEventListener("change", (event) => {
         const resultId = String(event.target.value || "").trim();
@@ -3841,7 +4414,7 @@ class GraphExporter:
           return;
         }
         loadCollectionResult(resultId).catch((err) => {
-          alert("Failed to load saved results: " + err.message);
+          setDashboardStatus("Failed to switch graphs: " + err.message, "warning");
         });
       });
 
@@ -3914,6 +4487,13 @@ class GraphExporter:
     function initialize() {
       setupControls();
       renderTimeline();
+      const initialResultId = currentResultIdForPayload(payload);
+      if (collectionResultId && collectionResultId !== initialResultId) {
+        loadCollectionResult(collectionResultId).catch((err) => {
+          setDashboardStatus("Failed to load the selected graph: " + err.message, "warning");
+        });
+        return;
+      }
       Plotly.react(graphDiv, figureSpec.data, figureSpec.layout, plotConfig).then(() => {
         setupGraphInteractions();
         if (state.selectedId && nodeById.has(state.selectedId)) {
