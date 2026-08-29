@@ -52,7 +52,7 @@ Canonical path-normalization rules:
 
 Examples:
 
-- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png` writes `out/dashboard.html`, `out/dashboard.manifest.json`, `out/<slug>-<hash>/hybrid.png`, `out/<slug>-<hash>/hybrid.html`, `out/<slug>-<hash>/hybrid.plotly.html`, `out/<slug>-<hash>/hybrid.json`, `out/<slug>-<hash>/hybrid.graphml`, `out/<slug>-<hash>/hybrid.config.json`
+- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png` writes `out/dashboard.html`, `out/dashboard.manifest.json`, `out/<slug>-<hash>/hybrid.png`, `out/<slug>-<hash>/hybrid.html`, `out/<slug>-<hash>/hybrid.plotly.html`, `out/<slug>-<hash>/hybrid.json`, `out/<slug>-<hash>/hybrid.csv`, `out/<slug>-<hash>/hybrid.bib`, `out/<slug>-<hash>/hybrid.graphml`, and `out/<slug>-<hash>/hybrid.config.json`
 - `citemesh build "<paper-id>" --strategy citation --export json -o report.graphml` writes `report.json`
 - `citemesh build "<paper-id>" --strategy recommendation --export dashboard -o report.dashboard.html` writes the standalone dashboard file `report.dashboard.html`
 - `citemesh build "<paper-id>" --strategy recommendation --export dashboard --export json -o report.dashboard.html` writes `report.dashboard.html`, `report.json`, and `report.config.json`

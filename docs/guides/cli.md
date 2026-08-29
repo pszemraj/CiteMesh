@@ -124,7 +124,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 
 ### Embedding Strategy
 
-- `--model`, `-m`: sentence-transformer model name (default `unsloth/embeddinggemma-300m`; examples: `all-MiniLM-L6-v2`, `google/embeddinggemma-300m`)
+- `--model`, `-m`: sentence-transformer model name (default `unsloth/embeddinggemma-300m`; alternate current checkpoint: `google/embeddinggemma-300m`)
 - `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
 - `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
@@ -139,8 +139,8 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)
 - `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows)
 - `--cache-overwrite-reason`: optional rationale string logged when `--force-rebuild-cache` clears embedding cache state
-- `--storage-precision {int8,float32}`: persistent embedding-cache precision (default `int8`)
-- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). Explicit `--binary-prefilter` requires `--storage-precision int8`.
+- `--storage-precision {int8,float32}`: persistent embedding-cache precision. Corpus mode defaults to `int8`; the default candidates mode normalizes an implicit `int8` setting to `float32` because corpus calibration is unavailable.
+- `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search. It defaults on for int8 corpus mode and is normalized off in candidates mode. Explicit `--binary-prefilter` requires `--storage-precision int8`.
 - `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`; explicit use requires `--storage-precision int8`)
 - `--encode-batch-size`: embedding-model encode batch size used during hydration/search (default `32`)
@@ -148,8 +148,8 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`; unsupported with `--cache-compression lzf`)
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). When enabled, compile is deferred on cold-cache hydration runs and attempted on warm-cache runs.
 - `--device {auto,cuda,mps,cpu}`: compute device for embedding model runs (default `auto`, which prefers CUDA, then MPS on Apple Silicon, then CPU). Explicit unavailable devices fail fast. Shared with hybrid.
-- `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing (default `candidates`, which embeds only S2 seed neighbors — no corpus download). Corpus-only flags (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--streaming`) imply `arxiv-corpus` when `--semantic-source` is omitted, and are rejected with explicit `candidates`. Candidate mode stores vectors as float32 (`--storage-precision int8` requires `arxiv-corpus`).
-- `--candidate-pool-size`: maximum S2 candidate pool fetched in candidates mode (default `400`; candidates mode only).
+- `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing (default `candidates`, which embeds only S2 seed neighbors — no corpus download). Explicit corpus-only flags (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--streaming`) imply `arxiv-corpus` when `--semantic-source` is omitted; the candidate-only `--candidate-pool-size` flag likewise implies `candidates`. An explicit source that conflicts with a mode-only flag is rejected. Candidate mode stores vectors as float32 (`--storage-precision int8` requires `arxiv-corpus`).
+- `--candidate-pool-size`: maximum S2 candidate pool fetched in candidates mode (default `400`; candidates mode only). Because it is an explicit candidate-mode request, it overrides a configured `defaults.semantic_source = "arxiv-corpus"` for that run.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 - Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in a shareable plain-text file without flooding the Rich console. `*.log` is ignored by git in this repo.
@@ -202,7 +202,7 @@ citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o report.dashb
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \
   --strategy embedding \
-  -m all-MiniLM-L6-v2 \
+  -m unsloth/embeddinggemma-300m \
   --dataset-split "train[:2%]" \
   --export plotly
 

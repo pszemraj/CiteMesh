@@ -10,21 +10,22 @@ Notable changes from the early script-based prototypes to the current package la
 
 ## Public Release Readiness
 
-- Added GitHub Actions CI: ruff lint/format, test matrix (Ubuntu + macOS × Python 3.10/3.13, CPU torch), and a no-extras install smoke that locks in the lazy-import contract for the core CLI.
+- Added intentionally small GitHub Actions CI: ruff lint/format, representative Ubuntu + macOS tests on Python 3.10/3.13 (CPU-only torch on Linux and the platform wheel on macOS), and a no-extras install smoke that locks in the lazy-import contract for the core CLI. Package-installing jobs fetch tags for accurate `setuptools-scm` versions; lint-only checkout stays shallow.
 - Key-aware Semantic Scholar rate limiting: authenticated clients pace at 1 request/second, anonymous clients stay at 0.5. A one-time INFO notice on key-less runs points at the free API key signup.
 - Smarter retry backoff (tenacity): direct REST calls (search, recommendations) now retry with full-jitter exponential backoff floored at the server's `Retry-After` and capped at 60s, instead of sleeping a flat `Retry-After: 2` on every attempt. The library-mediated call wrapper shares the same policy.
-- Fixed empty recommendation results for classic seed papers: the S2 recommendations endpoint's default "recent" candidate pool returns nothing for older landmark papers (e.g. arXiv:1706.03762), which silently emptied the recommendation strategy and the hybrid/embedding candidate pools. CiteMesh now retries the broader `all-cs` pool when the default pool comes back empty.
-- Seed-paper fetch failures now distinguish "identifier unknown to Semantic Scholar" (`ValueError`) from "API rate-limited/unreachable after retries" (`SemanticScholarUnavailableError`) for citation/recommendation seeds.
+- Fixed empty recommendation results for classic seed papers: the S2 recommendations endpoint's default "recent" candidate pool returns nothing for older landmark papers (e.g. arXiv:1706.03762), which silently emptied the recommendation strategy and the hybrid/embedding candidate pools. CiteMesh retries the broader `all-cs` pool only after a successful empty response; an unavailable primary request does not trigger a second retry cycle.
+- Seed-paper fetch failures now distinguish "identifier unknown to Semantic Scholar" (`ValueError`) from "API rate-limited/unreachable after retries" (`SemanticScholarUnavailableError`) for citation, recommendation, and standalone embedding seeds.
 - Paper search gets the same treatment: `citemesh search` and free-text query seeds no longer report "No results found" when the search API was actually rate-limited or unreachable — exhausted retries now surface as a `SemanticScholarUnavailableError` with the free-key pointer.
 - Added local semantic search to `citemesh search`: mode `local` searches the locally cached embeddings (candidate vectors accumulated across builds, or a hydrated corpus) via the cache-native search API. The query is encoded in the model's query prompt space and ranked with cosine scores; no Semantic Scholar traffic. Targets the same cache namespace a flagless build writes to, honoring `config.toml` defaults, with `--model`/`--device` overrides (which imply local mode).
 - Made `citemesh search` mode-aware: `--mode {auto,local,s2}` with `auto` as the default — local semantic search when the cache has vectors, Semantic Scholar keyword search otherwise, logging which backend ran. The preference persists via `citemesh config set defaults.search_mode <mode>` (explicit flag wins). Explicitly requested local mode fails with build guidance on an empty cache instead of silently falling back.
 - Rewrote the README for public beta (reference tool comparison, macOS/MPS support statement, S2 key guidance) and added CONTRIBUTING.md, AGENTS.md, and issue/PR templates.
-- Narrowed the root `.gitignore` `*.yaml` rule so workflow files are trackable.
+- Scoped the stray run-config ignore to root-level `/*.yaml`, so nested YAML files are never hidden from contributors.
 
 ## User Configuration
 
 - Added a persistent user config system: `config.toml` at the cache root plus a `citemesh config` subcommand (`list`/`get`/`set`/`unset`/`path`). A whitelisted `[defaults]` table overrides built-in defaults for most build flags (for example `semantic_source = "arxiv-corpus"` to restore the corpus default), and `[api] s2_api_key` supplies a Semantic Scholar key when the `S2_API_KEY` environment variable is absent. Precedence: explicit CLI flag > environment variable > config.toml > built-in default.
-- Config-supplied defaults outrank tuned implicit defaults (hybrid budget knobs) but never count as explicit flags for strategy gating or corpus-mode implication, so a global default cannot break unrelated strategies.
+- Config-supplied defaults outrank tuned implicit defaults (hybrid budget knobs) but never count as explicit flags for strategy gating. Explicit corpus-only and candidate-only flags symmetrically imply their source mode over a conflicting config default, while settings for the inactive mode stay inert.
+- Malformed TOML and invalid UTF-8 warn and yield an empty config for ordinary commands; config mutations fail closed rather than overwriting unreadable content.
 - Added `--no-streaming` so an enabled `defaults.streaming` preference can be disabled for one invocation while preserving explicit CLI-over-config precedence.
 - Unified the macOS cache root with Linux: `~/.cache/citemesh` (HuggingFace-style) instead of `~/Library/Caches/citemesh` (pre-release breaking change; `citemesh cache scan` hints when the legacy directory still exists).
 - `citemesh cache clear` now preserves `config.toml` while deleting cache payloads.
@@ -48,7 +49,7 @@ Notable changes from the early script-based prototypes to the current package la
 - `--torch-compile` is now declined on CPU (pure warm-up cost for CLI runs) and marked experimental on MPS (Inductor/Metal, eager fallback on failure).
 - Candidate-mode `--torch-compile` now runs without waiting for corpus hydration metadata; cold-cache deferral remains scoped to arXiv corpus hydration.
 - Split the torch dependency floor by platform: `>=2.9` on Linux/Windows, `>=2.13` on macOS. Declared the previously transitive `huggingface_hub` dependency explicitly.
-- Pinned a headless matplotlib backend (`Agg`) for static exports unless `MPLBACKEND` is set, avoiding the main-thread-only MacOSX GUI backend.
+- Static exports preserve the application's selected Matplotlib backend. When the active backend is the main-thread-only MacOSX GUI backend, CiteMesh attaches an Agg canvas only to its own static figure instead of mutating global plotting state.
 
 ## Breaking Changes
 
@@ -66,16 +67,16 @@ Notable changes from the early script-based prototypes to the current package la
 - Restricted dashboard collection bundle payload reads to manifest paths that stay under the collection root.
 - HTML exports (dashboard, Plotly, pyvis) now carry a `darkreader-lock` meta tag plus a transparent-overlay CSS guard: the Dark Reader browser extension repaints Plotly's transparent overlay SVGs with an opaque background, which hid the entire dashboard graph. Verified live in Chrome with Dark Reader installed — the lock disengages the extension and the graph renders in the native theme. Also fixed the paper-count label pluralization ("1 paper").
 - HTML exports additionally declare the standards-based `color-scheme` meta + CSS property (dark or light per theme) so Chrome's Auto Dark Mode and other well-behaved darkening extensions skip repainting; this complements the Dark Reader-specific lock (Plotly/vis.js offer no such signal themselves — the page-level declaration is the mechanism).
-- Dashboard hover tooltips are now theme-styled glance cards (panel background and border instead of raw marker color), wrap long titles instead of spanning the full pane, and add venue plus a relation line ("referenced by seed", "cites seed", "semantic match") so hover answers "should I look at this paper".
+- Dashboard hover tooltips are now theme-styled glance cards (panel background and border instead of raw marker color), wrap long titles instead of spanning the full pane, and add venue plus a relation line ("referenced by seed", "cites seed", "semantic match") so hover answers "should I look at this paper". Collection selection and imported-result rebuilds retain the same hover contract.
 - Fixed a misleading dashboard legend that claimed nodes were colored by provenance (seed/citation/semantic/both) while they are colored by a publication-year gradient; the legend now shows the real encodings (seed ring, older-to-newer gradient, size = citations) and the year timeline reuses the exact node colorscale.
-- Dashboard edge opacity/width is now min-max normalized per graph (raw hybrid weights cluster in 0.55-0.95 and previously clamped to a flat 0.6 alpha, rendering every edge identically); relative link strength is finally visible.
-- Added a saved-papers reading list to the dashboard: star toggles on list rows and in the details panel, a Saved filter chip, localStorage persistence per seed graph, plus "Saved BibTeX" download and "Copy Saved Links" (markdown list) so a triage session does not require opening every paper in a browser tab.
+- Dashboard edge opacity/width is now min-max normalized per graph (raw hybrid weights cluster in 0.55-0.95 and previously clamped to a flat 0.6 alpha, rendering every edge identically); collection selection and imported-result rebuilds use the same scale and viewport padding as the initial Python figure.
+- Added a saved-papers reading list to the dashboard: star toggles on list rows and in the details panel, a Saved filter chip, localStorage persistence per strategy and seed, plus "Saved BibTeX" download and "Copy Saved Links" (markdown list). Saved IDs are intersected with the active payload before badge, filter, or export use.
 - The seed's "Why This Paper" panel no longer prints a meaningless self-relevance score and self-path; it states the node is the seed and keeps its strongest links.
 
 ## Graph Rendering
 
 - Unified layout-oriented rendering pipeline across outputs.
-- Static layouts now scaffold and size-pack disconnected groups, orient their longer extent horizontally, cap non-seed labels by citation priority, suppress renderer-measured text overlaps, and fit a landscape viewport to the graph so dense PNG exports use the canvas and remain legible.
+- Static layouts now scaffold and size-pack disconnected groups, wrap singleton/small components across deterministic rows, place the largest component first, orient long extents horizontally, cap non-seed labels by citation priority, suppress text overlaps through a backend-independent renderer, and fit a landscape viewport to the graph so dense exports use the canvas and remain legible.
 - Dashboard graphs now use spatially distributed priority labels, larger nodes, tighter plot bounds, quieter background edges, and collapsed-by-default filters so dense interactive exports remain readable in three-pane browser layouts.
 - Added normalized edge opacity/width scaling for weight readability.
 - Routed integration-test outputs to temporary paths to reduce fixture confusion.

@@ -33,7 +33,7 @@ citemesh cache root
 ├── config.toml                    # Persistent user configuration (see Configuration guide)
 ├── embeddings/
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, text hashes, row_idx, authors/categories JSON, hydration state)
-│   ├── embeddings_<model-hash>.h5 # Quantized HDF5 matrix datasets (int8/f16/f32 + optional binary index + calibration ranges)
+│   ├── embeddings_<model-hash>.h5 # HDF5 matrix datasets (int8/float32 + optional binary index + calibration ranges)
 │   └── cache_<model-hash>.lock    # Inter-process lock for cache mutation
 └── references/
     └── <sha1>.json                # Semantic Scholar reference ID cache entries

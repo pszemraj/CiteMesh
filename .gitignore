@@ -1,4 +1,5 @@
 # local files
+.DS_Store
 out/*
 cache/*
 citemesh/_version.py

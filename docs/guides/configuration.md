@@ -28,6 +28,7 @@ Config values behave like personal built-in defaults, not like explicit flags:
 - They never trigger "unsupported option for strategy" errors. Setting `defaults.device` does not break `--strategy citation` runs; the value is simply unused there.
 - They outrank tuned implicit defaults (for example the hybrid strategy's implicit citation/reference budgets).
 - Explicit corpus-only CLI flags (for example `--corpus-size`) still imply `--semantic-source arxiv-corpus`, overriding a configured `defaults.semantic_source = "candidates"` for that run.
+- Explicit candidate-only CLI flags work symmetrically: `--candidate-pool-size` implies `--semantic-source candidates`, overriding a configured `defaults.semantic_source = "arxiv-corpus"`. Corpus-only settings that came only from config (for example streaming plus a sliced dataset split) stay inert in that candidate run.
 
 When config defaults are applied to a build, CiteMesh logs one INFO line listing the applied keys and the config file path.
 
@@ -47,7 +48,7 @@ Value forms for `config set`:
 - Export lists: comma-separated, e.g. `citemesh config set defaults.export json,dashboard`
 - Everything else: plain strings/integers
 
-Invalid keys and values are rejected at `set` time with the list of valid options. Invalid entries hand-edited into the file are ignored with a warning at load time, so a bad config never blocks CLI usage. Unknown keys already in the file are preserved when CiteMesh rewrites it (comments are not — the TOML round-trip is value-level).
+Invalid keys and values are rejected at `set` time with the list of valid options. Invalid entries, malformed TOML, and non-UTF-8 files are ignored with a warning during ordinary CLI loads, so a bad config never blocks unrelated commands. Mutating `config set`/`unset` operations fail instead of overwriting an unreadable file. Unknown keys already in the file are preserved when CiteMesh rewrites it (comments are not — the TOML round-trip is value-level).
 
 ## Supported keys
 
