@@ -111,6 +111,11 @@ def _int_caster(minimum: int) -> Callable[[Any], int]:
     """
 
     def _cast(value: Any) -> int:
+        """Cast a raw configuration value to a lower-bounded integer.
+
+        :param Any value: Raw TOML or CLI-provided value.
+        :return int: Parsed integer greater than or equal to ``minimum``.
+        """
         if isinstance(value, bool):
             raise ConfigValueError("expected an integer, got a boolean")
         if isinstance(value, str):
@@ -135,6 +140,11 @@ def _choice_caster(choices: Tuple[str, ...]) -> Callable[[Any], str]:
     """
 
     def _cast(value: Any) -> str:
+        """Cast a raw configuration value to an allowed string choice.
+
+        :param Any value: Raw TOML or CLI-provided value.
+        :return str: Stripped string present in ``choices``.
+        """
         text = _cast_str(value)
         if text not in choices:
             raise ConfigValueError(f"expected one of: {', '.join(choices)}")
