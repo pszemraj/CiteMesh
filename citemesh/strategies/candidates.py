@@ -75,17 +75,6 @@ def paper_identity_aliases(paper: Paper) -> List[str]:
     return sorted(aliases)
 
 
-def resolve_alias(aliases: Dict[str, str], paper: Paper) -> Optional[str]:
-    """Resolve an existing canonical paper ID from alias map.
-
-    :param Dict[str, str] aliases: Alias-to-canonical map.
-    :param Paper paper: Incoming paper payload.
-    :return Optional[str]: Canonical paper ID when already known.
-    """
-    matches = resolve_aliases(aliases, paper)
-    return matches[0] if matches else None
-
-
 def resolve_aliases(aliases: Dict[str, str], paper: Paper) -> List[str]:
     """Resolve every canonical paper ID matched by an incoming payload.
 
@@ -215,6 +204,66 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     return preferred
 
 
+@dataclass(frozen=True)
+class IdentityReconciliation:
+    """Result of reconciling one paper against known identity classes."""
+
+    canonical_id: Optional[str]
+    collapsed_ids: tuple[str, ...] = ()
+    seed_matched: bool = False
+
+
+def reconcile_paper_identity(
+    aliases: Dict[str, str],
+    seed: Paper,
+    papers: Dict[str, Paper],
+    incoming: Paper,
+) -> IdentityReconciliation:
+    """Merge an incoming payload into its seed or candidate identity class.
+
+    The seed always survives. Otherwise the first candidate insertion wins,
+    keeping graph order stable. Callers remain responsible for folding any
+    sidecar state associated with ``collapsed_ids``.
+
+    :param Dict[str, str] aliases: Alias-to-canonical map to update.
+    :param Paper seed: Canonical seed paper.
+    :param Dict[str, Paper] papers: Candidate mapping to reconcile in place.
+    :param Paper incoming: Newly observed paper payload.
+    :return IdentityReconciliation: Survivor and collapsed candidate IDs.
+    """
+    matched_ids = resolve_aliases(aliases, incoming)
+    seed_id = str(seed.paper_id)
+    if seed_id in matched_ids:
+        collapsed_ids = tuple(
+            paper_id
+            for paper_id in papers
+            if paper_id != seed_id and paper_id in matched_ids
+        )
+        for paper_id in collapsed_ids:
+            merge_paper_metadata(seed, papers.pop(paper_id))
+        merge_paper_metadata(seed, incoming)
+        repoint_aliases(aliases, seed_id, set(collapsed_ids) | {seed_id})
+        register_aliases(aliases, seed_id, incoming)
+        return IdentityReconciliation(seed_id, collapsed_ids, True)
+
+    matched_candidates = [
+        paper_id
+        for paper_id in papers
+        if paper_id != seed_id and paper_id in matched_ids
+    ]
+    if not matched_candidates:
+        return IdentityReconciliation(None)
+
+    canonical_id = matched_candidates[0]
+    collapsed_ids = tuple(matched_candidates[1:])
+    for paper_id in collapsed_ids:
+        merge_paper_metadata(papers[canonical_id], papers.pop(paper_id))
+    merge_paper_metadata(papers[canonical_id], incoming)
+    repoint_aliases(aliases, canonical_id, set(matched_candidates))
+    register_aliases(aliases, canonical_id, incoming)
+    return IdentityReconciliation(canonical_id, collapsed_ids)
+
+
 def paper_embedding_metadata(paper: Paper) -> Dict[str, object]:
     """Build embedding-cache metadata payload for a paper.
 
@@ -252,44 +301,27 @@ class CandidatePool:
         """
         if paper.is_seed:
             return
-        matched_ids = resolve_aliases(self._aliases, paper)
-        if self.seed.paper_id in matched_ids:
-            loser_ids = [
-                paper_id for paper_id in self.papers if paper_id in matched_ids
-            ]
-            for loser_id in loser_ids:
-                merge_paper_metadata(self.seed, self.papers.pop(loser_id))
-                self.sources.pop(loser_id, None)
-                self.seed_relations.pop(loser_id, None)
-            merge_paper_metadata(self.seed, paper)
-            repoint_aliases(
-                self._aliases,
-                self.seed.paper_id,
-                set(loser_ids) | {self.seed.paper_id},
-            )
-            register_aliases(self._aliases, self.seed.paper_id, paper)
+        reconciliation = reconcile_paper_identity(
+            self._aliases, self.seed, self.papers, paper
+        )
+        if reconciliation.seed_matched:
+            for paper_id in reconciliation.collapsed_ids:
+                self.sources.pop(paper_id, None)
+                self.seed_relations.pop(paper_id, None)
             return
 
-        matched_candidates = [
-            paper_id for paper_id in self.papers if paper_id in matched_ids
-        ]
-        if matched_candidates:
-            canonical_id = matched_candidates[0]
-            for loser_id in matched_candidates[1:]:
-                merge_paper_metadata(
-                    self.papers[canonical_id], self.papers.pop(loser_id)
-                )
+        canonical_id = reconciliation.canonical_id
+        if canonical_id is not None:
+            for paper_id in reconciliation.collapsed_ids:
                 self.sources.setdefault(canonical_id, set()).update(
-                    self.sources.pop(loser_id, set())
+                    self.sources.pop(paper_id, set())
                 )
                 merged_relation = merge_seed_relation(
                     self.seed_relations.get(canonical_id, ""),
-                    self.seed_relations.pop(loser_id, ""),
+                    self.seed_relations.pop(paper_id, ""),
                 )
                 if merged_relation:
                     self.seed_relations[canonical_id] = merged_relation
-            merge_paper_metadata(self.papers[canonical_id], paper)
-            repoint_aliases(self._aliases, canonical_id, set(matched_candidates))
         else:
             canonical_id = str(paper.paper_id)
             self.papers[canonical_id] = paper
@@ -299,7 +331,8 @@ class CandidatePool:
         )
         if merged_relation:
             self.seed_relations[canonical_id] = merged_relation
-        register_aliases(self._aliases, canonical_id, paper)
+        if reconciliation.canonical_id is None:
+            register_aliases(self._aliases, canonical_id, paper)
 
     def __post_init__(self) -> None:
         """Initialize alias map with seed identity."""

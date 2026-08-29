@@ -11,9 +11,8 @@ from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.candidates import (
     merge_paper_metadata,
+    reconcile_paper_identity,
     register_aliases,
-    repoint_aliases,
-    resolve_aliases,
 )
 
 if TYPE_CHECKING:
@@ -110,39 +109,18 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             # Recommendation payloads can include the seed paper itself.
             # Preserve the original seed object so GraphBuilderStrategy can always
             # identify a node with ``is_seed=True``.
-            matched_ids = resolve_aliases(identity_aliases, paper)
-            if seed.paper_id in matched_ids:
-                loser_ids = [
-                    paper_id
-                    for paper_id in papers
-                    if paper_id != seed.paper_id and paper_id in matched_ids
-                ]
-                for loser_id in loser_ids:
-                    merge_paper_metadata(seed, papers.pop(loser_id))
-                merge_paper_metadata(seed, paper)
-                repoint_aliases(
-                    identity_aliases,
-                    seed.paper_id,
-                    set(loser_ids) | {seed.paper_id},
-                )
-                register_aliases(identity_aliases, seed.paper_id, paper)
+            reconciliation = reconcile_paper_identity(
+                identity_aliases, seed, papers, paper
+            )
+            if reconciliation.seed_matched:
                 continue
 
-            matched_candidates = [
-                paper_id
-                for paper_id, existing in papers.items()
-                if not existing.is_seed and paper_id in matched_ids
-            ]
-            if matched_candidates:
-                canonical_id = matched_candidates[0]
+            canonical_id = reconciliation.canonical_id
+            if canonical_id is not None:
                 existing = papers[canonical_id]
-                for loser_id in matched_candidates[1:]:
-                    merge_paper_metadata(existing, papers.pop(loser_id))
                 if not existing.references:
                     self._hydrate_references(paper)
-                merge_paper_metadata(existing, paper)
-                repoint_aliases(identity_aliases, canonical_id, set(matched_candidates))
-                register_aliases(identity_aliases, canonical_id, paper)
+                    merge_paper_metadata(existing, paper)
                 continue
 
             if not paper.abstract or not paper.title:
