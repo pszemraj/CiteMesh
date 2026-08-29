@@ -159,11 +159,12 @@ def test_load_skips_unknown_and_invalid_entries(
     assert "unknown_table" in messages
 
 
+@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
 def test_load_corrupt_file_warns_and_returns_empty(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    payload: bytes, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     config_path = tmp_path / "config.toml"
-    config_path.write_text("not [valid toml", encoding="utf-8")
+    config_path.write_bytes(payload)
     with caplog.at_level(logging.WARNING, logger="citemesh.core.user_config"):
         config = load_user_config(config_path)
     assert config.defaults == {}
@@ -172,13 +173,14 @@ def test_load_corrupt_file_warns_and_returns_empty(
     )
 
 
-def test_set_on_corrupt_file_fails_loudly(tmp_path: Path) -> None:
+@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
+def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> None:
     config_path = tmp_path / "config.toml"
-    config_path.write_text("not [valid toml", encoding="utf-8")
+    config_path.write_bytes(payload)
     with pytest.raises(ConfigFileError, match="Cannot rewrite config file"):
         set_config_value("defaults.theme", "dark", path=config_path)
     # Corrupt content must remain untouched for manual repair.
-    assert config_path.read_text(encoding="utf-8") == "not [valid toml"
+    assert config_path.read_bytes() == payload
 
 
 def test_set_preserves_unrecognized_raw_keys(tmp_path: Path) -> None:
@@ -359,6 +361,36 @@ def test_cli_corpus_flag_overrides_config_semantic_source() -> None:
     assert args.semantic_source == "arxiv-corpus"
 
 
+def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
+    """Explicit candidate options should make unused corpus defaults inert."""
+    args, provided, build_parser = _parsed_build_args(
+        [
+            "paper-id",
+            "--strategy",
+            "embedding",
+            "--candidate-pool-size",
+            "50",
+        ]
+    )
+    config = UserConfig(
+        path=Path("unused"),
+        defaults={
+            "semantic_source": "arxiv-corpus",
+            "streaming": True,
+            "dataset_split": "train[:5%]",
+        },
+    )
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    cli_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied
+    )
+
+    assert args.semantic_source == "candidates"
+    assert args.candidate_pool_size == 50
+    assert args.streaming is True
+    assert args.dataset_split == "train[:5%]"
+
+
 def test_config_semantic_source_corpus_applies_without_flags() -> None:
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "embedding"]
@@ -482,10 +514,11 @@ def test_config_cli_without_subcommand_prints_help() -> None:
     assert "Config operations" in result.stdout
 
 
-def test_config_cli_list_survives_corrupt_file() -> None:
+@pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
+def test_config_cli_list_survives_corrupt_file(payload: bytes) -> None:
     config_path = user_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text("not [valid toml", encoding="utf-8")
+    config_path.write_bytes(payload)
     result = _run_cli(["config", "list"])
     assert result.returncode == 0
 

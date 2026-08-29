@@ -471,6 +471,9 @@ _CORPUS_ONLY_OPTION_DESTS: Set[str] = {
     "all_corpus",
     "streaming",
 }
+# Explicit candidate-only options imply candidate sourcing just as explicit
+# corpus-only options imply corpus sourcing.
+_CANDIDATE_ONLY_OPTION_DESTS: Set[str] = {"candidate_pool_size"}
 _BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
     "max_citations": ["--max-citations", "-c"],
     "max_references": ["--max-references", "-r"],
@@ -825,12 +828,29 @@ def _validate_build_cli_contract(
             for dest in provided
             if dest in _CORPUS_ONLY_OPTION_DESTS
         )
-        if provided_corpus_flags and "semantic_source" not in provided:
-            args.semantic_source = "arxiv-corpus"
-            logger.info(
-                "Corpus option(s) %s imply --semantic-source arxiv-corpus.",
-                ", ".join(provided_corpus_flags),
-            )
+        provided_candidate_flags = sorted(
+            _BUILD_OPTION_PRIMARY_FLAG[dest]
+            for dest in provided
+            if dest in _CANDIDATE_ONLY_OPTION_DESTS
+        )
+        if "semantic_source" not in provided:
+            if provided_corpus_flags and provided_candidate_flags:
+                build_parser.error(
+                    "Corpus-only and candidate-only options cannot be combined: "
+                    f"{', '.join(provided_corpus_flags + provided_candidate_flags)}."
+                )
+            if provided_corpus_flags:
+                args.semantic_source = "arxiv-corpus"
+                logger.info(
+                    "Corpus option(s) %s imply --semantic-source arxiv-corpus.",
+                    ", ".join(provided_corpus_flags),
+                )
+            elif provided_candidate_flags:
+                args.semantic_source = "candidates"
+                logger.info(
+                    "Candidate option(s) %s imply --semantic-source candidates.",
+                    ", ".join(provided_candidate_flags),
+                )
         if args.semantic_source != "arxiv-corpus":
             if provided_corpus_flags:
                 option_text = ", ".join(provided_corpus_flags)
@@ -851,11 +871,15 @@ def _validate_build_cli_contract(
                     "Candidate mode stores embeddings as float32 "
                     "(int8 calibration requires corpus hydration)."
                 )
-        elif "candidate_pool_size" in provided:
+        elif provided_candidate_flags:
             build_parser.error(
                 "--candidate-pool-size requires --semantic-source candidates."
             )
-        if args.streaming and ":" in str(args.dataset_split):
+        if (
+            args.semantic_source == "arxiv-corpus"
+            and args.streaming
+            and ":" in str(args.dataset_split)
+        ):
             build_parser.error(
                 "Streaming mode does not support sliced --dataset-split values "
                 "(for example train[:5%]). Use unsliced split (e.g. train) or "

@@ -348,7 +348,7 @@ def load_user_config(path: Optional[Path] = None) -> UserConfig:
     try:
         with config_path.open("rb") as handle:
             document = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         logger.warning("Ignoring unreadable config file %s: %s", config_path, exc)
         return UserConfig(path=config_path)
 
@@ -382,7 +382,7 @@ def _read_raw_document(config_path: Path) -> Dict[str, Any]:
     try:
         with config_path.open("rb") as handle:
             return tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigFileError(
             f"Cannot rewrite config file {config_path}: {exc}. "
             "Fix or remove the file, then retry."

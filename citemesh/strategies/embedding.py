@@ -758,7 +758,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 )
             self._clear_embedding_cache(clear_reason)
         self.use_streaming = use_streaming
-        if self.use_streaming and ":" in self.dataset_split:
+        if (
+            self.semantic_source == "arxiv-corpus"
+            and self.use_streaming
+            and ":" in self.dataset_split
+        ):
             raise ValueError(
                 "Streaming mode does not support sliced dataset splits such as "
                 f"'{self.dataset_split}'. Use --dataset-split train with "
@@ -1877,7 +1881,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         # Semantic Scholar fetches in hybrid mode.
         resolved_seed_paper = seed_paper
         if resolved_seed_paper is None:
-            resolved_seed_paper = self.client.get_paper(seed_id)
+            resolved_seed_paper = self.client.get_paper(
+                seed_id, raise_on_unavailable=True
+            )
 
         seed_metadata: Dict[str, str] = {}
 

@@ -1299,7 +1299,9 @@ class SemanticScholarClient:
         payload = self._request_json(
             f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}", base_params
         )
-        raw_recommendations = (payload or {}).get("recommendedPapers", [])
+        if payload is None:
+            return []
+        raw_recommendations = payload.get("recommendedPapers", [])
         if not raw_recommendations:
             # The default candidate pool ("recent") only covers recent papers
             # and returns nothing for classic seeds (e.g. 2017 landmark

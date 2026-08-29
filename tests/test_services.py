@@ -1048,6 +1048,12 @@ def test_recommendations_fall_back_to_all_cs_pool() -> None:
     assert client.get_recommended_papers("seed", limit=5) == []
     assert client._request_json.call_count == 2
 
+    # An unavailable primary request already exhausted its retry budget; it is
+    # not evidence that the recent pool was valid but empty.
+    client._request_json = MagicMock(return_value=None)
+    assert client.get_recommended_papers("seed", limit=5) == []
+    assert client._request_json.call_count == 1
+
 
 def test_jittered_backoff_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     """Backoff escalates exponentially with jitter, floored at Retry-After."""

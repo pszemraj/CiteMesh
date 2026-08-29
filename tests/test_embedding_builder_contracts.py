@@ -18,6 +18,7 @@ from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
 )
 from citemesh.data.embedding_cache import CacheNamespacePayloadStats, CacheSearchResult
+from citemesh.services.semantic_scholar import SemanticScholarUnavailableError
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
     ENCODE_BATCH_SIZE,
@@ -1339,8 +1340,18 @@ def test_metadata_and_streaming_loader_contracts(
             max_papers=1,
             dataset_split="train[:5%]",
             use_streaming=True,
+            semantic_source="arxiv-corpus",
             client=MagicMock(),
         )
+
+    candidate_builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        dataset_split="train[:5%]",
+        use_streaming=True,
+        semantic_source="candidates",
+        client=MagicMock(),
+    )
+    assert candidate_builder.semantic_source == "candidates"
 
 
 def test_arxiv_id_chronology_key_parses_both_styles() -> None:
@@ -1584,6 +1595,9 @@ def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
 
     query_builder.collect_papers("attention routing")
 
+    query_builder.client.get_paper.assert_called_once_with(
+        "attention routing", raise_on_unavailable=True
+    )
     assert query_calls == ["attention routing"]
     assert query_documents == []
     assert query_texts == ["Q::attention routing"]
@@ -1610,9 +1624,25 @@ def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
 
     paper_builder.collect_papers("paper-1")
 
+    paper_builder.client.get_paper.assert_called_once_with(
+        "paper-1", raise_on_unavailable=True
+    )
     assert paper_queries == []
     assert paper_documents == [{"title": "Seed Title", "abstract": "Seed Abstract"}]
     assert paper_texts == ["D::Seed Title::Seed Abstract"]
+
+    outage_builder, outage_queries, outage_documents = _build_builder()
+    outage_builder.client.get_paper = MagicMock(
+        side_effect=SemanticScholarUnavailableError("Semantic Scholar is unavailable")
+    )
+
+    with pytest.raises(
+        SemanticScholarUnavailableError, match="Semantic Scholar is unavailable"
+    ):
+        outage_builder.collect_papers("arxiv:1706.03762")
+
+    assert outage_queries == []
+    assert outage_documents == []
 
     prefetched_builder, prefetched_queries, prefetched_documents = _build_builder()
     prefetched_texts: list[str] = []
