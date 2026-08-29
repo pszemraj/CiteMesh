@@ -808,7 +808,7 @@ def test_legacy_head_slice_hydration_metadata_fails_is_hydrated() -> None:
 
         # Simulate a cache hydrated before the newest-slice policy landed.
         with cache._connect_db() as conn:
-            cache._set_cache_metadata(conn, HYDRATION_CORPUS_SIZE_KEY, "2")
+            cache._set_cache_metadata(conn, {HYDRATION_CORPUS_SIZE_KEY: "2"})
         assert not cache.is_hydrated("train", 2, dataset_source="fake/source")
 
 
