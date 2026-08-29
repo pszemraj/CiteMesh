@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
+import subprocess
+import sys
 import types
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -16,6 +20,7 @@ import pytest
 from citemesh.core import Author, Paper
 from citemesh.data.model_profiles import get_embedding_model_profile
 from citemesh.visualization import export as export_module
+from citemesh.visualization import render as render_module
 from citemesh.visualization import themes as themes_module
 from citemesh.visualization.export import (
     DASHBOARD_AXIS_MIN_PADDING,
@@ -685,6 +690,9 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert rendered_max_diameter == pytest.approx(DASHBOARD_MAX_NODE_DIAMETER)
     assert max(marker["line"]["width"]) >= 4
     assert min(marker["line"]["width"]) == 0
+    seed_index = payload["meta"]["plotly_node_order"].index("seed")
+    seed_ring_color = marker["line"]["color"][seed_index]
+    assert f"--seed-ring: {seed_ring_color};" in rendered
     node_x = node_trace["x"]
     node_y = node_trace["y"]
     x_span = max(node_x) - min(node_x)
@@ -736,6 +744,25 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert "function hasCompleteDashboardGeometry" in runtime_script
     assert "function selectDashboardLabelIds" in runtime_script
     assert "function dashboardNodeLabel" in runtime_script
+    assert "function dashboardHoverText" in runtime_script
+    assert "hoverTexts.push(dashboardHoverText(node, nodeId));" in runtime_script
+    assert "function normalizeDashboardEdgeStrengths" in runtime_script
+    assert (
+        f"const xPad = Math.max({DASHBOARD_AXIS_X_PADDING}, xSpan * 0.1);"
+        in runtime_script
+    )
+    assert (
+        f"const yPad = Math.max({DASHBOARD_AXIS_MIN_PADDING}, ySpan * 0.08);"
+        in runtime_script
+    )
+    assert "width: 0.45 + (1.2 * strength)" in runtime_script
+    assert (
+        "color: colorWithAlpha(dashboardEdgeColor, 0.07 + (0.25 * strength))"
+        in runtime_script
+    )
+    assert "return pruneSavedIdsForPayload(savedIds);" in runtime_script
+    assert "`citemesh-saved:${strategy}:${seedId}`" in runtime_script
+    assert '`Year: ${node.year || "n.d."}' not in runtime_script
     assert "setControlsCollapsed(true);" in runtime_script
     assert "escapeRegExp" not in runtime_script
 
@@ -1090,6 +1117,7 @@ def test_missing_year_visual_contracts(
             marker = dict(kwargs["marker"])
             marker["color"] = list(marker["color"])
             captured["marker"] = marker
+            captured["hovertext"] = list(kwargs["hovertext"])
         return {"type": "scatter", **kwargs}
 
     _install_fake_plotly(
@@ -1137,6 +1165,11 @@ def test_missing_year_visual_contracts(
     assert 0 not in marker_colors
     assert marker["cmin"] == 2000.0
     assert marker["cmax"] == 2001.0
+    hovertext = captured["hovertext"]
+    assert isinstance(hovertext, list)
+    seed_hover = next(text for text in hovertext if "Seed Paper" in text)
+    assert "n.d. | 3 citations" in seed_hover
+    assert "None" not in seed_hover
 
     graphml = nx.read_graphml(graphml_path)
     assert str(graphml.nodes["missing-year"]["year"]) == "0"
@@ -1344,19 +1377,18 @@ def test_portrait_layout_is_rotated_for_landscape_exports() -> None:
 
 
 def test_disconnected_components_are_packed_by_node_count() -> None:
-    """Larger components should receive more layout width than small islands."""
+    """Larger components should retain most layout width beside small islands."""
     graph = nx.Graph()
     main_nodes = [f"main-{index}" for index in range(6)]
-    island_nodes = ["island-a", "island-b"]
     graph.add_edges_from(zip(main_nodes, main_nodes[1:]))
-    graph.add_edge(*island_nodes)
+    island_nodes = [f"island-{index}" for index in range(6)]
+    graph.add_nodes_from(island_nodes)
     positions = {
         **{
             node: np.array([float(index % 3), float(index // 3)])
             for index, node in enumerate(main_nodes)
         },
-        "island-a": np.array([100.0, -1.0]),
-        "island-b": np.array([100.0, 1.0]),
+        **{node: np.array([100.0, 0.0]) for node in island_nodes},
     }
 
     packed = _pack_disconnected_components(positions, graph)
@@ -1365,8 +1397,30 @@ def test_disconnected_components_are_packed_by_node_count() -> None:
     coords = np.array(list(packed.values()), dtype=float)
     span_x, span_y = np.ptp(coords, axis=0)
 
-    assert max(main_x) - min(main_x) > max(island_x) - min(island_x)
+    assert (max(main_x) - min(main_x)) / span_x > 0.55
+    assert np.mean(main_x) < max(island_x)
     assert span_x > span_y
+
+
+def test_all_singleton_components_are_packed_in_two_dimensions() -> None:
+    """Many isolated nodes should occupy rows with a marker-sized footprint."""
+    graph = nx.Graph()
+    nodes = [f"paper-{index:02d}" for index in range(20)]
+    graph.add_nodes_from(nodes)
+    positions = {node: np.array([0.0, 0.0]) for node in nodes}
+
+    packed = _pack_disconnected_components(positions, graph)
+    coords = np.array([packed[node] for node in nodes], dtype=float)
+    pairwise_distances = [
+        math.dist(coords[left], coords[right])
+        for left in range(len(coords))
+        for right in range(left + 1, len(coords))
+    ]
+    span_x, span_y = np.ptp(coords, axis=0)
+
+    assert span_x > 0.0
+    assert span_y > 0.0
+    assert min(pairwise_distances) >= 0.45
 
 
 def test_static_viewport_limits_fill_landscape_canvas() -> None:
@@ -1592,15 +1646,102 @@ def test_semantic_export_uses_graph_strategy_when_metadata_is_omitted(
     assert related_node["seed_relation"] == "semantic_only"
 
 
-def test_visualization_pins_headless_backend() -> None:
-    """Importing the visualization package should pin a headless matplotlib backend."""
-    import os
+def test_visualization_import_preserves_programmatically_selected_backend(
+    tmp_path: Path,
+) -> None:
+    """Package import should not replace a backend selected through matplotlib."""
+    env = os.environ.copy()
+    env.pop("MPLBACKEND", None)
+    env["MPLCONFIGDIR"] = str(tmp_path / "matplotlib")
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import matplotlib; matplotlib.use('svg'); "
+            "import citemesh.visualization; "
+            "assert matplotlib.get_backend().lower() == 'svg'",
+        ],
+        cwd=Path(__file__).parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
-    if os.environ.get("MPLBACKEND"):
-        pytest.skip("MPLBACKEND explicitly set; backend pin intentionally skipped")
+    assert result.returncode == 0, result.stderr
 
-    import matplotlib
 
-    import citemesh.visualization  # noqa: F401
+@pytest.mark.parametrize(
+    ("backend", "suffix"), [("svg", ".svg"), ("pdf", ".pdf"), ("ps", ".ps")]
+)
+def test_visualize_graph_supports_non_agg_backends(
+    backend: str, suffix: str, tmp_path: Path
+) -> None:
+    """Static labels should render end-to-end on non-Agg canvases."""
+    output_path = tmp_path / f"graph{suffix}"
+    env = os.environ.copy()
+    env["MPLBACKEND"] = backend
+    env["MPLCONFIGDIR"] = str(tmp_path / f"matplotlib-{backend}")
+    script = """
+import sys
+from pathlib import Path
 
-    assert matplotlib.get_backend().lower() == "agg"
+import networkx as nx
+import numpy as np
+
+from citemesh.visualization import visualize_graph
+
+graph = nx.Graph()
+graph.add_node(
+    "seed", title="Seed Paper", year=2025, authors=["Seed Author"], is_seed=True
+)
+graph.add_node(
+    "related", title="Related Paper", year=2024, authors=["Other Author"]
+)
+graph.add_edge("seed", "related", weight=0.8)
+visualize_graph(
+    graph,
+    "seed",
+    Path(sys.argv[1]),
+    layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(output_path)],
+        cwd=Path(__file__).parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert output_path.stat().st_size > 0
+
+
+def test_visualize_graph_uses_local_agg_canvas_for_macosx(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Static export should avoid the MacOSX GUI canvas without switching globally."""
+    graph, seed_id = _build_graph()
+    output_path = tmp_path / "graph.png"
+
+    monkeypatch.setattr(render_module.matplotlib, "get_backend", lambda: "MacOSX")
+    monkeypatch.setattr(
+        render_module.matplotlib,
+        "use",
+        lambda *_args, **_kwargs: pytest.fail("Static export must not switch backends"),
+    )
+    monkeypatch.setattr(
+        render_module.plt,
+        "subplots",
+        lambda **_kwargs: pytest.fail("MacOSX export should use a local Agg canvas"),
+    )
+    visualize_graph(
+        graph,
+        seed_id,
+        output_path,
+        layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
+    )
+
+    assert output_path.stat().st_size > 0

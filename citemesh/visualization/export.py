@@ -781,7 +781,11 @@ class GraphExporter:
                 if len(paper.authors) > 3:
                     authors += f" +{len(paper.authors) - 3}"
                 lines.append(html.escape(authors))
-                fact_bits = [str(paper.year), f"{paper.citation_count:,} citations"]
+                paper_year = self._coerce_year(paper.year)
+                fact_bits = [
+                    str(paper_year) if paper_year > 0 else "n.d.",
+                    f"{paper.citation_count:,} citations",
+                ]
                 venue = " ".join(str(attrs.get("venue") or "").split())
                 if venue:
                     fact_bits.append(venue if len(venue) <= 44 else venue[:41] + "...")
@@ -1437,7 +1441,10 @@ class GraphExporter:
             "__GRAPH_BG__": theme_obj.background,
             "__NODE_COLOR_OLD__": _rgb_tuple_to_hex(theme_obj.node_color_old),
             "__NODE_COLOR_NEW__": _rgb_tuple_to_hex(theme_obj.node_color_new),
+            "__SEED_RING__": _rgb_tuple_to_hex(theme_obj.seed_color),
+            "__DASHBOARD_EDGE_COLOR__": _rgb_tuple_to_hex(theme_obj.edge_color),
             "__DASHBOARD_AXIS_MIN_PADDING__": str(DASHBOARD_AXIS_MIN_PADDING),
+            "__DASHBOARD_AXIS_X_PADDING__": str(DASHBOARD_AXIS_X_PADDING),
             "__DASHBOARD_LABEL_CAP__": str(DASHBOARD_LABEL_CAP),
             "__DASHBOARD_LABEL_MIN_DISTANCE__": str(DASHBOARD_LABEL_MIN_DISTANCE),
             "__PLOTLY_JS__": plotly_js,
@@ -1466,7 +1473,7 @@ class GraphExporter:
       --accent-soft: __ACCENT_SOFT__;
       --graph-bg: __GRAPH_BG__;
       --shadow-soft: rgba(0, 0, 0, 0.18);
-      --seed-ring: #d66cbf;
+      --seed-ring: __SEED_RING__;
     }
     * { box-sizing: border-box; }
     /* Plotly overlay SVGs must stay transparent; dark-mode extensions that
@@ -2287,7 +2294,97 @@ class GraphExporter:
     function currentSeedRingColor() {
       const styles = getComputedStyle(document.documentElement);
       const color = String(styles.getPropertyValue("--seed-ring") || "").trim();
-      return color || "#d66cbf";
+      return color || "__SEED_RING__";
+    }
+
+    function colorWithAlpha(hexColor, alpha) {
+      const match = /^#([0-9a-f]{6})$/i.exec(String(hexColor || "").trim());
+      const clampedAlpha = Math.max(0, Math.min(1, Number(alpha) || 0));
+      if (!match) {
+        return `rgba(255,255,255,${clampedAlpha.toFixed(3)})`;
+      }
+      const value = match[1];
+      const red = parseInt(value.slice(0, 2), 16);
+      const green = parseInt(value.slice(2, 4), 16);
+      const blue = parseInt(value.slice(4, 6), 16);
+      return `rgba(${red},${green},${blue},${clampedAlpha.toFixed(3)})`;
+    }
+
+    function normalizeDashboardEdgeStrengths(edges) {
+      const weights = edges.map((edge) =>
+        Math.max(safeFiniteNumber(edge && edge.weight, 0), 0)
+      );
+      if (!weights.length) {
+        return [];
+      }
+      const minimum = Math.min(...weights);
+      const maximum = Math.max(...weights);
+      const span = maximum - minimum;
+      if (span <= 1e-9) {
+        return weights.map(() => 0.5);
+      }
+      return weights.map((weight) => (weight - minimum) / span);
+    }
+
+    function wrapDashboardHoverTitle(value, width) {
+      const words = String(value || "").trim().split(/\\s+/).filter(Boolean);
+      const lines = [];
+      for (const word of words) {
+        const current = lines.length ? lines[lines.length - 1] : "";
+        if (!current || current.length + 1 + word.length > width) {
+          lines.push(word);
+        } else {
+          lines[lines.length - 1] = `${current} ${word}`;
+        }
+      }
+      return lines;
+    }
+
+    function dashboardHoverText(node, nodeId) {
+      const titleLines = wrapDashboardHoverTitle(node.title || nodeId, 58);
+      const titleHtml = titleLines.map(escapeHtml).join("<br>") || escapeHtml(nodeId);
+      const lines = [`<b>${titleHtml}</b>`];
+      const authorNames = Array.isArray(node.authors)
+        ? node.authors.map((author) => String(author || "").trim()).filter(Boolean)
+        : [];
+      let authors = authorNames.slice(0, 3).join(", ") || "Unknown";
+      if (authorNames.length > 3) {
+        authors += ` +${authorNames.length - 3}`;
+      }
+      lines.push(escapeHtml(authors));
+
+      const citationCount = Math.max(
+        Math.trunc(safeFiniteNumber(node.citation_count, 0)),
+        0
+      );
+      const factBits = [
+        hasYear(node) ? String(Number(node.year)) : "n.d.",
+        `${citationCount.toLocaleString("en-US")} citations`,
+      ];
+      const venue = String(node.venue || "").trim().split(/\\s+/).filter(Boolean).join(" ");
+      if (venue) {
+        factBits.push(venue.length <= 44 ? venue : `${venue.slice(0, 41)}...`);
+      }
+      lines.push(escapeHtml(factBits.join(" | ")));
+
+      const relationLabels = {
+        seed: "seed paper",
+        referenced_by_seed: "referenced by seed",
+        cites_seed: "cites seed",
+        overlap: "prior + derivative work",
+        semantic_only: "semantic match",
+        citation: "citation graph",
+        semantic: "semantic match",
+        both: "citations + semantic match",
+      };
+      const relationKey = node.is_seed
+        ? "seed"
+        : String(node.seed_relation || node.provenance || "");
+      const relationLabel = relationLabels[relationKey] || "";
+      if (relationLabel) {
+        lines.push(`<i>${escapeHtml(relationLabel)}</i>`);
+      }
+      return lines.join("<br>");
     }
 
     function extractEmbeddedScriptJson(text, scriptId) {
@@ -2402,6 +2499,7 @@ class GraphExporter:
       );
       const seedId = String(meta.seed_id || "");
       const seedRingColor = currentSeedRingColor();
+      const edgeStrengths = normalizeDashboardEdgeStrengths(nextEdges);
 
       const nodeTexts = [];
       const hoverTexts = [];
@@ -2413,18 +2511,11 @@ class GraphExporter:
         const node = nextNodeById.get(nodeId) || {};
         const label = labelIds.has(nodeId) ? dashboardNodeLabel(node, nodeId) : "";
         nodeTexts.push(label);
-        const authors = Array.isArray(node.authors) && node.authors.length
-          ? node.authors.slice(0, 3).join(", ")
-          : "Unknown";
         const nodeYear = Number.isFinite(Number(node.year)) && Number(node.year) > 0
           ? Number(node.year)
           : safeYearMin;
         nodeYears.push(nodeYear);
-        hoverTexts.push([
-          `<b>${escapeHtml(node.title || nodeId)}</b>`,
-          escapeHtml(authors),
-          `Year: ${node.year || "n.d."} | Citations: ${Number(node.citation_count || 0)}`,
-        ].join("<br>"));
+        hoverTexts.push(dashboardHoverText(node, nodeId));
         if (node.is_seed) {
           lineWidths.push(4.0);
           lineColors.push(seedRingColor);
@@ -2440,13 +2531,11 @@ class GraphExporter:
       const yMax = Math.max(...yPairs);
       const xSpan = Math.max(xMax - xMin, 1e-6);
       const ySpan = Math.max(yMax - yMin, 1e-6);
-      const xPad = Math.max(__DASHBOARD_AXIS_MIN_PADDING__, xSpan * 0.08);
+      const xPad = Math.max(__DASHBOARD_AXIS_X_PADDING__, xSpan * 0.1);
       const yPad = Math.max(__DASHBOARD_AXIS_MIN_PADDING__, ySpan * 0.08);
-      const baseShapeColor =
-        (((templateLayout.shapes || [])[0] || {}).line || {}).color
-        || "rgba(127, 143, 163, 0.24)";
+      const dashboardEdgeColor = "__DASHBOARD_EDGE_COLOR__";
       const edgeShapes = [];
-      nextEdges.forEach((edge) => {
+      nextEdges.forEach((edge, edgeIndex) => {
         const leftId = String(edge.source || "");
         const rightId = String(edge.target || "");
         const leftIdx = order.indexOf(leftId);
@@ -2465,12 +2554,13 @@ class GraphExporter:
         const direction = stableCurveDirection(leftId, rightId);
         const cx = midX - (dy * 0.15 * direction);
         const cy = midY + (dx * 0.15 * direction);
+        const strength = edgeStrengths[edgeIndex];
         edgeShapes.push({
           type: "path",
           path: `M ${x0},${y0} Q ${cx},${cy} ${x1},${y1}`,
           line: {
-            color: baseShapeColor,
-            width: Math.max(0.5, Number(edge.weight || 0) * 2.0),
+            color: colorWithAlpha(dashboardEdgeColor, 0.07 + (0.25 * strength)),
+            width: 0.45 + (1.2 * strength),
           },
           layer: "below",
         });
@@ -2500,7 +2590,7 @@ class GraphExporter:
         haloTrace.y = seedIdx >= 0 ? [yPairs[seedIdx]] : [];
         haloTrace.marker = Object.assign({}, haloTrace.marker || {}, {
           size: seedIdx >= 0 ? [alignedNodeSizes[seedIdx] * 2.05] : [],
-          color: seedIdx >= 0 ? ["rgba(214, 108, 191, 0.26)"] : [],
+          color: seedIdx >= 0 ? [colorWithAlpha(seedRingColor, 0.26)] : [],
         });
         nextTraceSpecs[nextHaloTraceIndex] = haloTrace;
       }
@@ -2636,14 +2726,27 @@ class GraphExporter:
     };
 
     function savedStorageKey() {
-      return "citemesh-saved:" + String((payload.meta && payload.meta.seed_id) || "default");
+      const meta = (payload && payload.meta) || {};
+      const strategy = String(meta.strategy || "default");
+      const seedId = String(meta.seed_id || "default");
+      return `citemesh-saved:${strategy}:${seedId}`;
+    }
+
+    function pruneSavedIdsForPayload(savedIds) {
+      const availableIds = new Set(
+        (payload.nodes || []).map((node) => String(node.id || "")).filter(Boolean)
+      );
+      return new Set(
+        Array.from(savedIds).filter((nodeId) => availableIds.has(String(nodeId)))
+      );
     }
 
     function loadSavedIdSet() {
       try {
         const raw = window.localStorage.getItem(savedStorageKey());
         const parsed = raw ? JSON.parse(raw) : [];
-        return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+        const savedIds = new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+        return pruneSavedIdsForPayload(savedIds);
       } catch (err) {
         return new Set();
       }

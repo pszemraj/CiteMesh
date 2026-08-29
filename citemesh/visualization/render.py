@@ -12,10 +12,12 @@ import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
 
+import matplotlib
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
+from matplotlib.backend_bases import _get_renderer
 
 from citemesh.core import VIZ_CONFIG
 
@@ -47,6 +49,8 @@ COMMUNITY_SCAFFOLD_WEIGHT = 0.15
 MAX_STATIC_NON_SEED_LABELS = 12
 DISCONNECTED_COMPONENT_GAP = 0.18
 DISCONNECTED_COMPONENT_MIN_SCALE = 0.32
+DISCONNECTED_COMPONENT_MIN_EXTENT = 0.28
+DISCONNECTED_COMPONENT_TARGET_ASPECT = 1.6
 STATIC_VIEWPORT_MARGIN_RATIO = 0.08
 STATIC_VIEWPORT_MIN_MARGIN = 0.1
 
@@ -418,7 +422,7 @@ def _layout_viewport_limits(
 def _pack_disconnected_components(
     pos: Dict[Hashable, np.ndarray], graph: nx.Graph
 ) -> Dict[Hashable, np.ndarray]:
-    """Pack disconnected components horizontally in proportion to node count.
+    """Pack disconnected components into deterministic size-aware rows.
 
     :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
     :param nx.Graph graph: Graph defining connected-component membership.
@@ -436,10 +440,15 @@ def _pack_disconnected_components(
             for node, position in pos.items()
         }
 
-    components.sort(key=lambda members: (len(members), tuple(map(str, members))))
+    components.sort(key=lambda members: (-len(members), tuple(map(str, members))))
     largest_size = max(len(component) for component in components)
-    packed: Dict[Hashable, np.ndarray] = {}
-    cursor_x = 0.0
+    component_layouts: List[
+        Tuple[
+            Dict[Hashable, np.ndarray],
+            Tuple[float, float],
+            Tuple[float, float],
+        ]
+    ] = []
 
     for component in components:
         component_pos = {
@@ -458,19 +467,52 @@ def _pack_disconnected_components(
             node: np.asarray(position, dtype=float) * scale
             for node, position in normalized.items()
         }
-        xs = [float(position[0]) for position in scaled.values()]
-        min_x = min(xs, default=0.0)
-        max_x = max(xs, default=0.0)
-        allocated_width = max(max_x - min_x, 0.18 * scale)
-        target_center_x = cursor_x + allocated_width * 0.5
-        current_center_x = (min_x + max_x) * 0.5
-        offset_x = target_center_x - current_center_x
+        coords = np.array(list(scaled.values()), dtype=float)
+        if coords.size:
+            min_x, min_y = coords.min(axis=0)
+            max_x, max_y = coords.max(axis=0)
+        else:
+            min_x = min_y = max_x = max_y = 0.0
+        width = max(float(max_x - min_x), DISCONNECTED_COMPONENT_MIN_EXTENT)
+        height = max(float(max_y - min_y), DISCONNECTED_COMPONENT_MIN_EXTENT)
+        component_layouts.append(
+            (
+                scaled,
+                (float((min_x + max_x) * 0.5), float((min_y + max_y) * 0.5)),
+                (width, height),
+            )
+        )
+
+    padded_area = sum(
+        (width + DISCONNECTED_COMPONENT_GAP) * (height + DISCONNECTED_COMPONENT_GAP)
+        for _, _, (width, height) in component_layouts
+    )
+    target_row_width = max(
+        max(width for _, _, (width, _) in component_layouts),
+        math.sqrt(padded_area * DISCONNECTED_COMPONENT_TARGET_ASPECT),
+    )
+
+    packed: Dict[Hashable, np.ndarray] = {}
+    cursor_x = 0.0
+    cursor_y = 0.0
+    row_height = 0.0
+    for scaled, current_center, (width, height) in component_layouts:
+        if cursor_x > 0.0 and cursor_x + width > target_row_width:
+            cursor_x = 0.0
+            cursor_y += row_height + DISCONNECTED_COMPONENT_GAP
+            row_height = 0.0
+
+        target_center_x = cursor_x + width * 0.5
+        target_center_y = cursor_y + height * 0.5
+        offset_x = target_center_x - current_center[0]
+        offset_y = target_center_y - current_center[1]
         for node, position in scaled.items():
             packed[node] = np.array(
-                [float(position[0]) + offset_x, float(position[1])],
+                [float(position[0]) + offset_x, float(position[1]) + offset_y],
                 dtype=float,
             )
-        cursor_x += allocated_width + DISCONNECTED_COMPONENT_GAP
+        cursor_x += width + DISCONNECTED_COMPONENT_GAP
+        row_height = max(row_height, height)
 
     if not packed:
         return {}
@@ -823,7 +865,7 @@ def draw_labels(
     label_bounds: List[Any] = []
     non_seed_label_count = 0
     ax.figure.canvas.draw()
-    renderer = ax.figure.canvas.get_renderer()
+    renderer = _get_renderer(ax.figure)
     for node in candidate_nodes:
         p = pos[node]
 
@@ -946,8 +988,19 @@ def visualize_graph(
     sizes = compute_node_sizes(graph)
     colors, _, _ = compute_node_colors(graph, seed_id, theme)
 
-    # Create figure
-    fig, ax = plt.subplots(figsize=VIZ_CONFIG.figure_size, facecolor=theme.background)
+    # The MacOSX canvas requires the GUI main thread. Use an Agg canvas only for
+    # this static figure without replacing the application's selected backend.
+    if str(matplotlib.get_backend()).lower() == "macosx":
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        fig = Figure(figsize=VIZ_CONFIG.figure_size, facecolor=theme.background)
+        FigureCanvasAgg(fig)
+        ax = fig.subplots()
+    else:
+        fig, ax = plt.subplots(
+            figsize=VIZ_CONFIG.figure_size, facecolor=theme.background
+        )
     fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.02)
     ax.set_aspect("equal")
     ax.axis("off")
@@ -986,12 +1039,12 @@ def visualize_graph(
         add_metadata_box(ax, metadata, pos, theme)
 
     # Save figure
-    plt.savefig(
+    fig.savefig(
         output_path,
         dpi=dpi,
         facecolor=theme.background,
     )
-    plt.close()
+    plt.close(fig)
 
 
 def generate_output_path(
