@@ -45,7 +45,7 @@ STRATEGY_CHOICES: Tuple[str, ...] = (
 THEME_CHOICES: Tuple[str, ...] = ("light", "dark", "solarized", "auto")
 DEVICE_CHOICES: Tuple[str, ...] = ("auto", "cuda", "mps", "cpu")
 SEMANTIC_SOURCE_CHOICES: Tuple[str, ...] = ("candidates", "arxiv-corpus")
-STORAGE_PRECISION_CHOICES: Tuple[str, ...] = ("int8", "float16", "float32")
+STORAGE_PRECISION_CHOICES: Tuple[str, ...] = ("int8", "float32")
 SEARCH_MODE_CHOICES: Tuple[str, ...] = ("auto", "local", "s2")
 EXPORT_CHOICES: Tuple[str, ...] = (
     "png",

@@ -13,13 +13,16 @@ import h5py
 import numpy as np
 import pytest
 
+import citemesh.data.embedding_cache as embedding_cache_module
 from citemesh.data.embedding_cache import (
+    BINARY_INDEX_DATASET_NAME,
     CALIBRATION_SAMPLE_SIZE_KEY,
     COMPRESSION_FILTER_KEY,
     COMPRESSION_LEVEL_KEY,
     EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR,
     EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS,
     EMBEDDING_DATASET_CHUNK_ROWS,
+    EMBEDDINGS_DATASET_NAME,
     HYDRATION_COMPLETE_KEY,
     HYDRATION_CORPUS_SIZE_KEY,
     HYDRATION_DATASET_SOURCE_KEY,
@@ -105,7 +108,6 @@ def test_embedding_cache_lifecycle_contract() -> None:
             "p1": {"title": "Updated", "abstract": "Abstract one"},
             "p2": {"title": "Paper Two", "abstract": "Abstract two", "year": 2024},
         }
-
         first = cache.get_embeddings(papers_v1, model, show_progress=False)
         second = cache.get_embeddings(papers_v1, model, show_progress=False)
         cache.get_embeddings(papers_v2, model, show_progress=False)
@@ -140,6 +142,17 @@ def test_embedding_cache_lifecycle_contract() -> None:
     assert rows == [("p1", 0), ("p2", 1)]
     assert row_idx_after_update == 0
     assert p2_metadata_after_refresh == 2024
+
+
+def test_embedding_cache_rejects_float16_persistent_storage() -> None:
+    """Persistent cache vectors must use int8 or float32 storage."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with pytest.raises(ValueError, match="storage_precision must be one of"):
+            EmbeddingCache(
+                cache_dir=tmpdir,
+                model_name="float16-storage-rejected",
+                storage_precision="float16",
+            )
 
 
 def test_embedding_cache_lock_timeout_env_override_contract(
@@ -477,6 +490,219 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
     assert results[0].embedding.dtype == np.float32
     assert results[0].embedding_dtype == "float32"
     assert results[0].storage_precision == "int8"
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_embedding_cache_search_keeps_tied_top_k_order_across_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_precision: str,
+) -> None:
+    """Float and int8 searches should rank ties by row over multiple chunks."""
+    monkeypatch.setattr(embedding_cache_module, "EMBEDDING_SEARCH_CHUNK_ROWS", 2)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name=f"tied-search-{storage_precision}",
+            storage_precision=storage_precision,
+        )
+        _set_test_int8_calibration(cache)
+        papers = {
+            f"p{idx}": {"title": f"Title {idx}", "abstract": "Same"} for idx in range(5)
+        }
+        model = LookupEncodeModel(
+            {
+                f"Title {idx}. Same": np.asarray([1.0, 0.0], dtype=np.float32)
+                for idx in range(5)
+            }
+        )
+        cache.get_embeddings(papers, model, show_progress=False)
+        bounded_results = cache.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=3,
+            binary_prefilter=False,
+            binary_rescore_multiplier=1,
+        )
+        all_results = cache.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=10,
+            binary_prefilter=False,
+            binary_rescore_multiplier=1,
+        )
+
+    assert [result.paper_id for result in bounded_results] == ["p0", "p1", "p2"]
+    assert [result.paper_id for result in all_results] == [
+        f"p{idx}" for idx in range(5)
+    ]
+    assert [result.score for result in all_results] == pytest.approx(
+        [all_results[0].score] * len(all_results)
+    )
+
+
+def test_embedding_cache_search_rejects_non_finite_query_embedding() -> None:
+    """Search should reject NaN query vectors before opening the cache payload."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="non-finite-query",
+            storage_precision="float32",
+        )
+        with pytest.raises(
+            ValueError, match="query_embedding must contain only finite values"
+        ):
+            cache.search(
+                query_embedding=np.asarray([np.nan, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=False,
+                binary_rescore_multiplier=1,
+            )
+
+
+def test_embedding_cache_search_fails_closed_on_non_finite_stored_vector() -> None:
+    """Search should identify non-finite matrix data as cache corruption."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="non-finite-stored-vector",
+            storage_precision="float32",
+        )
+        cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel(
+                {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+        with h5py.File(cache.h5_path, "a") as h5:
+            h5[EMBEDDINGS_DATASET_NAME][0, 0] = np.nan
+
+        with pytest.raises(RuntimeError, match="non-finite scores"):
+            cache.search(
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=False,
+                binary_rescore_multiplier=1,
+            )
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_embedding_cache_rejects_non_finite_model_output_before_write(
+    storage_precision: str,
+) -> None:
+    """Non-finite encoder output must not create vector or metadata rows."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name=f"non-finite-model-output-{storage_precision}",
+            storage_precision=storage_precision,
+        )
+        _set_test_int8_calibration(cache)
+        model = LookupEncodeModel(
+            {"Alpha. First": np.asarray([np.nan, np.inf], dtype=np.float32)}
+        )
+
+        with pytest.raises(ValueError, match="non-finite values"):
+            cache.upsert_embeddings(
+                {"p1": {"title": "Alpha", "abstract": "First"}},
+                model,
+                show_progress=False,
+            )
+
+        assert cache.embedding_count() == 0
+        with cache._connect_db() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+def test_embedding_cache_rejects_non_finite_calibration_ranges(
+    bad_value: float,
+) -> None:
+    """Calibration data must be finite before it is persisted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="non-finite-calibration")
+        ranges = np.asarray([[-1.0, -1.0], [1.0, bad_value]], dtype=np.float32)
+
+        with pytest.raises(ValueError, match="only finite values"):
+            cache.set_calibration_ranges(ranges=ranges, embedding_dim=2)
+
+        assert cache.has_calibration_ranges() is False
+
+
+def test_embedding_cache_matrix_dataset_helper_validates_dimensions_and_dtypes() -> (
+    None
+):
+    """Shared matrix helper should create and validate both cache matrix types."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="matrix-dataset-helper")
+        with h5py.File(cache.h5_path, "a") as h5:
+            embeddings = cache._ensure_embeddings_dataset(h5, embedding_dim=9)
+            binary = cache._ensure_binary_dataset(h5, embedding_dim=9)
+            assert binary is not None
+            assert embeddings.shape == (0, 9)
+            assert embeddings.maxshape == (None, 9)
+            assert embeddings.dtype == np.int8
+            assert binary.shape == (0, 2)
+            assert binary.maxshape == (None, 2)
+            assert binary.dtype == np.uint8
+
+        with h5py.File(cache.h5_path, "w") as h5:
+            h5.create_dataset(
+                EMBEDDINGS_DATASET_NAME,
+                shape=(0, 9),
+                maxshape=(None, 9),
+                dtype=np.float32,
+            )
+            with pytest.raises(ValueError, match="dtype mismatch"):
+                cache._ensure_embeddings_dataset(h5, embedding_dim=9)
+
+        with h5py.File(cache.h5_path, "w") as h5:
+            h5.create_dataset(
+                BINARY_INDEX_DATASET_NAME,
+                shape=(0, 2),
+                maxshape=(None, 2),
+                dtype=np.int8,
+            )
+            with pytest.raises(ValueError, match="dtype mismatch"):
+                cache._ensure_binary_dataset(h5, embedding_dim=9)
+
+
+def test_embedding_cache_metadata_loaders_preserve_serialized_and_parsed_shapes() -> (
+    None
+):
+    """Shared SQLite decoder should retain each caller's JSON-list contract."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="metadata-loader-shapes",
+            storage_precision="float32",
+        )
+        cache.get_embeddings(
+            {
+                "p1": {
+                    "title": "Alpha",
+                    "abstract": "First",
+                    "authors": ["Alice", "Bob"],
+                    "categories": ["cs.AI"],
+                    "venue": "NeurIPS",
+                    "arxiv_id": "2411.03884",
+                    "doi": "10.1/example",
+                }
+            },
+            LookupEncodeModel(
+                {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+        with cache._connect_db() as conn:
+            serialized = cache._load_existing_rows(conn, ["p1"])["p1"]
+            parsed = cache._load_metadata_by_rows(conn, [0])[0]
+
+    assert serialized["authors_json"] == '["Alice", "Bob"]'
+    assert serialized["categories_json"] == '["cs.AI"]'
+    assert "authors" not in serialized
+    assert parsed["authors"] == ["Alice", "Bob"]
+    assert parsed["categories"] == ["cs.AI"]
+    assert "authors_json" not in parsed
+    assert parsed["paper_id"] == "p1"
 
 
 def test_embedding_cache_metadata_refresh_survives_mixed_batch_encode_failure() -> None:
@@ -846,6 +1072,24 @@ def test_embedding_cache_binary_prefilter_rows_are_monotonic_subset() -> None:
     assert np.all(rows[:-1] < rows[1:])
 
 
+def test_embedding_cache_binary_prefilter_resolves_local_cutoff_ties_by_row() -> None:
+    """Chunk-local Hamming ties should retain the lowest absolute row indices."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="prefilter-local-ties")
+        with h5py.File(cache.h5_path, "a") as h5:
+            binary = h5.create_dataset(
+                BINARY_INDEX_DATASET_NAME,
+                data=np.zeros((65536, 1), dtype=np.uint8),
+            )
+            rows = cache._binary_prefilter_rows(
+                binary_dataset=binary,
+                query_embedding=np.zeros(8, dtype=np.float32),
+                candidate_count=64,
+            )
+
+    np.testing.assert_array_equal(rows, np.arange(64, dtype=np.int64))
+
+
 def test_embedding_cache_compression_codec_contracts() -> None:
     """Supported codecs should hydrate; unsupported codecs should fail fast."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -884,6 +1128,133 @@ def test_embedding_cache_compression_codec_contracts() -> None:
                 model_name="szip-codec",
                 compression="szip",
                 compression_level=1,
+            )
+
+
+def test_embedding_cache_adopts_existing_compression_until_explicit_clear() -> None:
+    """Requested compression should apply only to new or explicitly rebuilt payloads."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    with tempfile.TemporaryDirectory() as tmpdir:
+        original = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="compression-adoption",
+            compression="lzf",
+            compression_level=0,
+        )
+        _set_test_int8_calibration(original)
+        original.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel(
+                {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+        original.mark_hydrated(
+            dataset_source=source,
+            dataset_split="train",
+            corpus_size=2,
+            complete=True,
+        )
+
+        reopened = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="compression-adoption",
+            compression="gzip",
+            compression_level=1,
+        )
+        assert reopened.embedding_count() == 1
+        assert reopened.is_hydrated(
+            dataset_split="train",
+            corpus_size=2,
+            dataset_source=source,
+        )
+        results = reopened.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=2,
+        )
+        assert [result.paper_id for result in results] == ["p1"]
+
+        reopened.get_embeddings(
+            {"p2": {"title": "Beta", "abstract": "Second"}},
+            LookupEncodeModel(
+                {"Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+        with reopened._connect_db() as conn:
+            metadata = dict(conn.execute("SELECT key, value FROM cache_metadata"))
+            assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 2
+        with h5py.File(reopened.h5_path, "r") as h5:
+            assert h5[EMBEDDINGS_DATASET_NAME].compression == "lzf"
+            assert h5[BINARY_INDEX_DATASET_NAME].compression == "lzf"
+            assert str(h5.attrs[COMPRESSION_FILTER_KEY]) == "lzf"
+            assert int(h5.attrs[COMPRESSION_LEVEL_KEY]) == 0
+        assert metadata[COMPRESSION_FILTER_KEY] == "lzf"
+        assert metadata[COMPRESSION_LEVEL_KEY] == "0"
+
+        reopened.clear(reason="test requested compression after explicit rebuild")
+        _set_test_int8_calibration(reopened)
+        reopened.get_embeddings(
+            {"p3": {"title": "Gamma", "abstract": "Third"}},
+            LookupEncodeModel(
+                {"Gamma. Third": np.asarray([1.0, 0.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+        with reopened._connect_db() as conn:
+            rebuilt_metadata = dict(
+                conn.execute("SELECT key, value FROM cache_metadata")
+            )
+            assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 1
+        with h5py.File(reopened.h5_path, "r") as h5:
+            assert h5[EMBEDDINGS_DATASET_NAME].compression == "gzip"
+            assert h5[EMBEDDINGS_DATASET_NAME].compression_opts == 1
+            assert h5[BINARY_INDEX_DATASET_NAME].compression == "gzip"
+            assert h5[BINARY_INDEX_DATASET_NAME].compression_opts == 1
+        assert rebuilt_metadata[COMPRESSION_FILTER_KEY] == "gzip"
+        assert rebuilt_metadata[COMPRESSION_LEVEL_KEY] == "1"
+
+
+def test_embedding_cache_adopts_existing_gzip_level_without_masking_corruption() -> (
+    None
+):
+    """Physical-level adoption must not weaken unrelated HDF5 provenance checks."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        original = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="compression-level-adoption",
+            compression="gzip",
+            compression_level=9,
+        )
+        _set_test_int8_calibration(original)
+        original.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel(
+                {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+
+        reopened = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="compression-level-adoption",
+            compression="gzip",
+            compression_level=1,
+        )
+        assert reopened.embedding_count() == 1
+        with h5py.File(reopened.h5_path, "r") as h5:
+            assert h5[EMBEDDINGS_DATASET_NAME].compression_opts == 9
+
+        with h5py.File(reopened.h5_path, "a") as h5:
+            h5.attrs[SOURCE_TORCH_DTYPE_KEY] = "corrupt-dtype"
+        with pytest.raises(RuntimeError, match="source_torch_dtype"):
+            reopened.search(
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
             )
 
 
@@ -1219,6 +1590,49 @@ def test_embedding_cache_search_falls_back_when_binary_index_rows_mismatch(
 
     assert len(results) == 2
     assert {result.paper_id for result in results} == {"p1", "p2"}
+
+
+def test_embedding_cache_reload_drops_binary_index_with_wrong_dtype() -> None:
+    """Reload should discard a shape-compatible binary index that is not uint8."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="binary-dtype-mismatch")
+        _set_test_int8_calibration(cache)
+        cache.get_embeddings(
+            {
+                "p0": {"title": "Bad", "abstract": "Opposite"},
+                "p1": {"title": "Good", "abstract": "Match"},
+            },
+            LookupEncodeModel(
+                {
+                    "Bad. Opposite": np.asarray([-1.0, 0.0], dtype=np.float32),
+                    "Good. Match": np.asarray([1.0, 0.0], dtype=np.float32),
+                }
+            ),
+            show_progress=False,
+        )
+        with h5py.File(cache.h5_path, "a") as h5:
+            binary_shape = h5[BINARY_INDEX_DATASET_NAME].shape
+            del h5[BINARY_INDEX_DATASET_NAME]
+            h5.create_dataset(
+                BINARY_INDEX_DATASET_NAME,
+                data=np.zeros(binary_shape, dtype=np.float32),
+            )
+
+        reloaded = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="binary-dtype-mismatch",
+        )
+        with h5py.File(reloaded.h5_path, "r") as h5:
+            assert BINARY_INDEX_DATASET_NAME not in h5
+        results = reloaded.search(
+            query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=1,
+        )
+
+    assert [result.paper_id for result in results] == ["p1"]
+    assert reloaded.last_search_used_binary_prefilter is False
 
 
 def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:

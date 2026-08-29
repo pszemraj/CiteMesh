@@ -255,6 +255,69 @@ def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates()
     client.get_reference_ids.assert_called_once_with("overlap", force_refresh=False)
 
 
+def test_citation_collect_collapses_seed_and_candidate_identifier_aliases() -> None:
+    """Citation ingestion should retain canonical IDs for aliased relation records."""
+    seed = _paper("s2-seed")
+    seed.arxiv_id = "2508.12345"
+    reference = _paper("s2-candidate")
+    reference.arxiv_id = "2508.12346"
+    citation_alias = _paper("arxiv:2508.12346")
+    seed_alias = _paper("arxiv:2508.12345")
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [seed_alias, reference]
+    client.get_paper_citations.return_value = [citation_alias]
+
+    builder = CitationGraphBuilder(
+        max_papers=4,
+        max_references=2,
+        max_citations=1,
+        fetch_references=False,
+        client=client,
+    )
+    papers = builder.collect_papers("s2-seed")
+
+    assert set(papers) == {"s2-seed", "s2-candidate"}
+    assert papers["s2-seed"].is_seed is True
+    assert builder.seed_relations == {
+        "s2-seed": "seed",
+        "s2-candidate": "overlap",
+    }
+
+
+def test_citation_collect_repoints_relations_for_same_batch_bridge() -> None:
+    """Same-batch bridge merges must not leave relations for removed paper IDs."""
+    seed = _paper("seed")
+    arxiv_record = _paper("s2-arxiv")
+    arxiv_record.arxiv_id = "2508.12345"
+    doi_record = _paper("s2-doi")
+    doi_record.doi = "10.1000/bridge"
+    bridge = _paper("s2-bridge")
+    bridge.arxiv_id = "2508.12345"
+    bridge.doi = "10.1000/bridge"
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [arxiv_record, doi_record, bridge]
+    client.get_paper_citations.return_value = []
+
+    builder = CitationGraphBuilder(
+        max_papers=4,
+        max_references=3,
+        max_citations=0,
+        fetch_references=False,
+        client=client,
+    )
+    papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", "s2-arxiv"}
+    assert builder.seed_relations == {
+        "seed": "seed",
+        "s2-arxiv": "referenced_by_seed",
+    }
+
+
 def test_citation_build_graph_persists_seed_relation_metadata() -> None:
     """Citation graph export metadata should preserve seed relation classes."""
     seed = _paper("seed", refs=["seed-ref"])
@@ -1059,9 +1122,17 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
     pool.add(first, source="reference", relation="referenced_by_seed")
     pool.add(duplicate, source="recommendation", relation="semantic_only")
 
+    alias_only_duplicate = Paper(
+        paper_id="arxiv:2101.00001",
+        title="Payload Without Matching Metadata",
+        year=2022,
+        abstract="alternate payload",
+    )
+    pool.add(alias_only_duplicate, source="citation", relation="cites_seed")
+
     assert list(pool.papers) == ["s2:abc"]
-    assert pool.sources["s2:abc"] == {"reference", "recommendation"}
-    assert pool.seed_relations["s2:abc"] == "referenced_by_seed"
+    assert pool.sources["s2:abc"] == {"reference", "recommendation", "citation"}
+    assert pool.seed_relations["s2:abc"] == "overlap"
 
     seed_duplicate = Paper(
         paper_id="other:seed",
@@ -1071,6 +1142,280 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
     )
     pool.add(seed_duplicate, source="citation", relation="cites_seed")
     assert "other:seed" not in pool.papers
+
+
+def test_candidate_pool_collapses_identifier_bridge_classes() -> None:
+    """A record bridging arXiv and DOI aliases should merge both prior classes."""
+    from citemesh.strategies.candidates import CandidatePool
+
+    pool = CandidatePool(seed=_seed_paper())
+    arxiv_record = _paper("s2-arxiv")
+    arxiv_record.arxiv_id = "2508.12345"
+    doi_record = _paper("s2-doi")
+    doi_record.doi = "10.1000/bridge"
+    bridge = _paper("s2-bridge")
+    bridge.arxiv_id = "2508.12345"
+    bridge.doi = "10.1000/bridge"
+
+    pool.add(arxiv_record, source="reference", relation="referenced_by_seed")
+    pool.add(doi_record, source="citation", relation="cites_seed")
+    pool.add(bridge, source="recommendation", relation="semantic_only")
+
+    assert list(pool.papers) == ["s2-arxiv"]
+    assert pool.papers["s2-arxiv"].doi == "10.1000/bridge"
+    assert pool.sources["s2-arxiv"] == {"reference", "citation", "recommendation"}
+    assert pool.seed_relations["s2-arxiv"] == "overlap"
+    assert pool._aliases["id:10.1000/bridge"] == "s2-arxiv"
+
+
+def test_recommendation_collect_collapses_seed_and_candidate_identifier_aliases() -> (
+    None
+):
+    """Recommendation ingestion should not retain arXiv aliases as duplicate nodes."""
+    seed = _seed_paper("s2-seed")
+    seed.arxiv_id = "2508.12345"
+    candidate = _paper("s2-candidate")
+    candidate.arxiv_id = "2508.12346"
+    candidate_alias = _paper("arxiv:2508.12346")
+    seed_alias = _paper("arxiv:2508.12345")
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_recommended_papers.return_value = [
+        seed_alias,
+        candidate,
+        candidate_alias,
+    ]
+
+    papers = RecommendationGraphBuilder(
+        max_papers=4, fetch_references=False, client=client
+    ).collect_papers("s2-seed")
+
+    assert set(papers) == {"s2-seed", "s2-candidate"}
+    assert papers["s2-seed"].is_seed is True
+
+
+def test_recommendation_collect_reconciles_sparse_identifier_bridge() -> None:
+    """Sparse known records should still bridge existing identity classes."""
+    seed = _seed_paper()
+    arxiv_record = _paper("s2-arxiv")
+    arxiv_record.arxiv_id = "2508.12345"
+    doi_record = _paper("s2-doi")
+    doi_record.doi = "10.1000/bridge"
+    sparse_bridge = Paper(
+        paper_id="s2-bridge",
+        title="Bridge",
+        year=2025,
+        abstract="",
+        arxiv_id="2508.12345",
+        doi="10.1000/bridge",
+    )
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_recommended_papers.return_value = [
+        arxiv_record,
+        doi_record,
+        sparse_bridge,
+    ]
+
+    papers = RecommendationGraphBuilder(
+        max_papers=4, fetch_references=False, client=client
+    ).collect_papers("seed")
+
+    assert set(papers) == {"seed", "s2-arxiv"}
+    assert papers["s2-arxiv"].doi == "10.1000/bridge"
+
+
+def test_recommendation_collect_reconciles_bridge_after_capacity() -> None:
+    """Capacity filtering should not hide later identity bridge records."""
+    seed = _seed_paper()
+    arxiv_record = _paper("s2-arxiv")
+    arxiv_record.arxiv_id = "2508.12345"
+    doi_record = _paper("s2-doi")
+    doi_record.doi = "10.1000/bridge"
+    unrelated = _paper("unrelated")
+    bridge = _paper("s2-bridge")
+    bridge.arxiv_id = "2508.12345"
+    bridge.doi = "10.1000/bridge"
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_recommended_papers.return_value = [
+        arxiv_record,
+        doi_record,
+        unrelated,
+        bridge,
+    ]
+
+    papers = RecommendationGraphBuilder(
+        max_papers=3, fetch_references=False, client=client
+    ).collect_papers("seed")
+
+    assert set(papers) == {"seed", "s2-arxiv"}
+    assert papers["s2-arxiv"].doi == "10.1000/bridge"
+
+
+def test_hybrid_collection_collapses_identifier_bridge_classes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hybrid ingestion should preserve source and relation data across bridge merges."""
+    builder = HybridGraphBuilder(
+        max_papers=3, max_semantic=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    seed = _seed_paper()
+    arxiv_record = _paper("s2-arxiv")
+    arxiv_record.arxiv_id = "2508.12345"
+    doi_record = _paper("s2-doi")
+    doi_record.doi = "10.1000/bridge"
+    bridge = _paper("s2-bridge")
+    bridge.arxiv_id = "2508.12345"
+    bridge.doi = "10.1000/bridge"
+    builder.citation_builder.collect_papers = MagicMock(
+        return_value={
+            seed.paper_id: seed,
+            arxiv_record.paper_id: arxiv_record,
+            doi_record.paper_id: doi_record,
+        }
+    )
+    builder.citation_builder.seed_relations = {
+        seed.paper_id: "seed",
+        arxiv_record.paper_id: "referenced_by_seed",
+        doi_record.paper_id: "cites_seed",
+    }
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.collect_papers = MagicMock(
+        return_value={bridge.paper_id: bridge}
+    )
+    monkeypatch.setattr(builder, "_rank_candidates", lambda *_args: ["s2-arxiv"])
+
+    papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", "s2-arxiv"}
+    assert papers["s2-arxiv"].doi == "10.1000/bridge"
+    assert builder.paper_sources["s2-arxiv"] == "both"
+    assert builder.seed_relations["s2-arxiv"] == "overlap"
+
+
+def test_merge_paper_metadata_preserves_fields_and_unions_references() -> None:
+    """Canonical metadata merging should repair gaps without discarding rich fields."""
+    from citemesh.strategies.candidates import merge_paper_metadata
+
+    preferred = Paper(
+        paper_id="canonical",
+        title="Unknown",
+        year=None,
+        references=[" existing-ref ", "", "duplicate-ref"],
+        is_seed=False,
+    )
+    incoming = Paper(
+        paper_id="alternate",
+        title="Recovered Title",
+        year=2023,
+        authors=[Author(name="Ada Lovelace")],
+        citation_count=42,
+        abstract="Recovered abstract",
+        venue="Recovered venue",
+        arxiv_id="2508.12345",
+        doi="10.1000/example",
+        categories=["cs.AI"],
+        references=["duplicate-ref", "new-ref", "  ", "new-ref"],
+        is_seed=True,
+    )
+
+    merged = merge_paper_metadata(preferred, incoming)
+
+    assert merged is preferred
+    assert merged.title == "Recovered Title"
+    assert merged.year == 2023
+    assert merged.authors == [Author(name="Ada Lovelace")]
+    assert merged.citation_count == 42
+    assert merged.abstract == "Recovered abstract"
+    assert merged.venue == "Recovered venue"
+    assert merged.arxiv_id == "2508.12345"
+    assert merged.doi == "10.1000/example"
+    assert merged.categories == ["cs.AI"]
+    assert merged.references == ["existing-ref", "duplicate-ref", "new-ref"]
+    assert merged.is_seed is True
+
+    richer = Paper(
+        paper_id="richer",
+        title="Canonical Title",
+        year=2024,
+        abstract="Canonical abstract",
+        venue="Canonical venue",
+        references=["keep"],
+    )
+    merge_paper_metadata(richer, incoming)
+    assert richer.title == "Canonical Title"
+    assert richer.abstract == "Canonical abstract"
+    assert richer.venue == "Canonical venue"
+    assert richer.references == ["keep", "duplicate-ref", "new-ref"]
+
+
+def test_merge_paper_metadata_keeps_maximum_citation_count_in_either_order() -> None:
+    """Citation counts should merge monotonically regardless of arrival order."""
+    from citemesh.strategies.candidates import merge_paper_metadata
+
+    low_count = Paper(paper_id="low", title="Paper", year=2024, citation_count=1)
+    high_count = Paper(paper_id="high", title="Paper", year=2024, citation_count=100)
+    assert merge_paper_metadata(low_count, high_count).citation_count == 100
+
+    low_count = Paper(paper_id="low", title="Paper", year=2024, citation_count=1)
+    high_count = Paper(paper_id="high", title="Paper", year=2024, citation_count=100)
+    assert merge_paper_metadata(high_count, low_count).citation_count == 100
+
+
+def test_citation_seed_relations_use_shared_precedence_rules() -> None:
+    """Citation relation updates should retain the shared seed-label semantics."""
+    builder = CitationGraphBuilder(client=MagicMock())
+    builder.seed_relations = {"seed": "seed", "semantic": "semantic_only"}
+
+    builder._record_seed_relations(["seed", "semantic", "shared"], "cites_seed")
+    builder._record_seed_relations(["shared"], "referenced_by_seed")
+
+    assert builder.seed_relations == {
+        "seed": "seed",
+        "semantic": "cites_seed",
+        "shared": "overlap",
+    }
+
+
+def test_recommendation_duplicates_merge_without_replacing_richer_record() -> None:
+    """Recommendation duplicates should preserve the initial canonical object."""
+    seed = _seed_paper()
+    existing = Paper(
+        paper_id="duplicate",
+        title="Canonical Title",
+        year=2024,
+        authors=[Author(name="Existing Author")],
+        citation_count=100,
+        abstract="Canonical abstract",
+        venue="Canonical venue",
+        references=["existing-ref"],
+    )
+    incoming = Paper(
+        paper_id="duplicate",
+        title="Incoming Title",
+        year=2023,
+        citation_count=1,
+        abstract="Incoming abstract",
+        doi="10.1000/new",
+        references=["existing-ref", "incoming-ref"],
+    )
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_recommended_papers.return_value = [existing, incoming]
+
+    papers = RecommendationGraphBuilder(
+        max_papers=3,
+        fetch_references=False,
+        client=client,
+    ).collect_papers("seed")
+
+    assert papers["duplicate"] is existing
+    assert existing.title == "Canonical Title"
+    assert existing.abstract == "Canonical abstract"
+    assert existing.venue == "Canonical venue"
+    assert existing.doi == "10.1000/new"
+    assert existing.references == ["existing-ref", "incoming-ref"]
 
 
 def test_embedding_candidate_mode_skips_corpus_and_persists(

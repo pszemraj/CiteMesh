@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from citemesh import cli as cli_module
+from citemesh.core.config import EmbeddingStorageConfig
 from citemesh.core.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
     DEVICE_CHOICES,
@@ -121,7 +122,15 @@ def test_set_rejects_invalid_value_without_writing(tmp_path: Path) -> None:
         set_config_value("defaults.streaming", "maybe", path=config_path)
     with pytest.raises(ConfigValueError, match="unknown export format"):
         set_config_value("defaults.export", "json,docx", path=config_path)
+    with pytest.raises(ConfigValueError, match="defaults.storage_precision"):
+        set_config_value("defaults.storage_precision", "float16", path=config_path)
     assert not config_path.exists()
+
+
+def test_embedding_storage_config_rejects_float16() -> None:
+    """Core persistent-storage config should allow only int8 and float32."""
+    with pytest.raises(ValueError, match="storage_precision must be one of"):
+        EmbeddingStorageConfig(storage_precision="float16").validate()
 
 
 def test_load_skips_unknown_and_invalid_entries(
@@ -222,6 +231,7 @@ def test_config_choice_specs_match_build_parser_choices() -> None:
     assert set(parser_choices["device"]) == set(DEVICE_CHOICES)
     assert set(parser_choices["semantic_source"]) == set(SEMANTIC_SOURCE_CHOICES)
     assert set(parser_choices["storage_precision"]) == set(STORAGE_PRECISION_CHOICES)
+    assert STORAGE_PRECISION_CHOICES == ("int8", "float32")
     assert set(parser_choices["export"]) == set(EXPORT_CHOICES)
 
 
@@ -280,6 +290,13 @@ def test_config_default_applied_when_flag_omitted() -> None:
     assert applied == {"theme", "max_papers"}
     assert args.theme == "dark"
     assert args.max_papers == 22
+
+
+def test_build_parser_uses_dark_theme_by_default() -> None:
+    """The built-in visualization theme should be dark-first."""
+    args, _, _ = _parsed_build_args(["paper-id"])
+
+    assert args.theme == "dark"
 
 
 def test_explicit_cli_flag_wins_over_config_default() -> None:

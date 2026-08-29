@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from citemesh.core import Paper
-from citemesh.paper_ids import normalize_paper_id
+from citemesh.paper_ids import paper_identifier_aliases
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -45,13 +45,12 @@ def paper_identity_aliases(paper: Paper) -> List[str]:
     :return List[str]: Stable sorted alias keys.
     """
     aliases: Set[str] = set()
-    raw_id = str(paper.paper_id).strip()
-    if raw_id:
-        aliases.add(f"id:{raw_id.lower()}")
-        try:
-            aliases.add(f"id:{normalize_paper_id(raw_id).lower()}")
-        except ValueError:
-            pass
+    for identifier in paper_identifier_aliases(
+        paper_id=paper.paper_id,
+        arxiv_id=paper.arxiv_id,
+        doi=paper.doi,
+    ):
+        aliases.add(f"id:{identifier.lower()}")
 
     normalized_title = normalize_identity_text(paper.title or "")
     if normalized_title:
@@ -83,11 +82,31 @@ def resolve_alias(aliases: Dict[str, str], paper: Paper) -> Optional[str]:
     :param Paper paper: Incoming paper payload.
     :return Optional[str]: Canonical paper ID when already known.
     """
+    matches = resolve_aliases(aliases, paper)
+    return matches[0] if matches else None
+
+
+def resolve_aliases(aliases: Dict[str, str], paper: Paper) -> List[str]:
+    """Resolve every canonical paper ID matched by an incoming payload.
+
+    A record may bridge two previously distinct identifier classes (for
+    example, one payload supplies an arXiv ID and a later one supplies both
+    that arXiv ID and a DOI). Callers reconcile all returned classes before
+    registering the incoming aliases.
+
+    :param Dict[str, str] aliases: Alias-to-canonical map.
+    :param Paper paper: Incoming paper payload.
+    :return List[str]: Distinct matching canonical IDs in alias-key order.
+    """
+    matches: List[str] = []
+    seen: Set[str] = set()
     for alias in paper_identity_aliases(paper):
         canonical_id = aliases.get(alias)
-        if canonical_id is not None:
-            return canonical_id
-    return None
+        if canonical_id is None or canonical_id in seen:
+            continue
+        seen.add(canonical_id)
+        matches.append(canonical_id)
+    return matches
 
 
 def register_aliases(aliases: Dict[str, str], canonical_id: str, paper: Paper) -> None:
@@ -100,6 +119,21 @@ def register_aliases(aliases: Dict[str, str], canonical_id: str, paper: Paper) -
     """
     for alias in paper_identity_aliases(paper):
         aliases.setdefault(alias, canonical_id)
+
+
+def repoint_aliases(
+    aliases: Dict[str, str], canonical_id: str, replaced_ids: Set[str]
+) -> None:
+    """Point aliases owned by reconciled records at their surviving paper.
+
+    :param Dict[str, str] aliases: Alias-to-canonical map to mutate.
+    :param str canonical_id: Surviving canonical paper ID.
+    :param Set[str] replaced_ids: Canonical IDs collapsed into the survivor.
+    :return None: Alias map is mutated in place.
+    """
+    for alias, mapped_id in aliases.items():
+        if mapped_id in replaced_ids:
+            aliases[alias] = canonical_id
 
 
 def merge_seed_relation(existing: str, incoming: str) -> str:
@@ -140,14 +174,22 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     :param Paper incoming: Supplemental paper record to merge.
     :return Paper: ``preferred`` with missing metadata hydrated.
     """
+    if (
+        (not preferred.title or preferred.title == "Unknown")
+        and incoming.title
+        and incoming.title != "Unknown"
+    ):
+        preferred.title = incoming.title
     if not preferred.abstract and incoming.abstract:
         preferred.abstract = incoming.abstract
     if preferred.year is None and incoming.year is not None:
         preferred.year = incoming.year
     if (not preferred.authors) and incoming.authors:
         preferred.authors = incoming.authors
-    if preferred.citation_count <= 0 and incoming.citation_count > 0:
-        preferred.citation_count = incoming.citation_count
+    preferred.citation_count = max(
+        preferred.citation_count,
+        incoming.citation_count,
+    )
     if (not preferred.venue) and incoming.venue:
         preferred.venue = incoming.venue
     if (not preferred.arxiv_id) and incoming.arxiv_id:
@@ -156,8 +198,20 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
         preferred.doi = incoming.doi
     if (not preferred.categories) and incoming.categories:
         preferred.categories = incoming.categories
-    if (not preferred.references) and incoming.references:
-        preferred.references = incoming.references
+    reference_ids: List[str] = []
+    seen_references: Set[str] = set()
+    for reference_source in (preferred.references, incoming.references):
+        for reference_id in reference_source:
+            normalized_reference_id = str(reference_id).strip()
+            if (
+                not normalized_reference_id
+                or normalized_reference_id in seen_references
+            ):
+                continue
+            seen_references.add(normalized_reference_id)
+            reference_ids.append(normalized_reference_id)
+    preferred.references = reference_ids
+    preferred.is_seed = bool(preferred.is_seed or incoming.is_seed)
     return preferred
 
 
@@ -198,14 +252,44 @@ class CandidatePool:
         """
         if paper.is_seed:
             return
-        resolved = resolve_alias(self._aliases, paper)
-        if resolved == self.seed.paper_id:
+        matched_ids = resolve_aliases(self._aliases, paper)
+        if self.seed.paper_id in matched_ids:
+            loser_ids = [
+                paper_id for paper_id in self.papers if paper_id in matched_ids
+            ]
+            for loser_id in loser_ids:
+                merge_paper_metadata(self.seed, self.papers.pop(loser_id))
+                self.sources.pop(loser_id, None)
+                self.seed_relations.pop(loser_id, None)
             merge_paper_metadata(self.seed, paper)
+            repoint_aliases(
+                self._aliases,
+                self.seed.paper_id,
+                set(loser_ids) | {self.seed.paper_id},
+            )
             register_aliases(self._aliases, self.seed.paper_id, paper)
             return
-        if resolved is not None:
-            merge_paper_metadata(self.papers[resolved], paper)
-            canonical_id = resolved
+
+        matched_candidates = [
+            paper_id for paper_id in self.papers if paper_id in matched_ids
+        ]
+        if matched_candidates:
+            canonical_id = matched_candidates[0]
+            for loser_id in matched_candidates[1:]:
+                merge_paper_metadata(
+                    self.papers[canonical_id], self.papers.pop(loser_id)
+                )
+                self.sources.setdefault(canonical_id, set()).update(
+                    self.sources.pop(loser_id, set())
+                )
+                merged_relation = merge_seed_relation(
+                    self.seed_relations.get(canonical_id, ""),
+                    self.seed_relations.pop(loser_id, ""),
+                )
+                if merged_relation:
+                    self.seed_relations[canonical_id] = merged_relation
+            merge_paper_metadata(self.papers[canonical_id], paper)
+            repoint_aliases(self._aliases, canonical_id, set(matched_candidates))
         else:
             canonical_id = str(paper.paper_id)
             self.papers[canonical_id] = paper

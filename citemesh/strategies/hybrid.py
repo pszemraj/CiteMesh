@@ -31,7 +31,9 @@ from citemesh.strategies.candidates import (
     paper_embedding_metadata,
     paper_identity_aliases,
     register_aliases,
+    repoint_aliases,
     resolve_alias,
+    resolve_aliases,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
@@ -237,6 +239,15 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         """
         return resolve_alias(aliases, paper)
 
+    def _resolve_aliases(self, aliases: Dict[str, str], paper: Paper) -> List[str]:
+        """Resolve every existing identity class matched by a paper payload.
+
+        :param Dict[str, str] aliases: Alias-to-canonical map.
+        :param Paper paper: Incoming paper payload.
+        :return List[str]: Matching canonical paper IDs.
+        """
+        return resolve_aliases(aliases, paper)
+
     def _register_aliases(
         self, aliases: Dict[str, str], canonical_id: str, paper: Paper
     ) -> None:
@@ -275,6 +286,71 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :return Dict[str, object]: Metadata payload accepted by embedding cache.
         """
         return paper_embedding_metadata(paper)
+
+    def _reconcile_identity_matches(
+        self,
+        aliases: Dict[str, str],
+        papers: Dict[str, Paper],
+        candidates: Dict[str, Paper],
+        candidate_sources: Dict[str, Set[str]],
+        incoming: Paper,
+    ) -> tuple[Optional[str], bool]:
+        """Collapse every identity class bridged by an incoming paper.
+
+        The seed always survives. Otherwise the first candidate insertion wins,
+        preserving stable graph order while merging all metadata, provenance,
+        relations, and aliases from the collapsed records.
+
+        :param Dict[str, str] aliases: Alias-to-canonical map.
+        :param Dict[str, Paper] papers: Final paper map containing the seed.
+        :param Dict[str, Paper] candidates: Pre-ranking candidate map.
+        :param Dict[str, Set[str]] candidate_sources: Candidate provenance map.
+        :param Paper incoming: Newly observed candidate payload.
+        :return tuple[Optional[str], bool]: ``(survivor_id, seed_survived)``;
+            ``survivor_id`` is ``None`` when no class matched.
+        """
+        matched_ids = self._resolve_aliases(aliases, incoming)
+        seed_id = next(
+            (paper_id for paper_id, paper in papers.items() if paper.is_seed), None
+        )
+        if seed_id is not None and seed_id in matched_ids:
+            loser_ids = [paper_id for paper_id in candidates if paper_id in matched_ids]
+            for loser_id in loser_ids:
+                self._merge_paper_metadata(papers[seed_id], candidates.pop(loser_id))
+                candidate_sources.pop(loser_id, None)
+                self.seed_relations.pop(loser_id, None)
+                self.paper_sources.pop(loser_id, None)
+            self._merge_paper_metadata(papers[seed_id], incoming)
+            repoint_aliases(aliases, seed_id, set(loser_ids) | {seed_id})
+            self._register_aliases(aliases, seed_id, incoming)
+            return seed_id, True
+
+        matched_candidates = [
+            paper_id for paper_id in candidates if paper_id in matched_ids
+        ]
+        if not matched_candidates:
+            return None, False
+
+        canonical_id = matched_candidates[0]
+        for loser_id in matched_candidates[1:]:
+            self._merge_paper_metadata(
+                candidates[canonical_id], candidates.pop(loser_id)
+            )
+            candidate_sources.setdefault(canonical_id, set()).update(
+                candidate_sources.pop(loser_id, set())
+            )
+            merged_relation = self._merge_seed_relation(
+                self.seed_relations.get(canonical_id, ""),
+                self.seed_relations.pop(loser_id, ""),
+            )
+            if merged_relation:
+                self.seed_relations[canonical_id] = merged_relation
+            if loser_id in self.paper_sources:
+                self.paper_sources[canonical_id] = self.paper_sources.pop(loser_id)
+        self._merge_paper_metadata(candidates[canonical_id], incoming)
+        repoint_aliases(aliases, canonical_id, set(matched_candidates))
+        self._register_aliases(aliases, canonical_id, incoming)
+        return canonical_id, False
 
     def _seed_query_text(self, seed_paper: Paper) -> str:
         """Build query text used to embed the hybrid seed paper.
@@ -575,17 +651,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         for paper in citation_papers.values():
             if paper.paper_id == seed_paper.paper_id or paper.is_seed:
                 continue
-            resolved = self._resolve_alias(alias_map, paper)
-            if resolved == seed_paper.paper_id:
-                papers[seed_paper.paper_id] = self._merge_paper_metadata(
-                    papers[seed_paper.paper_id], paper
-                )
-                self._register_aliases(alias_map, seed_paper.paper_id, paper)
+            resolved, seed_survived = self._reconcile_identity_matches(
+                alias_map, papers, candidate_pool, candidate_sources, paper
+            )
+            if seed_survived:
                 continue
             if resolved is not None:
-                candidate_pool[resolved] = self._merge_paper_metadata(
-                    candidate_pool[resolved], paper
-                )
                 candidate_sources.setdefault(resolved, set()).add("citation")
                 relation = self._merge_seed_relation(
                     self.seed_relations.get(resolved, ""),
@@ -654,17 +725,12 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         for paper in semantic_papers.values():
             if paper.is_seed:
                 continue
-            resolved = self._resolve_alias(alias_map, paper)
-            if resolved == seed_paper.paper_id:
-                papers[seed_paper.paper_id] = self._merge_paper_metadata(
-                    papers[seed_paper.paper_id], paper
-                )
-                self._register_aliases(alias_map, seed_paper.paper_id, paper)
+            resolved, seed_survived = self._reconcile_identity_matches(
+                alias_map, papers, candidate_pool, candidate_sources, paper
+            )
+            if seed_survived:
                 continue
             if resolved is not None:
-                candidate_pool[resolved] = self._merge_paper_metadata(
-                    candidate_pool[resolved], paper
-                )
                 candidate_sources.setdefault(resolved, set()).add("semantic")
                 self.seed_relations.setdefault(resolved, "semantic_only")
                 self._register_aliases(alias_map, resolved, paper)

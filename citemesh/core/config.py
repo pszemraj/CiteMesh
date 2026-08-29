@@ -62,10 +62,9 @@ class EmbeddingStorageConfig:
 
     def validate(self) -> None:
         """Ensure storage settings are valid."""
-        if self.storage_precision not in {"float32", "float16", "int8"}:
+        if self.storage_precision not in {"float32", "int8"}:
             raise ValueError(
-                "Embedding storage_precision must be one of "
-                "{'float32', 'float16', 'int8'}"
+                "Embedding storage_precision must be one of {'float32', 'int8'}"
             )
         if self.binary_rescore_multiplier < 1:
             raise ValueError("binary_rescore_multiplier must be at least 1")

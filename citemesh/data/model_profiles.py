@@ -63,8 +63,7 @@ class EmbeddingModelProfile:
     aliases: Tuple[str, ...] = ()
     query_formatter: QueryFormatter = _identity_query_formatter
     document_formatter: DocumentFormatter = _identity_document_formatter
-    float16_supported: bool = True
-    preferred_torch_dtype: Optional[str] = None
+    preferred_compute_dtype: Optional[str] = None
     autocast_devices: Tuple[str, ...] = ()
     preferred_attention_implementation: Optional[str] = None
     compile_inner_transformer: bool = False
@@ -132,15 +131,15 @@ EMBEDDING_MODEL_PROFILES = (
         aliases=("unsloth/embeddinggemma",),
         query_formatter=_gemma_query_formatter,
         document_formatter=_gemma_document_formatter,
-        float16_supported=False,
-        preferred_torch_dtype="bfloat16",
-        autocast_devices=("cuda",),
+        preferred_compute_dtype="bfloat16",
+        autocast_devices=("cuda", "mps"),
         compile_inner_transformer=True,
         available_truncate_dims=(768, 512, 256, 128),
         recommended_truncate_dim=256,
         notes=(
             "Adds recommended query/document prompts for EmbeddingGemma. "
-            "Runs bf16 on CUDA (with autocast) and on MPS (autocast off)."
+            "Runs bf16 through autocast on supported CUDA and MPS runtimes; "
+            "otherwise uses float32."
         ),
     ),
 )

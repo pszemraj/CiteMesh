@@ -32,6 +32,7 @@ from citemesh.data.cache import atomic_write_json
 from citemesh.paper_ids import (
     external_ids_from_canonical_paper_id,
     normalize_paper_id,
+    paper_identifier_aliases,
 )
 
 logger = logging.getLogger(__name__)
@@ -152,18 +153,13 @@ def _paper_lookup_keys(paper: Paper) -> set[str]:
     :param Paper paper: Converted paper payload from Semantic Scholar.
     :return set[str]: Normalized identifier aliases for the paper.
     """
-    keys: set[str] = set()
-    candidates = [paper.paper_id, paper.doi]
-    if paper.arxiv_id:
-        candidates.extend([paper.arxiv_id, f"arxiv:{paper.arxiv_id}"])
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        with contextlib.suppress(ValueError):
-            keys.add(normalize_paper_id(candidate))
-
-    return keys
+    return set(
+        paper_identifier_aliases(
+            paper_id=paper.paper_id,
+            arxiv_id=paper.arxiv_id,
+            doi=paper.doi,
+        )
+    )
 
 
 def _reference_cache_path(paper_id: str) -> Path:
@@ -216,17 +212,19 @@ def _reference_id_candidate(raw_value: Any) -> Optional[str]:
     return None
 
 
-def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
-    """Validate and normalize cached reference ID payloads.
+def _normalize_reference_ids(payload: Any, *, strict: bool) -> Optional[List[str]]:
+    """Normalize reference payloads under cache or live-response rules.
 
-    Supports current payloads (list of strings) and legacy/mixed list entries
-    that store paper IDs in relation-shaped dictionaries.
+    Both callers accept current list-of-string payloads and legacy mixed
+    relation-shaped entries. Strict cache parsing marks malformed non-empty
+    lists invalid so they can be rebuilt; live API parsing tolerates them.
 
-    :param Any payload: Cached ``references`` field from JSON payload.
-    :return Optional[List[str]]: Normalized ID list, or ``None`` when invalid.
+    :param Any payload: Raw reference payload.
+    :param bool strict: Whether malformed payloads return ``None``.
+    :return Optional[List[str]]: Normalized IDs, or ``None`` for invalid strict data.
     """
     if not isinstance(payload, list):
-        return None
+        return None if strict else []
 
     normalized: List[str] = []
     seen: set[str] = set()
@@ -241,11 +239,18 @@ def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
         seen.add(paper_id)
         normalized.append(paper_id)
 
-    # Empty payloads are valid cache states (no references). Non-empty payloads
-    # that yield no usable IDs are treated as invalid so callers can rebuild.
     if payload and not normalized:
-        return None
+        return None if strict else []
     return normalized
+
+
+def _coerce_cached_reference_ids(payload: Any) -> Optional[List[str]]:
+    """Validate and normalize cached reference ID payloads.
+
+    :param Any payload: Cached ``references`` field from JSON payload.
+    :return Optional[List[str]]: Normalized ID list, or ``None`` when invalid.
+    """
+    return _normalize_reference_ids(payload, strict=True)
 
 
 def _validate_integer_limit(
@@ -710,30 +715,7 @@ class SemanticScholarClient:
         :param Any raw_references: Raw ``references`` payload from API response.
         :return List[str]: Parsed reference ID list (order-preserving, deduplicated).
         """
-        if not isinstance(raw_references, list):
-            return []
-
-        parsed: List[str] = []
-        seen: set[str] = set()
-
-        def _add_candidate(candidate: Optional[str]) -> None:
-            """Add a normalized reference ID if valid and unseen.
-
-            :param Optional[str] candidate: Candidate paper ID string.
-            :return None: Updates ``parsed`` in place.
-            """
-            if not candidate:
-                return
-            normalized = candidate.strip()
-            if not normalized or normalized in seen:
-                return
-            seen.add(normalized)
-            parsed.append(normalized)
-
-        for ref in raw_references:
-            _add_candidate(_reference_id_candidate(ref))
-
-        return parsed
+        return _normalize_reference_ids(raw_references, strict=False) or []
 
     @staticmethod
     def _unavailable_error(

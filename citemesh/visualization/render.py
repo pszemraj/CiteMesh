@@ -910,7 +910,7 @@ def visualize_graph(
     iterations: int = 100,
     dpi: int = None,
     metadata: Optional[Dict[str, Any]] = None,
-    theme_name: str = "light",
+    theme_name: str = "dark",
     layout: Optional[Dict[Hashable, np.ndarray]] = None,
     layout_seed: Optional[int] = None,
 ) -> None:

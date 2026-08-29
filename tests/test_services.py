@@ -16,6 +16,7 @@ import requests
 
 import citemesh.services as services_module
 from citemesh.core import API_CONFIG, Paper
+from citemesh.paper_ids import paper_identifier_aliases
 from citemesh.services import semantic_scholar as s2
 from citemesh.services import semantic_scholar as semantic_module
 from citemesh.services.semantic_scholar import (
@@ -368,6 +369,77 @@ def test_normalization_and_get_paper_id_contracts() -> None:
     assert client.client.get_paper.call_args.args[0] == "arxiv:2508.14040"
 
 
+@pytest.mark.parametrize(
+    ("paper_id", "arxiv_id", "doi", "expected_aliases"),
+    [
+        (
+            "2508.12345v2",
+            "",
+            "",
+            {"2508.12345v2", "2508.12345", "arxiv:2508.12345"},
+        ),
+        (
+            "https://arxiv.org/abs/cs.AI/0704123v3",
+            "",
+            "",
+            {
+                "https://arxiv.org/abs/cs.AI/0704123v3",
+                "arxiv:cs.AI/0704123",
+                "cs.AI/0704123",
+            },
+        ),
+        (
+            "S2-opaque-id",
+            "2508.12345v2",
+            "https://doi.org/10.1000/example",
+            {
+                "S2-opaque-id",
+                "2508.12345v2",
+                "2508.12345",
+                "arxiv:2508.12345",
+                "https://doi.org/10.1000/example",
+                "10.1000/example",
+            },
+        ),
+    ],
+)
+def test_paper_identifier_aliases_expand_cross_source_identifiers(
+    paper_id: str,
+    arxiv_id: str,
+    doi: str,
+    expected_aliases: set[str],
+) -> None:
+    """Identifier aliases should bridge arXiv, DOI, and opaque S2 payload fields."""
+    aliases = paper_identifier_aliases(
+        paper_id=paper_id,
+        arxiv_id=arxiv_id,
+        doi=doi,
+    )
+
+    assert expected_aliases <= set(aliases)
+    assert normalize_paper_id("2508.12345v2") == "2508.12345v2"
+
+
+def test_batch_lookup_keys_use_all_paper_identifier_aliases() -> None:
+    """Batch matching should resolve API records through field-level aliases."""
+    paper = Paper(
+        paper_id="s2-opaque",
+        title="Aliased",
+        year=2025,
+        arxiv_id="2508.12345v2",
+        doi="10.1000/example",
+    )
+
+    lookup_keys = s2._paper_lookup_keys(paper)
+
+    assert {
+        "s2-opaque",
+        "2508.12345",
+        "arxiv:2508.12345",
+        "10.1000/example",
+    } <= lookup_keys
+
+
 def test_get_papers_batches_and_falls_back_for_unmatched_ids() -> None:
     """Batch paper fetches should map results back to requested IDs and retry misses."""
     batch_paper = SimpleNamespace(
@@ -670,6 +742,29 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
 
     client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
     assert client.get_reference_ids("seed-type-error") == []
+
+
+def test_reference_payload_normalization_keeps_cache_and_live_contracts() -> None:
+    """Cache parsing should stay strict while live relation parsing stays tolerant."""
+    mixed_payload = [
+        " r1 ",
+        {"paperId": "r2"},
+        {"paper": {"paper_id": "r3"}},
+        SimpleNamespace(paper=SimpleNamespace(paperId="r4")),
+        "r1",
+        None,
+    ]
+    malformed_payload = [{"unexpected": "shape"}]
+
+    assert s2._coerce_cached_reference_ids(mixed_payload) == ["r1", "r2", "r3", "r4"]
+    assert SemanticScholarClient._extract_reference_ids(mixed_payload) == [
+        "r1",
+        "r2",
+        "r3",
+        "r4",
+    ]
+    assert s2._coerce_cached_reference_ids(malformed_payload) is None
+    assert SemanticScholarClient._extract_reference_ids(malformed_payload) == []
 
 
 def test_reference_cache_resilience_contracts(

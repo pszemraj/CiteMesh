@@ -73,7 +73,7 @@ Persistent defaults for most build flags can be stored with `citemesh config`; p
 | `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`) | deterministic built-in seed |
 | `--include-timestamp` | Include generation time in output metadata | disabled |
 | `--export`, `-e` | `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, or `all`; repeat flag for multiple (e.g. `-e json -e dashboard`) | `png` |
-| `--theme` | `light`, `dark`, `solarized`, `auto` | `light` |
+| `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` reads the active macOS appearance before falling back to terminal hints | `dark` |
 | `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
 | `--log-width` | Rich console wrap width in columns (`0` uses terminal width on TTYs and a stable redirected fallback) | `0` |
@@ -139,7 +139,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)
 - `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows)
 - `--cache-overwrite-reason`: optional rationale string logged when `--force-rebuild-cache` clears embedding cache state
-- `--storage-precision {int8,float16,float32}`: persistent embedding-cache precision (default `int8`)
+- `--storage-precision {int8,float32}`: persistent embedding-cache precision (default `int8`)
 - `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search (default enabled). Explicit `--binary-prefilter` requires `--storage-precision int8`.
 - `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`; explicit use requires `--storage-precision int8`)

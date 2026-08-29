@@ -117,7 +117,7 @@ In collection mode, this means you can keep one `dashboard.html` open and move b
 
 **Visual encodings:** node color is a publication-year gradient (the on-graph legend and year timeline share the exact colorscale), node size tracks citation count, the seed wears a ring halo, and edge opacity/width scale with relative link weight within the graph. Hovering a node shows a theme-styled card (wrapped title, authors, year | citations | venue, and its relation to the seed) and previews the full details panel; clicking locks the selection and draws its strongest links as arcs.
 
-All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening browser extensions leave the tuned palettes alone.
+All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening browser extensions leave the tuned palettes alone. Dark is the built-in default. With `--theme auto`, CiteMesh reads the active macOS appearance when available, then falls back to explicit terminal appearance hints.
 
 ### Sidecar (`<strategy>.config.json`)
 

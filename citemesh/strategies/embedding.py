@@ -14,6 +14,7 @@ import random
 import re
 import warnings
 from contextlib import nullcontext
+from dataclasses import dataclass
 from hashlib import sha1, sha256
 from itertools import islice
 from pathlib import Path
@@ -44,7 +45,11 @@ from citemesh.data import (
 )
 from citemesh.data.embedding_cache import CacheSearchResult
 from citemesh.data.model_profiles import compose_title_abstract_text
-from citemesh.paper_ids import external_ids_from_canonical_paper_id, normalize_paper_id
+from citemesh.paper_ids import (
+    external_ids_from_canonical_paper_id,
+    normalize_paper_id,
+    recognize_arxiv_identifier,
+)
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -77,6 +82,25 @@ _COMPILE_ELIGIBLE_DEVICES = frozenset({"cuda", "mps"})
 _TF32_COMPILE_BRIDGE_TORCH_VERSIONS = frozenset({(2, 9), (2, 10)})
 
 
+@dataclass(frozen=True)
+class _HydrationSourceSliceResult:
+    """Outcome of consuming one exact-source hydration slice.
+
+    ``hydrated_records`` counts unique records routed into cache batching, while
+    ``source_rows_consumed`` and ``source_exhausted`` describe source traversal.
+    Keeping those concepts separate prevents duplicate/invalid source rows from
+    being mistaken for an interrupted resume.
+
+    :ivar int hydrated_records: Records routed into cache batching.
+    :ivar int source_rows_consumed: Raw source rows yielded to hydration.
+    :ivar bool source_exhausted: Whether the selected source slice reached clean EOF.
+    """
+
+    hydrated_records: int
+    source_rows_consumed: int
+    source_exhausted: bool
+
+
 def _parse_torch_major_minor(version: str) -> tuple[int, int]:
     """Parse major/minor tuple from a torch version string.
 
@@ -87,6 +111,25 @@ def _parse_torch_major_minor(version: str) -> tuple[int, int]:
     if version_match:
         return int(version_match.group(1)), int(version_match.group(2))
     return (0, 0)
+
+
+def _transformers_auto_dtype_key() -> str:
+    """Return the installed Transformers keyword for automatic weight dtype.
+
+    Transformers 5 renamed ``torch_dtype`` to ``dtype`` while retaining the
+    former spelling for backward compatibility. Older supported releases only
+    understand ``torch_dtype``.
+
+    :return str: ``dtype`` on Transformers 5+, otherwise ``torch_dtype``.
+    """
+    try:
+        transformers = importlib.import_module("transformers")
+    except ImportError:
+        return "torch_dtype"
+    major, _minor = _parse_torch_major_minor(
+        str(getattr(transformers, "__version__", ""))
+    )
+    return "dtype" if major >= 5 else "torch_dtype"
 
 
 def _cuda_available(torch: Any) -> bool:
@@ -273,10 +316,6 @@ ARXIV_DATASET_CANDIDATES = (
     "CShorten/ML-ArXiv-Papers",
     "gfissore/arxiv-abstracts-2021",
 )
-ARXIV_IDENTIFIER_PATTERN = re.compile(
-    r"^(?:arxiv:)?((?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z\-]+)?/\d{7})(?:v\d+)?)$",
-    re.IGNORECASE,
-)
 
 
 def _canonicalize_embedding_paper_id(raw_id: Any) -> str:
@@ -292,12 +331,7 @@ def _canonicalize_embedding_paper_id(raw_id: Any) -> str:
     if text.startswith("arxiv_"):
         return text
 
-    match = ARXIV_IDENTIFIER_PATTERN.match(text)
-    if not match:
-        return text
-
-    normalized = re.sub(r"v\d+$", "", match.group(1), flags=re.IGNORECASE)
-    return f"arxiv:{normalized}"
+    return recognize_arxiv_identifier(text, allow_bare=True) or text
 
 
 def _query_seed_id(query_text: str) -> str:
@@ -584,7 +618,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.
         :param Optional[str] force_rebuild_reason: Optional operator rationale logged
             when ``force_rebuild_cache`` clears the embedding namespace.
-        :param str storage_precision: Persistent cache precision (``int8``, ``float16``, ``float32``).
+        :param str storage_precision: Persistent cache precision (``int8`` or ``float32``).
         :param Optional[bool] binary_prefilter: Whether cache search uses binary
             Hamming prefiltering. When ``None``, defaults to enabled only for
             ``int8`` storage precision.
@@ -642,10 +676,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 ) from exc
             if corpus_size < 1:
                 raise ValueError("corpus_size must be at least 1 when provided")
-        if str(storage_precision) not in {"int8", "float16", "float32"}:
-            raise ValueError(
-                "storage_precision must be one of {'float32', 'float16', 'int8'}"
-            )
+        if str(storage_precision) not in {"int8", "float32"}:
+            raise ValueError("storage_precision must be one of {'float32', 'int8'}")
         if top_k < 1:
             raise ValueError("top_k must be at least 1")
         if binary_rescore_multiplier is not None and binary_rescore_multiplier < 1:
@@ -906,9 +938,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         return "sdpa"
 
     def _resolve_source_dtype_hint(self) -> str:
-        """Resolve source dtype token used for cache provenance metadata.
+        """Resolve effective compute dtype used for cache provenance metadata.
 
-        :return str: Source dtype token.
+        :return str: Effective compute dtype token.
         """
         try:
             torch = _import_torch()
@@ -918,24 +950,73 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self.device == "cpu":
             return "float32"
 
-        preferred_dtype = (self.model_profile.preferred_torch_dtype or "").lower()
-        if self.device == "mps":
-            if preferred_dtype == "bfloat16" and self._mps_bf16_allowed(torch):
-                return "bfloat16"
-            if bool(self.model_profile.float16_supported):
-                return "float16"
-            return "float32"
-
-        if preferred_dtype == "bfloat16" and bool(
-            getattr(torch.cuda, "is_bf16_supported", lambda: False)()
-        ):
+        preferred_dtype = (self.model_profile.preferred_compute_dtype or "").lower()
+        if preferred_dtype == "bfloat16" and self._bf16_autocast_allowed(torch):
             return "bfloat16"
-        if bool(self.model_profile.float16_supported):
-            return "float16"
         return "float32"
 
+    def _bf16_autocast_allowed(self, torch: Any) -> bool:
+        """Return whether the active device can execute bf16 through autocast.
+
+        Model weights use the checkpoint/library's automatic dtype resolution.
+        Reduced compute precision is enabled only through a verified autocast
+        context; any missing or rejected runtime capability falls back to float32.
+
+        :param Any torch: Imported torch module.
+        :return bool: ``True`` when bf16 autocast is usable for the active device.
+        """
+        if self.device not in self.model_profile.autocast_devices:
+            return False
+
+        bf16_dtype = getattr(torch, "bfloat16", None)
+        autocast = getattr(torch, "autocast", None)
+        if bf16_dtype is None or not callable(autocast):
+            logger.warning(
+                "%s prefers bfloat16 autocast on %s, but this torch runtime does "
+                "not expose the required APIs; falling back to float32.",
+                self.model_name,
+                self.device,
+            )
+            return False
+
+        if self.device == "cuda":
+            cuda_module = getattr(torch, "cuda", None)
+            is_bf16_supported = getattr(cuda_module, "is_bf16_supported", None)
+            try:
+                cuda_bf16_supported = bool(
+                    is_bf16_supported() if callable(is_bf16_supported) else False
+                )
+            except Exception as exc:
+                logger.warning(
+                    "%s could not verify CUDA bfloat16 support (%s: %s); "
+                    "falling back to float32.",
+                    self.model_name,
+                    type(exc).__name__,
+                    exc,
+                )
+                return False
+            if not cuda_bf16_supported:
+                return False
+        elif self.device == "mps" and not self._mps_bf16_allowed(torch):
+            return False
+
+        try:
+            with autocast(device_type=self.device, dtype=bf16_dtype):
+                pass
+        except Exception as exc:
+            logger.warning(
+                "%s prefers bfloat16 autocast on %s, but the runtime rejected "
+                "that context (%s: %s); falling back to float32.",
+                self.model_name,
+                self.device,
+                type(exc).__name__,
+                exc,
+            )
+            return False
+        return True
+
     def _mps_bf16_allowed(self, torch: Any) -> bool:
-        """Return whether bf16 weights are allowed on MPS for this torch build.
+        """Return whether bf16 autocast is allowed on MPS for this torch build.
 
         :param Any torch: Imported ``torch`` module object.
         :return bool: ``True`` when torch meets the MPS bf16 policy floor.
@@ -945,7 +1026,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return True
         logger.warning(
             "%s prefers bfloat16 on MPS, but torch %s predates the verified "
-            "MPS floor %s; falling back to a lower-precision policy.",
+            "MPS floor %s; falling back to float32.",
             self.model_name,
             getattr(torch, "__version__", "unknown"),
             ".".join(str(part) for part in _MPS_MIN_TORCH_VERSION),
@@ -1373,12 +1454,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._encode_model = None
 
     def _resolve_model_kwargs(self) -> Dict[str, Any]:
-        """Compute SentenceTransformer kwargs for model precision policy.
+        """Compute SentenceTransformer kwargs and configure autocast policy.
 
         :return Dict[str, Any]: ``SentenceTransformer`` constructor kwargs.
         """
         self._reset_precision_runtime()
-        model_kwargs: Dict[str, Any] = {}
+        model_kwargs: Dict[str, Any] = {_transformers_auto_dtype_key(): "auto"}
         if self._attention_implementation_hint is not None:
             model_kwargs["attn_implementation"] = self._attention_implementation_hint
 
@@ -1392,41 +1473,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._source_dtype_hint = "float32"
             return model_kwargs
 
-        if self._source_dtype_hint == "bfloat16":
-            self._autocast_dtype = torch.bfloat16
-            model_kwargs["dtype"] = torch.bfloat16
-        elif self._source_dtype_hint == "float16":
-            float16_dtype = getattr(torch, "float16", None)
-            if (
-                float16_dtype is None
-            ):  # pragma: no cover - defensive for torch API drift
-                logger.warning(
-                    "%s selected float16 runtime, but torch.float16 is unavailable; using float32.",
-                    self.model_name,
-                )
-                self._source_dtype_hint = "float32"
-                return model_kwargs
-            self._autocast_dtype = float16_dtype
-            model_kwargs["dtype"] = float16_dtype
-        else:
+        if self._source_dtype_hint != "bfloat16":
             return model_kwargs
 
+        self._autocast_dtype = torch.bfloat16
         self._autocast_device_type = self.device
-        self._autocast_enabled = self.device in self.model_profile.autocast_devices
-
-        if self._autocast_enabled:
-            logger.debug(
-                "%s will run with dtype=%s and %s autocast.",
-                self.model_name,
-                self._source_dtype_hint,
-                self.device,
-            )
-        else:
-            logger.debug(
-                "%s will run with dtype=%s.",
-                self.model_name,
-                self._source_dtype_hint,
-            )
+        self._autocast_enabled = True
+        logger.debug(
+            "%s will load weights with automatic dtype selection and run with "
+            "bfloat16 autocast on %s.",
+            self.model_name,
+            self.device,
+        )
 
         return model_kwargs
 
@@ -1629,15 +1687,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             else:
                 self._maybe_compile_inner_transformer()
 
-            if (
-                not self.model_profile.float16_supported
-                and not model_kwargs
-                and not self.model_profile.preferred_torch_dtype
-            ):
-                logger.debug(
-                    "%s does not support float16 activations; using float32.",
-                    self.model_name,
-                )
             self._log_dimension_policy()
             if self.model_profile.notes and not self._profile_logged:
                 logger.debug(self.model_profile.notes)
@@ -2377,6 +2426,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return
 
+        if self.corpus_size is None and ":" not in str(self.dataset_split):
+            upstream_rows = self._resolve_dataset_split_row_count(dataset_source)
+            updated_rows = self._cached_payload_row_count()
+            rows_reconciled = self._finalize_full_corpus_hydration_rows(
+                source=dataset_source,
+                updated_rows=updated_rows,
+                upstream_rows=upstream_rows,
+                mark_complete=True,
+            )
+            if not rows_reconciled:
+                logger.info(
+                    "Initial full-corpus hydration for %s/%s completed with "
+                    "cache_rows=%d and upstream_rows=%d; recording the expected "
+                    "duplicate-ID row-count deficit.",
+                    dataset_source,
+                    self.dataset_split,
+                    updated_rows,
+                    upstream_rows,
+                )
+            return
+
         self.embedding_cache.mark_hydrated(
             dataset_source=dataset_source,
             dataset_split=self.dataset_split,
@@ -2395,8 +2465,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Dataset source recorded on the
             incomplete cache attempt.
-        :return bool: ``True`` when the incomplete cache was resumed and marked
-            complete without requiring a full namespace clear.
+        :return bool: ``True`` when the incomplete cache was resumed or safely
+            retained without requiring a full namespace clear.
         """
         if self.corpus_size is not None:
             return False
@@ -2461,13 +2531,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     self.dataset_split,
                     cached_rows,
                 )
-                self.embedding_cache.mark_hydrated(
-                    dataset_source=source,
-                    dataset_split=self.dataset_split,
-                    corpus_size=self.corpus_size,
-                    complete=True,
+                self._finalize_full_corpus_hydration_rows(
+                    source=source,
+                    updated_rows=cached_rows,
+                    upstream_rows=upstream_rows,
+                    mark_complete=True,
                 )
-                self.embedding_cache.clear_hydration_rowcount_reconciliation()
                 return True
 
         row_limit = None if upstream_rows is None else upstream_rows - cached_rows
@@ -2482,24 +2551,16 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             use_streaming=use_streaming,
             dataset_source=source,
         )
-        resumed_source, dataset = self._load_dataset_for_hydration(
+        resume_result = self._hydrate_exact_hydration_source_slice_with_progress(
             use_streaming=use_streaming,
-            preferred_dataset_source=source,
+            source=source,
             row_limit=row_limit,
             row_offset=cached_rows,
-            allow_source_fallback=False,
-        )
-        if resumed_source != source:
-            raise RuntimeError(
-                "Incomplete hydration resume resolved unexpected dataset source "
-                f"{resumed_source!r} (expected {source!r})."
-            )
-
-        resumed_records = self._hydrate_dataset_records(
-            dataset=dataset,
             progress_total=row_limit,
             progress_label=f"Resuming {source}",
+            operation="Incomplete hydration resume",
         )
+        resumed_records = resume_result.hydrated_records
         updated_rows = self._cached_payload_row_count()
         if updated_rows < cached_rows:
             raise RuntimeError(
@@ -2507,31 +2568,229 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 f"({updated_rows} < {cached_rows})."
             )
 
-        if upstream_rows is not None and updated_rows < upstream_rows:
+        if upstream_rows is not None:
+            expected_source_rows = int(row_limit or 0)
+            if (
+                not resume_result.source_exhausted
+                or resume_result.source_rows_consumed != expected_source_rows
+            ):
+                logger.warning(
+                    "Incomplete full-corpus resume for %s/%s consumed %d of %d "
+                    "expected source rows (slice_exhausted=%s); performing full "
+                    "rebuild.",
+                    source,
+                    self.dataset_split,
+                    resume_result.source_rows_consumed,
+                    expected_source_rows,
+                    resume_result.source_exhausted,
+                )
+                return False
+        elif not resume_result.source_exhausted:
             logger.warning(
-                "Incomplete full-corpus resume for %s/%s stopped short of upstream "
-                "row count (cache_rows=%d, upstream_rows=%d); performing full rebuild.",
+                "Incomplete full-corpus resume for %s/%s did not exhaust its "
+                "unknown-cardinality source slice; performing full revalidation.",
+                source,
+                self.dataset_split,
+            )
+            return False
+
+        rows_reconciled = self._finalize_full_corpus_hydration_rows(
+            source=source,
+            updated_rows=updated_rows,
+            upstream_rows=upstream_rows,
+            mark_complete=True,
+        )
+        if not rows_reconciled:
+            logger.info(
+                "Incomplete full-corpus resume for %s/%s exhausted its expected "
+                "source slice with cache_rows=%d and upstream_rows=%d; recording "
+                "the duplicate/invalid-ID row-count deficit.",
                 source,
                 self.dataset_split,
                 updated_rows,
                 upstream_rows,
             )
-            return False
-
-        self.embedding_cache.mark_hydrated(
-            dataset_source=source,
-            dataset_split=self.dataset_split,
-            corpus_size=self.corpus_size,
-            complete=True,
-        )
-        self.embedding_cache.clear_hydration_rowcount_reconciliation()
         logger.info(
-            "Resumed incomplete full-corpus cache for %s/%s (added=%d, cache_rows=%d).",
+            "Resumed incomplete full-corpus cache for %s/%s "
+            "(source_rows=%d, added=%d, cache_rows=%d).",
             source,
             self.dataset_split,
+            resume_result.source_rows_consumed,
             resumed_records,
             updated_rows,
         )
+        return True
+
+    def _load_exact_hydration_source_slice(
+        self,
+        *,
+        use_streaming: bool,
+        source: str,
+        operation: str,
+        row_limit: Optional[int] = None,
+        row_offset: Optional[int] = None,
+    ) -> Iterable[Dict[str, Any]]:
+        """Load a hydration slice while requiring the recorded source exactly.
+
+        :param bool use_streaming: Whether to load a streaming dataset iterator.
+        :param str source: Previously recorded dataset source to load.
+        :param str operation: Caller-facing operation name for mismatch errors.
+        :param Optional[int] row_limit: Optional number of rows to load.
+        :param Optional[int] row_offset: Optional source row offset.
+        :return Iterable[Dict[str, Any]]: The exact-source dataset slice.
+        :raises RuntimeError: If the loader resolves a different source.
+        """
+        resolved_source, dataset = self._load_dataset_for_hydration(
+            use_streaming=use_streaming,
+            preferred_dataset_source=source,
+            row_limit=row_limit,
+            row_offset=row_offset,
+            allow_source_fallback=False,
+        )
+        if resolved_source != source:
+            raise RuntimeError(
+                f"{operation} resolved unexpected dataset source {resolved_source!r} "
+                f"(expected {source!r})."
+            )
+        return dataset
+
+    def _hydrate_exact_hydration_source_slice(
+        self,
+        *,
+        use_streaming: bool,
+        source: str,
+        progress_total: Optional[int],
+        progress_label: str,
+        operation: str,
+        row_limit: Optional[int] = None,
+        row_offset: Optional[int] = None,
+        existing_paper_ids: Optional[Set[str]] = None,
+        max_new_records: Optional[int] = None,
+    ) -> int:
+        """Load and hydrate an exact-source dataset slice.
+
+        :param bool use_streaming: Whether to load a streaming dataset iterator.
+        :param str source: Previously recorded dataset source to load.
+        :param Optional[int] progress_total: Expected row count for progress display.
+        :param str progress_label: Progress-bar description label.
+        :param str operation: Caller-facing operation name for mismatch errors.
+        :param Optional[int] row_limit: Optional number of rows to load.
+        :param Optional[int] row_offset: Optional source row offset.
+        :param Optional[Set[str]] existing_paper_ids: IDs to skip during reconciliation.
+        :param Optional[int] max_new_records: Optional cap on newly hydrated records.
+        :return int: Number of records routed into cache batching.
+        """
+        result = self._hydrate_exact_hydration_source_slice_with_progress(
+            use_streaming=use_streaming,
+            source=source,
+            progress_total=progress_total,
+            progress_label=progress_label,
+            operation=operation,
+            row_limit=row_limit,
+            row_offset=row_offset,
+            existing_paper_ids=existing_paper_ids,
+            max_new_records=max_new_records,
+        )
+        return result.hydrated_records
+
+    def _hydrate_exact_hydration_source_slice_with_progress(
+        self,
+        *,
+        use_streaming: bool,
+        source: str,
+        progress_total: Optional[int],
+        progress_label: str,
+        operation: str,
+        row_limit: Optional[int] = None,
+        row_offset: Optional[int] = None,
+        existing_paper_ids: Optional[Set[str]] = None,
+        max_new_records: Optional[int] = None,
+    ) -> _HydrationSourceSliceResult:
+        """Load an exact-source slice and report both cache and source progress.
+
+        Exceptions from source iteration or cache writes propagate before a
+        result is returned, so callers cannot mistake a failed pass for clean EOF.
+
+        :param bool use_streaming: Whether to load a streaming dataset iterator.
+        :param str source: Previously recorded dataset source to load.
+        :param Optional[int] progress_total: Expected row count for progress display.
+        :param str progress_label: Progress-bar description label.
+        :param str operation: Caller-facing operation name for mismatch errors.
+        :param Optional[int] row_limit: Optional number of rows to load.
+        :param Optional[int] row_offset: Optional source row offset.
+        :param Optional[Set[str]] existing_paper_ids: IDs to skip during reconciliation.
+        :param Optional[int] max_new_records: Optional cap on newly hydrated records.
+        :return _HydrationSourceSliceResult: Cache writes and source-consumption state.
+        """
+        dataset = self._load_exact_hydration_source_slice(
+            use_streaming=use_streaming,
+            source=source,
+            operation=operation,
+            row_limit=row_limit,
+            row_offset=row_offset,
+        )
+        source_rows_consumed = 0
+        source_exhausted = False
+
+        def tracked_dataset() -> Iterable[Dict[str, Any]]:
+            """Yield source rows while recording clean iterator exhaustion.
+
+            :return Iterable[Dict[str, Any]]: Tracked source records.
+            """
+            nonlocal source_rows_consumed, source_exhausted
+            iterator = iter(dataset)
+            while True:
+                try:
+                    raw_record = next(iterator)
+                except StopIteration:
+                    source_exhausted = True
+                    return
+                source_rows_consumed += 1
+                yield raw_record
+
+        hydrated_records = self._hydrate_dataset_records(
+            dataset=tracked_dataset(),
+            progress_total=progress_total,
+            progress_label=progress_label,
+            existing_paper_ids=existing_paper_ids,
+            max_new_records=max_new_records,
+        )
+        return _HydrationSourceSliceResult(
+            hydrated_records=hydrated_records,
+            source_rows_consumed=source_rows_consumed,
+            source_exhausted=source_exhausted,
+        )
+
+    def _finalize_full_corpus_hydration_rows(
+        self,
+        *,
+        source: str,
+        updated_rows: int,
+        upstream_rows: Optional[int],
+        mark_complete: bool,
+    ) -> bool:
+        """Finalize hydration completion and row-count reconciliation metadata.
+
+        :param str source: Exact dataset source used for hydration.
+        :param int updated_rows: Current cached payload row count.
+        :param Optional[int] upstream_rows: Upstream split row count, if known.
+        :param bool mark_complete: Whether this path has completed hydration.
+        :return bool: ``True`` when row counts match or cannot be compared.
+        """
+        if mark_complete:
+            self.embedding_cache.mark_hydrated(
+                dataset_source=source,
+                dataset_split=self.dataset_split,
+                corpus_size=self.corpus_size,
+                complete=True,
+            )
+        if upstream_rows is not None and updated_rows < upstream_rows:
+            self.embedding_cache.set_hydration_rowcount_reconciliation(
+                upstream_rows=upstream_rows,
+                cached_rows=updated_rows,
+            )
+            return False
+        self.embedding_cache.clear_hydration_rowcount_reconciliation()
         return True
 
     def _resolve_hydration_progress_total(
@@ -2925,23 +3184,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             cached_rows,
             upstream_rows,
         )
-        refreshed_source, dataset = self._load_dataset_for_hydration(
+        tail_refreshed_records = self._hydrate_exact_hydration_source_slice(
             use_streaming=use_streaming,
-            preferred_dataset_source=source,
+            source=source,
             row_limit=delta_rows,
             row_offset=cached_rows,
-            allow_source_fallback=False,
-        )
-        if refreshed_source != source:
-            raise RuntimeError(
-                "Incremental refresh resolved unexpected dataset source "
-                f"{refreshed_source!r} (expected {source!r})."
-            )
-
-        tail_refreshed_records = self._hydrate_dataset_records(
-            dataset=dataset,
             progress_total=delta_rows,
             progress_label=f"Refreshing {source}",
+            operation="Incremental refresh",
         )
         updated_rows = self._cached_payload_row_count()
         head_reconciled_records = 0
@@ -2959,22 +3209,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 upstream_rows,
             )
             cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
-            reconciled_source, head_dataset = self._load_dataset_for_hydration(
+            head_reconciled_records = self._hydrate_exact_hydration_source_slice(
                 use_streaming=use_streaming,
-                preferred_dataset_source=source,
+                source=source,
                 row_limit=delta_rows,
                 row_offset=0,
-                allow_source_fallback=False,
-            )
-            if reconciled_source != source:
-                raise RuntimeError(
-                    "Head-slice reconciliation resolved unexpected dataset source "
-                    f"{reconciled_source!r} (expected {source!r})."
-                )
-            head_reconciled_records = self._hydrate_dataset_records(
-                dataset=head_dataset,
                 progress_total=delta_rows,
                 progress_label=f"Reconciling head {source}",
+                operation="Head-slice reconciliation",
                 existing_paper_ids=cached_paper_ids,
                 max_new_records=remaining_rows,
             )
@@ -2990,32 +3232,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     updated_rows,
                     upstream_rows,
                 )
-                reconciled_source, full_dataset = self._load_dataset_for_hydration(
+                full_reconciled_records = self._hydrate_exact_hydration_source_slice(
                     use_streaming=use_streaming,
-                    preferred_dataset_source=source,
-                    allow_source_fallback=False,
-                )
-                if reconciled_source != source:
-                    raise RuntimeError(
-                        "Full-split reconciliation resolved unexpected dataset source "
-                        f"{reconciled_source!r} (expected {source!r})."
-                    )
-                full_reconciled_records = self._hydrate_dataset_records(
-                    dataset=full_dataset,
+                    source=source,
                     progress_total=upstream_rows,
                     progress_label=f"Reconciling full {source}",
+                    operation="Full-split reconciliation",
                     existing_paper_ids=cached_paper_ids,
                     max_new_records=None,
                 )
                 updated_rows = self._cached_payload_row_count()
 
-        if updated_rows > 0:
-            self.embedding_cache.mark_hydrated(
-                dataset_source=source,
-                dataset_split=self.dataset_split,
-                corpus_size=self.corpus_size,
-                complete=True,
-            )
         logger.info(
             "Incremental refresh processed tail=%d head=%d full=%d rows "
             "for %s/%s (cache_rows=%d, upstream_rows=%d).",
@@ -3027,11 +3254,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             updated_rows,
             upstream_rows,
         )
-        if updated_rows < upstream_rows:
-            self.embedding_cache.set_hydration_rowcount_reconciliation(
-                upstream_rows=upstream_rows,
-                cached_rows=updated_rows,
-            )
+        rows_reconciled = self._finalize_full_corpus_hydration_rows(
+            source=source,
+            updated_rows=updated_rows,
+            upstream_rows=upstream_rows,
+            mark_complete=updated_rows > 0,
+        )
+        if not rows_reconciled:
             logger.info(
                 "Full-split reconciliation completed for %s/%s with cache_rows=%d "
                 "and upstream_rows=%d. Remaining row-count delta likely reflects "
@@ -3042,8 +3271,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 updated_rows,
                 upstream_rows,
             )
-        else:
-            self.embedding_cache.clear_hydration_rowcount_reconciliation()
 
     def _load_dataset_for_hydration(
         self,

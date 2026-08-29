@@ -18,6 +18,13 @@ from citemesh.core import Paper
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.candidates import (
+    merge_paper_metadata,
+    merge_seed_relation,
+    register_aliases,
+    repoint_aliases,
+    resolve_aliases,
+)
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -68,6 +75,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.client: SemanticScholarClient = client or get_client()
         self.reference_cache: Dict[str, list] = {}  # Cache reference lists
         self.seed_relations: Dict[str, str] = {}
+        self._identity_aliases: Dict[str, str] = {}
         self._abstract_index = AbstractSimilarityIndex()
 
     @staticmethod
@@ -78,49 +86,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param Paper incoming: Newly observed payload for the same paper ID.
         :return Paper: Mutated ``existing`` paper instance.
         """
-        if (
-            (not existing.title or existing.title == "Unknown")
-            and incoming.title
-            and incoming.title != "Unknown"
-        ):
-            existing.title = incoming.title
-        if (not existing.abstract) and incoming.abstract:
-            existing.abstract = incoming.abstract
-        if existing.year is None and incoming.year is not None:
-            existing.year = incoming.year
-        if (not existing.authors) and incoming.authors:
-            existing.authors = incoming.authors
-        if existing.citation_count <= 0 and incoming.citation_count > 0:
-            existing.citation_count = incoming.citation_count
-        if (not existing.venue) and incoming.venue:
-            existing.venue = incoming.venue
-        if (not existing.arxiv_id) and incoming.arxiv_id:
-            existing.arxiv_id = incoming.arxiv_id
-        if (not existing.doi) and incoming.doi:
-            existing.doi = incoming.doi
-        if (not existing.categories) and incoming.categories:
-            existing.categories = incoming.categories
-
-        if incoming.references:
-            if not existing.references:
-                existing.references = [
-                    str(ref_id).strip()
-                    for ref_id in incoming.references
-                    if str(ref_id).strip()
-                ]
-            else:
-                existing_refs = [ref for ref in existing.references if str(ref).strip()]
-                seen = set(existing_refs)
-                for ref_id in incoming.references:
-                    normalized_ref_id = str(ref_id).strip()
-                    if not normalized_ref_id or normalized_ref_id in seen:
-                        continue
-                    existing_refs.append(normalized_ref_id)
-                    seen.add(normalized_ref_id)
-                existing.references = existing_refs
-
-        existing.is_seed = bool(existing.is_seed or incoming.is_seed)
-        return existing
+        return merge_paper_metadata(existing, incoming)
 
     def _ensure_paper_references(self, paper: Paper) -> None:
         """Hydrate reference IDs for a paper without clobbering existing payload.
@@ -181,22 +147,82 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             relation_iterator = []
 
         for paper in relation_iterator:
-            normalized_paper_id = str(paper.paper_id).strip()
-            if not normalized_paper_id:
+            raw_paper_id = str(paper.paper_id).strip()
+            if not raw_paper_id:
                 continue
-            processed_ids.append(normalized_paper_id)
+            matched_ids = resolve_aliases(self._identity_aliases, paper)
+            seed_id = next(
+                (paper_id for paper_id, record in papers.items() if record.is_seed),
+                "",
+            )
+            if seed_id and seed_id in matched_ids:
+                loser_ids = [
+                    paper_id
+                    for paper_id in papers
+                    if paper_id != seed_id and paper_id in matched_ids
+                ]
+                loser_id_set = set(loser_ids)
+                for loser_id in loser_ids:
+                    self._merge_relation_paper(papers[seed_id], papers.pop(loser_id))
+                    cached_references = self.reference_cache.pop(loser_id, None)
+                    if cached_references is not None:
+                        self.reference_cache.setdefault(seed_id, cached_references)
+                    self.seed_relations.pop(loser_id, None)
+                self._merge_relation_paper(papers[seed_id], paper)
+                repoint_aliases(
+                    self._identity_aliases,
+                    seed_id,
+                    set(loser_ids) | {seed_id},
+                )
+                register_aliases(self._identity_aliases, seed_id, paper)
+                processed_ids[:] = [
+                    paper_id
+                    for paper_id in processed_ids
+                    if paper_id not in loser_id_set
+                ]
+                continue
 
-            existing = papers.get(normalized_paper_id)
-            if existing is not None:
-                self._merge_relation_paper(existing, paper)
-                self._ensure_paper_references(existing)
+            matched_candidates = [
+                paper_id
+                for paper_id, record in papers.items()
+                if not record.is_seed and paper_id in matched_ids
+            ]
+            if matched_candidates:
+                canonical_id = matched_candidates[0]
+                loser_id_set = set(matched_candidates[1:])
+                for loser_id in matched_candidates[1:]:
+                    self._merge_relation_paper(
+                        papers[canonical_id], papers.pop(loser_id)
+                    )
+                    cached_references = self.reference_cache.pop(loser_id, None)
+                    if cached_references is not None:
+                        self.reference_cache.setdefault(canonical_id, cached_references)
+                    merged_relation = merge_seed_relation(
+                        self.seed_relations.get(canonical_id, ""),
+                        self.seed_relations.pop(loser_id, ""),
+                    )
+                    if merged_relation:
+                        self.seed_relations[canonical_id] = merged_relation
+                self._merge_relation_paper(papers[canonical_id], paper)
+                repoint_aliases(
+                    self._identity_aliases, canonical_id, set(matched_candidates)
+                )
+                register_aliases(self._identity_aliases, canonical_id, paper)
+                self._ensure_paper_references(papers[canonical_id])
+                processed_ids[:] = [
+                    canonical_id if paper_id in loser_id_set else paper_id
+                    for paper_id in processed_ids
+                ]
+                processed_ids.append(canonical_id)
                 continue
 
             if len(papers) >= self.max_papers:
                 continue
 
-            papers[normalized_paper_id] = paper
+            papers[raw_paper_id] = paper
+            register_aliases(self._identity_aliases, raw_paper_id, paper)
             self._ensure_paper_references(paper)
+            processed_ids.append(raw_paper_id)
 
         if progress_bar is not None:
             progress_bar.close()
@@ -214,13 +240,11 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             normalized_id = str(paper_id).strip()
             if not normalized_id:
                 continue
-            existing = self.seed_relations.get(normalized_id)
-            if existing is None:
-                self.seed_relations[normalized_id] = relation
-                continue
-            if existing == "seed" or existing == relation or existing == "overlap":
-                continue
-            self.seed_relations[normalized_id] = "overlap"
+            merged_relation = merge_seed_relation(
+                self.seed_relations.get(normalized_id, ""), relation
+            )
+            if merged_relation:
+                self.seed_relations[normalized_id] = merged_relation
 
     def _get_references(self, paper_id: str) -> list:
         """
@@ -253,6 +277,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         # not leak across caller boundaries when builders are reused.
         self.reference_cache.clear()
         self.seed_relations = {}
+        self._identity_aliases = {}
         papers = {}
 
         # Step 1: Fetch seed paper
@@ -272,6 +297,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         seed.is_seed = True
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
+        register_aliases(self._identity_aliases, seed.paper_id, seed)
 
         # Store seed references in cache
         if self.fetch_references and seed.references:

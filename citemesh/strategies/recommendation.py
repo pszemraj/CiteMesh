@@ -9,6 +9,12 @@ from citemesh.core import Paper
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.candidates import (
+    merge_paper_metadata,
+    register_aliases,
+    repoint_aliases,
+    resolve_aliases,
+)
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -90,6 +96,8 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
         seed.is_seed = True
         papers[seed.paper_id] = seed
+        identity_aliases: Dict[str, str] = {}
+        register_aliases(identity_aliases, seed.paper_id, seed)
 
         logger.info("Fetching recommendations for %s", seed.paper_id)
         recommendations = self.client.get_recommended_papers(
@@ -102,31 +110,50 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             # Recommendation payloads can include the seed paper itself.
             # Preserve the original seed object so GraphBuilderStrategy can always
             # identify a node with ``is_seed=True``.
-            if paper.paper_id == seed.paper_id:
+            matched_ids = resolve_aliases(identity_aliases, paper)
+            if seed.paper_id in matched_ids:
+                loser_ids = [
+                    paper_id
+                    for paper_id in papers
+                    if paper_id != seed.paper_id and paper_id in matched_ids
+                ]
+                for loser_id in loser_ids:
+                    merge_paper_metadata(seed, papers.pop(loser_id))
+                merge_paper_metadata(seed, paper)
+                repoint_aliases(
+                    identity_aliases,
+                    seed.paper_id,
+                    set(loser_ids) | {seed.paper_id},
+                )
+                register_aliases(identity_aliases, seed.paper_id, paper)
+                continue
+
+            matched_candidates = [
+                paper_id
+                for paper_id, existing in papers.items()
+                if not existing.is_seed and paper_id in matched_ids
+            ]
+            if matched_candidates:
+                canonical_id = matched_candidates[0]
+                existing = papers[canonical_id]
+                for loser_id in matched_candidates[1:]:
+                    merge_paper_metadata(existing, papers.pop(loser_id))
+                if not existing.references:
+                    self._hydrate_references(paper)
+                merge_paper_metadata(existing, paper)
+                repoint_aliases(identity_aliases, canonical_id, set(matched_candidates))
+                register_aliases(identity_aliases, canonical_id, paper)
                 continue
 
             if not paper.abstract or not paper.title:
                 continue
 
-            existing = papers.get(paper.paper_id)
-            if existing is not None:
-                if existing.is_seed:
-                    continue
-                # Keep richer metadata when duplicates are returned.
-                if (not existing.abstract and paper.abstract) or (
-                    existing.title == "Unknown" and paper.title != "Unknown"
-                ):
-                    self._hydrate_references(paper)
-                    papers[paper.paper_id] = paper
-                elif not existing.references:
-                    self._hydrate_references(existing)
-                continue
-
             if len(papers) >= self.max_papers:
-                break
+                continue
 
             self._hydrate_references(paper)
             papers[paper.paper_id] = paper
+            register_aliases(identity_aliases, paper.paper_id, paper)
 
         self._abstract_index.build(papers)
         self._set_collection_summary(

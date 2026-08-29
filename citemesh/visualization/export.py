@@ -43,6 +43,8 @@ _GRAPHML_BEST_EFFORT_MIN_VERSION = (2, 8)
 GRAPHML_LAYOUT_METADATA_KEY = "citemesh_graphml_determinism"
 GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
 DASHBOARD_AXIS_MIN_PADDING = 0.14
+DASHBOARD_AXIS_X_PADDING = 0.18
+DASHBOARD_FOOTER_MARGIN = 78
 DASHBOARD_LABEL_CAP = 8
 DASHBOARD_LABEL_MIN_DISTANCE = 0.18
 DASHBOARD_MAX_NODE_DIAMETER = 58.0
@@ -260,7 +262,7 @@ class GraphExporter:
         graph: nx.Graph,
         seed_id: str,
         metadata: Optional[Dict] = None,
-        theme_name: str = "light",
+        theme_name: str = "dark",
         layout: Optional[Dict[Hashable, Iterable[float]]] = None,
     ):
         """Create exporter bound to a graph and seed paper metadata.
@@ -885,7 +887,12 @@ class GraphExporter:
         layout_kwargs: Dict[str, Any] = {
             "showlegend": False,
             "hovermode": "closest",
-            "margin": dict(b=20, l=5, r=5, t=max(0, int(margin_top))),
+            "margin": dict(
+                b=DASHBOARD_FOOTER_MARGIN if for_dashboard else 20,
+                l=5,
+                r=5,
+                t=max(0, int(margin_top)),
+            ),
             "xaxis": dict(showgrid=False, zeroline=False, showticklabels=False),
             "yaxis": dict(showgrid=False, zeroline=False, showticklabels=False),
             "plot_bgcolor": theme_obj.background,
@@ -899,7 +906,7 @@ class GraphExporter:
             y_max = max(node_y)
             x_span = max(x_max - x_min, 1e-6)
             y_span = max(y_max - y_min, 1e-6)
-            x_pad = max(DASHBOARD_AXIS_MIN_PADDING, x_span * 0.08)
+            x_pad = max(DASHBOARD_AXIS_X_PADDING, x_span * 0.1)
             y_pad = max(DASHBOARD_AXIS_MIN_PADDING, y_span * 0.08)
             layout_kwargs["xaxis"].update(
                 {"autorange": False, "range": [x_min - x_pad, x_max + x_pad]}
@@ -1465,6 +1472,18 @@ class GraphExporter:
     /* Plotly overlay SVGs must stay transparent; dark-mode extensions that
        repaint them opaque would otherwise hide the whole graph. */
     .js-plotly-plot svg.main-svg { background: transparent !important; }
+    /* Plotly injects low-opacity icon fills that are too dim on dark panels. */
+    .js-plotly-plot .modebar-btn path {
+      fill: var(--text-muted) !important;
+    }
+    .js-plotly-plot .modebar-btn:hover path,
+    .js-plotly-plot .modebar-btn.active path {
+      fill: var(--text-primary) !important;
+    }
+    .js-plotly-plot .modebar-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
     html, body {
       margin: 0;
       height: 100%;
@@ -1738,6 +1757,12 @@ class GraphExporter:
     }
     .meta-origin { color: color-mix(in srgb, var(--seed-ring) 82%, #f2d8ea); }
     #graph-pane .pane-header { gap: 10px; }
+    #graph-pane .pane-header .muted {
+      max-width: 72%;
+      font-size: 12px;
+      line-height: 1.25;
+      text-align: right;
+    }
     #graph-canvas-wrap {
       position: relative;
       flex: 1;
@@ -1937,8 +1962,8 @@ class GraphExporter:
       border: 1px solid color-mix(in srgb, var(--panel-border) 78%, transparent);
       border-radius: 10px;
       padding: 10px;
-      min-height: 0;
-      flex: 1;
+      min-height: 160px;
+      flex: 1 0 160px;
       background: rgba(255, 255, 255, 0.012);
     }
     #detail-abstract-label {
@@ -1986,7 +2011,7 @@ class GraphExporter:
         grid-template-columns: minmax(240px, 30vw) minmax(420px, 1fr) minmax(300px, 34vw);
       }
       .toolbar-row.primary { grid-template-columns: 1fr 168px 152px; }
-      .toolbar-row.secondary { grid-template-columns: 128px 128px 1fr; }
+      .toolbar-row.secondary { grid-template-columns: 140px 140px 1fr; }
     }
     @media (max-width: 1100px) {
       html, body {
@@ -2015,9 +2040,12 @@ class GraphExporter:
         overflow: visible;
       }
       #graph-pane { grid-area: graph; min-height: 520px; }
-      #detail-pane { grid-area: detail; min-height: 430px; }
+      #detail-pane { grid-area: detail; min-height: 620px; }
       #paper-list-pane { grid-area: list; min-height: 360px; }
       #__PLOTLY_DIV_ID__ { min-height: 500px; }
+    }
+    @media (max-width: 640px) {
+      #dashboard-toolbar { position: static; }
     }
   </style>
 </head>

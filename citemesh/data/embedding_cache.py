@@ -68,7 +68,7 @@ TEXT_FORMATTER_FINGERPRINT_KEY = "text_formatter_fingerprint"
 INT8_CLIPPED_VALUE_COUNT_KEY = "int8_clipped_value_count"
 INT8_TOTAL_VALUE_COUNT_KEY = "int8_total_value_count"
 
-_STORAGE_PRECISIONS = {"float32", "float16", "int8"}
+_STORAGE_PRECISIONS = {"float32", "int8"}
 _COMPRESSION_FILTERS = {"gzip", "lzf"}
 _COMPRESSION_FILTER_IDS = {
     "gzip": h5py.h5z.FILTER_DEFLATE,
@@ -78,7 +78,13 @@ _POPCOUNT_LUT = np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1).s
     axis=1
 )
 EMBEDDING_DATASET_CHUNK_ROWS = 2048
+EMBEDDING_SEARCH_CHUNK_ROWS = 65536
 INT8_SATURATION_WARN_RATIO = 0.005
+_PAPER_ROW_COLUMNS = (
+    "paper_id, text_hash, row_idx, title, abstract, year, authors_json, "
+    "categories_json, venue, arxiv_id, doi"
+)
+_PAPER_ROW_LOOKUP_COLUMNS = {"paper_id", "row_idx"}
 
 
 def _resolve_cache_lock_timeout_seconds() -> float:
@@ -178,8 +184,6 @@ def _storage_dtype_for_precision(storage_precision: str) -> np.dtype:
     """
     if storage_precision == "float32":
         return np.dtype(np.float32)
-    if storage_precision == "float16":
-        return np.dtype(np.float16)
     if storage_precision == "int8":
         return np.dtype(np.int8)
     raise ValueError(f"Unsupported storage precision: {storage_precision}")
@@ -220,13 +224,21 @@ def _sanitize_ranges(ranges: np.ndarray) -> np.ndarray:
     :return np.ndarray: Sanitized range matrix.
     """
     normalized = np.asarray(ranges, dtype=np.float32)
-    if normalized.shape[0] != 2:
+    if normalized.ndim != 2 or normalized.shape[0] != 2:
         raise ValueError(
             f"Calibration ranges must have shape (2, dim), got {normalized.shape}."
         )
+    if normalized.shape[1] < 1:
+        raise ValueError("Calibration ranges must cover at least one dimension.")
+    if not np.all(np.isfinite(normalized)):
+        raise ValueError("Calibration ranges must contain only finite values.")
 
     mins = normalized[0]
     maxs = normalized[1]
+    if np.any(maxs < mins):
+        raise ValueError(
+            "Calibration range maxima must be greater than or equal to minima."
+        )
     too_small = (maxs - mins) < 1e-6
     if np.any(too_small):
         maxs = maxs.copy()
@@ -366,7 +378,7 @@ class EmbeddingCache:
 
         :param Optional[Path] cache_dir: Cache directory override. Uses global cache when ``None``.
         :param str model_name: Model namespace string used for cache partitioning.
-        :param str storage_precision: Persistent embedding precision ``float32``/``float16``/``int8``.
+        :param str storage_precision: Persistent embedding precision ``float32``/``int8``.
         :param bool binary_prefilter: Whether to maintain a binary index for int8 search.
         :param int calibration_sample_size: Target sample size for int8 calibration ranges.
         :param str compression: HDF5 compression filter name (``gzip`` or ``lzf``).
@@ -409,6 +421,8 @@ class EmbeddingCache:
                 self.compression_level,
             )
             self.compression_level = 0
+        self._effective_compression = self.compression
+        self._effective_compression_level = self.compression_level
         self.source_torch_dtype = str(source_torch_dtype or "float32")
         self.text_formatter_fingerprint = str(text_formatter_fingerprint).strip()
         if not self.text_formatter_fingerprint:
@@ -636,11 +650,20 @@ class EmbeddingCache:
         )
         if embeddings_array.ndim == 1:
             embeddings_array = embeddings_array.reshape(1, -1)
+        if embeddings_array.ndim != 2:
+            raise ValueError(
+                "Embedding model must return a 2-dimensional matrix, "
+                f"got shape {embeddings_array.shape}."
+            )
         if embeddings_array.shape[0] != len(papers_to_embed):
             raise ValueError(
                 "Embedding model returned unexpected row count: "
                 f"{embeddings_array.shape[0]} for {len(papers_to_embed)} papers."
             )
+        if embeddings_array.shape[1] < 1:
+            raise ValueError("Embedding model returned vectors with zero dimensions.")
+        if not np.all(np.isfinite(embeddings_array)):
+            raise ValueError("Embedding model returned non-finite values.")
 
         embedding_dim = int(embeddings_array.shape[1])
         clipped_value_count = 0
@@ -852,6 +875,8 @@ class EmbeddingCache:
         query = np.asarray(query_embedding, dtype=np.float32)
         if query.ndim != 1:
             raise ValueError("query_embedding must be 1-dimensional")
+        if not np.all(np.isfinite(query)):
+            raise ValueError("query_embedding must contain only finite values")
         if not self.h5_path.exists():
             return []
 
@@ -1388,6 +1413,7 @@ class EmbeddingCache:
                 )
             self.db_path.unlink(missing_ok=True)
             self.h5_path.unlink(missing_ok=True)
+            self._reset_effective_compression()
             self._init_db()
 
     # ------------------------------------------------------------------
@@ -1506,9 +1532,13 @@ class EmbeddingCache:
                 BINARY_PREFILTER_ENABLED_KEY,
                 "1" if self.binary_prefilter else "0",
             )
-            self._set_cache_metadata(conn, COMPRESSION_FILTER_KEY, self.compression)
-            self._set_cache_metadata(
-                conn, COMPRESSION_LEVEL_KEY, str(self.compression_level)
+            self._set_cache_metadata_default(
+                conn, COMPRESSION_FILTER_KEY, self._effective_compression
+            )
+            self._set_cache_metadata_default(
+                conn,
+                COMPRESSION_LEVEL_KEY,
+                str(self._effective_compression_level),
             )
             # Preserve hydration completion across restarts; initialize only once.
             self._set_cache_metadata_default(conn, HYDRATION_COMPLETE_KEY, "0")
@@ -1663,8 +1693,8 @@ class EmbeddingCache:
             EMBEDDING_VECTOR_DTYPE_KEY: self.embedding_vector_dtype,
             TEXT_FORMATTER_FINGERPRINT_KEY: self.text_formatter_fingerprint,
             BINARY_PREFILTER_ENABLED_KEY: "1" if self.binary_prefilter else "0",
-            COMPRESSION_FILTER_KEY: self.compression,
-            COMPRESSION_LEVEL_KEY: str(self.compression_level),
+            COMPRESSION_FILTER_KEY: self._effective_compression,
+            COMPRESSION_LEVEL_KEY: str(self._effective_compression_level),
         }
         if self.storage_precision == "int8":
             expected[CALIBRATION_SAMPLE_SIZE_KEY] = str(self.calibration_sample_size)
@@ -1808,17 +1838,19 @@ class EmbeddingCache:
                 f"embeddings dataset dtype mismatch "
                 f"({embeddings_dataset.dtype} != {target_dtype})"
             )
-        if str(embeddings_dataset.compression or "") != self.compression:
+        if str(embeddings_dataset.compression or "") != self._effective_compression:
             _fail(
                 "embeddings dataset compression mismatch "
-                f"({embeddings_dataset.compression!r} != {self.compression!r})"
+                f"({embeddings_dataset.compression!r} != "
+                f"{self._effective_compression!r})"
             )
-        if self.compression != "lzf":
+        if self._effective_compression != "lzf":
             actual_compression_level = embeddings_dataset.compression_opts
-            if int(actual_compression_level) != int(self.compression_level):
+            if int(actual_compression_level) != int(self._effective_compression_level):
                 _fail(
                     "embeddings dataset compression level mismatch "
-                    f"({actual_compression_level!r} != {self.compression_level!r})"
+                    f"({actual_compression_level!r} != "
+                    f"{self._effective_compression_level!r})"
                 )
 
         row_count = int(embeddings_dataset.shape[0])
@@ -1856,10 +1888,82 @@ class EmbeddingCache:
         """
         self._set_cache_metadata(conn, H5_LAYOUT_KEY, H5_LAYOUT_MATRIX_VERSION)
 
+    def _reset_effective_compression(self) -> None:
+        """Reset physical-layout settings to the originally requested codec.
+
+        :return None: Updates effective compression state in-place.
+        """
+        self._effective_compression = self.compression
+        self._effective_compression_level = self.compression_level
+
+    def _persist_effective_compression_metadata(self, conn: sqlite3.Connection) -> None:
+        """Persist effective physical-layout settings in SQLite metadata.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :return None: Updates compression metadata in-place.
+        """
+        self._set_cache_metadata(
+            conn, COMPRESSION_FILTER_KEY, self._effective_compression
+        )
+        self._set_cache_metadata(
+            conn,
+            COMPRESSION_LEVEL_KEY,
+            str(self._effective_compression_level),
+        )
+
+    def _adopt_existing_dataset_compression(self, dataset: h5py.Dataset) -> None:
+        """Adopt immutable compression layout from an existing embedding matrix.
+
+        Compression changes storage layout but not embedding semantics. A requested
+        codec therefore applies only when a matrix is first created or rebuilt.
+
+        :param h5py.Dataset dataset: Existing embeddings matrix.
+        :return None: Updates effective compression state in-place.
+        :raises ValueError: If the persisted physical layout is unsupported.
+        """
+        compression = str(dataset.compression or "").strip().lower()
+        if compression not in _COMPRESSION_FILTERS:
+            raise ValueError(
+                "incompatible embedding cache compression filter: "
+                f"{dataset.compression!r}"
+            )
+
+        if compression == "lzf":
+            if dataset.compression_opts is not None:
+                raise ValueError(
+                    "incompatible lzf embedding cache compression options: "
+                    f"{dataset.compression_opts!r}"
+                )
+            compression_level = 0
+        else:
+            compression_options = dataset.compression_opts
+            if compression_options is None:
+                raise ValueError(
+                    "incompatible gzip embedding cache: missing compression level"
+                )
+            compression_level = int(compression_options)
+
+        if (
+            compression != self.compression
+            or compression_level != self.compression_level
+        ):
+            logger.info(
+                "Using existing embedding cache compression %s level %d for %s; "
+                "requested %s level %d applies after the cache is rebuilt.",
+                compression,
+                compression_level,
+                self.h5_path,
+                self.compression,
+                self.compression_level,
+            )
+        self._effective_compression = compression
+        self._effective_compression_level = compression_level
+
     def _ensure_h5_layout(self) -> None:
         """Ensure cache file uses matrix-based HDF5 layout."""
         if not self.h5_path.exists():
             with self._connect_db() as conn:
+                self._reset_effective_compression()
                 cursor = conn.cursor()
                 cursor.execute("SELECT COUNT(*) FROM papers")
                 paper_rows = int(cursor.fetchone()[0])
@@ -1878,6 +1982,7 @@ class EmbeddingCache:
                     )
                     conn.execute("DELETE FROM papers")
                     self._reset_hydration_metadata(conn)
+                self._persist_effective_compression_metadata(conn)
                 self._reconcile_layout_metadata(conn)
                 return
 
@@ -1895,6 +2000,7 @@ class EmbeddingCache:
                         "incompatible embedding cache dtype: "
                         f"{dataset.dtype} != {target_dtype}"
                     )
+                self._adopt_existing_dataset_compression(dataset)
 
                 embedding_dim = int(dataset.shape[1])
                 embedding_rows = int(dataset.shape[0])
@@ -1944,9 +2050,11 @@ class EmbeddingCache:
                 self.h5_path,
             )
             self.h5_path.unlink(missing_ok=True)
+            self._reset_effective_compression()
             with self._connect_db() as conn:
                 conn.execute("DELETE FROM papers")
                 self._reset_hydration_metadata(conn)
+                self._persist_effective_compression_metadata(conn)
                 self._reconcile_layout_metadata(conn)
             return
 
@@ -2123,8 +2231,8 @@ class EmbeddingCache:
         h5_file.attrs[TEXT_FORMATTER_FINGERPRINT_KEY] = self.text_formatter_fingerprint
         h5_file.attrs[CALIBRATION_SAMPLE_SIZE_KEY] = int(self.calibration_sample_size)
         h5_file.attrs[BINARY_PREFILTER_ENABLED_KEY] = int(self.binary_prefilter)
-        h5_file.attrs[COMPRESSION_FILTER_KEY] = self.compression
-        h5_file.attrs[COMPRESSION_LEVEL_KEY] = int(self.compression_level)
+        h5_file.attrs[COMPRESSION_FILTER_KEY] = self._effective_compression
+        h5_file.attrs[COMPRESSION_LEVEL_KEY] = int(self._effective_compression_level)
 
     def _load_existing_rows(
         self,
@@ -2141,42 +2249,82 @@ class EmbeddingCache:
             return {}
 
         existing_rows: Dict[str, Dict[str, Any]] = {}
-        for id_chunk in _chunked(paper_ids, SQLITE_QUERY_BATCH_SIZE):
-            placeholders = ",".join("?" for _ in id_chunk)
-            query = (
-                "SELECT paper_id, text_hash, row_idx, title, abstract, year, "
-                "authors_json, categories_json, venue, arxiv_id, doi "
-                f"FROM papers WHERE paper_id IN ({placeholders})"
-            )
-
-            for row in conn.execute(query, id_chunk):
-                (
-                    paper_id,
-                    text_hash,
-                    row_idx,
-                    title,
-                    abstract,
-                    year,
-                    authors_json,
-                    categories_json,
-                    venue,
-                    arxiv_id,
-                    doi,
-                ) = row
-                existing_rows[str(paper_id)] = {
-                    "text_hash": str(text_hash),
-                    "row_idx": int(row_idx) if row_idx is not None else None,
-                    "title": str(title or ""),
-                    "abstract": str(abstract or ""),
-                    "year": int(year) if year is not None else None,
-                    "authors_json": str(authors_json or ""),
-                    "categories_json": str(categories_json or ""),
-                    "venue": str(venue or ""),
-                    "arxiv_id": str(arxiv_id or ""),
-                    "doi": str(doi or ""),
-                }
+        for row in self._query_paper_rows(conn, paper_ids, lookup_column="paper_id"):
+            decoded = self._decode_paper_row(row, parse_json_lists=False)
+            paper_id = decoded.pop("paper_id")
+            existing_rows[str(paper_id)] = decoded
 
         return existing_rows
+
+    @staticmethod
+    def _query_paper_rows(
+        conn: sqlite3.Connection,
+        lookup_values: Sequence[Any],
+        *,
+        lookup_column: str,
+    ) -> Iterator[Tuple[Any, ...]]:
+        """Yield common paper rows for batched SQLite key lookups.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :param Sequence[Any] lookup_values: Values for the selected lookup column.
+        :param str lookup_column: ``papers`` column used for the ``IN`` lookup.
+        :return Iterator[Tuple[Any, ...]]: Rows in the shared paper-column layout.
+        :raises ValueError: If the requested lookup column is not supported.
+        """
+        if lookup_column not in _PAPER_ROW_LOOKUP_COLUMNS:
+            raise ValueError(f"Unsupported paper-row lookup column: {lookup_column}")
+
+        for value_chunk in _chunked(list(lookup_values), SQLITE_QUERY_BATCH_SIZE):
+            placeholders = ",".join("?" for _ in value_chunk)
+            query = (
+                f"SELECT {_PAPER_ROW_COLUMNS} FROM papers "
+                f"WHERE {lookup_column} IN ({placeholders})"
+            )
+            yield from conn.execute(query, value_chunk)
+
+    @staticmethod
+    def _decode_paper_row(
+        row: Tuple[Any, ...],
+        *,
+        parse_json_lists: bool,
+    ) -> Dict[str, Any]:
+        """Normalize one common paper row while retaining JSON shape choice.
+
+        :param Tuple[Any, ...] row: Row returned by ``_query_paper_rows``.
+        :param bool parse_json_lists: Decode authors/categories into lists when true.
+        :return Dict[str, Any]: Normalized scalar metadata and selected JSON shape.
+        """
+        (
+            paper_id,
+            text_hash,
+            row_idx,
+            title,
+            abstract,
+            year,
+            authors_json,
+            categories_json,
+            venue,
+            arxiv_id,
+            doi,
+        ) = row
+        decoded: Dict[str, Any] = {
+            "paper_id": str(paper_id),
+            "text_hash": str(text_hash),
+            "row_idx": int(row_idx) if row_idx is not None else None,
+            "title": str(title or ""),
+            "abstract": str(abstract or ""),
+            "year": int(year) if year is not None else None,
+            "venue": str(venue or ""),
+            "arxiv_id": str(arxiv_id or ""),
+            "doi": str(doi or ""),
+        }
+        if parse_json_lists:
+            decoded["authors"] = _parse_json_list(authors_json)
+            decoded["categories"] = _parse_json_list(categories_json)
+        else:
+            decoded["authors_json"] = str(authors_json or "")
+            decoded["categories_json"] = str(categories_json or "")
+        return decoded
 
     @staticmethod
     def _get_embeddings_dataset(h5_file: h5py.File) -> Optional[h5py.Dataset]:
@@ -2203,33 +2351,13 @@ class EmbeddingCache:
         :param int embedding_dim: Required embedding width.
         :return h5py.Dataset: Resizable embeddings dataset.
         """
-        dataset = self._get_embeddings_dataset(h5_file)
-        target_dtype = _storage_dtype_for_precision(self.storage_precision)
-        chunk_rows = EMBEDDING_DATASET_CHUNK_ROWS
-
-        if dataset is None:
-            compression_kwargs = self._dataset_compression_kwargs()
-            return h5_file.create_dataset(
-                EMBEDDINGS_DATASET_NAME,
-                shape=(0, embedding_dim),
-                maxshape=(None, embedding_dim),
-                dtype=target_dtype,
-                chunks=(chunk_rows, embedding_dim),
-                shuffle=True,
-                **compression_kwargs,
-            )
-
-        if int(dataset.shape[1]) != embedding_dim:
-            raise ValueError(
-                "Embedding dimension mismatch in cache: "
-                f"{int(dataset.shape[1])} != {embedding_dim}"
-            )
-        if np.dtype(dataset.dtype) != np.dtype(target_dtype):
-            raise ValueError(
-                "Embedding storage dtype mismatch in cache: "
-                f"{dataset.dtype} != {target_dtype}"
-            )
-
+        dataset = self._ensure_matrix_dataset(
+            h5_file,
+            name=EMBEDDINGS_DATASET_NAME,
+            width=embedding_dim,
+            dtype=_storage_dtype_for_precision(self.storage_precision),
+        )
+        assert dataset is not None
         return dataset
 
     def _ensure_binary_dataset(
@@ -2241,34 +2369,62 @@ class EmbeddingCache:
         :param int embedding_dim: Embedding width.
         :return Optional[h5py.Dataset]: Binary-index dataset when enabled.
         """
-        if not self.binary_prefilter:
+        packed_dim = (int(embedding_dim) + 7) // 8
+        return self._ensure_matrix_dataset(
+            h5_file,
+            name=BINARY_INDEX_DATASET_NAME,
+            width=packed_dim,
+            dtype=np.uint8,
+            enabled=self.binary_prefilter,
+        )
+
+    def _ensure_matrix_dataset(
+        self,
+        h5_file: h5py.File,
+        *,
+        name: str,
+        width: int,
+        dtype: np.dtype,
+        enabled: bool = True,
+    ) -> Optional[h5py.Dataset]:
+        """Create or validate an enabled resizable two-dimensional HDF5 matrix.
+
+        :param h5py.File h5_file: Open HDF5 file handle.
+        :param str name: Dataset name.
+        :param int width: Required number of matrix columns.
+        :param np.dtype dtype: Required matrix dtype.
+        :param bool enabled: Whether the optional matrix is enabled.
+        :return Optional[h5py.Dataset]: Valid matrix dataset, or ``None`` when disabled.
+        """
+        if not enabled:
             return None
 
-        packed_dim = (int(embedding_dim) + 7) // 8
-        chunk_rows = EMBEDDING_DATASET_CHUNK_ROWS
-        dataset = h5_file.get(BINARY_INDEX_DATASET_NAME)
+        target_dtype = np.dtype(dtype)
+        dataset = h5_file.get(name)
         if dataset is None:
             compression_kwargs = self._dataset_compression_kwargs()
             return h5_file.create_dataset(
-                BINARY_INDEX_DATASET_NAME,
-                shape=(0, packed_dim),
-                maxshape=(None, packed_dim),
-                dtype=np.uint8,
-                chunks=(chunk_rows, packed_dim),
+                name,
+                shape=(0, width),
+                maxshape=(None, width),
+                dtype=target_dtype,
+                chunks=(EMBEDDING_DATASET_CHUNK_ROWS, width),
                 shuffle=True,
                 **compression_kwargs,
             )
 
         if dataset.ndim != 2:
+            raise ValueError(f"Dataset '{name}' must be 2D.")
+        if int(dataset.shape[1]) != int(width):
             raise ValueError(
-                f"Binary dataset '{BINARY_INDEX_DATASET_NAME}' must be 2D."
+                f"Dataset '{name}' width mismatch in cache: "
+                f"{int(dataset.shape[1])} != {int(width)}"
             )
-        if int(dataset.shape[1]) != packed_dim:
+        if np.dtype(dataset.dtype) != target_dtype:
             raise ValueError(
-                "Binary embedding dimension mismatch in cache: "
-                f"{int(dataset.shape[1])} != {packed_dim}"
+                f"Dataset '{name}' dtype mismatch in cache: "
+                f"{dataset.dtype} != {target_dtype}"
             )
-
         return dataset
 
     @staticmethod
@@ -2286,6 +2442,8 @@ class EmbeddingCache:
         """
         if binary_dataset.ndim != 2:
             return False
+        if np.dtype(binary_dataset.dtype) != np.dtype(np.uint8):
+            return False
         expected_cols = (int(embedding_dim) + 7) // 8
         if int(binary_dataset.shape[1]) != expected_cols:
             return False
@@ -2301,13 +2459,13 @@ class EmbeddingCache:
 
         :return Dict[str, Any]: Keyword args passed into ``create_dataset``.
         """
-        compression = str(self.compression or "").strip()
+        compression = str(self._effective_compression or "").strip()
         if not compression:
             return {}
 
         kwargs: Dict[str, Any] = {"compression": compression}
         if compression.lower() != "lzf":
-            kwargs["compression_opts"] = int(self.compression_level)
+            kwargs["compression_opts"] = int(self._effective_compression_level)
         return kwargs
 
     def _require_calibration_ranges(
@@ -2426,8 +2584,6 @@ class EmbeddingCache:
                 matrix.astype(np.int8, copy=False),
             )
             matrix_f32 = l2_normalize_embeddings(matrix_f32)
-        elif self.storage_precision == "float16":
-            matrix_f32 = matrix.astype(np.float32, copy=False)
         else:
             matrix_f32 = np.asarray(matrix, dtype=np.float32)
 
@@ -2458,10 +2614,12 @@ class EmbeddingCache:
             dtype=np.uint8,
         )
 
-        keep_k = min(int(candidate_count), row_count)
+        keep_k = min(max(int(candidate_count), 0), row_count)
+        if keep_k == 0:
+            return np.asarray([], dtype=np.int64)
         all_rows: List[np.ndarray] = []
         all_dists: List[np.ndarray] = []
-        chunk_size = 65536
+        chunk_size = EMBEDDING_SEARCH_CHUNK_ROWS
 
         for start in range(0, row_count, chunk_size):
             end = min(start + chunk_size, row_count)
@@ -2473,7 +2631,14 @@ class EmbeddingCache:
             if local_k == dists.shape[0]:
                 local_idx = np.arange(dists.shape[0], dtype=np.int64)
             else:
-                local_idx = np.argpartition(dists, local_k - 1)[:local_k]
+                distance_cutoff = np.partition(dists, local_k - 1)[local_k - 1]
+                closer_idx = np.flatnonzero(dists < distance_cutoff)
+                remaining = local_k - int(closer_idx.size)
+                tied_idx = np.flatnonzero(dists == distance_cutoff)
+                local_idx = np.concatenate(
+                    (closer_idx, tied_idx[:remaining]),
+                    axis=0,
+                )
 
             all_rows.append((start + local_idx).astype(np.int64, copy=False))
             all_dists.append(dists[local_idx])
@@ -2521,43 +2686,20 @@ class EmbeddingCache:
                 self._dequantize_int8(h5_file, int8_matrix)
             )
             scores = matrix @ query
+            self._require_finite_scores(scores)
             return self._select_top_k(rows, scores, matrix, top_k)
 
-        row_count = int(embeddings_dataset.shape[0])
-        chunk_size = 65536
-        best_rows = np.asarray([], dtype=np.int64)
-        best_scores = np.asarray([], dtype=np.float32)
-        best_embeddings = np.empty((0, int(query.shape[0])), dtype=np.float32)
+        def load_chunk(start: int, end: int) -> np.ndarray:
+            """Load and normalize one int8 cache matrix chunk.
 
-        for start in range(0, row_count, chunk_size):
-            end = min(start + chunk_size, row_count)
+            :param int start: Inclusive row offset.
+            :param int end: Exclusive row offset.
+            :return np.ndarray: Dequantized, normalized float32 matrix.
+            """
             int8_chunk = np.asarray(embeddings_dataset[start:end], dtype=np.int8)
-            chunk_matrix = l2_normalize_embeddings(
-                self._dequantize_int8(h5_file, int8_chunk)
-            )
-            chunk_scores = chunk_matrix @ query
-            chunk_rows = np.arange(start, end, dtype=np.int64)
+            return l2_normalize_embeddings(self._dequantize_int8(h5_file, int8_chunk))
 
-            rows, scores, embeddings = self._select_top_k(
-                chunk_rows,
-                chunk_scores,
-                chunk_matrix,
-                top_k,
-            )
-            if rows.size == 0:
-                continue
-
-            merged_rows = np.concatenate((best_rows, rows), axis=0)
-            merged_scores = np.concatenate((best_scores, scores), axis=0)
-            merged_embeddings = np.concatenate((best_embeddings, embeddings), axis=0)
-            best_rows, best_scores, best_embeddings = self._select_top_k(
-                merged_rows,
-                merged_scores,
-                merged_embeddings,
-                top_k,
-            )
-
-        return best_rows, best_scores, best_embeddings
+        return self._score_chunked_rows(embeddings_dataset, query, top_k, load_chunk)
 
     def _score_float_rows(
         self,
@@ -2565,29 +2707,56 @@ class EmbeddingCache:
         query_embedding: np.ndarray,
         top_k: int,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Score float16/float32 embeddings against a float32 query.
+        """Score float32 embeddings against a float32 query.
 
         :param h5py.Dataset embeddings_dataset: Float matrix dataset.
         :param np.ndarray query_embedding: Float32 query embedding.
         :param int top_k: Top results to keep.
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
         """
-        row_count = int(embeddings_dataset.shape[0])
-        chunk_size = 65536
 
+        def load_chunk(start: int, end: int) -> np.ndarray:
+            """Load one float cache matrix chunk as float32.
+
+            :param int start: Inclusive row offset.
+            :param int end: Exclusive row offset.
+            :return np.ndarray: Float32 matrix chunk.
+            """
+            return np.asarray(embeddings_dataset[start:end], dtype=np.float32)
+
+        return self._score_chunked_rows(
+            embeddings_dataset,
+            query_embedding,
+            top_k,
+            load_chunk,
+        )
+
+    def _score_chunked_rows(
+        self,
+        embeddings_dataset: h5py.Dataset,
+        query_embedding: np.ndarray,
+        top_k: int,
+        load_chunk: Callable[[int, int], np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Score a matrix through a loader while retaining a bounded global top-k.
+
+        :param h5py.Dataset embeddings_dataset: Matrix dataset whose rows are scored.
+        :param np.ndarray query_embedding: Float32 query vector.
+        :param int top_k: Number of results to retain.
+        :param Callable[[int, int], np.ndarray] load_chunk: Matrix chunk loader.
+        :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and vectors.
+        """
+        row_count = int(embeddings_dataset.shape[0])
         best_rows = np.asarray([], dtype=np.int64)
         best_scores = np.asarray([], dtype=np.float32)
         best_embeddings = np.empty((0, int(query_embedding.shape[0])), dtype=np.float32)
 
-        for start in range(0, row_count, chunk_size):
-            end = min(start + chunk_size, row_count)
-            chunk_matrix = np.asarray(
-                embeddings_dataset[start:end],
-                dtype=np.float32,
-            )
+        for start in range(0, row_count, EMBEDDING_SEARCH_CHUNK_ROWS):
+            end = min(start + EMBEDDING_SEARCH_CHUNK_ROWS, row_count)
+            chunk_matrix = load_chunk(start, end)
             chunk_scores = chunk_matrix @ query_embedding
+            self._require_finite_scores(chunk_scores)
             chunk_rows = np.arange(start, end, dtype=np.int64)
-
             rows, scores, embeddings = self._select_top_k(
                 chunk_rows,
                 chunk_scores,
@@ -2597,17 +2766,32 @@ class EmbeddingCache:
             if rows.size == 0:
                 continue
 
-            merged_rows = np.concatenate((best_rows, rows), axis=0)
-            merged_scores = np.concatenate((best_scores, scores), axis=0)
-            merged_embeddings = np.concatenate((best_embeddings, embeddings), axis=0)
             best_rows, best_scores, best_embeddings = self._select_top_k(
-                merged_rows,
-                merged_scores,
-                merged_embeddings,
+                np.concatenate((best_rows, rows), axis=0),
+                np.concatenate((best_scores, scores), axis=0),
+                np.concatenate((best_embeddings, embeddings), axis=0),
                 top_k,
             )
 
         return best_rows, best_scores, best_embeddings
+
+    @staticmethod
+    def _require_finite_scores(scores: np.ndarray) -> None:
+        """Reject non-finite scores from corrupt cached embedding data.
+
+        Query vectors are validated at the public boundary, so non-finite scores
+        here indicate a malformed persisted embedding or a numerical failure.
+
+        :param np.ndarray scores: Similarity scores produced from cached vectors.
+        :return None: Raises when a score is not finite.
+        :raises RuntimeError: If cached vectors produce a non-finite score.
+        """
+        if not np.all(np.isfinite(scores)):
+            raise RuntimeError(
+                "Embedding cache integrity error: non-finite scores encountered "
+                "while scoring cached embeddings. Rebuild this cache namespace "
+                "to restore valid vectors."
+            )
 
     @staticmethod
     def _select_top_k(
@@ -2635,7 +2819,15 @@ class EmbeddingCache:
         if keep_k == rows.size:
             selected_idx = np.arange(rows.size, dtype=np.int64)
         else:
-            selected_idx = np.argpartition(-scores, keep_k - 1)[:keep_k]
+            score_cutoff = np.partition(scores, -keep_k)[-keep_k]
+            higher_score_idx = np.flatnonzero(scores > score_cutoff)
+            remaining = keep_k - int(higher_score_idx.size)
+            tied_idx = np.flatnonzero(scores == score_cutoff)
+            tied_order = np.argsort(rows[tied_idx], kind="stable")
+            selected_idx = np.concatenate(
+                (higher_score_idx, tied_idx[tied_order[:remaining]]),
+                axis=0,
+            )
 
         selected_rows = rows[selected_idx]
         selected_scores = scores[selected_idx]
@@ -2663,40 +2855,16 @@ class EmbeddingCache:
             return {}
 
         output: Dict[int, Dict[str, Any]] = {}
-        for chunk in _chunked(
-            [str(idx) for idx in row_indices], SQLITE_QUERY_BATCH_SIZE
+        for row in self._query_paper_rows(
+            conn,
+            [int(idx) for idx in row_indices],
+            lookup_column="row_idx",
         ):
-            numeric_chunk = [int(value) for value in chunk]
-            placeholders = ",".join("?" for _ in numeric_chunk)
-            query = (
-                "SELECT paper_id, title, abstract, year, row_idx, "
-                "authors_json, categories_json, venue, arxiv_id, doi "
-                f"FROM papers WHERE row_idx IN ({placeholders})"
-            )
-            for row in conn.execute(query, numeric_chunk):
-                (
-                    paper_id,
-                    title,
-                    abstract,
-                    year,
-                    row_idx,
-                    authors_json,
-                    categories_json,
-                    venue,
-                    arxiv_id,
-                    doi,
-                ) = row
-                output[int(row_idx)] = {
-                    "paper_id": str(paper_id),
-                    "title": str(title or ""),
-                    "abstract": str(abstract or ""),
-                    "year": int(year) if year is not None else None,
-                    "authors": _parse_json_list(authors_json),
-                    "categories": _parse_json_list(categories_json),
-                    "venue": str(venue or ""),
-                    "arxiv_id": str(arxiv_id or ""),
-                    "doi": str(doi or ""),
-                }
+            decoded = self._decode_paper_row(row, parse_json_lists=True)
+            row_idx = decoded.pop("row_idx")
+            decoded.pop("text_hash")
+            assert row_idx is not None
+            output[row_idx] = decoded
 
         return output
 
@@ -2712,12 +2880,12 @@ class EmbeddingCache:
         return hashlib.sha256(str(text).encode("utf-8")).hexdigest()
 
 
-def _chunked(values: Sequence[str], chunk_size: int) -> Iterable[List[str]]:
+def _chunked(values: Sequence[Any], chunk_size: int) -> Iterable[List[Any]]:
     """Yield fixed-size chunks from a sequence.
 
-    :param Sequence[str] values: Sequence to split into chunks.
+    :param Sequence[Any] values: Sequence to split into chunks.
     :param int chunk_size: Number of items per yielded chunk.
-    :return Iterable[List[str]]: Iterator over chunk lists.
+    :return Iterable[List[Any]]: Iterator over chunk lists.
     """
     for start in range(0, len(values), chunk_size):
         yield list(values[start : start + chunk_size])

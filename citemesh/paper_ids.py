@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, List, Optional
 from urllib.parse import unquote, urlparse
 
 
@@ -14,6 +14,91 @@ def strip_arxiv_version(identifier: str) -> str:
     :return str: Identifier without trailing ``v<digits>`` suffix.
     """
     return re.sub(r"v\d+$", "", identifier.strip(), flags=re.IGNORECASE)
+
+
+_ARXIV_IDENTIFIER_PATTERN = re.compile(
+    r"^(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z\-]+)?/\d{7})(?:v\d+)?$",
+    re.IGNORECASE,
+)
+
+
+def recognize_arxiv_identifier(
+    identifier: Any, *, allow_bare: bool = False
+) -> Optional[str]:
+    """Recognize and canonicalize an arXiv identifier candidate.
+
+    ``normalize_paper_id`` deliberately leaves a bare arXiv-looking user input
+    unchanged. Internal identity matching can opt into ``allow_bare`` so that
+    dataset IDs such as ``2508.12345v2`` still match API ``arxiv:`` IDs.
+
+    :param Any identifier: Raw identifier candidate.
+    :param bool allow_bare: Whether to accept identifiers without ``arxiv:``.
+    :return Optional[str]: Canonical ``arxiv:<suffix>`` token, or ``None``.
+    """
+    if not isinstance(identifier, str):
+        return None
+
+    normalized = identifier.strip()
+    if not normalized:
+        return None
+
+    lowered = normalized.lower()
+    explicitly_prefixed = lowered.startswith("arxiv:")
+    if explicitly_prefixed:
+        candidate = unquote(normalized.split(":", 1)[1]).strip()
+    elif allow_bare:
+        candidate = normalized
+    else:
+        return None
+
+    if not candidate:
+        return None
+    if not explicitly_prefixed and not _ARXIV_IDENTIFIER_PATTERN.fullmatch(candidate):
+        return None
+    return f"arxiv:{strip_arxiv_version(candidate)}"
+
+
+def paper_identifier_aliases(
+    *, paper_id: Any = "", arxiv_id: Any = "", doi: Any = ""
+) -> List[str]:
+    """Build stable identifier aliases for one paper payload.
+
+    This expands identifiers supplied by separate API fields as well as the
+    primary paper ID. It intentionally recognizes bare arXiv IDs here without
+    changing the stricter public ``normalize_paper_id`` contract.
+
+    :param Any paper_id: Primary Semantic Scholar, DOI, arXiv, or URL ID.
+    :param Any arxiv_id: Optional arXiv suffix field.
+    :param Any doi: Optional DOI suffix field.
+    :return List[str]: Sorted normalized and raw identifier aliases.
+    """
+    aliases: set[str] = set()
+    raw_candidates = (paper_id, arxiv_id, doi)
+
+    for candidate in raw_candidates:
+        if not isinstance(candidate, str):
+            continue
+        normalized = candidate.strip()
+        if not normalized:
+            continue
+        aliases.add(normalized)
+        try:
+            canonical_identifier = normalize_paper_id(normalized)
+            aliases.add(canonical_identifier)
+        except ValueError:
+            continue
+        arxiv_alias = recognize_arxiv_identifier(canonical_identifier)
+        if arxiv_alias:
+            aliases.add(arxiv_alias)
+            aliases.add(arxiv_alias.split(":", 1)[1])
+
+    for candidate in (paper_id, arxiv_id):
+        arxiv_alias = recognize_arxiv_identifier(candidate, allow_bare=True)
+        if arxiv_alias:
+            aliases.add(arxiv_alias)
+            aliases.add(arxiv_alias.split(":", 1)[1])
+
+    return sorted(aliases)
 
 
 def extract_arxiv_identifier(raw_path: str) -> Optional[str]:
@@ -38,9 +123,11 @@ def extract_arxiv_identifier(raw_path: str) -> Optional[str]:
     if candidate.endswith(".pdf"):
         candidate = candidate[:-4]
     candidate = candidate.strip()
-    candidate = re.sub(r"^(?:arxiv:)", "", candidate, flags=re.IGNORECASE)
-    candidate = strip_arxiv_version(candidate)
-    return candidate or None
+    prefixed_candidate = (
+        candidate if candidate.lower().startswith("arxiv:") else f"arxiv:{candidate}"
+    )
+    recognized = recognize_arxiv_identifier(prefixed_candidate)
+    return recognized.split(":", 1)[1] if recognized else None
 
 
 def host_matches_domain(host: str, domain: str) -> bool:
@@ -126,11 +213,10 @@ def normalize_paper_id(paper_id: str) -> str:
         return suffix
 
     if lowered.startswith("arxiv:"):
-        suffix = unquote(normalized.split(":", 1)[1]).strip()
-        suffix = strip_arxiv_version(suffix)
-        if not suffix:
+        arxiv_identifier = recognize_arxiv_identifier(normalized)
+        if not arxiv_identifier:
             raise ValueError(f"Invalid paper ID: {paper_id}")
-        return f"arxiv:{suffix}"
+        return arxiv_identifier
 
     if lowered.startswith("http://") or lowered.startswith("https://"):
         hosted_identifier = _normalize_hosted_identifier(normalized)

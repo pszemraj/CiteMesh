@@ -8,6 +8,14 @@ Practical conventions for working on CiteMesh (humans and coding agents).
 - Run project commands through the env, e.g. `conda run -n inf python -m pytest`.
 - Torch floors are platform-split: `>=2.9` Linux/Windows, `>=2.13` macOS (required for reliable MPS bf16).
 
+## Model and dtype policy (non-negotiable)
+
+- Never use FP16/float16/half precision anywhere in CiteMesh: not for model compute, autocast, embedding output, persistent storage, calibration, tests, benchmarks, or fallbacks. If a selected checkpoint or runtime resolves to FP16, stop and choose a compatible current model instead of proceeding.
+- Load model weights with the library's automatic checkpoint dtype selection (`dtype="auto"`, or the supported compatibility equivalent). Do not force all weights to FP32, and never request FP16 weights.
+- The only compute modes are verified BF16 autocast and FP32. If BF16 is unavailable or unverified, fall back to FP32.
+- Embedding outputs are FP32. Persistent embedding storage is INT8 or FP32 only.
+- Do not use obsolete or legacy embedding models for real inference, validation, benchmarks, or defaults. MiniLM is explicitly disallowed. Use the current project-designated model—presently `unsloth/embeddinggemma-300m`—or a newer suitable model; do not substitute an older/smaller model for convenience without explicit user approval.
+
 ## Sandboxed execution caveat (macOS)
 
 Inside sandboxed agent shells (e.g. Claude Code's sandbox), Metal is not visible: `torch.backends.mps.is_available()` falsely returns `False` and network access may be blocked. Anything touching torch devices, model downloads, or live APIs must run escalated/outside the sandbox. Unit tests are sandbox-safe — they use a fake-torch harness and never load real models.

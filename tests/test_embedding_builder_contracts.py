@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import types
 from hashlib import sha256
-from typing import Any
+from typing import Any, Iterable
 from unittest.mock import MagicMock
 
 import h5py
@@ -47,6 +47,26 @@ def _disable_embedding_optional_deps(
     if request.node.name in _REAL_DEP_CHECK_TESTS:
         return
     disable_embedding_dep_checks(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("transformers_version", "expected_key"),
+    [("4.57.1", "torch_dtype"), ("5.0.0", "dtype")],
+)
+def test_transformers_auto_dtype_key_uses_supported_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+    transformers_version: str,
+    expected_key: str,
+) -> None:
+    """Automatic model dtype should use the installed Transformers API spelling."""
+    fake_transformers = types.SimpleNamespace(__version__=transformers_version)
+    monkeypatch.setattr(
+        embedding_module.importlib,
+        "import_module",
+        lambda module_name: fake_transformers,
+    )
+
+    assert embedding_module._transformers_auto_dtype_key() == expected_key
 
 
 def _install_fake_sentence_transformers(
@@ -105,6 +125,7 @@ def _install_fake_torch(
     bf16_supported: bool,
     *,
     mps_available: bool = False,
+    autocast_behavior: str = "identity",
     compile_behavior: str = "identity",
     capability: tuple[int, int] | None = (8, 0),
     include_tf32_global_api: bool = True,
@@ -112,7 +133,6 @@ def _install_fake_torch(
 ) -> tuple[object, list[tuple[Any, ...]], object]:
     """Install fake ``torch`` module for precision tests."""
     bf16_token = object()
-    fp16_token = object()
     autocast_log: list[tuple[Any, ...]] = []
 
     class _FakeAutocast:
@@ -121,6 +141,8 @@ def _install_fake_torch(
 
         def __enter__(self) -> "_FakeAutocast":
             autocast_log.append(("enter",))
+            if autocast_behavior == "raise":
+                raise RuntimeError("autocast unavailable")
             return self
 
         def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
@@ -191,7 +213,6 @@ def _install_fake_torch(
     fake_torch = types.ModuleType("torch")
     fake_torch.__version__ = torch_version
     fake_torch.bfloat16 = bf16_token
-    fake_torch.float16 = fp16_token
     fake_torch.autocast = _autocast
     fake_torch.compile = _compile
     fake_torch.set_float32_matmul_precision = _set_float32_matmul_precision
@@ -310,12 +331,16 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         assert init_log["kwargs"]["truncate_dim"] == 256
         assert embeddings.shape == (1, 2)
         assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
+        assert (
+            init_log["kwargs"]["model_kwargs"].get(
+                "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
+            )
+            == "auto"
+        )
         if expected_dtype == "bfloat16":
-            assert init_log["kwargs"]["model_kwargs"]["dtype"] is bf16_token
             assert ("call", "cuda", bf16_token) in autocast_log
             assert ("enter",) in autocast_log and ("exit",) in autocast_log
         else:
-            assert "dtype" not in init_log["kwargs"]["model_kwargs"]
             assert autocast_log == []
 
     compile_cases = [
@@ -495,13 +520,45 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     )
 
 
-def test_embedding_runtime_policy_keeps_torch_cpu_fallback_unmodified(
+def test_embedding_bf16_autocast_rejection_falls_back_to_float32(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rejected bf16 autocast context must keep compute in float32."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, autocast_log, _fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        autocast_behavior="raise",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert builder._source_dtype_hint == "float32"
+    assert builder._autocast_enabled is False
+    assert (
+        init_log["kwargs"]["model_kwargs"].get(
+            "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
+        )
+        == "auto"
+    )
+    assert autocast_log == [("call", "cuda", _bf16_token), ("enter",)]
+    assert any(
+        "runtime rejected that context" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_embedding_runtime_policy_keeps_fp32_fallback_unmodified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Runtime policy should keep CPU execution on the default torch path."""
+    """Models without bf16 policy should stay on the default float32 path."""
 
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
+    _bf16_token, autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=True,
         bf16_supported=False,
@@ -510,17 +567,23 @@ def test_embedding_runtime_policy_keeps_torch_cpu_fallback_unmodified(
         "citemesh.strategies.embedding._module_available",
         lambda module_name: module_name == "flash_attn",
     )
-    fp16_builder = EmbeddingGraphBuilder(
+    accelerator_builder = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="sentence-transformers/all-MiniLM-L6-v2",
         client=MagicMock(),
     )
-    fp16_builder._load_model()
+    accelerator_builder._load_model()
 
-    assert init_log["kwargs"]["model_kwargs"]["dtype"] is fake_torch.float16
     assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
-    assert fp16_builder._source_dtype_hint == "float16"
-    assert fp16_builder._attention_implementation_hint == "sdpa"
+    assert (
+        init_log["kwargs"]["model_kwargs"].get(
+            "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
+        )
+        == "auto"
+    )
+    assert accelerator_builder._source_dtype_hint == "float32"
+    assert accelerator_builder._attention_implementation_hint == "sdpa"
+    assert autocast_log == []
 
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     _install_fake_torch(
@@ -539,7 +602,13 @@ def test_embedding_runtime_policy_keeps_torch_cpu_fallback_unmodified(
     )
     cpu_builder._load_model()
 
-    assert init_log["kwargs"] == {"device": "cpu"}
+    assert init_log["kwargs"]["device"] == "cpu"
+    assert (
+        init_log["kwargs"]["model_kwargs"].get(
+            "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
+        )
+        == "auto"
+    )
     assert cpu_builder._source_dtype_hint == "float32"
     assert cpu_builder._attention_implementation_hint is None
 
@@ -1289,6 +1358,23 @@ def test_arxiv_id_chronology_key_parses_both_styles() -> None:
     assert key(None) is None
 
 
+@pytest.mark.parametrize(
+    ("raw_id", "expected"),
+    [
+        ("2508.01234v2", "arxiv:2508.01234"),
+        ("arXiv:2508.01234v2", "arxiv:2508.01234"),
+        ("hep-th/9901001v3", "arxiv:hep-th/9901001"),
+        ("arxiv_12", "arxiv_12"),
+        ("S2:opaque-id", "S2:opaque-id"),
+    ],
+)
+def test_embedding_dataset_ids_share_arxiv_recognition(
+    raw_id: str, expected: str
+) -> None:
+    """Dataset ID normalization should use shared arXiv recognition rules."""
+    assert embedding_module._canonicalize_embedding_paper_id(raw_id) == expected
+
+
 def test_capped_hydration_selects_newest_rows_by_arxiv_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1779,7 +1865,7 @@ def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
         )
     )
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
-    monkeypatch.setattr(builder, "_hydrate_dataset_records", MagicMock(return_value=50))
+    monkeypatch.setattr(builder, "_cache_metadata_batch", lambda batch: len(batch))
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
@@ -1797,6 +1883,337 @@ def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
         corpus_size=builder.corpus_size,
         complete=True,
     )
+
+
+def test_incomplete_full_corpus_resume_without_row_count_marks_clean_eof_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean unknown-cardinality EOF should complete the reusable cache."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=False)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    builder.embedding_cache.payload_stats = MagicMock(
+        return_value=CacheNamespacePayloadStats(
+            file_count=2,
+            size_bytes=1024,
+            sqlite_rows=100,
+            embedding_rows=100,
+            hydration_complete=False,
+            hydration_split="train",
+            hydration_corpus_size="all",
+            hydration_dataset_source=source,
+        )
+    )
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
+    clear_cache_mock = MagicMock()
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: None)
+    monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
+    load_mock = MagicMock(return_value=(source, []))
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    load_mock.assert_called_once_with(
+        use_streaming=False,
+        preferred_dataset_source=source,
+        row_limit=None,
+        row_offset=100,
+        allow_source_fallback=False,
+    )
+    builder.embedding_cache.mark_hydrated.assert_called_once_with(
+        dataset_source=source,
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation.assert_called_once()
+    clear_cache_mock.assert_not_called()
+
+
+def test_incomplete_full_corpus_resume_memoizes_duplicate_id_deficit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fully consumed resume slice should not rebuild for duplicate source IDs."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=False)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    builder.embedding_cache.payload_stats = MagicMock(
+        side_effect=[
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=2,
+                embedding_rows=2,
+                hydration_complete=False,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+            CacheNamespacePayloadStats(
+                file_count=2,
+                size_bytes=1024,
+                sqlite_rows=4,
+                embedding_rows=4,
+                hydration_complete=False,
+                hydration_split="train",
+                hydration_corpus_size="all",
+                hydration_dataset_source=source,
+            ),
+        ]
+    )
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    builder.embedding_cache.set_hydration_rowcount_reconciliation = MagicMock()
+    clear_cache_mock = MagicMock()
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 5)
+    monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
+    load_mock = MagicMock(
+        return_value=(
+            source,
+            [
+                {"id": "p0", "title": "Duplicate", "abstract": "A"},
+                {"id": "p2", "title": "Two", "abstract": "A"},
+                {"id": "p3", "title": "Three", "abstract": "A"},
+            ],
+        )
+    )
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
+    monkeypatch.setattr(builder, "_cache_metadata_batch", lambda batch: len(batch))
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    load_mock.assert_called_once_with(
+        use_streaming=False,
+        preferred_dataset_source=source,
+        row_limit=3,
+        row_offset=2,
+        allow_source_fallback=False,
+    )
+    clear_cache_mock.assert_not_called()
+    builder.embedding_cache.mark_hydrated.assert_called_once_with(
+        dataset_source=source,
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
+    builder.embedding_cache.set_hydration_rowcount_reconciliation.assert_called_once_with(
+        upstream_rows=5,
+        cached_rows=4,
+    )
+
+
+def test_incomplete_full_corpus_resume_does_not_complete_failed_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source exception must propagate before hydration is marked complete."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=True,
+        client=MagicMock(),
+    )
+    builder.embedding_cache.payload_stats = MagicMock(
+        return_value=CacheNamespacePayloadStats(
+            file_count=2,
+            size_bytes=1024,
+            sqlite_rows=2,
+            embedding_rows=2,
+            hydration_complete=False,
+            hydration_split="train",
+            hydration_corpus_size="all",
+            hydration_dataset_source=source,
+        )
+    )
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: None)
+    monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
+
+    def failed_source() -> Iterable[dict[str, Any]]:
+        """Yield one row before simulating a source iteration failure."""
+        yield {"id": "p2", "title": "Two", "abstract": "A"}
+        raise RuntimeError("source iteration failed")
+
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        MagicMock(return_value=(source, failed_source())),
+    )
+
+    with pytest.raises(RuntimeError, match="source iteration failed"):
+        builder._resume_incomplete_full_corpus_cache(
+            use_streaming=True,
+            cached_dataset_source=source,
+        )
+
+    builder.embedding_cache.mark_hydrated.assert_not_called()
+
+
+def test_initial_full_corpus_hydration_memoizes_duplicate_id_row_deficit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initial full hydration should reconcile canonical duplicates across flushes."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    monkeypatch.setattr("citemesh.strategies.embedding.HYDRATION_FLUSH_SIZE", 2)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=False)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=None)
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    builder.embedding_cache.set_hydration_rowcount_reconciliation = MagicMock()
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
+    monkeypatch.setattr(builder, "_clear_embedding_cache", MagicMock())
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 5)
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        MagicMock(
+            return_value=(
+                source,
+                [
+                    {"id": "p0", "title": "Zero", "abstract": "A"},
+                    {"id": "p1", "title": "One", "abstract": "A"},
+                    {"id": "p0", "title": "Zero", "abstract": "A"},
+                    {"id": "p2", "title": "Two", "abstract": "A"},
+                    {"id": "p3", "title": "Three", "abstract": "A"},
+                ],
+            )
+        ),
+    )
+    cached_ids: set[str] = set()
+
+    def _cache_batch(batch: list[dict[str, Any]]) -> int:
+        """Model cache writes that coalesce duplicate canonical IDs."""
+        cached_ids.update(str(record["paper_id"]) for record in batch)
+        return len(batch)
+
+    monkeypatch.setattr(builder, "_cache_metadata_batch", _cache_batch)
+    monkeypatch.setattr(builder, "_cached_payload_row_count", lambda: len(cached_ids))
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cached_ids == {"p0", "p1", "p2", "p3"}
+    assert [
+        call.kwargs["complete"]
+        for call in builder.embedding_cache.mark_hydrated.call_args_list
+    ] == [False, True]
+    builder.embedding_cache.set_hydration_rowcount_reconciliation.assert_called_once_with(
+        upstream_rows=5,
+        cached_rows=4,
+    )
+
+
+def test_full_corpus_hydration_finalization_preserves_rowcount_transitions() -> None:
+    """Finalization should memoize shortfalls and clear reconciliation on recovery."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    builder.embedding_cache.mark_hydrated = MagicMock()
+    builder.embedding_cache.set_hydration_rowcount_reconciliation = MagicMock()
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
+
+    assert not builder._finalize_full_corpus_hydration_rows(
+        source=source,
+        updated_rows=100,
+        upstream_rows=110,
+        mark_complete=True,
+    )
+    builder.embedding_cache.mark_hydrated.assert_called_once_with(
+        dataset_source=source,
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
+    builder.embedding_cache.set_hydration_rowcount_reconciliation.assert_called_once_with(
+        upstream_rows=110,
+        cached_rows=100,
+    )
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation.assert_not_called()
+
+    builder.embedding_cache.mark_hydrated.reset_mock()
+    builder.embedding_cache.set_hydration_rowcount_reconciliation.reset_mock()
+    assert builder._finalize_full_corpus_hydration_rows(
+        source=source,
+        updated_rows=110,
+        upstream_rows=110,
+        mark_complete=True,
+    )
+    builder.embedding_cache.mark_hydrated.assert_called_once_with(
+        dataset_source=source,
+        dataset_split=builder.dataset_split,
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
+    builder.embedding_cache.set_hydration_rowcount_reconciliation.assert_not_called()
+    builder.embedding_cache.clear_hydration_rowcount_reconciliation.assert_called_once()
+
+
+def test_exact_hydration_slice_fails_closed_on_source_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exact-source hydration should not encode data returned by another source."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    load_mock = MagicMock(return_value=("CShorten/ML-ArXiv-Papers", []))
+    hydrate_mock = MagicMock()
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
+    monkeypatch.setattr(builder, "_hydrate_dataset_records", hydrate_mock)
+
+    with pytest.raises(RuntimeError, match="Incremental refresh resolved unexpected"):
+        builder._hydrate_exact_hydration_source_slice(
+            use_streaming=False,
+            source=source,
+            row_limit=10,
+            row_offset=100,
+            progress_total=10,
+            progress_label=f"Refreshing {source}",
+            operation="Incremental refresh",
+        )
+
+    load_mock.assert_called_once_with(
+        use_streaming=False,
+        preferred_dataset_source=source,
+        row_limit=10,
+        row_offset=100,
+        allow_source_fallback=False,
+    )
+    hydrate_mock.assert_not_called()
 
 
 def test_full_corpus_hydrated_cache_skips_incremental_refresh_without_growth(
@@ -2668,7 +3085,7 @@ def test_embedding_device_forwarded_to_sentence_transformer(
 def test_embedding_mps_precision_policy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """EmbeddingGemma on MPS should load bf16 weights with sdpa and no autocast."""
+    """EmbeddingGemma on MPS should use bf16 autocast with auto-loaded weights."""
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     bf16_token, autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
@@ -2682,11 +3099,18 @@ def test_embedding_mps_precision_policy(
 
     assert builder.device == "mps"
     assert builder._source_dtype_hint == "bfloat16"
-    assert init_log["kwargs"]["model_kwargs"]["dtype"] is bf16_token
+    assert (
+        init_log["kwargs"]["model_kwargs"].get(
+            "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
+        )
+        == "auto"
+    )
     assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
-    assert builder._autocast_enabled is False
-    assert builder._get_model_for_encoding() is builder.model
-    assert autocast_log == []
+    assert builder._autocast_enabled is True
+    assert builder._get_model_for_encoding() is not builder.model
+    builder._encode_texts(["seed"])
+    assert ("call", "mps", bf16_token) in autocast_log
+    assert ("enter",) in autocast_log and ("exit",) in autocast_log
 
 
 def test_embedding_mps_bf16_soft_gate_pre_2_13(
@@ -2708,19 +3132,24 @@ def test_embedding_mps_bf16_soft_gate_pre_2_13(
 
     assert builder.device == "mps"
     assert builder._source_dtype_hint == "float32"
-    assert "dtype" not in init_log["kwargs"].get("model_kwargs", {})
+    assert (
+        init_log["kwargs"]["model_kwargs"].get(
+            "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
+        )
+        == "auto"
+    )
     assert any(
         "predates the verified MPS floor" in record.getMessage()
         for record in caplog.records
     )
 
 
-def test_embedding_mps_float16_profile_policy(
+def test_embedding_mps_default_profile_uses_float32(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """float16-capable profiles should run fp16 on MPS with sdpa, no autocast."""
+    """Profiles without an explicit bf16 policy should stay float32 on MPS."""
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
-    _bf16_token, autocast_log, fake_torch = _install_fake_torch(
+    _bf16_token, autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=False,
         bf16_supported=False,
@@ -2734,8 +3163,13 @@ def test_embedding_mps_float16_profile_policy(
     )
     builder._load_model()
 
-    assert builder._source_dtype_hint == "float16"
-    assert init_log["kwargs"]["model_kwargs"]["dtype"] is fake_torch.float16
+    assert builder._source_dtype_hint == "float32"
+    assert (
+        init_log["kwargs"]["model_kwargs"].get(
+            "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
+        )
+        == "auto"
+    )
     assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
     assert builder._autocast_enabled is False
     assert autocast_log == []

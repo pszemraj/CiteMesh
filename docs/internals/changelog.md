@@ -42,7 +42,7 @@ Notable changes from the early script-based prototypes to the current package la
 ## Runtime & Devices
 
 - Added explicit device resolution with a `--device {auto,cuda,mps,cpu}` flag for embedding/hybrid strategies: `auto` prefers CUDA, then MPS (Apple Silicon), then CPU; explicit unavailable devices fail fast at parse time.
-- Added first-class MPS support: EmbeddingGemma loads bf16 weights on MPS (torch >= 2.13) with `sdpa` attention and autocast off; float16-safe profiles run fp16. CPU stays float32.
+- Added first-class MPS support: EmbeddingGemma uses bf16 autocast on verified MPS runtimes (torch >= 2.13) with `sdpa` attention; unsupported runtimes and CPU stay float32.
 - Cache namespaces track compute dtype (not device), so bf16 caches built on CUDA and MPS interoperate; warm-on-GPU-then-copy-to-Mac now works.
 - TF32 configuration is now gated on the resolved device: `--device cpu` on a CUDA host no longer flips global TF32 backend state (bug fix).
 - `--torch-compile` is now declined on CPU (pure warm-up cost for CLI runs) and marked experimental on MPS (Inductor/Metal, eager fallback on failure).
@@ -58,6 +58,7 @@ Notable changes from the early script-based prototypes to the current package la
 
 ## Export & Visualization
 
+- Made dark the built-in visualization default and taught `--theme auto` to read the active macOS interface appearance before terminal fallbacks; responsive dashboards now protect edge labels and footer overlays, keep detail abstracts readable with expanded filters, and let the tall wrapped toolbar scroll away at phone widths.
 - Added `GraphExporter` to emit PNG, Pyvis HTML, Plotly HTML, Dashboard HTML, JSON, CSV, BibTeX, and GraphML from one graph object.
 - Centralized theming (light, dark, solarized, auto) for static and interactive exporters.
 - Added adaptive metadata callout contrast based on active theme.
@@ -83,6 +84,9 @@ Notable changes from the early script-based prototypes to the current package la
 ## Persistent Caching
 
 - Introduced `EmbeddingCache` with SQLite metadata + HDF5 matrix storage.
+- Restricted persistent embedding storage to `int8` or `float32`; float16 is no longer accepted by cache, CLI, or user-config storage settings.
+- Changed embedding precision policy to automatic checkpoint weight-dtype loading, with bf16 compute available only through verified autocast on supported CUDA/MPS runtimes; unsupported or rejected autocast falls back to fp32 compute.
+- Existing embedding caches now retain their physical HDF5 compression filter and level when reopened with different compression flags; requested compression applies to new or explicitly rebuilt payloads without changing semantic cache identity.
 - Switched embedding cache defaults to quantized storage (`int8` + calibration ranges) with optional binary prefilter index for large-corpus retrieval.
 - Added cache-native search API with binary Hamming prefilter + float query rescoring.
 - Persisted authors/categories metadata in cache so warm-cache retrieval can skip corpus reloads.

@@ -951,6 +951,24 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
         assert token in result.stderr
 
 
+def test_cli_rejects_float16_persistent_storage_precision() -> None:
+    """The build parser should reject float16 persistent storage."""
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "embedding",
+            "--storage-precision",
+            "float16",
+        ]
+    )
+
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
+    assert "float16" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("args", "expected_tokens"),
     [
@@ -1834,7 +1852,7 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         "strategy": "hybrid",
         "nodes": 1,
         "edges": 0,
-        "theme": "light",
+        "theme": "dark",
     }
     assert any("export artifacts saved" in message for message in logged)
     assert all("PNG saved to" not in message for message in logged)

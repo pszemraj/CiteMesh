@@ -16,8 +16,11 @@ import pytest
 from citemesh.core import Author, Paper
 from citemesh.data.model_profiles import get_embedding_model_profile
 from citemesh.visualization import export as export_module
+from citemesh.visualization import themes as themes_module
 from citemesh.visualization.export import (
     DASHBOARD_AXIS_MIN_PADDING,
+    DASHBOARD_AXIS_X_PADDING,
+    DASHBOARD_FOOTER_MARGIN,
     DASHBOARD_LABEL_CAP,
     DASHBOARD_LABEL_MIN_DISTANCE,
     DASHBOARD_MAX_NODE_DIAMETER,
@@ -604,6 +607,13 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "#dashboard-root {\n      display: grid;\n      gap: 12px;\n      padding: 12px;\n      flex: 1 1 auto;",
         "#paper-list {\n      margin: 0;\n      padding: 0;\n      list-style: none;\n      overflow-y: auto;",
         "#detail-content {\n      padding: 14px 13px 12px;\n      flex: 1;\n      min-height: 0;\n      display: flex;\n      flex-direction: column;\n      gap: 16px;\n      overflow-y: auto;",
+        "#graph-pane .pane-header .muted {\n      max-width: 72%;\n      font-size: 12px;",
+        "min-height: 160px;\n      flex: 1 0 160px;",
+        "#detail-pane { grid-area: detail; min-height: 620px; }",
+        ".toolbar-row.secondary { grid-template-columns: 140px 140px 1fr; }",
+        "@media (max-width: 640px) {\n      #dashboard-toolbar { position: static; }",
+        ".js-plotly-plot .modebar-btn path {\n      fill: var(--text-muted) !important;",
+        ".js-plotly-plot .modebar-btn:focus-visible {\n      outline: 2px solid var(--accent);",
         "width: 100%;\n      height: 100%;\n      min-height: 0;",
     ]:
         assert css_token in rendered
@@ -643,6 +653,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert figure["layout"]["uirevision"] == "citemesh-dashboard-static-layout-v1"
     assert figure["layout"]["xaxis"]["autorange"] is False
     assert figure["layout"]["yaxis"]["autorange"] is False
+    assert figure["layout"]["margin"]["b"] == DASHBOARD_FOOTER_MARGIN
     assert len(figure["layout"]["xaxis"]["range"]) == 2
     assert len(figure["layout"]["yaxis"]["range"]) == 2
     edge_shape = figure["layout"]["shapes"][0]
@@ -678,7 +689,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     node_y = node_trace["y"]
     x_span = max(node_x) - min(node_x)
     y_span = max(node_y) - min(node_y)
-    expected_x_pad = max(DASHBOARD_AXIS_MIN_PADDING, x_span * 0.08)
+    expected_x_pad = max(DASHBOARD_AXIS_X_PADDING, x_span * 0.1)
     expected_y_pad = max(DASHBOARD_AXIS_MIN_PADDING, y_span * 0.08)
     assert figure["layout"]["xaxis"]["range"] == pytest.approx(
         [min(node_x) - expected_x_pad, max(node_x) + expected_x_pad]
@@ -1396,13 +1407,66 @@ def test_get_theme_auto_detection_and_unknown_default(
     assert get_theme("not-a-theme").name == "light"
 
 
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr", "expected_theme"),
+    [
+        (0, "Dark\n", "", "dark"),
+        (1, "", "The domain/default pair does not exist", "light"),
+    ],
+)
+def test_get_theme_auto_reads_macos_system_appearance(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+    expected_theme: str,
+) -> None:
+    """Auto theme should map the native macOS appearance to CiteMesh themes."""
+    for key in ("COLORFGBG", "DARKMODE", "TERM_PROGRAM"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(themes_module.sys, "platform", "darwin")
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs: object) -> object:
+        """Capture the native appearance query and return its synthetic result."""
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return types.SimpleNamespace(
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    monkeypatch.setattr(themes_module.subprocess, "run", fake_run)
+
+    assert get_theme("auto").name == expected_theme
+    assert captured["command"] == [
+        "defaults",
+        "read",
+        "-g",
+        "AppleInterfaceStyle",
+    ]
+    assert captured["kwargs"] == {
+        "capture_output": True,
+        "check": False,
+        "text": True,
+        "timeout": 1.0,
+    }
+
+
+def test_visualization_api_defaults_to_dark() -> None:
+    """Direct exporter users should receive the same dark-first default as the CLI."""
+    graph, seed_id = _build_graph()
+
+    assert GraphExporter(graph, seed_id).theme.name == "dark"
+
+
 def test_model_profiles_match_expected_formatters() -> None:
     """Gemma and default profiles should expose expected formatting behavior."""
     gemma = get_embedding_model_profile("google/embeddinggemma-300m")
     assert gemma.name == "google/embeddinggemma"
-    assert gemma.float16_supported is False
-    assert gemma.preferred_torch_dtype == "bfloat16"
-    assert gemma.autocast_devices == ("cuda",)
+    assert gemma.preferred_compute_dtype == "bfloat16"
+    assert gemma.autocast_devices == ("cuda", "mps")
     assert gemma.compile_inner_transformer is True
     assert gemma.available_truncate_dims == (768, 512, 256, 128)
     assert gemma.recommended_truncate_dim == 256
@@ -1420,7 +1484,7 @@ def test_model_profiles_match_expected_formatters() -> None:
 
     default = get_embedding_model_profile("all-MiniLM-L6-v2")
     assert default.name == "default"
-    assert default.preferred_torch_dtype is None
+    assert default.preferred_compute_dtype is None
     assert default.autocast_devices == ()
     assert default.compile_inner_transformer is False
     assert default.available_truncate_dims is None

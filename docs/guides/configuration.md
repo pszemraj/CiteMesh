@@ -64,7 +64,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `semantic_source` | Default `--semantic-source` (`candidates`, `arxiv-corpus`) |
 | `candidate_pool_size` | Default `--candidate-pool-size` |
 | `encode_batch_size` | Default `--encode-batch-size` |
-| `storage_precision` | Default `--storage-precision` (`int8`, `float16`, `float32`) |
+| `storage_precision` | Default `--storage-precision` (`int8`, `float32`) |
 | `max_papers` | Default `--max-papers` |
 | `max_semantic` | Default `--max-semantic` |
 | `max_citations` | Default `--max-citations` |

@@ -70,7 +70,7 @@ pip install -e ".[viz]"
 pip install -e ".[all]"
 ```
 
-On macOS the `embeddings` extra requires torch >= 2.13 (installed automatically) and runs on the MPS backend with bfloat16 by default; see [Embedding Runtime](docs/reference/embedding-runtime.md).
+On macOS the `embeddings` extra requires torch >= 2.13 (installed automatically) and runs on the MPS backend with bfloat16 autocast when supported, falling back to float32; see [Embedding Runtime](docs/reference/embedding-runtime.md).
 
 ### Run One Graph
 
@@ -100,7 +100,7 @@ CiteMesh works without credentials using Semantic Scholar's shared anonymous poo
 
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
 - Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
-- Local embeddings with first-class device support: CUDA, Apple Silicon (MPS, bf16), CPU.
+- Local embeddings with first-class device support: CUDA, Apple Silicon (MPS), and CPU, using bf16 autocast only on supported accelerator runtimes.
 - Multi-format outputs with one shared run contract across static, interactive, and structured exports.
 - Persistent user-level caching for embeddings and reference expansion; caches are portable across machines at matching compute dtype.
 - Mode-aware `citemesh search`: offline semantic search over every paper you've already embedded — your builds accumulate into a searchable personal library — used automatically when available, with Semantic Scholar keyword search as the fallback (`--mode local|s2|auto`).

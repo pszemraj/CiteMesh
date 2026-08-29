@@ -37,18 +37,19 @@ CiteMesh resolves an explicit compute device before loading any embedding model:
 
 ## Precision and Compile Policy
 
-Per-device precision matrix (EmbeddingGemma is the default profile; a "float16-safe" profile is any model whose profile marks float16 as supported):
+Per-device precision matrix (EmbeddingGemma is the default profile):
 
-| Device | EmbeddingGemma | float16-safe profiles | Autocast |
+| Device | EmbeddingGemma | Other profiles | Autocast |
 | --- | --- | --- | --- |
-| `cuda` | bfloat16 (when `is_bf16_supported()`) | float16 | on for profiles that opt in (EmbeddingGemma) |
-| `mps` | bfloat16 (torch >= 2.13) | float16 | off |
+| `cuda` | bfloat16 when `is_bf16_supported()`, otherwise float32 | float32 | bfloat16 only for profiles that opt in |
+| `mps` | bfloat16 when torch >= 2.13 and the context is accepted, otherwise float32 | float32 | bfloat16 only for profiles that opt in |
 | `cpu` | float32 | float32 | off |
 
 Notes:
 
-- On MPS, bf16 weights provide the memory/speed win; autocast stays off because MPS autocast op coverage is narrower than CUDA's and the encode path does not need the fp32-promotion safety net. Enabling it later is a one-token change in the model profile (`autocast_devices`).
-- bf16-on-MPS requires torch >= 2.13 (the floor verified on Apple Silicon). On older torch the runtime logs a warning and falls back to float16 when the profile allows it, else float32.
+- Embedding models load with Transformers automatic dtype resolution (`dtype="auto"` on current Transformers, with the legacy `torch_dtype="auto"` spelling on older supported releases). This preserves the checkpoint/configured weight dtype instead of forcing fp32 or a reduced dtype.
+- Reduced-precision compute is bfloat16-only and is entered through `torch.autocast` around encode calls. If the device capability, torch API, version guard, or autocast-context probe rejects bfloat16, CiteMesh uses float32.
+- bf16-on-MPS requires torch >= 2.13 (the floor verified on Apple Silicon). Older torch releases fall back to float32.
 - CPU stays float32: reduced precision on CPU is slower, not faster.
 - Attention implementation: `sdpa` on CUDA and MPS (`flash_attention_2` only via model-profile opt-in plus an importable `flash_attn`, CUDA-only); CPU leaves the transformers default. `flash_attn` is never probed off-CUDA.
 - CiteMesh does not select OpenVINO or ONNX backends on top of torch.
@@ -77,7 +78,7 @@ When `--storage-precision int8` is active, retrieval uses a two-stage path:
 Important distinction:
 
 - This is not end-to-end "binary embeddings" storage/retrieval in the SBERT sense.
-- Primary cache vectors remain `int8` (or `float16`/`float32` by config), and final ranking is computed from those vectors.
+- Primary cache vectors remain `int8` (or `float32` by config), and final ranking is computed from those vectors.
 - The binary representation is only a prefilter index for candidate pruning before exact rescoring.
 
 Interpretation:

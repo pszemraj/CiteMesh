@@ -8,6 +8,8 @@ consistent across static and interactive outputs.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
@@ -93,7 +95,7 @@ def get_theme(name: str) -> Theme:
 
 
 def _detect_terminal_theme() -> Theme:
-    """Detect terminal theme preference from common environment indicators.
+    """Detect host appearance from explicit environment and system indicators.
 
     :return Theme: Best-effort inferred terminal theme.
     """
@@ -113,7 +115,45 @@ def _detect_terminal_theme() -> Theme:
     if os.environ.get("DARKMODE") == "1":
         return THEMES["dark"]
 
+    system_theme = _detect_macos_theme()
+    if system_theme is not None:
+        return system_theme
+
     if os.environ.get("TERM_PROGRAM") == "iTerm.app":
         return THEMES["light"]
 
     return THEMES["light"]
+
+
+def _detect_macos_theme() -> Theme | None:
+    """Read the active macOS interface appearance when available.
+
+    macOS omits ``AppleInterfaceStyle`` for the light appearance and writes
+    ``Dark`` when dark appearance is active. Failures other than that normal
+    missing-key case fall back to the cross-platform terminal heuristics.
+
+    :return Theme | None: Active macOS theme, or ``None`` off macOS/on failure.
+    """
+    if sys.platform != "darwin":
+        return None
+
+    try:
+        result = subprocess.run(
+            ["defaults", "read", "-g", "AppleInterfaceStyle"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=1.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if result.returncode == 0:
+        return (
+            THEMES["dark"]
+            if result.stdout.strip().casefold() == "dark"
+            else THEMES["light"]
+        )
+    if "does not exist" in result.stderr.casefold():
+        return THEMES["light"]
+    return None

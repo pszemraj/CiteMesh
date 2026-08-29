@@ -1348,7 +1348,7 @@ User configuration:
     build_parser.add_argument(
         "--theme",
         choices=["light", "dark", "solarized", "auto"],
-        default="light",
+        default="dark",
         help="Visualization theme to use",
     )
 
@@ -1540,7 +1540,7 @@ User configuration:
 
     embedding_group.add_argument(
         "--storage-precision",
-        choices=["int8", "float16", "float32"],
+        choices=["int8", "float32"],
         default=EMBEDDING_STORAGE_CONFIG.storage_precision,
         help=("Persistent embedding cache precision (default: %(default)s)"),
     )
