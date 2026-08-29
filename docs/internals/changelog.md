@@ -59,12 +59,15 @@ Notable changes from the early script-based prototypes to the current package la
 
 ## Export & Visualization
 
+- Replaced per-result dashboard shells and the path-based dashboard manifest with a reusable two-file collection: `dashboard.html` plus the versioned, portable `dashboard.citemesh.json` package. Dashboard-only builds now create exactly those two root files, and repeated builds upsert the `(strategy, seed_id)` slot; explicitly requested other formats keep their per-seed artifacts and sidecar.
+- Added explicit collection/graph contracts (`kind: "citemesh-dashboard-collection"` and `kind: "citemesh-graph"`, both schema v1), portable per-result build settings, non-destructive migration from valid legacy `dashboard.manifest.json` entries on the next build, browser multi-file **Add Results**, and **Export Collection**.
+- Kept collection delivery intentionally local and self-contained: the viewer embeds the current package snapshot for reliable `file://` use, with no database, server, service worker, ZIP layer, or additional CI job.
 - Made dark the built-in visualization default and taught `--theme auto` to read the active macOS interface appearance before terminal fallbacks; responsive dashboards now protect edge labels and footer overlays, keep detail abstracts readable with expanded filters, and let the tall wrapped toolbar scroll away at phone widths.
 - Added `GraphExporter` to emit PNG, Pyvis HTML, Plotly HTML, Dashboard HTML, JSON, CSV, BibTeX, and GraphML from one graph object.
 - Centralized theming (light, dark, solarized, auto) for static and interactive exporters.
 - Added adaptive metadata callout contrast based on active theme.
 - Switched node coloring to continuous gradients for consistent year-based styling.
-- Restricted dashboard collection bundle payload reads to manifest paths that stay under the collection root.
+- Restricted legacy dashboard-manifest migration reads to payload paths that stay under the collection root.
 - HTML exports (dashboard, Plotly, pyvis) now carry a `darkreader-lock` meta tag plus a transparent-overlay CSS guard: the Dark Reader browser extension repaints Plotly's transparent overlay SVGs with an opaque background, which hid the entire dashboard graph. Verified live in Chrome with Dark Reader installed — the lock disengages the extension and the graph renders in the native theme. Also fixed the paper-count label pluralization ("1 paper").
 - HTML exports additionally declare the standards-based `color-scheme` meta + CSS property (dark or light per theme) so Chrome's Auto Dark Mode and other well-behaved darkening extensions skip repainting; this complements the Dark Reader-specific lock (Plotly/vis.js offer no such signal themselves — the page-level declaration is the mechanism).
 - Dashboard hover tooltips are now theme-styled glance cards (panel background and border instead of raw marker color), wrap long titles instead of spanning the full pane, and add venue plus a relation line ("referenced by seed", "cites seed", "semantic match") so hover answers "should I look at this paper". Collection selection and imported-result rebuilds retain the same hover contract.

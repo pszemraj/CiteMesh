@@ -25,7 +25,8 @@ GraphBuilderStrategy (base class)
 Visualization + Export
     ├── visualization.visualize_graph -> PNG
     ├── export.GraphExporter -> HTML / Plotly / Dashboard / JSON / CSV / BibTeX / GraphML
-    └── cli sidecar writer -> *.config.json (rebuild params + run metadata)
+    ├── dashboard collection writer -> dashboard.citemesh.json + dashboard.html
+    └── cli sidecar writer -> *.config.json for explicitly retained run artifacts
 ```
 
 Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `venue`, `arxiv_id`, `doi`, `is_seed`) so visualization and export layers remain strategy-agnostic.
@@ -37,7 +38,7 @@ Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `a
 - Defines `citemesh` entry point and command dispatch.
 - Parses validated arguments and resolves output paths.
 - Selects strategy implementations and triggers graph construction.
-- Coordinates render/export steps, writes sidecar config artifacts, and passes run metadata downstream.
+- Coordinates render/export steps, writes sidecar config artifacts, upserts dashboard collection packages, and passes run metadata downstream.
 
 Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
@@ -82,6 +83,37 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 - Reuses computed layout and style values for cross-format consistency.
 - Normalizes node attributes for serializer compatibility (for example GraphML-safe fields).
 - Artifact-level format details and sidecar schema are documented in [Output Artifacts](../reference/output-artifacts.md).
+
+### Dashboard Collections
+
+Normal dashboard output separates reusable presentation from changing data:
+
+```text
+dashboard.html
+    └── self-contained viewer with the current package snapshot
+
+dashboard.citemesh.json
+    └── citemesh-dashboard-collection/v1
+          └── one or more citemesh-graph/v1 payloads + portable build settings
+```
+
+The package is authoritative. Each build atomically upserts the result keyed by
+`(strategy, seed_id)` and refreshes the same viewer; dashboard-only runs do not
+create per-seed files. Other explicitly selected export formats retain their
+per-seed artifacts and one sidecar. An explicit `*.dashboard.html` target bypasses
+the collection writer and remains a self-contained one-result export.
+
+The HTML snapshot is deliberate: a page opened directly from `file://` cannot
+reliably fetch an adjacent JSON file across browsers. Keeping one embedded snapshot
+preserves zero-setup offline use while the JSON package supports browser
+multi-import and **Export Collection**. Legacy `dashboard.manifest.json`
+collections are read non-destructively and migrated into the package on the next
+build.
+
+This is intentionally a two-file local format, not a service architecture. Do not
+add a database, local server, service worker, or ZIP container without a concrete
+requirement. Package regressions belong in the existing unit/browser checks; they
+do not justify another CI job or a broader matrix.
 
 ### Caching Support
 

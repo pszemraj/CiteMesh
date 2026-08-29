@@ -21,7 +21,7 @@ The CLI defaults to the `recommendation` strategy for the fastest topical pass. 
 | Graph quota | None — build as many as you like | Limited free graphs |
 | Strategies | Recommendation, citation, embedding, hybrid | Single fixed algorithm |
 | Semantic similarity | Your embeddings, computed locally (CUDA / Apple Silicon MPS / CPU) | Opaque server-side |
-| Outputs | PNG, interactive HTML/Plotly, self-contained dashboard, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
+| Outputs | PNG, interactive HTML/Plotly, reusable dashboard collections, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
 | Automation | Scriptable CLI with deterministic exports and JSON sidecars | Manual browsing |
 
 By default the embedding and hybrid strategies are **corpus-free**: they embed only the seed's Semantic Scholar neighbors (references/citations/recommendations), so a laptop builds a graph in seconds — no multi-gigabyte corpus download required. An opt-in local arXiv corpus mode (`--semantic-source arxiv-corpus`) is available for corpus-scale retrieval.
@@ -78,6 +78,16 @@ On macOS the `embeddings` extra requires torch >= 2.13 (installed automatically)
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
+For an offline dashboard library, point repeated builds at the same collection
+root. CiteMesh keeps one viewer and one portable data package instead of generating
+a dashboard per paper:
+
+```bash
+citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard -o research
+citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard -o research
+# Open research/dashboard.html and switch between both results.
+```
+
 For command syntax and operational details, use:
 
 - [CLI Usage](docs/guides/cli.md)
@@ -101,7 +111,7 @@ CiteMesh works without credentials using Semantic Scholar's shared anonymous poo
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
 - Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
 - Local embeddings with first-class device support: CUDA, Apple Silicon (MPS), and CPU, using bf16 autocast only on supported accelerator runtimes.
-- Multi-format outputs with one shared run contract across static, interactive, and structured exports.
+- Multi-format outputs with one shared run contract across static, interactive, and structured exports; dashboard-only collections stay at two files as results accumulate.
 - Persistent user-level caching for embeddings and reference expansion; caches are portable across machines at matching compute dtype.
 - Mode-aware `citemesh search`: offline semantic search over every paper you've already embedded — your builds accumulate into a searchable personal library — used automatically when available, with Semantic Scholar keyword search as the fallback (`--mode local|s2|auto`).
 - Persistent personal defaults via `citemesh config` (`config.toml`).

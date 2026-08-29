@@ -74,7 +74,7 @@ Persistent defaults for most build flags can be stored with `citemesh config`; p
 | `--include-timestamp` | Include generation time in output metadata | disabled |
 | `--export`, `-e` | `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, or `all`; repeat flag for multiple (e.g. `-e json -e dashboard`) | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` reads the active macOS appearance before falling back to terminal hints | `dark` |
-| `--output`, `-o` | Output path (single export) or output directory base (multi-export) | auto-generated per-paper folder |
+| `--output`, `-o` | Output path, or collection root for normal dashboard exports; an explicit `*.dashboard.html` path requests standalone mode | auto-generated `out/` collection root for dashboard, otherwise a per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
 | `--log-width` | Rich console wrap width in columns (`0` uses terminal width on TTYs and a stable redirected fallback) | `0` |
 | `--log-file` | Optional plain-text log file path (overwrites existing file) | disabled |
@@ -178,6 +178,34 @@ Accepted `--export` values are `png`, `html`, `plotly`, `dashboard`, `json`, `cs
 
 Format-specific files, dashboard collection behavior, `*.config.json` sidecars, and determinism notes are covered in [Output Artifacts](../reference/output-artifacts.md).
 
+### Dashboard collection lifecycle
+
+A normal `--export dashboard` run maintains one collection at the selected output
+root:
+
+```text
+dashboard.html             reusable local viewer
+dashboard.citemesh.json    versioned one-or-many-result data package
+```
+
+Dashboard-only mode creates exactly those two files. Rebuild into the same root to
+upsert the `(strategy, seed_id)` result slot; a second paper adds another selectable
+result without creating another dashboard. Explicitly requested non-dashboard
+formats still go under that seed's `<slug>-<hash>/` directory with one config
+sidecar.
+
+The browser's **Add Results** action accepts one or multiple CiteMesh graph JSON
+files, collection packages, or current dashboard HTML files. **Export Collection**
+saves the resulting in-browser set as a portable `dashboard.citemesh.json` package.
+The package and its embedded graph payloads declare `kind` plus `schema_version: 1`
+(`citemesh-dashboard-collection` and `citemesh-graph`, respectively).
+
+The viewer embeds a package snapshot so it works when opened directly from the
+local filesystem; browsers do not consistently allow `file://` pages to fetch
+neighboring JSON. This design needs no local server, database, or archive step.
+Use an explicit output ending in `.dashboard.html` when you want a legacy-style,
+single-result HTML file instead of a collection.
+
 Interactive exports require viz dependencies. The `recommended` extra already includes them; otherwise install `viz` explicitly:
 
 ```bash
@@ -193,7 +221,13 @@ citemesh build "arxiv:1706.03762" --strategy citation -p 20
 # Hybrid graph with all export formats
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 
-# Shared dashboard shell + per-run JSON payloads under ./research
+# Create or update a reusable two-file dashboard collection under ./research
+citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o research --theme dark
+
+# Add another selectable result to that same dashboard/package
+citemesh build "arxiv:1810.04805" --strategy recommendation -e dashboard -o research --theme dark
+
+# Also retain this run's standalone graph JSON and build sidecar under its seed folder
 citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json -o research --theme dark
 
 # Standalone dashboard file for a one-off result
