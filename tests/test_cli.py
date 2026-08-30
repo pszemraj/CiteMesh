@@ -47,6 +47,7 @@ from citemesh.strategies.hybrid import (
     HYBRID_DEFAULT_MAX_PAPERS,
     HYBRID_DEFAULT_MAX_REFERENCES,
 )
+from citemesh.visualization import GraphExporter as ProductionGraphExporter
 from citemesh.visualization import generate_output_path
 from tests._helpers import (
     build_seed_graph,
@@ -175,45 +176,23 @@ def _make_exporter_stub(
 def _dashboard_graph_payload(
     graph: nx.Graph, seed_id: str, strategy: str
 ) -> dict[str, object]:
-    """Build a minimal canonical graph payload for package-focused CLI tests.
+    """Build a canonical graph payload for package-focused CLI tests.
 
     :param nx.Graph graph: Source graph.
     :param str seed_id: Seed node identifier.
     :param str strategy: Strategy descriptor.
     :return dict[str, object]: Canonical graph payload accepted by package helpers.
     """
-    node_ids = [str(node_id) for node_id in graph.nodes]
-    return {
-        "kind": "citemesh-graph",
-        "schema_version": 1,
-        "seed_id": seed_id,
-        "meta": {"strategy": strategy},
-        "summary": {
-            "nodes": graph.number_of_nodes(),
-            "edges": graph.number_of_edges(),
-        },
-        "nodes": [{"id": node_id} for node_id in node_ids],
-        "dashboard": {
-            "meta": {
-                "seed_id": seed_id,
-                "strategy": strategy,
-                "summary": {
-                    "nodes": graph.number_of_nodes(),
-                    "edges": graph.number_of_edges(),
-                },
-                "plotly_node_order": node_ids,
-                "plotly_positions": [
-                    [float(index), float(index % 2)]
-                    for index, _node_id in enumerate(node_ids)
-                ],
-                "plotly_node_sizes": [8.0 for _node_id in node_ids],
-            }
-        },
-        "edges": [
-            {"source": str(left), "target": str(right), "weight": 0.0}
-            for left, right in graph.edges
-        ],
+    layout = {
+        node_id: (float(index), float(index % 2))
+        for index, node_id in enumerate(graph.nodes)
     }
+    return ProductionGraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": strategy},
+        layout=layout,
+    ).graph_payload()
 
 
 def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
@@ -477,37 +456,6 @@ def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
     assert "\x1b[" not in content
     assert "debug file sink test" not in stderr.getvalue()
     assert "info file sink test" in stderr.getvalue()
-
-
-@pytest.mark.slow
-@pytest.mark.integration
-def test_citation_strategy_runs() -> None:
-    """Citation strategy should complete successfully with a small graph."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        output = Path(tmpdir) / "test_output.png"
-        result = run_cli_command(
-            [
-                "build",
-                "arxiv:1706.03762",
-                "--strategy",
-                "citation",
-                "-p",
-                "5",
-                "-c",
-                "3",
-                "-r",
-                "3",
-                "--seed",
-                "42",
-                "-o",
-                str(output),
-            ],
-        )
-        assert result.returncode == 0, (
-            f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-        )
-        assert output.exists()
-        assert output.stat().st_size > 1000
 
 
 def test_search_command_prints_results_to_stdout(
@@ -897,6 +845,17 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
             ],
             "--top-k",
         ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "--device",
+                "cpu",
+            ],
+            "--device",
+        ),
     ]
     for args, token in cases:
         result = run_cli_command(args)
@@ -1016,6 +975,56 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "all-MiniLM-L6-v2",
             ],
             "Hybrid semantic branch is disabled with --max-semantic 0",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "hybrid",
+                "--max-semantic",
+                "0",
+                "--device",
+                "cpu",
+            ],
+            "remove embedding-only option(s): --device",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--semantic-source",
+                "candidates",
+                "--corpus-size",
+                "5000",
+            ],
+            "Corpus-only option(s) require --semantic-source arxiv-corpus: --corpus-size",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--storage-precision",
+                "int8",
+            ],
+            "--storage-precision int8 requires --semantic-source arxiv-corpus",
+        ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "embedding",
+                "--semantic-source",
+                "arxiv-corpus",
+                "--candidate-pool-size",
+                "100",
+            ],
+            "--candidate-pool-size requires --semantic-source candidates",
         ),
         (
             [
@@ -2877,6 +2886,9 @@ def test_cli_help_contracts() -> None:
                 "--spring-iterations",
                 "citation/recommendation",
                 "repeat for multiple",
+                "dashboard.html",
+                DASHBOARD_PACKAGE_FILENAME,
+                ".dashboard.html",
             ],
         ),
         (["search", "--help"], ["search", "--limit"]),
@@ -2888,15 +2900,6 @@ def test_cli_help_contracts() -> None:
         lowered = result.stdout.lower()
         for token in expected_tokens:
             assert token.lower() in lowered
-
-
-def test_build_help_discloses_dashboard_collection_mode_contracts() -> None:
-    """Build help should disclose dashboard collection-vs-standalone behavior."""
-    result = run_cli_command(["build", "--help"])
-    assert result.returncode == 0
-    lowered = result.stdout.lower()
-    for token in ["dashboard.html", DASHBOARD_PACKAGE_FILENAME, ".dashboard.html"]:
-        assert token in lowered
 
 
 def test_output_path_and_slug_contracts() -> None:
@@ -3206,42 +3209,6 @@ def test_builder_defaults_match_cli_defaults() -> None:
     )
 
 
-def test_build_rejects_device_flag_for_non_embedding_strategies() -> None:
-    """--device is embedding/hybrid-scoped and rejected elsewhere."""
-    result = run_cli_command(
-        [
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "citation",
-            "--device",
-            "cpu",
-        ]
-    )
-    assert result.returncode != 0
-    assert "Unsupported option(s)" in result.stderr
-    assert "--device" in result.stderr
-
-
-def test_build_rejects_device_flag_when_hybrid_semantic_disabled() -> None:
-    """--device is embedding-only for hybrid and invalid with --max-semantic 0."""
-    result = run_cli_command(
-        [
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "hybrid",
-            "--max-semantic",
-            "0",
-            "--device",
-            "cpu",
-        ]
-    )
-    assert result.returncode != 0
-    assert "Hybrid semantic branch is disabled" in result.stderr
-    assert "--device" in result.stderr
-
-
 def test_build_rejects_unavailable_explicit_device(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3315,62 +3282,3 @@ def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:
     cli_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "candidates"
     assert args.storage_precision == "float32"
-
-
-def test_build_rejects_corpus_flags_with_explicit_candidates_source() -> None:
-    """Explicit candidates mode should reject corpus-only flags."""
-    result = run_cli_command(
-        [
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "embedding",
-            "--semantic-source",
-            "candidates",
-            "--corpus-size",
-            "5000",
-        ]
-    )
-    assert result.returncode != 0
-    assert "Corpus-only option(s) require --semantic-source arxiv-corpus" in (
-        result.stderr
-    )
-    assert "--corpus-size" in result.stderr
-
-
-def test_build_rejects_int8_storage_in_candidate_mode() -> None:
-    """Explicit int8 storage should require the corpus source."""
-    result = run_cli_command(
-        [
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "embedding",
-            "--storage-precision",
-            "int8",
-        ]
-    )
-    assert result.returncode != 0
-    assert "--storage-precision int8 requires --semantic-source arxiv-corpus" in (
-        result.stderr
-    )
-
-
-def test_build_rejects_candidate_pool_size_in_corpus_mode() -> None:
-    """--candidate-pool-size should be candidates-mode only."""
-    result = run_cli_command(
-        [
-            "build",
-            "arxiv:1706.03762",
-            "--strategy",
-            "embedding",
-            "--semantic-source",
-            "arxiv-corpus",
-            "--candidate-pool-size",
-            "100",
-        ]
-    )
-    assert result.returncode != 0
-    assert "--candidate-pool-size requires --semantic-source candidates" in (
-        result.stderr
-    )

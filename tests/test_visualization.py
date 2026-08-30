@@ -1788,40 +1788,29 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
     assert "Seed Paper" in bib_text or "Related Paper" in bib_text
 
 
-def test_recommendation_export_defaults_to_semantic_provenance(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("strategy", "strategy_source"),
+    [
+        ("recommendation", "exporter"),
+        ("recommendation", "graph"),
+        ("embedding", "graph"),
+    ],
+)
+def test_semantic_export_provenance(
+    tmp_path: Path, strategy: str, strategy_source: str
 ) -> None:
-    """Recommendation exports should classify fallback provenance as semantic."""
+    """Semantic exports should classify provenance from either strategy source."""
     graph, seed_id = _build_graph()
-    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "recommendation"})
-
-    json_path = tmp_path / "recommendation.json"
-    exporter.to_json(json_path)
-
-    payload = json.loads(json_path.read_text())
-    seed_node = next(node for node in payload["nodes"] if node["id"] == seed_id)
-    related_node = next(node for node in payload["nodes"] if node["id"] == "related")
-
-    assert seed_node["provenance"] == "seed"
-    assert seed_node["provenance_base"] == "semantic"
-    assert seed_node["seed_relation"] == "seed"
-    assert related_node["provenance"] == "semantic"
-    assert related_node["provenance_base"] == "semantic"
-    assert related_node["seed_relation"] == "semantic_only"
-
-
-@pytest.mark.parametrize("strategy", ["recommendation", "embedding"])
-def test_semantic_export_uses_graph_strategy_when_metadata_is_omitted(
-    tmp_path: Path, strategy: str
-) -> None:
-    """Semantic exports should stay correct when callers omit exporter metadata."""
-    graph, seed_id = _build_graph()
-    graph.graph["strategy"] = strategy
+    metadata = None
+    if strategy_source == "exporter":
+        metadata = {"strategy": strategy}
+    else:
+        graph.graph["strategy"] = strategy
     if strategy == "embedding":
         graph.graph["embedding_runtime"] = {"storage_precision": "int8"}
 
-    exporter = GraphExporter(graph, seed_id)
-    json_path = tmp_path / f"{strategy}.json"
+    exporter = GraphExporter(graph, seed_id, metadata=metadata)
+    json_path = tmp_path / f"{strategy}-{strategy_source}.json"
     exporter.to_json(json_path)
 
     payload = json.loads(json_path.read_text())
