@@ -25,6 +25,7 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
+    IdentityRegistry,
     fetch_candidate_pool,
     merge_seed_relation,
     paper_embedding_metadata,
@@ -276,7 +277,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     def _ingest_candidate(
         self,
-        aliases: Dict[str, str],
+        aliases: IdentityRegistry,
         seed: Paper,
         candidates: Dict[str, Paper],
         candidate_sources: Dict[str, Set[str]],
@@ -287,7 +288,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
     ) -> Optional[str]:
         """Reconcile and tag one pre-ranking candidate.
 
-        :param Dict[str, str] aliases: Alias-to-canonical map.
+        :param IdentityRegistry aliases: Identity registry.
         :param Paper seed: Canonical seed paper.
         :param Dict[str, Paper] candidates: Pre-ranking candidate map.
         :param Dict[str, Set[str]] candidate_sources: Candidate provenance map.
@@ -604,7 +605,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.paper_sources = {}
         self.seed_relations = {}
         self.candidate_source_status = {}
-        alias_map: Dict[str, str] = {}
+        alias_map = IdentityRegistry()
 
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")

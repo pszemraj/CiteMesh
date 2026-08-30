@@ -12,6 +12,7 @@ from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.candidates import (
+    IdentityRegistry,
     fetch_candidate_source,
     merge_paper_metadata,
     reconcile_paper_identity,
@@ -101,7 +102,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
 
         seed.is_seed = True
         papers[seed.paper_id] = seed
-        identity_aliases: Dict[str, str] = {}
+        identity_aliases = IdentityRegistry()
         register_aliases(identity_aliases, seed.paper_id, seed)
 
         logger.info("Fetching recommendations for %s", seed.paper_id)

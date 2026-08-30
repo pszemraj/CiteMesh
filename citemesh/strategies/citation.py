@@ -20,6 +20,7 @@ from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
+    IdentityRegistry,
     fetch_candidate_source,
     merge_seed_relation,
     reconcile_paper_identity,
@@ -77,7 +78,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache: Dict[str, list] = {}  # Cache reference lists
         self.seed_relations: Dict[str, str] = {}
         self.candidate_source_status: Dict[str, str] = {}
-        self._identity_aliases: Dict[str, str] = {}
+        self._identity_aliases = IdentityRegistry()
         self._abstract_index = AbstractSimilarityIndex()
 
     def _ensure_paper_references(self, paper: Paper) -> None:
@@ -246,7 +247,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache.clear()
         self.seed_relations = {}
         self.candidate_source_status = {}
-        self._identity_aliases = {}
+        self._identity_aliases = IdentityRegistry()
         papers = {}
         source_results: list[CandidateSourceResult] = []
 

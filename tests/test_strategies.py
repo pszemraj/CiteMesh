@@ -21,7 +21,11 @@ from citemesh.strategies.base import (
 )
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
+    CandidatePool,
+    IdentityRegistry,
     fetch_candidate_pool,
+    paper_identity_aliases,
+    register_aliases,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
@@ -71,6 +75,19 @@ def _seed_paper(paper_id: str = "seed") -> Paper:
         abstract="seed abstract",
         is_seed=True,
     )
+
+
+def _identity_bridge_records() -> tuple[Paper, Paper, Paper]:
+    """Build compatible S2/arXiv and DOI classes plus one bridging payload."""
+    s2_id = "a" * 40
+    arxiv_record = _paper(s2_id)
+    arxiv_record.arxiv_id = "2508.12345"
+    doi_record = _paper("10.1000/bridge")
+    doi_record.doi = "10.1000/bridge"
+    bridge = _paper(s2_id)
+    bridge.arxiv_id = "2508.12345"
+    bridge.doi = "10.1000/bridge"
+    return arxiv_record, doi_record, bridge
 
 
 def _make_constant_similarity_builder(
@@ -293,13 +310,7 @@ def test_citation_collect_collapses_seed_and_candidate_identifier_aliases() -> N
 def test_citation_collect_repoints_relations_for_same_batch_bridge() -> None:
     """Same-batch bridge merges must not leave relations for removed paper IDs."""
     seed = _paper("seed")
-    arxiv_record = _paper("s2-arxiv")
-    arxiv_record.arxiv_id = "2508.12345"
-    doi_record = _paper("s2-doi")
-    doi_record.doi = "10.1000/bridge"
-    bridge = _paper("s2-bridge")
-    bridge.arxiv_id = "2508.12345"
-    bridge.doi = "10.1000/bridge"
+    arxiv_record, doi_record, bridge = _identity_bridge_records()
 
     client = MagicMock()
     client.get_paper.return_value = seed
@@ -315,10 +326,10 @@ def test_citation_collect_repoints_relations_for_same_batch_bridge() -> None:
     )
     papers = builder.collect_papers("seed")
 
-    assert set(papers) == {"seed", "s2-arxiv"}
+    assert set(papers) == {"seed", arxiv_record.paper_id}
     assert builder.seed_relations == {
         "seed": "seed",
-        "s2-arxiv": "referenced_by_seed",
+        arxiv_record.paper_id: "referenced_by_seed",
     }
 
 
@@ -1250,11 +1261,12 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
     seed = _seed_paper()
     pool = CandidatePool(seed=seed)
     first = Paper(
-        paper_id="s2:abc",
+        paper_id="b" * 40,
         title="Same Paper",
         year=2021,
         abstract="An abstract",
         citation_count=5,
+        arxiv_id="2101.00001",
     )
     duplicate = Paper(
         paper_id="arxiv:2101.00001",
@@ -1274,18 +1286,22 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
     )
     pool.add(alias_only_duplicate, source="citation", relation="cites_seed")
 
-    assert list(pool.papers) == ["s2:abc"]
-    assert pool.sources["s2:abc"] == {"reference", "recommendation", "citation"}
-    assert pool.seed_relations["s2:abc"] == "overlap"
+    assert list(pool.papers) == [first.paper_id]
+    assert pool.sources[first.paper_id] == {
+        "reference",
+        "recommendation",
+        "citation",
+    }
+    assert pool.seed_relations[first.paper_id] == "overlap"
 
     seed_duplicate = Paper(
-        paper_id="other:seed",
+        paper_id=seed.paper_id,
         title=seed.title,
         year=seed.year,
         abstract="richer seed abstract",
     )
     pool.add(seed_duplicate, source="citation", relation="cites_seed")
-    assert "other:seed" not in pool.papers
+    assert set(pool.papers) == {first.paper_id}
 
 
 def test_candidate_pool_collapses_identifier_bridge_classes() -> None:
@@ -1293,23 +1309,196 @@ def test_candidate_pool_collapses_identifier_bridge_classes() -> None:
     from citemesh.strategies.candidates import CandidatePool
 
     pool = CandidatePool(seed=_seed_paper())
-    arxiv_record = _paper("s2-arxiv")
-    arxiv_record.arxiv_id = "2508.12345"
-    doi_record = _paper("s2-doi")
-    doi_record.doi = "10.1000/bridge"
-    bridge = _paper("s2-bridge")
-    bridge.arxiv_id = "2508.12345"
-    bridge.doi = "10.1000/bridge"
+    arxiv_record, doi_record, bridge = _identity_bridge_records()
 
     pool.add(arxiv_record, source="reference", relation="referenced_by_seed")
     pool.add(doi_record, source="citation", relation="cites_seed")
     pool.add(bridge, source="recommendation", relation="semantic_only")
 
-    assert list(pool.papers) == ["s2-arxiv"]
-    assert pool.papers["s2-arxiv"].doi == "10.1000/bridge"
-    assert pool.sources["s2-arxiv"] == {"reference", "citation", "recommendation"}
-    assert pool.seed_relations["s2-arxiv"] == "overlap"
-    assert pool._aliases["id:10.1000/bridge"] == "s2-arxiv"
+    assert list(pool.papers) == [arxiv_record.paper_id]
+    assert pool.papers[arxiv_record.paper_id].doi == "10.1000/bridge"
+    assert pool.sources[arxiv_record.paper_id] == {
+        "reference",
+        "citation",
+        "recommendation",
+    }
+    assert pool.seed_relations[arxiv_record.paper_id] == "overlap"
+    assert pool._aliases["id:10.1000/bridge"] == arxiv_record.paper_id
+
+
+def test_identity_reconciliation_rejects_conflicting_strong_ids() -> None:
+    """Matching metadata must not override contradictory S2 or DOI evidence."""
+    authors = [Author(name="Ada Lovelace")]
+    first = Paper(
+        paper_id="1" * 40,
+        title="Shared Scientific Title",
+        year=2024,
+        authors=authors,
+        abstract="Shared abstract",
+        doi="10.1000/first",
+    )
+    second = Paper(
+        paper_id="2" * 40,
+        title="Shared Scientific Title",
+        year=2024,
+        authors=authors,
+        abstract="Shared abstract",
+        doi="10.1000/second",
+    )
+    seed = Paper(
+        paper_id="3" * 40,
+        title="Shared Scientific Title",
+        year=2024,
+        authors=authors,
+        abstract="Shared abstract",
+        is_seed=True,
+    )
+    pool = CandidatePool(seed=seed)
+
+    pool.add(first, source="reference", relation="referenced_by_seed")
+    pool.add(second, source="recommendation", relation="semantic_only")
+
+    assert set(pool.papers) == {first.paper_id, second.paper_id}
+    assert pool.sources[first.paper_id] == {"reference"}
+    assert pool.sources[second.paper_id] == {"recommendation"}
+
+    pool.add(
+        Paper(
+            paper_id="4" * 40,
+            title=seed.title,
+            year=seed.year,
+            authors=authors,
+            abstract=seed.abstract,
+        ),
+        source="citation",
+        relation="cites_seed",
+    )
+    assert "4" * 40 in pool.papers
+
+
+@pytest.mark.parametrize("title", ["Unknown", "Untitled", "None", "N/A"])
+def test_identity_placeholder_titles_never_create_weak_aliases(title: str) -> None:
+    """Placeholder titles must not become global metadata identity keys."""
+    paper = Paper(
+        paper_id="placeholder",
+        title=title,
+        year=2024,
+        authors=[Author(name="Unknown Author")],
+    )
+    assert not any(alias.startswith("meta:") for alias in paper_identity_aliases(paper))
+
+
+def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
+    """Same-primary refreshes must not assign a contradictory DOI to that class."""
+    primary_a = "a" * 40
+    primary_b = "b" * 40
+    pool = CandidatePool(seed=_seed_paper())
+    canonical = Paper(
+        paper_id=primary_a,
+        title="Canonical",
+        year=2024,
+        doi="10.1000/a",
+    )
+    conflicting_refresh = Paper(
+        paper_id=primary_a,
+        title="Canonical refreshed",
+        year=2024,
+        doi="10.1000/b",
+    )
+    actual_doi_owner = Paper(
+        paper_id=primary_b,
+        title="Different paper",
+        year=2024,
+        doi="10.1000/b",
+    )
+
+    pool.add(canonical, source="reference", relation="referenced_by_seed")
+    pool.add(conflicting_refresh, source="citation", relation="cites_seed")
+    pool.add(actual_doi_owner, source="recommendation", relation="semantic_only")
+
+    assert set(pool.papers) == {primary_a, primary_b}
+    assert pool.papers[primary_a].doi == "10.1000/a"
+    assert pool._aliases["id:10.1000/b"] == primary_b
+
+
+def test_identity_transitive_weak_bridge_cannot_collapse_conflicting_classes() -> None:
+    """A metadata bridge must not transitively unite contradictory strong IDs."""
+    authors = [Author(name="Grace Hopper")]
+    pool = CandidatePool(seed=_seed_paper())
+    left = Paper(
+        paper_id="c" * 40,
+        title="Shared",
+        year=2023,
+        authors=authors,
+        doi="10.1000/left",
+    )
+    middle = Paper(
+        paper_id="10.1000/right",
+        title="Shared",
+        year=2023,
+        authors=authors,
+        doi="10.1000/right",
+    )
+    right = Paper(
+        paper_id="d" * 40,
+        title="Different",
+        year=2023,
+        authors=authors,
+        doi="10.1000/right",
+    )
+
+    pool.add(left, source="reference", relation="referenced_by_seed")
+    pool.add(middle, source="citation", relation="cites_seed")
+    pool.add(right, source="recommendation", relation="semantic_only")
+
+    assert set(pool.papers) == {left.paper_id, middle.paper_id}
+    assert pool.sources[left.paper_id] == {"reference"}
+    assert pool.sources[middle.paper_id] == {"citation", "recommendation"}
+
+
+def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> None:
+    """Hybrid false twins should remain separate source classes without a bonus."""
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    seed = _seed_paper()
+    aliases = IdentityRegistry()
+    register_aliases(aliases, seed.paper_id, seed)
+    candidates: dict[str, Paper] = {}
+    sources: dict[str, set[str]] = {}
+    authors = [Author(name="Katherine Johnson")]
+    citation_twin = Paper(
+        paper_id="e" * 40,
+        title="Same title",
+        year=2022,
+        authors=authors,
+    )
+    semantic_twin = Paper(
+        paper_id="f" * 40,
+        title="Same title",
+        year=2022,
+        authors=authors,
+    )
+    builder._ingest_candidate(
+        aliases,
+        seed,
+        candidates,
+        sources,
+        citation_twin,
+        source="citation",
+        relation="cites_seed",
+    )
+    builder._ingest_candidate(
+        aliases,
+        seed,
+        candidates,
+        sources,
+        semantic_twin,
+        source="semantic",
+        relation="semantic_only",
+    )
+
+    assert set(candidates) == {citation_twin.paper_id, semantic_twin.paper_id}
+    assert sources[citation_twin.paper_id] == {"citation"}
+    assert sources[semantic_twin.paper_id] == {"semantic"}
 
 
 def test_recommendation_collect_collapses_seed_and_candidate_identifier_aliases() -> (
@@ -1341,12 +1530,9 @@ def test_recommendation_collect_collapses_seed_and_candidate_identifier_aliases(
 def test_recommendation_collect_reconciles_sparse_identifier_bridge() -> None:
     """Sparse known records should still bridge existing identity classes."""
     seed = _seed_paper()
-    arxiv_record = _paper("s2-arxiv")
-    arxiv_record.arxiv_id = "2508.12345"
-    doi_record = _paper("s2-doi")
-    doi_record.doi = "10.1000/bridge"
+    arxiv_record, doi_record, _bridge = _identity_bridge_records()
     sparse_bridge = Paper(
-        paper_id="s2-bridge",
+        paper_id=arxiv_record.paper_id,
         title="Bridge",
         year=2025,
         abstract="",
@@ -1365,21 +1551,15 @@ def test_recommendation_collect_reconciles_sparse_identifier_bridge() -> None:
         max_papers=4, fetch_references=False, client=client
     ).collect_papers("seed")
 
-    assert set(papers) == {"seed", "s2-arxiv"}
-    assert papers["s2-arxiv"].doi == "10.1000/bridge"
+    assert set(papers) == {"seed", arxiv_record.paper_id}
+    assert papers[arxiv_record.paper_id].doi == "10.1000/bridge"
 
 
 def test_recommendation_collect_reconciles_bridge_after_capacity() -> None:
     """Capacity filtering should not hide later identity bridge records."""
     seed = _seed_paper()
-    arxiv_record = _paper("s2-arxiv")
-    arxiv_record.arxiv_id = "2508.12345"
-    doi_record = _paper("s2-doi")
-    doi_record.doi = "10.1000/bridge"
+    arxiv_record, doi_record, bridge = _identity_bridge_records()
     unrelated = _paper("unrelated")
-    bridge = _paper("s2-bridge")
-    bridge.arxiv_id = "2508.12345"
-    bridge.doi = "10.1000/bridge"
     client = MagicMock()
     client.get_paper.return_value = seed
     client.get_recommended_papers.return_value = [
@@ -1393,8 +1573,8 @@ def test_recommendation_collect_reconciles_bridge_after_capacity() -> None:
         max_papers=3, fetch_references=False, client=client
     ).collect_papers("seed")
 
-    assert set(papers) == {"seed", "s2-arxiv"}
-    assert papers["s2-arxiv"].doi == "10.1000/bridge"
+    assert set(papers) == {"seed", arxiv_record.paper_id}
+    assert papers[arxiv_record.paper_id].doi == "10.1000/bridge"
 
 
 def test_hybrid_collection_collapses_identifier_bridge_classes(
@@ -1405,13 +1585,7 @@ def test_hybrid_collection_collapses_identifier_bridge_classes(
         max_papers=3, max_semantic=1, semantic_source="arxiv-corpus", client=MagicMock()
     )
     seed = _seed_paper()
-    arxiv_record = _paper("s2-arxiv")
-    arxiv_record.arxiv_id = "2508.12345"
-    doi_record = _paper("s2-doi")
-    doi_record.doi = "10.1000/bridge"
-    bridge = _paper("s2-bridge")
-    bridge.arxiv_id = "2508.12345"
-    bridge.doi = "10.1000/bridge"
+    arxiv_record, doi_record, bridge = _identity_bridge_records()
     builder.citation_builder.collect_papers = MagicMock(
         return_value={
             seed.paper_id: seed,
@@ -1428,14 +1602,16 @@ def test_hybrid_collection_collapses_identifier_bridge_classes(
     builder.embedding_builder.collect_papers = MagicMock(
         return_value={bridge.paper_id: bridge}
     )
-    monkeypatch.setattr(builder, "_rank_candidates", lambda *_args: ["s2-arxiv"])
+    monkeypatch.setattr(
+        builder, "_rank_candidates", lambda *_args: [arxiv_record.paper_id]
+    )
 
     papers = builder.collect_papers("seed")
 
-    assert set(papers) == {"seed", "s2-arxiv"}
-    assert papers["s2-arxiv"].doi == "10.1000/bridge"
-    assert builder.paper_sources["s2-arxiv"] == "both"
-    assert builder.seed_relations["s2-arxiv"] == "overlap"
+    assert set(papers) == {"seed", arxiv_record.paper_id}
+    assert papers[arxiv_record.paper_id].doi == "10.1000/bridge"
+    assert builder.paper_sources[arxiv_record.paper_id] == "both"
+    assert builder.seed_relations[arxiv_record.paper_id] == "overlap"
 
 
 def test_merge_paper_metadata_preserves_fields_and_unions_references() -> None:

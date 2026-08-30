@@ -19,6 +19,11 @@ Notable changes from the early script-based prototypes to the current package la
   recommendations, and free-text candidate acquisition. Partial source success is
   preserved with deterministic `candidate_source_status` export metadata; total
   source outages now fail closed instead of publishing a seed-only graph.
+- Paper identity reconciliation now keeps strong IDs namespaced and accumulated,
+  treats contested aliases as ambiguous, rejects transitive same-namespace
+  conflicts, and requires meaningful title/year/author evidence for weak matches.
+  Exact primary-ID refreshes remain authoritative without registering a
+  contradictory DOI or arXiv alias.
 - Paper search gets the same treatment: `citemesh search` and free-text query seeds no longer report "No results found" when the search API was actually rate-limited or unreachable — exhausted retries now surface as a `SemanticScholarUnavailableError` with the free-key pointer.
 - Added local semantic search to `citemesh search`: mode `local` searches the locally cached embeddings (candidate vectors accumulated across builds, or a hydrated corpus) via the cache-native search API. The query is encoded in the model's query prompt space and ranked with cosine scores; no Semantic Scholar traffic. Targets the same cache namespace a flagless build writes to, honoring `config.toml` defaults, with `--model`/`--device` overrides (which imply local mode).
 - Made `citemesh search` mode-aware: `--mode {auto,local,s2}` with `auto` as the default — local semantic search when the cache has vectors, Semantic Scholar keyword search otherwise, logging which backend ran. The preference persists via `citemesh config set defaults.search_mode <mode>` (explicit flag wins). Explicitly requested local mode fails with build guidance on an empty cache instead of silently falling back.
