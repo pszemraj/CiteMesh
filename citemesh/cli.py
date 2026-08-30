@@ -480,38 +480,8 @@ _CORPUS_ONLY_OPTION_DESTS: Set[str] = {
 # Explicit candidate-only options imply candidate sourcing just as explicit
 # corpus-only options imply corpus sourcing.
 _CANDIDATE_ONLY_OPTION_DESTS: Set[str] = {"candidate_pool_size"}
-_BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
-    "max_citations": ["--max-citations", "-c"],
-    "max_references": ["--max-references", "-r"],
-    "similarity_threshold": ["--similarity-threshold", "-t"],
-    "no_references": ["--no-references"],
-    "refresh_reference_cache": ["--refresh-reference-cache"],
-    "model": ["--model", "-m"],
-    "model_revision": ["--model-revision"],
-    "dataset_split": ["--dataset-split"],
-    "corpus_size": ["--corpus-size"],
-    "all_corpus": ["--all-corpus"],
-    "top_k": ["--top-k", "-k"],
-    "truncate_dim": ["--truncate-dim"],
-    "streaming": ["--streaming", "--no-streaming"],
-    "force_rebuild_cache": ["--force-rebuild-cache"],
-    "overwrite_cache": ["--overwrite-cache"],
-    "cache_overwrite_reason": ["--cache-overwrite-reason"],
-    "storage_precision": ["--storage-precision"],
-    "binary_prefilter": ["--binary-prefilter", "--no-binary-prefilter"],
-    "binary_rescore_multiplier": ["--binary-rescore-multiplier"],
-    "calibration_sample_size": ["--calibration-sample-size"],
-    "cache_compression": ["--cache-compression"],
-    "cache_compression_level": ["--cache-compression-level"],
-    "encode_batch_size": ["--encode-batch-size"],
-    "torch_compile": ["--torch-compile", "--no-torch-compile"],
-    "device": ["--device"],
-    "semantic_source": ["--semantic-source"],
-    "candidate_pool_size": ["--candidate-pool-size"],
-    "max_semantic": ["--max-semantic"],
-}
 _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
-    dest: flags[0] for dest, flags in _BUILD_OPTION_FLAGS.items()
+    dest: f"--{dest.replace('_', '-')}" for dest in _BUILD_STRATEGY_OPTION_SUPPORT
 }
 _CACHE_COMPRESSION_CHOICES = ("gzip", "lzf")
 _HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {

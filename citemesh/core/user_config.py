@@ -182,63 +182,39 @@ def _cast_export(value: Any) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-@dataclass(frozen=True)
-class ConfigKeySpec:
-    """Validation spec for one whitelisted config key."""
-
-    caster: Callable[[Any], Any]
-    description: str
+ConfigCaster = Callable[[Any], Any]
 
 
-CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigKeySpec] = {
-    "strategy": ConfigKeySpec(
-        _choice_caster(STRATEGY_CHOICES), "Default --strategy value"
-    ),
-    "export": ConfigKeySpec(
-        _cast_export, "Default --export format list (comma-separated when set)"
-    ),
-    "theme": ConfigKeySpec(_choice_caster(THEME_CHOICES), "Default --theme value"),
-    "model": ConfigKeySpec(_cast_str, "Default --model checkpoint name"),
-    "model_revision": ConfigKeySpec(_cast_str, "Default --model-revision token"),
-    "device": ConfigKeySpec(_choice_caster(DEVICE_CHOICES), "Default --device value"),
-    "semantic_source": ConfigKeySpec(
-        _choice_caster(SEMANTIC_SOURCE_CHOICES), "Default --semantic-source value"
-    ),
-    "candidate_pool_size": ConfigKeySpec(
-        _int_caster(1), "Default --candidate-pool-size value"
-    ),
-    "encode_batch_size": ConfigKeySpec(
-        _int_caster(1), "Default --encode-batch-size value"
-    ),
-    "storage_precision": ConfigKeySpec(
-        _choice_caster(STORAGE_PRECISION_CHOICES),
-        "Default --storage-precision value",
-    ),
-    "max_papers": ConfigKeySpec(_int_caster(1), "Default --max-papers value"),
-    "max_semantic": ConfigKeySpec(_int_caster(0), "Default --max-semantic value"),
-    "max_citations": ConfigKeySpec(_int_caster(0), "Default --max-citations value"),
-    "max_references": ConfigKeySpec(_int_caster(0), "Default --max-references value"),
-    "top_k": ConfigKeySpec(_int_caster(1), "Default --top-k value"),
-    "truncate_dim": ConfigKeySpec(_int_caster(1), "Default --truncate-dim value"),
-    "corpus_size": ConfigKeySpec(_int_caster(1), "Default --corpus-size value"),
-    "dataset_split": ConfigKeySpec(_cast_str, "Default --dataset-split value"),
-    "streaming": ConfigKeySpec(_cast_bool, "Default --streaming/--no-streaming toggle"),
-    "torch_compile": ConfigKeySpec(_cast_bool, "Default --torch-compile toggle"),
+CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigCaster] = {
+    "strategy": _choice_caster(STRATEGY_CHOICES),
+    "export": _cast_export,
+    "theme": _choice_caster(THEME_CHOICES),
+    "model": _cast_str,
+    "model_revision": _cast_str,
+    "device": _choice_caster(DEVICE_CHOICES),
+    "semantic_source": _choice_caster(SEMANTIC_SOURCE_CHOICES),
+    "candidate_pool_size": _int_caster(1),
+    "encode_batch_size": _int_caster(1),
+    "storage_precision": _choice_caster(STORAGE_PRECISION_CHOICES),
+    "max_papers": _int_caster(1),
+    "max_semantic": _int_caster(0),
+    "max_citations": _int_caster(0),
+    "max_references": _int_caster(0),
+    "top_k": _int_caster(1),
+    "truncate_dim": _int_caster(1),
+    "corpus_size": _int_caster(1),
+    "dataset_split": _cast_str,
+    "streaming": _cast_bool,
+    "torch_compile": _cast_bool,
     # Search-command default (not a build flag): mode for `citemesh search`.
-    "search_mode": ConfigKeySpec(
-        _choice_caster(SEARCH_MODE_CHOICES),
-        "Default `citemesh search` mode (auto = local when cached embeddings "
-        "exist, else s2)",
-    ),
+    "search_mode": _choice_caster(SEARCH_MODE_CHOICES),
 }
 
-CONFIG_API_KEY_SPECS: Dict[str, ConfigKeySpec] = {
-    "s2_api_key": ConfigKeySpec(
-        _cast_str, "Semantic Scholar API key (S2_API_KEY env var wins when set)"
-    ),
+CONFIG_API_KEY_SPECS: Dict[str, ConfigCaster] = {
+    "s2_api_key": _cast_str,
 }
 
-_TABLE_SPECS: Dict[str, Dict[str, ConfigKeySpec]] = {
+_TABLE_SPECS: Dict[str, Dict[str, ConfigCaster]] = {
     DEFAULTS_TABLE: CONFIG_DEFAULT_KEY_SPECS,
     API_TABLE: CONFIG_API_KEY_SPECS,
 }
@@ -271,11 +247,11 @@ def known_config_keys() -> list[str]:
     return sorted(keys)
 
 
-def parse_config_key(dotted_key: str) -> Tuple[str, str, ConfigKeySpec]:
+def parse_config_key(dotted_key: str) -> Tuple[str, str, ConfigCaster]:
     """Resolve a dotted config key into its table, key, and validation spec.
 
     :param str dotted_key: Dotted key such as ``defaults.semantic_source``.
-    :return Tuple[str, str, ConfigKeySpec]: ``(table, key, spec)`` triple.
+    :return Tuple[str, str, ConfigCaster]: ``(table, key, caster)`` triple.
     """
     table, separator, key = str(dotted_key).strip().partition(".")
     specs = _TABLE_SPECS.get(table)
@@ -290,14 +266,14 @@ def parse_config_key(dotted_key: str) -> Tuple[str, str, ConfigKeySpec]:
 def _validated_table(
     document: Dict[str, Any],
     table: str,
-    specs: Dict[str, ConfigKeySpec],
+    specs: Dict[str, ConfigCaster],
     config_path: Path,
 ) -> Dict[str, Any]:
     """Extract and validate one config table, warning on invalid entries.
 
     :param Dict[str, Any] document: Parsed TOML document.
     :param str table: Table name to validate.
-    :param Dict[str, ConfigKeySpec] specs: Whitelisted key specs for the table.
+    :param Dict[str, ConfigCaster] specs: Whitelisted key casters for the table.
     :param Path config_path: Source file path used in warning messages.
     :return Dict[str, Any]: Validated key/value pairs (invalid entries dropped).
     """
@@ -314,14 +290,14 @@ def _validated_table(
         return {}
     validated: Dict[str, Any] = {}
     for key, raw_value in raw_table.items():
-        spec = specs.get(key)
-        if spec is None:
+        caster = specs.get(key)
+        if caster is None:
             logger.warning(
                 "Ignoring unknown config key '%s.%s' in %s.", table, key, config_path
             )
             continue
         try:
-            validated[key] = spec.caster(raw_value)
+            validated[key] = caster(raw_value)
         except ConfigValueError as exc:
             logger.warning(
                 "Ignoring invalid config value for '%s.%s' in %s: %s.",
@@ -440,9 +416,9 @@ def set_config_value(
     :param Optional[Path] path: Optional explicit config file path override.
     :return Any: The validated, persisted value.
     """
-    table, key, spec = parse_config_key(dotted_key)
+    table, key, caster = parse_config_key(dotted_key)
     try:
-        value = spec.caster(raw_value)
+        value = caster(raw_value)
     except ConfigValueError as exc:
         raise ConfigValueError(f"Invalid value for '{dotted_key}': {exc}") from exc
     config_path = path if path is not None else user_config_path()
