@@ -541,6 +541,7 @@ def _fake_local_search_builder(
     """Build a fake EmbeddingGraphBuilder for local-search CLI tests."""
     fake_builder = MagicMock()
     fake_builder.search_local.return_value = list(results or [])
+    fake_builder.has_persistent_embedding_artifacts.return_value = False
     fake_builder.embedding_cache = SimpleNamespace(
         embedding_count=lambda: cached_count,
         last_search_total_embeddings=cached_count,
@@ -593,6 +594,7 @@ def test_search_mode_local_prints_cached_results(
     assert "Ada Lovelace" in plain_stdout
     assert "Searched 42 locally cached embeddings" in plain_stdout
     fake_builder.search_local.assert_called_once_with("cached topic", top_k=1)
+    fake_builder.prepare_embedding_cache.assert_called_once_with()
 
     # Namespace parity with a flagless build: candidates mode with the int8
     # default normalized to float32 storage.
@@ -642,6 +644,29 @@ def test_search_auto_uses_local_when_cache_populated(
     notices = str(info_mock.call_args_list)
     assert "locally cached embeddings" in notices
     assert "--mode s2" in notices
+    client_factory.assert_not_called()
+
+
+def test_search_auto_resolves_artifact_namespace_when_cache_files_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto search should resolve an exact cache after a placeholder miss."""
+    fake_builder = _fake_local_search_builder(
+        cached_count=0, results=[_FAKE_LOCAL_RESULT]
+    )
+    fake_builder.embedding_cache.embedding_count = MagicMock(side_effect=[0, 42])
+    fake_builder.has_persistent_embedding_artifacts.return_value = True
+    monkeypatch.setattr(
+        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    client_factory = MagicMock()
+    monkeypatch.setattr(cli_module, "get_client", client_factory)
+
+    result = run_cli_command(["search", "cached topic", "-n", "1"])
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    fake_builder.prepare_embedding_cache.assert_called_once_with()
+    fake_builder.search_local.assert_called_once_with("cached topic", top_k=1)
     client_factory.assert_not_called()
 
 

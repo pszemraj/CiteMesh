@@ -3411,7 +3411,16 @@ def _run_search_command(
         builder, defaults = _prepare_local_search_builder(
             args, build_parser, user_config
         )
+        if mode == "local":
+            builder.prepare_embedding_cache()
         cached_count = builder.embedding_cache.embedding_count()
+        if (
+            mode == "auto"
+            and cached_count == 0
+            and builder.has_persistent_embedding_artifacts()
+        ):
+            builder.prepare_embedding_cache()
+            cached_count = builder.embedding_cache.embedding_count()
     except Exception as exc:
         if mode == "auto":
             logger.info(

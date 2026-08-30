@@ -259,7 +259,7 @@ citemesh build "<paper-id-from-search>" --strategy recommendation
 
 The default mode is `auto`: local search when your cache has embeddings, S2 keyword search otherwise, with a log line saying which backend ran and why. Persist a preference with `citemesh config set defaults.search_mode <auto|local|s2>` (explicit `--mode` still wins). Passing `--model` or `--device` implies local mode. Explicitly requesting `local` (flag or config) with an empty cache is an error with guidance rather than a silent fallback.
 
-Local search targets the same cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. Namespaces are keyed by model and compute dtype: pass `--model` if you build with a non-default model, and note that CPU (float32) and CUDA/MPS (bfloat16) runs use distinct namespaces — search on the same device class you build on.
+Local search targets the same retrieval cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. Namespaces are keyed by the runtime-active model artifact, requested revision, representation contract, formatter, dimensions, and compute dtype. Pass `--model` if you build with a non-default model; CPU (float32) and CUDA/MPS (bfloat16) runs use distinct namespaces, while CUDA and MPS share a namespace when both resolve to bf16.
 
 ## Troubleshooting
 

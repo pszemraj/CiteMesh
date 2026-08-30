@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import types
-from hashlib import sha256
+from pathlib import Path
 from typing import Any, Iterable
 from unittest.mock import MagicMock
 
@@ -118,6 +119,8 @@ def _pin_model_fingerprint(
 ) -> None:
     """Pin deterministic model fingerprint for hydration tests."""
     monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
+    builder._resolved_model_fingerprint = fingerprint
+    builder._bind_embedding_cache_to_active_model()
 
 
 def _install_fake_torch(
@@ -680,6 +683,7 @@ def test_embedding_compile_is_deferred_when_cache_not_hydrated(
         semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     monkeypatch.setattr(builder, "_cache_hydrated_for_active_spec", lambda: False)
     builder._load_model()
 
@@ -784,13 +788,18 @@ def test_embedding_fingerprint_uses_active_fallback_model_identity(
     )
 
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    requested_cache_path = builder.embedding_cache.h5_path
     builder._load_model()
     fingerprint = builder._resolve_model_fingerprint()
+    builder._ensure_cache_model_fingerprint()
 
     assert builder._active_model_name == fallback_model
     assert (
         fingerprint == f"hf::{fallback_model}::0123456789abcdef0123456789abcdef01234567"
     )
+    assert builder.embedding_cache.h5_path != requested_cache_path
+    assert f"model={fallback_model}" in builder.embedding_cache.model_name
+    assert f"artifact={fingerprint}" in builder.embedding_cache.model_name
 
 
 def test_embedding_cache_namespace_partition_contracts(
@@ -1000,90 +1009,33 @@ def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
 
 
 def test_embedding_cache_offline_fingerprint_lookup_contracts(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Offline lookup outcomes should preserve cache safety across identity states."""
+    """Pinned commits work offline; unresolved mutable identities fail closed."""
 
-    compatible_fp = "hf::org/offline-test::0123456789abcdef0123456789abcdef01234567"
-    cases = [
-        {
-            "label": "compatible cached fingerprint is reused",
-            "model_name": "org/offline-test",
-            "model_revision": "0123456789abcdef0123456789abcdef01234567",
-            "has_cached_payload": True,
-            "cached_fingerprint": compatible_fp,
-            "expected_resolved": compatible_fp,
-            "expect_clear": False,
-            "expect_set_fingerprint": None,
-            "expected_log_fragment": "Reusing compatible cached fingerprint",
-        },
-        {
-            "label": "sha-only cached fingerprint clears payload",
-            "model_name": "org/offline-strict",
-            "model_revision": None,
-            "has_cached_payload": True,
-            "cached_fingerprint": (
-                "hf::org/offline-strict::0123456789abcdef0123456789abcdef01234567"
-            ),
-            "expected_resolved": "hf::org/offline-strict::revision=main::offline-unverified",
-            "expect_clear": True,
-            "expect_set_fingerprint": "hf::org/offline-strict::revision=main::offline-unverified",
-            "expected_log_fragment": "incompatible with requested identity",
-        },
-        {
-            "label": "incompatible cached fingerprint clears payload",
-            "model_name": "org/offline-test",
-            "model_revision": "refs/pr/12",
-            "has_cached_payload": True,
-            "cached_fingerprint": compatible_fp,
-            "expected_resolved": "hf::org/offline-test::revision=refs/pr/12::offline-unverified",
-            "expect_clear": True,
-            "expect_set_fingerprint": "hf::org/offline-test::revision=refs/pr/12::offline-unverified",
-            "expected_log_fragment": "is incompatible with requested identity",
-        },
-        {
-            "label": "missing cached fingerprint reuses payload with fallback identity",
-            "model_name": "org/offline-no-fingerprint",
-            "model_revision": "refs/pr/12",
-            "has_cached_payload": True,
-            "cached_fingerprint": None,
-            "expected_resolved": (
-                "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
-            ),
-            "expect_clear": False,
-            "expect_set_fingerprint": (
-                "hf::org/offline-no-fingerprint::revision=refs/pr/12::offline-unverified"
-            ),
-            "expected_log_fragment": "Reusing cached payload with fallback identity",
-        },
-        {
-            "label": "offline initialization sets fallback for empty namespace",
-            "model_name": "org/offline-init",
-            "model_revision": "refs/pr/34",
-            "has_cached_payload": False,
-            "cached_fingerprint": None,
-            "expected_resolved": "hf::org/offline-init::revision=refs/pr/34::offline-unverified",
-            "expect_clear": False,
-            "expect_set_fingerprint": (
-                "hf::org/offline-init::revision=refs/pr/34::offline-unverified"
-            ),
-            "expected_log_fragment": "offline initialization",
-        },
-    ]
+    commit_sha = "0123456789abcdef0123456789abcdef01234567"
+    pinned = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/offline-test",
+        model_revision=commit_sha,
+        client=MagicMock(),
+    )
+    assert pinned._resolve_model_fingerprint() == f"hf::org/offline-test::{commit_sha}"
 
-    for case in cases:
-        caplog.clear()
+    for has_payload, cached_fingerprint in [
+        (True, f"hf::org/offline-unverified::{commit_sha}"),
+        (True, None),
+        (False, None),
+    ]:
         builder = EmbeddingGraphBuilder(
             max_papers=1,
-            model_name=case["model_name"],
-            model_revision=case["model_revision"],
+            model_name="org/offline-unverified",
+            model_revision="refs/pr/12",
             client=MagicMock(),
         )
-        builder.embedding_cache.has_cached_payload = MagicMock(
-            return_value=bool(case["has_cached_payload"])
-        )
+        builder.embedding_cache.has_cached_payload = MagicMock(return_value=has_payload)
         builder.embedding_cache.get_model_fingerprint = MagicMock(
-            return_value=case["cached_fingerprint"]
+            return_value=cached_fingerprint
         )
         builder.embedding_cache.clear = MagicMock()
         builder.embedding_cache.set_model_fingerprint = MagicMock()
@@ -1091,38 +1043,26 @@ def test_embedding_cache_offline_fingerprint_lookup_contracts(
             side_effect=RuntimeError("network unavailable")
         )
 
-        with caplog.at_level(logging.WARNING):
+        with pytest.raises(
+            RuntimeError,
+            match="refusing persistent cache access",
+        ):
             builder._ensure_cache_model_fingerprint()
 
-        assert builder._resolved_model_fingerprint == case["expected_resolved"], case[
-            "label"
-        ]
-        if case["expect_clear"]:
-            builder.embedding_cache.clear.assert_called_once()
-        else:
-            assert builder.embedding_cache.clear.call_count == 0
-
-        expected_set_fingerprint = case["expect_set_fingerprint"]
-        if expected_set_fingerprint is None:
-            builder.embedding_cache.set_model_fingerprint.assert_not_called()
-        else:
-            builder.embedding_cache.set_model_fingerprint.assert_called_once_with(
-                expected_set_fingerprint
-            )
-        assert any(
-            case["expected_log_fragment"] in record.getMessage()
-            for record in caplog.records
-        ), case["label"]
+        builder.embedding_cache.clear.assert_not_called()
+        builder.embedding_cache.set_model_fingerprint.assert_not_called()
 
 
-def test_embedding_cache_sets_missing_cached_fingerprint_after_lookup(
+def test_embedding_cache_clears_payload_missing_fingerprint_after_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A cached payload without fingerprint should be migrated to a resolved fingerprint."""
+    """An unidentified legacy payload must be cleared before recording identity."""
 
     builder = EmbeddingGraphBuilder(
         max_papers=1, model_name="org/needs-fingerprint", client=MagicMock()
     )
+    builder._resolved_model_fingerprint = "resolved-fp"
+    builder._bind_embedding_cache_to_active_model()
     builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
     builder.embedding_cache.get_model_fingerprint = MagicMock(return_value=None)
     builder.embedding_cache.set_model_fingerprint = MagicMock()
@@ -1134,7 +1074,7 @@ def test_embedding_cache_sets_missing_cached_fingerprint_after_lookup(
 
     builder.embedding_cache.set_model_fingerprint.assert_called_once_with("resolved-fp")
     assert builder._resolved_model_fingerprint == "resolved-fp"
-    assert builder.embedding_cache.clear.call_count == 0
+    builder.embedding_cache.clear.assert_called_once()
 
 
 def test_embedding_fingerprint_resolution_contracts(
@@ -1206,12 +1146,134 @@ def test_embedding_fingerprint_resolution_contracts(
         client=MagicMock(),
     )
 
-    expected_config = sha256(config_bytes).hexdigest()
-    expected_weights = sha256(weights_bytes).hexdigest()
-    assert artifact_builder._resolve_model_fingerprint() == (
-        "hf::org/artifact-model::revision=refs/pr/7"
-        f"::config={expected_config}::weights={expected_weights}"
+    expected_artifact = artifact_builder._resolve_inference_artifact_digest(
+        snapshot_root
     )
+    assert artifact_builder._resolve_model_fingerprint() == (
+        f"hf::org/artifact-model::revision=refs/pr/7::artifact={expected_artifact}"
+    )
+
+
+def test_local_model_fingerprint_covers_inference_artifact_manifest(
+    tmp_path: Path,
+) -> None:
+    """Weights, tokenizer, and pooling changes must alter local model identity."""
+    model_path = tmp_path / "local-model"
+    pooling_path = model_path / "1_Pooling"
+    pooling_path.mkdir(parents=True)
+    (model_path / "config.json").write_text('{"model_type":"test"}')
+    (model_path / "modules.json").write_text(
+        '[{"idx":0,"name":"pool","path":"1_Pooling","type":"Pooling"}]'
+    )
+    (model_path / "model.safetensors").write_bytes(b"weights-a")
+    (model_path / "tokenizer.json").write_text('{"version":"a"}')
+    (pooling_path / "config.json").write_text('{"pooling_mode_mean_tokens":true}')
+    (model_path / "README.md").write_text("documentation a")
+
+    def _identity() -> tuple[str, Path]:
+        """Resolve a fresh fingerprint and physical cache for the local fixture."""
+        builder = EmbeddingGraphBuilder(
+            max_papers=1,
+            model_name=str(model_path),
+            client=MagicMock(),
+        )
+        fingerprint = builder._resolve_model_fingerprint()
+        builder._ensure_cache_model_fingerprint()
+        return fingerprint, builder.embedding_cache.h5_path
+
+    initial, initial_cache_path = _identity()
+    (model_path / "README.md").write_text("documentation b")
+    assert _identity() == (initial, initial_cache_path)
+
+    (pooling_path / "config.json").write_text('{"pooling_mode_mean_tokens":false}')
+    pooling_changed, pooling_cache_path = _identity()
+    assert pooling_changed != initial
+    assert pooling_cache_path != initial_cache_path
+
+    (model_path / "tokenizer.json").write_text('{"version":"b"}')
+    tokenizer_changed, tokenizer_cache_path = _identity()
+    assert tokenizer_changed != pooling_changed
+    assert tokenizer_cache_path != pooling_cache_path
+
+    (model_path / "model.safetensors").write_bytes(b"weights-b")
+    weights_changed, weights_cache_path = _identity()
+    assert weights_changed != tokenizer_changed
+    assert weights_cache_path != tokenizer_cache_path
+
+    (model_path / "model.safetensors").write_bytes(b"weights-a")
+    (model_path / "tokenizer.json").write_text('{"version":"a"}')
+    (pooling_path / "config.json").write_text('{"pooling_mode_mean_tokens":true}')
+    assert _identity() == (initial, initial_cache_path)
+
+
+def test_local_model_fingerprint_validates_sharded_weight_indexes(
+    tmp_path: Path,
+) -> None:
+    """Every indexed shard must participate in identity and remain present."""
+    model_path = tmp_path / "sharded-model"
+    model_path.mkdir()
+    first_shard = model_path / "model-00001-of-00002.safetensors"
+    second_shard = model_path / "model-00002-of-00002.safetensors"
+    first_shard.write_bytes(b"first-a")
+    second_shard.write_bytes(b"second-a")
+    (model_path / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    "layer.0": first_shard.name,
+                    "layer.1": second_shard.name,
+                }
+            }
+        )
+    )
+
+    first = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name=str(model_path),
+        client=MagicMock(),
+    )._resolve_model_fingerprint()
+    second_shard.write_bytes(b"second-b")
+    second = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name=str(model_path),
+        client=MagicMock(),
+    )._resolve_model_fingerprint()
+    assert second != first
+
+    first_shard.unlink()
+    with pytest.raises(RuntimeError, match="missing shard"):
+        EmbeddingGraphBuilder(
+            max_papers=1,
+            model_name=str(model_path),
+            client=MagicMock(),
+        )._resolve_model_fingerprint()
+
+
+def test_embedding_cache_namespace_partitions_revisions_without_thrashing() -> None:
+    """Revision A to B to A should select two stable physical cache namespaces."""
+    first_a = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/revisioned-model",
+        model_revision="revision-a",
+        client=MagicMock(),
+    )
+    revision_b = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/revisioned-model",
+        model_revision="revision-b",
+        client=MagicMock(),
+    )
+    second_a = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/revisioned-model",
+        model_revision="revision-a",
+        client=MagicMock(),
+    )
+
+    assert first_a.embedding_cache.h5_path != revision_b.embedding_cache.h5_path
+    assert first_a.embedding_cache.h5_path == second_a.embedding_cache.h5_path
+    assert "revision=revision-a" in first_a.embedding_cache.model_name
+    assert "representation=retrieval-document-v1" in first_a.embedding_cache.model_name
 
 
 def test_metadata_and_streaming_loader_contracts(

@@ -66,7 +66,7 @@ Compile policy:
 
 ## Cache Portability Across Devices
 
-The embedding cache namespace tracks the *compute dtype*, not the device. A cache hydrated with bf16 on a CUDA box and one hydrated with bf16 on MPS share a byte-identical namespace: you can warm the cache on a GPU host, copy the cache directory to a Mac, and get full cache hits. CPU (float32) caches live in a separate, deliberately conservative namespace.
+The embedding cache namespace tracks the runtime-active model artifact, requested revision, representation/formatter contract, dimensions, storage settings, and *compute dtype*, but not the device. A cache hydrated with bf16 on a CUDA box and one hydrated with bf16 on MPS share a byte-identical namespace when every semantic input matches: you can warm the cache on a GPU host, copy the cache directory to a Mac, and get full cache hits. CPU (float32) caches live in a separate, deliberately conservative namespace.
 
 ## Int8 Retrieval Pipeline
 

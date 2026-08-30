@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import heapq
 import importlib.util
+import json
 import logging
+import os
 import random
 import re
 import warnings
@@ -80,6 +82,37 @@ _COMPILE_ELIGIBLE_DEVICES = frozenset({"cuda", "mps"})
 # Legacy release-branch workaround window where Inductor conflicted with the
 # fp32_precision TF32 API; later torch releases use the modern API directly.
 _TF32_COMPILE_BRIDGE_TORCH_VERSIONS = frozenset({(2, 9), (2, 10)})
+_INFERENCE_ARTIFACT_SUFFIXES = frozenset(
+    {
+        ".bin",
+        ".json",
+        ".merges",
+        ".model",
+        ".onnx",
+        ".pt",
+        ".pth",
+        ".py",
+        ".safetensors",
+        ".tflite",
+        ".tiktoken",
+        ".txt",
+        ".vocab",
+    }
+)
+_IGNORED_ARTIFACT_DIRECTORIES = frozenset({".git", "logs", "runs", "wandb"})
+_IGNORED_ARTIFACT_FILES = frozenset(
+    {
+        ".ds_store",
+        ".gitattributes",
+        ".gitignore",
+        "optimizer.pt",
+        "rng_state.pth",
+        "scaler.pt",
+        "scheduler.pt",
+        "trainer_state.json",
+        "training_args.bin",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -735,29 +768,25 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.embeddings: Dict[str, np.ndarray] = {}
         self.candidate_source_status: Dict[str, str] = {}
         self.client = client or get_client()
-        self.embedding_cache = EmbeddingCache(
-            model_name=self._embedding_cache_namespace(),
-            storage_precision=self.storage_precision,
-            binary_prefilter=self.binary_prefilter,
-            calibration_sample_size=self.calibration_sample_size,
-            compression=self.cache_compression,
-            compression_level=self.cache_compression_level,
-            source_torch_dtype=self._source_dtype_hint,
-            text_formatter_fingerprint=self._document_formatter_fingerprint,
-        )
+        self._active_model_name: Optional[str] = None
+        self._embedding_cache: Optional[EmbeddingCache] = None
+        self._pending_force_rebuild_reason: Optional[str] = None
         normalized_force_rebuild_reason = (
             " ".join(str(force_rebuild_reason).split())
             if force_rebuild_reason is not None
             else ""
         )
         if force_rebuild_cache:
-            logger.info("Forcing embedding cache rebuild as requested.")
+            logger.info(
+                "Embedding cache rebuild requested; deferring clear until the "
+                "runtime-active model namespace is resolved."
+            )
             clear_reason = "explicit --force-rebuild-cache request"
             if normalized_force_rebuild_reason:
                 clear_reason = (
                     f"{clear_reason}; user_reason={normalized_force_rebuild_reason}"
                 )
-            self._clear_embedding_cache(clear_reason)
+            self._pending_force_rebuild_reason = clear_reason
         self.use_streaming = use_streaming
         if (
             self.semantic_source == "arxiv-corpus"
@@ -780,10 +809,74 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
         self._tf32_mode = "off"
-        self._active_model_name: Optional[str] = None
         self._resolved_model_fingerprint: Optional[str] = None
-        self._resolved_offline_fingerprint: Optional[str] = None
         self._last_search_used_binary_prefilter: Optional[bool] = None
+
+    @property
+    def embedding_cache(self) -> EmbeddingCache:
+        """Return the current cache, creating the requested namespace lazily.
+
+        Actual embedding operations call :meth:`_load_model` first; model
+        fallback can therefore rebind this property to the runtime-active
+        checkpoint before any vector is read or written.
+
+        :return EmbeddingCache: Current persistent cache namespace.
+        """
+        if self._embedding_cache is None:
+            self._embedding_cache = self._create_embedding_cache(
+                self._embedding_cache_namespace()
+            )
+        return self._embedding_cache
+
+    @embedding_cache.setter
+    def embedding_cache(self, cache: EmbeddingCache) -> None:
+        """Replace the active cache object for tests and specialized callers.
+
+        :param EmbeddingCache cache: Cache-compatible object to install.
+        :return None: Replaces the current cache reference.
+        """
+        self._embedding_cache = cache
+
+    def _create_embedding_cache(self, namespace: str) -> EmbeddingCache:
+        """Construct one cache for the supplied representation namespace.
+
+        :param str namespace: Complete cache partition key.
+        :return EmbeddingCache: Initialized persistent cache.
+        """
+        return EmbeddingCache(
+            model_name=namespace,
+            storage_precision=self.storage_precision,
+            binary_prefilter=self.binary_prefilter,
+            calibration_sample_size=self.calibration_sample_size,
+            compression=self.cache_compression,
+            compression_level=self.cache_compression_level,
+            source_torch_dtype=self._source_dtype_hint,
+            text_formatter_fingerprint=self._document_formatter_fingerprint,
+        )
+
+    def _bind_embedding_cache_to_active_model(self) -> None:
+        """Bind persistent state to the checkpoint that actually loaded.
+
+        :return None: Replaces a provisional requested-model cache when fallback
+            selected another checkpoint and applies a deferred explicit clear once.
+        """
+        if self._resolved_model_fingerprint is None:
+            # A pre-load cache object is only a cheap discovery handle. Never
+            # retain it after model fallback has selected the active checkpoint.
+            self._embedding_cache = None
+            return
+
+        namespace = self._embedding_cache_namespace(
+            artifact_identity=self._resolved_model_fingerprint
+        )
+        if (
+            self._embedding_cache is None
+            or str(getattr(self._embedding_cache, "model_name", "")) != namespace
+        ):
+            self._embedding_cache = self._create_embedding_cache(namespace)
+        if self._pending_force_rebuild_reason is not None:
+            self._embedding_cache.clear(reason=self._pending_force_rebuild_reason)
+            self._pending_force_rebuild_reason = None
 
     def _clear_embedding_cache(self, reason: str) -> None:
         """Clear embedding namespace payload with explicit reason logging.
@@ -843,12 +936,25 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
         return requested_dim
 
-    def _embedding_cache_namespace(self) -> str:
-        """Build cache namespace key for the active model + embedding dimension.
+    def _embedding_cache_namespace(
+        self,
+        *,
+        representation: str = "retrieval-document-v1",
+        artifact_identity: Optional[str] = None,
+    ) -> str:
+        """Build a cache key for the active model and representation contract.
 
+        :param str representation: Semantic role and schema version of stored vectors.
+        :param Optional[str] artifact_identity: Immutable resolved checkpoint identity.
         :return str: Namespace key used for embedding cache partitioning.
         """
-        parts = [self.model_name]
+        parts = [
+            f"model={self._cache_model_identity()}",
+            f"revision={self._requested_hf_revision_token()}",
+            f"artifact={artifact_identity or 'unresolved'}",
+            f"representation={representation}",
+            "normalization=l2-v1",
+        ]
         if self.truncate_dim is not None:
             parts.append(f"truncate_dim={self.truncate_dim}")
         parts.append(f"storage_precision={self.storage_precision}")
@@ -1026,38 +1132,46 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         model_identity = self._cache_model_identity()
         resolved_path = Path(model_identity).expanduser()
         if resolved_path.exists():
-            fingerprint = f"local-path::{resolved_path.resolve()}"
+            artifact_digest = self._resolve_inference_artifact_digest(resolved_path)
+            fingerprint = (
+                f"local::{resolved_path.resolve()}::artifact={artifact_digest}"
+            )
             self._resolved_model_fingerprint = fingerprint
             return fingerprint
 
         model_id = model_identity
         if "/" not in model_id:
-            revision_token = self.model_revision or "default"
-            fingerprint = f"model-alias::{model_id}::revision={revision_token}"
-            self._resolved_model_fingerprint = fingerprint
-            return fingerprint
+            raise RuntimeError(
+                "Could not derive immutable artifact identity for embedding model alias "
+                f"{model_id!r}; use a local checkpoint path or a full Hugging Face "
+                "repository ID."
+            )
 
         requested_revision = self._requested_hf_revision_token()
+        if re.fullmatch(r"[0-9a-f]{40}", requested_revision, flags=re.IGNORECASE):
+            fingerprint = f"hf::{model_id}::{requested_revision.lower()}"
+            self._resolved_model_fingerprint = fingerprint
+            return fingerprint
         resolved_sha = ""
         resolution_error: Optional[Exception] = None
 
-        try:
-            huggingface_hub = _import_huggingface_hub_module()
-            model_info = huggingface_hub.HfApi().model_info(
-                repo_id=model_id,
-                revision=requested_revision,
-            )
-            resolved_sha = str(getattr(model_info, "sha", "") or "").strip()
-        except Exception as exc:
-            resolution_error = exc
+        local_snapshot_sha = self._resolve_local_hf_snapshot_sha(
+            model_id=model_id,
+            requested_revision=requested_revision,
+        )
+        if local_snapshot_sha is not None:
+            resolved_sha = local_snapshot_sha
 
         if not resolved_sha:
-            local_snapshot_sha = self._resolve_local_hf_snapshot_sha(
-                model_id=model_id,
-                requested_revision=requested_revision,
-            )
-            if local_snapshot_sha is not None:
-                resolved_sha = local_snapshot_sha
+            try:
+                huggingface_hub = _import_huggingface_hub_module()
+                model_info = huggingface_hub.HfApi().model_info(
+                    repo_id=model_id,
+                    revision=requested_revision,
+                )
+                resolved_sha = str(getattr(model_info, "sha", "") or "").strip()
+            except Exception as exc:
+                resolution_error = exc
 
         if not resolved_sha:
             local_artifact_fingerprint = self._resolve_local_hf_artifact_fingerprint(
@@ -1067,8 +1181,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if local_artifact_fingerprint is not None:
                 logger.warning(
                     "Could not resolve Hugging Face commit SHA for %s (revision=%s). "
-                    "Using local artifact fingerprint from config.json + model.safetensors; "
-                    "assuming local artifacts are unchanged.",
+                    "Using a content fingerprint of the complete local inference "
+                    "artifact manifest.",
                     model_id,
                     requested_revision,
                 )
@@ -1162,6 +1276,144 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 digest.update(chunk)
         return digest.hexdigest()
 
+    @staticmethod
+    def _safe_artifact_reference(root: Path, source: Path, raw_path: object) -> Path:
+        """Resolve one manifest reference without allowing lexical path escape.
+
+        Hugging Face snapshot files may be symlinks into the blob store, so this
+        validates the logical path before following the file rather than rejecting
+        legitimate cache symlink targets.
+
+        :param Path root: Artifact root directory.
+        :param Path source: Manifest file containing the reference.
+        :param object raw_path: Referenced relative path.
+        :return Path: Validated logical path below ``root``.
+        :raises RuntimeError: If the reference is absolute or escapes the root.
+        """
+        reference = str(raw_path or "").strip()
+        if not reference:
+            raise RuntimeError(f"Empty artifact reference in {source}.")
+        candidate = source.parent / reference
+        root_absolute = os.path.abspath(root)
+        candidate_absolute = os.path.abspath(candidate)
+        if os.path.commonpath([root_absolute, candidate_absolute]) != root_absolute:
+            raise RuntimeError(
+                f"Artifact reference {reference!r} in {source} escapes {root}."
+            )
+        return Path(candidate_absolute)
+
+    @classmethod
+    def _inference_artifact_paths(cls, artifact_root: Path) -> List[Path]:
+        """Enumerate and validate inference-relevant checkpoint artifacts.
+
+        :param Path artifact_root: Local model file or directory.
+        :return List[Path]: Stable sorted artifact paths.
+        :raises RuntimeError: If the layout is empty, malformed, or incomplete.
+        """
+        root = artifact_root.expanduser().resolve()
+        if root.is_file():
+            return [root]
+        if not root.is_dir():
+            raise RuntimeError(f"Local embedding model path is not readable: {root}")
+
+        artifacts: Set[Path] = set()
+        for directory, child_directories, file_names in os.walk(root):
+            child_directories[:] = [
+                name
+                for name in child_directories
+                if name.lower() not in _IGNORED_ARTIFACT_DIRECTORIES
+                and not name.lower().startswith("checkpoint-")
+            ]
+            directory_path = Path(directory)
+            for file_name in file_names:
+                lowered = file_name.lower()
+                if (
+                    lowered in _IGNORED_ARTIFACT_FILES
+                    or lowered.startswith("readme")
+                    or lowered.startswith("license")
+                ):
+                    continue
+                path = directory_path / file_name
+                if path.suffix.lower() in _INFERENCE_ARTIFACT_SUFFIXES:
+                    artifacts.add(path)
+
+        modules_path = root / "modules.json"
+        if modules_path.is_file():
+            try:
+                modules_payload = json.loads(modules_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"Malformed SentenceTransformers modules.json: {exc}"
+                ) from exc
+            if not isinstance(modules_payload, list):
+                raise RuntimeError("SentenceTransformers modules.json must be a list.")
+            for module in modules_payload:
+                if not isinstance(module, dict):
+                    raise RuntimeError(
+                        "SentenceTransformers modules.json entries must be objects."
+                    )
+                module_path = str(module.get("path", "") or "").strip()
+                if not module_path:
+                    continue
+                resolved_module = cls._safe_artifact_reference(
+                    root, modules_path, module_path
+                )
+                if not resolved_module.exists():
+                    raise RuntimeError(
+                        f"SentenceTransformers module path is missing: {module_path}"
+                    )
+
+        index_paths = [
+            path for path in artifacts if path.name.lower().endswith(".index.json")
+        ]
+        for index_path in index_paths:
+            try:
+                index_payload = json.loads(index_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    f"Malformed weight index {index_path}: {exc}"
+                ) from exc
+            weight_map = (
+                index_payload.get("weight_map")
+                if isinstance(index_payload, dict)
+                else None
+            )
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise RuntimeError(f"Weight index has no weight_map: {index_path}")
+            for shard_name in sorted({str(value) for value in weight_map.values()}):
+                shard_path = cls._safe_artifact_reference(root, index_path, shard_name)
+                if not shard_path.is_file():
+                    raise RuntimeError(
+                        f"Weight index references a missing shard: {shard_name}"
+                    )
+                artifacts.add(shard_path)
+
+        if not artifacts:
+            raise RuntimeError(
+                f"No inference-relevant artifacts found under local model path {root}."
+            )
+        return sorted(artifacts, key=lambda path: path.relative_to(root).as_posix())
+
+    @classmethod
+    def _resolve_inference_artifact_digest(cls, artifact_root: Path) -> str:
+        """Hash a canonical manifest of inference-relevant model contents.
+
+        :param Path artifact_root: Local model file or directory.
+        :return str: SHA-256 manifest digest.
+        """
+        root = artifact_root.expanduser().resolve()
+        paths = cls._inference_artifact_paths(root)
+        digest = sha256()
+        for path in paths:
+            relative = (
+                path.name if root.is_file() else path.relative_to(root).as_posix()
+            )
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(cls._sha256_file(path).encode("ascii"))
+            digest.update(b"\0")
+        return digest.hexdigest()
+
     def _resolve_local_hf_artifact_fingerprint(
         self, model_id: str, requested_revision: str
     ) -> Optional[str]:
@@ -1177,169 +1429,41 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if snapshot_path is None:
             return None
 
-        config_path = snapshot_path / "config.json"
-        weights_path = snapshot_path / "model.safetensors"
-        if not config_path.is_file() or not weights_path.is_file():
-            return None
-
         try:
-            config_hash = self._sha256_file(config_path)
-            weights_hash = self._sha256_file(weights_path)
-        except OSError:
+            artifact_digest = self._resolve_inference_artifact_digest(snapshot_path)
+        except (OSError, RuntimeError):
             return None
 
         return (
-            f"hf::{model_id}::revision={requested_revision}"
-            f"::config={config_hash}::weights={weights_hash}"
+            f"hf::{model_id}::revision={requested_revision}::artifact={artifact_digest}"
         )
-
-    def _offline_model_fingerprint_fallback(self) -> str:
-        """Build a deterministic fallback fingerprint token for offline verification gaps.
-
-        :return str: Deterministic fingerprint proxy derived from model identity hints.
-        """
-        if self._resolved_offline_fingerprint is not None:
-            return self._resolved_offline_fingerprint
-
-        model_id = self._cache_model_identity()
-        if "/" not in model_id:
-            revision_token = self.model_revision or "default"
-            fingerprint = f"model-alias::{model_id}::revision={revision_token}"
-            self._resolved_offline_fingerprint = fingerprint
-            return fingerprint
-
-        requested_revision = (self.model_revision or "main").strip() or "main"
-        local_artifact_fingerprint = self._resolve_local_hf_artifact_fingerprint(
-            model_id=model_id,
-            requested_revision=requested_revision,
-        )
-        if local_artifact_fingerprint is not None:
-            self._resolved_offline_fingerprint = local_artifact_fingerprint
-            return local_artifact_fingerprint
-
-        fingerprint = (
-            f"hf::{model_id}::revision={requested_revision}::offline-unverified"
-        )
-        self._resolved_offline_fingerprint = fingerprint
-        return fingerprint
-
-    def _cached_fingerprint_compatible_with_requested_identity(
-        self, cached_fingerprint: Optional[str]
-    ) -> bool:
-        """Return whether cached fingerprint is compatible with active model identity.
-
-        This is used only when strong SHA verification cannot be resolved.
-
-        :param Optional[str] cached_fingerprint: Existing cached fingerprint token.
-        :return bool: ``True`` when offline reuse is safe for the requested identity.
-        """
-        if cached_fingerprint is None:
-            return False
-
-        fingerprint = str(cached_fingerprint).strip()
-        if not fingerprint:
-            return False
-
-        model_id = self._cache_model_identity()
-        if "/" not in model_id:
-            return fingerprint == self._offline_model_fingerprint_fallback()
-
-        expected_prefix = f"hf::{model_id}::"
-        if not fingerprint.startswith(expected_prefix):
-            return False
-
-        requested_revision = self._requested_hf_revision_token()
-        if fingerprint.endswith("::offline-unverified"):
-            return fingerprint == self._offline_model_fingerprint_fallback()
-        if fingerprint == self._offline_model_fingerprint_fallback():
-            return True
-
-        suffix = fingerprint[len(expected_prefix) :]
-        if not re.fullmatch(r"[0-9a-f]{40}", suffix, flags=re.IGNORECASE):
-            return False
-
-        if re.fullmatch(r"[0-9a-f]{40}", requested_revision, flags=re.IGNORECASE):
-            return suffix.lower() == requested_revision.lower()
-        return False
 
     def _ensure_cache_model_fingerprint(self) -> None:
         """Verify cache payload is bound to the active model fingerprint."""
-        has_cached_payload = self.embedding_cache.has_cached_payload()
-        cached_fingerprint = self.embedding_cache.get_model_fingerprint()
-
         try:
             model_fingerprint = self._resolve_model_fingerprint()
         except Exception as exc:
-            model_fingerprint = self._offline_model_fingerprint_fallback()
-            if (
-                has_cached_payload
-                and self._cached_fingerprint_compatible_with_requested_identity(
-                    cached_fingerprint
-                )
-            ):
-                self._resolved_model_fingerprint = str(cached_fingerprint)
-                logger.warning(
-                    "Could not resolve Hugging Face model fingerprint for %s while "
-                    "reuse checks are active. Reusing compatible cached fingerprint %s.",
-                    self.model_name,
-                    cached_fingerprint,
-                )
-                logger.debug(
-                    "Skipping model-fingerprint enforcement due resolution failure: %s",
-                    exc,
-                )
-                return
+            raise RuntimeError(
+                "Could not verify the runtime-active embedding model identity; "
+                "refusing persistent cache access instead of adopting an "
+                f"unverified payload for {self._cache_model_identity()!r}."
+            ) from exc
 
-            if has_cached_payload and cached_fingerprint:
-                logger.warning(
-                    "Could not resolve Hugging Face model fingerprint for %s and "
-                    "cached fingerprint %s is incompatible with requested identity %s. "
-                    "Clearing namespace cache to avoid stale embedding reuse.",
-                    self.model_name,
-                    cached_fingerprint,
-                    model_fingerprint,
-                )
-                self._clear_embedding_cache(
-                    "cached fingerprint incompatible with requested identity "
-                    f"(cached={cached_fingerprint}, requested={model_fingerprint})"
-                )
-            elif has_cached_payload:
-                logger.warning(
-                    "Could not resolve Hugging Face model fingerprint for %s with no "
-                    "stored fingerprint. Reusing cached payload with fallback identity %s "
-                    "and recording this assumption for future offline checks.",
-                    self.model_name,
-                    model_fingerprint,
-                )
-            else:
-                logger.warning(
-                    "Could not resolve Hugging Face model fingerprint for %s while "
-                    "initializing cache metadata. Using fallback identity %s for "
-                    "offline initialization.",
-                    self.model_name,
-                    model_fingerprint,
-                )
-            logger.debug(
-                "Skipping model-fingerprint enforcement due resolution failure: %s",
-                exc,
-            )
-            self._resolved_model_fingerprint = model_fingerprint
-            self.embedding_cache.set_model_fingerprint(model_fingerprint)
-            return
-
-        if cached_fingerprint is not None and cached_fingerprint != model_fingerprint:
+        self._resolved_model_fingerprint = model_fingerprint
+        self._bind_embedding_cache_to_active_model()
+        has_cached_payload = self.embedding_cache.has_cached_payload()
+        cached_fingerprint = self.embedding_cache.get_model_fingerprint()
+        if has_cached_payload and cached_fingerprint != model_fingerprint:
             logger.warning(
                 "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
                 "Clearing namespace cache.",
                 cached_fingerprint or "missing",
                 model_fingerprint,
             )
-            if has_cached_payload:
-                self._clear_embedding_cache(
-                    "model fingerprint mismatch "
-                    f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint})"
-                )
-        self._resolved_model_fingerprint = model_fingerprint
+            self._clear_embedding_cache(
+                "model fingerprint mismatch "
+                f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint})"
+            )
         if not has_cached_payload or cached_fingerprint != model_fingerprint:
             self.embedding_cache.set_model_fingerprint(model_fingerprint)
 
@@ -1594,11 +1718,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     )
                 if self._active_model_name != candidate_model:
                     self._resolved_model_fingerprint = None
-                    self._resolved_offline_fingerprint = None
                 self._active_model_name = candidate_model
                 break
 
+            self._bind_embedding_cache_to_active_model()
             self._configure_tf32_runtime()
+            if self.enable_torch_compile and self.semantic_source == "arxiv-corpus":
+                # Warm-cache compile policy needs the exact artifact namespace.
+                self._ensure_cache_model_fingerprint()
             if self._should_defer_compile_for_cache_hydration():
                 self._compile_status_reason = (
                     "deferred while hydrating cache; compile resumes on warm-cache runs"
@@ -2091,8 +2218,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError("query must not be empty")
         if int(top_k) < 1:
             raise ValueError("top_k must be at least 1")
-        self._load_model()
-        self._ensure_cache_model_fingerprint()
+        self.prepare_embedding_cache()
         query_text = self.model_profile.format_query(normalized_query, {})
         query_embedding = self._encode_texts([query_text])[0]
         return self.embedding_cache.search(
@@ -2101,6 +2227,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             binary_prefilter=self.binary_prefilter,
             binary_rescore_multiplier=self.binary_rescore_multiplier,
         )
+
+    def prepare_embedding_cache(self) -> EmbeddingCache:
+        """Resolve the runtime-active model and its exact persistent namespace.
+
+        :return EmbeddingCache: Artifact-bound cache ready for safe access.
+        """
+        self._load_model()
+        self._ensure_cache_model_fingerprint()
+        return self.embedding_cache
+
+    def has_persistent_embedding_artifacts(self) -> bool:
+        """Return whether any physical vector cache exists under this cache root.
+
+        This cheap probe lets auto local-search avoid loading a model when the
+        user has never built an embedding cache. Exact namespace selection still
+        occurs before any vector is searched.
+
+        :return bool: Whether at least one HDF5 embedding payload exists.
+        """
+        cache_directory = self.embedding_cache.h5_path.parent
+        return any(cache_directory.glob("embeddings_*.h5"))
 
     def _format_seed_for_embedding(
         self,
