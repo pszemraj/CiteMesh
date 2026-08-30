@@ -33,7 +33,6 @@ from citemesh.data.embedding_cache import (
     SOURCE_TORCH_DTYPE_KEY,
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
-    EmbeddingCacheUpsertStats,
     _corpus_size_token,
     _resolve_cache_lock_timeout_seconds,
 )
@@ -153,6 +152,27 @@ def test_embedding_cache_rejects_float16_persistent_storage() -> None:
                 model_name="float16-storage-rejected",
                 storage_precision="float16",
             )
+
+
+def test_embedding_cache_removes_legacy_unused_text_hash_index(tmp_path: Path) -> None:
+    """Reopening a namespace should discard its obsolete text-hash index."""
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-text-hash-index")
+    with cache._connect_db() as conn:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_papers_text_hash ON papers(text_hash)"
+        )
+
+    reopened = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-text-hash-index")
+    with reopened._connect_db() as conn:
+        indexes = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+
+    assert "idx_papers_text_hash" not in indexes
+    assert "idx_papers_row_idx" in indexes
 
 
 def test_embedding_cache_lock_timeout_env_override_contract(
@@ -281,10 +301,10 @@ def test_embedding_cache_uses_length_bucketed_encode_batches() -> None:
     assert list(embeddings) == ["p1", "p2", "p3", "p4"]
 
 
-def test_embedding_cache_upsert_tracks_int8_saturation(
+def test_embedding_cache_upsert_records_int8_saturation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Int8 cache writes should persist saturation stats when values clip."""
+    """Int8 cache writes should persist saturation telemetry when values clip."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(
             cache_dir=tmpdir,
@@ -305,18 +325,12 @@ def test_embedding_cache_upsert_tracks_int8_saturation(
             {"Alpha. First": np.asarray([2.0, -1.0], dtype=np.float32)}
         )
         with caplog.at_level("WARNING"):
-            stats = cache.upsert_embeddings(
+            cache.upsert_embeddings(
                 {"p1": {"title": "Alpha", "abstract": "First"}},
                 out_of_range_model,
                 show_progress=False,
             )
 
-        assert stats == EmbeddingCacheUpsertStats(
-            requested=1,
-            cache_hits=0,
-            encoded=1,
-            race_reused=0,
-        )
         assert any(
             "Int8 calibration saturation detected" in record.message
             for record in caplog.records
@@ -488,8 +502,8 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
     assert results[0].metadata["arxiv_id"] == "2411.03884"
     assert results[0].metadata["doi"] == "10.1145/3133956.3134029"
     assert results[0].embedding.dtype == np.float32
-    assert results[0].embedding_dtype == "float32"
-    assert results[0].storage_precision == "int8"
+    assert cache.embedding_vector_dtype == "float32"
+    assert cache.storage_precision == "int8"
 
 
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])

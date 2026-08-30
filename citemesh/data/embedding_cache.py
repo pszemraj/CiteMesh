@@ -320,8 +320,6 @@ class CacheSearchResult:
     score: float
     embedding: np.ndarray
     metadata: Dict[str, Any]
-    embedding_dtype: str = "float32"
-    storage_precision: str = "float32"
 
 
 @dataclass(frozen=True)
@@ -347,16 +345,6 @@ class PendingEmbeddingRecord:
     text_hash: str
     text: str
     row_idx: Optional[int]
-
-
-@dataclass(frozen=True)
-class EmbeddingCacheUpsertStats:
-    """Summary of cache-write activity for hydration-only embedding upserts."""
-
-    requested: int
-    cache_hits: int
-    encoded: int
-    race_reused: int
 
 
 class EmbeddingCache:
@@ -475,7 +463,7 @@ class EmbeddingCache:
         batch_size: int = 32,
         show_progress: bool = False,
         text_builder: Optional[Callable[[Dict[str, object]], str]] = None,
-    ) -> EmbeddingCacheUpsertStats:
+    ) -> None:
         """Persist embeddings for papers without materializing float32 return payloads.
 
         :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
@@ -483,9 +471,9 @@ class EmbeddingCache:
         :param int batch_size: Batch size for model encoding.
         :param bool show_progress: Whether to display progress bars.
         :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
-        :return EmbeddingCacheUpsertStats: Summary of hit/miss/write activity.
+        :return None: Persists missing embeddings without materializing them.
         """
-        result = self._process_embeddings(
+        self._process_embeddings(
             papers,
             model,
             batch_size=batch_size,
@@ -493,8 +481,6 @@ class EmbeddingCache:
             text_builder=text_builder,
             return_embeddings=False,
         )
-        assert isinstance(result, EmbeddingCacheUpsertStats)
-        return result
 
     def _process_embeddings(
         self,
@@ -505,7 +491,7 @@ class EmbeddingCache:
         show_progress: bool,
         text_builder: Optional[Callable[[Dict[str, object]], str]],
         return_embeddings: bool,
-    ) -> Dict[str, np.ndarray] | EmbeddingCacheUpsertStats:
+    ) -> Optional[Dict[str, np.ndarray]]:
         """Hydrate cache entries and optionally materialize float32 embeddings.
 
         :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
@@ -514,22 +500,16 @@ class EmbeddingCache:
         :param bool show_progress: Whether to display progress bars.
         :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
         :param bool return_embeddings: Whether to return float32 embedding payloads.
-        :return Dict[str, np.ndarray] | EmbeddingCacheUpsertStats: Embedding map or write summary.
+        :return Optional[Dict[str, np.ndarray]]: Embedding map when requested, else ``None``.
         """
         if not papers:
             if return_embeddings:
                 return {}
-            return EmbeddingCacheUpsertStats(
-                requested=0,
-                cache_hits=0,
-                encoded=0,
-                race_reused=0,
-            )
+            return None
 
         cached_embeddings: Dict[str, np.ndarray] = {}
         papers_to_embed: List[PendingEmbeddingRecord] = []
         cached_rows: List[Tuple[str, int]] = []
-        cache_hit_count = 0
         builder = text_builder or compose_title_abstract_text
 
         items = list(papers.items())
@@ -580,7 +560,6 @@ class EmbeddingCache:
                     and embeddings_dataset is not None
                     and 0 <= row_idx < cached_limit
                 ):
-                    cache_hit_count += 1
                     if return_embeddings:
                         cached_rows.append((paper_id, row_idx))
                     if self._metadata_fields_changed(existing_row, metadata):
@@ -622,12 +601,7 @@ class EmbeddingCache:
             if not papers_to_embed:
                 if return_embeddings:
                     return cached_embeddings
-                return EmbeddingCacheUpsertStats(
-                    requested=len(items),
-                    cache_hits=cache_hit_count,
-                    encoded=0,
-                    race_reused=0,
-                )
+                return None
 
             if self.storage_precision == "int8":
                 calibration_ranges = self._require_calibration_ranges(h5_file=h5)
@@ -695,7 +669,6 @@ class EmbeddingCache:
             else None
         )
 
-        race_reused_count = 0
         with (
             self._cache_lock(),
             self._connect_db() as conn,
@@ -751,7 +724,6 @@ class EmbeddingCache:
                     and latest_row_idx is not None
                     and 0 <= latest_row_idx < existing_row_count
                 ):
-                    race_reused_count += 1
                     rows_to_upsert.append(
                         self._metadata_tuple(
                             paper_id=record.paper_id,
@@ -830,13 +802,7 @@ class EmbeddingCache:
 
         if return_embeddings:
             return {**cached_embeddings, **new_embeddings}
-
-        return EmbeddingCacheUpsertStats(
-            requested=len(items),
-            cache_hits=cache_hit_count,
-            encoded=len(papers_to_embed),
-            race_reused=race_reused_count,
-        )
+        return None
 
     def embedding_count(self) -> int:
         """Return the number of embeddings persisted in this cache namespace.
@@ -1000,8 +966,6 @@ class EmbeddingCache:
                         score=float(scores[idx]),
                         embedding=np.asarray(embeddings[idx], dtype=np.float32),
                         metadata=result_metadata,
-                        embedding_dtype=self.embedding_vector_dtype,
-                        storage_precision=self.storage_precision,
                     )
                 )
 
@@ -1484,9 +1448,7 @@ class EmbeddingCache:
             if "doi" not in columns:
                 conn.execute("ALTER TABLE papers ADD COLUMN doi TEXT")
 
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_papers_text_hash ON papers(text_hash)"
-            )
+            conn.execute("DROP INDEX IF EXISTS idx_papers_text_hash")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_papers_row_idx ON papers(row_idx)"
             )
