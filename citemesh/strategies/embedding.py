@@ -58,6 +58,7 @@ from citemesh.strategies.base import (
     GraphBuilderStrategy,
     build_capped_undirected_graph,
     deterministic_sort_key,
+    validate_embedding_vectors,
 )
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
@@ -2405,53 +2406,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             str(self.model_profile.format_similarity(content, text_metadata)) or content
         )
 
-    @staticmethod
-    def _validate_materialized_embeddings(
-        required_ids: Iterable[str],
-        embeddings: Dict[str, np.ndarray],
-        *,
-        context: str,
-    ) -> Dict[str, np.ndarray]:
-        """Validate a complete finite, nonzero, dimensionally consistent vector map.
-
-        :param Iterable[str] required_ids: Paper IDs that require vectors.
-        :param Dict[str, np.ndarray] embeddings: Materialized vectors by paper ID.
-        :param str context: User-facing task description for errors.
-        :return Dict[str, np.ndarray]: Validated float32 vector map.
-        :raises RuntimeError: If any required vector is missing or invalid.
-        """
-        ordered_ids = list(required_ids)
-        missing = [paper_id for paper_id in ordered_ids if paper_id not in embeddings]
-        if missing:
-            raise RuntimeError(
-                f"{context} is missing {len(missing)} vector(s): "
-                + ", ".join(missing[:5])
-            )
-
-        validated: Dict[str, np.ndarray] = {}
-        expected_dimension: Optional[int] = None
-        for paper_id in ordered_ids:
-            vector = np.asarray(embeddings[paper_id], dtype=np.float32)
-            if vector.ndim != 1 or vector.size == 0:
-                raise RuntimeError(
-                    f"{context} received a malformed vector for {paper_id}."
-                )
-            if not np.all(np.isfinite(vector)):
-                raise RuntimeError(
-                    f"{context} received a non-finite vector for {paper_id}."
-                )
-            if float(np.linalg.norm(vector)) <= 1e-12:
-                raise RuntimeError(f"{context} received a zero vector for {paper_id}.")
-            if expected_dimension is None:
-                expected_dimension = int(vector.size)
-            elif int(vector.size) != expected_dimension:
-                raise RuntimeError(
-                    f"{context} received inconsistent vector dimensions for {paper_id}: "
-                    f"expected {expected_dimension}, got {int(vector.size)}."
-                )
-            validated[paper_id] = vector
-        return validated
-
     def materialize_graph_embeddings(
         self, papers: Dict[str, Paper]
     ) -> Dict[str, np.ndarray]:
@@ -2479,7 +2433,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             show_progress=False,
             text_builder=self._format_graph_similarity_metadata,
         )
-        self.embeddings = self._validate_materialized_embeddings(
+        self.embeddings = validate_embedding_vectors(
             papers,
             embeddings,
             context="Graph-similarity embedding",

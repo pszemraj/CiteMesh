@@ -7,15 +7,77 @@ enabling the Strategy pattern for different similarity computation approaches.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+)
 
 import networkx as nx
 import numpy as np
 
 from citemesh.core import TEMPORAL_CONFIG, Paper
-from citemesh.strategies.similarity import compute_indexed_similarity_score
 
 logger = logging.getLogger(__name__)
+
+
+def validate_embedding_vectors(
+    required_ids: Iterable[str],
+    embeddings: Mapping[str, np.ndarray],
+    *,
+    context: str,
+    vector_label: str = "vector",
+    error_factory: Callable[[str], Exception] = RuntimeError,
+) -> Dict[str, np.ndarray]:
+    """Validate a complete finite, nonzero, dimensionally consistent vector map.
+
+    :param Iterable[str] required_ids: Paper IDs that require vectors.
+    :param Mapping[str, np.ndarray] embeddings: Materialized vectors by paper ID.
+    :param str context: User-facing task description for errors.
+    :param str vector_label: Noun used for vectors in error messages.
+    :param Callable[[str], Exception] error_factory: Exception constructor.
+    :return Dict[str, np.ndarray]: Validated float32 vector map.
+    :raises Exception: From ``error_factory`` when a required vector is unusable.
+    """
+    ordered_ids = list(required_ids)
+    missing = [paper_id for paper_id in ordered_ids if paper_id not in embeddings]
+    if missing:
+        raise error_factory(
+            f"{context} is missing {len(missing)} {vector_label}(s): "
+            + ", ".join(missing[:5])
+        )
+
+    validated: Dict[str, np.ndarray] = {}
+    expected_dimension: Optional[int] = None
+    for paper_id in ordered_ids:
+        vector = np.asarray(embeddings[paper_id], dtype=np.float32)
+        if vector.ndim != 1 or vector.size == 0:
+            raise error_factory(
+                f"{context} received a malformed {vector_label} for {paper_id}."
+            )
+        if not np.all(np.isfinite(vector)):
+            raise error_factory(
+                f"{context} received a non-finite {vector_label} for {paper_id}."
+            )
+        if float(np.linalg.norm(vector)) <= 1e-12:
+            raise error_factory(
+                f"{context} received a zero {vector_label} for {paper_id}."
+            )
+        if expected_dimension is None:
+            expected_dimension = int(vector.size)
+        elif int(vector.size) != expected_dimension:
+            raise error_factory(
+                f"{context} received inconsistent {vector_label} dimensions for "
+                f"{paper_id}: expected {expected_dimension}, got {int(vector.size)}."
+            )
+        validated[paper_id] = vector
+    return validated
 
 
 def deterministic_sort_key(
@@ -309,18 +371,36 @@ class GraphBuilderStrategy(ABC):
         :param bool cap_at_one: Whether to clamp the combined similarity score to ``1.0``.
         :return float: Composite indexed similarity score.
         """
-        return compute_indexed_similarity_score(
-            paper1,
-            paper2,
-            abstract_index=self._abstract_index,
-            temporal_similarity_fn=self.temporal_similarity,
-            citation_similarity_fn=self.citation_similarity,
-            bibliographic_coupling_fn=self.bibliographic_coupling,
-            fetch_references=bool(getattr(self, "fetch_references", False)),
-            with_references_weights=with_references_weights,
-            without_references_weights=without_references_weights,
-            cap_at_one=cap_at_one,
+        abstract_similarity = self._abstract_index.similarity(
+            paper1.paper_id, paper2.paper_id
         )
+        temporal_similarity = self.temporal_similarity(paper1, paper2)
+        citation_similarity = self.citation_similarity(paper1, paper2)
+        has_bibliographic_coupling = bool(
+            getattr(self, "fetch_references", False)
+            and paper1.references
+            and paper2.references
+        )
+        bibliographic_coupling = (
+            self.bibliographic_coupling(paper1, paper2)
+            if has_bibliographic_coupling
+            else 0.0
+        )
+        weights = (
+            with_references_weights
+            if has_bibliographic_coupling
+            else without_references_weights
+        )
+        abstract_weight, temporal_weight, citation_weight, bibliographic_weight = (
+            weights
+        )
+        score = (
+            abstract_weight * abstract_similarity
+            + temporal_weight * temporal_similarity
+            + citation_weight * citation_similarity
+            + bibliographic_weight * bibliographic_coupling
+        )
+        return min(score, 1.0) if cap_at_one else score
 
     # Utility methods for common similarity computations
 

@@ -20,6 +20,7 @@ from citemesh.strategies.base import (
     GraphBuilderStrategy,
     build_capped_undirected_graph,
     deterministic_sort_key,
+    validate_embedding_vectors,
 )
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
@@ -74,40 +75,13 @@ def require_complete_embeddings(
     :raises EmbeddingInferenceError: If vectors are missing, malformed, non-finite,
         zero length, or dimensionally inconsistent.
     """
-    required_ids = [seed_id, *candidate_ids]
-    missing_ids = [paper_id for paper_id in required_ids if paper_id not in embeddings]
-    if missing_ids:
-        preview = ", ".join(missing_ids[:5])
-        raise EmbeddingInferenceError(
-            "Semantic reranking is missing "
-            f"{len(missing_ids)} required vector(s): {preview}"
-        )
-
-    vectors: Dict[str, np.ndarray] = {}
-    expected_dimension: Optional[int] = None
-    for paper_id in required_ids:
-        vector = np.asarray(embeddings[paper_id], dtype=np.float32)
-        if vector.ndim != 1 or vector.size == 0:
-            raise EmbeddingInferenceError(
-                f"Semantic reranking received a non-vector embedding for {paper_id}."
-            )
-        if not np.all(np.isfinite(vector)):
-            raise EmbeddingInferenceError(
-                f"Semantic reranking received a non-finite embedding for {paper_id}."
-            )
-        if float(np.linalg.norm(vector)) <= 1e-12:
-            raise EmbeddingInferenceError(
-                f"Semantic reranking received a zero embedding for {paper_id}."
-            )
-        if expected_dimension is None:
-            expected_dimension = int(vector.size)
-        elif int(vector.size) != expected_dimension:
-            raise EmbeddingInferenceError(
-                "Semantic reranking received inconsistent embedding dimensions: "
-                f"expected {expected_dimension}, got {int(vector.size)} for {paper_id}."
-            )
-        vectors[paper_id] = vector
-
+    vectors = validate_embedding_vectors(
+        [seed_id, *candidate_ids],
+        embeddings,
+        context="Semantic reranking",
+        vector_label="embedding",
+        error_factory=EmbeddingInferenceError,
+    )
     return vectors[seed_id]
 
 
