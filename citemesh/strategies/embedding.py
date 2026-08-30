@@ -120,6 +120,12 @@ _GRAPH_SIMILARITY_REPRESENTATION = "graph-similarity-v1"
 _PLACEHOLDER_EMBEDDING_TITLES = frozenset(
     {"", "n/a", "na", "none", "unknown", "untitled"}
 )
+_FORMATTER_FINGERPRINT_PROBES = (
+    {"title": "Alpha", "abstract": "Beta"},
+    {"title": "Alpha", "abstract": ""},
+    {"title": "", "abstract": "Beta"},
+    {"title": "  Alpha  ", "abstract": "  Beta  "},
+)
 
 
 class EmbeddingTask(str, Enum):
@@ -811,11 +817,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         # feed the cache namespace computed for EmbeddingCache further down.
         self.requested_device = str(device or "auto").strip().lower()
         self.device = resolve_embedding_device(self.requested_device)
-        self._document_formatter_fingerprint = (
-            self._resolve_document_formatter_fingerprint()
+        self._document_formatter_fingerprint = self._resolve_formatter_fingerprint(
+            formatter=self.model_profile.document_formatter,
+            probe_renderer=self.model_profile.format_document,
         )
-        self._similarity_formatter_fingerprint = (
-            self._resolve_similarity_formatter_fingerprint()
+        self._similarity_formatter_fingerprint = self._resolve_formatter_fingerprint(
+            formatter=self.model_profile.similarity_formatter,
+            probe_renderer=self._format_similarity_fingerprint_probe,
         )
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
         self._attention_implementation_hint = (
@@ -905,18 +913,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return EmbeddingCache: Graph-only persistent cache namespace.
         """
         if self._graph_embedding_cache is None:
-            self._graph_embedding_cache = self._create_embedding_cache(
-                self._embedding_cache_namespace(
-                    representation=_GRAPH_SIMILARITY_REPRESENTATION,
-                    artifact_identity=self._resolved_model_fingerprint,
-                    storage_precision="float32",
-                    binary_prefilter=False,
-                    formatter_identity=self._similarity_formatter_fingerprint,
-                ),
-                storage_precision="float32",
-                binary_prefilter=False,
-                formatter_identity=self._similarity_formatter_fingerprint,
-            )
+            self._graph_embedding_cache = self._create_graph_embedding_cache()
         return self._graph_embedding_cache
 
     @graph_embedding_cache.setter
@@ -963,6 +960,34 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             ),
         )
 
+    def _graph_embedding_cache_namespace(self) -> str:
+        """Return the complete graph-similarity cache namespace.
+
+        :return str: Namespace for the active graph representation and artifact.
+        """
+        return self._embedding_cache_namespace(
+            representation=_GRAPH_SIMILARITY_REPRESENTATION,
+            artifact_identity=self._resolved_model_fingerprint,
+            storage_precision="float32",
+            binary_prefilter=False,
+            formatter_identity=self._similarity_formatter_fingerprint,
+        )
+
+    def _create_graph_embedding_cache(
+        self, namespace: Optional[str] = None
+    ) -> EmbeddingCache:
+        """Construct the float32 cache for graph-similarity vectors.
+
+        :param Optional[str] namespace: Precomputed namespace override.
+        :return EmbeddingCache: Graph-only persistent cache.
+        """
+        return self._create_embedding_cache(
+            namespace or self._graph_embedding_cache_namespace(),
+            storage_precision="float32",
+            binary_prefilter=False,
+            formatter_identity=self._similarity_formatter_fingerprint,
+        )
+
     def _bind_embedding_cache_to_active_model(self) -> None:
         """Bind persistent state to the checkpoint that actually loaded.
 
@@ -985,22 +1010,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         ):
             self._embedding_cache = self._create_embedding_cache(namespace)
         if self._graph_embedding_cache is not None:
-            graph_namespace = self._embedding_cache_namespace(
-                representation=_GRAPH_SIMILARITY_REPRESENTATION,
-                artifact_identity=self._resolved_model_fingerprint,
-                storage_precision="float32",
-                binary_prefilter=False,
-                formatter_identity=self._similarity_formatter_fingerprint,
-            )
+            graph_namespace = self._graph_embedding_cache_namespace()
             if (
                 str(getattr(self._graph_embedding_cache, "model_name", ""))
                 != graph_namespace
             ):
-                self._graph_embedding_cache = self._create_embedding_cache(
-                    graph_namespace,
-                    storage_precision="float32",
-                    binary_prefilter=False,
-                    formatter_identity=self._similarity_formatter_fingerprint,
+                self._graph_embedding_cache = self._create_graph_embedding_cache(
+                    graph_namespace
                 )
         if self._pending_force_rebuild_reason is not None:
             self._embedding_cache.clear(reason=self._pending_force_rebuild_reason)
@@ -1120,58 +1136,30 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             parts.append(f"mode={self.semantic_source}")
         return "::".join(parts)
 
-    def _resolve_document_formatter_fingerprint(self) -> str:
-        """Resolve deterministic formatter fingerprint used by embedding cache.
+    def _format_similarity_fingerprint_probe(self, metadata: Dict[str, str]) -> str:
+        """Render one graph formatter probe with the persisted legacy policy.
 
+        :param Dict[str, str] metadata: Formatter probe metadata.
+        :return str: Similarity input used to partition existing cache namespaces.
+        """
+        content = compose_title_abstract_text(metadata) or "unknown-paper"
+        return self.model_profile.format_similarity(content, dict(metadata))
+
+    def _resolve_formatter_fingerprint(
+        self,
+        *,
+        formatter: Callable[..., str],
+        probe_renderer: Callable[[Dict[str, str]], str],
+    ) -> str:
+        """Resolve a deterministic cache fingerprint for one formatter role.
+
+        :param Callable[..., str] formatter: Underlying formatter identity.
+        :param Callable[[Dict[str, str]], str] probe_renderer: Probe rendering callback.
         :return str: SHA-256 digest of profile formatter probes.
         """
-        probes = (
-            {"title": "Alpha", "abstract": "Beta"},
-            {"title": "Alpha", "abstract": ""},
-            {"title": "", "abstract": "Beta"},
-            {"title": "  Alpha  ", "abstract": "  Beta  "},
-        )
         outputs = [
-            self.model_profile.format_document(dict(payload)) for payload in probes
+            probe_renderer(dict(metadata)) for metadata in _FORMATTER_FINGERPRINT_PROBES
         ]
-        payload = "||".join(
-            (
-                str(self.model_profile.name),
-                str(getattr(self.model_profile.document_formatter, "__module__", "")),
-                str(
-                    getattr(
-                        self.model_profile.document_formatter,
-                        "__qualname__",
-                        getattr(
-                            self.model_profile.document_formatter,
-                            "__name__",
-                            "formatter",
-                        ),
-                    )
-                ),
-                *outputs,
-            )
-        )
-        return sha256(payload.encode("utf-8")).hexdigest()[:16]
-
-    def _resolve_similarity_formatter_fingerprint(self) -> str:
-        """Resolve deterministic graph-similarity formatter fingerprint.
-
-        :return str: SHA-256 digest of profile similarity-formatter probes.
-        """
-        probes = (
-            {"title": "Alpha", "abstract": "Beta"},
-            {"title": "Alpha", "abstract": ""},
-            {"title": "", "abstract": "Beta"},
-            {"title": "  Alpha  ", "abstract": "  Beta  "},
-        )
-        outputs = []
-        for metadata in probes:
-            content = compose_title_abstract_text(metadata) or "unknown-paper"
-            outputs.append(
-                self.model_profile.format_similarity(content, dict(metadata))
-            )
-        formatter = self.model_profile.similarity_formatter
         payload = "||".join(
             (
                 str(self.model_profile.name),

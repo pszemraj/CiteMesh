@@ -1302,6 +1302,8 @@ def test_task_specific_embedding_caches_partition_storage_and_formatters(
     assert retrieval_cache.text_formatter_fingerprint != (
         graph_cache.text_formatter_fingerprint
     )
+    assert builder._document_formatter_fingerprint == "0d40a6b5f7852b1a"
+    assert builder._similarity_formatter_fingerprint == "78ac67b7a864666a"
     assert "representation=retrieval-document-v1" in retrieval_cache.model_name
     assert "representation=graph-similarity-v1" in graph_cache.model_name
     assert "storage_precision=float32" in graph_cache.model_name
@@ -1320,13 +1322,7 @@ def test_force_rebuild_clears_retrieval_and_graph_task_caches() -> None:
     retrieval_namespace = builder._embedding_cache_namespace(
         artifact_identity="artifact-a"
     )
-    graph_namespace = builder._embedding_cache_namespace(
-        representation="graph-similarity-v1",
-        artifact_identity="artifact-a",
-        storage_precision="float32",
-        binary_prefilter=False,
-        formatter_identity=builder._similarity_formatter_fingerprint,
-    )
+    graph_namespace = builder._graph_embedding_cache_namespace()
     retrieval_cache = MagicMock(model_name=retrieval_namespace)
     graph_cache = MagicMock(model_name=graph_namespace)
     builder.embedding_cache = retrieval_cache
