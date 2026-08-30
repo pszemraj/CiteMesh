@@ -8,8 +8,9 @@ import json
 import os
 import platform
 import tempfile
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, TextIO
 
 
 def _default_cache_root() -> Path:
@@ -63,23 +64,20 @@ def get_cache_dir(*parts: str, create: bool = True) -> Path:
     return path
 
 
-def atomic_write_json(
+def _atomic_write_text_payload(
     path: Path,
-    payload: Any,
+    writer: Callable[[TextIO], object],
     *,
-    indent: int | None = None,
-    sort_keys: bool = True,
+    newline: str | None,
 ) -> None:
-    """Persist JSON content with a crash-safe atomic rename.
+    """Atomically replace a UTF-8 text file using a writer callback.
 
-    :param Path path: Target JSON file path.
-    :param Any payload: JSON-serializable payload to write.
-    :param int | None indent: Optional JSON indentation level.
-    :param bool sort_keys: Whether to sort object keys during serialization.
-    :return None: Writes the target file in place.
+    :param Path path: Target text file path.
+    :param Callable[[TextIO], object] writer: Callback that writes the payload.
+    :param str | None newline: Text-mode newline translation policy.
+    :return None: Writes and durably replaces the target file.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path: Path | None = None
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{path.name}.",
         suffix=".tmp",
@@ -88,8 +86,8 @@ def atomic_write_json(
     )
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-            json.dump(payload, tmp_file, indent=indent, sort_keys=sort_keys)
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as tmp_file:
+            writer(tmp_file)
             tmp_file.flush()
             os.fsync(tmp_file.fileno())
 
@@ -106,11 +104,49 @@ def atomic_write_json(
             if directory_fd is not None:
                 os.close(directory_fd)
     finally:
-        if tmp_path is not None:
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def atomic_write_text(
+    path: Path,
+    content: str,
+    *,
+    newline: str | None = "",
+) -> None:
+    """Persist complete UTF-8 text with a crash-safe atomic rename.
+
+    :param Path path: Target text file path.
+    :param str content: Complete text payload.
+    :param str | None newline: Text-mode newline translation policy.
+    :return None: Writes the target file in place.
+    """
+    _atomic_write_text_payload(
+        path,
+        lambda handle: handle.write(content),
+        newline=newline,
+    )
+
+
+def atomic_write_json(
+    path: Path,
+    payload: Any,
+    *,
+    indent: int | None = None,
+    sort_keys: bool = True,
+) -> None:
+    """Persist JSON content with a crash-safe atomic rename.
+
+    :param Path path: Target JSON file path.
+    :param Any payload: JSON-serializable payload to write.
+    :param int | None indent: Optional JSON indentation level.
+    :param bool sort_keys: Whether to sort object keys during serialization.
+    :return None: Writes the target file in place.
+    """
+    writer = partial(json.dump, payload, indent=indent, sort_keys=sort_keys)
+    _atomic_write_text_payload(path, writer, newline=None)
 
 
 def format_bytes(num_bytes: int) -> str:

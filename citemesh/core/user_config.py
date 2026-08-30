@@ -14,8 +14,6 @@ loading configuration never imports strategy or visualization modules.
 from __future__ import annotations
 
 import logging
-import os
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -27,7 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
 
 import tomli_w
 
-from citemesh.data.cache import get_cache_dir
+from citemesh.data.cache import atomic_write_text, get_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -379,28 +377,12 @@ def _write_document(config_path: Path, document: Dict[str, Any]) -> None:
         raise ConfigFileError(
             f"Cannot serialize config document for {config_path}: {exc}"
         ) from exc
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{config_path.name}.",
-        suffix=".tmp",
-        dir=config_path.parent,
-        text=True,
-    )
-    tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-            tmp_file.write(payload)
-            tmp_file.flush()
-            os.fsync(tmp_file.fileno())
-        os.replace(tmp_name, config_path)
+        atomic_write_text(config_path, payload, newline=None)
     except OSError as exc:
         raise ConfigFileError(
             f"Failed to write config file {config_path}: {exc}"
         ) from exc
-    finally:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 def set_config_value(

@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from citemesh.core import Author, Paper
+from citemesh.data import cache as cache_module
 from citemesh.data.model_profiles import get_embedding_model_profile
 from citemesh.visualization import export as export_module
 from citemesh.visualization import render as render_module
@@ -526,10 +527,10 @@ def test_atomic_dashboard_write_preserves_previous_viewer(
         del source, target
         raise OSError("replace failed")
 
-    monkeypatch.setattr(export_module.os, "replace", fail_replace)
+    monkeypatch.setattr(cache_module.os, "replace", fail_replace)
 
     with pytest.raises(OSError, match="replace failed"):
-        export_module._atomic_write_text(destination, "new viewer")
+        cache_module.atomic_write_text(destination, "new viewer")
 
     assert destination.read_text(encoding="utf-8") == "previous viewer"
     assert list(tmp_path.iterdir()) == [destination]

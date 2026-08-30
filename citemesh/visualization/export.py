@@ -14,9 +14,7 @@ import io
 import json
 import logging
 import math
-import os
 import re
-import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, Iterable, Optional, Tuple
@@ -25,6 +23,7 @@ from urllib.parse import quote
 import networkx as nx
 
 from citemesh.core import Paper
+from citemesh.data.cache import atomic_write_text
 
 from .ordering import ordered_edges_with_data, ordered_nodes
 from .render import (
@@ -54,30 +53,6 @@ GRAPH_PAYLOAD_KIND = "citemesh-graph"
 GRAPH_PAYLOAD_SCHEMA_VERSION = 1
 DASHBOARD_COLLECTION_KIND = "citemesh-dashboard-collection"
 DASHBOARD_COLLECTION_SCHEMA_VERSION = 1
-
-
-def _atomic_write_text(path: Path, content: str) -> None:
-    """Atomically replace a UTF-8 text artifact from the destination directory.
-
-    :param Path path: Destination file path.
-    :param str content: Complete text content to write.
-    :return None: Writes and atomically replaces ``path``.
-    """
-    destination = Path(path)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=str(destination.parent),
-        prefix=f".{destination.name}.",
-        suffix=".tmp",
-    )
-    temporary_path = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content)
-        os.replace(temporary_path, destination)
-    except BaseException:
-        temporary_path.unlink(missing_ok=True)
-        raise
 
 
 def _load_pyvis_network_class() -> Any:
@@ -406,7 +381,7 @@ class GraphExporter:
         :param Path path: Destination JSON path.
         :return None: Writes the graph payload to disk.
         """
-        _atomic_write_text(
+        atomic_write_text(
             path,
             json.dumps(self.graph_payload(), sort_keys=True, indent=2),
         )
@@ -676,7 +651,7 @@ class GraphExporter:
             figure_json=figure_json,
             collection_json=collection_json,
         )
-        _atomic_write_text(path, html_output)
+        atomic_write_text(path, html_output)
 
     # ------------------------------------------------------------------
     # Internal helpers
