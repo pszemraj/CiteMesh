@@ -53,6 +53,62 @@ HYBRID_SOURCE_OVERLAP_BONUS = 0.10
 HYBRID_CITATION_SOURCE_BONUS = 0.02
 
 
+class EmbeddingInferenceError(RuntimeError):
+    """Semantic inference could not produce a complete hybrid ranking space."""
+
+
+def require_complete_embeddings(
+    *,
+    seed_id: str,
+    candidate_ids: List[str],
+    embeddings: Dict[str, np.ndarray],
+) -> np.ndarray:
+    """Validate that hybrid reranking has one usable vector per required paper.
+
+    :param str seed_id: Seed paper identifier.
+    :param List[str] candidate_ids: Candidate identifiers admitted to reranking.
+    :param Dict[str, np.ndarray] embeddings: Materialized retrieval embeddings.
+    :return np.ndarray: Validated seed embedding.
+    :raises EmbeddingInferenceError: If vectors are missing, malformed, non-finite,
+        zero length, or dimensionally inconsistent.
+    """
+    required_ids = [seed_id, *candidate_ids]
+    missing_ids = [paper_id for paper_id in required_ids if paper_id not in embeddings]
+    if missing_ids:
+        preview = ", ".join(missing_ids[:5])
+        raise EmbeddingInferenceError(
+            "Semantic reranking is missing "
+            f"{len(missing_ids)} required vector(s): {preview}"
+        )
+
+    vectors: Dict[str, np.ndarray] = {}
+    expected_dimension: Optional[int] = None
+    for paper_id in required_ids:
+        vector = np.asarray(embeddings[paper_id], dtype=np.float32)
+        if vector.ndim != 1 or vector.size == 0:
+            raise EmbeddingInferenceError(
+                f"Semantic reranking received a non-vector embedding for {paper_id}."
+            )
+        if not np.all(np.isfinite(vector)):
+            raise EmbeddingInferenceError(
+                f"Semantic reranking received a non-finite embedding for {paper_id}."
+            )
+        if float(np.linalg.norm(vector)) <= 1e-12:
+            raise EmbeddingInferenceError(
+                f"Semantic reranking received a zero embedding for {paper_id}."
+            )
+        if expected_dimension is None:
+            expected_dimension = int(vector.size)
+        elif int(vector.size) != expected_dimension:
+            raise EmbeddingInferenceError(
+                "Semantic reranking received inconsistent embedding dimensions: "
+                f"expected {expected_dimension}, got {int(vector.size)} for {paper_id}."
+            )
+        vectors[paper_id] = vector
+
+    return vectors[seed_id]
+
+
 class HybridGraphBuilder(GraphBuilderStrategy):
     """
     Hybrid strategy combining citations and embeddings.
@@ -303,7 +359,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param List[str] candidate_ids: Candidate IDs needing embeddings.
         :param Dict[str, Paper] candidates: Candidate paper payloads.
         :param Dict[str, np.ndarray] embeddings_map: In-memory embedding map to update.
-        :return None: Mutates ``embeddings_map`` in place when encoding succeeds.
+        :return None: Mutates ``embeddings_map`` in place.
+        :raises EmbeddingInferenceError: If candidate embeddings cannot be completed.
         """
         if not candidate_ids or self.embedding_builder is None:
             return
@@ -319,13 +376,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             try:
                 encoded_map = self.embedding_builder.embed_papers(subset)
             except Exception as exc:
-                logger.debug(
-                    "Hybrid candidate embedding via cache failed; rerank falls "
-                    "back to non-semantic scoring (%s: %s).",
-                    type(exc).__name__,
-                    exc,
-                )
-                return
+                raise EmbeddingInferenceError(
+                    "Hybrid candidate embedding failed during semantic reranking: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
             embeddings_map.update(encoded_map)
             return
 
@@ -334,9 +388,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if model_profile is None or not callable(
             getattr(model_profile, "format_document", None)
         ):
-            return
+            raise EmbeddingInferenceError(
+                "Hybrid semantic reranking has no document formatter."
+            )
         if not callable(encode_texts):
-            return
+            raise EmbeddingInferenceError(
+                "Hybrid semantic reranking has no embedding encoder."
+            )
 
         texts: List[str] = []
         ordered_candidate_ids: List[str] = []
@@ -367,25 +425,20 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 show_progress_bar=False,
             )
         except Exception as exc:
-            logger.debug(
-                "Hybrid in-memory candidate embedding encode failed; rerank falls back "
-                "to non-semantic scoring (%s: %s).",
-                type(exc).__name__,
-                exc,
-            )
-            return
+            raise EmbeddingInferenceError(
+                "Hybrid in-memory candidate embedding failed during semantic "
+                f"reranking: {type(exc).__name__}: {exc}"
+            ) from exc
 
         encoded_array = np.asarray(encoded, dtype=np.float32)
         if encoded_array.ndim == 1:
             encoded_array = encoded_array.reshape(1, -1)
         if encoded_array.shape[0] != len(ordered_candidate_ids):
-            logger.warning(
-                "Hybrid candidate encode returned %d rows for %d candidates; "
-                "skipping semantic rerank enrichment for this batch.",
-                int(encoded_array.shape[0]),
-                len(ordered_candidate_ids),
+            raise EmbeddingInferenceError(
+                "Hybrid candidate encoding returned "
+                f"{int(encoded_array.shape[0])} row(s) for "
+                f"{len(ordered_candidate_ids)} candidate(s)."
             )
-            return
 
         for idx, paper_id in enumerate(ordered_candidate_ids):
             embeddings_map[paper_id] = encoded_array[idx]
@@ -397,7 +450,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         :param Paper seed_paper: Seed paper.
         :param Dict[str, Paper] candidates: Candidate paper pool.
-        :return Optional[np.ndarray]: Seed embedding when available.
+        :return Optional[np.ndarray]: Seed embedding, or ``None`` only when semantic
+            reranking was explicitly disabled.
+        :raises EmbeddingInferenceError: If required semantic vectors cannot be
+            materialized or validated.
         """
         if self.embedding_builder is None:
             return None
@@ -423,31 +479,27 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     [seed_text], show_progress_bar=False
                 )[0]
             except Exception as exc:
-                logger.debug(
-                    "Hybrid seed embedding unavailable for %s; rerank falls back to "
-                    "non-semantic seed scoring (%s: %s).",
-                    seed_paper.paper_id,
-                    type(exc).__name__,
-                    exc,
-                )
-                seed_embedding = None
-            if seed_embedding is not None:
-                embeddings_map[seed_paper.paper_id] = seed_embedding
+                raise EmbeddingInferenceError(
+                    "Hybrid seed embedding failed during semantic reranking: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            embeddings_map[seed_paper.paper_id] = seed_embedding
 
         missing_ids = [
             paper_id for paper_id in candidates if paper_id not in embeddings_map
         ]
-        if missing_ids and seed_embedding is not None:
+        if missing_ids:
             self._embed_candidates(
                 candidate_ids=missing_ids,
                 candidates=candidates,
                 embeddings_map=embeddings_map,
             )
 
-        # Transient seed-encode failures should degrade to non-semantic reranking.
-        if seed_embedding is None:
-            return None
-        return np.asarray(seed_embedding, dtype=np.float32)
+        return require_complete_embeddings(
+            seed_id=seed_paper.paper_id,
+            candidate_ids=list(candidates),
+            embeddings=embeddings_map,
+        )
 
     def _seed_relevance_score(
         self,

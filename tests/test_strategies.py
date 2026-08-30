@@ -21,7 +21,7 @@ from citemesh.strategies.base import (
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
-from citemesh.strategies.hybrid import HybridGraphBuilder
+from citemesh.strategies.hybrid import EmbeddingInferenceError, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
 from tests._helpers import disable_embedding_dep_checks
 
@@ -461,9 +461,7 @@ def test_citation_similarity_uses_reference_and_fallback_branches(
     assert without_refs == pytest.approx(expected_without_refs)
 
 
-def test_hybrid_collection_merges_and_tracks_sources(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_hybrid_collection_merges_and_tracks_sources() -> None:
     """Hybrid collection should merge citation+semantic papers and source labels."""
     builder = HybridGraphBuilder(
         max_papers=5, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
@@ -481,6 +479,10 @@ def test_hybrid_collection_merges_and_tracks_sources(
     }
     assert builder.embedding_builder is not None
     builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
+    builder.embedding_builder.embeddings = {
+        paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
+        for paper_id in {"seed", "c1", "s1", "s2"}
+    }
 
     papers = builder.collect_papers("seed")
 
@@ -564,10 +566,10 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
         builder.collect_papers("seed")
 
 
-def test_hybrid_rerank_falls_back_when_seed_embedding_unavailable(
+def test_hybrid_rerank_fails_when_seed_embedding_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hybrid rerank should continue when seed embedding encode is unavailable."""
+    """Hybrid rerank should surface a batch-wide seed embedding failure."""
     builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
     assert builder.embedding_builder is not None
 
@@ -583,16 +585,46 @@ def test_hybrid_rerank_falls_back_when_seed_embedding_unavailable(
         side_effect=RuntimeError("temporary seed encode failure")
     )
 
-    seed_embedding = builder._ensure_candidate_embeddings(
-        seed, {candidate.paper_id: candidate}
-    )
+    with pytest.raises(
+        EmbeddingInferenceError,
+        match="Hybrid seed embedding failed during semantic reranking",
+    ):
+        builder._rank_candidates(
+            seed,
+            {candidate.paper_id: candidate},
+            {candidate.paper_id: {"semantic"}},
+        )
 
-    assert seed_embedding is None
-    assert builder._rank_candidates(
-        seed,
-        {candidate.paper_id: candidate},
-        {candidate.paper_id: {"semantic"}},
-    ) == [candidate.paper_id]
+
+@pytest.mark.parametrize(
+    ("candidate_vector", "message"),
+    [
+        (np.asarray([np.nan, 0.0], dtype=np.float32), "non-finite embedding"),
+        (np.asarray([0.0, 0.0], dtype=np.float32), "zero embedding"),
+        (np.asarray([0.1, 0.2, 0.3], dtype=np.float32), "inconsistent embedding"),
+    ],
+)
+def test_hybrid_rerank_rejects_invalid_candidate_embeddings(
+    candidate_vector: np.ndarray,
+    message: str,
+) -> None:
+    """Hybrid rerank should reject unusable vectors instead of substituting zero."""
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=1, client=MagicMock())
+    assert builder.embedding_builder is not None
+
+    seed = _seed_paper("seed")
+    candidate = _paper("c1")
+    builder.embedding_builder.embeddings = {
+        seed.paper_id: np.asarray([1.0, 0.0], dtype=np.float32),
+        candidate.paper_id: candidate_vector,
+    }
+
+    with pytest.raises(EmbeddingInferenceError, match=message):
+        builder._rank_candidates(
+            seed,
+            {candidate.paper_id: candidate},
+            {candidate.paper_id: {"semantic"}},
+        )
 
 
 def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
