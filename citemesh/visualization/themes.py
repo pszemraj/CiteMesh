@@ -119,9 +119,6 @@ def _detect_terminal_theme() -> Theme:
     if system_theme is not None:
         return system_theme
 
-    if os.environ.get("TERM_PROGRAM") == "iTerm.app":
-        return THEMES["light"]
-
     return THEMES["light"]
 
 

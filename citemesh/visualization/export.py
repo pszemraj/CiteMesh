@@ -23,18 +23,27 @@ from urllib.parse import quote
 import networkx as nx
 
 from citemesh.core import Paper
+from citemesh.dashboard_contracts import (
+    DASHBOARD_COLLECTION_KIND,
+    DASHBOARD_COLLECTION_SCHEMA_VERSION,
+    GRAPH_PAYLOAD_KIND,
+    GRAPH_PAYLOAD_SCHEMA_VERSION,
+)
 from citemesh.data.cache import atomic_write_text
 
 from .ordering import ordered_edges_with_data, ordered_nodes
 from .render import (
-    MISSING_YEAR_FALLBACK_MAX,
-    MISSING_YEAR_FALLBACK_MIN,
     _normalize_layout_positions,
     compute_layout,
     compute_node_colors,
     compute_node_sizes,
 )
 from .themes import Theme, get_theme
+from .years import (
+    coerce_publication_year,
+    publication_year_bounds,
+    publication_year_scale,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +58,6 @@ DASHBOARD_FOOTER_MARGIN = 78
 DASHBOARD_LABEL_CAP = 8
 DASHBOARD_LABEL_MIN_DISTANCE = 0.18
 DASHBOARD_MAX_NODE_DIAMETER = 58.0
-GRAPH_PAYLOAD_KIND = "citemesh-graph"
-GRAPH_PAYLOAD_SCHEMA_VERSION = 1
-DASHBOARD_COLLECTION_KIND = "citemesh-dashboard-collection"
-DASHBOARD_COLLECTION_SCHEMA_VERSION = 1
 
 
 def _load_pyvis_network_class() -> Any:
@@ -476,7 +481,7 @@ class GraphExporter:
 
         for node, attrs in sorted_nodes:
             cleaned = self._serialize_node(node, attrs)
-            cleaned["year"] = self._coerce_year(cleaned.get("year"))
+            cleaned["year"] = coerce_publication_year(cleaned.get("year"))
             if isinstance(cleaned.get("authors"), list):
                 cleaned["authors"] = ", ".join(cleaned["authors"])
             if isinstance(cleaned.get("categories"), list):
@@ -811,7 +816,7 @@ class GraphExporter:
                 if len(paper.authors) > 3:
                     authors += f" +{len(paper.authors) - 3}"
                 lines.append(html.escape(authors))
-                paper_year = self._coerce_year(paper.year)
+                paper_year = coerce_publication_year(paper.year)
                 fact_bits = [
                     str(paper_year) if paper_year > 0 else "n.d.",
                     f"{paper.citation_count:,} citations",
@@ -1004,7 +1009,7 @@ class GraphExporter:
             node_str = str(node_id)
             serialized = self._serialize_node(node_id, attrs)
             serialized["id"] = node_str
-            serialized["year"] = self._coerce_year(serialized.get("year"))
+            serialized["year"] = coerce_publication_year(serialized.get("year"))
             serialized["citation_count"] = max(
                 int(serialized.get("citation_count") or 0), 0
             )
@@ -1065,18 +1070,10 @@ class GraphExporter:
         :return Dict[str, Any]: Dashboard metadata payload.
         """
         strategy = self._strategy()
-        valid_years = [
-            int(node.get("year", 0))
-            for node in node_payloads
-            if int(node.get("year", 0)) > 0
-        ]
-        if valid_years:
-            year_range = {"min": min(valid_years), "max": max(valid_years)}
-        else:
-            year_range = {
-                "min": MISSING_YEAR_FALLBACK_MIN,
-                "max": MISSING_YEAR_FALLBACK_MAX,
-            }
+        year_min, year_max = publication_year_bounds(
+            node.get("year") for node in node_payloads
+        )
+        year_range = {"min": year_min, "max": year_max}
 
         meta: Dict[str, Any] = {
             "seed_id": str(self.seed_id),
@@ -1460,7 +1457,7 @@ class GraphExporter:
             if author_names:
                 fields.append(("author", " and ".join(author_names)))
 
-        year = self._coerce_year(node_payload.get("year"))
+        year = coerce_publication_year(node_payload.get("year"))
         if year > 0:
             fields.append(("year", str(year)))
 
@@ -1527,6 +1524,10 @@ class GraphExporter:
             "__DASHBOARD_LABEL_CAP__": str(DASHBOARD_LABEL_CAP),
             "__DASHBOARD_LABEL_MIN_DISTANCE__": str(DASHBOARD_LABEL_MIN_DISTANCE),
             "__DASHBOARD_MAX_NODE_DIAMETER__": str(DASHBOARD_MAX_NODE_DIAMETER),
+            "__GRAPH_PAYLOAD_KIND_JSON__": json.dumps(GRAPH_PAYLOAD_KIND),
+            "__GRAPH_PAYLOAD_SCHEMA_VERSION__": str(GRAPH_PAYLOAD_SCHEMA_VERSION),
+            "__COLLECTION_KIND_JSON__": json.dumps(DASHBOARD_COLLECTION_KIND),
+            "__COLLECTION_SCHEMA_VERSION__": str(DASHBOARD_COLLECTION_SCHEMA_VERSION),
             "__PLOTLY_JS__": plotly_js,
             "__PAYLOAD_JSON__": payload_json,
             "__FIGURE_JSON__": figure_json,
@@ -2250,10 +2251,10 @@ class GraphExporter:
   <script id="citemesh-dashboard-figure" type="application/json">__FIGURE_JSON__</script>
   <script id="citemesh-dashboard-collection" type="application/json">__COLLECTION_JSON__</script>
   <script>
-    const GRAPH_PAYLOAD_KIND = "citemesh-graph";
-    const GRAPH_PAYLOAD_SCHEMA_VERSION = 1;
-    const COLLECTION_KIND = "citemesh-dashboard-collection";
-    const COLLECTION_SCHEMA_VERSION = 1;
+    const GRAPH_PAYLOAD_KIND = __GRAPH_PAYLOAD_KIND_JSON__;
+    const GRAPH_PAYLOAD_SCHEMA_VERSION = __GRAPH_PAYLOAD_SCHEMA_VERSION__;
+    const COLLECTION_KIND = __COLLECTION_KIND_JSON__;
+    const COLLECTION_SCHEMA_VERSION = __COLLECTION_SCHEMA_VERSION__;
     let payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
     const baseFigureTemplate = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
     let figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
@@ -4600,52 +4601,9 @@ class GraphExporter:
         :return Tuple[list[float], float, float]: Marker years, color-scale min, and
             color-scale max.
         """
-        raw_years = [
-            self._coerce_year(self.graph.nodes[node].get("year")) for node in node_ids
-        ]
-        valid_years = [year for year in raw_years if year > 0]
-
-        if valid_years:
-            year_min = float(min(valid_years))
-            year_max = float(max(valid_years))
-        else:
-            year_min = float(MISSING_YEAR_FALLBACK_MIN)
-            year_max = float(MISSING_YEAR_FALLBACK_MAX)
-
-        if year_max <= year_min:
-            year_max = year_min + 1.0
-
-        midpoint = (year_min + year_max) / 2.0
-        normalized_years = [float(year) if year > 0 else midpoint for year in raw_years]
-        return normalized_years, year_min, year_max
-
-    @staticmethod
-    def _coerce_year(raw_year: object) -> int:
-        """Normalize optional year values for formats that disallow null years.
-
-        :param object raw_year: Raw year value from node metadata.
-        :return int: Integer year when valid, otherwise ``0``.
-        """
-        if isinstance(raw_year, bool):
-            return 0
-
-        # Accept native and NumPy integer-like values.
-        try:
-            import numbers
-
-            if isinstance(raw_year, numbers.Integral):
-                return int(raw_year)
-        except (TypeError, ValueError):
-            pass
-
-        # Some upstream callers may provide year as a numeric string.
-        if isinstance(raw_year, str):
-            try:
-                return int(raw_year)
-            except ValueError:
-                pass
-
-        return 0
+        return publication_year_scale(
+            self.graph.nodes[node].get("year") for node in node_ids
+        )
 
     @staticmethod
     def _serialize_node(node_id: Hashable, attrs: Dict[str, Any]) -> Dict[str, Any]:
@@ -4716,7 +4674,7 @@ class GraphExporter:
             first_author = str(raw_authors[0]).strip()
             surname = first_author.split()[-1] if first_author else ""
 
-        year = cls._coerce_year(attrs.get("year"))
+        year = coerce_publication_year(attrs.get("year"))
         if surname and year > 0:
             return f"{surname}, {year}"
         if year > 0:

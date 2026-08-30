@@ -23,9 +23,9 @@ import pytest
 
 from citemesh import cli as cli_module
 from citemesh.cli import (
+    DASHBOARD_COLLECTION_KIND,
+    DASHBOARD_COLLECTION_SCHEMA_VERSION,
     DASHBOARD_PACKAGE_FILENAME,
-    DASHBOARD_PACKAGE_KIND,
-    DASHBOARD_PACKAGE_SCHEMA_VERSION,
     DashboardPackageError,
     _is_standalone_dashboard_output,
     canonicalize_paper_id_for_metadata,
@@ -1354,8 +1354,8 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
             DASHBOARD_PACKAGE_FILENAME,
         }
         package = load_dashboard_package(output / DASHBOARD_PACKAGE_FILENAME)
-        assert package["kind"] == DASHBOARD_PACKAGE_KIND
-        assert package["schema_version"] == DASHBOARD_PACKAGE_SCHEMA_VERSION
+        assert package["kind"] == DASHBOARD_COLLECTION_KIND
+        assert package["schema_version"] == DASHBOARD_COLLECTION_SCHEMA_VERSION
         assert package["current_result_id"] == "recommendation:seed"
         assert [entry["result_id"] for entry in package["results"]] == [
             "recommendation:seed"
@@ -1826,7 +1826,7 @@ def test_dashboard_collection_resolver_avoids_implicit_result_artifacts(
         b"\xff",
         json.dumps(
             {
-                "kind": DASHBOARD_PACKAGE_KIND,
+                "kind": DASHBOARD_COLLECTION_KIND,
                 "schema_version": 999,
                 "current_result_id": None,
                 "results": [],
@@ -1866,7 +1866,7 @@ def test_dashboard_build_preflights_invalid_package_before_writing(
     package_path.write_text(
         json.dumps(
             {
-                "kind": DASHBOARD_PACKAGE_KIND,
+                "kind": DASHBOARD_COLLECTION_KIND,
                 "schema_version": 999,
                 "current_result_id": None,
                 "results": [],

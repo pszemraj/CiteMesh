@@ -27,11 +27,10 @@ from .ordering import (
     ordered_nodes,
 )
 from .themes import Theme, get_theme
+from .years import coerce_publication_year, publication_year_bounds
 
 logger = logging.getLogger(__name__)
 MAX_TITLE_CHARS = 40
-MISSING_YEAR_FALLBACK_MIN = 2000
-MISSING_YEAR_FALLBACK_MAX = 2001
 KK_LAYOUT_DISTANCE_ATTR = "layout_distance"
 KK_LAYOUT_DISTANCE_EPSILON = 1e-6
 LAYOUT_PADDING_RATIO = 0.1
@@ -646,23 +645,17 @@ def compute_node_colors(
     :return Tuple[List[Tuple[float, float, float]], int, int]: Tuple of (color_list, min_year, max_year)
     """
     nodes = ordered_nodes(graph)
-    years = [graph.nodes[n].get("year") for n in nodes if graph.nodes[n].get("year")]
-    if years:
-        min_year = min(years)
-        max_year = max(years)
-    else:
-        min_year = MISSING_YEAR_FALLBACK_MIN
-        max_year = MISSING_YEAR_FALLBACK_MAX
+    years = [coerce_publication_year(graph.nodes[node].get("year")) for node in nodes]
+    min_year, max_year = publication_year_bounds(years)
 
     colors = []
-    for node in nodes:
+    for node, year in zip(nodes, years):
         # Seed paper gets special color
         if node == seed_id:
             colors.append(theme.seed_color)
             continue
 
-        year = graph.nodes[node].get("year")
-        if year is None:
+        if year <= 0:
             norm = 0.5
         elif max_year == min_year:
             norm = 0.5

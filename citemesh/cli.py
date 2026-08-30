@@ -40,6 +40,12 @@ from citemesh.core.user_config import (
     unset_config_value,
     user_config_path,
 )
+from citemesh.dashboard_contracts import (
+    DASHBOARD_COLLECTION_KIND,
+    DASHBOARD_COLLECTION_SCHEMA_VERSION,
+    GRAPH_PAYLOAD_KIND,
+    GRAPH_PAYLOAD_SCHEMA_VERSION,
+)
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     format_bytes,
@@ -411,10 +417,6 @@ _EXPORTER_METHOD: Dict[str, str] = {
 _THEME_AWARE_FORMATS: frozenset = frozenset({"html", "plotly", "dashboard"})
 DASHBOARD_COLLECTION_FILENAME = "dashboard.html"
 DASHBOARD_PACKAGE_FILENAME = "dashboard.citemesh.json"
-DASHBOARD_PACKAGE_KIND = "citemesh-dashboard-collection"
-DASHBOARD_PACKAGE_SCHEMA_VERSION = 1
-DASHBOARD_GRAPH_KIND = "citemesh-graph"
-DASHBOARD_GRAPH_SCHEMA_VERSION = 1
 LEGACY_DASHBOARD_MANIFEST_FILENAME = "dashboard.manifest.json"
 # Verify dispatch coverage at import time — a new EXPORT_FORMATS entry without
 # a dispatch mapping will fail fast here rather than silently skip at runtime.
@@ -2099,12 +2101,12 @@ def _validate_dashboard_graph_payload(
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} payload must be an object."
         )
-    if raw_payload.get("kind") != DASHBOARD_GRAPH_KIND:
+    if raw_payload.get("kind") != GRAPH_PAYLOAD_KIND:
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} has unsupported graph kind."
         )
     graph_schema = raw_payload.get("schema_version")
-    if type(graph_schema) is not int or graph_schema != DASHBOARD_GRAPH_SCHEMA_VERSION:
+    if type(graph_schema) is not int or graph_schema != GRAPH_PAYLOAD_SCHEMA_VERSION:
         raise DashboardPackageError(
             f"Dashboard package result {result_id!r} has unsupported graph schema "
             f"version {graph_schema!r}."
@@ -2353,14 +2355,14 @@ def _validate_dashboard_package(raw_package: object) -> Dict[str, Any]:
     """
     if not isinstance(raw_package, dict):
         raise DashboardPackageError("Dashboard package must be a JSON object.")
-    if raw_package.get("kind") != DASHBOARD_PACKAGE_KIND:
+    if raw_package.get("kind") != DASHBOARD_COLLECTION_KIND:
         raise DashboardPackageError(
             f"Unsupported dashboard package kind {raw_package.get('kind')!r}."
         )
     schema_version = raw_package.get("schema_version")
     if (
         type(schema_version) is not int
-        or schema_version != DASHBOARD_PACKAGE_SCHEMA_VERSION
+        or schema_version != DASHBOARD_COLLECTION_SCHEMA_VERSION
     ):
         raise DashboardPackageError(
             f"Unsupported dashboard package schema version {schema_version!r}."
@@ -2392,8 +2394,8 @@ def _validate_dashboard_package(raw_package: object) -> Dict[str, Any]:
             "Dashboard package current_result_id does not reference a package result."
         )
     return {
-        "kind": DASHBOARD_PACKAGE_KIND,
-        "schema_version": DASHBOARD_PACKAGE_SCHEMA_VERSION,
+        "kind": DASHBOARD_COLLECTION_KIND,
+        "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
         "current_result_id": current_result_id,
         "results": results,
     }
@@ -2481,8 +2483,8 @@ def _load_legacy_dashboard_results(collection_root: Path) -> list[Dict[str, Any]
             graph_payload = _read_json_object(json_path, label="legacy graph payload")
             config_payload = _read_json_object(config_path, label="legacy graph config")
             graph_payload = dict(graph_payload)
-            graph_payload.setdefault("kind", DASHBOARD_GRAPH_KIND)
-            graph_payload.setdefault("schema_version", DASHBOARD_GRAPH_SCHEMA_VERSION)
+            graph_payload.setdefault("kind", GRAPH_PAYLOAD_KIND)
+            graph_payload.setdefault("schema_version", GRAPH_PAYLOAD_SCHEMA_VERSION)
             build = config_payload.get("build", {})
             summary = graph_payload.get("summary", raw_entry.get("summary"))
             candidate = _validate_dashboard_result_entry(
@@ -2569,8 +2571,8 @@ def update_dashboard_package(
             ]
             package = _validate_dashboard_package(
                 {
-                    "kind": DASHBOARD_PACKAGE_KIND,
-                    "schema_version": DASHBOARD_PACKAGE_SCHEMA_VERSION,
+                    "kind": DASHBOARD_COLLECTION_KIND,
+                    "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
                     "current_result_id": result_id,
                     "results": [entry, *filtered],
                 }

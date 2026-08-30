@@ -18,6 +18,12 @@ import numpy as np
 import pytest
 
 from citemesh.core import Author, Paper
+from citemesh.dashboard_contracts import (
+    DASHBOARD_COLLECTION_KIND,
+    DASHBOARD_COLLECTION_SCHEMA_VERSION,
+    GRAPH_PAYLOAD_KIND,
+    GRAPH_PAYLOAD_SCHEMA_VERSION,
+)
 from citemesh.data import cache as cache_module
 from citemesh.data.model_profiles import get_embedding_model_profile
 from citemesh.visualization import export as export_module
@@ -833,6 +839,16 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert len(runtime_scripts) == 2
 
     runtime_script = runtime_scripts[-1]
+    assert f'const GRAPH_PAYLOAD_KIND = "{GRAPH_PAYLOAD_KIND}";' in runtime_script
+    assert (
+        f"const GRAPH_PAYLOAD_SCHEMA_VERSION = {GRAPH_PAYLOAD_SCHEMA_VERSION};"
+        in runtime_script
+    )
+    assert f'const COLLECTION_KIND = "{DASHBOARD_COLLECTION_KIND}";' in runtime_script
+    assert (
+        f"const COLLECTION_SCHEMA_VERSION = {DASHBOARD_COLLECTION_SCHEMA_VERSION};"
+        in runtime_script
+    )
     assert "new DOMParser()" in runtime_script
     assert "function parseImportedResultSetFromText" in runtime_script
     assert "const packageCurrentResultId = String(" in runtime_script
@@ -1343,6 +1359,27 @@ def test_missing_year_visual_contracts(
     size_map_2 = dict(zip(ordered_nodes, compute_node_sizes(graph_2)))
     assert size_map_1 == size_map_2
     assert size_map_1["a"] >= size_map_1["b"]
+
+
+def test_publication_year_coercion_is_shared_across_visual_surfaces() -> None:
+    """String, NumPy, and invalid years should resolve consistently everywhere."""
+    graph = nx.Graph()
+    graph.add_node("seed", title="Seed", year="2024", is_seed=True)
+    graph.add_node("older", title="Older", year=np.int64(2020))
+    graph.add_node("invalid", title="Invalid", year="unknown")
+    layout = {"seed": (0.0, 0.0), "older": (1.0, 0.0), "invalid": (0.5, 1.0)}
+
+    _, min_year, max_year = compute_node_colors(graph, "seed", get_theme("light"))
+    exporter = GraphExporter(graph, "seed", layout=layout)
+    payload = exporter.graph_payload()
+    marker_years, scale_min, scale_max = exporter._plotly_year_scale(
+        ["invalid", "older", "seed"]
+    )
+
+    assert (min_year, max_year) == (2020, 2024)
+    assert payload["meta"]["year_range"] == {"min": 2020, "max": 2024}
+    assert marker_years == [2022.0, 2020.0, 2024.0]
+    assert (scale_min, scale_max) == (2020.0, 2024.0)
 
 
 def test_exporter_html_exports_are_byte_stable_with_real_plotly(
