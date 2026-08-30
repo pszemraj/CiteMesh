@@ -111,7 +111,6 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             lambda: self.client.get_recommended_papers(
                 seed.paper_id,
                 limit=self.max_papers * 2,
-                include_references=self.fetch_references,
                 raise_on_unavailable=True,
             ),
         )

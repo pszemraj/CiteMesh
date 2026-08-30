@@ -719,20 +719,25 @@ class SemanticScholarClient:
 
     @staticmethod
     def _unavailable_error(
-        context: str, detail: str, *, rate_limited: bool
+        context: str,
+        detail: str,
+        *,
+        rate_limited: bool,
+        issue_hint: str = "This is a service availability issue",
     ) -> "SemanticScholarUnavailableError":
         """Build the availability error raised when retries are exhausted.
 
         :param str context: Human-readable request context (e.g. ``"searching for 'x'"``).
         :param str detail: Trailing detail appended after the attempt count.
         :param bool rate_limited: Whether the final failure was an HTTP 429.
+        :param str issue_hint: Explanation placed before retry guidance.
         :return SemanticScholarUnavailableError: Flavored availability error.
         """
         flavor = "rate-limited (HTTP 429)" if rate_limited else "unreachable"
         return SemanticScholarUnavailableError(
             f"Semantic Scholar API {flavor} while {context} "
             f"(after {API_CONFIG.max_retries} attempts{detail}). "
-            "This is a service availability issue - retry shortly, or set "
+            f"{issue_hint} - retry shortly, or set "
             f"S2_API_KEY for a dedicated rate limit (free keys: {S2_API_KEY_SIGNUP_URL})."
         )
 
@@ -875,17 +880,13 @@ class SemanticScholarClient:
             :return Optional[Paper]: ``None`` in tolerant mode.
             """
             if raise_on_unavailable:
-                flavor = (
-                    "rate-limited (HTTP 429)"
-                    if self._is_rate_limit_error(exc)
-                    else "unreachable"
-                )
-                raise SemanticScholarUnavailableError(
-                    f"Semantic Scholar API {flavor} while fetching {paper_id} "
-                    f"(after {API_CONFIG.max_retries} attempts: {exc}). "
-                    "This is a service availability issue, not a bad paper ID - "
-                    "retry shortly, or set S2_API_KEY for a dedicated rate "
-                    f"limit (free keys: {S2_API_KEY_SIGNUP_URL})."
+                raise self._unavailable_error(
+                    f"fetching {paper_id}",
+                    f": {exc}",
+                    rate_limited=self._is_rate_limit_error(exc),
+                    issue_hint=(
+                        "This is a service availability issue, not a bad paper ID"
+                    ),
                 ) from exc
             logger.error(
                 "Failed to fetch paper %s after %s attempts: %s",
@@ -1303,7 +1304,6 @@ class SemanticScholarClient:
         paper_id: str,
         limit: int = 50,
         fields: Optional[List[str]] = None,
-        include_references: bool = False,
         *,
         raise_on_unavailable: bool = False,
     ) -> List[Paper]:
@@ -1313,8 +1313,6 @@ class SemanticScholarClient:
         :param str paper_id: S2 paper ID
         :param int limit: Maximum recommendations
         :param Optional[List[str]] fields: API fields to return.
-        :param bool include_references: Whether recommendation payload should include
-            reference lists when the endpoint supports it.
         :param bool raise_on_unavailable: Whether exhausted operational retries
             raise instead of returning an empty list.
         :return List[Paper]: Ranked recommendation papers.
@@ -1326,7 +1324,7 @@ class SemanticScholarClient:
         # unsupported nested-reference field tokens). Keep the request field set
         # endpoint-compatible and let callers hydrate references via dedicated
         # reference-ID methods when needed.
-        if include_references and "references" in fields:
+        if "references" in fields:
             fields = [field for field in fields if field != "references"]
         parsed_limit = _validate_integer_limit(limit, "limit")
 

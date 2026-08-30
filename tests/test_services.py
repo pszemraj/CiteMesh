@@ -581,7 +581,9 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
 
     client = SemanticScholarClient(timeout=1)
     client._request_json = MagicMock(return_value={"recommendedPapers": []})
-    client.get_recommended_papers("seed", limit=1, include_references=True)
+    client.get_recommended_papers(
+        "seed", limit=1, fields=["paperId", "title", "references"]
+    )
     request_params = client._request_json.call_args.args[1]
     assert isinstance(request_params, dict)
     assert "references" not in str(request_params.get("fields", ""))
@@ -1020,8 +1022,9 @@ def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
         with pytest.raises(
             semantic_module.SemanticScholarUnavailableError,
             match="unreachable while fetching seed",
-        ):
+        ) as outage:
             client.get_paper("seed", raise_on_unavailable=True)
+    assert "not a bad paper ID" in str(outage.value)
 
     rate_limited = SemanticScholarClient(timeout=1)
     rate_limited._rate_limit = lambda: None
