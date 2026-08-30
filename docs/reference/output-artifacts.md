@@ -188,7 +188,7 @@ Top-level fields:
   response with no papers), or `unavailable` (operational failure). Partial
   results remain usable and preserve the unavailable source; if every attempted
   source is unavailable, the build fails and writes no normal result artifacts.
-- embedding/hybrid runtime retrieval metadata when available, including `effective_device` and `effective_compute_dtype` (the device and dtype the encoder actually ran with)
+- embedding/hybrid runtime metadata when available, including `effective_device` and `effective_compute_dtype` (the device and dtype the encoder actually ran with), plus `retrieval_representation` and `graph_representation` identifying the distinct prompt-conditioned vector roles
 
 See embedding metadata term definitions in [Embedding Runtime](embedding-runtime.md).
 

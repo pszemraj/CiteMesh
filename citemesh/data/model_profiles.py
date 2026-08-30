@@ -12,6 +12,7 @@ from typing import Callable, Dict, Mapping, Optional, Tuple
 
 QueryFormatter = Callable[[str, Optional[Dict[str, str]]], str]
 DocumentFormatter = Callable[[Dict[str, str]], str]
+SimilarityFormatter = Callable[[str, Optional[Dict[str, str]]], str]
 
 DEFAULT_EMBEDDING_MODEL_NAME = "unsloth/embeddinggemma-300m"
 DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, Tuple[str, ...]] = {
@@ -55,6 +56,16 @@ def _identity_document_formatter(metadata: Dict[str, str]) -> str:
     return compose_title_abstract_text(metadata)
 
 
+def _identity_similarity_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
+    """Return symmetric-similarity input text unchanged.
+
+    :param str text: Composed paper text.
+    :param Optional[Dict[str, str]] _: Unused metadata context.
+    :return str: Unmodified similarity text.
+    """
+    return text
+
+
 @dataclass(frozen=True)
 class EmbeddingModelProfile:
     """Per-model hints used by embedding strategies."""
@@ -63,6 +74,7 @@ class EmbeddingModelProfile:
     aliases: Tuple[str, ...] = ()
     query_formatter: QueryFormatter = _identity_query_formatter
     document_formatter: DocumentFormatter = _identity_document_formatter
+    similarity_formatter: SimilarityFormatter = _identity_similarity_formatter
     preferred_compute_dtype: Optional[str] = None
     autocast_devices: Tuple[str, ...] = ()
     preferred_attention_implementation: Optional[str] = None
@@ -87,6 +99,17 @@ class EmbeddingModelProfile:
         :return str: Profile-formatted document text.
         """
         return self.document_formatter(metadata)
+
+    def format_similarity(
+        self, text: str, metadata: Optional[Dict[str, str]] = None
+    ) -> str:
+        """Format paper text for symmetric semantic-similarity scoring.
+
+        :param str text: Composed paper text.
+        :param Optional[Dict[str, str]] metadata: Optional paper metadata context.
+        :return str: Profile-formatted symmetric-similarity input.
+        """
+        return self.similarity_formatter(text, metadata)
 
     def matches(self, model_name: str) -> bool:
         """Return whether model identifier maps to this profile.
@@ -123,6 +146,16 @@ def _gemma_document_formatter(metadata: Dict[str, str]) -> str:
     return f"title: {title} | text: {abstract}"
 
 
+def _gemma_similarity_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
+    """Format paper text for EmbeddingGemma's symmetric STS task.
+
+    :param str text: Composed title and abstract text.
+    :param Optional[Dict[str, str]] _: Unused metadata context.
+    :return str: EmbeddingGemma sentence-similarity prompt.
+    """
+    return f"task: sentence similarity | query: {text.strip()}"
+
+
 DEFAULT_PROFILE = EmbeddingModelProfile(name="default")
 
 EMBEDDING_MODEL_PROFILES = (
@@ -131,13 +164,15 @@ EMBEDDING_MODEL_PROFILES = (
         aliases=("unsloth/embeddinggemma",),
         query_formatter=_gemma_query_formatter,
         document_formatter=_gemma_document_formatter,
+        similarity_formatter=_gemma_similarity_formatter,
         preferred_compute_dtype="bfloat16",
         autocast_devices=("cuda", "mps"),
         compile_inner_transformer=True,
         available_truncate_dims=(768, 512, 256, 128),
         recommended_truncate_dim=256,
         notes=(
-            "Adds recommended query/document prompts for EmbeddingGemma. "
+            "Adds recommended retrieval-query, retrieval-document, and symmetric "
+            "sentence-similarity prompts for EmbeddingGemma. "
             "Runs bf16 through autocast on supported CUDA and MPS runtimes; "
             "otherwise uses float32."
         ),

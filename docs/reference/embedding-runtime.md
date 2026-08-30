@@ -26,6 +26,20 @@ Fallback behavior:
 - `unsloth/embeddinggemma-*` and `google/embeddinggemma-*` map to the same EmbeddingGemma runtime profile.
 - This means both receive the same prompt formatting, truncate-dim policy, and compile eligibility behavior.
 
+## Task-Specific Vector Spaces
+
+CiteMesh keeps retrieval ranking and graph topology in separate prompt-conditioned spaces:
+
+- A resolved paper seed and a free-text seed use the model's retrieval-query role.
+- Candidate and corpus papers use the retrieval-document role for seed-to-paper ranking and local semantic search.
+- Papers selected for the final graph are re-encoded with the symmetric sentence-similarity (STS) role; only those vectors are used for paper-to-paper edge scores.
+
+For EmbeddingGemma, the symmetric formatter is exactly `task: sentence similarity | query: <title/abstract>`. Other profiles default to an identity formatter until they declare a task-specific symmetric contract. Encoder outputs remain normalized float32 before any retrieval-cache quantization.
+
+Retrieval documents and graph-similarity vectors have independent cache namespaces, formatter fingerprints, and storage contracts. The graph namespace is always float32 with no binary prefilter. This prevents a dimension match from making asymmetric retrieval vectors eligible for symmetric graph scoring.
+
+The regression suite locks in prompt routing, cache separation, and fail-closed vector completeness. A small frozen real-EmbeddingGemma MPS smoke additionally checks retrieval Recall/nDCG and a related-versus-unrelated STS margin. Per the project's solo/pre-user CI policy, that real-model check remains opt-in local/release validation (`pytest -m slow`), not another CI job.
+
 ## Device Selection
 
 CiteMesh resolves an explicit compute device before loading any embedding model:
@@ -66,7 +80,7 @@ Compile policy:
 
 ## Cache Portability Across Devices
 
-The embedding cache namespace tracks the runtime-active model artifact, requested revision, representation/formatter contract, dimensions, storage settings, and *compute dtype*, but not the device. A cache hydrated with bf16 on a CUDA box and one hydrated with bf16 on MPS share a byte-identical namespace when every semantic input matches: you can warm the cache on a GPU host, copy the cache directory to a Mac, and get full cache hits. CPU (float32) caches live in a separate, deliberately conservative namespace.
+Each embedding cache namespace tracks the runtime-active model artifact, requested revision, task representation/formatter contract, dimensions, storage settings, and *compute dtype*, but not the device. A cache hydrated with bf16 on a CUDA box and one hydrated with bf16 on MPS share a byte-identical namespace when every semantic input matches: you can warm the cache on a GPU host, copy the cache directory to a Mac, and get full cache hits. CPU (float32) caches live in a separate, deliberately conservative namespace.
 
 ## Int8 Retrieval Pipeline
 

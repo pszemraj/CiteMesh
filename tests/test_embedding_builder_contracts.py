@@ -24,8 +24,10 @@ from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
     ENCODE_BATCH_SIZE,
     EmbeddingGraphBuilder,
+    EmbeddingTask,
     _extract_dataset_paper_metadata,
     _query_seed_id,
+    format_paper_for_embedding,
     resolve_embedding_device,
 )
 from citemesh.text_batching import estimate_text_length_bucket
@@ -508,11 +510,11 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
 
     assert any("runtime: device=" in message for message in info_messages)
     assert not any(
-        "Adds recommended query/document prompts for EmbeddingGemma." in message
+        "Adds recommended retrieval-query, retrieval-document, and symmetric" in message
         for message in info_messages
     )
     assert any(
-        "Adds recommended query/document prompts for EmbeddingGemma." in message
+        "Adds recommended retrieval-query, retrieval-document, and symmetric" in message
         for message in debug_messages
     )
     assert not any("embedding dimension: using" in message for message in info_messages)
@@ -1276,6 +1278,96 @@ def test_embedding_cache_namespace_partitions_revisions_without_thrashing() -> N
     assert "representation=retrieval-document-v1" in first_a.embedding_cache.model_name
 
 
+def test_task_specific_embedding_caches_partition_storage_and_formatters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corpus retrieval and graph STS vectors must use distinct physical contracts."""
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        semantic_source="arxiv-corpus",
+        storage_precision="int8",
+        binary_prefilter=True,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="artifact-a")
+
+    retrieval_cache = builder.embedding_cache
+    graph_cache = builder.graph_embedding_cache
+
+    assert retrieval_cache.h5_path != graph_cache.h5_path
+    assert retrieval_cache.storage_precision == "int8"
+    assert retrieval_cache.binary_prefilter is True
+    assert graph_cache.storage_precision == "float32"
+    assert graph_cache.binary_prefilter is False
+    assert retrieval_cache.text_formatter_fingerprint != (
+        graph_cache.text_formatter_fingerprint
+    )
+    assert "representation=retrieval-document-v1" in retrieval_cache.model_name
+    assert "representation=graph-similarity-v1" in graph_cache.model_name
+    assert "storage_precision=float32" in graph_cache.model_name
+    assert "mode=" not in graph_cache.model_name
+
+
+def test_force_rebuild_clears_retrieval_and_graph_task_caches() -> None:
+    """An explicit rebuild request should clear both semantic representations."""
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        force_rebuild_cache=True,
+        force_rebuild_reason="task contract changed",
+        client=MagicMock(),
+    )
+    builder._resolved_model_fingerprint = "artifact-a"
+    retrieval_namespace = builder._embedding_cache_namespace(
+        artifact_identity="artifact-a"
+    )
+    graph_namespace = builder._embedding_cache_namespace(
+        representation="graph-similarity-v1",
+        artifact_identity="artifact-a",
+        storage_precision="float32",
+        binary_prefilter=False,
+        formatter_identity=builder._similarity_formatter_fingerprint,
+    )
+    retrieval_cache = MagicMock(model_name=retrieval_namespace)
+    graph_cache = MagicMock(model_name=graph_namespace)
+    builder.embedding_cache = retrieval_cache
+    builder.graph_embedding_cache = graph_cache
+
+    builder._bind_embedding_cache_to_active_model()
+
+    expected_reason = (
+        "explicit --force-rebuild-cache request; user_reason=task contract changed"
+    )
+    retrieval_cache.clear.assert_called_once_with(reason=expected_reason)
+    graph_cache.clear.assert_called_once_with(reason=expected_reason)
+    assert builder._pending_force_rebuild_reason is None
+
+
+def test_paper_embedding_task_dispatcher_uses_id_fallback() -> None:
+    """Every task should retain paper identity when title and abstract are empty."""
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    paper = Paper(paper_id="paper-without-text", title="", year=None, abstract="")
+
+    query = format_paper_for_embedding(
+        profile=builder.model_profile,
+        paper=paper,
+        task=EmbeddingTask.RETRIEVAL_QUERY,
+    )
+    document = format_paper_for_embedding(
+        profile=builder.model_profile,
+        paper=paper,
+        task=EmbeddingTask.RETRIEVAL_DOCUMENT,
+    )
+    graph = format_paper_for_embedding(
+        profile=builder.model_profile,
+        paper=paper,
+        task=EmbeddingTask.GRAPH_SIMILARITY,
+    )
+
+    assert "paper-without-text" in query
+    assert "paper-without-text" in document
+    assert "paper-without-text" in graph
+
+
 def test_metadata_and_streaming_loader_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1612,10 +1704,10 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     fake_load_dataset_for_hydration.assert_not_called()
 
 
-def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
+def test_collect_papers_formats_all_seeds_in_retrieval_query_space(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Seed embedding should use query prompts only for free-text query seeds."""
+    """Free-text and resolved-paper seeds should both use retrieval-query prompts."""
 
     def _build_builder() -> tuple[
         EmbeddingGraphBuilder, list[str], list[dict[str, str]]
@@ -1689,9 +1781,9 @@ def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
     paper_builder.client.get_paper.assert_called_once_with(
         "paper-1", raise_on_unavailable=True
     )
-    assert paper_queries == []
-    assert paper_documents == [{"title": "Seed Title", "abstract": "Seed Abstract"}]
-    assert paper_texts == ["D::Seed Title::Seed Abstract"]
+    assert paper_queries == ["Seed Title. Seed Abstract"]
+    assert paper_documents == []
+    assert paper_texts == ["Q::Seed Title. Seed Abstract"]
 
     outage_builder, outage_queries, outage_documents = _build_builder()
     outage_builder.client.get_paper = MagicMock(
@@ -1731,11 +1823,114 @@ def test_collect_papers_formats_query_and_paper_seeds_in_expected_spaces(
         ),
     )
 
-    assert prefetched_queries == []
-    assert prefetched_documents == [
-        {"title": "Seed Title", "abstract": "Seed Abstract"}
-    ]
-    assert prefetched_texts == ["D::Seed Title::Seed Abstract"]
+    assert prefetched_queries == ["Seed Title. Seed Abstract"]
+    assert prefetched_documents == []
+    assert prefetched_texts == ["Q::Seed Title. Seed Abstract"]
+
+
+def test_graph_similarity_materialization_uses_sts_cache_and_warm_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Final graph papers should encode once with STS prompts in their own cache."""
+    builder = EmbeddingGraphBuilder(max_papers=2, client=MagicMock())
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="artifact-sts")
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    captured_texts: list[str] = []
+
+    class _CaptureModel:
+        def encode(self, texts: list[str], **_kwargs: Any) -> np.ndarray:
+            captured_texts.extend(texts)
+            return np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)[: len(texts)]
+
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: _CaptureModel())
+    papers = {
+        "seed": Paper(
+            paper_id="seed",
+            title="Attention Models",
+            year=None,
+            abstract="Transformer attention for language.",
+            is_seed=True,
+        ),
+        "peer": Paper(
+            paper_id="peer",
+            title="Graph Attention",
+            year=None,
+            abstract="Attention mechanisms for graph neural networks.",
+        ),
+    }
+
+    vectors = builder.materialize_graph_embeddings(papers)
+
+    assert set(vectors) == set(papers)
+    assert set(captured_texts) == {
+        "task: sentence similarity | query: Attention Models. "
+        "Transformer attention for language.",
+        "task: sentence similarity | query: Graph Attention. "
+        "Attention mechanisms for graph neural networks.",
+    }
+    assert builder.graph_embedding_cache.embedding_count() == 2
+    assert builder.embedding_cache.embedding_count() == 0
+    assert builder.retrieval_embeddings == {}
+
+    class _FailOnEncode:
+        def encode(self, _texts: list[str], **_kwargs: Any) -> np.ndarray:
+            raise AssertionError("warm graph cache should not re-encode")
+
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: _FailOnEncode())
+    warmed = builder.materialize_graph_embeddings(papers)
+    assert set(warmed) == set(papers)
+
+
+def test_graph_similarity_materialization_fails_closed_on_missing_vectors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A partial graph vector map must fail before pairwise scoring begins."""
+    builder = EmbeddingGraphBuilder(max_papers=2, client=MagicMock())
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_ensure_cache_model_fingerprint",
+        lambda **_kwargs: None,
+    )
+    builder.graph_embedding_cache = MagicMock()
+    builder.graph_embedding_cache.get_embeddings.return_value = {
+        "seed": np.asarray([1.0, 0.0], dtype=np.float32)
+    }
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: MagicMock())
+    papers = {
+        "seed": Paper(paper_id="seed", title="Seed", year=None, is_seed=True),
+        "peer": Paper(paper_id="peer", title="Peer", year=None),
+    }
+
+    with pytest.raises(RuntimeError, match="missing 1 vector.*peer"):
+        builder.materialize_graph_embeddings(papers)
+
+
+def test_embedding_build_prepares_graph_vectors_before_edge_scoring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The base build lifecycle should invoke STS preparation before similarities."""
+    builder = EmbeddingGraphBuilder(max_papers=2, top_k=1, client=MagicMock())
+    papers = {
+        "seed": Paper(paper_id="seed", title="Seed", year=2024, is_seed=True),
+        "peer": Paper(paper_id="peer", title="Peer", year=2024),
+    }
+    monkeypatch.setattr(builder, "collect_papers", lambda _seed_id, **_kwargs: papers)
+    prepare = MagicMock(
+        side_effect=lambda selected: builder.embeddings.update(
+            {
+                paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
+                for paper_id in selected
+            }
+        )
+    )
+    monkeypatch.setattr(builder, "materialize_graph_embeddings", prepare)
+
+    graph, seed_id = builder.build_graph("seed")
+
+    assert seed_id == "seed"
+    prepare.assert_called_once_with(papers)
+    assert graph.has_edge("seed", "peer")
 
 
 def test_collect_papers_dataset_source_revalidation_contracts(
@@ -2981,6 +3176,8 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
         "requested_device": "auto",
         "compute_dtype": builder._source_dtype_hint,
         "autocast": False,
+        "retrieval_representation": "retrieval-query/retrieval-document",
+        "graph_representation": "graph-similarity",
     }
 
 
@@ -3087,6 +3284,7 @@ def test_embedding_build_graph_persists_runtime_metadata(
         },
     )
     monkeypatch.setattr(builder, "compute_similarity", lambda _p1, _p2: 0.0)
+    monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _papers: None)
 
     graph, seed_id = builder.build_graph("seed")
     assert seed_id == "seed"
@@ -3096,6 +3294,8 @@ def test_embedding_build_graph_persists_runtime_metadata(
         "requested_device": "auto",
         "compute_dtype": builder._source_dtype_hint,
         "autocast": False,
+        "retrieval_representation": "retrieval-query/retrieval-document",
+        "graph_representation": "graph-similarity",
     }
 
 
@@ -3394,8 +3594,8 @@ def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
 
 
 @pytest.mark.slow
-def test_embedding_real_mps_smoke() -> None:
-    """Load the real default model on MPS and encode two strings.
+def test_embedding_real_mps_task_space_quality_smoke() -> None:
+    """Validate frozen retrieval and symmetric-task behavior on real MPS.
 
     Requires real Metal access: skips on Linux CI and inside sandboxes that
     hide the MPS device. Run escalated on Apple Silicon for a meaningful pass.
@@ -3408,8 +3608,154 @@ def test_embedding_real_mps_smoke() -> None:
     builder = EmbeddingGraphBuilder(max_papers=2, client=MagicMock())
     assert builder.device == "mps"
     builder._load_model()
-    vectors = builder._encode_texts(
-        ["attention is all you need", "graph neural networks survey"]
-    )
-    assert vectors.shape[0] == 2
-    assert np.isfinite(vectors).all()
+
+    retrieval_cases = [
+        (
+            Paper(
+                paper_id="transformer-seed",
+                title="Transformer language models",
+                year=2017,
+                abstract=(
+                    "A sequence transduction architecture based entirely on "
+                    "self-attention for machine translation."
+                ),
+            ),
+            [
+                Paper(
+                    paper_id="attention",
+                    title="Attention Is All You Need",
+                    year=2017,
+                    abstract=(
+                        "The Transformer replaces recurrence with multi-head "
+                        "self-attention for sequence modeling."
+                    ),
+                ),
+                Paper(
+                    paper_id="bert",
+                    title="BERT",
+                    year=2018,
+                    abstract=(
+                        "Bidirectional Transformer pre-training learns deep "
+                        "language representations."
+                    ),
+                ),
+                Paper(
+                    paper_id="alphazero",
+                    title="Mastering Chess and Shogi by Self-Play",
+                    year=2017,
+                    abstract="A reinforcement learning system for board games.",
+                ),
+                Paper(
+                    paper_id="mask-rcnn",
+                    title="Mask R-CNN",
+                    year=2017,
+                    abstract="An object detection and instance segmentation model.",
+                ),
+            ],
+            {"attention", "bert"},
+        ),
+        (
+            Paper(
+                paper_id="rag-seed",
+                title="Retrieval-augmented language generation",
+                year=2020,
+                abstract=(
+                    "Dense passage retrieval supplies external documents to a "
+                    "neural text generator."
+                ),
+            ),
+            [
+                Paper(
+                    paper_id="rag",
+                    title="Retrieval-Augmented Generation",
+                    year=2020,
+                    abstract=(
+                        "A language model conditions generation on passages from "
+                        "a dense neural retriever."
+                    ),
+                ),
+                Paper(
+                    paper_id="dpr",
+                    title="Dense Passage Retrieval",
+                    year=2020,
+                    abstract=(
+                        "Dual encoders retrieve relevant passages for open-domain "
+                        "question answering."
+                    ),
+                ),
+                Paper(
+                    paper_id="nerf",
+                    title="Neural Radiance Fields",
+                    year=2020,
+                    abstract="A neural representation for novel view synthesis.",
+                ),
+                Paper(
+                    paper_id="ddpm",
+                    title="Denoising Diffusion Probabilistic Models",
+                    year=2020,
+                    abstract="A generative model based on iterative denoising.",
+                ),
+            ],
+            {"rag", "dpr"},
+        ),
+    ]
+
+    recalls: list[float] = []
+    ndcgs: list[float] = []
+    for seed, candidates, relevant_ids in retrieval_cases:
+        query_text = format_paper_for_embedding(
+            profile=builder.model_profile,
+            paper=seed,
+            task=EmbeddingTask.RETRIEVAL_QUERY,
+        )
+        document_texts = [
+            format_paper_for_embedding(
+                profile=builder.model_profile,
+                paper=paper,
+                task=EmbeddingTask.RETRIEVAL_DOCUMENT,
+            )
+            for paper in candidates
+        ]
+        vectors = builder._encode_texts([query_text, *document_texts])
+        scores = vectors[1:] @ vectors[0]
+        ranking = np.argsort(-scores)
+        ranked_ids = [candidates[int(index)].paper_id for index in ranking]
+        recalls.append(len(set(ranked_ids[:2]) & relevant_ids) / len(relevant_ids))
+        gains = np.asarray(
+            [1.0 if paper_id in relevant_ids else 0.0 for paper_id in ranked_ids]
+        )
+        discounts = 1.0 / np.log2(np.arange(2, len(ranked_ids) + 2))
+        dcg = float(np.sum(gains * discounts))
+        ideal_dcg = float(np.sum(np.sort(gains)[::-1] * discounts))
+        ndcgs.append(dcg / ideal_dcg)
+
+    assert float(np.mean(recalls)) >= 0.75
+    assert float(np.mean(ndcgs)) >= 0.75
+
+    related_pairs = [
+        (retrieval_cases[0][1][0], retrieval_cases[0][1][1]),
+        (retrieval_cases[1][1][0], retrieval_cases[1][1][1]),
+    ]
+    unrelated_pairs = [
+        (retrieval_cases[0][1][0], retrieval_cases[1][1][2]),
+        (retrieval_cases[1][1][0], retrieval_cases[0][1][2]),
+    ]
+    pair_papers = [
+        paper for pair in [*related_pairs, *unrelated_pairs] for paper in pair
+    ]
+    similarity_texts = [
+        format_paper_for_embedding(
+            profile=builder.model_profile,
+            paper=paper,
+            task=EmbeddingTask.GRAPH_SIMILARITY,
+        )
+        for paper in pair_papers
+    ]
+    similarity_vectors = builder._encode_texts(similarity_texts)
+    pair_scores = np.sum(similarity_vectors[0::2] * similarity_vectors[1::2], axis=1)
+    related_mean = float(np.mean(pair_scores[: len(related_pairs)]))
+    unrelated_mean = float(np.mean(pair_scores[len(related_pairs) :]))
+
+    assert similarity_vectors.shape == (8, builder.truncate_dim)
+    assert np.isfinite(similarity_vectors).all()
+    assert related_mean >= unrelated_mean + 0.05

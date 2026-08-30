@@ -17,6 +17,7 @@ import re
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
+from enum import Enum
 from hashlib import sha1, sha256
 from itertools import islice
 from pathlib import Path
@@ -113,6 +114,60 @@ _IGNORED_ARTIFACT_FILES = frozenset(
         "training_args.bin",
     }
 )
+_RETRIEVAL_DOCUMENT_REPRESENTATION = "retrieval-document-v1"
+_GRAPH_SIMILARITY_REPRESENTATION = "graph-similarity-v1"
+_PLACEHOLDER_EMBEDDING_TITLES = frozenset(
+    {"", "n/a", "na", "none", "unknown", "untitled"}
+)
+
+
+class EmbeddingTask(str, Enum):
+    """Prompt-conditioned embedding roles used by CiteMesh."""
+
+    RETRIEVAL_QUERY = "retrieval-query"
+    RETRIEVAL_DOCUMENT = "retrieval-document"
+    GRAPH_SIMILARITY = "graph-similarity"
+
+
+def _embedding_text_metadata(title: object, abstract: object) -> Dict[str, str]:
+    """Normalize title/abstract fields without treating placeholders as content.
+
+    :param object title: Raw paper title.
+    :param object abstract: Raw paper abstract.
+    :return Dict[str, str]: Clean text metadata for prompt formatting.
+    """
+    normalized_title = str(title or "").strip()
+    if normalized_title.casefold() in _PLACEHOLDER_EMBEDDING_TITLES:
+        normalized_title = ""
+    return {
+        "title": normalized_title,
+        "abstract": str(abstract or "").strip(),
+    }
+
+
+def format_paper_for_embedding(
+    *, profile: Any, paper: Paper, task: EmbeddingTask
+) -> str:
+    """Format one paper for a specific retrieval or graph task.
+
+    :param Any profile: Active embedding model profile.
+    :param Paper paper: Paper whose title/abstract should be formatted.
+    :param EmbeddingTask task: Required prompt-conditioned vector role.
+    :return str: Model input text, falling back to the paper ID when needed.
+    :raises ValueError: If ``task`` is unsupported.
+    """
+    metadata = _embedding_text_metadata(paper.title, paper.abstract)
+    content = compose_title_abstract_text(metadata) or str(paper.paper_id)
+    if task is EmbeddingTask.RETRIEVAL_QUERY:
+        return str(profile.format_query(content, metadata))
+    if task is EmbeddingTask.RETRIEVAL_DOCUMENT:
+        document_metadata = dict(metadata)
+        if not compose_title_abstract_text(document_metadata):
+            document_metadata["title"] = str(paper.paper_id)
+        return str(profile.format_document(document_metadata)) or content
+    if task is EmbeddingTask.GRAPH_SIMILARITY:
+        return str(profile.format_similarity(content, metadata)) or content
+    raise ValueError(f"Unsupported embedding task: {task}")
 
 
 @dataclass(frozen=True)
@@ -758,6 +813,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._document_formatter_fingerprint = (
             self._resolve_document_formatter_fingerprint()
         )
+        self._similarity_formatter_fingerprint = (
+            self._resolve_similarity_formatter_fingerprint()
+        )
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
         self._attention_implementation_hint = (
             self._resolve_attention_implementation_hint()
@@ -765,11 +823,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._source_dtype_hint = self._resolve_source_dtype_hint()
         self.top_k = top_k
         self.model = None
+        self.retrieval_embeddings: Dict[str, np.ndarray] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
         self.candidate_source_status: Dict[str, str] = {}
         self.client = client or get_client()
         self._active_model_name: Optional[str] = None
         self._embedding_cache: Optional[EmbeddingCache] = None
+        self._graph_embedding_cache: Optional[EmbeddingCache] = None
         self._pending_force_rebuild_reason: Optional[str] = None
         normalized_force_rebuild_reason = (
             " ".join(str(force_rebuild_reason).split())
@@ -837,21 +897,69 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         self._embedding_cache = cache
 
-    def _create_embedding_cache(self, namespace: str) -> EmbeddingCache:
+    @property
+    def graph_embedding_cache(self) -> EmbeddingCache:
+        """Return the float32 cache for symmetric graph-similarity vectors.
+
+        :return EmbeddingCache: Graph-only persistent cache namespace.
+        """
+        if self._graph_embedding_cache is None:
+            self._graph_embedding_cache = self._create_embedding_cache(
+                self._embedding_cache_namespace(
+                    representation=_GRAPH_SIMILARITY_REPRESENTATION,
+                    artifact_identity=self._resolved_model_fingerprint,
+                    storage_precision="float32",
+                    binary_prefilter=False,
+                    formatter_identity=self._similarity_formatter_fingerprint,
+                ),
+                storage_precision="float32",
+                binary_prefilter=False,
+                formatter_identity=self._similarity_formatter_fingerprint,
+            )
+        return self._graph_embedding_cache
+
+    @graph_embedding_cache.setter
+    def graph_embedding_cache(self, cache: EmbeddingCache) -> None:
+        """Replace the graph cache object for tests and specialized callers.
+
+        :param EmbeddingCache cache: Cache-compatible object to install.
+        :return None: Replaces the current graph-cache reference.
+        """
+        self._graph_embedding_cache = cache
+
+    def _create_embedding_cache(
+        self,
+        namespace: str,
+        *,
+        storage_precision: Optional[str] = None,
+        binary_prefilter: Optional[bool] = None,
+        formatter_identity: Optional[str] = None,
+    ) -> EmbeddingCache:
         """Construct one cache for the supplied representation namespace.
 
         :param str namespace: Complete cache partition key.
+        :param Optional[str] storage_precision: Representation-specific storage mode.
+        :param Optional[bool] binary_prefilter: Representation-specific prefilter mode.
+        :param Optional[str] formatter_identity: Representation formatter fingerprint.
         :return EmbeddingCache: Initialized persistent cache.
         """
+        resolved_storage = storage_precision or self.storage_precision
+        resolved_prefilter = (
+            self.binary_prefilter
+            if binary_prefilter is None
+            else bool(binary_prefilter)
+        )
         return EmbeddingCache(
             model_name=namespace,
-            storage_precision=self.storage_precision,
-            binary_prefilter=self.binary_prefilter,
+            storage_precision=resolved_storage,
+            binary_prefilter=resolved_prefilter,
             calibration_sample_size=self.calibration_sample_size,
             compression=self.cache_compression,
             compression_level=self.cache_compression_level,
             source_torch_dtype=self._source_dtype_hint,
-            text_formatter_fingerprint=self._document_formatter_fingerprint,
+            text_formatter_fingerprint=(
+                formatter_identity or self._document_formatter_fingerprint
+            ),
         )
 
     def _bind_embedding_cache_to_active_model(self) -> None:
@@ -864,6 +972,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             # A pre-load cache object is only a cheap discovery handle. Never
             # retain it after model fallback has selected the active checkpoint.
             self._embedding_cache = None
+            self._graph_embedding_cache = None
             return
 
         namespace = self._embedding_cache_namespace(
@@ -874,8 +983,27 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             or str(getattr(self._embedding_cache, "model_name", "")) != namespace
         ):
             self._embedding_cache = self._create_embedding_cache(namespace)
+        if self._graph_embedding_cache is not None:
+            graph_namespace = self._embedding_cache_namespace(
+                representation=_GRAPH_SIMILARITY_REPRESENTATION,
+                artifact_identity=self._resolved_model_fingerprint,
+                storage_precision="float32",
+                binary_prefilter=False,
+                formatter_identity=self._similarity_formatter_fingerprint,
+            )
+            if (
+                str(getattr(self._graph_embedding_cache, "model_name", ""))
+                != graph_namespace
+            ):
+                self._graph_embedding_cache = self._create_embedding_cache(
+                    graph_namespace,
+                    storage_precision="float32",
+                    binary_prefilter=False,
+                    formatter_identity=self._similarity_formatter_fingerprint,
+                )
         if self._pending_force_rebuild_reason is not None:
             self._embedding_cache.clear(reason=self._pending_force_rebuild_reason)
+            self.graph_embedding_cache.clear(reason=self._pending_force_rebuild_reason)
             self._pending_force_rebuild_reason = None
 
     def _clear_embedding_cache(self, reason: str) -> None:
@@ -898,6 +1026,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             "requested_device": self.requested_device,
             "compute_dtype": self._source_dtype_hint,
             "autocast": self._autocast_enabled,
+            "retrieval_representation": (
+                f"{EmbeddingTask.RETRIEVAL_QUERY.value}/"
+                f"{EmbeddingTask.RETRIEVAL_DOCUMENT.value}"
+            ),
+            "graph_representation": EmbeddingTask.GRAPH_SIMILARITY.value,
         }
 
     def _cache_model_identity(self) -> str:
@@ -939,15 +1072,28 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
     def _embedding_cache_namespace(
         self,
         *,
-        representation: str = "retrieval-document-v1",
+        representation: str = _RETRIEVAL_DOCUMENT_REPRESENTATION,
         artifact_identity: Optional[str] = None,
+        storage_precision: Optional[str] = None,
+        binary_prefilter: Optional[bool] = None,
+        formatter_identity: Optional[str] = None,
     ) -> str:
         """Build a cache key for the active model and representation contract.
 
         :param str representation: Semantic role and schema version of stored vectors.
         :param Optional[str] artifact_identity: Immutable resolved checkpoint identity.
+        :param Optional[str] storage_precision: Representation-specific storage mode.
+        :param Optional[bool] binary_prefilter: Representation-specific prefilter mode.
+        :param Optional[str] formatter_identity: Representation formatter fingerprint.
         :return str: Namespace key used for embedding cache partitioning.
         """
+        resolved_storage = storage_precision or self.storage_precision
+        resolved_prefilter = (
+            self.binary_prefilter
+            if binary_prefilter is None
+            else bool(binary_prefilter)
+        )
+        resolved_formatter = formatter_identity or self._document_formatter_fingerprint
         parts = [
             f"model={self._cache_model_identity()}",
             f"revision={self._requested_hf_revision_token()}",
@@ -957,16 +1103,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         ]
         if self.truncate_dim is not None:
             parts.append(f"truncate_dim={self.truncate_dim}")
-        parts.append(f"storage_precision={self.storage_precision}")
-        parts.append(f"binary_prefilter={int(self.binary_prefilter)}")
-        if self.storage_precision == "int8":
+        parts.append(f"storage_precision={resolved_storage}")
+        parts.append(f"binary_prefilter={int(resolved_prefilter)}")
+        if resolved_storage == "int8":
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
         parts.append(f"source_dtype={self._source_dtype_hint}")
-        parts.append(f"doc_formatter={self._document_formatter_fingerprint}")
+        parts.append(f"formatter={resolved_formatter}")
         # Candidate mode gets its own namespace so incremental candidate rows
         # never mix with (and never distort row counts of) corpus hydrations.
         # The corpus namespace stays token-free for legacy cache compatibility.
-        if self.semantic_source != "arxiv-corpus":
+        if (
+            representation == _RETRIEVAL_DOCUMENT_REPRESENTATION
+            and self.semantic_source != "arxiv-corpus"
+        ):
             parts.append(f"mode={self.semantic_source}")
         return "::".join(parts)
 
@@ -997,6 +1146,40 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                             "__name__",
                             "formatter",
                         ),
+                    )
+                ),
+                *outputs,
+            )
+        )
+        return sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    def _resolve_similarity_formatter_fingerprint(self) -> str:
+        """Resolve deterministic graph-similarity formatter fingerprint.
+
+        :return str: SHA-256 digest of profile similarity-formatter probes.
+        """
+        probes = (
+            {"title": "Alpha", "abstract": "Beta"},
+            {"title": "Alpha", "abstract": ""},
+            {"title": "", "abstract": "Beta"},
+            {"title": "  Alpha  ", "abstract": "  Beta  "},
+        )
+        outputs = []
+        for metadata in probes:
+            content = compose_title_abstract_text(metadata) or "unknown-paper"
+            outputs.append(
+                self.model_profile.format_similarity(content, dict(metadata))
+            )
+        formatter = self.model_profile.similarity_formatter
+        payload = "||".join(
+            (
+                str(self.model_profile.name),
+                str(getattr(formatter, "__module__", "")),
+                str(
+                    getattr(
+                        formatter,
+                        "__qualname__",
+                        getattr(formatter, "__name__", "formatter"),
                     )
                 ),
                 *outputs,
@@ -1438,8 +1621,16 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             f"hf::{model_id}::revision={requested_revision}::artifact={artifact_digest}"
         )
 
-    def _ensure_cache_model_fingerprint(self) -> None:
-        """Verify cache payload is bound to the active model fingerprint."""
+    def _ensure_cache_model_fingerprint(
+        self,
+        *,
+        representation: str = _RETRIEVAL_DOCUMENT_REPRESENTATION,
+    ) -> None:
+        """Verify one task cache is bound to the active model fingerprint.
+
+        :param str representation: Retrieval-document or graph-similarity role.
+        :return None: Validates and records model identity on the selected cache.
+        """
         try:
             model_fingerprint = self._resolve_model_fingerprint()
         except Exception as exc:
@@ -1451,8 +1642,16 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         self._resolved_model_fingerprint = model_fingerprint
         self._bind_embedding_cache_to_active_model()
-        has_cached_payload = self.embedding_cache.has_cached_payload()
-        cached_fingerprint = self.embedding_cache.get_model_fingerprint()
+        if representation == _RETRIEVAL_DOCUMENT_REPRESENTATION:
+            cache = self.embedding_cache
+        elif representation == _GRAPH_SIMILARITY_REPRESENTATION:
+            cache = self.graph_embedding_cache
+        else:
+            raise ValueError(
+                f"Unsupported embedding cache representation: {representation}"
+            )
+        has_cached_payload = cache.has_cached_payload()
+        cached_fingerprint = cache.get_model_fingerprint()
         if has_cached_payload and cached_fingerprint != model_fingerprint:
             logger.warning(
                 "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
@@ -1460,12 +1659,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 cached_fingerprint or "missing",
                 model_fingerprint,
             )
-            self._clear_embedding_cache(
-                "model fingerprint mismatch "
-                f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint})"
+            cache.clear(
+                reason=(
+                    "model fingerprint mismatch "
+                    f"(cached={cached_fingerprint or 'missing'}, "
+                    f"active={model_fingerprint})"
+                )
             )
         if not has_cached_payload or cached_fingerprint != model_fingerprint:
-            self.embedding_cache.set_model_fingerprint(model_fingerprint)
+            cache.set_model_fingerprint(model_fingerprint)
 
     def _log_dimension_policy(self) -> None:
         """Emit one-time debug log for active embedding dimensionality."""
@@ -2000,6 +2202,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
         papers: Dict[str, Paper] = {}
+        self.retrieval_embeddings = {}
         self.embeddings = {}
         self.candidate_source_status = {}
 
@@ -2014,28 +2217,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 seed_id, raise_on_unavailable=True
             )
 
-        seed_metadata: Dict[str, str] = {}
-
         if resolved_seed_paper:
             # Found via S2 API
             resolved_seed_paper.is_seed = True
             papers[resolved_seed_paper.paper_id] = resolved_seed_paper
-            seed_title = (resolved_seed_paper.title or "").strip()
-            seed_abstract = (resolved_seed_paper.abstract or "").strip()
-            seed_text = (
-                compose_title_abstract_text(
-                    {"title": seed_title, "abstract": seed_abstract}
-                )
-                or seed_id
-            )
-            seed_metadata = {
-                "title": seed_title,
-                "abstract": seed_abstract,
-            }
         else:
             # Treat as text query
             logger.info(f"Using '{seed_id}' as text query")
-            seed_text = seed_id
             # Create dummy seed paper
             query_seed = _query_seed_id(seed_id)
             resolved_seed_paper = Paper(
@@ -2045,19 +2233,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 is_seed=True,
             )
             papers[query_seed] = resolved_seed_paper
-            seed_metadata = {"title": seed_id, "abstract": ""}
 
         # Compute normalized seed embedding
         logger.debug("Computing seed embedding...")
-        formatted_seed_text = self._format_seed_for_embedding(
-            seed_text=seed_text,
-            seed_metadata=seed_metadata,
-            seed_is_free_text_query=resolved_seed_paper.paper_id.startswith("query:"),
+        formatted_seed_text = format_paper_for_embedding(
+            profile=self.model_profile,
+            paper=resolved_seed_paper,
+            task=EmbeddingTask.RETRIEVAL_QUERY,
         )
         seed_embedding = self._encode_texts(
             [formatted_seed_text], show_progress_bar=False
         )[0]
-        self.embeddings[resolved_seed_paper.paper_id] = seed_embedding
+        self.retrieval_embeddings[resolved_seed_paper.paper_id] = seed_embedding
 
         if self.semantic_source != "arxiv-corpus":
             logger.debug("Using candidate-pool semantic search...")
@@ -2070,7 +2257,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 if paper_id in papers:
                     continue
                 papers[paper_id] = paper
-                self.embeddings[paper_id] = embedding
+                self.retrieval_embeddings[paper_id] = embedding
             self._update_citation_counts(papers)
             return papers
 
@@ -2111,7 +2298,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
 
             papers[paper_id] = paper
-            self.embeddings[paper_id] = embedding
+            self.retrieval_embeddings[paper_id] = embedding
 
         self._update_citation_counts(papers)
         return papers
@@ -2179,7 +2366,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         return [(paper_id, paper, vector) for _, paper_id, paper, vector, _ in scored]
 
     def embed_papers(self, papers: Dict[str, Paper]) -> Dict[str, np.ndarray]:
-        """Embed papers through the persistent cache, encoding only missing ones.
+        """Embed retrieval documents through cache, encoding only missing ones.
 
         :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
         :return Dict[str, np.ndarray]: Mapping of paper IDs to float32 embeddings.
@@ -2192,13 +2379,120 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             paper_id: paper_embedding_metadata(paper)
             for paper_id, paper in papers.items()
         }
-        return self.embedding_cache.get_embeddings(
+        embeddings = self.embedding_cache.get_embeddings(
             metadata_map,
             self._get_model_for_encoding(),
             batch_size=self.encode_batch_size,
             show_progress=False,
             text_builder=self.model_profile.format_document,
         )
+        self.retrieval_embeddings.update(embeddings)
+        return embeddings
+
+    def _format_graph_similarity_metadata(self, metadata: Dict[str, object]) -> str:
+        """Format cached paper metadata for symmetric graph similarity.
+
+        :param Dict[str, object] metadata: Cache metadata including paper identity.
+        :return str: Profile-formatted symmetric similarity input.
+        """
+        text_metadata = _embedding_text_metadata(
+            metadata.get("title"), metadata.get("abstract")
+        )
+        content = compose_title_abstract_text(text_metadata) or str(
+            metadata.get("paper_id") or "unknown-paper"
+        )
+        return (
+            str(self.model_profile.format_similarity(content, text_metadata)) or content
+        )
+
+    @staticmethod
+    def _validate_materialized_embeddings(
+        required_ids: Iterable[str],
+        embeddings: Dict[str, np.ndarray],
+        *,
+        context: str,
+    ) -> Dict[str, np.ndarray]:
+        """Validate a complete finite, nonzero, dimensionally consistent vector map.
+
+        :param Iterable[str] required_ids: Paper IDs that require vectors.
+        :param Dict[str, np.ndarray] embeddings: Materialized vectors by paper ID.
+        :param str context: User-facing task description for errors.
+        :return Dict[str, np.ndarray]: Validated float32 vector map.
+        :raises RuntimeError: If any required vector is missing or invalid.
+        """
+        ordered_ids = list(required_ids)
+        missing = [paper_id for paper_id in ordered_ids if paper_id not in embeddings]
+        if missing:
+            raise RuntimeError(
+                f"{context} is missing {len(missing)} vector(s): "
+                + ", ".join(missing[:5])
+            )
+
+        validated: Dict[str, np.ndarray] = {}
+        expected_dimension: Optional[int] = None
+        for paper_id in ordered_ids:
+            vector = np.asarray(embeddings[paper_id], dtype=np.float32)
+            if vector.ndim != 1 or vector.size == 0:
+                raise RuntimeError(
+                    f"{context} received a malformed vector for {paper_id}."
+                )
+            if not np.all(np.isfinite(vector)):
+                raise RuntimeError(
+                    f"{context} received a non-finite vector for {paper_id}."
+                )
+            if float(np.linalg.norm(vector)) <= 1e-12:
+                raise RuntimeError(f"{context} received a zero vector for {paper_id}.")
+            if expected_dimension is None:
+                expected_dimension = int(vector.size)
+            elif int(vector.size) != expected_dimension:
+                raise RuntimeError(
+                    f"{context} received inconsistent vector dimensions for {paper_id}: "
+                    f"expected {expected_dimension}, got {int(vector.size)}."
+                )
+            validated[paper_id] = vector
+        return validated
+
+    def materialize_graph_embeddings(
+        self, papers: Dict[str, Paper]
+    ) -> Dict[str, np.ndarray]:
+        """Materialize selected papers in a symmetric graph-similarity space.
+
+        :param Dict[str, Paper] papers: Final graph papers by canonical ID.
+        :return Dict[str, np.ndarray]: Validated graph-similarity vectors.
+        """
+        if not papers:
+            self.embeddings = {}
+            return {}
+        self._load_model()
+        self._ensure_cache_model_fingerprint(
+            representation=_GRAPH_SIMILARITY_REPRESENTATION
+        )
+        metadata_map = {}
+        for paper_id, paper in papers.items():
+            metadata = paper_embedding_metadata(paper)
+            metadata["paper_id"] = paper_id
+            metadata_map[paper_id] = metadata
+        embeddings = self.graph_embedding_cache.get_embeddings(
+            metadata_map,
+            self._get_model_for_encoding(),
+            batch_size=self.encode_batch_size,
+            show_progress=False,
+            text_builder=self._format_graph_similarity_metadata,
+        )
+        self.embeddings = self._validate_materialized_embeddings(
+            papers,
+            embeddings,
+            context="Graph-similarity embedding",
+        )
+        return dict(self.embeddings)
+
+    def prepare_graph_scoring(self, papers: Dict[str, Paper]) -> None:
+        """Populate symmetric vectors immediately before pairwise edge scoring.
+
+        :param Dict[str, Paper] papers: Final selected graph papers.
+        :return None: Materializes the graph-similarity cache and vector map.
+        """
+        self.materialize_graph_embeddings(papers)
 
     def search_local(self, query: str, top_k: int) -> List[CacheSearchResult]:
         """Semantically search this builder's persistent embedding cache.
@@ -2248,34 +2542,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         cache_directory = self.embedding_cache.h5_path.parent
         return any(cache_directory.glob("embeddings_*.h5"))
-
-    def _format_seed_for_embedding(
-        self,
-        seed_text: str,
-        seed_metadata: Dict[str, str],
-        *,
-        seed_is_free_text_query: bool,
-    ) -> str:
-        """Format a seed input into the correct embedding prompt space.
-
-        Paper-to-paper retrieval stays in document space. Only free-text user
-        queries should cross from query space into the hydrated document corpus.
-
-        :param str seed_text: Raw seed text or fallback identifier.
-        :param Dict[str, str] seed_metadata: Seed metadata payload.
-        :param bool seed_is_free_text_query: Whether the seed came from user query text.
-        :return str: Prompt-formatted seed text for embedding encode.
-        """
-        if seed_is_free_text_query:
-            return self.model_profile.format_query(seed_text, seed_metadata)
-
-        document_text = self.model_profile.format_document(
-            {
-                "title": seed_metadata.get("title", ""),
-                "abstract": seed_metadata.get("abstract", ""),
-            }
-        )
-        return document_text or seed_text
 
     def _select_candidates(
         self, seed_embedding: np.ndarray, use_streaming: bool

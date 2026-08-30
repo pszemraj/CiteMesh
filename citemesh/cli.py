@@ -618,6 +618,8 @@ def _embedding_export_metadata(
 
     effective_device: Optional[str] = None
     effective_compute_dtype: Optional[str] = None
+    retrieval_representation = "retrieval-query/retrieval-document"
+    graph_representation = "graph-similarity"
     if isinstance(runtime_metadata, dict):
         raw_device = runtime_metadata.get("device")
         raw_compute_dtype = runtime_metadata.get("compute_dtype")
@@ -625,11 +627,22 @@ def _embedding_export_metadata(
             effective_device = raw_device
         if isinstance(raw_compute_dtype, str) and raw_compute_dtype:
             effective_compute_dtype = raw_compute_dtype
+        raw_retrieval_representation = runtime_metadata.get("retrieval_representation")
+        raw_graph_representation = runtime_metadata.get("graph_representation")
+        if (
+            isinstance(raw_retrieval_representation, str)
+            and raw_retrieval_representation
+        ):
+            retrieval_representation = raw_retrieval_representation
+        if isinstance(raw_graph_representation, str) and raw_graph_representation:
+            graph_representation = raw_graph_representation
 
     return {
         "effective_vector_dtype": "float32",
         "effective_device": effective_device,
         "effective_compute_dtype": effective_compute_dtype,
+        "retrieval_representation": retrieval_representation,
+        "graph_representation": graph_representation,
         "semantic_source": str(cli_args.semantic_source),
         "candidate_pool_size": int(cli_args.candidate_pool_size),
         "storage_precision": str(cli_args.storage_precision),

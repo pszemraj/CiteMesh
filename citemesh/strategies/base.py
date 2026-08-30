@@ -198,6 +198,14 @@ class GraphBuilderStrategy(ABC):
         """Allow subclasses to provide a collection summary."""
         self._collection_summary = summary
 
+    def prepare_graph_scoring(self, papers: Dict[str, Paper]) -> None:
+        """Prepare strategy-specific state required by pairwise graph scoring.
+
+        :param Dict[str, Paper] papers: Final collected papers keyed by ID.
+        :return None: Base strategies require no additional preparation.
+        """
+        del papers
+
     def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
         """
         Build the complete similarity graph.
@@ -226,6 +234,7 @@ class GraphBuilderStrategy(ABC):
         else:
             logger.info("Collected %s papers", len(self.papers))
         logger.info("Seed paper: %s", seed_paper.title)
+        self.prepare_graph_scoring(self.papers)
 
         # Step 2: Create graph with nodes
         graph = nx.Graph()

@@ -2417,6 +2417,8 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         "effective_vector_dtype": "float32",
         "effective_device": None,
         "effective_compute_dtype": None,
+        "retrieval_representation": "retrieval-query/retrieval-document",
+        "graph_representation": "graph-similarity",
         "semantic_source": "candidates",
         "candidate_pool_size": 400,
         "storage_precision": "float32",

@@ -41,11 +41,18 @@ citemesh cache root
 
 `config.toml` is configuration, not cache: it is documented in [User Configuration](configuration.md) and survives `citemesh cache clear`.
 
-Model hashes are the first 12 characters of `sha256(<namespace>)`. The embedding namespace binds the runtime-active model (including a fallback checkpoint), requested revision, immutable resolved artifact fingerprint, representation role, normalization contract, resolved truncate dimension, storage precision, effective binary-prefilter mode, resolved source torch dtype, and document-formatter fingerprint; `int8` namespaces also include calibration sample size. Candidate mode (`--semantic-source candidates`, the default) adds `mode=candidates` so incrementally embedded S2 candidates never mix with corpus hydrations. The namespace intentionally carries no device token: it tracks compute dtype, so caches built at the same dtype (for example bf16 on CUDA and bf16 on MPS) remain portable across machines.
+Model hashes are the first 12 characters of `sha256(<namespace>)`. Every embedding namespace binds the runtime-active model (including a fallback checkpoint), requested revision, immutable resolved artifact fingerprint, representation role, normalization contract, resolved truncate dimension, storage precision, effective binary-prefilter mode, resolved source torch dtype, and task-formatter fingerprint; `int8` namespaces also include calibration sample size. Candidate mode (`--semantic-source candidates`, the default) adds `mode=candidates` to the retrieval-document namespace so incrementally embedded S2 candidates never mix with corpus hydrations. The graph-similarity namespace is source-mode independent because it contains only selected papers encoded under the same symmetric task contract. Namespaces intentionally carry no device token: they track compute dtype, so caches built at the same dtype (for example bf16 on CUDA and bf16 on MPS) remain portable across machines.
 
 ## Embedding Cache Behavior
 
 `EmbeddingCache` stores each paper embedding once per namespace. Vectors are kept in a resizable HDF5 matrix, while SQLite tracks metadata and `row_idx` mappings.
+
+Embedding and hybrid builds use two task-specific caches:
+
+- The retrieval-document cache stores candidate or corpus papers for asymmetric seed-to-paper ranking. Paper and free-text seeds are encoded transiently with the model's retrieval-query prompt; those query vectors are not persisted as documents.
+- The graph-similarity cache stores only selected graph papers encoded with the model's symmetric sentence-similarity prompt. It is always float32 with no binary prefilter and is the sole vector source for paper-to-paper edges.
+
+The two caches have different representation and formatter identities, so dimensions alone can never make their vectors interchangeable. Local semantic search reads only retrieval-document caches.
 
 Default storage mode is quantized:
 
@@ -79,7 +86,7 @@ Hydration write policy:
 - Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--encode-batch-size`.
 - Cache persistence flushes metadata/embedding appends in larger bursts (`256` records) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
 
-Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)). By default, CiteMesh asks for confirmation before applying this destructive rebuild. Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts). Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata.
+Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)). The rebuild clears both the retrieval-document and graph-similarity namespaces for the resolved model contract. By default, CiteMesh asks for confirmation before applying this destructive rebuild. Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts). Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata.
 
 Before persistent cache access, CiteMesh resolves an immutable artifact fingerprint and makes it part of the physical namespace. Hugging Face repositories use the resolved commit SHA when available; an explicitly requested 40-character commit is already immutable and works offline. A standard local Hugging Face snapshot also exposes its commit SHA without an API request. If a cached snapshot does not expose a SHA, CiteMesh hashes its complete inference-relevant artifact manifest. The same manifest policy applies to arbitrary local model paths and covers weights and referenced shards, tokenizer inputs, SentenceTransformers module definitions and numbered module configuration (including pooling), and custom model code. Documentation and training-only files are excluded.
 

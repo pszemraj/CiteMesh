@@ -1680,6 +1680,10 @@ def test_model_profiles_match_expected_formatters() -> None:
         gemma.format_document({"title": " Title ", "abstract": " Abstract "})
         == "title: Title | text: Abstract"
     )
+    assert (
+        gemma.format_similarity("  related paper  ")
+        == "task: sentence similarity | query: related paper"
+    )
     unsloth_gemma = get_embedding_model_profile("unsloth/embeddinggemma-300m")
     assert unsloth_gemma.name == "google/embeddinggemma"
     assert unsloth_gemma.compile_inner_transformer is True
@@ -1694,6 +1698,7 @@ def test_model_profiles_match_expected_formatters() -> None:
     assert default.recommended_truncate_dim is None
     assert default.format_query("plain") == "plain"
     assert default.format_document({"title": "T", "abstract": ""}) == "T"
+    assert default.format_similarity("plain") == "plain"
 
 
 def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:

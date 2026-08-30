@@ -29,6 +29,12 @@ Notable changes from the early script-based prototypes to the current package la
   formatter, normalization, dimensions, and dtype/storage contracts. Local weight,
   tokenizer, pooling/module, and shard changes select new physical caches; unresolved
   identities fail closed instead of adopting `offline-unverified` payloads.
+- Embedding and hybrid runs now keep asymmetric retrieval and symmetric graph
+  vectors separate: seeds use retrieval-query prompts, candidates/corpus rows use
+  retrieval-document prompts, and selected graph nodes use a dedicated float32 STS
+  cache with no binary prefilter. Prompt routing, cache separation, and completeness
+  fail closed in unit tests; a frozen real-EmbeddingGemma quality smoke remains
+  opt-in local/release validation rather than expanding the intentionally small CI.
 - Paper search gets the same treatment: `citemesh search` and free-text query seeds no longer report "No results found" when the search API was actually rate-limited or unreachable — exhausted retries now surface as a `SemanticScholarUnavailableError` with the free-key pointer.
 - Added local semantic search to `citemesh search`: mode `local` searches the locally cached embeddings (candidate vectors accumulated across builds, or a hydrated corpus) via the cache-native search API. The query is encoded in the model's query prompt space and ranked with cosine scores; no Semantic Scholar traffic. Targets the same cache namespace a flagless build writes to, honoring `config.toml` defaults, with `--model`/`--device` overrides (which imply local mode).
 - Made `citemesh search` mode-aware: `--mode {auto,local,s2}` with `auto` as the default — local semantic search when the cache has vectors, Semantic Scholar keyword search otherwise, logging which backend ran. The preference persists via `citemesh config set defaults.search_mode <mode>` (explicit flag wins). Explicitly requested local mode fails with build guidance on an empty cache instead of silently falling back.

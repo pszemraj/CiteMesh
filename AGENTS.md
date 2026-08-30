@@ -38,6 +38,8 @@ no-extras install smoke. Do not add broad version matrices, release services,
 duplicated jobs, or external-service integration runs without a concrete bug or
 release requirement. Package-installing jobs fetch Git history because
 `setuptools-scm` needs tags for an accurate version; lint-only jobs stay shallow.
+Real-model and MPS quality smokes remain opt-in local/release validation, not a
+separate CI job, until a concrete release requirement justifies that cost.
 
 ## Code conventions
 

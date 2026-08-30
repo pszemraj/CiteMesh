@@ -15,7 +15,6 @@ import numpy as np
 
 from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
-from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -36,7 +35,9 @@ from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
     ENCODE_BATCH_SIZE,
     EmbeddingGraphBuilder,
+    EmbeddingTask,
     _check_embedding_deps,
+    format_paper_for_embedding,
 )
 from citemesh.text_batching import l2_normalize_embeddings
 
@@ -332,20 +333,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             self.seed_relations[canonical_id] = merged_relation
         return canonical_id
 
-    def _seed_query_text(self, seed_paper: Paper) -> str:
-        """Build query text used to embed the hybrid seed paper.
-
-        :param Paper seed_paper: Seed paper record.
-        :return str: Query text payload used for encoding.
-        """
-        text = compose_title_abstract_text(
-            {
-                "title": seed_paper.title,
-                "abstract": seed_paper.abstract,
-            }
-        )
-        return text or str(seed_paper.paper_id)
-
     def _embed_candidates(
         self,
         candidate_ids: List[str],
@@ -460,22 +447,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if self.embedding_builder is None:
             return None
 
-        embeddings_map = getattr(self.embedding_builder, "embeddings", None)
+        embeddings_map = getattr(self.embedding_builder, "retrieval_embeddings", None)
         if not isinstance(embeddings_map, dict):
             return None
 
         seed_embedding = embeddings_map.get(seed_paper.paper_id)
         if seed_embedding is None:
             try:
-                seed_text = self.embedding_builder._format_seed_for_embedding(
-                    seed_text=self._seed_query_text(seed_paper),
-                    seed_metadata={
-                        "title": seed_paper.title or "",
-                        "abstract": seed_paper.abstract or "",
-                    },
-                    seed_is_free_text_query=str(seed_paper.paper_id).startswith(
-                        "query:"
-                    ),
+                seed_text = format_paper_for_embedding(
+                    profile=self.embedding_builder.model_profile,
+                    paper=seed_paper,
+                    task=EmbeddingTask.RETRIEVAL_QUERY,
                 )
                 seed_embedding = self.embedding_builder._encode_texts(
                     [seed_text], show_progress_bar=False
@@ -524,11 +506,14 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if (
             seed_embedding is not None
             and self.embedding_builder is not None
-            and isinstance(getattr(self.embedding_builder, "embeddings", None), dict)
-            and candidate.paper_id in self.embedding_builder.embeddings
+            and isinstance(
+                getattr(self.embedding_builder, "retrieval_embeddings", None), dict
+            )
+            and candidate.paper_id in self.embedding_builder.retrieval_embeddings
         ):
             candidate_embedding = np.asarray(
-                self.embedding_builder.embeddings[candidate.paper_id], dtype=np.float32
+                self.embedding_builder.retrieval_embeddings[candidate.paper_id],
+                dtype=np.float32,
             )
             cosine = float(
                 np.clip(np.dot(seed_embedding, candidate_embedding), -1.0, 1.0)
@@ -605,6 +590,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         self.paper_sources = {}
         self.seed_relations = {}
         self.candidate_source_status = {}
+        if self.embedding_builder is not None:
+            self.embedding_builder.retrieval_embeddings = {}
+            self.embedding_builder.embeddings = {}
         alias_map = IdentityRegistry()
 
         # Step 1: Collect from citations
@@ -729,6 +717,22 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.info("Added %s semantic papers", added_semantic)
 
         return papers
+
+    def prepare_graph_scoring(self, papers: Dict[str, Paper]) -> None:
+        """Build the final symmetric vector space used by hybrid graph edges.
+
+        :param Dict[str, Paper] papers: Final selected papers.
+        :return None: Populates the embedding builder's graph-vector map.
+        :raises EmbeddingInferenceError: If symmetric inference cannot complete.
+        """
+        if self.embedding_builder is None:
+            return
+        try:
+            self.embedding_builder.materialize_graph_embeddings(papers)
+        except Exception as exc:
+            raise EmbeddingInferenceError(
+                f"Hybrid graph-similarity embedding failed: {type(exc).__name__}: {exc}"
+            ) from exc
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

@@ -601,11 +601,15 @@ def test_hybrid_collection_merges_and_tracks_sources() -> None:
         "c1": "referenced_by_seed",
     }
     assert builder.embedding_builder is not None
-    builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
-    builder.embedding_builder.embeddings = {
-        paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
-        for paper_id in {"seed", "c1", "s1", "s2"}
-    }
+
+    def _collect_semantic(*_args: object, **_kwargs: object) -> dict[str, Paper]:
+        builder.embedding_builder.retrieval_embeddings = {
+            paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
+            for paper_id in {"seed", "c1", "s1", "s2"}
+        }
+        return semantic_papers
+
+    builder.embedding_builder.collect_papers = MagicMock(side_effect=_collect_semantic)
 
     papers = builder.collect_papers("seed")
 
@@ -665,6 +669,58 @@ def test_embedding_and_hybrid_similarity_normalize_scaled_embeddings(
     )
 
 
+def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() -> None:
+    """Hybrid seed ranking and pairwise topology must consume different spaces."""
+    builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
+    assert builder.embedding_builder is not None
+    seed = _seed_paper("seed")
+    candidate = _paper("candidate", year=seed.year)
+    builder.paper_sources = {"seed": "semantic", "candidate": "semantic"}
+    builder.embedding_builder.retrieval_embeddings = {
+        "seed": np.asarray([1.0, 0.0], dtype=np.float32),
+        "candidate": np.asarray([1.0, 0.0], dtype=np.float32),
+    }
+    builder.embedding_builder.embeddings = {
+        "seed": np.asarray([1.0, 0.0], dtype=np.float32),
+        "candidate": np.asarray([0.0, 1.0], dtype=np.float32),
+    }
+
+    seed_vector = builder._ensure_candidate_embeddings(seed, {"candidate": candidate})
+    assert seed_vector is not None
+    assert float(
+        np.dot(seed_vector, builder.embedding_builder.retrieval_embeddings["candidate"])
+    ) == pytest.approx(1.0)
+
+    graph_score = builder.compute_similarity(seed, candidate)
+    expected_without_embedding = (
+        HYBRID_CONFIG.semantic_semantic_weights[1]
+        * builder.temporal_similarity(seed, candidate)
+        + HYBRID_CONFIG.semantic_semantic_weights[2]
+        * builder.citation_similarity(seed, candidate)
+        + HYBRID_CONFIG.semantic_semantic_weights[3]
+        * builder.bibliographic_coupling(seed, candidate)
+        + HYBRID_CONFIG.co_citation_boost
+    )
+    assert graph_score == pytest.approx(expected_without_embedding)
+
+
+def test_hybrid_graph_preparation_fails_closed_on_sts_inference() -> None:
+    """Hybrid should surface graph-space inference failures before edge creation."""
+    builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.materialize_graph_embeddings = MagicMock(
+        side_effect=RuntimeError("simulated MPS STS failure")
+    )
+
+    with pytest.raises(
+        EmbeddingInferenceError,
+        match="Hybrid graph-similarity embedding failed.*simulated MPS STS failure",
+    ):
+        builder.prepare_graph_scoring(
+            {"seed": _seed_paper("seed"), "peer": _paper("peer")}
+        )
+
+
 def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -698,7 +754,7 @@ def test_hybrid_rerank_fails_when_seed_embedding_unavailable(
 
     seed = _seed_paper("seed")
     candidate = _paper("c1")
-    builder.embedding_builder.embeddings = {
+    builder.embedding_builder.retrieval_embeddings = {
         candidate.paper_id: np.asarray([0.2, 0.1, 0.3], dtype=np.float32)
     }
     builder.embedding_builder.model_profile = MagicMock(
@@ -737,7 +793,7 @@ def test_hybrid_rerank_rejects_invalid_candidate_embeddings(
 
     seed = _seed_paper("seed")
     candidate = _paper("c1")
-    builder.embedding_builder.embeddings = {
+    builder.embedding_builder.retrieval_embeddings = {
         seed.paper_id: np.asarray([1.0, 0.0], dtype=np.float32),
         candidate.paper_id: candidate_vector,
     }
@@ -761,7 +817,7 @@ def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
 
     seed = _seed_paper("seed")
     candidate = _paper("c1")
-    builder.embedding_builder.embeddings = {}
+    builder.embedding_builder.retrieval_embeddings = {}
     builder.embedding_builder.model_profile = MagicMock(
         format_query=lambda text, _metadata: text,
         format_document=compose_title_abstract_text,
@@ -787,7 +843,7 @@ def test_hybrid_rerank_keeps_candidate_embedding_hydration_in_memory(
         seed_embedding, np.asarray([0.4, 0.1, 0.2], dtype=np.float32)
     )
     np.testing.assert_allclose(
-        builder.embedding_builder.embeddings[candidate.paper_id],
+        builder.embedding_builder.retrieval_embeddings[candidate.paper_id],
         np.asarray([0.3, 0.2, 0.1], dtype=np.float32),
     )
     builder.embedding_builder.embedding_cache.get_embeddings.assert_not_called()
@@ -1087,9 +1143,15 @@ def test_max_papers_is_total_node_cap_including_seed(
     class FakeEmbeddingBuilder:
         def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:
             self.max_papers = max_papers
+            self.retrieval_embeddings: dict[str, np.ndarray] = {}
+            self.embeddings: dict[str, np.ndarray] = {}
 
         def collect_papers(self, seed_id: str, **_: object) -> dict[str, Paper]:
             del seed_id
+            self.retrieval_embeddings = {
+                paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
+                for paper_id in {"seed", "c1", "c2", "s1", "s2"}
+            }
             return {"seed": _seed_paper(), "s1": _paper("s1"), "s2": _paper("s2")}
 
     monkeypatch.setattr(hybrid_strategy, "CitationGraphBuilder", FakeCitationBuilder)
@@ -1776,7 +1838,7 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
     assert client.get_recommended_papers.called
     non_seed = [paper_id for paper_id in papers if paper_id != "seed"]
     for paper_id in non_seed:
-        assert paper_id in builder.embeddings
+        assert paper_id in builder.retrieval_embeddings
     assert builder.candidate_source_status == {
         "citations": "complete",
         "recommendations": "complete",
