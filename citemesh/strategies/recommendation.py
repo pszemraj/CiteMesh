@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+import networkx as nx
 
 from citemesh.core import Paper
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.candidates import (
+    fetch_candidate_source,
     merge_paper_metadata,
     reconcile_paper_identity,
     register_aliases,
+    require_available_candidate_source,
 )
 
 if TYPE_CHECKING:
@@ -50,6 +54,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.similarity_threshold = similarity_threshold
         self.client = client or get_client()
         self._abstract_index = AbstractSimilarityIndex()
+        self.candidate_source_status: Dict[str, str] = {}
 
     def _hydrate_references(self, paper: Paper) -> None:
         """Populate reference IDs for a paper when strategy settings require it.
@@ -80,6 +85,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :return Dict[str, Paper]: Papers included in graph.
         """
         papers: Dict[str, Paper] = {}
+        self.candidate_source_status = {}
 
         logger.info("Fetching seed paper: %s", seed_id)
         seed = self.client.get_paper(
@@ -99,13 +105,24 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         register_aliases(identity_aliases, seed.paper_id, seed)
 
         logger.info("Fetching recommendations for %s", seed.paper_id)
-        recommendations = self.client.get_recommended_papers(
-            seed.paper_id,
-            limit=self.max_papers * 2,
-            include_references=self.fetch_references,
+        recommendation_result = fetch_candidate_source(
+            "recommendations",
+            lambda: self.client.get_recommended_papers(
+                seed.paper_id,
+                limit=self.max_papers * 2,
+                include_references=self.fetch_references,
+                raise_on_unavailable=True,
+            ),
+        )
+        self.candidate_source_status = {
+            recommendation_result.source: recommendation_result.state.value
+        }
+        require_available_candidate_source(
+            [recommendation_result],
+            context=f"recommendation acquisition for {seed.paper_id}",
         )
 
-        for paper in recommendations:
+        for paper in recommendation_result.papers:
             # Recommendation payloads can include the seed paper itself.
             # Preserve the original seed object so GraphBuilderStrategy can always
             # identify a node with ``is_seed=True``.
@@ -138,6 +155,19 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             f"Collected {len(papers)} papers from recommendations"
         )
         return papers
+
+    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
+        """Build a recommendation graph with candidate-source status metadata.
+
+        :param str seed_id: Seed paper identifier.
+        :param Any kwargs: Strategy-specific options forwarded to parent build.
+        :return Tuple[nx.Graph, str]: Built graph and canonical seed identifier.
+        """
+        graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph.graph["candidate_source_status"] = dict(
+            sorted(self.candidate_source_status.items())
+        )
+        return graph, actual_seed_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

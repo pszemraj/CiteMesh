@@ -117,7 +117,8 @@ Top-level fields:
 - `kind` (`"citemesh-graph"`)
 - `schema_version` (`1`)
 - `seed_id`
-- `meta` (`strategy`, `year_range`)
+- `meta` (`strategy`, `year_range`, and `candidate_source_status` when the build
+  queried Semantic Scholar neighborhood sources)
 - `summary` (`nodes`, `edges`)
 - `nodes` — enriched per-paper objects (see below)
 - `edges` (`source`, `target`, `weight`, plus readable source/target title/label fields)
@@ -182,6 +183,11 @@ Top-level fields:
 
 - common run metadata (`paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`)
 - strategy score semantics (`score_contract`)
+- Semantic Scholar neighborhood outcomes (`candidate_source_status`) keyed by
+  attempted source. Values are `complete` (papers returned), `empty` (successful
+  response with no papers), or `unavailable` (operational failure). Partial
+  results remain usable and preserve the unavailable source; if every attempted
+  source is unavailable, the build fails and writes no normal result artifacts.
 - embedding/hybrid runtime retrieval metadata when available, including `effective_device` and `effective_compute_dtype` (the device and dtype the encoder actually ran with)
 
 See embedding metadata term definitions in [Embedding Runtime](embedding-runtime.md).

@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from enum import Enum
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Set
 
 from citemesh.core import Paper
 from citemesh.paper_ids import paper_identifier_aliases
@@ -26,6 +27,94 @@ logger = logging.getLogger(__name__)
 SEMANTIC_SOURCE_CHOICES = ("candidates", "arxiv-corpus")
 DEFAULT_CANDIDATE_POOL_SIZE = 400
 QUERY_SEED_SEARCH_LIMIT = 20
+
+
+class CandidateAcquisitionError(RuntimeError):
+    """No requested candidate source could be evaluated."""
+
+
+class CandidateSourceState(str, Enum):
+    """Outcome of one attempted candidate source."""
+
+    COMPLETE = "complete"
+    EMPTY = "empty"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class CandidateSourceResult:
+    """Papers and availability state returned by one candidate source."""
+
+    source: str
+    state: CandidateSourceState
+    papers: tuple[Paper, ...] = ()
+    error: str = ""
+
+
+def fetch_candidate_source(
+    source: str,
+    fetch: Callable[[], List[Paper]],
+) -> CandidateSourceResult:
+    """Fetch one source without confusing an outage with valid empty evidence.
+
+    :param str source: Stable source name used in metadata.
+    :param Callable[[], List[Paper]] fetch: Strict service fetch operation.
+    :return CandidateSourceResult: Tri-state source result.
+    :raises Exception: Unexpected programming or payload errors from ``fetch``.
+    """
+    from citemesh.services import SemanticScholarUnavailableError
+
+    try:
+        papers = tuple(fetch())
+    except SemanticScholarUnavailableError as exc:
+        return CandidateSourceResult(
+            source=source,
+            state=CandidateSourceState.UNAVAILABLE,
+            error=str(exc),
+        )
+    return CandidateSourceResult(
+        source=source,
+        state=(CandidateSourceState.COMPLETE if papers else CandidateSourceState.EMPTY),
+        papers=papers,
+    )
+
+
+def require_available_candidate_source(
+    results: Sequence[CandidateSourceResult],
+    *,
+    context: str,
+) -> None:
+    """Require at least one attempted source to have completed, even if empty.
+
+    Partial source outages remain usable but are surfaced once in logs. When every
+    attempted source is unavailable, callers must not publish a normal graph.
+
+    :param Sequence[CandidateSourceResult] results: Attempted source results.
+    :param str context: Human-readable acquisition context for diagnostics.
+    :return None: Returns after validating the result set.
+    :raises CandidateAcquisitionError: If every attempted source was unavailable.
+    """
+    if not results:
+        return
+    unavailable = [
+        result for result in results if result.state is CandidateSourceState.UNAVAILABLE
+    ]
+    if len(unavailable) == len(results):
+        sources = ", ".join(result.source for result in unavailable)
+        raise CandidateAcquisitionError(
+            f"All requested Semantic Scholar sources were unavailable for {context}: "
+            f"{sources}."
+        )
+    if unavailable:
+        details = "; ".join(
+            f"{result.source}: {result.error or 'unavailable'}"
+            for result in unavailable
+        )
+        logger.warning(
+            "Continuing %s with partial Semantic Scholar evidence (%s).",
+            context,
+            details,
+        )
 
 
 def normalize_identity_text(raw_text: str) -> str:
@@ -290,6 +379,7 @@ class CandidatePool:
     papers: Dict[str, Paper] = field(default_factory=dict)
     sources: Dict[str, Set[str]] = field(default_factory=dict)
     seed_relations: Dict[str, str] = field(default_factory=dict)
+    source_status: Dict[str, str] = field(default_factory=dict)
 
     def add(self, paper: Paper, *, source: str, relation: str) -> None:
         """Add a paper to the pool, merging duplicates by identity aliases.
@@ -361,52 +451,71 @@ def fetch_candidate_pool(
     :return CandidatePool: Deduplicated candidate pool with provenance tags.
     """
     pool = CandidatePool(seed=seed_paper)
+    source_results: List[CandidateSourceResult] = []
     seed_id = str(seed_paper.paper_id)
     is_query_seed = seed_id.startswith("query:")
 
     if is_query_seed:
         query_text = (seed_paper.title or "").strip() or seed_id
-        try:
-            search_hits = client.search_papers(
+        search_result = fetch_candidate_source(
+            "search",
+            lambda: client.search_papers(
                 query_text,
                 limit=QUERY_SEED_SEARCH_LIMIT,
                 raise_on_unavailable=True,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Candidate search for query seed failed (%s: %s); pool stays empty.",
-                type(exc).__name__,
-                exc,
-            )
-            search_hits = []
-        for paper in search_hits:
+            ),
+        )
+        source_results.append(search_result)
+        for paper in search_result.papers:
             pool.add(paper, source="recommendation", relation="semantic_only")
         anchor_ids = list(pool.papers)[:1]
     else:
         anchor_ids = [seed_id]
         if max_references > 0:
-            for paper in client.get_paper_references(seed_id, limit=max_references):
+            reference_result = fetch_candidate_source(
+                "references",
+                lambda: client.get_paper_references(
+                    seed_id,
+                    limit=max_references,
+                    raise_on_unavailable=True,
+                ),
+            )
+            source_results.append(reference_result)
+            for paper in reference_result.papers:
                 pool.add(paper, source="reference", relation="referenced_by_seed")
         if max_citations > 0:
-            for paper in client.get_paper_citations(seed_id, limit=max_citations):
+            citation_result = fetch_candidate_source(
+                "citations",
+                lambda: client.get_paper_citations(
+                    seed_id,
+                    limit=max_citations,
+                    raise_on_unavailable=True,
+                ),
+            )
+            source_results.append(citation_result)
+            for paper in citation_result.papers:
                 pool.add(paper, source="citation", relation="cites_seed")
 
     if max_recommendations > 0 and anchor_ids:
-        try:
-            recommendations = client.get_recommended_papers(
-                anchor_ids[0], limit=max_recommendations
-            )
-        except Exception as exc:
-            logger.warning(
-                "Candidate recommendations fetch failed (%s: %s); continuing "
-                "with %d pooled candidates.",
-                type(exc).__name__,
-                exc,
-                len(pool.papers),
-            )
-            recommendations = []
-        for paper in recommendations:
+        recommendation_result = fetch_candidate_source(
+            "recommendations",
+            lambda: client.get_recommended_papers(
+                anchor_ids[0],
+                limit=max_recommendations,
+                raise_on_unavailable=True,
+            ),
+        )
+        source_results.append(recommendation_result)
+        for paper in recommendation_result.papers:
             pool.add(paper, source="recommendation", relation="semantic_only")
+
+    pool.source_status = {
+        result.source: result.state.value for result in source_results
+    }
+    require_available_candidate_source(
+        source_results,
+        context=f"candidate acquisition for {seed_id}",
+    )
 
     logger.debug(
         "Candidate pool for %s: %d papers (refs<=%d cites<=%d recs<=%d).",

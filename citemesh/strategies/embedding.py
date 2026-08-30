@@ -733,6 +733,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.top_k = top_k
         self.model = None
         self.embeddings: Dict[str, np.ndarray] = {}
+        self.candidate_source_status: Dict[str, str] = {}
         self.client = client or get_client()
         self.embedding_cache = EmbeddingCache(
             model_name=self._embedding_cache_namespace(),
@@ -1873,6 +1874,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         papers: Dict[str, Paper] = {}
         self.embeddings = {}
+        self.candidate_source_status = {}
 
         # Load model lazily.
         self._load_model()
@@ -2019,6 +2021,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             max_citations=max_citations,
             max_recommendations=max_recommendations,
         )
+        self.candidate_source_status = dict(pool.source_status)
         if not pool.papers:
             logger.warning(
                 "Candidate pool for %s is empty; graph will only contain the seed.",
@@ -3462,6 +3465,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         # Use base class to collect papers and create nodes
         graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
         graph.graph["embedding_runtime"] = self._embedding_runtime_metadata()
+        graph.graph["candidate_source_status"] = dict(
+            sorted(self.candidate_source_status.items())
+        )
         # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
         filtered_graph = build_capped_undirected_graph(graph, self.top_k)
 

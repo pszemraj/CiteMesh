@@ -19,6 +19,10 @@ from citemesh.strategies.base import (
     deterministic_sort_key,
     select_capped_undirected_edges,
 )
+from citemesh.strategies.candidates import (
+    CandidateAcquisitionError,
+    fetch_candidate_pool,
+)
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import EmbeddingInferenceError, HybridGraphBuilder
@@ -346,6 +350,10 @@ def test_citation_build_graph_persists_seed_relation_metadata() -> None:
         "ref1": "referenced_by_seed",
         "seed": "seed",
     }
+    assert graph.graph["candidate_source_status"] == {
+        "citations": "complete",
+        "references": "complete",
+    }
 
 
 def test_recommendation_build_graph_persists_strategy_metadata() -> None:
@@ -367,6 +375,110 @@ def test_recommendation_build_graph_persists_strategy_metadata() -> None:
 
     assert seed_id == "seed"
     assert graph.graph["strategy"] == "recommendation"
+    assert graph.graph["candidate_source_status"] == {"recommendations": "complete"}
+
+
+def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages() -> None:
+    """Candidate sources should preserve empty evidence and fail only on total outage."""
+    from citemesh.services import SemanticScholarUnavailableError
+
+    seed = _seed_paper()
+    partial_client = MagicMock()
+    partial_client.get_paper_references.side_effect = SemanticScholarUnavailableError(
+        "references down"
+    )
+    partial_client.get_paper_citations.return_value = []
+    partial_client.get_recommended_papers.return_value = [_paper("rec1")]
+
+    partial_pool = fetch_candidate_pool(
+        partial_client,
+        seed,
+        max_references=1,
+        max_citations=1,
+        max_recommendations=1,
+    )
+    assert set(partial_pool.papers) == {"rec1"}
+    assert partial_pool.source_status == {
+        "references": "unavailable",
+        "citations": "empty",
+        "recommendations": "complete",
+    }
+
+    empty_client = MagicMock()
+    empty_client.get_paper_references.return_value = []
+    empty_client.get_paper_citations.return_value = []
+    empty_pool = fetch_candidate_pool(
+        empty_client,
+        seed,
+        max_references=1,
+        max_citations=1,
+    )
+    assert empty_pool.papers == {}
+    assert empty_pool.source_status == {
+        "references": "empty",
+        "citations": "empty",
+    }
+
+    unavailable_client = MagicMock()
+    unavailable_client.get_paper_references.side_effect = (
+        SemanticScholarUnavailableError("references down")
+    )
+    unavailable_client.get_paper_citations.side_effect = (
+        SemanticScholarUnavailableError("citations down")
+    )
+    with pytest.raises(CandidateAcquisitionError, match="references, citations"):
+        fetch_candidate_pool(
+            unavailable_client,
+            seed,
+            max_references=1,
+            max_citations=1,
+        )
+
+    query_client = MagicMock()
+    query_client.search_papers.side_effect = SemanticScholarUnavailableError(
+        "search down"
+    )
+    with pytest.raises(CandidateAcquisitionError, match="search"):
+        fetch_candidate_pool(
+            query_client,
+            Paper(
+                paper_id="query:topic",
+                title="topic",
+                year=None,
+                is_seed=True,
+            ),
+            max_recommendations=1,
+        )
+    query_client.get_recommended_papers.assert_not_called()
+
+    recommendation_client = MagicMock()
+    recommendation_client.get_paper.return_value = seed
+    recommendation_client.get_recommended_papers.side_effect = (
+        SemanticScholarUnavailableError("recommendations down")
+    )
+    with pytest.raises(CandidateAcquisitionError, match="recommendations"):
+        RecommendationGraphBuilder(
+            max_papers=3,
+            fetch_references=False,
+            client=recommendation_client,
+        ).collect_papers("seed")
+
+    citation_client = MagicMock()
+    citation_client.get_paper.return_value = seed
+    citation_client.get_paper_references.side_effect = SemanticScholarUnavailableError(
+        "references down"
+    )
+    citation_client.get_paper_citations.side_effect = SemanticScholarUnavailableError(
+        "citations down"
+    )
+    with pytest.raises(CandidateAcquisitionError, match="references, citations"):
+        CitationGraphBuilder(
+            max_papers=3,
+            max_references=1,
+            max_citations=1,
+            fetch_references=False,
+            client=citation_client,
+        ).collect_papers("seed")
 
 
 def test_refresh_reference_cache_force_lookup_contracts() -> None:
@@ -1489,6 +1601,11 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
     non_seed = [paper_id for paper_id in papers if paper_id != "seed"]
     for paper_id in non_seed:
         assert paper_id in builder.embeddings
+    assert builder.candidate_source_status == {
+        "citations": "complete",
+        "recommendations": "complete",
+        "references": "complete",
+    }
 
     # A fresh builder must hit the persisted candidate cache without encoding.
     class _RaisingModel:
@@ -1579,7 +1696,12 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
     papers = builder.collect_papers("seed")
 
     assert "seed" in papers
-    client.get_recommended_papers.assert_called_once_with("seed", limit=1)
+    client.get_recommended_papers.assert_called_once_with(
+        "seed",
+        limit=1,
+        raise_on_unavailable=True,
+    )
+    assert builder.candidate_source_status == {"recommendations": "complete"}
     semantic_added = [
         paper_id
         for paper_id, source in builder.paper_sources.items()

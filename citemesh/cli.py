@@ -3605,6 +3605,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "theme": args.theme,
                 "score_contract": _strategy_score_contract(args.strategy),
             }
+            raw_source_status = graph.graph.get("candidate_source_status")
+            if isinstance(raw_source_status, dict):
+                metadata["candidate_source_status"] = {
+                    str(source): str(status)
+                    for source, status in sorted(
+                        raw_source_status.items(), key=lambda item: str(item[0])
+                    )
+                }
             include_embedding_metadata = _embedding_branch_enabled(args)
             if include_embedding_metadata:
                 runtime_embedding_metadata: Optional[Dict[str, Any]] = None

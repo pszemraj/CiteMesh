@@ -196,7 +196,13 @@ def test_exporter_serialization_contracts_and_determinism(
     exporter = GraphExporter(
         graph,
         seed_id,
-        metadata={"strategy": "citation"},
+        metadata={
+            "strategy": "citation",
+            "candidate_source_status": {
+                "references": "unavailable",
+                "citations": "complete",
+            },
+        },
         layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
     )
 
@@ -213,10 +219,18 @@ def test_exporter_serialization_contracts_and_determinism(
     assert payload["schema_version"] == 1
     assert exporter.graph_payload() == payload
     assert payload["seed_id"] == seed_id
+    assert payload["meta"]["candidate_source_status"] == {
+        "citations": "complete",
+        "references": "unavailable",
+    }
     assert "metadata" not in payload
     assert payload["summary"] == {"nodes": 2, "edges": 1}
     assert "dashboard" in payload
     assert payload["dashboard"]["meta"]["seed_id"] == seed_id
+    assert payload["dashboard"]["meta"]["candidate_source_status"] == {
+        "citations": "complete",
+        "references": "unavailable",
+    }
     assert len(payload["dashboard"]["meta"]["plotly_node_order"]) == 2
     assert len(payload["dashboard"]["meta"]["plotly_positions"]) == 2
     assert len(payload["dashboard"]["meta"]["plotly_node_sizes"]) == 2
@@ -230,6 +244,10 @@ def test_exporter_serialization_contracts_and_determinism(
     assert seed_node["is_seed"] in {"1", 1}
     assert "Alice Smith" in seed_node["authors"]
     assert graphml.graph["citemesh_meta_strategy"] == "citation"
+    assert json.loads(graphml.graph["citemesh_meta_candidate_source_status"]) == {
+        "citations": "complete",
+        "references": "unavailable",
+    }
 
     policy = _graphml_determinism_policy()
     assert graphml.graph[GRAPHML_LAYOUT_METADATA_KEY] == policy

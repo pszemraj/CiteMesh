@@ -1025,12 +1025,20 @@ class SemanticScholarClient:
 
         return matched
 
-    def get_paper_citations(self, paper_id: str, limit: int = 20) -> List[Paper]:
+    def get_paper_citations(
+        self,
+        paper_id: str,
+        limit: int = 20,
+        *,
+        raise_on_unavailable: bool = False,
+    ) -> List[Paper]:
         """
         Fetch papers that cite the given paper.
 
         :param str paper_id: Paper identifier
         :param int limit: Maximum number of citations to fetch
+        :param bool raise_on_unavailable: Whether exhausted operational retries
+            raise instead of returning an empty list.
         :return List[Paper]: Citation Papers (may be empty).
         """
         parsed_limit = _validate_integer_limit(limit, "limit", allow_zero=True)
@@ -1042,14 +1050,23 @@ class SemanticScholarClient:
             limit=parsed_limit,
             fetch_method=self.client.get_paper_citations,
             relation_label="citations",
+            raise_on_unavailable=raise_on_unavailable,
         )
 
-    def get_paper_references(self, paper_id: str, limit: int = 20) -> List[Paper]:
+    def get_paper_references(
+        self,
+        paper_id: str,
+        limit: int = 20,
+        *,
+        raise_on_unavailable: bool = False,
+    ) -> List[Paper]:
         """
         Fetch papers referenced by the given paper.
 
         :param str paper_id: Paper identifier
         :param int limit: Maximum number of references to fetch
+        :param bool raise_on_unavailable: Whether exhausted operational retries
+            raise instead of returning an empty list.
         :return List[Paper]: List of Paper objects (may be shorter than limit)
         """
         parsed_limit = _validate_integer_limit(limit, "limit", allow_zero=True)
@@ -1061,6 +1078,7 @@ class SemanticScholarClient:
             limit=parsed_limit,
             fetch_method=self.client.get_paper_references,
             relation_label="references",
+            raise_on_unavailable=raise_on_unavailable,
         )
 
     def _get_related_papers(
@@ -1069,6 +1087,7 @@ class SemanticScholarClient:
         limit: int,
         fetch_method: Callable[..., Any],
         relation_label: str,
+        raise_on_unavailable: bool,
     ) -> List[Paper]:
         """Fetch and convert citation-like relation payloads with shared retry logic.
 
@@ -1076,6 +1095,7 @@ class SemanticScholarClient:
         :param int limit: Maximum number of relation records to fetch.
         :param Callable[..., Any] fetch_method: Semantic Scholar relation fetch method.
         :param str relation_label: Human-readable label used in logs.
+        :param bool raise_on_unavailable: Whether exhausted operational retries raise.
         :return List[Paper]: Converted relation papers.
         """
         papers: List[Paper] = []
@@ -1100,6 +1120,28 @@ class SemanticScholarClient:
 
             return papers
 
+        def _final_failure(exc: Exception) -> List[Paper]:
+            """Apply the caller-selected failure contract after retry exhaustion.
+
+            :param Exception exc: Final operational failure.
+            :return List[Paper]: Accumulated papers in tolerant mode.
+            :raises SemanticScholarUnavailableError: In strict mode.
+            """
+            if raise_on_unavailable:
+                raise self._unavailable_error(
+                    f"fetching {relation_label} for {normalized_paper_id}",
+                    f": {exc}",
+                    rate_limited=self._is_rate_limit_error(exc),
+                ) from exc
+            logger.warning(
+                "Failed to fetch %s for %s after %s attempts: %s",
+                relation_label,
+                normalized_paper_id,
+                API_CONFIG.max_retries,
+                exc,
+            )
+            return papers
+
         return self._call_with_retries(
             _operation,
             on_retry=lambda attempt, wait_time, exc: logger.warning(
@@ -1109,16 +1151,7 @@ class SemanticScholarClient:
                 attempt,
                 wait_time,
             ),
-            on_final_failure=lambda exc: (
-                logger.warning(
-                    "Failed to fetch %s for %s after %s attempts: %s",
-                    relation_label,
-                    normalized_paper_id,
-                    API_CONFIG.max_retries,
-                    exc,
-                )
-                or papers
-            ),
+            on_final_failure=_final_failure,
             handled_exceptions=(
                 (
                     ObjectNotFoundException,
@@ -1271,6 +1304,8 @@ class SemanticScholarClient:
         limit: int = 50,
         fields: Optional[List[str]] = None,
         include_references: bool = False,
+        *,
+        raise_on_unavailable: bool = False,
     ) -> List[Paper]:
         """
         Get semantically related papers using S2 recommendations.
@@ -1280,6 +1315,8 @@ class SemanticScholarClient:
         :param Optional[List[str]] fields: API fields to return.
         :param bool include_references: Whether recommendation payload should include
             reference lists when the endpoint supports it.
+        :param bool raise_on_unavailable: Whether exhausted operational retries
+            raise instead of returning an empty list.
         :return List[Paper]: Ranked recommendation papers.
         """
         if fields is None:
@@ -1297,7 +1334,10 @@ class SemanticScholarClient:
         encoded_paper_id = quote(normalized_paper_id, safe="")
         base_params = {"fields": ",".join(fields), "limit": parsed_limit}
         payload = self._request_json(
-            f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}", base_params
+            f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
+            base_params,
+            raise_on_unavailable=raise_on_unavailable,
+            context=f"fetching recommendations for {normalized_paper_id}",
         )
         if payload is None:
             return []
@@ -1309,6 +1349,8 @@ class SemanticScholarClient:
             fallback_payload = self._request_json(
                 f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
                 {**base_params, "from": "all-cs"},
+                raise_on_unavailable=raise_on_unavailable,
+                context=(f"fetching all-cs recommendations for {normalized_paper_id}"),
             )
             raw_recommendations = (fallback_payload or {}).get("recommendedPapers", [])
             if raw_recommendations:

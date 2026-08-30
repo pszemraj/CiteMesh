@@ -264,6 +264,10 @@ Local search targets the same cache namespace a flagless build writes to (honori
 ## Troubleshooting
 
 - **No results / paper not found**: confirm identifier format and Semantic Scholar availability.
+- **Partial Semantic Scholar outage**: CiteMesh continues only when at least one
+  requested neighborhood source completed. Export metadata records each attempted
+  source as `complete`, `empty`, or `unavailable`; a total source outage exits
+  nonzero instead of producing a plausible seed-only graph.
 - **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
 - **Full-corpus run still mentions `50000`**: that usually means CiteMesh is replacing an older capped namespace before hydrating the requested full selected split. Check the compact config log line for `split=...` and `corpus=all`.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.

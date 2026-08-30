@@ -272,6 +272,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         # Track paper sources for adaptive similarity
         self.paper_sources: Dict[str, str] = {}  # paper_id -> citation|semantic|both
         self.seed_relations: Dict[str, str] = {}
+        self.candidate_source_status: Dict[str, str] = {}
 
     def _ingest_candidate(
         self,
@@ -602,11 +603,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         papers: Dict[str, Paper] = {}
         self.paper_sources = {}
         self.seed_relations = {}
+        self.candidate_source_status = {}
         alias_map: Dict[str, str] = {}
 
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")
         citation_papers = self.citation_builder.collect_papers(seed_id)
+        citation_source_status = getattr(
+            self.citation_builder, "candidate_source_status", {}
+        )
+        if isinstance(citation_source_status, dict):
+            self.candidate_source_status.update(citation_source_status)
         seed_paper = next(
             (paper for paper in citation_papers.values() if paper.is_seed), None
         )
@@ -678,6 +685,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                         self.embedding_builder.candidate_pool_size,
                     ),
                 )
+                self.candidate_source_status.update(pool.source_status)
                 semantic_papers = pool.papers
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
@@ -819,6 +827,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 self.seed_relations.items(), key=lambda item: item[0]
             )
         }
+        graph.graph["candidate_source_status"] = dict(
+            sorted(self.candidate_source_status.items())
+        )
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:

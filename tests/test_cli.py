@@ -39,6 +39,7 @@ from citemesh.cli import (
 from citemesh.core import Author, Paper
 from citemesh.core.user_config import UserConfig
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import ENCODE_BATCH_SIZE
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
@@ -716,7 +717,10 @@ def test_search_mode_from_config_local_empty_cache_cites_config(
     assert "config.toml" in message
 
 
-def test_invalid_paper_id_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invalid_paper_id_fails_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """Invalid build errors should produce a clean non-zero exit."""
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
@@ -733,6 +737,33 @@ def test_invalid_paper_id_fails_cleanly(monkeypatch: pytest.MonkeyPatch) -> None
     assert error_mock.call_count == 1
     assert "Seed paper not found" in str(error_mock.call_args)
     assert "Traceback" not in result.stderr
+
+    output = tmp_path / "unavailable.json"
+    error_mock.reset_mock()
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        MagicMock(
+            side_effect=CandidateAcquisitionError(
+                "All requested Semantic Scholar sources were unavailable"
+            )
+        ),
+    )
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "json",
+            "-o",
+            str(output),
+        ]
+    )
+    assert result.returncode != 0
+    assert not output.exists()
+    assert "All requested Semantic Scholar sources" in str(error_mock.call_args)
 
 
 def test_cli_argument_validation_contracts() -> None:
@@ -2338,6 +2369,20 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
             extra_args=extra_args,
         )
         assert ("timestamp" in metadata) is expected_key
+
+    status_graph = nx.Graph()
+    status_graph.graph["candidate_source_status"] = {
+        "references": "unavailable",
+        "citations": "empty",
+    }
+    metadata = _capture_metadata(
+        strategy="citation",
+        graph=status_graph,
+    )
+    assert metadata["candidate_source_status"] == {
+        "citations": "empty",
+        "references": "unavailable",
+    }
 
     metadata = _capture_metadata(
         strategy="embedding",

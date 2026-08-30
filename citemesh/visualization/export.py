@@ -369,14 +369,18 @@ class GraphExporter:
             sorted_edges=sorted_edges,
             include_plotly_geometry=self._layout is not None,
         )
+        portable_meta: Dict[str, Any] = {
+            "strategy": dashboard_meta["strategy"],
+            "year_range": dashboard_meta["year_range"],
+        }
+        candidate_source_status = dashboard_meta.get("candidate_source_status")
+        if isinstance(candidate_source_status, dict):
+            portable_meta["candidate_source_status"] = candidate_source_status
         return {
             "kind": GRAPH_PAYLOAD_KIND,
             "schema_version": GRAPH_PAYLOAD_SCHEMA_VERSION,
             "seed_id": str(self.seed_id),
-            "meta": {
-                "strategy": dashboard_meta["strategy"],
-                "year_range": dashboard_meta["year_range"],
-            },
+            "meta": portable_meta,
             "summary": dashboard_meta["summary"],
             "nodes": enriched,
             "dashboard": {
@@ -1109,6 +1113,14 @@ class GraphExporter:
             },
             "year_range": year_range,
         }
+        raw_source_status = self.metadata.get("candidate_source_status")
+        if isinstance(raw_source_status, dict):
+            meta["candidate_source_status"] = {
+                str(source): str(status)
+                for source, status in sorted(
+                    raw_source_status.items(), key=lambda item: str(item[0])
+                )
+            }
         if include_plotly_geometry:
             positions = self._get_layout()
             meta["plotly_node_order"] = [str(node_id) for node_id in node_ids]
@@ -3295,6 +3307,7 @@ class GraphExporter:
         meta: {
           strategy: nextMeta.strategy || "",
           year_range: nextMeta.year_range || {},
+          candidate_source_status: nextMeta.candidate_source_status || {},
         },
         summary,
         dashboard: {
@@ -3458,6 +3471,10 @@ class GraphExporter:
           edges: importedEdges.length,
         },
         year_range: importedDashboardMeta.year_range || importedMeta.year_range || {},
+        candidate_source_status:
+          importedDashboardMeta.candidate_source_status
+          || importedMeta.candidate_source_status
+          || {},
         plotly_node_order:
           importedDashboardMeta.plotly_node_order || importedMeta.plotly_node_order || [],
         plotly_positions:

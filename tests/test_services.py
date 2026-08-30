@@ -21,6 +21,7 @@ from citemesh.services import semantic_scholar as s2
 from citemesh.services import semantic_scholar as semantic_module
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
+    SemanticScholarUnavailableError,
     get_client,
     normalize_paper_id,
     reset_client,
@@ -318,6 +319,36 @@ def test_retry_and_backoff_contracts() -> None:
 
     assert result is None
     assert sleep_mock.call_count == API_CONFIG.max_retries - 1
+
+    for api_method, public_method in [
+        ("get_paper_citations", "get_paper_citations"),
+        ("get_paper_references", "get_paper_references"),
+    ]:
+        client = SemanticScholarClient(timeout=1)
+        client._rate_limit = lambda: None
+        setattr(client.client, api_method, MagicMock(side_effect=Exception("down")))
+        with (
+            patch("citemesh.services.semantic_scholar.time.sleep"),
+            pytest.raises(
+                SemanticScholarUnavailableError,
+                match="Semantic Scholar API unreachable",
+            ),
+        ):
+            getattr(client, public_method)(
+                "seed",
+                limit=5,
+                raise_on_unavailable=True,
+            )
+
+        setattr(client.client, api_method, MagicMock(return_value=[]))
+        assert (
+            getattr(client, public_method)(
+                "seed",
+                limit=5,
+                raise_on_unavailable=True,
+            )
+            == []
+        )
 
 
 def test_normalization_and_get_paper_id_contracts() -> None:
@@ -1053,6 +1084,30 @@ def test_recommendations_fall_back_to_all_cs_pool() -> None:
     client._request_json = MagicMock(return_value=None)
     assert client.get_recommended_papers("seed", limit=5) == []
     assert client._request_json.call_count == 1
+
+    primary_outage = SemanticScholarUnavailableError("recommendations unavailable")
+    client._request_json = MagicMock(side_effect=primary_outage)
+    with pytest.raises(
+        SemanticScholarUnavailableError, match="recommendations unavailable"
+    ):
+        client.get_recommended_papers(
+            "seed",
+            limit=5,
+            raise_on_unavailable=True,
+        )
+    assert client._request_json.call_count == 1
+
+    fallback_outage = SemanticScholarUnavailableError("all-cs unavailable")
+    client._request_json = MagicMock(
+        side_effect=[{"recommendedPapers": []}, fallback_outage]
+    )
+    with pytest.raises(SemanticScholarUnavailableError, match="all-cs unavailable"):
+        client.get_recommended_papers(
+            "seed",
+            limit=5,
+            raise_on_unavailable=True,
+        )
+    assert client._request_json.call_count == 2
 
 
 def test_jittered_backoff_policy(monkeypatch: pytest.MonkeyPatch) -> None:

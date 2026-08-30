@@ -19,9 +19,12 @@ from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import GraphBuilderStrategy
 from citemesh.strategies.candidates import (
+    CandidateSourceResult,
+    fetch_candidate_source,
     merge_seed_relation,
     reconcile_paper_identity,
     register_aliases,
+    require_available_candidate_source,
 )
 
 if TYPE_CHECKING:
@@ -73,6 +76,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.client: SemanticScholarClient = client or get_client()
         self.reference_cache: Dict[str, list] = {}  # Cache reference lists
         self.seed_relations: Dict[str, str] = {}
+        self.candidate_source_status: Dict[str, str] = {}
         self._identity_aliases: Dict[str, str] = {}
         self._abstract_index = AbstractSimilarityIndex()
 
@@ -241,8 +245,10 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         # not leak across caller boundaries when builders are reused.
         self.reference_cache.clear()
         self.seed_relations = {}
+        self.candidate_source_status = {}
         self._identity_aliases = {}
         papers = {}
+        source_results: list[CandidateSourceResult] = []
 
         # Step 1: Fetch seed paper
         logger.info(f"Fetching seed paper: {seed_id}")
@@ -270,37 +276,58 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         logger.info("Seed: %s", seed.title)
 
         # Step 2: Fetch references (older papers)
-        logger.info(f"Fetching up to {self.max_references} references...")
-        references = self.client.get_paper_references(
-            seed.paper_id, limit=self.max_references
-        )
         progress_enabled = stderr_isatty()
-        reference_ids = self._ingest_relation_batch(
-            papers,
-            seed,
-            references,
-            progress_enabled=progress_enabled,
-            progress_description="Downloading references",
-        )
-        self._record_seed_relations(reference_ids, "referenced_by_seed")
+        if self.max_references > 0:
+            logger.info(f"Fetching up to {self.max_references} references...")
+            reference_result = fetch_candidate_source(
+                "references",
+                lambda: self.client.get_paper_references(
+                    seed.paper_id,
+                    limit=self.max_references,
+                    raise_on_unavailable=True,
+                ),
+            )
+            source_results.append(reference_result)
+            reference_ids = self._ingest_relation_batch(
+                papers,
+                seed,
+                list(reference_result.papers),
+                progress_enabled=progress_enabled,
+                progress_description="Downloading references",
+            )
+            self._record_seed_relations(reference_ids, "referenced_by_seed")
 
         # Step 3: Fetch citations (newer papers)
         remaining = self.max_papers - len(papers)
-        if remaining > 0:
+        if remaining > 0 and self.max_citations > 0:
             logger.info(
                 f"Fetching up to {min(remaining, self.max_citations)} citations..."
             )
-            citations = self.client.get_paper_citations(
-                seed.paper_id, limit=min(remaining, self.max_citations)
+            citation_result = fetch_candidate_source(
+                "citations",
+                lambda: self.client.get_paper_citations(
+                    seed.paper_id,
+                    limit=min(remaining, self.max_citations),
+                    raise_on_unavailable=True,
+                ),
             )
+            source_results.append(citation_result)
             citation_ids = self._ingest_relation_batch(
                 papers,
                 seed,
-                citations,
+                list(citation_result.papers),
                 progress_enabled=progress_enabled,
                 progress_description="Downloading citations",
             )
             self._record_seed_relations(citation_ids, "cites_seed")
+
+        self.candidate_source_status = {
+            result.source: result.state.value for result in source_results
+        }
+        require_available_candidate_source(
+            source_results,
+            context=f"citation acquisition for {seed.paper_id}",
+        )
 
         reference_lists = len(self.reference_cache)
         summary = (
@@ -326,6 +353,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             )
             if str(node_id) in graph.nodes
         }
+        graph.graph["candidate_source_status"] = dict(
+            sorted(self.candidate_source_status.items())
+        )
         return graph, actual_seed_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
