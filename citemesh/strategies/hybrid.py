@@ -28,7 +28,6 @@ from citemesh.strategies.candidates import (
     IdentityRegistry,
     fetch_candidate_pool,
     merge_seed_relation,
-    paper_embedding_metadata,
     reconcile_paper_identity,
     register_aliases,
 )
@@ -366,11 +365,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if paper is None:
                 continue
 
-            document_text = str(
-                model_profile.format_document(paper_embedding_metadata(paper))
+            document_text = format_paper_for_embedding(
+                profile=model_profile,
+                paper=paper,
+                task=EmbeddingTask.RETRIEVAL_DOCUMENT,
             ).strip()
-            if not document_text:
-                document_text = str(paper.paper_id)
             texts.append(document_text)
             ordered_candidate_ids.append(paper_id)
 

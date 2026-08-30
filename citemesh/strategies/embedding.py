@@ -28,6 +28,7 @@ from typing import (
     Dict,
     Iterable,
     List,
+    Mapping,
     Optional,
     Set,
     Tuple,
@@ -163,17 +164,44 @@ def format_paper_for_embedding(
     :return str: Model input text, falling back to the paper ID when needed.
     :raises ValueError: If ``task`` is unsupported.
     """
-    metadata = _embedding_text_metadata(paper.title, paper.abstract)
-    content = compose_title_abstract_text(metadata) or str(paper.paper_id)
+    return format_embedding_metadata(
+        profile=profile,
+        metadata={"title": paper.title, "abstract": paper.abstract},
+        paper_id=paper.paper_id,
+        task=task,
+    )
+
+
+def format_embedding_metadata(
+    *,
+    profile: Any,
+    metadata: Mapping[str, object],
+    task: EmbeddingTask,
+    paper_id: object = "",
+) -> str:
+    """Format paper metadata for one prompt-conditioned embedding role.
+
+    :param Any profile: Active embedding model profile.
+    :param Mapping[str, object] metadata: Paper metadata containing text fields.
+    :param EmbeddingTask task: Required prompt-conditioned vector role.
+    :param object paper_id: Identity fallback when title and abstract are empty.
+    :return str: Profile-formatted input with a stable identity fallback.
+    :raises ValueError: If ``task`` is unsupported.
+    """
+    text_metadata = _embedding_text_metadata(
+        metadata.get("title"), metadata.get("abstract")
+    )
+    fallback_id = str(paper_id or metadata.get("paper_id") or "unknown-paper")
+    content = compose_title_abstract_text(text_metadata) or fallback_id
     if task is EmbeddingTask.RETRIEVAL_QUERY:
-        return str(profile.format_query(content, metadata))
+        return str(profile.format_query(content, text_metadata))
     if task is EmbeddingTask.RETRIEVAL_DOCUMENT:
-        document_metadata = dict(metadata)
+        document_metadata = dict(text_metadata)
         if not compose_title_abstract_text(document_metadata):
-            document_metadata["title"] = str(paper.paper_id)
+            document_metadata["title"] = fallback_id
         return str(profile.format_document(document_metadata)) or content
     if task is EmbeddingTask.GRAPH_SIMILARITY:
-        return str(profile.format_similarity(content, metadata)) or content
+        return str(profile.format_similarity(content, text_metadata)) or content
     raise ValueError(f"Unsupported embedding task: {task}")
 
 
@@ -819,11 +847,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.device = resolve_embedding_device(self.requested_device)
         self._document_formatter_fingerprint = self._resolve_formatter_fingerprint(
             formatter=self.model_profile.document_formatter,
-            probe_renderer=self.model_profile.format_document,
+            probe_renderer=self._format_retrieval_document_metadata,
         )
         self._similarity_formatter_fingerprint = self._resolve_formatter_fingerprint(
             formatter=self.model_profile.similarity_formatter,
-            probe_renderer=self._format_similarity_fingerprint_probe,
+            probe_renderer=self._format_graph_similarity_metadata,
         )
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
         self._attention_implementation_hint = (
@@ -1135,15 +1163,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         ):
             parts.append(f"mode={self.semantic_source}")
         return "::".join(parts)
-
-    def _format_similarity_fingerprint_probe(self, metadata: Dict[str, str]) -> str:
-        """Render one graph formatter probe with the persisted legacy policy.
-
-        :param Dict[str, str] metadata: Formatter probe metadata.
-        :return str: Similarity input used to partition existing cache namespaces.
-        """
-        content = compose_title_abstract_text(metadata) or "unknown-paper"
-        return self.model_profile.format_similarity(content, dict(metadata))
 
     def _resolve_formatter_fingerprint(
         self,
@@ -2365,7 +2384,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._load_model()
         self._ensure_cache_model_fingerprint()
         metadata_map = {
-            paper_id: paper_embedding_metadata(paper)
+            paper_id: {
+                **paper_embedding_metadata(paper),
+                "paper_id": paper_id,
+            }
             for paper_id, paper in papers.items()
         }
         embeddings = self.embedding_cache.get_embeddings(
@@ -2373,10 +2395,23 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._get_model_for_encoding(),
             batch_size=self.encode_batch_size,
             show_progress=False,
-            text_builder=self.model_profile.format_document,
+            text_builder=self._format_retrieval_document_metadata,
         )
         self.retrieval_embeddings.update(embeddings)
         return embeddings
+
+    def _format_retrieval_document_metadata(self, metadata: Dict[str, object]) -> str:
+        """Format cached metadata for retrieval-document encoding.
+
+        :param Dict[str, object] metadata: Cache metadata including paper identity.
+        :return str: Profile-formatted retrieval-document input.
+        """
+        return format_embedding_metadata(
+            profile=self.model_profile,
+            metadata=metadata,
+            paper_id=metadata.get("paper_id", ""),
+            task=EmbeddingTask.RETRIEVAL_DOCUMENT,
+        )
 
     def _format_graph_similarity_metadata(self, metadata: Dict[str, object]) -> str:
         """Format cached paper metadata for symmetric graph similarity.
@@ -2384,14 +2419,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param Dict[str, object] metadata: Cache metadata including paper identity.
         :return str: Profile-formatted symmetric similarity input.
         """
-        text_metadata = _embedding_text_metadata(
-            metadata.get("title"), metadata.get("abstract")
-        )
-        content = compose_title_abstract_text(text_metadata) or str(
-            metadata.get("paper_id") or "unknown-paper"
-        )
-        return (
-            str(self.model_profile.format_similarity(content, text_metadata)) or content
+        return format_embedding_metadata(
+            profile=self.model_profile,
+            metadata=metadata,
+            paper_id=metadata.get("paper_id", ""),
+            task=EmbeddingTask.GRAPH_SIMILARITY,
         )
 
     def materialize_graph_embeddings(
@@ -3632,13 +3664,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         sample_texts = [
-            self.model_profile.format_document(
-                {
-                    "title": metadata.get("title", ""),
-                    "abstract": metadata.get("abstract", ""),
-                }
-            )
-            for metadata in records
+            self._format_retrieval_document_metadata(metadata) for metadata in records
         ]
         sample_embeddings = self._encode_texts(
             sample_texts,
@@ -3670,7 +3696,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if not paper_id:
                 continue
             payload = dict(metadata)
-            payload.pop("paper_id", None)
             metadata_map[paper_id] = payload
 
         if not metadata_map:
@@ -3681,7 +3706,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._get_model_for_encoding(),
             batch_size=min(self.encode_batch_size, len(metadata_map)),
             show_progress=False,
-            text_builder=self.model_profile.format_document,
+            text_builder=self._format_retrieval_document_metadata,
         )
         return len(metadata_map)
 

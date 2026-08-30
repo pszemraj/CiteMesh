@@ -1358,10 +1358,17 @@ def test_paper_embedding_task_dispatcher_uses_id_fallback() -> None:
         paper=paper,
         task=EmbeddingTask.GRAPH_SIMILARITY,
     )
+    cached_metadata = {
+        "paper_id": paper.paper_id,
+        "title": paper.title,
+        "abstract": paper.abstract,
+    }
 
     assert "paper-without-text" in query
     assert "paper-without-text" in document
     assert "paper-without-text" in graph
+    assert builder._format_retrieval_document_metadata(cached_metadata) == document
+    assert builder._format_graph_similarity_metadata(cached_metadata) == graph
 
 
 def test_metadata_and_streaming_loader_contracts(
