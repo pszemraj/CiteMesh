@@ -3,10 +3,10 @@
 CiteMesh stores durable personal defaults in a TOML file at the cache root:
 
 ```text
-<cache_root>/config.toml       # default: ~/.cache/citemesh/config.toml
+<cache_root>/config.toml
 ```
 
-Use it for preferences you would otherwise repeat on every invocation — for example always using corpus-backed semantic sourcing, a preferred theme, or a Semantic Scholar API key.
+Use it for preferences you would otherwise repeat on every invocation - for example always using corpus-backed semantic sourcing, a preferred theme, or a Semantic Scholar API key.
 
 Related docs:
 
@@ -19,7 +19,8 @@ Related docs:
 Effective values resolve in this order (first match wins):
 
 1. Explicit CLI flag (`--semantic-source arxiv-corpus`)
-2. Environment variable (only `S2_API_KEY` today; presence wins even when empty)
+2. Environment variable (only `S2_API_KEY` today; presence wins even when empty,
+   and an empty value explicitly selects anonymous access)
 3. `config.toml` value
 4. Built-in default
 
@@ -48,11 +49,11 @@ Value forms for `config set`:
 - Export lists: comma-separated, e.g. `citemesh config set defaults.export json,dashboard`
 - Everything else: plain strings/integers
 
-Invalid keys and values are rejected at `set` time with the list of valid options. Invalid entries, malformed TOML, and non-UTF-8 files are ignored with a warning during ordinary CLI loads, so a bad config never blocks unrelated commands. Mutating `config set`/`unset` operations fail instead of overwriting an unreadable file. Unknown keys already in the file are preserved when CiteMesh rewrites it (comments are not — the TOML round-trip is value-level).
+Invalid keys and values are rejected at `set` time with the list of valid options. Invalid entries, malformed TOML, and non-UTF-8 files are ignored with a warning during ordinary CLI loads, so a bad config never blocks unrelated commands. Mutating `config set`/`unset` operations fail instead of overwriting an unreadable file. Unknown keys already in the file are preserved when CiteMesh rewrites it (comments are not - the TOML round-trip is value-level).
 
 ## Supported keys
 
-`[defaults]` — whitelisted build-flag defaults (plus `search_mode`, which applies to `citemesh search` instead of `build`):
+`[defaults]` - whitelisted build-flag defaults (plus `search_mode`, which applies to `citemesh search` instead of `build`):
 
 | Key | Meaning |
 | --- | --- |
@@ -82,7 +83,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 
 | Key | Meaning |
 | --- | --- |
-| `s2_api_key` | Semantic Scholar API key. The `S2_API_KEY` environment variable wins when present (even when set to an empty string). Masked in `config list` output; `config get` prints the full value. |
+| `s2_api_key` | Semantic Scholar API key used only when `S2_API_KEY` is absent. Masked in `config list` output; `config get` prints the full value. |
 
 Example `config.toml`:
 
@@ -100,4 +101,5 @@ s2_api_key = "your-key-here"
 
 - The file lives at the cache root, so `CITEMESH_CACHE_DIR` moves it too.
 - `citemesh cache clear` deletes cached payloads but **never** `config.toml`.
-- To reset configuration, delete the file (`rm "$(citemesh config path)"`) or `citemesh config unset` individual keys.
+- To reset configuration, delete the path printed by `citemesh config path`, or
+  use `citemesh config unset` for individual keys.

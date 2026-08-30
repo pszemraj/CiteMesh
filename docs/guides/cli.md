@@ -11,10 +11,7 @@ Related docs:
 - Defaults parameter study: [Defaults Tuning Study](../reference/defaults-tuning-study.md)
 - Environment variables: [Environment Variables](../reference/environment.md)
 
-Install notes:
-
-- For the normal full-featured runtime, use the `recommended` extra from [README](../../README.md).
-- `embeddings` and `viz` remain useful as targeted add-ons when you want only one optional capability.
+Installation and optional extras are covered in [README](../../README.md).
 
 ## Basic Invocation
 
@@ -49,7 +46,9 @@ citemesh config path
 
 For cache path/layout/hydration details, see [Caching & Data](caching.md). In non-interactive shells, `citemesh cache clear` requires `--yes`. `citemesh cache clear` never deletes `config.toml`. In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--overwrite-cache`.
 
-Persistent defaults for most build flags can be stored with `citemesh config`; precedence is explicit CLI flag > environment variable > `config.toml` > built-in default. Keys, value forms, and precedence subtleties are documented in [User Configuration](configuration.md).
+Persistent defaults for most build flags can be stored with `citemesh config`.
+Supported keys, value forms, and precedence are documented in
+[User Configuration](configuration.md).
 
 ## Accepted Identifiers
 
@@ -60,7 +59,8 @@ Persistent defaults for most build flags can be stored with `citemesh config`; p
 - bare arXiv-like IDs (for example `1706.03762`) may work when Semantic Scholar resolves them
 - arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/abs/arXiv:1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`; `vN` suffixes are normalized away)
 - Semantic Scholar paper ID
-- Free-form text query (embedding strategy treats it as text seed when S2 lookup fails)
+- Free-form text query for the embedding strategy when Semantic Scholar reports
+  that the input is not a known paper. Service outages remain errors.
 
 ## Core Options
 
@@ -73,7 +73,7 @@ Persistent defaults for most build flags can be stored with `citemesh config`; p
 | `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`) | deterministic built-in seed |
 | `--include-timestamp` | Include generation time in output metadata | disabled |
 | `--export`, `-e` | `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, or `all`; repeat flag for multiple (e.g. `-e json -e dashboard`) | `png` |
-| `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` reads the active macOS appearance before falling back to terminal hints | `dark` |
+| `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` checks explicit environment hints before macOS appearance | `dark` |
 | `--output`, `-o` | Output path, or collection root for normal dashboard exports; an explicit `*.dashboard.html` path requests standalone mode | auto-generated `out/` collection root for dashboard, otherwise a per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
 | `--log-width` | Rich console wrap width in columns (`0` uses terminal width on TTYs and a stable redirected fallback) | `0` |
@@ -109,18 +109,10 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `embedding` uses embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`, storage/cache flags below).
 - The embedding branch of `hybrid` reuses embedding controls except `--top-k` (hybrid edge pruning follows its own policy).
 
-### Recommendation Strategy
-
-- Uses Semantic Scholar recommendations as the primary neighborhood signal.
-- Uses cross-strategy controls above (`--similarity-threshold`, `--no-references`, `--refresh-reference-cache`).
-
 ### Citation Strategy
 
 - `--max-citations`, `-c`: limit number of citing papers (default `25`; hybrid implicit default `45`)
 - `--max-references`, `-r`: limit number of referenced papers (default `25`; hybrid implicit default `12`)
-- `--similarity-threshold`, `-t`: minimum edge similarity threshold (`0.0` to `1.0`, default `0.2`)
-- `--no-references`: skip reference-list fetching (faster, no bibliographic coupling)
-- `--refresh-reference-cache`: bypass persisted reference-cache reads and fetch fresh reference IDs
 
 ### Embedding Strategy
 
@@ -128,29 +120,43 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
 - `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
 - `--corpus-size`: maximum papers to load from corpus (default `50000`)
-- With non-streaming unsliced splits, CiteMesh loads `split[:corpus_size]` directly (it does not download/process the full split just to stop after `corpus_size` rows).
 - `--all-corpus`: remove corpus-size cap and process the full selected split
 - `--all-corpus` applies within the selected `--dataset-split`; `--dataset-split train --all-corpus` means "all of `train`", not "every split published by the dataset"
 - If a same-model cache namespace was previously hydrated with a capped corpus, `--all-corpus` rebuilds that namespace; cache-clear logs label the replaced payload as `cached_*` to distinguish it from the new target.
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
-- `--truncate-dim`: optional embedding output-dimension truncation (for EmbeddingGemma: `768`, `512`, `256`, `128`)
+- `--truncate-dim`: optional embedding output-dimension truncation (for
+  EmbeddingGemma: `768`, `512`, `256`, `128`; omitted uses the model profile's
+  recommendation)
 - `--streaming` / `--no-streaming`: stream the HuggingFace dataset or load cached shards. Streaming requires a non-sliced split (for example `train`); the negative form overrides an enabled `defaults.streaming` config value for one run.
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)
 - `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows)
 - `--cache-overwrite-reason`: optional rationale string logged when `--force-rebuild-cache` clears embedding cache state
 - `--storage-precision {int8,float32}`: persistent embedding-cache precision. Corpus mode defaults to `int8`; the default candidates mode normalizes an implicit `int8` setting to `float32` because corpus calibration is unavailable.
 - `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search. It defaults on for int8 corpus mode and is normalized off in candidates mode. Explicit `--binary-prefilter` requires `--storage-precision int8`.
-- `--binary-rescore-multiplier`: oversampling factor for binary prefilter candidate rescoring (default `8`). Explicit use requires `--storage-precision int8`.
+- `--binary-rescore-multiplier`: oversampling factor for binary-prefilter rescoring.
+  The int8 default is `8`; float32 and candidate modes normalize it to an unused
+  effective value of `1`. Explicit use requires `--storage-precision int8`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`; explicit use requires `--storage-precision int8`)
 - `--encode-batch-size`: embedding-model encode batch size used during hydration/search (default `32`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
-- `--cache-compression-level`: HDF5 compression level for cache datasets (default `1`; unsupported with `--cache-compression lzf`)
+- `--cache-compression-level`: HDF5 compression level for cache datasets (gzip
+  default `1`). Selecting `lzf` without an explicit level normalizes the level to
+  `0`; combining `lzf` with an explicit level is rejected.
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). When enabled, compile is deferred on cold-cache hydration runs and attempted on warm-cache runs.
 - `--device {auto,cuda,mps,cpu}`: compute device for embedding model runs (default `auto`, which prefers CUDA, then MPS on Apple Silicon, then CPU). Explicit unavailable devices fail fast. Shared with hybrid.
-- `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing (default `candidates`, which embeds only S2 seed neighbors — no corpus download). Explicit corpus-only flags (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--streaming`) imply `arxiv-corpus` when `--semantic-source` is omitted; the candidate-only `--candidate-pool-size` flag likewise implies `candidates`. An explicit source that conflicts with a mode-only flag is rejected. Candidate mode stores vectors as float32 (`--storage-precision int8` requires `arxiv-corpus`).
-- `--candidate-pool-size`: maximum S2 candidate pool fetched in candidates mode (default `400`; candidates mode only). Because it is an explicit candidate-mode request, it overrides a configured `defaults.semantic_source = "arxiv-corpus"` for that run.
-- Task-specific vector spaces are enforced: paper/free-text seeds use the model's retrieval-query prompt, candidates and corpus rows use its retrieval-document prompt, and selected graph nodes are re-encoded with its symmetric sentence-similarity prompt before edge scoring. Retrieval and graph vectors use separate cache namespaces; graph vectors are always float32 with no binary prefilter.
+- `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing
+  (default `candidates`, which uses an S2-derived pool without a corpus download).
+  Explicit corpus-only flags (`--dataset-split`, `--corpus-size`, `--all-corpus`,
+  `--streaming`) imply `arxiv-corpus` when `--semantic-source` is omitted; the
+  candidate-only `--candidate-pool-size` flag likewise implies `candidates`. An
+  explicit source that conflicts with a mode-only flag is rejected. Candidate mode
+  stores vectors as float32 (`--storage-precision int8` requires `arxiv-corpus`).
+- `--candidate-pool-size`: S2 source-fetch budget for known-paper seeds in
+  candidates mode (default `400`; candidates mode only). A free-text seed first
+  adds up to 20 keyword-search results, then applies the recommendation budget to
+  its top anchor. As an explicit candidate-mode request, this flag overrides a
+  configured `defaults.semantic_source = "arxiv-corpus"` for that run.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 - Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in a shareable plain-text file without flooding the Rich console. `*.log` is ignored by git in this repo.
@@ -158,54 +164,20 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 ### Hybrid Strategy
 
 - Inherits citation flags for collection, including `--no-references` and `--refresh-reference-cache`.
-- Reuses embedding corpus/model/cache controls (`--model-revision`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`/`--no-streaming`, `--storage-precision`, `--device`, binary prefilter/rescore flags, calibration/compression flags).
+- Reuses all embedding controls except `--top-k`.
 - When omitted, hybrid applies tuned seed-discovery defaults for collection depth:
   - `--max-papers`: `45`
   - `--max-citations`: `45`
   - `--max-references`: `12`
 - `--max-semantic`: maximum non-seed semantic neighbors to add after hybrid reranking. Valid values are `0` through `max-papers - 1`. If omitted, hybrid defaults to `min(20, max-papers - 1)`.
-- Hybrid adjudication policy:
-  - fetches full citation candidates up to `max_references + max_citations`
-  - fetches semantic candidates (expanded pool) and merges duplicates
-  - reranks the union by seed relevance (semantic/citation/temporal/bibliographic signals) with a boost for papers found by both branches
-  - applies the `max_semantic` cap only to semantic-only additions
 - Setting `--max-semantic 0` disables semantic enrichment; embedding-only flags are rejected to avoid no-op configuration.
 - If `--max-semantic` is omitted and `--max-papers` is `1`, the effective default is also `0`; embedding-only hybrid flags are rejected in that configuration for the same reason.
-- Hybrid runs fail closed if semantic enrichment fails; CiteMesh does not silently downgrade to citation-only output.
 
 ## Export Formats
 
-Accepted `--export` values are `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, and `all`.
-
-Format-specific files, dashboard collection behavior, `*.config.json` sidecars, and determinism notes are covered in [Output Artifacts](../reference/output-artifacts.md).
-
-### Dashboard collection lifecycle
-
-A normal `--export dashboard` run maintains one collection at the selected output
-root:
-
-```text
-dashboard.html             reusable local viewer
-dashboard.citemesh.json    versioned one-or-many-result data package
-```
-
-Dashboard-only mode creates exactly those two files. Rebuild into the same root to
-upsert the `(strategy, seed_id)` result slot; a second paper adds another selectable
-result without creating another dashboard. Explicitly requested non-dashboard
-formats still go under that seed's `<slug>-<hash>/` directory with one config
-sidecar.
-
-The browser's **Add Results** action accepts one or multiple CiteMesh graph JSON
-files, collection packages, or current dashboard HTML files. **Export Collection**
-saves the resulting in-browser set as a portable `dashboard.citemesh.json` package.
-The package and its embedded graph payloads declare `kind` plus `schema_version: 1`
-(`citemesh-dashboard-collection` and `citemesh-graph`, respectively).
-
-The viewer embeds a package snapshot so it works when opened directly from the
-local filesystem; browsers do not consistently allow `file://` pages to fetch
-neighboring JSON. This design needs no local server, database, or archive step.
-Use an explicit output ending in `.dashboard.html` when you want a legacy-style,
-single-result HTML file instead of a collection.
+Format-specific files, dashboard collection and standalone behavior, package
+schemas, `*.config.json` sidecars, and determinism notes are covered in
+[Output Artifacts](../reference/output-artifacts.md).
 
 Interactive exports require viz dependencies. The `recommended` extra already includes them; otherwise install `viz` explicitly:
 
@@ -256,7 +228,7 @@ citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
 ```
 
-`citemesh search` has two backends selected by `--mode`. Mode `local` is semantic search over the embeddings already persisted in your local cache: candidate vectors accumulate across embedding/hybrid builds (every build grows your searchable library), or the full hydrated corpus in `arxiv-corpus` mode. The query is encoded locally in the model's query prompt space and ranked against every cached vector — no Semantic Scholar traffic, works offline once the model is downloaded. Results include cosine scores and full paper IDs ready for `citemesh build`. Mode `s2` is remote keyword search on the Semantic Scholar API — a convenience for finding seed paper IDs. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results.
+`citemesh search` has two backends selected by `--mode`. Mode `local` is semantic search over the embeddings already persisted in your local cache: candidate vectors accumulate across embedding/hybrid builds (every build grows your searchable library), or the full hydrated corpus in `arxiv-corpus` mode. The query is encoded locally in the model's query prompt space and ranked against every cached vector - no Semantic Scholar traffic, works offline once the model is downloaded. Results include cosine scores and full paper IDs ready for `citemesh build`. Mode `s2` is remote keyword search on the Semantic Scholar API - a convenience for finding seed paper IDs. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results.
 
 The default mode is `auto`: local search when your cache has embeddings, S2 keyword search otherwise, with a log line saying which backend ran and why. Persist a preference with `citemesh config set defaults.search_mode <auto|local|s2>` (explicit `--mode` still wins). Passing `--model` or `--device` implies local mode. Explicitly requesting `local` (flag or config) with an empty cache is an error with guidance rather than a silent fallback.
 

@@ -14,8 +14,8 @@ Related docs:
 
 A normal dashboard-only run writes exactly two files at the collection root:
 
-- `dashboard.html` — reusable tri-pane viewer with an embedded snapshot, so it opens directly from the local filesystem
-- `dashboard.citemesh.json` — authoritative, portable collection package containing one or more graph results and their portable build settings
+- `dashboard.html` - reusable tri-pane viewer with an embedded snapshot, so it opens directly from the local filesystem
+- `dashboard.citemesh.json` - authoritative, portable collection package containing one or more graph results and their portable build settings
 
 Reusing the same collection root adds or refreshes a package result; it does not
 create another dashboard or a per-seed artifact directory. Results are keyed by
@@ -120,7 +120,9 @@ Top-level fields:
 - `meta` (`strategy`, `year_range`, and `candidate_source_status` when the build
   queried Semantic Scholar neighborhood sources)
 - `summary` (`nodes`, `edges`)
-- `nodes` — enriched per-paper objects (see below)
+- `nodes` - enriched per-paper objects (see below)
+- `dashboard` (`meta` is always present; layout geometry is included when a shared
+  layout was computed)
 - `edges` (`source`, `target`, `weight`, plus readable source/target title/label fields)
 
 `source`/`target` are canonical node IDs for unambiguous graph processing. The extra `*_title` and `*_label` fields are provided for readable inspection.
@@ -148,21 +150,30 @@ The dashboard viewer (`dashboard.html` in collection mode, or `<name>.dashboard.
 
 **Toolbar data actions:**
 
-- **Export JSON** — downloads the embedded enriched payload as a standalone `.json` file
-- **Export CSV** — generates a CSV table client-side from the current dataset
-- **All BibTeX** — downloads all papers' BibTeX entries as a single `.bib` file
-- **Saved BibTeX / Copy Saved Links** — appear once you star papers; download the reading list as `.bib`, or copy it as a markdown link list
-- **Graph selector** — switches between graph slots in the active collection
-- **Add Results** — imports one or multiple `citemesh-graph` JSON files, `citemesh-dashboard-collection` packages, or current dashboard HTML exports into the browser session; matching `(strategy, seed_id)` slots are refreshed instead of duplicated
-- **Export Collection** — downloads the active one-or-many-result browser collection as `dashboard.citemesh.json`
+- **Export JSON** - downloads the embedded enriched payload as a standalone `.json` file
+- **Export CSV** - generates a CSV table client-side from the current dataset
+- **All BibTeX** - downloads all papers' BibTeX entries as a single `.bib` file
+- **Saved BibTeX / Copy Saved Links** - appear once you star papers; download the reading list as `.bib`, or copy it as a markdown link list
+- **Graph selector** - switches between graph slots in the active collection
+- **Add Results** - imports one or multiple `citemesh-graph` JSON files, `citemesh-dashboard-collection` packages, or current dashboard HTML exports into the browser session; matching `(strategy, seed_id)` slots are refreshed instead of duplicated
+- **Export Collection** - downloads the active one-or-many-result browser collection as `dashboard.citemesh.json`
 
-In collection mode, keep one `dashboard.html` open and move between results rather than opening a separate dashboard for each paper. Browser imports change the in-memory session; use **Export Collection** to persist that merged set. Rebuilding into the same collection root updates the on-disk package and refreshes the viewer snapshot.
+In collection mode, keep one `dashboard.html` open and move between results rather
+than opening a separate dashboard for each paper. Browser imports change the
+in-memory session; use **Export Collection** to persist that merged set.
 
-**Reading list:** every paper row and the detail panel carry a star toggle. Starred papers persist in browser `localStorage` per seed graph, the `Saved` chip filters the list down to them, and the saved-scoped export buttons above turn a triage session into a `.bib` file or a markdown link list without opening each paper in a tab.
+**Reading list:** every paper row and the detail panel carry a star toggle. Starred
+papers persist in browser `localStorage` per `(strategy, seed_id)` result, the
+`Saved` chip filters the list down to them, and the saved-scoped export buttons
+above turn a triage session into a `.bib` file or a markdown link list without
+opening each paper in a tab.
 
 **Visual encodings:** node color is a publication-year gradient (the on-graph legend and year timeline share the exact colorscale), node size tracks citation count, the seed wears a ring halo, and edge opacity/width scale with relative link weight within the graph. Hovering a node shows a theme-styled card (wrapped title, authors, year | citations | venue, and its relation to the seed) and previews the full details panel; clicking locks the selection and draws its strongest links as arcs.
 
-All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening browser extensions leave the tuned palettes alone. Dark is the built-in default. With `--theme auto`, CiteMesh reads the active macOS appearance when available, then falls back to explicit terminal appearance hints.
+All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta
+so auto-darkening browser extensions leave the tuned palettes alone. Theme choices
+and defaults are described in [CLI Usage](../guides/cli.md); auto-detection inputs
+are described in [Environment Variables](environment.md).
 
 ### Sidecar (`<strategy>.config.json`)
 

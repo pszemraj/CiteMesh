@@ -68,7 +68,7 @@ Legacy connectivity separated candidates clearly:
 - `h25_25_25`: largest component ratio `0.65`
 - `h20_20_*`: largest component ratio `0.525`
 
-This was the deciding signal for the default choice.
+This was the deciding signal within the initial sweep matrix.
 
 ### Runtime note
 
@@ -80,34 +80,15 @@ Per-run elapsed time has heavy-tail behavior driven by network-bound citation-co
 
 ## Default Decision
 
-Defaults are set to:
-
-- `--max-papers`: `45` (hybrid when omitted)
-- `--max-references`: `12` (hybrid when omitted)
-- `--max-citations`: `45` (hybrid when omitted)
-- hybrid implicit `--max-semantic`: `min(20, max-papers - 1)`
+The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-match
+and abstract-review study favored a more citation-heavy, reference-light
+allocation. The active values are listed in
+[CLI Usage](../guides/cli.md).
 
 Why:
 
-- Broad multi-seed sweep established a stable baseline but over-selected off-goal papers in manual relevance checks.
-- Follow-up fuzzy-match + abstract review study (PolyCom seed, in-process run set) favored citation-heavy / reference-light allocation (`45/12/20`) for the discovery goal.
+- The broad multi-seed sweep established a stable baseline but over-selected
+  off-goal papers in manual relevance checks.
+- Follow-up fuzzy-match and abstract review favored a citation-heavy,
+  reference-light allocation for the discovery goal.
 - The updated defaults improve practical triage for "recent follow-up + foundational prior work" without forcing users to set branch-specific knobs each run.
-
-## Related Outcomes From Earlier Tuning
-
-These remain in effect from earlier study stages:
-
-- embedding `--top-k` default `4`
-- hydration flush window `256`
-- log width default `140`
-
-## Artifacts
-
-Local raw outputs for this sweep are under:
-
-- `out/studies/defaults-sweep-v4-2026-02-16/`
-- `out/studies/defaults-sweep-v4-2026-02-16/runs.csv`
-- `out/studies/defaults-sweep-v4-2026-02-16/summary_all.csv`
-- `out/studies/defaults-sweep-v4-2026-02-16/summary_recent.csv`
-- `out/studies/defaults-sweep-v4-2026-02-16/summary_legacy.csv`
-- `out/OLD-polynomial-composition-activati-b68d34de/study-inproc-20260220-224514/guidance.md`

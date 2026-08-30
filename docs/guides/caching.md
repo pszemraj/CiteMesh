@@ -16,7 +16,7 @@ By default, project caches are stored under:
 - **Linux and macOS**: `${XDG_CACHE_HOME:-~/.cache}/citemesh`
 - **Windows**: `%LOCALAPPDATA%\\CiteMesh` (or `%APPDATA%\\CiteMesh` if `LOCALAPPDATA` is unset)
 
-macOS previously used `~/Library/Caches/citemesh`; the root is now unified with Linux (HuggingFace-style `~/.cache/citemesh`) so cache paths and `config.toml` are predictable across machines. `citemesh cache scan` prints a migration hint if the legacy macOS directory still exists — move or delete it to reclaim space.
+macOS previously used `~/Library/Caches/citemesh`; the root is now unified with Linux (HuggingFace-style `~/.cache/citemesh`) so cache paths and `config.toml` are predictable across machines. `citemesh cache scan` prints a migration hint if the legacy macOS directory still exists - move or delete it to reclaim space.
 
 Override the root with:
 
@@ -41,20 +41,32 @@ citemesh cache root
 
 `config.toml` is configuration, not cache: it is documented in [User Configuration](configuration.md) and survives `citemesh cache clear`.
 
-Model hashes are the first 12 characters of `sha256(<namespace>)`. Every embedding namespace binds the runtime-active model (including a fallback checkpoint), requested revision, immutable resolved artifact fingerprint, representation role, normalization contract, resolved truncate dimension, storage precision, effective binary-prefilter mode, resolved source torch dtype, and task-formatter fingerprint; `int8` namespaces also include calibration sample size. Candidate mode (`--semantic-source candidates`, the default) adds `mode=candidates` to the retrieval-document namespace so incrementally embedded S2 candidates never mix with corpus hydrations. The graph-similarity namespace is source-mode independent because it contains only selected papers encoded under the same symmetric task contract. Namespaces intentionally carry no device token: they track compute dtype, so caches built at the same dtype (for example bf16 on CUDA and bf16 on MPS) remain portable across machines.
+Model hashes are the first 12 characters of `sha256(<namespace>)`. Every embedding namespace binds the runtime-active model (including a fallback checkpoint), requested revision, immutable resolved artifact fingerprint, representation role, normalization contract, resolved truncate dimension, storage precision, effective binary-prefilter mode, resolved source torch dtype, and task-formatter fingerprint; `int8` namespaces also include calibration sample size. Candidate mode (`--semantic-source candidates`, the default) adds `mode=candidates` to the retrieval-document namespace so incrementally embedded S2 candidates never mix with corpus hydrations. The graph-similarity namespace is source-mode independent because it contains only selected papers encoded under the same symmetric task contract. Namespaces intentionally carry no device token: matching contracts share a namespace whenever compute dtype also matches, including CUDA/MPS at bf16 or CPU/accelerator runtimes at float32.
 
 ## Embedding Cache Behavior
 
 `EmbeddingCache` stores each paper embedding once per namespace. Vectors are kept in a resizable HDF5 matrix, while SQLite tracks metadata and `row_idx` mappings.
 
-Embedding and hybrid builds use two task-specific caches:
+Embedding and hybrid builds use two physical cache roles. Prompt routing and
+formatter behavior are described in [Embedding Runtime](../reference/embedding-runtime.md):
 
-- The retrieval-document cache stores candidate or corpus papers for asymmetric seed-to-paper ranking. Paper and free-text seeds are encoded transiently with the model's retrieval-query prompt; those query vectors are not persisted as documents.
-- The graph-similarity cache stores only selected graph papers encoded with the model's symmetric sentence-similarity prompt. It is always float32 with no binary prefilter and is the sole vector source for paper-to-paper edges.
+- The retrieval-document cache stores candidate or corpus papers for seed-to-paper
+  ranking. Query vectors are transient and are not persisted as documents.
+- The graph-similarity cache stores only selected graph papers. It is always
+  float32 with no binary prefilter and is the sole vector source for
+  paper-to-paper edges.
 
-The two caches have different representation and formatter identities, so dimensions alone can never make their vectors interchangeable. Local semantic search reads only retrieval-document caches.
+The roles have different representation and formatter identities, so dimensions
+alone cannot make their vectors interchangeable. Local semantic search reads only
+retrieval-document caches.
 
-Default storage mode is quantized:
+With built-in CLI settings:
+
+- Candidate mode uses float32 retrieval storage with no binary prefilter.
+- arXiv corpus mode uses int8 retrieval storage with the binary prefilter enabled.
+
+Explicit corpus-mode flags can select float32 storage or disable the prefilter. An
+int8 retrieval cache may contain:
 
 - `embeddings`: `int8` matrix (`N x dim`)
 - `calibration_ranges`: float32 per-dimension min/max (`2 x dim`)
@@ -90,7 +102,7 @@ Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuil
 
 Before persistent cache access, CiteMesh resolves an immutable artifact fingerprint and makes it part of the physical namespace. Hugging Face repositories use the resolved commit SHA when available; an explicitly requested 40-character commit is already immutable and works offline. A standard local Hugging Face snapshot also exposes its commit SHA without an API request. If a cached snapshot does not expose a SHA, CiteMesh hashes its complete inference-relevant artifact manifest. The same manifest policy applies to arbitrary local model paths and covers weights and referenced shards, tokenizer inputs, SentenceTransformers module definitions and numbered module configuration (including pooling), and custom model code. Documentation and training-only files are excluded.
 
-Model loading fallback is resolved before persistent vectors are read or written, so the active checkpoint—not merely the requested model token—selects the namespace. Changing a local artifact in place or moving a mutable Hub revision to new contents selects a different cache while preserving the old one; switching revision A to B and back to A therefore reopens A's prior cache. If no reliable commit or complete local artifact identity can be established, CiteMesh refuses persistent cache access. It never adopts an unidentified legacy payload or an `offline-unverified` assumption. A fingerprint mismatch inside an identified namespace is treated as corruption and cleared before use.
+Model loading fallback is resolved before persistent vectors are read or written, so the active checkpoint, not merely the requested model token, selects the namespace. Changing a local artifact in place or moving a mutable Hub revision to new contents selects a different cache while preserving the old one; switching revision A to B and back to A therefore reopens A's prior cache. If no reliable commit or complete local artifact identity can be established, CiteMesh refuses persistent cache access. It never adopts an unidentified legacy payload or an `offline-unverified` assumption. A fingerprint mismatch inside an identified namespace is treated as corruption and cleared before use.
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
 
@@ -106,7 +118,10 @@ All reconciliation steps are ID-aware and append only uncached paper IDs. If a p
 
 When switching a namespace from a capped corpus (for example `--corpus-size 50000`) to `--all-corpus`, cache-clear logs report both the requested target and the replaced cached payload. Seeing `requested_corpus=all` alongside `cached_corpus=50000` means CiteMesh is replacing the old capped namespace before hydrating the full split; it does not mean the new run is silently limited to `50000`.
 
-When int8 calibration clipping is detected during a hydration run, CiteMesh emits that warning once per namespace and keeps accumulating the underlying saturation stats in cache metadata instead of repeating the same warning every flush window.
+When int8 calibration clipping is detected during a hydration run, CiteMesh emits
+that warning once per cache instance/run and keeps accumulating the underlying
+saturation stats in cache metadata instead of repeating the same warning every
+flush window.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias mutates upstream without changing source name, treat cache reuse as a performance optimization rather than a strict reproducibility guarantee.
 

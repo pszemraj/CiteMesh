@@ -32,5 +32,5 @@ Use the [issue templates](https://github.com/pszemraj/CiteMesh/issues/new/choose
 ## Scope notes
 
 - Live Semantic Scholar behavior (rate limits, payload quirks) changes over time; fixes there are very welcome.
-- New graph strategies or embedding providers should implement the existing strategy/template seams rather than adding parallel code paths — open an issue first to discuss the design.
+- New graph strategies or embedding providers should implement the existing strategy/template seams rather than adding parallel code paths - open an issue first to discuss the design.
 - CI is intentionally small for the project's current solo-maintained, pre-user stage: lint/format, representative Linux/macOS tests, and a no-extras install smoke. Add jobs or matrix breadth only for a concrete compatibility bug or release requirement.

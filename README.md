@@ -1,6 +1,10 @@
 # CiteMesh
 
-Build exploration-friendly paper graphs from a single paper or query using recommendation, citation, embedding, or hybrid strategies. CiteMesh ships as a single CLI with consistent visuals and export formats so you can switch approaches without changing tools — an open-source, embeddings-powered take on the reference tool workflow.
+Build exploration-friendly paper graphs from a known paper with recommendation,
+citation, embedding, or hybrid strategies, or start the embedding strategy from a
+free-text query. CiteMesh ships as a single CLI with consistent visuals and export
+formats so you can switch approaches without changing tools -- an open-source,
+embeddings-powered take on the reference tool workflow.
 
 ![CiteMesh UI](assets/ui.png)
 
@@ -18,13 +22,16 @@ The CLI defaults to the `recommendation` strategy for the fastest topical pass. 
 | | CiteMesh | Typical hosted graph tools |
 | --- | --- | --- |
 | Open source | MIT, self-hosted CLI | Closed, web-only |
-| Graph quota | None — build as many as you like | Limited free graphs |
+| Graph quota | None - build as many as you like | Limited free graphs |
 | Strategies | Recommendation, citation, embedding, hybrid | Single fixed algorithm |
 | Semantic similarity | Your embeddings, computed locally (CUDA / Apple Silicon MPS / CPU) | Opaque server-side |
 | Outputs | PNG, interactive HTML/Plotly, reusable dashboard collections, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
 | Automation | Scriptable CLI with deterministic exports and JSON sidecars | Manual browsing |
 
-By default the embedding and hybrid strategies are **corpus-free**: they embed only the seed's Semantic Scholar neighbors (references/citations/recommendations), so a laptop builds a graph in seconds — no multi-gigabyte corpus download required. An opt-in local arXiv corpus mode (`--semantic-source arxiv-corpus`) is available for corpus-scale retrieval.
+By default the embedding and hybrid strategies are **corpus-free**. For known-paper
+seeds they embed Semantic Scholar neighbors instead of downloading a local corpus.
+An opt-in arXiv mode (`--semantic-source arxiv-corpus`) is available for
+corpus-scale retrieval.
 
 ## Project Status
 
@@ -44,31 +51,20 @@ Install from GitHub:
 pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.git"
 ```
 
-For local development:
-
-```bash
-git clone https://github.com/pszemraj/CiteMesh.git && cd CiteMesh
-pip install -e ".[dev,viz]"
-```
-
 Optional extras:
 
 ```bash
 # Minimal citation/recommendation CLI only
-pip install "git+https://github.com/pszemraj/CiteMesh.git"
-
-# Recommended runtime bundle: embeddings + interactive exports
-pip install -e ".[recommended]"
+pip install "citemesh @ git+https://github.com/pszemraj/CiteMesh.git"
 
 # Embedding strategy + semantic enrichment support
-pip install -e ".[embeddings]"
+pip install "citemesh[embeddings] @ git+https://github.com/pszemraj/CiteMesh.git"
 
 # Interactive HTML/Plotly exports
-pip install -e ".[viz]"
-
-# Everything currently defined by the project, including dev tools
-pip install -e ".[all]"
+pip install "citemesh[viz] @ git+https://github.com/pszemraj/CiteMesh.git"
 ```
+
+For an editable development install, follow [Contributing](CONTRIBUTING.md).
 
 On macOS the `embeddings` extra requires torch >= 2.13 (installed automatically) and runs on the MPS backend with bfloat16 autocast when supported, falling back to float32; see [Embedding Runtime](docs/reference/embedding-runtime.md).
 
@@ -78,15 +74,16 @@ On macOS the `embeddings` extra requires torch >= 2.13 (installed automatically)
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
-For an offline dashboard library, point repeated builds at the same collection
-root. CiteMesh keeps one viewer and one portable data package instead of generating
-a dashboard per paper:
+Point repeated dashboard builds at the same output root to maintain an offline
+collection:
 
 ```bash
 citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard -o research
 citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard -o research
-# Open research/dashboard.html and switch between both results.
 ```
+
+See [Output Artifacts](docs/reference/output-artifacts.md) for collection updates,
+standalone dashboard files, and the portable package format.
 
 For command syntax and operational details, use:
 
@@ -113,7 +110,9 @@ CiteMesh works without credentials using Semantic Scholar's shared anonymous poo
 - Local embeddings with first-class device support: CUDA, Apple Silicon (MPS), and CPU, using bf16 autocast only on supported accelerator runtimes.
 - Multi-format outputs with one shared run contract across static, interactive, and structured exports; dashboard-only collections stay at two files as results accumulate.
 - Persistent user-level caching for embeddings and reference expansion; caches are portable across machines at matching compute dtype.
-- Mode-aware `citemesh search`: offline semantic search over every paper you've already embedded — your builds accumulate into a searchable personal library — used automatically when available, with Semantic Scholar keyword search as the fallback (`--mode local|s2|auto`).
+- Mode-aware `citemesh search`: offline semantic search over the active retrieval
+  cache, used automatically when that namespace has vectors, with Semantic Scholar
+  keyword search as the fallback (`--mode local|s2|auto`).
 - Persistent personal defaults via `citemesh config` (`config.toml`).
 - Typed, modular internals that are straightforward to extend.
 

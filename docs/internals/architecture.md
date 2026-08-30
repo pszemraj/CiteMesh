@@ -64,7 +64,8 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 - Loads, validates, and rewrites the persistent `config.toml` at the cache root.
 - Whitelists `[defaults]` build-flag keys and `[api] s2_api_key` with per-key casters; invalid entries are ignored with warnings so a bad config never blocks CLI usage.
-- The CLI applies these values post-parse for options not explicitly provided (precedence: CLI flag > environment > config.toml > built-in default); see [Guides: User Configuration](../guides/configuration.md).
+- The CLI applies these values after argument parsing; precedence and supported
+  keys are described in [User Configuration](../guides/configuration.md).
 
 ### Visualization (`citemesh/visualization/render.py`)
 
@@ -74,8 +75,8 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 ### Themes (`citemesh/visualization/themes.py`)
 
-- Defines immutable theme objects (`light`, `dark`, `solarized`, `auto`).
-- Provides shared interpolation utilities reused by static and interactive outputs.
+- Defines the immutable `light`, `dark`, and `solarized` palettes.
+- Resolves `auto` from environment and host appearance signals.
 
 ### Exporter (`citemesh/visualization/export.py`)
 
@@ -86,39 +87,17 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 ### Dashboard Collections
 
-Normal dashboard output separates reusable presentation from changing data:
+- `citemesh/cli.py` validates, locks, and atomically upserts collection packages.
+- `GraphExporter` embeds the selected collection snapshot in the reusable viewer.
 
-```text
-dashboard.html
-    └── self-contained viewer with the current package snapshot
-
-dashboard.citemesh.json
-    └── citemesh-dashboard-collection/v1
-          └── one or more citemesh-graph/v1 payloads + portable build settings
-```
-
-The package is authoritative. Each build atomically upserts the result keyed by
-`(strategy, seed_id)` and refreshes the same viewer; dashboard-only runs do not
-create per-seed files. Other explicitly selected export formats retain their
-per-seed artifacts and one sidecar. An explicit `*.dashboard.html` target bypasses
-the collection writer and remains a self-contained one-result export.
-
-The HTML snapshot is deliberate: a page opened directly from `file://` cannot
-reliably fetch an adjacent JSON file across browsers. Keeping one embedded snapshot
-preserves zero-setup offline use while the JSON package supports browser
-multi-import and **Export Collection**. Legacy `dashboard.manifest.json`
-collections are read non-destructively and migrated into the package on the next
-build.
-
-This is intentionally a two-file local format, not a service architecture. Do not
-add a database, local server, service worker, or ZIP container without a concrete
-requirement. Package regressions belong in the existing unit/browser checks; they
-do not justify another CI job or a broader matrix.
+File placement, schemas, migration, browser imports, and standalone-dashboard
+behavior are described in [Output Artifacts](../reference/output-artifacts.md).
 
 ### Caching Support
 
 - `citemesh/data/cache.py` resolves user-scoped cache roots.
-- `citemesh/data/embedding_cache.py` manages quantized SQLite/HDF5 embedding cache state (`int8` matrix, calibration ranges, optional binary index, hydration metadata).
+- `citemesh/data/embedding_cache.py` manages SQLite metadata and HDF5 embedding
+  datasets.
 - `citemesh/data/model_profiles.py` stores model-specific runtime profile metadata.
 
 On-disk layout and invalidation behavior are documented in [Caching & Data](../guides/caching.md).

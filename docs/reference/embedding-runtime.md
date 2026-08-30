@@ -25,6 +25,8 @@ Fallback behavior:
 
 - `unsloth/embeddinggemma-*` and `google/embeddinggemma-*` map to the same EmbeddingGemma runtime profile.
 - This means both receive the same prompt formatting, truncate-dim policy, and compile eligibility behavior.
+- When `--truncate-dim` is omitted, this profile uses its recommended dimension of
+  `256`.
 
 ## Task-Specific Vector Spaces
 
@@ -45,7 +47,7 @@ The regression suite locks in prompt routing, cache separation, and fail-closed 
 CiteMesh resolves an explicit compute device before loading any embedding model:
 
 - `--device auto` (default) prefers `cuda`, then `mps` (Apple Silicon Metal), then `cpu`.
-- An explicit `--device cuda` or `--device mps` on a host where that backend is unavailable fails fast with a parser error — CiteMesh never silently downgrades an explicit accelerator request to CPU.
+- An explicit `--device cuda` or `--device mps` on a host where that backend is unavailable fails fast with a CLI usage error; CiteMesh never silently downgrades an explicit accelerator request to CPU.
 - The resolved device is passed directly to `SentenceTransformer(device=...)` and drives every precision, attention, TF32, and compile decision below.
 - The effective device and compute dtype are recorded in the run's export metadata (`effective_device`, `effective_compute_dtype`) and config sidecar.
 
@@ -78,32 +80,19 @@ Compile policy:
 - On cold-cache runs that must hydrate embeddings, compile is deferred for that run to avoid Inductor compile/recompile overhead during long corpus hydration.
 - Legacy note: on torch `2.9`/`2.10` with compile enabled, the runtime uses `torch.set_float32_matmul_precision("high")` instead of the `fp32_precision` API to avoid a release-branch Inductor mixed-API conflict. Later torch releases use the modern API directly.
 
-## Cache Portability Across Devices
+## Cache Storage and Portability
 
-Each embedding cache namespace tracks the runtime-active model artifact, requested revision, task representation/formatter contract, dimensions, storage settings, and *compute dtype*, but not the device. A cache hydrated with bf16 on a CUDA box and one hydrated with bf16 on MPS share a byte-identical namespace when every semantic input matches: you can warm the cache on a GPU host, copy the cache directory to a Mac, and get full cache hits. CPU (float32) caches live in a separate, deliberately conservative namespace.
-
-## Int8 Retrieval Pipeline
-
-When `--storage-precision int8` is active, retrieval uses a two-stage path:
-
-- Stage 1 (`binary_prefilter`): approximate shortlist with Hamming distance over bit-packed binary sign sketches.
-- Stage 2 (`binary_rescore_multiplier`): exact dot-product rescoring on int8/dequantized vectors for the shortlist.
-
-Important distinction:
-
-- This is not end-to-end "binary embeddings" storage/retrieval in the SBERT sense.
-- Primary cache vectors remain `int8` (or `float32` by config), and final ranking is computed from those vectors.
-- The binary representation is only a prefilter index for candidate pruning before exact rescoring.
-
-Interpretation:
-
-- `binary_prefilter_enabled=true` means the namespace is configured to use Stage 1.
-- `binary_prefilter_used_for_query=true` means Stage 1 was actually used for this query (not bypassed due compatibility fallback).
-- `binary_rescore_multiplier=8` means CiteMesh rescored `top_k * 8` shortlisted candidates exactly before taking final top-k.
+Namespace identity, cross-device reuse, physical storage precision, calibration,
+and the optional binary prefilter are described in
+[Caching & Data](../guides/caching.md).
 
 ## Dependency Floor
 
-- Embedding workflows require `torch>=2.9.0` on Linux/Windows and `torch>=2.13.0` on macOS (plus `sentence-transformers` and `datasets`). The macOS floor matches the torch release verified for MPS bf16 execution.
+- The `embeddings` install extra provides `torch>=2.9.0` on Linux/Windows,
+  `torch>=2.13.0` on macOS, SentenceTransformers, and Datasets. Candidate mode
+  uses the encoder stack without loading Datasets; `arxiv-corpus` mode also uses
+  Datasets for hydration. The macOS torch floor matches the release verified for
+  MPS bf16 execution.
 
 ## Implementation References
 
