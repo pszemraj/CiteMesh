@@ -1921,7 +1921,7 @@ def test_model_profiles_match_expected_formatters() -> None:
     assert unsloth_gemma.compile_inner_transformer is True
     assert unsloth_gemma.format_query("plain").startswith("task: search result")
 
-    default = get_embedding_model_profile("all-MiniLM-L6-v2")
+    default = get_embedding_model_profile("org/generic-embedding-model")
     assert default.name == "default"
     assert default.preferred_compute_dtype is None
     assert default.autocast_devices == ()

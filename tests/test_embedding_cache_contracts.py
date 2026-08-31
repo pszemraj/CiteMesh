@@ -872,7 +872,7 @@ def test_embedding_cache_default_text_builder_matches_profile_formatter() -> Non
         "p2": {"title": "Beta", "abstract": "  "},
         "p3": {"title": "   ", "abstract": "Gamma"},
     }
-    profile = get_embedding_model_profile("sentence-transformers/all-MiniLM-L6-v2")
+    profile = get_embedding_model_profile("org/generic-embedding-model")
     expected_texts = [profile.format_document(metadata) for metadata in papers.values()]
 
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -967,7 +967,7 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
                 "--strategy",
                 "citation",
                 "--model",
-                "all-MiniLM-L6-v2",
+                "org/generic-embedding-model",
             ],
             "--model",
         ),
@@ -977,7 +977,7 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
                 "arxiv:1706.03762",
                 "--strategy",
                 "citation",
-                "-mall-MiniLM-L6-v2",
+                "-morg/generic-embedding-model",
             ],
             "--model",
         ),
@@ -1164,7 +1164,7 @@ def test_cli_validates_embedding_option_dependencies_at_parse_time() -> None:
                 "--max-semantic",
                 "0",
                 "--model",
-                "all-MiniLM-L6-v2",
+                "org/generic-embedding-model",
             ],
             "Hybrid semantic branch is disabled with --max-semantic 0",
         ),
@@ -1356,7 +1356,7 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
                 "--strategy",
                 "hybrid",
                 "--model",
-                "all-MiniLM-L6-v2",
+                "org/generic-embedding-model",
                 "--dataset-split",
                 "train",
                 "--export",
@@ -3007,7 +3007,7 @@ def test_programmatic_strategy_dispatch_contracts() -> None:
 
     invalid_namespace = _dispatch_namespace(
         similarity_threshold=0.21,
-        model="all-MiniLM-L6-v2",
+        model="org/generic-embedding-model",
     )
     with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
         cli_module._build_strategy_graph(invalid_namespace, "recommendation")
