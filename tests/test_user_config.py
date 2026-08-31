@@ -18,6 +18,7 @@ from citemesh.core.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
     DEVICE_CHOICES,
     EXPORT_CHOICES,
+    MODEL_PROFILE_CHOICES,
     SEARCH_MODE_CHOICES,
     SEMANTIC_SOURCE_CHOICES,
     STORAGE_PRECISION_CHOICES,
@@ -231,6 +232,7 @@ def test_config_choice_specs_match_build_parser_choices() -> None:
     assert set(parser_choices["strategy"]) == set(STRATEGY_CHOICES)
     assert set(parser_choices["theme"]) == set(THEME_CHOICES)
     assert set(parser_choices["device"]) == set(DEVICE_CHOICES)
+    assert set(parser_choices["model_profile"]) == set(MODEL_PROFILE_CHOICES)
     assert set(parser_choices["semantic_source"]) == set(SEMANTIC_SOURCE_CHOICES)
     assert set(parser_choices["storage_precision"]) == set(STORAGE_PRECISION_CHOICES)
     assert STORAGE_PRECISION_CHOICES == ("int8", "float32")

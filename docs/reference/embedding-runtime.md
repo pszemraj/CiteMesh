@@ -24,9 +24,12 @@ Fallback behavior:
 ## EmbeddingGemma Profile Mapping
 
 - `unsloth/embeddinggemma-*` and `google/embeddinggemma-*` map to the same EmbeddingGemma runtime profile.
+- Local checkpoints are recognized from their transformer architecture and SentenceTransformers task-prompt metadata, including direct Hugging Face snapshot paths and nested Transformer modules.
+- `--model-profile embeddinggemma` binds the same contract for stripped/custom fine-tune exports; `--model-profile default` explicitly disables family-specific behavior.
 - This means both receive the same prompt formatting, truncate-dim policy, and compile eligibility behavior.
 - When `--truncate-dim` is omitted, this profile uses its recommended dimension of
   `256`.
+- Every fallback load candidate resolves its own profile before loader kwargs, formatter fingerprints, and cache namespaces are computed.
 
 ## Task-Specific Vector Spaces
 

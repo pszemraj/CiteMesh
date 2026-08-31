@@ -48,6 +48,7 @@ package. Current behavior is described in the linked guides and references:
 - Split asymmetric retrieval vectors from symmetric graph-similarity vectors and
   gave each representation its own formatter and cache identity; see
   [Embedding Runtime](../reference/embedding-runtime.md).
+- Resolved embedding model profiles from local checkpoint metadata and runtime-active fallbacks, with an explicit override and profile-schema cache partitioning.
 - Persisted hybrid candidate vectors and changed hybrid selection from a
   citation-first add-on to merged candidate reranking with an overlap boost.
 - Selected capped arXiv corpora by submission chronology encoded in paper IDs

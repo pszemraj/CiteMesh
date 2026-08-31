@@ -44,7 +44,7 @@ from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
-    get_embedding_model_profile,
+    resolve_embedding_model_profile,
     validate_compression_filter,
 )
 from citemesh.data.embedding_cache import CacheSearchResult
@@ -691,6 +691,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self,
         max_papers: int = 40,
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
+        model_profile: str = "auto",
         model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
         corpus_size: Optional[int] = 50000,
@@ -717,6 +718,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         :param int max_papers: Maximum papers in final graph
         :param str model_name: Sentence transformer model name
+        :param str model_profile: Model task/runtime profile override
+            (``auto``, ``embeddinggemma``, or ``default``).
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: HuggingFace dataset split
         :param Optional[int] corpus_size: Maximum papers to load from corpus (``None`` = all in split)
@@ -800,6 +803,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.semantic_source = normalized_semantic_source
         self.candidate_pool_size = int(candidate_pool_size)
         self.model_name = normalized_model_name
+        self.requested_model_profile = str(model_profile).strip().casefold()
+        self._requested_truncate_dim = truncate_dim
         normalized_revision = (
             str(model_revision).strip() if model_revision is not None else ""
         )
@@ -840,7 +845,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.cache_compression_level = int(cache_compression_level)
         self.encode_batch_size = int(encode_batch_size)
         self.enable_torch_compile = bool(enable_torch_compile)
-        self.model_profile = get_embedding_model_profile(self.model_name)
+        self.model_profile = resolve_embedding_model_profile(
+            self.model_name,
+            self.requested_model_profile,
+        )
         # Device must resolve before the attention/dtype hints below: those hints
         # feed the cache namespace computed for EmbeddingCache further down.
         self.requested_device = str(device or "auto").strip().lower()
@@ -1076,6 +1084,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 f"{EmbeddingTask.RETRIEVAL_DOCUMENT.value}"
             ),
             "graph_representation": EmbeddingTask.GRAPH_SIMILARITY.value,
+            "model_profile": self.model_profile.schema_token,
         }
 
     def _cache_model_identity(self) -> str:
@@ -1143,6 +1152,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             f"model={self._cache_model_identity()}",
             f"revision={self._requested_hf_revision_token()}",
             f"artifact={artifact_identity or 'unresolved'}",
+            f"profile={self.model_profile.schema_token}",
             f"representation={representation}",
             "normalization=l2-v1",
         ]
@@ -1194,6 +1204,46 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
         )
         return sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    def _bind_model_contract(self, model_name_or_path: str) -> None:
+        """Bind profile-derived formatting and runtime policy to one load candidate.
+
+        :param str model_name_or_path: Hub identifier or local checkpoint path.
+        :return None: Recomputes profile-dependent state when the contract changes.
+        """
+        resolved_profile = resolve_embedding_model_profile(
+            model_name_or_path,
+            self.requested_model_profile,
+        )
+        if resolved_profile == self.model_profile:
+            return
+
+        self.model_profile = resolved_profile
+        self._document_formatter_fingerprint = self._resolve_formatter_fingerprint(
+            formatter=self.model_profile.document_formatter,
+            probe_renderer=self._format_retrieval_document_metadata,
+        )
+        self._similarity_formatter_fingerprint = self._resolve_formatter_fingerprint(
+            formatter=self.model_profile.similarity_formatter,
+            probe_renderer=self._format_graph_similarity_metadata,
+        )
+        self.truncate_dim = self._resolve_truncate_dim(self._requested_truncate_dim)
+        self._attention_implementation_hint = (
+            self._resolve_attention_implementation_hint()
+        )
+        self._source_dtype_hint = self._resolve_source_dtype_hint()
+        self._embedding_cache = None
+        self._graph_embedding_cache = None
+        self._resolved_model_fingerprint = None
+        self._autocast_dtype = None
+        self._autocast_device_type = None
+        self._autocast_enabled = False
+        self._encode_model = None
+        self._inner_model_compiled = False
+        self._compile_status_reason = None
+        self._profile_logged = False
+        self._dim_logged = False
+        self._runtime_summary_logged = False
 
     def _resolve_attention_implementation_hint(self) -> Optional[str]:
         """Resolve preferred attention implementation for the resolved device.
@@ -1885,19 +1935,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             sentence_transformer_cls = _import_sentence_transformer_class()
 
             logger.info(f"Loading embedding model: {self.model_name}")
-            model_kwargs = self._resolve_model_kwargs()
-            st_kwargs: Dict[str, Any] = {"device": self.device}
-            if model_kwargs:
-                st_kwargs["model_kwargs"] = model_kwargs
-            if self.truncate_dim is not None:
-                st_kwargs["truncate_dim"] = self.truncate_dim
-            if self.model_revision is not None:
-                st_kwargs["revision"] = self.model_revision
-
             load_candidates = self._model_load_candidates()
             model_errors: List[Tuple[str, Exception]] = []
             for idx, candidate_model in enumerate(load_candidates):
                 try:
+                    self._bind_model_contract(candidate_model)
+                    model_kwargs = self._resolve_model_kwargs()
+                    st_kwargs: Dict[str, Any] = {"device": self.device}
+                    if model_kwargs:
+                        st_kwargs["model_kwargs"] = model_kwargs
+                    if self.truncate_dim is not None:
+                        st_kwargs["truncate_dim"] = self.truncate_dim
+                    if self.model_revision is not None:
+                        st_kwargs["revision"] = self.model_revision
                     self.model = sentence_transformer_cls(candidate_model, **st_kwargs)
                 except Exception as exc:
                     model_errors.append((candidate_model, exc))

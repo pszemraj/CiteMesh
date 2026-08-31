@@ -90,6 +90,7 @@ def _install_fake_sentence_transformers(
     class _FakeSentenceTransformer:
         def __init__(self, model_name_or_path: str, **kwargs: Any):
             init_log.setdefault("attempts", []).append(model_name_or_path)
+            init_log.setdefault("attempt_kwargs", []).append(dict(kwargs))
             if model_name_or_path in blocked_models:
                 raise RuntimeError(f"failed loading {model_name_or_path}")
             init_log["model_name"] = model_name_or_path
@@ -123,6 +124,62 @@ def _pin_model_fingerprint(
     monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
     builder._resolved_model_fingerprint = fingerprint
     builder._bind_embedding_cache_to_active_model()
+
+
+def _write_local_sentence_transformer_profile(
+    root: Path,
+    *,
+    embeddinggemma: bool,
+    nested_transformer: bool = False,
+) -> None:
+    """Write minimal local SentenceTransformers metadata for profile tests.
+
+    :param Path root: Checkpoint root to populate.
+    :param bool embeddinggemma: Whether metadata should declare EmbeddingGemma.
+    :param bool nested_transformer: Whether transformer config lives in a module dir.
+    :return None: Writes fixture metadata below ``root``.
+    """
+    root.mkdir(parents=True)
+    transformer_root = root / "0_Transformer" if nested_transformer else root
+    transformer_root.mkdir(exist_ok=True)
+    transformer_config = (
+        {
+            "model_type": "gemma3_text",
+            "architectures": ["Gemma3TextModel"],
+        }
+        if embeddinggemma
+        else {"model_type": "bert", "architectures": ["BertModel"]}
+    )
+    (transformer_root / "config.json").write_text(
+        json.dumps(transformer_config),
+        encoding="utf-8",
+    )
+    (root / "modules.json").write_text(
+        json.dumps(
+            [
+                {
+                    "idx": 0,
+                    "name": "0",
+                    "path": "0_Transformer" if nested_transformer else "",
+                    "type": "sentence_transformers.models.Transformer",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    prompts = (
+        {
+            "Retrieval-query": "task: search result | query: ",
+            "Retrieval-document": "title: none | text: ",
+            "STS": "task: sentence similarity | query: ",
+        }
+        if embeddinggemma
+        else {"query": "", "document": ""}
+    )
+    (root / "config_sentence_transformers.json").write_text(
+        json.dumps({"prompts": prompts}),
+        encoding="utf-8",
+    )
 
 
 def _install_fake_torch(
@@ -758,6 +815,161 @@ def test_embedding_default_model_loads_with_fallback_chain(
     assert any(
         "Using fallback embedding checkpoint:" in message for message in log_messages
     )
+
+
+@pytest.mark.parametrize(
+    ("layout", "nested_transformer"),
+    [
+        ("arbitrary", False),
+        ("snapshot", False),
+        ("nested", True),
+    ],
+)
+def test_local_embeddinggemma_artifacts_resolve_task_profile(
+    tmp_path: Path,
+    layout: str,
+    nested_transformer: bool,
+) -> None:
+    """Local and snapshot paths should retain EmbeddingGemma task separation."""
+    if layout == "snapshot":
+        model_path = (
+            tmp_path
+            / "models--custom--fine-tune"
+            / "snapshots"
+            / "0123456789abcdef0123456789abcdef01234567"
+        )
+    else:
+        model_path = tmp_path / f"unrelated-checkpoint-name-{layout}"
+    _write_local_sentence_transformer_profile(
+        model_path,
+        embeddinggemma=True,
+        nested_transformer=nested_transformer,
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name=str(model_path),
+        client=MagicMock(),
+    )
+    paper = Paper(
+        paper_id="paper",
+        title="Attention Models",
+        year=2024,
+        abstract="An abstract.",
+    )
+    query = format_paper_for_embedding(
+        profile=builder.model_profile,
+        paper=paper,
+        task=EmbeddingTask.RETRIEVAL_QUERY,
+    )
+    document = format_paper_for_embedding(
+        profile=builder.model_profile,
+        paper=paper,
+        task=EmbeddingTask.RETRIEVAL_DOCUMENT,
+    )
+    similarity = format_paper_for_embedding(
+        profile=builder.model_profile,
+        paper=paper,
+        task=EmbeddingTask.GRAPH_SIMILARITY,
+    )
+
+    assert builder.model_profile.schema_token == "embeddinggemma-v1"
+    assert builder.truncate_dim == 256
+    assert query == "task: search result | query: Attention Models. An abstract."
+    assert document == "title: Attention Models | text: An abstract."
+    assert similarity == (
+        "task: sentence similarity | query: Attention Models. An abstract."
+    )
+    assert len({query, document, similarity}) == 3
+    assert "profile=embeddinggemma-v1" in builder.embedding_cache.model_name
+    assert "profile=embeddinggemma-v1" in builder.graph_embedding_cache.model_name
+
+
+def test_local_model_profile_override_and_generic_detection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local metadata should outrank names while explicit overrides remain available."""
+    misleading_path = tmp_path / "google" / "embeddinggemma-custom"
+    _write_local_sentence_transformer_profile(
+        misleading_path,
+        embeddinggemma=False,
+    )
+    monkeypatch.chdir(tmp_path)
+
+    generic = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="google/embeddinggemma-custom",
+        client=MagicMock(),
+    )
+    forced_embeddinggemma = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="google/embeddinggemma-custom",
+        model_profile="embeddinggemma",
+        client=MagicMock(),
+    )
+    recognized_but_forced_default = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name=DEFAULT_EMBEDDING_MODEL_NAME,
+        model_profile="default",
+        client=MagicMock(),
+    )
+
+    assert generic.model_profile.schema_token == "default-v1"
+    assert generic.truncate_dim is None
+    assert forced_embeddinggemma.model_profile.schema_token == "embeddinggemma-v1"
+    assert forced_embeddinggemma.truncate_dim == 256
+    assert recognized_but_forced_default.model_profile.schema_token == "default-v1"
+    assert recognized_but_forced_default.truncate_dim is None
+    with pytest.raises(ValueError, match="Unknown model profile"):
+        EmbeddingGraphBuilder(
+            max_papers=1,
+            model_profile="unknown-profile",
+            client=MagicMock(),
+        )
+
+
+def test_embedding_fallback_rebinds_profile_before_model_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A different-family fallback should receive its own complete load contract."""
+    requested_model = "org/generic-model"
+    fallback_model = tmp_path / "fine-tuned-local-model"
+    _write_local_sentence_transformer_profile(
+        fallback_model,
+        embeddinggemma=True,
+    )
+    init_log, _ = _install_fake_sentence_transformers(
+        monkeypatch,
+        fail_model_names={requested_model},
+    )
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    monkeypatch.setattr(
+        embedding_module,
+        "DEFAULT_EMBEDDING_MODEL_FALLBACKS",
+        {requested_model: (str(fallback_model),)},
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name=requested_model,
+        client=MagicMock(),
+    )
+    builder._load_model()
+
+    assert init_log["attempts"] == [requested_model, str(fallback_model)]
+    assert "truncate_dim" not in init_log["attempt_kwargs"][0]
+    assert init_log["attempt_kwargs"][1]["truncate_dim"] == 256
+    assert builder._active_model_name == str(fallback_model)
+    assert builder.model_profile.schema_token == "embeddinggemma-v1"
+    assert builder.truncate_dim == 256
+    assert f"model={fallback_model}" in builder.embedding_cache.model_name
+    assert "profile=embeddinggemma-v1" in builder.embedding_cache.model_name
 
 
 def test_embedding_fingerprint_uses_active_fallback_model_identity(
@@ -3181,6 +3393,7 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
         "autocast": False,
         "retrieval_representation": "retrieval-query/retrieval-document",
         "graph_representation": "graph-similarity",
+        "model_profile": "embeddinggemma-v1",
     }
 
 
@@ -3299,6 +3512,7 @@ def test_embedding_build_graph_persists_runtime_metadata(
         "autocast": False,
         "retrieval_representation": "retrieval-query/retrieval-document",
         "graph_representation": "graph-similarity",
+        "model_profile": "embeddinggemma-v1",
     }
 
 

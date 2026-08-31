@@ -188,7 +188,7 @@ Top-level fields:
 
 - `citation` for reference/citation collection knobs that affected the run. Recommendation sidecars include only shared reference-hydration settings, while citation and hybrid sidecars also include citation-expansion budgets.
 - `hybrid` for resolved `max_semantic`.
-- `embedding` for embedding/hybrid semantic settings, including the requested `device` token.
+- `embedding` for embedding/hybrid semantic settings, including the requested `device` and `model_profile` tokens.
 
 `metadata` includes:
 
@@ -199,7 +199,7 @@ Top-level fields:
   response with no papers), or `unavailable` (operational failure). Partial
   results remain usable and preserve the unavailable source; if every attempted
   source is unavailable, the build fails and writes no normal result artifacts.
-- embedding/hybrid runtime metadata when available, including `effective_device` and `effective_compute_dtype` (the device and dtype the encoder actually ran with), plus `retrieval_representation` and `graph_representation` identifying the distinct prompt-conditioned vector roles
+- embedding/hybrid runtime metadata when available, including `effective_device`, `effective_compute_dtype`, and the resolved `model_profile`, plus `retrieval_representation` and `graph_representation` identifying the distinct prompt-conditioned vector roles
 
 See embedding metadata term definitions in [Embedding Runtime](embedding-runtime.md).
 

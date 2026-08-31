@@ -7,7 +7,9 @@ embedding checkpoints without hard-coding logic in the strategies.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Dict, Mapping, Optional, Tuple
 
 QueryFormatter = Callable[[str, Optional[Dict[str, str]]], str]
@@ -18,6 +20,11 @@ DEFAULT_EMBEDDING_MODEL_NAME = "unsloth/embeddinggemma-300m"
 DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, Tuple[str, ...]] = {
     "unsloth/embeddinggemma-300m": ("google/embeddinggemma-300m",),
 }
+EMBEDDING_MODEL_PROFILE_CHOICES: Tuple[str, ...] = (
+    "auto",
+    "default",
+    "embeddinggemma",
+)
 
 
 def compose_title_abstract_text(metadata: Mapping[str, object]) -> str:
@@ -71,6 +78,7 @@ class EmbeddingModelProfile:
     """Per-model hints used by embedding strategies."""
 
     name: str
+    schema_token: str
     aliases: Tuple[str, ...] = ()
     query_formatter: QueryFormatter = _identity_query_formatter
     document_formatter: DocumentFormatter = _identity_document_formatter
@@ -156,11 +164,15 @@ def _gemma_similarity_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
     return f"task: sentence similarity | query: {text.strip()}"
 
 
-DEFAULT_PROFILE = EmbeddingModelProfile(name="default")
+DEFAULT_PROFILE = EmbeddingModelProfile(
+    name="default",
+    schema_token="default-v1",
+)
 
 EMBEDDING_MODEL_PROFILES = (
     EmbeddingModelProfile(
         name="google/embeddinggemma",
+        schema_token="embeddinggemma-v1",
         aliases=("unsloth/embeddinggemma",),
         query_formatter=_gemma_query_formatter,
         document_formatter=_gemma_document_formatter,
@@ -179,6 +191,88 @@ EMBEDDING_MODEL_PROFILES = (
     ),
 )
 
+_PROFILE_BY_KEY: Mapping[str, EmbeddingModelProfile] = {
+    "default": DEFAULT_PROFILE,
+    "embeddinggemma": EMBEDDING_MODEL_PROFILES[0],
+}
+
+
+def _read_json_object(path: Path) -> Dict[str, object]:
+    """Read a JSON object, returning an empty mapping for absent/invalid files.
+
+    :param Path path: JSON file to inspect.
+    :return Dict[str, object]: Parsed object or an empty mapping.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _local_transformer_configs(root: Path) -> Tuple[Dict[str, object], ...]:
+    """Read transformer configs from root and SentenceTransformers modules.
+
+    :param Path root: Local model directory.
+    :return Tuple[Dict[str, object], ...]: Non-empty transformer config objects.
+    """
+    config_paths = [root / "config.json"]
+    try:
+        modules = json.loads((root / "modules.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        modules = []
+    raw_modules = modules if isinstance(modules, list) else []
+
+    for module in raw_modules:
+        if not isinstance(module, dict):
+            continue
+        module_type = str(module.get("type", "")).casefold()
+        module_path = module.get("path")
+        if "transformer" not in module_type or not isinstance(module_path, str):
+            continue
+        config_paths.append(root / module_path / "config.json")
+
+    configs = tuple(_read_json_object(path) for path in dict.fromkeys(config_paths))
+    return tuple(config for config in configs if config)
+
+
+def _local_checkpoint_is_embeddinggemma(root: Path) -> bool:
+    """Return whether local metadata declares the EmbeddingGemma task contract.
+
+    :param Path root: Local model directory.
+    :return bool: Whether architecture and SentenceTransformers prompts match.
+    """
+    has_gemma_architecture = False
+    for transformer_config in _local_transformer_configs(root):
+        architectures = transformer_config.get("architectures", [])
+        normalized_architectures = (
+            {value.casefold() for value in architectures if isinstance(value, str)}
+            if isinstance(architectures, list)
+            else set()
+        )
+        model_type = str(transformer_config.get("model_type", "")).casefold()
+        if model_type == "gemma3_text" or "gemma3textmodel" in normalized_architectures:
+            has_gemma_architecture = True
+            break
+
+    sentence_transformer_config = _read_json_object(
+        root / "config_sentence_transformers.json"
+    )
+    raw_prompts = sentence_transformer_config.get("prompts", {})
+    prompt_names = (
+        {str(name).casefold() for name in raw_prompts}
+        if isinstance(raw_prompts, dict)
+        else set()
+    )
+    has_embedding_tasks = {
+        "retrieval-query",
+        "retrieval-document",
+        "sts",
+    }.issubset(prompt_names)
+    return has_gemma_architecture and has_embedding_tasks
+
 
 def get_embedding_model_profile(model_name: str) -> EmbeddingModelProfile:
     """Return the best matching profile for a model name.
@@ -191,3 +285,33 @@ def get_embedding_model_profile(model_name: str) -> EmbeddingModelProfile:
         if profile.matches(normalized):
             return profile
     return DEFAULT_PROFILE
+
+
+def resolve_embedding_model_profile(
+    model_name_or_path: str,
+    requested_profile: str = "auto",
+) -> EmbeddingModelProfile:
+    """Resolve a model profile from an override, local artifact, or Hub alias.
+
+    :param str model_name_or_path: Hub identifier or local checkpoint directory.
+    :param str requested_profile: ``auto`` or an explicit profile key.
+    :return EmbeddingModelProfile: Resolved task/runtime contract.
+    :raises ValueError: If ``requested_profile`` is unknown.
+    """
+    normalized_request = str(requested_profile).strip().casefold()
+    if normalized_request != "auto":
+        try:
+            return _PROFILE_BY_KEY[normalized_request]
+        except KeyError as exc:
+            choices = ", ".join(EMBEDDING_MODEL_PROFILE_CHOICES)
+            raise ValueError(
+                f"Unknown model profile {requested_profile!r}; expected one of: {choices}."
+            ) from exc
+
+    local_path = Path(model_name_or_path).expanduser()
+    if local_path.is_dir():
+        if _local_checkpoint_is_embeddinggemma(local_path):
+            return _PROFILE_BY_KEY["embeddinggemma"]
+        return DEFAULT_PROFILE
+
+    return get_embedding_model_profile(model_name_or_path)

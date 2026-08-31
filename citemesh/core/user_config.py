@@ -42,6 +42,7 @@ STRATEGY_CHOICES: Tuple[str, ...] = (
 )
 THEME_CHOICES: Tuple[str, ...] = ("light", "dark", "solarized", "auto")
 DEVICE_CHOICES: Tuple[str, ...] = ("auto", "cuda", "mps", "cpu")
+MODEL_PROFILE_CHOICES: Tuple[str, ...] = ("auto", "default", "embeddinggemma")
 SEMANTIC_SOURCE_CHOICES: Tuple[str, ...] = ("candidates", "arxiv-corpus")
 STORAGE_PRECISION_CHOICES: Tuple[str, ...] = ("int8", "float32")
 SEARCH_MODE_CHOICES: Tuple[str, ...] = ("auto", "local", "s2")
@@ -188,6 +189,7 @@ CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigCaster] = {
     "export": _cast_export,
     "theme": _choice_caster(THEME_CHOICES),
     "model": _cast_str,
+    "model_profile": _choice_caster(MODEL_PROFILE_CHOICES),
     "model_revision": _cast_str,
     "device": _choice_caster(DEVICE_CHOICES),
     "semantic_source": _choice_caster(SEMANTIC_SOURCE_CHOICES),

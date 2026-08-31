@@ -105,6 +105,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         refresh_reference_cache: bool = False,
         max_semantic: Optional[int] = None,
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
+        model_profile: str = "auto",
         model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
         corpus_size: Optional[int] = 50000,
@@ -137,6 +138,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             enrichment. Values must satisfy ``0 <= max_semantic <= max_papers - 1``.
             When omitted, defaults to ``min(20, max_papers - 1)``.
         :param str model_name: Embedding model name
+        :param str model_profile: Model task/runtime profile override.
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
         :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
@@ -206,6 +208,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 # max_semantic contract counts only added non-seed neighbors.
                 max_papers=self._semantic_candidate_cap + 1,
                 model_name=model_name,
+                model_profile=model_profile,
                 model_revision=model_revision,
                 dataset_split=dataset_split,
                 corpus_size=corpus_size,

@@ -61,6 +61,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `export` | Default `--export` format list |
 | `theme` | Default `--theme` (`light`, `dark`, `solarized`, `auto`) |
 | `model` | Default `--model` checkpoint |
+| `model_profile` | Default `--model-profile` (`auto`, `default`, `embeddinggemma`) |
 | `model_revision` | Default `--model-revision` |
 | `device` | Default `--device` (`auto`, `cuda`, `mps`, `cpu`) |
 | `semantic_source` | Default `--semantic-source` (`candidates`, `arxiv-corpus`) |

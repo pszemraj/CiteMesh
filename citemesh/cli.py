@@ -48,6 +48,7 @@ from citemesh.dashboard_contracts import (
 )
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
+    EMBEDDING_MODEL_PROFILE_CHOICES,
     format_bytes,
     get_cache_dir,
     validate_compression_filter,
@@ -448,6 +449,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "no_references": {"citation", "recommendation", "hybrid"},
     "refresh_reference_cache": {"citation", "recommendation", "hybrid"},
     "model": {"embedding", "hybrid"},
+    "model_profile": {"embedding", "hybrid"},
     "model_revision": {"embedding", "hybrid"},
     "dataset_split": {"embedding", "hybrid"},
     "corpus_size": {"embedding", "hybrid"},
@@ -497,6 +499,7 @@ _PROGRAMMATIC_BUILD_VALUE_DESTS: Set[str] = set(_BUILD_STRATEGY_OPTION_SUPPORT) 
 }
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
+    "model_profile",
     "model_revision",
     "dataset_split",
     "corpus_size",
@@ -535,6 +538,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
     """
     return {
         "model_name": cli_args.model,
+        "model_profile": cli_args.model_profile,
         "model_revision": cli_args.model_revision,
         "dataset_split": cli_args.dataset_split,
         "corpus_size": None if cli_args.all_corpus else cli_args.corpus_size,
@@ -590,6 +594,7 @@ def _embedding_export_metadata(
 
     effective_device: Optional[str] = None
     effective_compute_dtype: Optional[str] = None
+    effective_model_profile = str(cli_args.model_profile)
     retrieval_representation = "retrieval-query/retrieval-document"
     graph_representation = "graph-similarity"
     if isinstance(runtime_metadata, dict):
@@ -599,6 +604,9 @@ def _embedding_export_metadata(
             effective_device = raw_device
         if isinstance(raw_compute_dtype, str) and raw_compute_dtype:
             effective_compute_dtype = raw_compute_dtype
+        raw_model_profile = runtime_metadata.get("model_profile")
+        if isinstance(raw_model_profile, str) and raw_model_profile:
+            effective_model_profile = raw_model_profile
         raw_retrieval_representation = runtime_metadata.get("retrieval_representation")
         raw_graph_representation = runtime_metadata.get("graph_representation")
         if (
@@ -613,6 +621,7 @@ def _embedding_export_metadata(
         "effective_vector_dtype": "float32",
         "effective_device": effective_device,
         "effective_compute_dtype": effective_compute_dtype,
+        "model_profile": effective_model_profile,
         "retrieval_representation": retrieval_representation,
         "graph_representation": graph_representation,
         "semantic_source": str(cli_args.semantic_source),
@@ -1463,6 +1472,15 @@ User configuration:
         type=_non_empty_str,
         default=DEFAULT_EMBEDDING_MODEL_NAME,
         help="Sentence transformer model name",
+    )
+    embedding_group.add_argument(
+        "--model-profile",
+        choices=list(EMBEDDING_MODEL_PROFILE_CHOICES),
+        default="auto",
+        help=(
+            "Embedding task/runtime profile (default: auto; use an explicit "
+            "profile for stripped local exports)"
+        ),
     )
     embedding_group.add_argument(
         "--model-revision",
@@ -2690,6 +2708,7 @@ def _build_graph_config_payload(
     if semantic_enabled:
         embedding_config = {
             "model": cli_args.model,
+            "model_profile": cli_args.model_profile,
             "model_revision": cli_args.model_revision,
             "semantic_source": str(cli_args.semantic_source),
             "candidate_pool_size": int(cli_args.candidate_pool_size),
