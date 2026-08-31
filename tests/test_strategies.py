@@ -124,6 +124,8 @@ def _make_constant_similarity_builder(
         del paper1, paper2
         return 1.0
 
+    monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _papers: None)
+
     builder.collect_papers = MethodType(fake_collect_papers, builder)
     builder.should_create_edge = MethodType(always_true, builder)
     builder.compute_similarity = MethodType(constant_similarity, builder)
@@ -1929,6 +1931,11 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
         ),
     )
     monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder.embedding_builder,
+        "_resolve_model_fingerprint",
+        lambda: "test::immutable-artifact",
+    )
     builder.embedding_builder.model = SeededRandomEncodeModel(embedding_dim=4)
 
     papers = builder.collect_papers("seed")

@@ -38,6 +38,9 @@ jobs:
     env:
       # Explicitly anonymous: tests must never hit authenticated S2 paths.
       S2_API_KEY: ""
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
     steps:
       - uses: actions/checkout@v4
         with:
