@@ -90,6 +90,7 @@ class EmbeddingModelProfile:
     preferred_compute_dtype: Optional[str] = None
     autocast_devices: Tuple[str, ...] = ()
     preferred_attention_implementation: Optional[str] = None
+    requires_bidirectional_attention: bool = False
     compile_inner_transformer: bool = False
     available_truncate_dims: Optional[Tuple[int, ...]] = None
     recommended_truncate_dim: Optional[int] = None
@@ -185,6 +186,7 @@ EMBEDDING_MODEL_PROFILES = (
         preferred_compute_dtype="bfloat16",
         autocast_devices=("cuda", "mps"),
         preferred_attention_implementation="sdpa",
+        requires_bidirectional_attention=True,
         compile_inner_transformer=True,
         available_truncate_dims=(768, 512, 256, 128),
         recommended_truncate_dim=256,

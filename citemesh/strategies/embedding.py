@@ -2015,6 +2015,40 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 ", ".join(sorted(weight_dtypes)),
             )
 
+    def _validate_loaded_model_contract(
+        self,
+        model: Any,
+        model_name_or_path: str,
+    ) -> None:
+        """Require live transformer settings declared by the active model profile.
+
+        :param Any model: Newly loaded SentenceTransformer-compatible model.
+        :param str model_name_or_path: Candidate checkpoint that produced ``model``.
+        :return None: The runtime-active transformer satisfies its profile.
+        :raises EmbeddingBackendCompatibilityError: If a required live setting
+            is absent, inaccessible, or disabled.
+        """
+        if not self.model_profile.requires_bidirectional_attention:
+            return
+
+        try:
+            active_config = model[0].auto_model.config
+            bidirectional_attention = active_config.use_bidirectional_attention
+        except Exception as exc:
+            raise EmbeddingBackendCompatibilityError(
+                f"Embedding checkpoint {model_name_or_path!r} requires bidirectional "
+                "attention, but the runtime-active setting at "
+                "model[0].auto_model.config.use_bidirectional_attention could not "
+                "be verified."
+            ) from exc
+
+        if bidirectional_attention is not True:
+            raise EmbeddingBackendCompatibilityError(
+                f"Embedding checkpoint {model_name_or_path!r} requires bidirectional "
+                "attention, but the runtime-active transformer reports "
+                f"use_bidirectional_attention={bidirectional_attention!r}."
+            )
+
     def _autocast_context(self) -> Any:
         """Return autocast context for model encoding.
 
@@ -2297,6 +2331,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                         candidate_model, **st_kwargs
                     )
                     self._validate_loaded_model_precision(loaded_model, candidate_model)
+                    self._validate_loaded_model_contract(loaded_model, candidate_model)
                     self.model = loaded_model
                 except (
                     EmbeddingBackendCompatibilityError,

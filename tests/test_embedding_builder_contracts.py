@@ -189,15 +189,26 @@ def _install_fake_sentence_transformers(
     monkeypatch: pytest.MonkeyPatch,
     *,
     fail_model_names: set[str] | None = None,
+    active_bidirectional_attention: bool | None = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Install fake ``sentence_transformers`` module for precision tests."""
+    """Install fake ``sentence_transformers`` module for runtime tests.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patching fixture.
+    :param Optional[set[str]] fail_model_names: Model names whose construction fails.
+    :param Optional[bool] active_bidirectional_attention: Live transformer flag, or
+        ``None`` to omit it.
+    :return tuple[dict[str, Any], list[dict[str, Any]]]: Constructor and encode logs.
+    """
     init_log: dict[str, Any] = {}
     encode_log: list[dict[str, Any]] = []
     blocked_models = set(fail_model_names or ())
 
     class _FakeInnerBlock:
         def __init__(self) -> None:
-            self.auto_model = object()
+            config = types.SimpleNamespace()
+            if active_bidirectional_attention is not None:
+                config.use_bidirectional_attention = active_bidirectional_attention
+            self.auto_model = types.SimpleNamespace(config=config)
 
     class _FakeSentenceTransformer:
         def __init__(self, model_name_or_path: str, **kwargs: Any):
@@ -1212,6 +1223,72 @@ def test_local_model_profile_override_and_generic_detection(
             model_profile="unknown-profile",
             client=MagicMock(),
         )
+
+
+@pytest.mark.parametrize(
+    ("contract_source", "active_bidirectional_attention", "should_fail"),
+    [
+        pytest.param("prompts", False, True, id="prompts-loaded-false"),
+        pytest.param("prompts", None, True, id="prompts-loaded-missing"),
+        pytest.param("root-true", False, True, id="root-true-active-false"),
+        pytest.param("known-model", True, False, id="loaded-true"),
+        pytest.param("explicit", False, True, id="explicit-profile-loaded-false"),
+        pytest.param("generic", False, False, id="generic-profile-unaffected"),
+    ],
+)
+def test_loaded_embeddinggemma_requires_bidirectional_attention(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    contract_source: str,
+    active_bidirectional_attention: bool | None,
+    should_fail: bool,
+) -> None:
+    """The live transformer must satisfy the selected EmbeddingGemma contract."""
+    model_name = DEFAULT_EMBEDDING_MODEL_NAME
+    model_profile = "auto"
+    if contract_source in {"prompts", "root-true"}:
+        model_path = tmp_path / contract_source
+        _write_local_sentence_transformer_profile(
+            model_path,
+            embeddinggemma=True,
+            include_task_prompts=contract_source == "prompts",
+            include_bidirectional_flag=contract_source == "root-true",
+        )
+        model_name = str(model_path)
+    elif contract_source == "explicit":
+        model_name = "org/generic-embedding-model"
+        model_profile = "embeddinggemma"
+    elif contract_source == "generic":
+        model_name = "org/generic-embedding-model"
+
+    _install_fake_sentence_transformers(
+        monkeypatch,
+        active_bidirectional_attention=active_bidirectional_attention,
+    )
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name=model_name,
+        model_profile=model_profile,
+        client=MagicMock(),
+    )
+
+    if should_fail:
+        with pytest.raises(
+            embedding_module.EmbeddingBackendCompatibilityError,
+            match="bidirectional attention",
+        ):
+            builder._load_model()
+        assert builder.model is None
+        assert builder._embedding_cache is None
+        return
+
+    builder._load_model()
+    assert builder.model is not None
 
 
 def test_embedding_fallback_rebinds_profile_before_model_load(
