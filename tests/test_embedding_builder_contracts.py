@@ -73,6 +73,53 @@ def test_transformers_auto_dtype_key_uses_supported_spelling(
     assert embedding_module._transformers_auto_dtype_key() == expected_key
 
 
+@pytest.mark.parametrize(
+    ("model_name", "transformers_version", "should_reject"),
+    [
+        (DEFAULT_EMBEDDING_MODEL_NAME, "4.56.2", True),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "4.57.0", False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "5.0.0", False),
+        ("org/generic-embedding-model", "4.56.2", False),
+    ],
+)
+def test_model_load_enforces_profile_transformers_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    model_name: str,
+    transformers_version: str,
+    should_reject: bool,
+) -> None:
+    """Model loading should enforce only the active profile's backend floor."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    fake_transformers = types.SimpleNamespace(__version__=transformers_version)
+    monkeypatch.setattr(
+        embedding_module.importlib,
+        "import_module",
+        lambda module_name: fake_transformers,
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name=model_name,
+        client=MagicMock(),
+    )
+
+    if should_reject:
+        with pytest.raises(
+            embedding_module.EmbeddingBackendCompatibilityError,
+            match=r"requires transformers>=4\.57",
+        ):
+            builder._load_model()
+        assert "attempts" not in init_log
+        return
+
+    builder._load_model()
+    assert init_log["attempts"] == [model_name]
+
+
 def _install_fake_sentence_transformers(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -873,7 +920,7 @@ def test_local_embeddinggemma_artifacts_resolve_task_profile(
         task=EmbeddingTask.GRAPH_SIMILARITY,
     )
 
-    assert builder.model_profile.schema_token == "embeddinggemma-v1"
+    assert builder.model_profile.schema_token == "embeddinggemma-v2"
     assert builder.truncate_dim == 256
     assert query == "task: search result | query: Attention Models. An abstract."
     assert document == "title: Attention Models | text: An abstract."
@@ -881,8 +928,9 @@ def test_local_embeddinggemma_artifacts_resolve_task_profile(
         "task: sentence similarity | query: Attention Models. An abstract."
     )
     assert len({query, document, similarity}) == 3
-    assert "profile=embeddinggemma-v1" in builder.embedding_cache.model_name
-    assert "profile=embeddinggemma-v1" in builder.graph_embedding_cache.model_name
+    assert "profile=embeddinggemma-v2" in builder.embedding_cache.model_name
+    assert "profile=embeddinggemma-v1" not in builder.embedding_cache.model_name
+    assert "profile=embeddinggemma-v2" in builder.graph_embedding_cache.model_name
 
 
 def test_local_model_profile_override_and_generic_detection(
@@ -917,7 +965,7 @@ def test_local_model_profile_override_and_generic_detection(
 
     assert generic.model_profile.schema_token == "default-v1"
     assert generic.truncate_dim is None
-    assert forced_embeddinggemma.model_profile.schema_token == "embeddinggemma-v1"
+    assert forced_embeddinggemma.model_profile.schema_token == "embeddinggemma-v2"
     assert forced_embeddinggemma.truncate_dim == 256
     assert recognized_but_forced_default.model_profile.schema_token == "default-v1"
     assert recognized_but_forced_default.truncate_dim is None
@@ -966,10 +1014,10 @@ def test_embedding_fallback_rebinds_profile_before_model_load(
     assert "truncate_dim" not in init_log["attempt_kwargs"][0]
     assert init_log["attempt_kwargs"][1]["truncate_dim"] == 256
     assert builder._active_model_name == str(fallback_model)
-    assert builder.model_profile.schema_token == "embeddinggemma-v1"
+    assert builder.model_profile.schema_token == "embeddinggemma-v2"
     assert builder.truncate_dim == 256
     assert f"model={fallback_model}" in builder.embedding_cache.model_name
-    assert "profile=embeddinggemma-v1" in builder.embedding_cache.model_name
+    assert "profile=embeddinggemma-v2" in builder.embedding_cache.model_name
 
 
 def test_embedding_fingerprint_uses_active_fallback_model_identity(
@@ -3454,7 +3502,7 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
         "autocast": False,
         "retrieval_representation": "retrieval-query/retrieval-document",
         "graph_representation": "graph-similarity",
-        "model_profile": "embeddinggemma-v1",
+        "model_profile": "embeddinggemma-v2",
     }
 
 
@@ -3573,7 +3621,7 @@ def test_embedding_build_graph_persists_runtime_metadata(
         "autocast": False,
         "retrieval_representation": "retrieval-query/retrieval-document",
         "graph_representation": "graph-similarity",
-        "model_profile": "embeddinggemma-v1",
+        "model_profile": "embeddinggemma-v2",
     }
 
 

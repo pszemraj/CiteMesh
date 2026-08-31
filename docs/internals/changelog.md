@@ -64,6 +64,7 @@ package. Current behavior is described in the linked guides and references:
   runtimes.
 - Split torch dependency floors by platform and made `torch.compile` an opt-in,
   profile-gated optimization.
+- Required Transformers 4.57 or newer for EmbeddingGemma, enforced the profile-specific floor before model loading, and invalidated caches created before bidirectional attention was guaranteed.
 - Added immutable model-artifact fingerprints and runtime-active checkpoint
   identity to persistent cache namespaces.
 - Moved embedding storage to SQLite metadata plus HDF5 vector datasets with

@@ -58,6 +58,7 @@ embeddings = [
     "sentence-transformers>=3.0.0",
     "torch>=2.9.0; sys_platform != 'darwin'",
     "torch>=2.13.0; sys_platform == 'darwin'",
+    "transformers>=4.57.0",
 ]
 recommended = ["citemesh[embeddings,viz]"]
 dev = [
@@ -70,6 +71,7 @@ dev = [
     "sentence-transformers>=3.0.0",
     "torch>=2.9.0; sys_platform != 'darwin'",
     "torch>=2.13.0; sys_platform == 'darwin'",
+    "transformers>=4.57.0",
 ]
 all = ["citemesh[dev,embeddings,viz]"]
 

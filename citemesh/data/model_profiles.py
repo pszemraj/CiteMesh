@@ -80,6 +80,7 @@ class EmbeddingModelProfile:
     name: str
     schema_token: str
     aliases: Tuple[str, ...] = ()
+    minimum_transformers_version: Optional[Tuple[int, int]] = None
     query_formatter: QueryFormatter = _identity_query_formatter
     document_formatter: DocumentFormatter = _identity_document_formatter
     similarity_formatter: SimilarityFormatter = _identity_similarity_formatter
@@ -172,8 +173,9 @@ DEFAULT_PROFILE = EmbeddingModelProfile(
 EMBEDDING_MODEL_PROFILES = (
     EmbeddingModelProfile(
         name="google/embeddinggemma",
-        schema_token="embeddinggemma-v1",
+        schema_token="embeddinggemma-v2",
         aliases=("unsloth/embeddinggemma",),
+        minimum_transformers_version=(4, 57),
         query_formatter=_gemma_query_formatter,
         document_formatter=_gemma_document_formatter,
         similarity_formatter=_gemma_similarity_formatter,

@@ -48,7 +48,10 @@ from citemesh.data import (
     validate_compression_filter,
 )
 from citemesh.data.embedding_cache import CacheSearchResult
-from citemesh.data.model_profiles import compose_title_abstract_text
+from citemesh.data.model_profiles import (
+    EmbeddingModelProfile,
+    compose_title_abstract_text,
+)
 from citemesh.paper_ids import (
     external_ids_from_canonical_paper_id,
     normalize_paper_id,
@@ -138,6 +141,10 @@ class EmbeddingTask(str, Enum):
     RETRIEVAL_QUERY = "retrieval-query"
     RETRIEVAL_DOCUMENT = "retrieval-document"
     GRAPH_SIMILARITY = "graph-similarity"
+
+
+class EmbeddingBackendCompatibilityError(RuntimeError):
+    """The active embedding model requires a newer inference backend."""
 
 
 def _embedding_text_metadata(title: object, abstract: object) -> Dict[str, str]:
@@ -256,6 +263,29 @@ def _transformers_auto_dtype_key() -> str:
         str(getattr(transformers, "__version__", ""))
     )
     return "dtype" if major >= 5 else "torch_dtype"
+
+
+def _require_transformers_compatibility(profile: EmbeddingModelProfile) -> None:
+    """Require the Transformers floor declared by an embedding model profile.
+
+    :param EmbeddingModelProfile profile: Runtime-active model contract.
+    :return None: The installed backend satisfies the model contract.
+    :raises EmbeddingBackendCompatibilityError: If Transformers is too old.
+    """
+    minimum = profile.minimum_transformers_version
+    if minimum is None:
+        return
+
+    transformers = importlib.import_module("transformers")
+    raw_version = str(getattr(transformers, "__version__", "")).strip()
+    detected = _parse_torch_major_minor(raw_version)
+    if detected < minimum:
+        required = ".".join(str(part) for part in minimum)
+        raise EmbeddingBackendCompatibilityError(
+            f"{profile.name} requires transformers>={required} because older "
+            "Gemma 3 implementations ignore bidirectional attention. "
+            f"Detected transformers=={raw_version or 'unknown'}."
+        )
 
 
 def _accelerator_available(torch: Any, backend: str) -> bool:
@@ -1943,6 +1973,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             for idx, candidate_model in enumerate(load_candidates):
                 try:
                     self._bind_model_contract(candidate_model)
+                    _require_transformers_compatibility(self.model_profile)
                     model_kwargs = self._resolve_model_kwargs()
                     st_kwargs: Dict[str, Any] = {"device": self.device}
                     if model_kwargs:
@@ -1952,6 +1983,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     if self.model_revision is not None:
                         st_kwargs["revision"] = self.model_revision
                     self.model = sentence_transformer_cls(candidate_model, **st_kwargs)
+                except EmbeddingBackendCompatibilityError:
+                    raise
                 except Exception as exc:
                     model_errors.append((candidate_model, exc))
                     has_more_candidates = idx + 1 < len(load_candidates)
