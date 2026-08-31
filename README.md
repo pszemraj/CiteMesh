@@ -6,7 +6,10 @@ free-text query. CiteMesh ships as a single CLI with consistent visuals and expo
 formats so you can switch approaches without changing tools -- an open-source,
 embeddings-powered take on the reference tool workflow.
 
-![CiteMesh UI](assets/ui.png)
+![CiteMesh dashboard showing a hybrid graph for Attention is All you Need](assets/ui.png)
+
+_Current dashboard rendered from a repository-local hybrid run for “Attention is
+All you Need” (45 papers, 107 links)._
 
 ## Core Use Case
 

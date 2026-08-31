@@ -148,6 +148,11 @@ Combined BibTeX entries for all papers in the graph, one `@article` per paper. R
 
 The dashboard viewer (`dashboard.html` in collection mode, or `<name>.dashboard.html` for explicit standalone output) is a tri-pane research interface with embedded Plotly graph, paper list, and detail panel. Collection-mode HTML embeds a snapshot of `dashboard.citemesh.json`; this intentional duplication lets the viewer work when opened as `file://...`, where browsers do not reliably permit JavaScript to fetch adjacent local files. The JSON package remains the authoritative reusable data file.
 
+![CiteMesh dashboard with the Prior works filter active](../../assets/ui-prior-works.png)
+
+_The same local run with **Prior works** active: the graph and paper list narrow
+to 19 foundational papers while the selected seed's full details remain visible._
+
 **Toolbar data actions:**
 
 - **Export JSON** - downloads the embedded enriched payload as a standalone `.json` file
