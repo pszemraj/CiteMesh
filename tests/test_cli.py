@@ -511,14 +511,21 @@ _FAKE_LOCAL_RESULT = SimpleNamespace(
 
 
 def test_search_mode_s2_rejects_local_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--model/--device are meaningless for explicit S2 keyword search."""
+    """Embedding namespace flags are meaningless for explicit S2 keyword search."""
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     result = run_cli_command(
-        ["search", "attention", "--mode", "s2", "--model", "some-model"]
+        [
+            "search",
+            "attention",
+            "--mode",
+            "s2",
+            "--model-profile",
+            "embeddinggemma",
+        ]
     )
     assert result.returncode == 2
-    assert "--model and --device only apply to local semantic search" in str(
+    assert "--model, --model-profile, and --device only apply" in str(
         error_mock.call_args
     )
 
@@ -553,10 +560,20 @@ def test_search_mode_local_prints_cached_results(
     assert builder_kwargs["storage_precision"] == "float32"
 
 
-def test_search_model_flag_implies_local_mode(
+@pytest.mark.parametrize(
+    ("namespace_args", "expected_kwarg", "expected_value"),
+    [
+        (["--model", "custom/model"], "model_name", "custom/model"),
+        (["--model-profile", "embeddinggemma"], "model_profile", "embeddinggemma"),
+    ],
+)
+def test_search_namespace_flag_implies_local_mode(
     monkeypatch: pytest.MonkeyPatch,
+    namespace_args: list[str],
+    expected_kwarg: str,
+    expected_value: str,
 ) -> None:
-    """--model without --mode selects local search for that model namespace."""
+    """A namespace override without --mode should select local search."""
     fake_builder = _fake_local_search_builder(
         cached_count=7, results=[_FAKE_LOCAL_RESULT]
     )
@@ -565,10 +582,10 @@ def test_search_model_flag_implies_local_mode(
     client_factory = MagicMock()
     monkeypatch.setattr(cli_module, "get_client", client_factory)
 
-    result = run_cli_command(["search", "cached topic", "--model", "custom/model"])
+    result = run_cli_command(["search", "cached topic", *namespace_args])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     assert "Local semantic search for 'cached topic'" in " ".join(result.stdout.split())
-    assert builder_factory.call_args.kwargs["model_name"] == "custom/model"
+    assert builder_factory.call_args.kwargs[expected_kwarg] == expected_value
     client_factory.assert_not_called()
 
 
