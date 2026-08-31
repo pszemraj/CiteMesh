@@ -103,9 +103,11 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             paper.references = list(cached_refs)
             return
 
+        from citemesh.services import SemanticScholarUnavailableError
+
         try:
             paper.references = self._get_references(paper_id)
-        except RuntimeError as exc:
+        except SemanticScholarUnavailableError as exc:
             logger.warning(
                 "Reference IDs unavailable for related paper %s; continuing "
                 "without bibliographic-coupling data for that paper: %s",

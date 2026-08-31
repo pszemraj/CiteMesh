@@ -208,17 +208,37 @@ def has_strong_identifier_conflict(
     left: IdentityEvidence,
     right: IdentityEvidence,
 ) -> bool:
-    """Return whether shared strong-ID namespaces contain disjoint values.
+    """Return whether strong-ID evidence contains an irreconcilable conflict.
+
+    Exact DOI/arXiv agreement identifies one work even when Semantic Scholar
+    assigned duplicate opaque records. Conflicting external identifiers remain
+    irreconcilable.
 
     :param IdentityEvidence left: First evidence set.
     :param IdentityEvidence right: Second evidence set.
-    :return bool: ``True`` when a same-namespace contradiction exists.
+    :return bool: ``True`` when the evidence cannot describe one work.
     """
     shared_namespaces = set(left.strong_ids) & set(right.strong_ids)
-    return any(
-        set(left.strong_ids[namespace]).isdisjoint(right.strong_ids[namespace])
+    disagreements = {
+        namespace
         for namespace in shared_namespaces
+        if set(left.strong_ids[namespace]).isdisjoint(right.strong_ids[namespace])
+    }
+    if not disagreements:
+        return False
+
+    agreeing_external_ids = any(
+        namespace in shared_namespaces
+        and not set(left.strong_ids[namespace]).isdisjoint(right.strong_ids[namespace])
+        for namespace in ("doi", "arxiv")
     )
+    if disagreements == {"s2"} and agreeing_external_ids:
+        # Semantic Scholar may assign multiple opaque records to one work. A
+        # shared DOI/arXiv identifier is authoritative evidence that those S2
+        # records describe the same paper; contradictory external IDs remain a
+        # hard conflict.
+        return False
+    return True
 
 
 class IdentityRegistry:

@@ -632,6 +632,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         logger.info("Enriching with up to %s semantic matches...", semantic_budget)
 
+        from citemesh.services import SemanticScholarUnavailableError
+
         try:
             if self.semantic_source == "arxiv-corpus":
                 semantic_papers = self.embedding_builder.collect_papers(
@@ -652,6 +654,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 )
                 self.candidate_source_status.update(pool.source_status)
                 semantic_papers = pool.papers
+        except SemanticScholarUnavailableError:
+            raise
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
@@ -807,6 +811,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             for paper_id, relation in sorted(
                 self.seed_relations.items(), key=lambda item: item[0]
             )
+            if str(paper_id) in graph.nodes
         }
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())

@@ -69,6 +69,10 @@ class SemanticScholarUnavailableError(RuntimeError):
     """Raised when the Semantic Scholar API stays unreachable after retries."""
 
 
+class SemanticScholarRequestError(RuntimeError):
+    """Raised when Semantic Scholar rejects a non-retryable client request."""
+
+
 _MAX_BACKOFF_SECONDS = 60.0
 
 
@@ -760,6 +764,8 @@ class SemanticScholarClient:
             HTTP 404 still returns ``None`` (genuinely absent resource).
         :param str context: Request description used in availability errors.
         :return Optional[Dict[str, Any]]: Parsed JSON payload or ``None`` on failure.
+        :raises SemanticScholarRequestError: If a non-429 HTTP 4xx response
+            rejects the request.
         """
 
         def _attempt() -> Optional[Dict[str, Any]]:
@@ -775,6 +781,15 @@ class SemanticScholarClient:
                 raise _RetryableRequestError(
                     f"HTTP 429 from {url}",
                     retry_after=self._safe_retry_after(response),
+                )
+            if 400 <= response.status_code < 500:
+                if response.status_code in {401, 403}:
+                    remediation = "Check S2_API_KEY credentials and access permissions."
+                else:
+                    remediation = "Check request parameters and requested fields."
+                raise SemanticScholarRequestError(
+                    f"Semantic Scholar rejected the request while {context} "
+                    f"(HTTP {response.status_code}). {remediation}"
                 )
             response.raise_for_status()
             return response.json()
@@ -1100,33 +1115,33 @@ class SemanticScholarClient:
         :param bool raise_on_unavailable: Whether exhausted operational retries raise.
         :return List[Paper]: Converted relation papers.
         """
-        papers: List[Paper] = []
         normalized_paper_id = normalize_paper_id(paper_id)
 
         def _operation() -> List[Paper]:
             """Fetch and convert citation/reference relation records.
 
-            :return List[Paper]: Converted relation papers collected so far.
+            :return List[Paper]: Converted relation papers for this attempt.
             """
+            attempt_papers: List[Paper] = []
             relation_records = fetch_method(normalized_paper_id, limit=limit)
             if not relation_records:
-                return papers
+                return attempt_papers
 
             for record in relation_records:
                 paper = self._convert_api_paper(getattr(record, "paper", None))
                 if paper:
-                    papers.append(paper)
+                    attempt_papers.append(paper)
 
-                if len(papers) >= limit:
+                if len(attempt_papers) >= limit:
                     break
 
-            return papers
+            return attempt_papers
 
         def _final_failure(exc: Exception) -> List[Paper]:
             """Apply the caller-selected failure contract after retry exhaustion.
 
             :param Exception exc: Final operational failure.
-            :return List[Paper]: Accumulated papers in tolerant mode.
+            :return List[Paper]: Empty list in tolerant mode.
             :raises SemanticScholarUnavailableError: In strict mode.
             """
             if raise_on_unavailable:
@@ -1142,7 +1157,7 @@ class SemanticScholarClient:
                 API_CONFIG.max_retries,
                 exc,
             )
-            return papers
+            return []
 
         return self._call_with_retries(
             _operation,
@@ -1163,7 +1178,7 @@ class SemanticScholarClient:
                             relation_label,
                             normalized_paper_id,
                         )
-                        or papers
+                        or []
                     ),
                 ),
             ),
@@ -1178,6 +1193,8 @@ class SemanticScholarClient:
         :param str paper_id: Paper identifier
         :param bool force_refresh: Whether to bypass cache reads and fetch fresh IDs.
         :return List[str]: List of referenced paper IDs
+        :raises TypeError: If the SDK or response payload violates the relation contract.
+        :raises SemanticScholarUnavailableError: If operational retries are exhausted.
         """
         normalized_paper_id = normalize_paper_id(paper_id)
         cache_path = _reference_cache_path(normalized_paper_id)
@@ -1231,10 +1248,10 @@ class SemanticScholarClient:
             )
             return []
 
-        def _operation() -> List[str]:
-            """Fetch, normalize, and persist reference IDs for one paper.
+        def _operation() -> List[Any]:
+            """Fetch one materialized reference-relation response.
 
-            :return List[str]: Normalized reference IDs.
+            :return List[Any]: Raw relation records for later validation.
             """
             raw_references = self.client.get_paper_references(
                 normalized_paper_id,
@@ -1244,28 +1261,23 @@ class SemanticScholarClient:
                 raise TypeError(
                     "Reference relation response must be an iterable of records."
                 )
-            references = list(raw_references)
-            if not references:
-                return _persist_empty()
+            return list(raw_references)
 
-            normalized_ref_ids = _normalize_reference_ids(references, strict=True)
-            if normalized_ref_ids is None:
-                raise TypeError(
-                    "Non-empty reference response contained no valid paper IDs."
-                )
-            self._persist_reference_cache_entry(
-                cache_path,
-                normalized_paper_id,
-                normalized_ref_ids,
-            )
-            return normalized_ref_ids
+        def _raise_contract_failure(exc: Exception) -> List[Any]:
+            """Surface local SDK/payload contract errors without retrying.
 
-        def _raise_failure(exc: Exception) -> List[str]:
-            """Raise a stable retry-exhaustion error for reference-ID fetches.
+            :param Exception exc: Local contract failure.
+            :raises Exception: Always re-raises ``exc``.
+            :return List[Any]: This function does not return successfully.
+            """
+            raise exc
+
+        def _raise_failure(exc: Exception) -> List[Any]:
+            """Raise an availability error after operational retry exhaustion.
 
             :param Exception exc: Final exception raised by the API client.
-            :raises RuntimeError: Always raised after logging the retry failure.
-            :return List[str]: This function does not return successfully.
+            :raises SemanticScholarUnavailableError: Always after logging.
+            :return List[Any]: This function does not return successfully.
             """
             logger.warning(
                 "Failed to fetch reference IDs for %s after %s attempts: %s",
@@ -1273,11 +1285,13 @@ class SemanticScholarClient:
                 API_CONFIG.max_retries,
                 exc,
             )
-            raise RuntimeError(
-                f"Failed to fetch reference IDs after retries for {normalized_paper_id}."
+            raise self._unavailable_error(
+                f"fetching reference IDs for {normalized_paper_id}",
+                f": {exc}",
+                rate_limited=self._is_rate_limit_error(exc),
             ) from exc
 
-        return self._call_with_retries(
+        references = self._call_with_retries(
             _operation,
             on_retry=lambda attempt, wait_time, exc: logger.warning(
                 "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
@@ -1287,6 +1301,8 @@ class SemanticScholarClient:
             ),
             on_final_failure=_raise_failure,
             handled_exceptions=(
+                (TypeError, _raise_contract_failure),
+                (ValueError, _raise_contract_failure),
                 (
                     ObjectNotFoundException,
                     lambda _exc: (
@@ -1294,11 +1310,25 @@ class SemanticScholarClient:
                             "Paper not found for reference IDs: %s",
                             normalized_paper_id,
                         )
-                        or _persist_empty()
+                        or []
                     ),
                 ),
             ),
         )
+        if not references:
+            return _persist_empty()
+
+        normalized_ref_ids = _normalize_reference_ids(references, strict=True)
+        if normalized_ref_ids is None:
+            raise TypeError(
+                "Non-empty reference response contained no valid paper IDs."
+            )
+        self._persist_reference_cache_entry(
+            cache_path,
+            normalized_paper_id,
+            normalized_ref_ids,
+        )
+        return normalized_ref_ids
 
     def get_recommended_papers(
         self,
@@ -1315,7 +1345,9 @@ class SemanticScholarClient:
         :param int limit: Maximum recommendations
         :param Optional[List[str]] fields: API fields to return.
         :param bool raise_on_unavailable: Whether exhausted operational retries
-            raise instead of returning an empty list.
+            for the primary request raise instead of returning an empty list. An
+            unavailable optional ``all-cs`` widening request preserves a
+            successful empty primary result.
         :return List[Paper]: Ranked recommendation papers.
         """
         if fields is None:
@@ -1345,12 +1377,23 @@ class SemanticScholarClient:
             # The default candidate pool ("recent") only covers recent papers
             # and returns nothing for classic seeds (e.g. 2017 landmark
             # papers). Fall back to the broader CS pool before giving up.
-            fallback_payload = self._request_json(
-                f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
-                {**base_params, "from": "all-cs"},
-                raise_on_unavailable=raise_on_unavailable,
-                context=(f"fetching all-cs recommendations for {normalized_paper_id}"),
-            )
+            try:
+                fallback_payload = self._request_json(
+                    f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
+                    {**base_params, "from": "all-cs"},
+                    raise_on_unavailable=raise_on_unavailable,
+                    context=(
+                        f"fetching all-cs recommendations for {normalized_paper_id}"
+                    ),
+                )
+            except SemanticScholarUnavailableError as exc:
+                logger.warning(
+                    "The optional all-cs recommendation fallback was unavailable "
+                    "for %s; preserving the successful empty recent-pool result: %s",
+                    normalized_paper_id,
+                    exc,
+                )
+                fallback_payload = None
             raw_recommendations = (fallback_payload or {}).get("recommendedPapers", [])
             if raw_recommendations:
                 logger.debug(

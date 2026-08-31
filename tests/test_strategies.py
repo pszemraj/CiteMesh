@@ -537,8 +537,12 @@ def test_refresh_reference_cache_force_lookup_contracts() -> None:
 
 def test_citation_related_paper_reference_failure_remains_uncached() -> None:
     """One unavailable related-paper reference list should not abort collection."""
+    from citemesh.services import SemanticScholarUnavailableError
+
     client = MagicMock()
-    client.get_reference_ids.side_effect = RuntimeError("publisher elided references")
+    client.get_reference_ids.side_effect = SemanticScholarUnavailableError(
+        "publisher elided references"
+    )
     builder = CitationGraphBuilder(fetch_references=True, client=client)
     paper = _paper("related-paper")
 
@@ -550,6 +554,10 @@ def test_citation_related_paper_reference_failure_remains_uncached() -> None:
         paper.paper_id,
         force_refresh=False,
     )
+
+    client.get_reference_ids.side_effect = RuntimeError("local hydration bug")
+    with pytest.raises(RuntimeError, match="local hydration bug"):
+        builder._ensure_paper_references(_paper("broken-paper"))
 
 
 def test_citation_collect_clears_in_memory_reference_cache_between_requests() -> None:
@@ -760,6 +768,30 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
 
     with pytest.raises(
         RuntimeError, match="Semantic enrichment failed: semantic backend unavailable"
+    ):
+        builder.collect_papers("seed")
+
+
+def test_hybrid_collection_preserves_semantic_scholar_outage_type() -> None:
+    """Hybrid API callers should retain the service availability taxonomy."""
+    from citemesh.services import SemanticScholarUnavailableError
+
+    builder = HybridGraphBuilder(
+        max_papers=5,
+        max_semantic=2,
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
+    )
+    seed = _seed_paper()
+    builder.citation_builder.collect_papers = MagicMock(return_value={"seed": seed})
+    assert builder.embedding_builder is not None
+    builder.embedding_builder.collect_papers = MagicMock(
+        side_effect=SemanticScholarUnavailableError("semantic service outage")
+    )
+
+    with pytest.raises(
+        SemanticScholarUnavailableError,
+        match="semantic service outage",
     ):
         builder.collect_papers("seed")
 
@@ -1022,7 +1054,11 @@ def test_hybrid_build_graph_skips_pruning_when_disabled(
 
     builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
     builder.paper_sources = {"seed": "citation", "a": "semantic"}
-    builder.seed_relations = {"seed": "seed", "a": "semantic_only"}
+    builder.seed_relations = {
+        "seed": "seed",
+        "a": "semantic_only",
+        "pruned": "citation",
+    }
     graph = nx.Graph()
     graph.add_node("seed", is_seed=True)
     graph.add_node("a", is_seed=False)
@@ -1383,6 +1419,38 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
     )
     pool.add(seed_duplicate, source="citation", relation="cites_seed")
     assert set(pool.papers) == {first.paper_id}
+
+
+@pytest.mark.parametrize(
+    ("identifier_field", "identifier_value"),
+    [("doi", "10.1000/shared"), ("arxiv_id", "2508.12345")],
+)
+def test_identity_external_id_agreement_overrides_s2_record_disagreement(
+    identifier_field: str,
+    identifier_value: str,
+) -> None:
+    """Shared DOI/arXiv evidence should collapse duplicate S2 seed records."""
+    seed = Paper(
+        paper_id="1" * 40,
+        title="Canonical Seed",
+        year=2025,
+        abstract="",
+        is_seed=True,
+    )
+    setattr(seed, identifier_field, identifier_value)
+    duplicate = Paper(
+        paper_id="2" * 40,
+        title="Duplicate Seed Record",
+        year=2025,
+        abstract="hydrated abstract",
+    )
+    setattr(duplicate, identifier_field, identifier_value)
+    pool = CandidatePool(seed=seed)
+
+    pool.add(duplicate, source="recommendation", relation="semantic_only")
+
+    assert pool.papers == {}
+    assert seed.abstract == "hydrated abstract"
 
 
 def test_candidate_pool_collapses_identifier_bridge_classes() -> None:

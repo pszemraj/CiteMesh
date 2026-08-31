@@ -248,7 +248,7 @@ def _select_dashboard_label_nodes(
     return set(selected)
 
 
-def _inject_darkreader_lock(path: Path, color_scheme: str = "light") -> None:
+def _inject_darkreader_lock(path: Path | str, color_scheme: str = "light") -> None:
     """Insert dark-mode-extension defenses into a written HTML export.
 
     CiteMesh HTML exports ship their own tuned themes; auto-darkening
@@ -258,21 +258,22 @@ def _inject_darkreader_lock(path: Path, color_scheme: str = "light") -> None:
     meta, and the standards-based ``color-scheme`` meta that Chrome's Auto
     Dark Mode and well-behaved extensions consult before repainting a page.
 
-    :param Path path: HTML file to rewrite in place (no-op when it has no
+    :param Path | str path: HTML file to rewrite in place (no-op when it has no
         ``<head>`` tag or already carries the lock).
     :param str color_scheme: Declared scheme for the export, ``dark`` or
         ``light``.
     :return None: Rewrites the file in place.
     """
+    resolved_path = Path(path)
     try:
-        content = path.read_text(encoding="utf-8")
+        content = resolved_path.read_text(encoding="utf-8")
     except OSError:
         return
     if "darkreader-lock" in content or "<head>" not in content:
         return
     scheme = color_scheme if color_scheme in {"dark", "light"} else "light"
     scheme_meta = f'<meta name="color-scheme" content="{scheme}" />'
-    path.write_text(
+    resolved_path.write_text(
         content.replace("<head>", f"<head>{DARKREADER_LOCK_META}{scheme_meta}", 1),
         encoding="utf-8",
     )
@@ -1915,7 +1916,7 @@ class GraphExporter:
     }
     .legend-marker.seed {
       border: 2px solid var(--seed-ring);
-      background: rgba(214, 108, 191, 0.28);
+      background: color-mix(in srgb, var(--seed-ring) 28%, transparent);
     }
     .legend-gradient {
       width: 36px;
@@ -2263,17 +2264,34 @@ class GraphExporter:
     const embeddedCollectionBundle = JSON.parse(
       document.getElementById("citemesh-dashboard-collection").textContent
     );
-    let collectionBundle = normalizeCollectionPackage(
-      embeddedCollectionBundle,
-      "this dashboard",
-      true
-    );
-    const initialEntry = collectionEntryFromGraphPayload(payload, "Current graph", true);
-    if (!collectionBundle.results.some((entry) => entry.result_id === initialEntry.result_id)) {
-      collectionBundle.results.unshift(initialEntry);
+    let collectionBundle = emptyCollectionPackage();
+    let initialEntry = null;
+    let bootstrapFailureMessage = "";
+    let bootstrapStatusMessage = "";
+    try {
+      initialEntry = collectionEntryFromGraphPayload(payload, "Current graph", true);
+    } catch (err) {
+      bootstrapFailureMessage =
+        "Dashboard graph data is invalid: " + String((err && err.message) || err);
     }
-    if (!collectionBundle.current_result_id) {
-      collectionBundle.current_result_id = initialEntry.result_id;
+    if (initialEntry) {
+      try {
+        collectionBundle = normalizeCollectionPackage(
+          embeddedCollectionBundle,
+          "this dashboard",
+          true
+        );
+      } catch (err) {
+        bootstrapStatusMessage =
+          "Embedded graph collection was ignored: " + String((err && err.message) || err);
+        collectionBundle = emptyCollectionPackage();
+      }
+      if (!collectionBundle.results.some((entry) => entry.result_id === initialEntry.result_id)) {
+        collectionBundle.results.unshift(initialEntry);
+      }
+      if (!collectionBundle.current_result_id) {
+        collectionBundle.current_result_id = initialEntry.result_id;
+      }
     }
     const graphDiv = document.getElementById("__PLOTLY_DIV_ID__");
     const plotConfig = {
@@ -4478,6 +4496,13 @@ class GraphExporter:
     }
 
     function initialize() {
+      if (bootstrapFailureMessage) {
+        setDashboardStatus(bootstrapFailureMessage, "warning");
+        return;
+      }
+      if (bootstrapStatusMessage) {
+        setDashboardStatus(bootstrapStatusMessage, "warning");
+      }
       setupControls();
       renderTimeline();
       const initialResultId = currentResultIdForPayload(payload);

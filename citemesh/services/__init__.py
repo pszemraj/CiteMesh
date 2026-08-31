@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from .semantic_scholar import (
         SemanticScholarClient,
+        SemanticScholarRequestError,
         SemanticScholarUnavailableError,
         get_client,
         reset_client,
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SemanticScholarClient",
+    "SemanticScholarRequestError",
     "SemanticScholarUnavailableError",
     "get_client",
     "reset_client",

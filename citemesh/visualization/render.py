@@ -17,7 +17,6 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-from matplotlib.backend_bases import _get_renderer
 
 from citemesh.core import VIZ_CONFIG
 
@@ -52,6 +51,31 @@ DISCONNECTED_COMPONENT_MIN_EXTENT = 0.28
 DISCONNECTED_COMPONENT_TARGET_ASPECT = 1.6
 STATIC_VIEWPORT_MARGIN_RATIO = 0.08
 STATIC_VIEWPORT_MIN_MARGIN = 0.1
+
+
+def _figure_renderer(figure: plt.Figure) -> Any:
+    """Return a renderer without depending on Matplotlib private APIs.
+
+    Interactive and vector canvases do not consistently expose
+    ``get_renderer``. In that case a temporary Agg canvas supplies public text
+    measurement while the caller's original canvas is restored for export.
+
+    :param plt.Figure figure: Figure whose artists need measurement.
+    :return Any: Matplotlib renderer compatible with artist extent methods.
+    """
+    original_canvas = figure.canvas
+    get_renderer = getattr(original_canvas, "get_renderer", None)
+    if callable(get_renderer):
+        return get_renderer()
+
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    agg_canvas = FigureCanvasAgg(figure)
+    try:
+        agg_canvas.draw()
+        return agg_canvas.get_renderer()
+    finally:
+        figure.set_canvas(original_canvas)
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -858,7 +882,7 @@ def draw_labels(
     label_bounds: List[Any] = []
     non_seed_label_count = 0
     ax.figure.canvas.draw()
-    renderer = _get_renderer(ax.figure)
+    renderer = _figure_renderer(ax.figure)
     for node in candidate_nodes:
         p = pos[node]
 

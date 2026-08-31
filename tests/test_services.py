@@ -21,6 +21,7 @@ from citemesh.services import semantic_scholar as s2
 from citemesh.services import semantic_scholar as semantic_module
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
+    SemanticScholarRequestError,
     SemanticScholarUnavailableError,
     get_client,
     normalize_paper_id,
@@ -78,6 +79,7 @@ def test_service_and_strategy_package_exports() -> None:
             ("citemesh.services.semantic_scholar", "semanticscholar"),
             {
                 "SemanticScholarClient",
+                "SemanticScholarRequestError",
                 "SemanticScholarUnavailableError",
                 "get_client",
                 "reset_client",
@@ -349,6 +351,52 @@ def test_retry_and_backoff_contracts() -> None:
             )
             == []
         )
+
+
+def test_related_paper_retry_discards_partial_attempt_results() -> None:
+    """A failed relation conversion attempt must not duplicate earlier rows."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    records = [
+        SimpleNamespace(paper=SimpleNamespace(paperId="first")),
+        SimpleNamespace(paper=SimpleNamespace(paperId="second")),
+    ]
+    client.client.get_paper_references = MagicMock(return_value=records)
+    client._convert_api_paper = MagicMock(
+        side_effect=[
+            Paper(paper_id="first", title="First", year=None),
+            RuntimeError("temporary conversion failure"),
+            Paper(paper_id="first", title="First", year=None),
+            Paper(paper_id="second", title="Second", year=None),
+        ]
+    )
+
+    with patch("citemesh.services.semantic_scholar.time.sleep"):
+        papers = client.get_paper_references("seed", limit=2)
+
+    assert [paper.paper_id for paper in papers] == ["first", "second"]
+    assert client.client.get_paper_references.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [(400, "request parameters and requested fields"), (401, "S2_API_KEY")],
+)
+def test_direct_endpoint_non_retryable_4xx_is_actionable(
+    status_code: int,
+    message: str,
+) -> None:
+    """Non-429 client errors should fail once without availability wording."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client._session.get = MagicMock(return_value=_MockResponse(status_code=status_code))
+
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        with pytest.raises(SemanticScholarRequestError, match=message):
+            client.search_papers("attention", raise_on_unavailable=True)
+
+    client._session.get.assert_called_once()
+    sleep_mock.assert_not_called()
 
 
 def test_normalization_and_get_paper_id_contracts() -> None:
@@ -778,12 +826,11 @@ def test_reference_cache_hit_corrupt_and_failure_paths(
     client.client.get_paper_references = MagicMock(
         side_effect=TypeError("SDK signature changed")
     )
-    with patch("citemesh.services.semantic_scholar.time.sleep"):
-        with pytest.raises(
-            RuntimeError,
-            match=r"Failed to fetch reference IDs after retries for seed-type-error\.",
-        ):
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        with pytest.raises(TypeError, match="SDK signature changed"):
             client.get_reference_ids("seed-type-error")
+    client.client.get_paper_references.assert_called_once()
+    sleep_mock.assert_not_called()
     assert not type_error_cache_path.exists()
 
     client.client.get_paper_references = MagicMock(
@@ -847,12 +894,17 @@ def test_malformed_reference_response_is_never_cached(
     client._rate_limit = lambda: None
     client.client.get_paper_references = MagicMock(return_value=malformed_payload)
 
-    with patch("citemesh.services.semantic_scholar.time.sleep"):
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
         with pytest.raises(
-            RuntimeError,
-            match=r"Failed to fetch reference IDs after retries for malformed-seed\.",
+            TypeError,
+            match=(
+                "Reference relation response|"
+                "Non-empty reference response contained no valid paper IDs"
+            ),
         ):
             client.get_reference_ids("malformed-seed")
+    client.client.get_paper_references.assert_called_once()
+    sleep_mock.assert_not_called()
 
     cache_path = s2._reference_cache_path(s2.normalize_paper_id("malformed-seed"))
     assert not cache_path.exists()
@@ -902,8 +954,8 @@ def test_reference_cache_resilience_contracts(
     )
     with patch("citemesh.services.semantic_scholar.time.sleep"):
         with pytest.raises(
-            RuntimeError,
-            match=r"Failed to fetch reference IDs after retries for seed-failure\.",
+            SemanticScholarUnavailableError,
+            match="unreachable while fetching reference IDs for seed-failure",
         ):
             failing_client.get_reference_ids("seed-failure")
 
@@ -1165,16 +1217,20 @@ def test_recommendations_fall_back_to_all_cs_pool() -> None:
         )
     assert client._request_json.call_count == 1
 
-    fallback_outage = SemanticScholarUnavailableError("all-cs unavailable")
+    fallback_outage = semantic_module.SemanticScholarUnavailableError(
+        "all-cs unavailable"
+    )
     client._request_json = MagicMock(
         side_effect=[{"recommendedPapers": []}, fallback_outage]
     )
-    with pytest.raises(SemanticScholarUnavailableError, match="all-cs unavailable"):
+    assert (
         client.get_recommended_papers(
             "seed",
             limit=5,
             raise_on_unavailable=True,
         )
+        == []
+    )
     assert client._request_json.call_count == 2
 
 

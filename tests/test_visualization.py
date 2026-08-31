@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import types
@@ -502,6 +503,11 @@ def test_inject_darkreader_lock_is_idempotent_and_head_gated(tmp_path: Path) -> 
         encoding="utf-8"
     )
 
+    string_path = tmp_path / "string-path.html"
+    string_path.write_text("<html><head></head></html>", encoding="utf-8")
+    _inject_darkreader_lock(str(string_path), "dark")
+    assert "darkreader-lock" in string_path.read_text(encoding="utf-8")
+
 
 def test_edge_strength_scale_normalizes_within_graph() -> None:
     """Edge strengths must be min-max scaled so relative weight is visible."""
@@ -760,6 +766,9 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     seed_index = payload["meta"]["plotly_node_order"].index("seed")
     seed_ring_color = marker["line"]["color"][seed_index]
     assert f"--seed-ring: {seed_ring_color};" in rendered
+    assert (
+        "background: color-mix(in srgb, var(--seed-ring) 28%, transparent);" in rendered
+    )
     node_x = node_trace["x"]
     node_y = node_trace["y"]
     x_span = max(node_x) - min(node_x)
@@ -931,6 +940,191 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert '`Year: ${node.year || "n.d."}' not in runtime_script
     assert "setControlsCollapsed(true);" in runtime_script
     assert "escapeRegExp" not in runtime_script
+
+
+def _execute_dashboard_runtime_in_node(
+    path: Path,
+    *,
+    expected_status: str,
+    expect_plotly: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Execute one generated dashboard runtime against a minimal DOM harness.
+
+    :param Path path: Generated dashboard artifact.
+    :param str expected_status: Status-banner substring required after bootstrap.
+    :param bool expect_plotly: Whether valid initial graph data should reach Plotly.
+    :return subprocess.CompletedProcess[str]: Completed Node.js process.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is unavailable for dashboard runtime validation")
+
+    harness = r"""
+const fs = require("fs");
+const html = fs.readFileSync(process.argv[1], "utf8");
+const expectedStatus = process.argv[2];
+const expectPlotly = process.argv[3] === "true";
+function scriptText(id) {
+  const pattern = new RegExp(`<script id="${id}"[^>]*>([\\s\\S]*?)<\\/script>`);
+  const match = pattern.exec(html);
+  if (!match) throw new Error(`missing script ${id}`);
+  return match[1];
+}
+const runtimeScripts = Array.from(html.matchAll(/<script>([\s\S]*?)<\/script>/g));
+const runtime = runtimeScripts[runtimeScripts.length - 1][1];
+const classes = new Set();
+const status = {
+  textContent: "",
+  classList: {
+    toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name); },
+    remove(...names) { names.forEach((name) => classes.delete(name)); },
+  },
+};
+const noOp = () => {};
+const genericClasses = {
+  toggle() {},
+  remove() {},
+  add() {},
+  contains() { return false; },
+};
+const fallbackElement = new Proxy({
+  textContent: "",
+  value: "",
+  files: [],
+  style: {},
+  classList: genericClasses,
+  addEventListener: noOp,
+  appendChild: noOp,
+  click: noOp,
+  remove: noOp,
+  scrollIntoView: noOp,
+  getAttribute() { return null; },
+}, {
+  get(target, property) {
+    return property in target ? target[property] : noOp;
+  },
+  set(target, property, value) {
+    target[property] = value;
+    return true;
+  },
+});
+global.document = {
+  documentElement: {},
+  body: fallbackElement,
+  getElementById(id) {
+    if (id === "citemesh-dashboard-data"
+        || id === "citemesh-dashboard-figure"
+        || id === "citemesh-dashboard-collection") {
+      return { textContent: scriptText(id) };
+    }
+    if (id === "dashboard-status") return status;
+    return fallbackElement;
+  },
+  querySelectorAll() { return []; },
+  createElement() { return fallbackElement; },
+};
+global.window = {
+  localStorage: { getItem() { return null; }, setItem() {} },
+  addEventListener: noOp,
+  open: noOp,
+  setTimeout: noOp,
+};
+let plotlyCalled = false;
+global.Plotly = {
+  react() {
+    plotlyCalled = true;
+    return new Promise(() => {});
+  },
+};
+global.getComputedStyle = () => ({ getPropertyValue() { return ""; } });
+eval(runtime);
+if (!classes.has("visible")) throw new Error("status banner remained hidden");
+if (!status.textContent.includes(expectedStatus)) {
+  throw new Error(`unexpected status: ${status.textContent}`);
+}
+if (plotlyCalled !== expectPlotly) {
+  throw new Error(`unexpected Plotly state: ${plotlyCalled}`);
+}
+process.stdout.write(status.textContent);
+"""
+    return subprocess.run(
+        [node, "-e", harness, str(path), expected_status, str(expect_plotly).lower()],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_dashboard_invalid_bootstrap_surfaces_status_in_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Executable dashboard bootstrap should report invalid embedded graph data."""
+
+    class FakeFigure(_BaseFakeFigure):
+        def to_plotly_json(self) -> dict[str, object]:
+            return {"data": self.data, "layout": self.layout}
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    graph, seed_id = _build_graph()
+    graph.graph.clear()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "invalid-bootstrap.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    result = _execute_dashboard_runtime_in_node(
+        out_path,
+        expected_status="Dashboard graph data is invalid",
+        expect_plotly=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Graph results must identify the build strategy" in result.stdout
+
+
+def test_dashboard_invalid_embedded_collection_keeps_current_graph_in_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A malformed embedded collection should warn while rendering the graph."""
+
+    class FakeFigure(_BaseFakeFigure):
+        def to_plotly_json(self) -> dict[str, object]:
+            return {"data": self.data, "layout": self.layout}
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "invalid-collection.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+    rendered = out_path.read_text(encoding="utf-8")
+    rendered = re.sub(
+        r'(<script id="citemesh-dashboard-collection" type="application/json">)'
+        r".*?(</script>)",
+        r'\1{"kind":"unsupported-collection","results":[]}\2',
+        rendered,
+        count=1,
+        flags=re.DOTALL,
+    )
+    out_path.write_text(rendered, encoding="utf-8")
+
+    result = _execute_dashboard_runtime_in_node(
+        out_path,
+        expected_status="Embedded graph collection was ignored",
+        expect_plotly=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Unsupported collection kind" in result.stdout
 
 
 def test_dashboard_labels_balance_priority_and_spacing() -> None:
