@@ -82,7 +82,7 @@ def _atomic_write_text_payload(
         prefix=f".{path.name}.",
         suffix=".tmp",
         dir=path.parent,
-        text=True,
+        text=False,
     )
     tmp_path = Path(tmp_name)
     try:

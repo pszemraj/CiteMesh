@@ -1713,6 +1713,68 @@ class EmbeddingCache:
                 f"(valid={int(valid_rows)}, distinct={int(distinct_rows)}, expected={row_count})"
             )
 
+    def _recover_trailing_h5_rows(
+        self,
+        conn: sqlite3.Connection,
+        h5_file: h5py.File,
+        embeddings_dataset: h5py.Dataset,
+    ) -> int:
+        """Truncate HDF5 rows appended before their SQLite transaction committed.
+
+        :param sqlite3.Connection conn: Open SQLite connection with committed mappings.
+        :param h5py.File h5_file: Open HDF5 cache handle.
+        :param h5py.Dataset embeddings_dataset: Resizable embeddings matrix dataset.
+        :return int: Embedding row count after any recoverable truncation.
+        """
+        embedding_rows = int(embeddings_dataset.shape[0])
+        paper_rows = int(conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0])
+        if embedding_rows <= paper_rows:
+            return embedding_rows
+
+        valid_rows, distinct_rows, minimum_row, maximum_row = conn.execute(
+            """
+            SELECT COUNT(row_idx), COUNT(DISTINCT row_idx), MIN(row_idx), MAX(row_idx)
+            FROM papers
+            WHERE row_idx IS NOT NULL
+              AND row_idx >= 0
+              AND row_idx < ?
+            """,
+            (embedding_rows,),
+        ).fetchone()
+        committed_prefix_is_complete = bool(
+            int(valid_rows) == paper_rows
+            and int(distinct_rows) == paper_rows
+            and (
+                paper_rows == 0
+                or (int(minimum_row) == 0 and int(maximum_row) == paper_rows - 1)
+            )
+        )
+        if not committed_prefix_is_complete:
+            return embedding_rows
+
+        orphan_rows = embedding_rows - paper_rows
+        logger.warning(
+            "Recovering embedding cache %s by truncating %d uncommitted trailing "
+            "HDF5 row(s); preserving %d committed row(s).",
+            self.h5_path,
+            orphan_rows,
+            paper_rows,
+        )
+        embeddings_dataset.resize((paper_rows, int(embeddings_dataset.shape[1])))
+
+        binary_dataset = h5_file.get(BINARY_INDEX_DATASET_NAME)
+        if (
+            binary_dataset is not None
+            and binary_dataset.ndim == 2
+            and int(binary_dataset.shape[0]) > paper_rows
+        ):
+            try:
+                binary_dataset.resize((paper_rows, int(binary_dataset.shape[1])))
+            except (OSError, TypeError, ValueError):
+                del h5_file[BINARY_INDEX_DATASET_NAME]
+
+        return paper_rows
+
     def _reset_effective_compression(self) -> None:
         """Reset physical-layout settings to the originally requested codec.
 
@@ -1821,10 +1883,16 @@ class EmbeddingCache:
                 self._adopt_existing_dataset_compression(dataset)
 
                 embedding_dim = int(dataset.shape[1])
-                embedding_rows = int(dataset.shape[0])
                 if self.storage_precision == "int8":
                     self._require_calibration_ranges(h5, embedding_dim)
 
+                # Prefilter state is auxiliary; toggling it does not change vector rows.
+                h5.attrs[BINARY_PREFILTER_ENABLED_KEY] = int(self.binary_prefilter)
+                embedding_rows = self._recover_trailing_h5_rows(
+                    conn=conn,
+                    h5_file=h5,
+                    embeddings_dataset=dataset,
+                )
                 self._assert_runtime_cache_consistency(
                     conn=conn,
                     h5_file=h5,
@@ -1847,6 +1915,8 @@ class EmbeddingCache:
                         self.h5_path,
                     )
                     del h5[BINARY_INDEX_DATASET_NAME]
+
+                self._ensure_binary_dataset(h5, embedding_dim)
         except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError):
             logger.warning(
                 "Embedding cache %s is incompatible with current schema. "
@@ -2131,13 +2201,63 @@ class EmbeddingCache:
         :return Optional[h5py.Dataset]: Binary-index dataset when enabled.
         """
         packed_dim = (int(embedding_dim) + 7) // 8
-        return self._ensure_matrix_dataset(
+        binary_dataset = self._ensure_matrix_dataset(
             h5_file,
             name=BINARY_INDEX_DATASET_NAME,
             width=packed_dim,
             dtype=np.uint8,
             enabled=self.binary_prefilter,
         )
+        if binary_dataset is None:
+            return None
+
+        embeddings_dataset = self._get_embeddings_dataset(h5_file)
+        embedding_rows = (
+            int(embeddings_dataset.shape[0]) if embeddings_dataset is not None else 0
+        )
+        if int(binary_dataset.shape[0]) != embedding_rows:
+            logger.warning(
+                "Rebuilding binary index in %s to cover %d persisted embedding row(s).",
+                self.h5_path,
+                embedding_rows,
+            )
+            if embeddings_dataset is None:
+                binary_dataset.resize((0, packed_dim))
+            else:
+                self._rebuild_binary_dataset(
+                    h5_file=h5_file,
+                    embeddings_dataset=embeddings_dataset,
+                    binary_dataset=binary_dataset,
+                )
+        return binary_dataset
+
+    def _rebuild_binary_dataset(
+        self,
+        h5_file: h5py.File,
+        embeddings_dataset: h5py.Dataset,
+        binary_dataset: h5py.Dataset,
+    ) -> None:
+        """Rebuild the binary prefilter from persisted int8 embeddings.
+
+        :param h5py.File h5_file: Open HDF5 cache handle.
+        :param h5py.Dataset embeddings_dataset: Persisted int8 embedding matrix.
+        :param h5py.Dataset binary_dataset: Resizable uint8 binary-index matrix.
+        :return None: Replaces all binary-index rows in-place.
+        """
+        if self.storage_precision != "int8":
+            raise RuntimeError("Binary prefilter indexes require int8 storage.")
+
+        row_count = int(embeddings_dataset.shape[0])
+        packed_dim = (int(embeddings_dataset.shape[1]) + 7) // 8
+        binary_dataset.resize((row_count, packed_dim))
+        for start in range(0, row_count, EMBEDDING_DATASET_CHUNK_ROWS):
+            end = min(start + EMBEDDING_DATASET_CHUNK_ROWS, row_count)
+            stored_chunk = np.asarray(
+                embeddings_dataset[start:end],
+                dtype=np.int8,
+            )
+            float_chunk = self._dequantize_int8(h5_file, stored_chunk)
+            binary_dataset[start:end] = _quantize_ubinary_embeddings(float_chunk)
 
     def _ensure_matrix_dataset(
         self,

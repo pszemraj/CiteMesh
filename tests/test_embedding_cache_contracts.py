@@ -1606,8 +1606,8 @@ def test_embedding_cache_search_falls_back_when_binary_index_rows_mismatch(
     assert {result.paper_id for result in results} == {"p1", "p2"}
 
 
-def test_embedding_cache_reload_drops_binary_index_with_wrong_dtype() -> None:
-    """Reload should discard a shape-compatible binary index that is not uint8."""
+def test_embedding_cache_reload_rebuilds_stale_binary_index_before_next_write() -> None:
+    """Reload should rebuild a stale binary index before appending more rows."""
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="binary-dtype-mismatch")
         _set_test_int8_calibration(cache)
@@ -1637,7 +1637,17 @@ def test_embedding_cache_reload_drops_binary_index_with_wrong_dtype() -> None:
             model_name="binary-dtype-mismatch",
         )
         with h5py.File(reloaded.h5_path, "r") as h5:
-            assert BINARY_INDEX_DATASET_NAME not in h5
+            binary = h5[BINARY_INDEX_DATASET_NAME]
+            assert binary.shape == (2, 1)
+            assert binary.dtype == np.uint8
+
+        reloaded.get_embeddings(
+            {"p2": {"title": "Other", "abstract": "Orthogonal"}},
+            LookupEncodeModel(
+                {"Other. Orthogonal": np.asarray([0.0, 1.0], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
         results = reloaded.search(
             query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
             top_k=1,
@@ -1646,7 +1656,50 @@ def test_embedding_cache_reload_drops_binary_index_with_wrong_dtype() -> None:
         )
 
     assert [result.paper_id for result in results] == ["p1"]
-    assert reloaded.last_search_used_binary_prefilter is False
+    assert reloaded.last_search_used_binary_prefilter is True
+
+
+def test_embedding_cache_enabling_binary_prefilter_preserves_populated_namespace(
+    tmp_path: Path,
+) -> None:
+    """Enabling the auxiliary binary index should preserve and index existing rows."""
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="enable-binary-prefilter",
+        binary_prefilter=False,
+    )
+    _set_test_int8_calibration(cache)
+    cache.get_embeddings(
+        {
+            "p0": {"title": "Bad", "abstract": "Opposite"},
+            "p1": {"title": "Good", "abstract": "Match"},
+        },
+        LookupEncodeModel(
+            {
+                "Bad. Opposite": np.asarray([-1.0, 0.0], dtype=np.float32),
+                "Good. Match": np.asarray([1.0, 0.0], dtype=np.float32),
+            }
+        ),
+        show_progress=False,
+    )
+    with h5py.File(cache.h5_path, "r") as h5:
+        assert BINARY_INDEX_DATASET_NAME not in h5
+
+    reloaded = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="enable-binary-prefilter",
+        binary_prefilter=True,
+    )
+    results = reloaded.search(
+        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=True,
+        binary_rescore_multiplier=1,
+    )
+
+    assert reloaded.embedding_count() == 2
+    assert [result.paper_id for result in results] == ["p1"]
+    assert reloaded.last_search_used_binary_prefilter is True
 
 
 def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
@@ -1758,13 +1811,21 @@ def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
     assert not reloaded.h5_path.exists()
 
 
-def test_embedding_cache_recovery_clears_orphan_h5_rows(tmp_path: Path) -> None:
-    """Reload should clear namespace when HDF5 has rows missing SQLite metadata mappings."""
+def test_embedding_cache_recovery_truncates_orphan_h5_rows(tmp_path: Path) -> None:
+    """Reload should truncate uncommitted HDF5 rows and preserve committed mappings."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="orphan-h5-row-recovery")
     _set_test_int8_calibration(cache)
     cache.get_embeddings(
-        {"seed": {"title": "Seed", "abstract": "x"}},
-        LookupEncodeModel({"Seed. x": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        {
+            "seed": {"title": "Seed", "abstract": "x"},
+            "other": {"title": "Other", "abstract": "y"},
+        },
+        LookupEncodeModel(
+            {
+                "Seed. x": np.asarray([1.0, 0.0], dtype=np.float32),
+                "Other. y": np.asarray([0.0, 1.0], dtype=np.float32),
+            }
+        ),
         show_progress=False,
     )
     with h5py.File(cache.h5_path, "a") as h5:
@@ -1779,9 +1840,21 @@ def test_embedding_cache_recovery_clears_orphan_h5_rows(tmp_path: Path) -> None:
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="orphan-h5-row-recovery")
     with reloaded._connect_db() as conn:
         paper_rows = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+    with h5py.File(reloaded.h5_path, "r") as h5:
+        embedding_rows = int(h5[EMBEDDINGS_DATASET_NAME].shape[0])
+        binary_rows = int(h5[BINARY_INDEX_DATASET_NAME].shape[0])
+    results = reloaded.search(
+        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=True,
+        binary_rescore_multiplier=2,
+    )
 
-    assert paper_rows == 0
-    assert not reloaded.has_cached_payload()
+    assert paper_rows == 2
+    assert embedding_rows == 2
+    assert binary_rows == 2
+    assert reloaded.has_cached_payload()
+    assert [result.paper_id for result in results] == ["seed"]
 
 
 def test_embedding_cache_clear_releases_file_handles(tmp_path: Path) -> None:
