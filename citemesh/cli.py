@@ -16,7 +16,18 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NoReturn,
+    Optional,
+    Protocol,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import networkx as nx
 from filelock import FileLock, Timeout
@@ -230,7 +241,7 @@ def _configure_logging(
         show_time=False,
         show_path=False,
         rich_tracebacks=False,
-        markup=True,
+        markup=False,
     )
     console_handler.setLevel(console_level)
     handlers: list[logging.Handler] = [console_handler]
@@ -437,6 +448,31 @@ class _StrategyBuilderProtocol(Protocol):
         :return tuple[nx.Graph, str]: Built graph and normalized seed paper ID.
         """
         ...
+
+
+class _ParserErrorSink(Protocol):
+    """Protocol for argparse-compatible validation error sinks."""
+
+    def error(self, message: str) -> NoReturn:
+        """Stop validation with a user-facing error.
+
+        :param str message: Validation failure message.
+        :raises SystemExit: Argparse implementations terminate CLI parsing.
+        """
+        ...
+
+
+class _ValueErrorParserErrorSink:
+    """Translate parser-style validation failures into catchable exceptions."""
+
+    @staticmethod
+    def error(message: str) -> NoReturn:
+        """Raise a parser-style validation message as ``ValueError``.
+
+        :param str message: Validation failure message.
+        :raises ValueError: Always raised with ``message``.
+        """
+        raise ValueError(message)
 
 
 StrategyFactory = Callable[[argparse.Namespace], _StrategyBuilderProtocol]
@@ -706,8 +742,57 @@ def _apply_user_config_defaults(
             f"{dest}={format_config_value(user_config.defaults[dest])}"
             for dest in sorted(applied)
         )
-        logger.info("Applying config defaults from %s: %s", user_config.path, summary)
+        logger.info("Loaded config defaults from %s: %s", user_config.path, summary)
     return applied
+
+
+def _config_error_context(
+    *,
+    related_dests: Set[str],
+    config_defaults: Set[str],
+    config_path: Path | None,
+) -> str:
+    """Describe config values that contributed to a contract failure.
+
+    :param Set[str] related_dests: Option destinations relevant to the failure.
+    :param Set[str] config_defaults: Destinations filled from config.toml.
+    :param Path | None config_path: Active config.toml path when available.
+    :return str: Diagnostic suffix, or an empty string for CLI-only failures.
+    """
+    configured = sorted(related_dests & set(config_defaults))
+    if not configured:
+        return ""
+    key_text = ", ".join(f"defaults.{dest}" for dest in configured)
+    source = str(config_path) if config_path is not None else "config.toml"
+    return (
+        f" Config source: {key_text} in {source}; update or unset the configured value."
+    )
+
+
+def _build_contract_error(
+    error_sink: _ParserErrorSink,
+    message: str,
+    *,
+    related_dests: Set[str] = frozenset(),
+    config_defaults: Set[str] = frozenset(),
+    config_path: Path | None = None,
+) -> NoReturn:
+    """Route a build-contract failure through the active error sink.
+
+    :param _ParserErrorSink error_sink: Argparse or exception-raising error sink.
+    :param str message: Base validation failure message.
+    :param Set[str] related_dests: Option destinations relevant to the failure.
+    :param Set[str] config_defaults: Destinations filled from config.toml.
+    :param Path | None config_path: Active config.toml path when available.
+    :raises SystemExit: When ``error_sink`` is an argparse parser.
+    :raises ValueError: When ``error_sink`` raises catchable validation errors.
+    """
+    context = _config_error_context(
+        related_dests=related_dests,
+        config_defaults=config_defaults,
+        config_path=config_path,
+    )
+    error_sink.error(f"{message}{context}")
 
 
 def _apply_user_config_api_key(user_config: UserConfig) -> None:
@@ -792,24 +877,29 @@ def _strategy_score_contract(strategy: str) -> Dict[str, object]:
 
 def _validate_build_cli_contract(
     args: argparse.Namespace,
-    build_parser: argparse.ArgumentParser,
+    build_parser: _ParserErrorSink,
     provided: Set[str],
     config_defaults: Set[str] = frozenset(),
+    config_path: Path | None = None,
 ) -> None:
     """Validate strategy-scoped and dependent build options before execution.
 
     :param argparse.Namespace args: Parsed build arguments.
-    :param argparse.ArgumentParser build_parser: Build subcommand parser.
+    :param _ParserErrorSink build_parser: Parser-like validation error sink.
     :param Set[str] provided: Explicit option destinations found in argv.
     :param Set[str] config_defaults: Destinations filled from config.toml; they
         outrank built-in defaults (hybrid implicit budgets) but never count as
         explicit flags for strategy gating or corpus-mode implication.
+    :param Path | None config_path: Active config.toml path for diagnostics.
     :return None: Mutates normalized args for effective no-op elimination.
     """
     strategy = str(args.strategy)
     _apply_hybrid_default_overrides(args, provided | set(config_defaults))
+    contract_provided = set(provided)
+    if not bool(getattr(args, "streaming", False)):
+        contract_provided.discard("streaming")
     unsupported: List[str] = []
-    for dest in sorted(provided):
+    for dest in sorted(contract_provided):
         allowed = _BUILD_STRATEGY_OPTION_SUPPORT.get(dest)
         if allowed is None:
             continue
@@ -825,15 +915,15 @@ def _validate_build_cli_contract(
     if strategy in {"embedding", "hybrid"}:
         provided_corpus_flags = sorted(
             _BUILD_OPTION_PRIMARY_FLAG[dest]
-            for dest in provided
+            for dest in contract_provided
             if dest in _CORPUS_ONLY_OPTION_DESTS
         )
         provided_candidate_flags = sorted(
             _BUILD_OPTION_PRIMARY_FLAG[dest]
-            for dest in provided
+            for dest in contract_provided
             if dest in _CANDIDATE_ONLY_OPTION_DESTS
         )
-        if "semantic_source" not in provided:
+        if "semantic_source" not in contract_provided:
             if provided_corpus_flags and provided_candidate_flags:
                 build_parser.error(
                     "Corpus-only and candidate-only options cannot be combined: "
@@ -852,13 +942,31 @@ def _validate_build_cli_contract(
                     ", ".join(provided_candidate_flags),
                 )
         if args.semantic_source != "arxiv-corpus":
+            ignored_config_corpus_dests = sorted(
+                set(config_defaults) & _CORPUS_ONLY_OPTION_DESTS
+            )
+            if ignored_config_corpus_dests:
+                ignored_text = ", ".join(
+                    f"defaults.{dest}" for dest in ignored_config_corpus_dests
+                )
+                source = str(config_path) if config_path is not None else "config.toml"
+                logger.info(
+                    "Ignoring corpus-only config default(s) %s from %s because "
+                    "the effective semantic source is candidates; set "
+                    "defaults.semantic_source='arxiv-corpus' to apply them.",
+                    ignored_text,
+                    source,
+                )
             if provided_corpus_flags:
                 option_text = ", ".join(provided_corpus_flags)
                 build_parser.error(
                     f"Corpus-only option(s) require --semantic-source arxiv-corpus: "
                     f"{option_text}."
                 )
-            if "storage_precision" in provided and args.storage_precision == "int8":
+            if (
+                "storage_precision" in contract_provided
+                and args.storage_precision == "int8"
+            ):
                 build_parser.error(
                     "--storage-precision int8 requires --semantic-source "
                     "arxiv-corpus (int8 calibration ranges are computed during "
@@ -880,10 +988,14 @@ def _validate_build_cli_contract(
             and args.streaming
             and ":" in str(args.dataset_split)
         ):
-            build_parser.error(
+            _build_contract_error(
+                build_parser,
                 "Streaming mode does not support sliced --dataset-split values "
                 "(for example train[:5%]). Use unsliced split (e.g. train) or "
-                "disable --streaming."
+                "disable --streaming.",
+                related_dests={"dataset_split", "streaming"},
+                config_defaults=config_defaults,
+                config_path=config_path,
             )
         if bool(args.overwrite_cache) and not bool(args.force_rebuild_cache):
             build_parser.error("--overwrite-cache requires --force-rebuild-cache.")
@@ -893,15 +1005,21 @@ def _validate_build_cli_contract(
             build_parser.error(
                 "--cache-overwrite-reason requires --force-rebuild-cache."
             )
-        if args.all_corpus and "corpus_size" in provided:
+        if args.all_corpus and "corpus_size" in contract_provided:
             build_parser.error(
                 "--all-corpus cannot be combined with explicit --corpus-size."
             )
-        if str(args.device) != "auto":
+        if _embedding_branch_enabled(args) and str(args.device) != "auto":
             try:
                 resolve_embedding_device(args.device)
             except ValueError as exc:
-                build_parser.error(str(exc))
+                _build_contract_error(
+                    build_parser,
+                    str(exc),
+                    related_dests={"device"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
+                )
         try:
             args.cache_compression = validate_compression_filter(
                 str(args.cache_compression)
@@ -915,7 +1033,7 @@ def _validate_build_cli_contract(
         if resolved_compression_level < 0:
             build_parser.error("--cache-compression-level must be at least 0.")
         if args.cache_compression == "lzf":
-            if "cache_compression_level" in provided:
+            if "cache_compression_level" in contract_provided:
                 build_parser.error(
                     "--cache-compression-level is unsupported with "
                     "--cache-compression lzf."
@@ -923,15 +1041,15 @@ def _validate_build_cli_contract(
             resolved_compression_level = 0
         args.cache_compression_level = int(resolved_compression_level)
         if str(args.storage_precision) != "int8":
-            if "binary_prefilter" in provided and bool(args.binary_prefilter):
+            if "binary_prefilter" in contract_provided and bool(args.binary_prefilter):
                 build_parser.error(
                     "--binary-prefilter requires --storage-precision int8."
                 )
-            if "binary_rescore_multiplier" in provided:
+            if "binary_rescore_multiplier" in contract_provided:
                 build_parser.error(
                     "--binary-rescore-multiplier requires --storage-precision int8."
                 )
-            if "calibration_sample_size" in provided:
+            if "calibration_sample_size" in contract_provided:
                 build_parser.error(
                     "--calibration-sample-size requires --storage-precision int8."
                 )
@@ -944,15 +1062,19 @@ def _validate_build_cli_contract(
         if args.max_semantic is not None and int(args.max_semantic) >= int(
             args.max_papers
         ):
-            build_parser.error(
-                "--max-semantic must be between 0 and --max-papers - 1 for hybrid."
+            _build_contract_error(
+                build_parser,
+                "--max-semantic must be between 0 and --max-papers - 1 for hybrid.",
+                related_dests={"max_papers", "max_semantic"},
+                config_defaults=config_defaults,
+                config_path=config_path,
             )
         resolved_max_semantic = _resolved_hybrid_max_semantic(args)
 
         if resolved_max_semantic == 0:
             ignored_embedding_options = sorted(
                 _BUILD_OPTION_PRIMARY_FLAG[dest]
-                for dest in provided
+                for dest in contract_provided
                 if dest in _HYBRID_EMBEDDING_OPTION_DESTS
             )
             if ignored_embedding_options:
@@ -1043,13 +1165,13 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
 def _normalize_programmatic_build_value(
     action: argparse.Action,
     value: object,
-    parser_error_sink: argparse.ArgumentParser,
+    parser_error_sink: _ParserErrorSink,
 ) -> object:
     """Normalize a programmatic build value using the parser action contract.
 
     :param argparse.Action action: Parser action defining the value contract.
     :param object value: Programmatic value to validate.
-    :param argparse.ArgumentParser parser_error_sink: Parser-like error sink.
+    :param _ParserErrorSink parser_error_sink: Parser-like error sink.
     :return object: Normalized value compatible with CLI parsing rules.
     """
     if value is None:
@@ -1079,13 +1201,13 @@ def _normalize_programmatic_build_value(
 def _validate_programmatic_build_values(
     args: argparse.Namespace,
     build_parser: argparse.ArgumentParser,
-    parser_error_sink: argparse.ArgumentParser,
+    parser_error_sink: _ParserErrorSink,
 ) -> None:
     """Validate programmatic build namespaces against CLI scalar contracts.
 
     :param argparse.Namespace args: Candidate build namespace.
     :param argparse.ArgumentParser build_parser: Build parser used for action metadata.
-    :param argparse.ArgumentParser parser_error_sink: Parser-like error sink.
+    :param _ParserErrorSink parser_error_sink: Parser-like error sink.
     :return None: Mutates ``args`` with normalized CLI-equivalent values.
     """
     for action in build_parser._actions:
@@ -1195,26 +1317,14 @@ def _build_strategy_graph(
             )
         )
 
-        class _ProgrammaticBuildParser:
-            """Tiny parser shim translating parser.error into ValueError."""
-
-            @staticmethod
-            def error(message: str) -> None:
-                """Raise parser-style validation messages as ``ValueError``.
-
-                :param str message: Validation error message.
-                :raises ValueError: Always raised with ``message``.
-                """
-                raise ValueError(message)
-
         _validate_programmatic_build_values(
             args_for_validation,
             build_parser_snapshot,
-            _ProgrammaticBuildParser(),  # type: ignore[arg-type]
+            _ValueErrorParserErrorSink(),
         )
         _validate_build_cli_contract(
             args_for_validation,
-            _ProgrammaticBuildParser(),  # type: ignore[arg-type]
+            _ValueErrorParserErrorSink(),
             inferred_provided,
         )
         _synchronize_namespace_values(args, args_for_validation)
@@ -1750,6 +1860,7 @@ User configuration:
     search_parser.add_argument(
         "--model",
         "-m",
+        type=_non_empty_str,
         default=None,
         help=(
             "Embedding model for local search (implies --mode local); must "
@@ -3234,19 +3345,26 @@ def _prepare_local_search_builder(
     """
     defaults = build_parser.parse_args(["local-search-placeholder-seed"])
     _pop_tracked_option_dests(defaults)
-    defaults.strategy = "embedding"
     config_default_dests = _apply_user_config_defaults(
-        defaults, frozenset(), user_config
+        defaults, {"strategy"}, user_config
     )
-    _validate_build_cli_contract(
-        defaults, build_parser, frozenset(), config_defaults=config_default_dests
-    )
+    defaults.strategy = "embedding"
     if args.model:
         defaults.model = args.model
+        config_default_dests.discard("model")
     if args.model_profile:
         defaults.model_profile = args.model_profile
+        config_default_dests.discard("model_profile")
     if args.device:
         defaults.device = args.device
+        config_default_dests.discard("device")
+    _validate_build_cli_contract(
+        defaults,
+        _ValueErrorParserErrorSink(),
+        frozenset(),
+        config_defaults=config_default_dests,
+        config_path=user_config.path,
+    )
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
     return builder, defaults
 
@@ -3525,6 +3643,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_parser,
             provided_build_options,
             config_defaults=config_default_dests,
+            config_path=user_config.path,
         )
         try:
             raw_exports = args.export or ["png"]

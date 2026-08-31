@@ -459,6 +459,31 @@ def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
     assert "info file sink test" in stderr.getvalue()
 
 
+def test_rich_logging_preserves_unknown_config_table_name(tmp_path: Path) -> None:
+    """Config warnings should keep bracket-like table identifiers visible.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions verify Rich markup does not consume the table name.
+    """
+    saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[plugin_settings]\nenabled = true\n", encoding="utf-8")
+    stderr = io.StringIO()
+
+    try:
+        with redirect_stderr(stderr):
+            cli_module._configure_logging(log_level="info", log_width=0)
+            cli_module.load_user_config(config_path)
+            for handler in logging.getLogger().handlers:
+                handler.flush()
+    finally:
+        _restore_cli_logging_state(saved_handlers, saved_level, saved_configured)
+
+    warning = stderr.getvalue()
+    assert "Ignoring unknown config table" in warning
+    assert "[plugin_settings]" in warning
+
+
 def test_search_command_prints_results_to_stdout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -530,6 +555,18 @@ def test_search_mode_s2_rejects_local_flags(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
 
+def test_search_rejects_empty_model_override() -> None:
+    """An empty model token should fail parsing instead of silently no-oping.
+
+    :return None: Assertions verify the non-empty model contract.
+    """
+    result = run_cli_command(["search", "attention", "--model", ""])
+
+    assert result.returncode == 2
+    assert "--model" in result.stderr
+    assert "must be a non-empty string" in result.stderr
+
+
 def test_search_mode_local_prints_cached_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -558,6 +595,143 @@ def test_search_mode_local_prints_cached_results(
     assert builder_kwargs["model_name"] == DEFAULT_EMBEDDING_MODEL_NAME
     assert builder_kwargs["semantic_source"] == "candidates"
     assert builder_kwargs["storage_precision"] == "float32"
+
+
+@pytest.mark.parametrize("search_args", [[], ["--mode", "local"]])
+def test_search_forces_embedding_strategy_over_configured_build_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+    search_args: list[str],
+) -> None:
+    """Build strategy defaults must not corrupt local search normalization.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :param list[str] search_args: Auto or explicit-local search mode arguments.
+    :return None: Assertions verify local search keeps embedding candidate defaults.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml",
+        defaults={"strategy": "recommendation"},
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    client_factory = MagicMock()
+    monkeypatch.setattr(cli_module, "get_client", client_factory)
+
+    result = run_cli_command(["search", "cached topic", *search_args])
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["semantic_source"] == "candidates"
+    assert builder_kwargs["storage_precision"] == "float32"
+    assert builder_kwargs["binary_prefilter"] is False
+    client_factory.assert_not_called()
+
+
+def test_search_auto_falls_back_on_config_contract_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto search should catch local config failures and use S2 without build usage.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions verify the config failure remains catchable.
+    """
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    monkeypatch.setattr(
+        cli_module,
+        "resolve_embedding_device",
+        MagicMock(side_effect=ValueError("CUDA is unavailable")),
+    )
+    mock_client = MagicMock()
+    mock_client.search_papers.return_value = [
+        Paper(
+            paper_id="0123456789abcdef0123456789abcdef01234567",
+            title="Fallback Result",
+            year=2025,
+            authors=[Author(name="Ada Lovelace")],
+            citation_count=1,
+            abstract="Fallback result",
+        )
+    ]
+    monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+    info = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info)
+
+    result = run_cli_command(["search", "attention"])
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "Fallback Result" in result.stdout
+    assert "usage: citemesh build" not in result.stderr
+    notices = str(info.call_args_list)
+    assert "defaults.device" in notices
+    assert str(config.path) in notices
+    assert "searching the Semantic Scholar API instead" in notices
+
+
+def test_search_local_reports_config_contract_error_without_build_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit local search should report config failures as local errors.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions verify no build parser ``SystemExit`` escapes.
+    """
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    monkeypatch.setattr(
+        cli_module,
+        "resolve_embedding_device",
+        MagicMock(side_effect=ValueError("CUDA is unavailable")),
+    )
+    error = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error)
+
+    result = run_cli_command(["search", "attention", "--mode", "local"])
+
+    assert result.returncode == 1
+    assert "usage: citemesh build" not in result.stderr
+    message = str(error.call_args)
+    assert "Local search unavailable" in message
+    assert "defaults.device" in message
+    assert str(config.path) in message
+
+
+def test_search_device_flag_overrides_config_before_local_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit local device should replace config before contract validation.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions verify CLI-over-config precedence during validation.
+    """
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
+    )
+    monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    resolver = MagicMock(return_value="cpu")
+    monkeypatch.setattr(cli_module, "resolve_embedding_device", resolver)
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+
+    result = run_cli_command(
+        ["search", "cached topic", "--mode", "local", "--device", "cpu"]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert builder_factory.call_args.kwargs["device"] == "cpu"
+    assert resolver.call_count == 2
+    assert all(call.args == ("cpu",) for call in resolver.call_args_list)
 
 
 @pytest.mark.parametrize(

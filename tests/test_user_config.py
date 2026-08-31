@@ -9,6 +9,7 @@ import os
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -338,6 +339,30 @@ def test_explicit_no_streaming_wins_over_enabled_config_default() -> None:
     assert args.semantic_source == "arxiv-corpus"
 
 
+def test_no_streaming_does_not_imply_or_conflict_with_candidate_mode() -> None:
+    """The negative streaming toggle should be value-aware during mode selection.
+
+    :return None: Assertions verify ``--no-streaming`` remains a candidate-mode no-op.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        [
+            "paper-id",
+            "--strategy",
+            "embedding",
+            "--no-streaming",
+            "--candidate-pool-size",
+            "50",
+        ]
+    )
+
+    cli_module._validate_build_cli_contract(args, build_parser, provided)
+
+    assert "streaming" in provided
+    assert args.streaming is False
+    assert args.semantic_source == "candidates"
+    assert args.storage_precision == "float32"
+
+
 def test_config_default_outranks_hybrid_implicit_defaults() -> None:
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "hybrid"]
@@ -435,6 +460,133 @@ def test_config_embedding_defaults_do_not_gate_citation_strategy() -> None:
     cli_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
+
+
+def test_config_device_is_inert_when_hybrid_semantic_branch_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Disabled hybrid semantic work should not resolve config-only devices.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions verify the unavailable device is never inspected.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "hybrid", "--max-semantic", "0"]
+    )
+    config = UserConfig(path=Path("config.toml"), defaults={"device": "cuda"})
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    resolver = MagicMock(side_effect=ValueError("CUDA is unavailable"))
+    monkeypatch.setattr(cli_module, "resolve_embedding_device", resolver)
+
+    cli_module._validate_build_cli_contract(
+        args,
+        build_parser,
+        provided,
+        config_defaults=applied,
+        config_path=config.path,
+    )
+
+    resolver.assert_not_called()
+
+
+def test_config_device_validation_names_the_config_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime device failures should identify a config-sourced value.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions verify actionable config provenance.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding"]
+    )
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
+    )
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    monkeypatch.setattr(
+        cli_module,
+        "resolve_embedding_device",
+        MagicMock(side_effect=ValueError("CUDA is unavailable")),
+    )
+
+    with pytest.raises(ValueError) as error:
+        cli_module._validate_build_cli_contract(
+            args,
+            cli_module._ValueErrorParserErrorSink(),
+            provided,
+            config_defaults=applied,
+            config_path=config.path,
+        )
+
+    message = str(error.value)
+    assert "CUDA is unavailable" in message
+    assert "defaults.device" in message
+    assert str(config.path) in message
+    assert "update or unset" in message
+
+
+def test_config_max_semantic_validation_names_the_config_source() -> None:
+    """Hybrid budget failures should identify config-sourced values.
+
+    :return None: Assertions verify actionable config provenance.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "hybrid"]
+    )
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"max_semantic": 100}
+    )
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+
+    with pytest.raises(ValueError) as error:
+        cli_module._validate_build_cli_contract(
+            args,
+            cli_module._ValueErrorParserErrorSink(),
+            provided,
+            config_defaults=applied,
+            config_path=config.path,
+        )
+
+    message = str(error.value)
+    assert "--max-semantic must be between" in message
+    assert "defaults.max_semantic" in message
+    assert str(config.path) in message
+
+
+def test_candidate_mode_announces_ignored_corpus_config_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate mode should explain why corpus-only config keys are inert.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions verify the ignored-key guidance.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding"]
+    )
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml",
+        defaults={"corpus_size": 1234, "streaming": True},
+    )
+    info = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info)
+
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    cli_module._validate_build_cli_contract(
+        args,
+        build_parser,
+        provided,
+        config_defaults=applied,
+        config_path=config.path,
+    )
+
+    messages = str(info.call_args_list)
+    assert "Loaded config defaults" in messages
+    assert "Ignoring corpus-only config default(s)" in messages
+    assert "defaults.corpus_size" in messages
+    assert "defaults.streaming" in messages
+    assert "defaults.semantic_source='arxiv-corpus'" in messages
 
 
 # ---------------------------------------------------------------------------
