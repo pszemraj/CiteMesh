@@ -1235,8 +1235,11 @@ class SemanticScholarClient:
 
             :return List[str]: Normalized reference IDs.
             """
-            references = self.client.get_paper_references(
-                normalized_paper_id, fields=["paperId"]
+            references = list(
+                self.client.get_paper_references(
+                    normalized_paper_id,
+                    fields=["paperId"],
+                )
             )
             if not references:
                 return _persist_empty()
@@ -1276,16 +1279,6 @@ class SemanticScholarClient:
             ),
             on_final_failure=_raise_failure,
             handled_exceptions=(
-                (
-                    TypeError,
-                    lambda _exc: (
-                        logger.debug(
-                            "Reference payload missing for %s (treating as empty)",
-                            normalized_paper_id,
-                        )
-                        or _persist_empty()
-                    ),
-                ),
                 (
                     ObjectNotFoundException,
                     lambda _exc: (

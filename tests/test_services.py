@@ -658,11 +658,11 @@ def test_external_id_fallback_from_paper_id_contracts() -> None:
     assert doi.doi == "10.1145/3133956.3134029"
 
 
-def test_reference_cache_hit_corrupt_and_type_error_paths(
+def test_reference_cache_hit_corrupt_and_failure_paths(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reference cache should reuse valid/legacy hits and rebuild invalid payloads."""
+    """Reference cache should reuse valid hits and never persist operational failures."""
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
@@ -773,8 +773,36 @@ def test_reference_cache_hit_corrupt_and_type_error_paths(
         assert rebuilt_refs == rebuilt_ids
         assert json.loads(rebuilt_cache_path.read_text())["references"] == rebuilt_ids
 
-    client.client.get_paper_references = MagicMock(side_effect=TypeError("missing"))
-    assert client.get_reference_ids("seed-type-error") == []
+    type_error_id = s2.normalize_paper_id("seed-type-error")
+    type_error_cache_path = s2._reference_cache_path(type_error_id)
+    client.client.get_paper_references = MagicMock(
+        side_effect=TypeError("SDK signature changed")
+    )
+    with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"Failed to fetch reference IDs after retries for seed-type-error\.",
+        ):
+            client.get_reference_ids("seed-type-error")
+    assert not type_error_cache_path.exists()
+
+    client.client.get_paper_references = MagicMock(
+        return_value=iter(
+            [
+                _make_reference_record("real-reference"),
+                _make_reference_record("second-reference"),
+            ]
+        )
+    )
+    assert client.get_reference_ids("seed-type-error") == [
+        "real-reference",
+        "second-reference",
+    ]
+    client.client.get_paper_references.assert_called_once()
+    assert json.loads(type_error_cache_path.read_text())["references"] == [
+        "real-reference",
+        "second-reference",
+    ]
 
 
 def test_reference_payload_normalization_keeps_cache_and_live_contracts() -> None:
