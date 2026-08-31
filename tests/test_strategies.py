@@ -535,6 +535,23 @@ def test_refresh_reference_cache_force_lookup_contracts() -> None:
     )
 
 
+def test_citation_related_paper_reference_failure_remains_uncached() -> None:
+    """One unavailable related-paper reference list should not abort collection."""
+    client = MagicMock()
+    client.get_reference_ids.side_effect = RuntimeError("publisher elided references")
+    builder = CitationGraphBuilder(fetch_references=True, client=client)
+    paper = _paper("related-paper")
+
+    builder._ensure_paper_references(paper)
+
+    assert paper.references == []
+    assert paper.paper_id not in builder.reference_cache
+    client.get_reference_ids.assert_called_once_with(
+        paper.paper_id,
+        force_refresh=False,
+    )
+
+
 def test_citation_collect_clears_in_memory_reference_cache_between_requests() -> None:
     """Citation collection should scope in-memory reference cache to one request."""
     seed = _paper("seed", refs=["seed-ref"])

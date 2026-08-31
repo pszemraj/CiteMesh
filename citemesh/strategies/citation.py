@@ -103,7 +103,15 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             paper.references = list(cached_refs)
             return
 
-        paper.references = self._get_references(paper_id)
+        try:
+            paper.references = self._get_references(paper_id)
+        except RuntimeError as exc:
+            logger.warning(
+                "Reference IDs unavailable for related paper %s; continuing "
+                "without bibliographic-coupling data for that paper: %s",
+                paper_id,
+                exc,
+            )
 
     def _ingest_relation_batch(
         self,
