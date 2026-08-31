@@ -49,7 +49,10 @@ from citemesh.data import (
     resolve_embedding_model_profile,
     validate_compression_filter,
 )
-from citemesh.data.embedding_cache import CacheSearchResult
+from citemesh.data.embedding_cache import (
+    EMBEDDING_DATASET_CHUNK_ROWS,
+    CacheSearchResult,
+)
 from citemesh.data.model_profiles import (
     EmbeddingModelProfile,
     compose_title_abstract_text,
@@ -563,7 +566,7 @@ def _import_huggingface_hub_module() -> Any:
 
 
 ENCODE_BATCH_SIZE = 32
-HYDRATION_FLUSH_SIZE = 256
+HYDRATION_FLUSH_SIZE = EMBEDDING_DATASET_CHUNK_ROWS
 CANDIDATE_MULTIPLIER = 4
 CITATION_COUNT_ENRICHMENT_LIMIT = 20
 CALIBRATION_RESERVOIR_SEED = 0

@@ -18,7 +18,11 @@ from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
     DEFAULT_EMBEDDING_MODEL_NAME,
 )
-from citemesh.data.embedding_cache import CacheNamespacePayloadStats, CacheSearchResult
+from citemesh.data.embedding_cache import (
+    EMBEDDING_DATASET_CHUNK_ROWS,
+    CacheNamespacePayloadStats,
+    CacheSearchResult,
+)
 from citemesh.services.semantic_scholar import SemanticScholarUnavailableError
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
@@ -3543,6 +3547,7 @@ def test_hydration_flush_size_controls_cache_write_bursting(
     tmp_path: Any,
 ) -> None:
     """Hydration should flush metadata batches using configured flush threshold."""
+    assert embedding_module.HYDRATION_FLUSH_SIZE == EMBEDDING_DATASET_CHUNK_ROWS
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
     monkeypatch.setattr("citemesh.strategies.embedding.HYDRATION_FLUSH_SIZE", 3)
 

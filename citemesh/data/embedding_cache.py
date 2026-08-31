@@ -1089,16 +1089,11 @@ class EmbeddingCache:
 
         previous_clipped = int(h5_file.attrs.get(INT8_CLIPPED_VALUE_COUNT_KEY, 0))
         previous_total = int(h5_file.attrs.get(INT8_TOTAL_VALUE_COUNT_KEY, 0))
-        h5_file.attrs[INT8_CLIPPED_VALUE_COUNT_KEY] = previous_clipped + int(
-            clipped_value_count
-        )
-        h5_file.attrs[INT8_TOTAL_VALUE_COUNT_KEY] = previous_total + int(
-            total_value_count
-        )
-
         saturation_ratio = float(clipped_value_count) / float(total_value_count)
         cumulative_clipped = previous_clipped + int(clipped_value_count)
         cumulative_total = previous_total + int(total_value_count)
+        h5_file.attrs.modify(INT8_CLIPPED_VALUE_COUNT_KEY, cumulative_clipped)
+        h5_file.attrs.modify(INT8_TOTAL_VALUE_COUNT_KEY, cumulative_total)
         cumulative_ratio = float(cumulative_clipped) / float(cumulative_total)
         if (
             saturation_ratio >= INT8_SATURATION_WARN_RATIO
@@ -1887,7 +1882,9 @@ class EmbeddingCache:
                     self._require_calibration_ranges(h5, embedding_dim)
 
                 # Prefilter state is auxiliary; toggling it does not change vector rows.
-                h5.attrs[BINARY_PREFILTER_ENABLED_KEY] = int(self.binary_prefilter)
+                h5.attrs.modify(
+                    BINARY_PREFILTER_ENABLED_KEY, int(self.binary_prefilter)
+                )
                 embedding_rows = self._recover_trailing_h5_rows(
                     conn=conn,
                     h5_file=h5,
@@ -2066,7 +2063,13 @@ class EmbeddingCache:
         :return None: Mutates HDF5 attrs in-place.
         """
         for key, value in self._runtime_contract_values().items():
-            h5_file.attrs[key] = value
+            if key not in h5_file.attrs:
+                h5_file.attrs[key] = value
+                continue
+            current_value = self._metadata_value_from_h5_attr(h5_file.attrs[key])
+            expected_value = self._metadata_value_from_h5_attr(value)
+            if current_value != expected_value:
+                h5_file.attrs.modify(key, value)
 
     def _load_existing_rows(
         self,

@@ -388,6 +388,38 @@ def test_embedding_cache_int8_saturation_warning_emits_once_per_run(
             assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 4
 
 
+def test_embedding_cache_repeated_attribute_updates_do_not_bloat_hdf5_metadata(
+    tmp_path: Path,
+) -> None:
+    """Repeated metadata updates should not accumulate replaced HDF5 attributes."""
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="hdf5-attribute-growth")
+    cache.set_calibration_ranges(
+        ranges=np.vstack(
+            (
+                np.full(512, -1.0, dtype=np.float32),
+                np.full(512, 1.0, dtype=np.float32),
+            )
+        ),
+        embedding_dim=512,
+    )
+    initial_size = cache.h5_path.stat().st_size
+    for _ in range(256):
+        with h5py.File(cache.h5_path, "a") as h5:
+            cache._set_h5_attrs(h5)
+            cache._record_int8_saturation(
+                h5,
+                clipped_value_count=0,
+                total_value_count=512 * 256,
+            )
+
+    metadata_growth = cache.h5_path.stat().st_size - initial_size
+    with h5py.File(cache.h5_path, "r") as h5:
+        assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 0
+        assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 512 * 256 * 256
+
+    assert metadata_growth < 64 * 1024
+
+
 def test_embedding_cache_default_int8_path_stays_local_to_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
