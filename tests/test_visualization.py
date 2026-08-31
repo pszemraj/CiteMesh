@@ -60,6 +60,11 @@ from citemesh.visualization.render import (
     visualize_graph,
 )
 from citemesh.visualization.themes import get_theme
+from citemesh.visualization.years import (
+    coerce_publication_year,
+    publication_year_bounds,
+    publication_year_scale,
+)
 from tests._helpers import raise_import_error
 
 
@@ -1574,6 +1579,37 @@ def test_publication_year_coercion_is_shared_across_visual_surfaces() -> None:
     assert payload["meta"]["year_range"] == {"min": 2020, "max": 2024}
     assert marker_years == [2022.0, 2020.0, 2024.0]
     assert (scale_min, scale_max) == (2020.0, 2024.0)
+
+
+@pytest.mark.parametrize(
+    ("raw_year", "expected"),
+    [
+        (2024, 2024),
+        (np.int64(2023), 2023),
+        (" 2022 ", 2022),
+        (True, 0),
+        (2021.0, 0),
+        ("unknown", 0),
+        (None, 0),
+    ],
+)
+def test_publication_year_coercion_direct_contract(
+    raw_year: object,
+    expected: int,
+) -> None:
+    """The shared year helper should reject ambiguous non-integral values."""
+    assert coerce_publication_year(raw_year) == expected
+
+
+def test_publication_year_bounds_and_scale_direct_contracts() -> None:
+    """Missing and singleton year sets should retain deterministic color bounds."""
+    assert publication_year_bounds([None, False, "unknown"]) == (2000, 2001)
+    assert publication_year_bounds(["2022", np.int64(2019), None]) == (2019, 2022)
+    assert publication_year_scale([2024, None]) == (
+        [2024.0, 2024.5],
+        2024.0,
+        2025.0,
+    )
 
 
 def test_exporter_html_exports_are_byte_stable_with_real_plotly(
