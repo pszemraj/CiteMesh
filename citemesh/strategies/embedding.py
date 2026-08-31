@@ -15,10 +15,11 @@ import os
 import random
 import re
 import warnings
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha1, sha256
+from importlib import metadata as importlib_metadata
 from itertools import islice
 from pathlib import Path
 from typing import (
@@ -27,6 +28,7 @@ from typing import (
     Callable,
     Dict,
     Iterable,
+    Iterator,
     List,
     Mapping,
     Optional,
@@ -147,6 +149,10 @@ class EmbeddingBackendCompatibilityError(RuntimeError):
     """The active embedding model requires a newer inference backend."""
 
 
+class EmbeddingPrecisionCompatibilityError(RuntimeError):
+    """The checkpoint's automatic weight dtype violates runtime precision policy."""
+
+
 def _embedding_text_metadata(title: object, abstract: object) -> Dict[str, str]:
     """Normalize title/abstract fields without treating placeholders as content.
 
@@ -246,6 +252,37 @@ def _parse_torch_major_minor(version: str) -> tuple[int, int]:
     return (0, 0)
 
 
+def _parse_major_minor(version: str) -> Optional[tuple[int, int]]:
+    """Parse a leading semantic-version major/minor pair.
+
+    :param str version: Raw package version string.
+    :return Optional[tuple[int, int]]: Parsed pair, or ``None`` when unavailable.
+    """
+    version_match = re.match(r"^(\d+)\.(\d+)", str(version).strip())
+    if version_match is None:
+        return None
+    return int(version_match.group(1)), int(version_match.group(2))
+
+
+def _installed_transformers_major_minor(transformers: Any) -> Optional[tuple[int, int]]:
+    """Resolve the installed Transformers version from module or distribution data.
+
+    Editable and development builds sometimes expose a nonstandard module
+    ``__version__`` even though their installed distribution metadata is valid.
+
+    :param Any transformers: Imported Transformers module.
+    :return Optional[tuple[int, int]]: Verified major/minor pair when discoverable.
+    """
+    module_version = _parse_major_minor(getattr(transformers, "__version__", ""))
+    if module_version is not None:
+        return module_version
+    try:
+        distribution_version = importlib_metadata.version("transformers")
+    except importlib_metadata.PackageNotFoundError:
+        return None
+    return _parse_major_minor(distribution_version)
+
+
 def _transformers_auto_dtype_key() -> str:
     """Return the installed Transformers keyword for automatic weight dtype.
 
@@ -259,9 +296,8 @@ def _transformers_auto_dtype_key() -> str:
         transformers = importlib.import_module("transformers")
     except ImportError:
         return "torch_dtype"
-    major, _minor = _parse_torch_major_minor(
-        str(getattr(transformers, "__version__", ""))
-    )
+    detected = _installed_transformers_major_minor(transformers)
+    major = detected[0] if detected is not None else 0
     return "dtype" if major >= 5 else "torch_dtype"
 
 
@@ -278,13 +314,24 @@ def _require_transformers_compatibility(profile: EmbeddingModelProfile) -> None:
 
     transformers = importlib.import_module("transformers")
     raw_version = str(getattr(transformers, "__version__", "")).strip()
-    detected = _parse_torch_major_minor(raw_version)
+    detected = _installed_transformers_major_minor(transformers)
+    if detected is None:
+        raise EmbeddingBackendCompatibilityError(
+            f"Could not determine the installed Transformers version for {profile.name}; "
+            "the bidirectional-attention compatibility floor cannot be verified. "
+            "Reinstall a supported transformers>=4.57 release."
+        )
     if detected < minimum:
         required = ".".join(str(part) for part in minimum)
+        detected_label = (
+            raw_version
+            if _parse_major_minor(raw_version) is not None
+            else ".".join(str(part) for part in detected)
+        )
         raise EmbeddingBackendCompatibilityError(
             f"{profile.name} requires transformers>={required} because older "
             "Gemma 3 implementations ignore bidirectional attention. "
-            f"Detected transformers=={raw_version or 'unknown'}."
+            f"Detected transformers=={detected_label}."
         )
 
 
@@ -295,17 +342,80 @@ def _accelerator_available(torch: Any, backend: str) -> bool:
     :param str backend: Accelerator token (``cuda`` or ``mps``).
     :return bool: ``True`` when the backend reports as available.
     """
-    owner = torch if backend == "cuda" else getattr(torch, "backends", None)
+    if backend == "mps":
+        _built, available = _mps_capabilities(torch)
+        return available
+
+    owner = torch
     backend_module = getattr(owner, backend, None)
     is_available = getattr(backend_module, "is_available", None)
     if not callable(is_available):
         return False
     try:
-        if backend == "mps":
+        return bool(is_available())
+    except Exception:
+        return False
+
+
+def _mps_capabilities(torch: Any) -> tuple[bool, bool]:
+    """Return whether the torch MPS backend is built and currently available.
+
+    :param Any torch: Imported torch module object.
+    :return tuple[bool, bool]: ``(is_built, is_available)`` capability flags.
+    """
+    backends = getattr(torch, "backends", None)
+    backend_mps = getattr(backends, "mps", None) if backends is not None else None
+    torch_mps = getattr(torch, "mps", None)
+
+    is_built = getattr(backend_mps, "is_built", None)
+    try:
+        built = bool(is_built()) if callable(is_built) else False
+    except Exception:
+        built = False
+
+    available = False
+    for owner in (torch_mps, backend_mps):
+        is_available = getattr(owner, "is_available", None)
+        if not callable(is_available):
+            continue
+        try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
-                return bool(is_available())
-        return bool(is_available())
+                available = bool(is_available())
+        except Exception:
+            available = False
+        if available:
+            break
+
+    if available:
+        built = True
+    return built, available
+
+
+def _cuda_native_bf16_supported(torch: Any) -> bool:
+    """Return whether CUDA provides native rather than emulated bfloat16.
+
+    :param Any torch: Imported torch module object.
+    :return bool: ``True`` only for a live CUDA backend with native bf16 support.
+    """
+    cuda_module = getattr(torch, "cuda", None)
+    is_supported = getattr(cuda_module, "is_bf16_supported", None)
+    if not callable(is_supported):
+        return False
+    try:
+        return bool(is_supported(including_emulation=False))
+    except TypeError:
+        get_capability = getattr(cuda_module, "get_device_capability", None)
+        try:
+            capability = get_capability(0) if callable(get_capability) else None
+        except Exception:
+            return False
+        return bool(
+            isinstance(capability, tuple)
+            and capability
+            and int(capability[0]) >= 8
+            and is_supported()
+        )
     except Exception:
         return False
 
@@ -346,11 +456,17 @@ def resolve_embedding_device(requested: Optional[str]) -> str:
         raise ValueError(
             "device='cuda' was requested but CUDA is not available in this runtime."
         )
-    if normalized == "mps" and not _accelerator_available(torch, "mps"):
-        raise ValueError(
-            "device='mps' was requested but the MPS backend is not available "
-            "in this runtime."
-        )
+    if normalized == "mps":
+        mps_built, mps_available = _mps_capabilities(torch)
+        if not mps_built:
+            raise ValueError(
+                "device='mps' was requested but this torch build has no MPS support."
+            )
+        if not mps_available:
+            raise ValueError(
+                "device='mps' was requested but the built MPS backend is not "
+                "available on this machine."
+            )
     return normalized
 
 
@@ -486,11 +602,42 @@ def _query_seed_id(query_text: str) -> str:
     return f"query:{digest}"
 
 
-class _AutocastEncodeProxy:
+def _model_floating_dtype_names(model: Any) -> Set[str]:
+    """Return recognized floating-point parameter dtypes from a loaded model.
+
+    :param Any model: Model object that may expose ``parameters()``.
+    :return Set[str]: Normalized subset of ``float16``, ``bfloat16``, and ``float32``.
+    """
+    parameters = getattr(model, "parameters", None)
+    if not callable(parameters):
+        return set()
+
+    recognized: Set[str] = set()
+    aliases = {
+        "float": "float32",
+        "float16": "float16",
+        "half": "float16",
+        "bfloat16": "bfloat16",
+        "float32": "float32",
+    }
+    try:
+        for parameter in parameters():
+            dtype_name = str(getattr(parameter, "dtype", "")).casefold()
+            normalized = dtype_name.removeprefix("torch.")
+            mapped = aliases.get(normalized)
+            if mapped is not None:
+                recognized.add(mapped)
+    except Exception:
+        logger.debug("Could not inspect loaded model parameter dtypes", exc_info=True)
+        return set()
+    return recognized
+
+
+class _PrecisionEncodeProxy:
     """Wrap model encode calls in a precision context manager."""
 
     def __init__(self, model: Any, context_factory: Callable[[], Any]):
-        """Create a model proxy for encode-time autocast.
+        """Create a model proxy for encode-time precision controls.
 
         :param Any model: Wrapped model object exposing ``encode``.
         :param Callable[[], Any] context_factory: Callable returning a context manager.
@@ -943,6 +1090,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._autocast_enabled = False
         self._encode_model: Optional[Any] = None
         self._inner_model_compiled = False
+        self._eager_inner_transformer: Optional[Any] = None
         self._compile_status_reason: Optional[str] = None
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
@@ -1273,6 +1421,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._autocast_enabled = False
         self._encode_model = None
         self._inner_model_compiled = False
+        self._eager_inner_transformer = None
         self._compile_status_reason = None
         self._profile_logged = False
         self._dim_logged = False
@@ -1285,17 +1434,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         if self.device == "cpu":
             return None
-        if self.device == "mps":
-            # flash_attn ships CUDA-only kernels; never probe it off-CUDA.
-            return "sdpa"
 
         preferred_attention = str(
             self.model_profile.preferred_attention_implementation or ""
         ).strip()
-        if preferred_attention == "flash_attention_2" and _module_available(
-            "flash_attn"
-        ):
+        if not preferred_attention:
+            return None
+        if preferred_attention != "flash_attention_2":
             return preferred_attention
+        if self.device == "cuda" and _module_available("flash_attn"):
+            return preferred_attention
+        # flash_attn ships CUDA-only kernels; the profile's portable fallback is SDPA.
         return "sdpa"
 
     def _resolve_source_dtype_hint(self) -> str:
@@ -1341,22 +1490,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
 
         if self.device == "cuda":
-            cuda_module = getattr(torch, "cuda", None)
-            is_bf16_supported = getattr(cuda_module, "is_bf16_supported", None)
-            try:
-                cuda_bf16_supported = bool(
-                    is_bf16_supported() if callable(is_bf16_supported) else False
-                )
-            except Exception as exc:
-                logger.warning(
-                    "%s could not verify CUDA bfloat16 support (%s: %s); "
-                    "falling back to float32.",
-                    self.model_name,
-                    type(exc).__name__,
-                    exc,
-                )
-                return False
-            if not cuda_bf16_supported:
+            if not _cuda_native_bf16_supported(torch):
                 return False
         elif self.device == "mps" and not self._mps_bf16_allowed(torch):
             return False
@@ -1838,6 +1972,46 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         return model_kwargs
 
+    def _validate_loaded_model_precision(
+        self,
+        model: Any,
+        model_name_or_path: str,
+    ) -> None:
+        """Reject automatic checkpoint dtypes outside the verified compute policy.
+
+        CiteMesh deliberately keeps Transformers automatic checkpoint loading so
+        compatible weights are not needlessly coerced. The live loaded parameters
+        are therefore the authoritative dtype check: float16 is forbidden
+        everywhere, and bfloat16 weights are accepted only when this runtime has
+        already selected the verified bfloat16 autocast path.
+
+        :param Any model: Newly loaded SentenceTransformer-compatible model.
+        :param str model_name_or_path: Candidate checkpoint that produced ``model``.
+        :return None: The model's automatic dtype is compatible.
+        :raises EmbeddingPrecisionCompatibilityError: If live weights resolve to an
+            unsupported precision.
+        """
+        weight_dtypes = _model_floating_dtype_names(model)
+        if "float16" in weight_dtypes:
+            raise EmbeddingPrecisionCompatibilityError(
+                f"Embedding checkpoint {model_name_or_path!r} resolved float16 weights "
+                "under automatic dtype loading. CiteMesh forbids float16; choose a "
+                "current checkpoint whose saved weights are float32 or bfloat16."
+            )
+        if "bfloat16" in weight_dtypes and self._source_dtype_hint != "bfloat16":
+            raise EmbeddingPrecisionCompatibilityError(
+                f"Embedding checkpoint {model_name_or_path!r} resolved bfloat16 weights "
+                f"on device={self.device}, but this runtime has not verified bfloat16 "
+                "compute for the active model profile. Choose a float32 checkpoint "
+                "instead of mixing bfloat16 execution into a float32 cache namespace."
+            )
+        if weight_dtypes:
+            logger.debug(
+                "%s automatic weight dtype(s): %s.",
+                model_name_or_path,
+                ", ".join(sorted(weight_dtypes)),
+            )
+
     def _autocast_context(self) -> Any:
         """Return autocast context for model encoding.
 
@@ -1860,20 +2034,115 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             dtype=self._autocast_dtype,
         )
 
+    @contextmanager
+    def _tf32_context(self) -> Iterator[None]:
+        """Apply CUDA-only TF32 controls for one encode call and restore them.
+
+        :return Iterator[None]: Context that scopes process-global torch settings.
+        """
+        if self._tf32_mode not in {"tf32", "tf32-matmul-high"}:
+            yield
+            return
+
+        try:
+            torch = _import_torch()
+        except ImportError:
+            yield
+            return
+
+        if self._tf32_mode == "tf32-matmul-high":
+            get_precision = getattr(torch, "get_float32_matmul_precision", None)
+            set_precision = getattr(torch, "set_float32_matmul_precision", None)
+            if not callable(get_precision) or not callable(set_precision):
+                yield
+                return
+            original = get_precision()
+            try:
+                set_precision("high")
+            except Exception:
+                logger.warning("Could not enable scoped CUDA TF32 matmul precision.")
+                yield
+                return
+            try:
+                yield
+            finally:
+                try:
+                    set_precision(original)
+                except Exception:
+                    logger.warning(
+                        "Could not restore the prior torch float32 matmul precision."
+                    )
+            return
+
+        backends = getattr(torch, "backends", None)
+        cuda_backend = getattr(backends, "cuda", None)
+        cudnn_backend = getattr(backends, "cudnn", None)
+        targets = (
+            getattr(cuda_backend, "matmul", None),
+            getattr(cudnn_backend, "conv", None),
+        )
+        if any(
+            target is None or not hasattr(target, "fp32_precision")
+            for target in targets
+        ):
+            yield
+            return
+
+        originals = [(target, target.fp32_precision) for target in targets]
+        changed: list[tuple[Any, Any]] = []
+        try:
+            for target, original in originals:
+                target.fp32_precision = "tf32"
+                changed.append((target, original))
+        except Exception:
+            for target, original in reversed(changed):
+                try:
+                    target.fp32_precision = original
+                except Exception:
+                    pass
+            logger.warning("Could not enable scoped CUDA TF32 backend precision.")
+            yield
+            return
+
+        try:
+            yield
+        finally:
+            for target, original in reversed(originals):
+                try:
+                    target.fp32_precision = original
+                except Exception:
+                    logger.warning(
+                        "Could not restore a prior CUDA TF32 backend setting."
+                    )
+
+    @contextmanager
+    def _precision_context(self) -> Iterator[None]:
+        """Combine scoped TF32 and autocast controls around model encoding.
+
+        :return Iterator[None]: Active encode-time precision context.
+        """
+        with ExitStack() as stack:
+            stack.enter_context(self._tf32_context())
+            stack.enter_context(self._autocast_context())
+            yield
+
     def _get_model_for_encoding(self) -> Any:
         """Return model object used for embedding encode calls.
 
-        :return Any: Base model or autocast-enabled proxy.
+        :return Any: Base model or encode-time precision proxy.
         """
         if self.model is None:
             raise RuntimeError("Embedding model is not loaded.")
 
-        if not self._autocast_enabled:
+        if not self._autocast_enabled and self._tf32_mode not in {
+            "tf32",
+            "tf32-matmul-high",
+        }:
             return self.model
 
         if self._encode_model is None:
-            self._encode_model = _AutocastEncodeProxy(
-                self.model, self._autocast_context
+            self._encode_model = _PrecisionEncodeProxy(
+                self.model, self._precision_context
             )
 
         return self._encode_model
@@ -1896,6 +2165,45 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if effective_batch_size < 1:
             raise ValueError("batch_size must be at least 1 when provided")
 
+        try:
+            return self._encode_texts_once(
+                encode_model,
+                texts,
+                effective_batch_size=effective_batch_size,
+                show_progress_bar=show_progress_bar,
+            )
+        except Exception as compile_error:
+            compiled_failure = compile_error
+            if not self._restore_eager_model_after_compile_failure(compiled_failure):
+                raise
+
+        eager_encode_model = self._get_model_for_encoding()
+        try:
+            return self._encode_texts_once(
+                eager_encode_model,
+                texts,
+                effective_batch_size=effective_batch_size,
+                show_progress_bar=show_progress_bar,
+            )
+        except Exception as eager_error:
+            raise eager_error from compiled_failure
+
+    def _encode_texts_once(
+        self,
+        encode_model: Any,
+        texts: List[str],
+        *,
+        effective_batch_size: int,
+        show_progress_bar: bool,
+    ) -> np.ndarray:
+        """Execute one complete length-bucketed encode attempt.
+
+        :param Any encode_model: Model or precision-context proxy exposing ``encode``.
+        :param List[str] texts: Text payloads to encode.
+        :param int effective_batch_size: Validated maximum rows per batch.
+        :param bool show_progress_bar: Whether model batches may display progress.
+        :return np.ndarray: Normalized float32 embeddings in original order.
+        """
         return encode_texts_in_length_buckets(
             texts,
             batch_size=min(effective_batch_size, len(texts)),
@@ -1982,8 +2290,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                         st_kwargs["truncate_dim"] = self.truncate_dim
                     if self.model_revision is not None:
                         st_kwargs["revision"] = self.model_revision
-                    self.model = sentence_transformer_cls(candidate_model, **st_kwargs)
-                except EmbeddingBackendCompatibilityError:
+                    loaded_model = sentence_transformer_cls(
+                        candidate_model, **st_kwargs
+                    )
+                    self._validate_loaded_model_precision(loaded_model, candidate_model)
+                    self.model = loaded_model
+                except (
+                    EmbeddingBackendCompatibilityError,
+                    EmbeddingPrecisionCompatibilityError,
+                ):
                     raise
                 except Exception as exc:
                     model_errors.append((candidate_model, exc))
@@ -2094,59 +2409,46 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             and torch_version in _TF32_COMPILE_BRIDGE_TORCH_VERSIONS
         )
         if should_use_compile_bridge:
+            get_matmul_precision = getattr(torch, "get_float32_matmul_precision", None)
             set_matmul_precision = getattr(torch, "set_float32_matmul_precision", None)
-            if not callable(set_matmul_precision):
+            if not callable(get_matmul_precision) or not callable(set_matmul_precision):
                 self._tf32_mode = "unsupported"
                 logger.debug(
-                    "Skipping TF32 config for %s: compile-safe matmul precision API unavailable.",
+                    "Skipping TF32 config for %s: restorable compile-safe matmul "
+                    "precision APIs unavailable.",
                     self.model_name,
                 )
                 return
-            try:
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore",
-                        message=r"Please use the new API settings to control TF32 behavior.*",
-                        category=UserWarning,
-                    )
-                    set_matmul_precision("high")
-                self._tf32_mode = "tf32-matmul-high"
-                logger.debug(
-                    "Configured compile-safe TF32 matmul precision for %s on torch %s.",
-                    self.model_name,
-                    getattr(torch, "__version__", "unknown"),
-                )
-                return
-            except Exception as exc:
-                self._tf32_mode = "unsupported"
-                logger.debug(
-                    "Failed setting compile-safe TF32 matmul precision for %s: %s",
-                    self.model_name,
-                    exc,
-                )
-                return
+            self._tf32_mode = "tf32-matmul-high"
+            logger.debug(
+                "Will scope compile-safe TF32 matmul precision to encode calls for "
+                "%s on torch %s.",
+                self.model_name,
+                getattr(torch, "__version__", "unknown"),
+            )
+            return
 
         backends = getattr(torch, "backends", None)
-        if backends is None or not hasattr(backends, "fp32_precision"):
+        cuda_backend = getattr(backends, "cuda", None) if backends is not None else None
+        cudnn_backend = (
+            getattr(backends, "cudnn", None) if backends is not None else None
+        )
+        matmul_backend = getattr(cuda_backend, "matmul", None)
+        conv_backend = getattr(cudnn_backend, "conv", None)
+        if any(
+            owner is None or not hasattr(owner, "fp32_precision")
+            for owner in (matmul_backend, conv_backend)
+        ):
             self._tf32_mode = "unsupported"
             logger.debug(
-                "Skipping TF32 config for %s: torch.backends.fp32_precision unavailable.",
+                "Skipping TF32 config for %s: CUDA-scoped fp32_precision APIs "
+                "unavailable.",
                 self.model_name,
             )
             return
 
-        try:
-            backends.fp32_precision = "tf32"
-            self._tf32_mode = "tf32"
-            logger.debug("Enabled TF32 kernels for CUDA matmul/conv (Ampere+ GPU).")
-            return
-        except Exception as exc:
-            self._tf32_mode = "unsupported"
-            logger.debug(
-                "Failed setting TF32 precision API for %s: %s",
-                self.model_name,
-                exc,
-            )
+        self._tf32_mode = "tf32"
+        logger.debug("Will scope TF32 to CUDA matmul/conv encode calls (Ampere+ GPU).")
 
     def _log_runtime_summary(self) -> None:
         """Emit concise one-time runtime summary at info level."""
@@ -2207,12 +2509,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return
 
-        if self.device == "mps":
-            logger.info(
-                "torch.compile on MPS (Inductor/Metal) is experimental; "
-                "falling back to eager execution on compile failure."
-            )
-
         if not self.model_profile.compile_inner_transformer:
             self._compile_status_reason = "profile does not support inner-model compile"
             return
@@ -2262,8 +2558,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         try:
-            transformer_block.auto_model = compile_fn(auto_model)
+            compiled_model = compile_fn(auto_model)
+            transformer_block.auto_model = compiled_model
         except Exception as exc:
+            try:
+                transformer_block.auto_model = auto_model
+            except Exception:
+                pass
             self._compile_status_reason = f"compile failed ({type(exc).__name__})"
             logger.warning(
                 "torch.compile failed for %s inner transformer; continuing without compile: %s",
@@ -2272,12 +2573,61 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return
 
+        self._eager_inner_transformer = auto_model
         self._inner_model_compiled = True
         self._compile_status_reason = None
+        if self.device == "mps":
+            logger.info(
+                "torch.compile on MPS (Inductor/Metal) is experimental; the first "
+                "encode will retry from the eager inner model if compilation fails."
+            )
         logger.debug(
             "Enabled torch.compile for %s inner transformer (model[0].auto_model).",
             self.model_name,
         )
+
+    def _restore_eager_model_after_compile_failure(self, error: Exception) -> bool:
+        """Restore the original inner model after a lazy compiled-call failure.
+
+        ``torch.compile`` normally defers backend compilation until the first
+        invocation, so wrapping the module successfully is not proof that it can
+        execute. Retrying the whole encode request is safe because no embeddings
+        are returned or persisted until all length buckets finish.
+
+        :param Exception error: Failure raised while the compiled model executed.
+        :return bool: Whether an eager model was restored for one retry.
+        """
+        if (
+            not self._inner_model_compiled
+            or self._eager_inner_transformer is None
+            or self.model is None
+        ):
+            return False
+        try:
+            transformer_block = self.model[0]
+            transformer_block.auto_model = self._eager_inner_transformer
+        except Exception:
+            logger.warning(
+                "Compiled embedding execution failed and the eager inner model "
+                "could not be restored.",
+                exc_info=True,
+            )
+            return False
+
+        self._inner_model_compiled = False
+        self._eager_inner_transformer = None
+        self._encode_model = None
+        self._compile_status_reason = (
+            f"compiled execution failed ({type(error).__name__}); restored eager model"
+        )
+        logger.warning(
+            "Compiled embedding execution failed for %s (%s: %s); retrying the "
+            "complete encode request with the eager inner model.",
+            self.model_name,
+            type(error).__name__,
+            error,
+        )
+        return True
 
     def collect_papers(
         self,

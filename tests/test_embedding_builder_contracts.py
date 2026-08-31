@@ -120,6 +120,67 @@ def test_model_load_enforces_profile_transformers_floor(
     assert init_log["attempts"] == [model_name]
 
 
+def test_transformers_version_falls_back_to_distribution_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nonstandard module versions should use valid installed package metadata."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    fake_transformers = types.SimpleNamespace(__version__="development-build")
+    monkeypatch.setattr(
+        embedding_module.importlib,
+        "import_module",
+        lambda _module_name: fake_transformers,
+    )
+    monkeypatch.setattr(
+        embedding_module.importlib_metadata,
+        "version",
+        lambda _distribution: "5.14.1",
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert init_log["attempts"] == [DEFAULT_EMBEDDING_MODEL_NAME]
+    assert "dtype" in init_log["kwargs"]["model_kwargs"]
+
+
+def test_transformers_unknown_version_fails_with_verification_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unverifiable backend version should fail closed without claiming 0.0."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    fake_transformers = types.SimpleNamespace(__version__="development-build")
+    monkeypatch.setattr(
+        embedding_module.importlib,
+        "import_module",
+        lambda _module_name: fake_transformers,
+    )
+    monkeypatch.setattr(
+        embedding_module.importlib_metadata,
+        "version",
+        lambda _distribution: "unknown",
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    with pytest.raises(
+        embedding_module.EmbeddingBackendCompatibilityError,
+        match="Could not determine the installed Transformers version",
+    ):
+        builder._load_model()
+
+    assert "attempts" not in init_log
+
+
 def _install_fake_sentence_transformers(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -178,12 +239,17 @@ def _write_local_sentence_transformer_profile(
     *,
     embeddinggemma: bool,
     nested_transformer: bool = False,
+    include_task_prompts: bool = True,
+    include_bidirectional_flag: bool = True,
 ) -> None:
     """Write minimal local SentenceTransformers metadata for profile tests.
 
     :param Path root: Checkpoint root to populate.
     :param bool embeddinggemma: Whether metadata should declare EmbeddingGemma.
     :param bool nested_transformer: Whether transformer config lives in a module dir.
+    :param bool include_task_prompts: Whether to write task-prompt metadata.
+    :param bool include_bidirectional_flag: Whether to write EmbeddingGemma's
+        model-specific bidirectional-attention flag.
     :return None: Writes fixture metadata below ``root``.
     """
     root.mkdir(parents=True)
@@ -193,6 +259,11 @@ def _write_local_sentence_transformer_profile(
         {
             "model_type": "gemma3_text",
             "architectures": ["Gemma3TextModel"],
+            **(
+                {"use_bidirectional_attention": True}
+                if include_bidirectional_flag
+                else {}
+            ),
         }
         if embeddinggemma
         else {"model_type": "bert", "architectures": ["BertModel"]}
@@ -223,10 +294,11 @@ def _write_local_sentence_transformer_profile(
         if embeddinggemma
         else {"query": "", "document": ""}
     )
-    (root / "config_sentence_transformers.json").write_text(
-        json.dumps({"prompts": prompts}),
-        encoding="utf-8",
-    )
+    if include_task_prompts:
+        (root / "config_sentence_transformers.json").write_text(
+            json.dumps({"prompts": prompts}),
+            encoding="utf-8",
+        )
 
 
 def _install_fake_torch(
@@ -235,6 +307,8 @@ def _install_fake_torch(
     bf16_supported: bool,
     *,
     mps_available: bool = False,
+    mps_built: bool | None = None,
+    bf16_native_supported: bool | None = None,
     autocast_behavior: str = "identity",
     compile_behavior: str = "identity",
     capability: tuple[int, int] | None = (8, 0),
@@ -273,9 +347,18 @@ def _install_fake_torch(
         return model
 
     matmul_precision_calls: list[str] = []
+    matmul_precision_state = {"value": "highest"}
 
     def _set_float32_matmul_precision(precision: str) -> None:
         matmul_precision_calls.append(precision)
+        matmul_precision_state["value"] = precision
+
+    def _get_float32_matmul_precision() -> str:
+        """Return the fake process-wide matmul precision token.
+
+        :return str: Current fake precision token.
+        """
+        return matmul_precision_state["value"]
 
     matmul_backend = types.SimpleNamespace()
     cudnn_backend = types.SimpleNamespace()
@@ -308,14 +391,28 @@ def _install_fake_torch(
             cuda=types.SimpleNamespace(matmul=matmul_backend),
             cudnn=cudnn_backend,
         )
+    resolved_mps_built = mps_available if mps_built is None else mps_built
     fake_backends.mps = types.SimpleNamespace(
         is_available=lambda: mps_available,
-        is_built=lambda: mps_available,
+        is_built=lambda: resolved_mps_built,
     )
+
+    bf16_support_calls: list[bool] = []
+
+    def _is_bf16_supported(*, including_emulation: bool = True) -> bool:
+        """Return fake native/emulated CUDA bfloat16 support.
+
+        :param bool including_emulation: Whether emulated support is acceptable.
+        :return bool: Configured support verdict.
+        """
+        bf16_support_calls.append(including_emulation)
+        if including_emulation or bf16_native_supported is None:
+            return bf16_supported
+        return bf16_native_supported
 
     cuda_module = types.SimpleNamespace(
         is_available=lambda: cuda_available,
-        is_bf16_supported=lambda: bf16_supported,
+        is_bf16_supported=_is_bf16_supported,
     )
     if capability is not None:
         cuda_module.get_device_capability = lambda _index=0: capability
@@ -325,8 +422,10 @@ def _install_fake_torch(
     fake_torch.bfloat16 = bf16_token
     fake_torch.autocast = _autocast
     fake_torch.compile = _compile
+    fake_torch.get_float32_matmul_precision = _get_float32_matmul_precision
     fake_torch.set_float32_matmul_precision = _set_float32_matmul_precision
     fake_torch._matmul_precision_calls = matmul_precision_calls
+    fake_torch._bf16_support_calls = bf16_support_calls
     fake_torch._compile_calls = compile_calls
     fake_torch.cuda = cuda_module
     fake_torch.backends = fake_backends
@@ -458,7 +557,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.9.0", True),
         (DEFAULT_EMBEDDING_MODEL_NAME, "tagged", (7, 5), "2.10.0", True),
         (DEFAULT_EMBEDDING_MODEL_NAME, "raise", (7, 5), "2.10.0", False),
-        ("sentence-transformers/all-MiniLM-L6-v2", "tagged", (8, 0), "2.10.0", False),
+        ("org/generic-embedding-model", "tagged", (8, 0), "2.10.0", False),
     ]
     for (
         model_name,
@@ -525,10 +624,10 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     assert builder._inner_model_compiled is False
 
     tf32_cases = [
-        ((8, 0), True, True, "2.9.0", "tf32-matmul-high", "none", "high"),
-        ((8, 0), True, False, "2.9.0", "tf32", "tf32", None),
-        ((8, 0), False, True, "2.10.0", "tf32-matmul-high", None, "high"),
-        ((7, 5), True, True, "2.10.0", "off", "none", None),
+        ((8, 0), True, True, "2.9.0", "tf32-matmul-high"),
+        ((8, 0), True, False, "2.9.0", "tf32"),
+        ((8, 0), False, True, "2.10.0", "tf32-matmul-high"),
+        ((7, 5), True, True, "2.10.0", "off"),
     ]
     for (
         capability,
@@ -536,8 +635,6 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         enable_torch_compile,
         torch_version,
         expected_mode,
-        expected_backend_precision,
-        expected_matmul_precision,
     ) in tf32_cases:
         _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
@@ -556,26 +653,33 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         )
         builder._load_model()
 
+        assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
+        assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
         if include_tf32_global_api:
-            assert fake_torch.backends.fp32_precision == expected_backend_precision
-            expected_matmul_backend = expected_backend_precision or "none"
-            assert (
-                fake_torch.backends.cuda.matmul.fp32_precision
-                == expected_matmul_backend
-            )
-            assert (
-                fake_torch.backends.cudnn.conv.fp32_precision == expected_matmul_backend
-            )
+            assert fake_torch.backends.fp32_precision == "none"
         else:
             assert not hasattr(fake_torch.backends, "fp32_precision")
-            assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
-            assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
 
-        if expected_matmul_precision is None:
-            assert fake_torch._matmul_precision_calls == []
-        else:
-            assert fake_torch._matmul_precision_calls == [expected_matmul_precision]
         assert builder._tf32_mode == expected_mode
+        with builder._tf32_context():
+            if expected_mode == "tf32":
+                assert fake_torch.backends.cuda.matmul.fp32_precision == "tf32"
+                assert fake_torch.backends.cudnn.conv.fp32_precision == "tf32"
+            else:
+                assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
+                assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
+            expected_matmul = (
+                "high" if expected_mode == "tf32-matmul-high" else "highest"
+            )
+            assert fake_torch.get_float32_matmul_precision() == expected_matmul
+
+        assert fake_torch.backends.cuda.matmul.fp32_precision == "none"
+        assert fake_torch.backends.cudnn.conv.fp32_precision == "none"
+        assert fake_torch.get_float32_matmul_precision() == "highest"
+        expected_calls = (
+            ["high", "highest"] if expected_mode == "tf32-matmul-high" else []
+        )
+        assert fake_torch._matmul_precision_calls == expected_calls
 
     _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, _fake_torch = _install_fake_torch(
@@ -662,6 +766,85 @@ def test_embedding_bf16_autocast_rejection_falls_back_to_float32(
     )
 
 
+def test_cuda_bf16_policy_rejects_emulated_only_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUDA autocast should require native bf16 instead of tensor emulation."""
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _bf16_token, autocast_log, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=True,
+        bf16_native_supported=False,
+    )
+
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    builder._load_model()
+
+    assert builder._source_dtype_hint == "float32"
+    assert builder._autocast_enabled is False
+    assert fake_torch._bf16_support_calls == [False]
+    assert autocast_log == []
+    assert (
+        init_log["kwargs"]["model_kwargs"].get(
+            "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
+        )
+        == "auto"
+    )
+
+
+@pytest.mark.parametrize(
+    ("weight_dtype", "message"),
+    [
+        ("torch.float16", "forbids float16"),
+        ("torch.bfloat16", "has not verified bfloat16 compute"),
+    ],
+)
+def test_automatic_checkpoint_dtype_must_match_verified_runtime_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    weight_dtype: str,
+    message: str,
+) -> None:
+    """Live automatic weight dtypes must not contradict float32 provenance."""
+
+    class _Parameter:
+        def __init__(self, dtype: str):
+            self.dtype = dtype
+
+    class _DtypeModel:
+        def __init__(self, _model_name: str, **_kwargs: Any):
+            self._parameters = [_Parameter(weight_dtype)]
+
+        def parameters(self) -> Iterable[_Parameter]:
+            """Iterate fake parameters for live dtype inspection.
+
+            :return Iterable[_Parameter]: One configured fake parameter.
+            """
+            return iter(self._parameters)
+
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_sentence_transformer_class",
+        lambda: _DtypeModel,
+    )
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/custom-embedding-model",
+        client=MagicMock(),
+    )
+
+    with pytest.raises(
+        embedding_module.EmbeddingPrecisionCompatibilityError,
+        match=message,
+    ):
+        builder._load_model()
+
+
 def test_embedding_runtime_policy_keeps_fp32_fallback_unmodified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -679,12 +862,12 @@ def test_embedding_runtime_policy_keeps_fp32_fallback_unmodified(
     )
     accelerator_builder = EmbeddingGraphBuilder(
         max_papers=1,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_name="org/generic-embedding-model",
         client=MagicMock(),
     )
     accelerator_builder._load_model()
 
-    assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
+    assert "attn_implementation" not in init_log["kwargs"]["model_kwargs"]
     assert (
         init_log["kwargs"]["model_kwargs"].get(
             "dtype", init_log["kwargs"]["model_kwargs"].get("torch_dtype")
@@ -692,7 +875,7 @@ def test_embedding_runtime_policy_keeps_fp32_fallback_unmodified(
         == "auto"
     )
     assert accelerator_builder._source_dtype_hint == "float32"
-    assert accelerator_builder._attention_implementation_hint == "sdpa"
+    assert accelerator_builder._attention_implementation_hint is None
     assert autocast_log == []
 
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
@@ -707,7 +890,7 @@ def test_embedding_runtime_policy_keeps_fp32_fallback_unmodified(
     )
     cpu_builder = EmbeddingGraphBuilder(
         max_papers=1,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_name="org/generic-embedding-model",
         client=MagicMock(),
     )
     cpu_builder._load_model()
@@ -730,7 +913,7 @@ def test_encode_texts_uses_length_bucketed_batches(
 
     builder = EmbeddingGraphBuilder(
         max_papers=1,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_name="org/generic-embedding-model",
         client=MagicMock(),
     )
 
@@ -931,6 +1114,56 @@ def test_local_embeddinggemma_artifacts_resolve_task_profile(
     assert "profile=embeddinggemma-v2" in builder.embedding_cache.model_name
     assert "profile=embeddinggemma-v1" not in builder.embedding_cache.model_name
     assert "profile=embeddinggemma-v2" in builder.graph_embedding_cache.model_name
+
+
+def test_plain_transformers_embeddinggemma_export_resolves_from_model_contract(
+    tmp_path: Path,
+) -> None:
+    """Bidirectional model metadata should identify exports without ST prompts."""
+    model_path = tmp_path / "plain-transformers-export"
+    _write_local_sentence_transformer_profile(
+        model_path,
+        embeddinggemma=True,
+        include_task_prompts=False,
+    )
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name=str(model_path),
+        client=MagicMock(),
+    )
+
+    assert builder.model_profile.schema_token == "embeddinggemma-v2"
+    assert builder.model_profile.minimum_transformers_version == (4, 57)
+    assert builder.truncate_dim == 256
+
+
+def test_ambiguous_local_gemma_checkpoint_warns_before_default_profile(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Architecture alone should not silently claim or discard an embedding profile."""
+    model_path = tmp_path / "ambiguous-gemma-export"
+    _write_local_sentence_transformer_profile(
+        model_path,
+        embeddinggemma=True,
+        include_task_prompts=False,
+        include_bidirectional_flag=False,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder = EmbeddingGraphBuilder(
+            max_papers=1,
+            model_name=str(model_path),
+            client=MagicMock(),
+        )
+
+    assert builder.model_profile.schema_token == "default-v1"
+    assert any(
+        "automatic profile detection cannot prove the embedding contract"
+        in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_local_model_profile_override_and_generic_detection(
@@ -3680,6 +3913,46 @@ def test_embedding_device_resolution_rejects_unavailable_or_unknown(
         resolve_embedding_device(requested)
 
 
+@pytest.mark.parametrize(
+    ("mps_built", "expected_message"),
+    [
+        (False, "torch build has no MPS support"),
+        (True, "built MPS backend is not available"),
+    ],
+)
+def test_explicit_mps_reports_build_and_runtime_failures_separately(
+    monkeypatch: pytest.MonkeyPatch,
+    mps_built: bool,
+    expected_message: str,
+) -> None:
+    """Explicit MPS diagnostics should distinguish build and machine support."""
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=False,
+        mps_built=mps_built,
+    )
+
+    with pytest.raises(ValueError, match=expected_message):
+        resolve_embedding_device("mps")
+
+
+def test_mps_availability_implies_build_for_older_torch_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Older torch APIs without ``is_built`` should trust live availability."""
+    _bf16, _autocast, fake_torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=True,
+    )
+    del fake_torch.backends.mps.is_built
+
+    assert resolve_embedding_device("mps") == "mps"
+
+
 def test_embedding_device_forwarded_to_sentence_transformer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3776,7 +4049,7 @@ def test_embedding_mps_default_profile_uses_float32(
     )
     builder = EmbeddingGraphBuilder(
         max_papers=1,
-        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_name="org/generic-embedding-model",
         client=MagicMock(),
     )
     builder._load_model()
@@ -3788,7 +4061,7 @@ def test_embedding_mps_default_profile_uses_float32(
         )
         == "auto"
     )
-    assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
+    assert "attn_implementation" not in init_log["kwargs"]["model_kwargs"]
     assert builder._autocast_enabled is False
     assert autocast_log == []
 
@@ -3853,6 +4126,76 @@ def test_embedding_compile_device_gating(
         if not expect_compiled:
             assert builder._compile_status_reason == "compile disabled for device=cpu"
             assert fake_torch._compile_calls == []
+
+
+def test_lazy_compile_failure_restores_eager_model_and_retries_full_encode(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """First-call compiler failures should deliver the promised eager fallback."""
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+        mps_available=True,
+        torch_version="2.13.0",
+        compile_behavior="tagged",
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        enable_torch_compile=True,
+        client=MagicMock(),
+    )
+    original_inner = object()
+
+    class _InnerBlock:
+        def __init__(self) -> None:
+            self.auto_model = original_inner
+
+    class _LazyFailureModel:
+        def __init__(self) -> None:
+            self.block = _InnerBlock()
+            self.encode_attempts = 0
+
+        def __getitem__(self, index: int) -> _InnerBlock:
+            """Return the single fake transformer block.
+
+            :param int index: Required zero index.
+            :return _InnerBlock: Fake transformer block.
+            """
+            assert index == 0
+            return self.block
+
+        def encode(self, texts: list[str], **_kwargs: Any) -> np.ndarray:
+            """Fail while wrapped, then succeed after eager restoration.
+
+            :param list[str] texts: Text batch.
+            :param Any _kwargs: Ignored SentenceTransformer encode controls.
+            :return np.ndarray: One float32 row per input.
+            """
+            self.encode_attempts += 1
+            if isinstance(self.block.auto_model, tuple):
+                raise RuntimeError("Inductor Metal codegen failed")
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    model = _LazyFailureModel()
+    builder.model = model
+    builder._maybe_compile_inner_transformer()
+
+    assert builder._inner_model_compiled is True
+    assert isinstance(model.block.auto_model, tuple)
+    with caplog.at_level(logging.WARNING):
+        embeddings = builder._encode_texts(["seed"])
+
+    assert embeddings.shape == (1, 2)
+    assert model.encode_attempts == 2
+    assert model.block.auto_model is original_inner
+    assert builder._inner_model_compiled is False
+    assert "restored eager model" in str(builder._compile_status_reason)
+    assert any(
+        "retrying the complete encode request" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_embedding_tf32_skipped_for_non_cuda_device(

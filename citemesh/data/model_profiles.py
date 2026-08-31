@@ -8,6 +8,7 @@ embedding checkpoints without hard-coding logic in the strategies.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Mapping, Optional, Tuple
@@ -15,6 +16,8 @@ from typing import Callable, Dict, Mapping, Optional, Tuple
 QueryFormatter = Callable[[str, Optional[Dict[str, str]]], str]
 DocumentFormatter = Callable[[Dict[str, str]], str]
 SimilarityFormatter = Callable[[str, Optional[Dict[str, str]]], str]
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_MODEL_NAME = "unsloth/embeddinggemma-300m"
 DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, Tuple[str, ...]] = {
@@ -181,6 +184,7 @@ EMBEDDING_MODEL_PROFILES = (
         similarity_formatter=_gemma_similarity_formatter,
         preferred_compute_dtype="bfloat16",
         autocast_devices=("cuda", "mps"),
+        preferred_attention_implementation="sdpa",
         compile_inner_transformer=True,
         available_truncate_dims=(768, 512, 256, 128),
         recommended_truncate_dim=256,
@@ -240,13 +244,15 @@ def _local_transformer_configs(root: Path) -> Tuple[Dict[str, object], ...]:
     return tuple(config for config in configs if config)
 
 
-def _local_checkpoint_is_embeddinggemma(root: Path) -> bool:
-    """Return whether local metadata declares the EmbeddingGemma task contract.
+def _local_embeddinggemma_evidence(root: Path) -> Tuple[bool, bool, bool]:
+    """Inspect local metadata for EmbeddingGemma contract evidence.
 
     :param Path root: Local model directory.
-    :return bool: Whether architecture and SentenceTransformers prompts match.
+    :return Tuple[bool, bool, bool]: Architecture, bidirectional-attention, and
+        SentenceTransformers-task evidence flags.
     """
     has_gemma_architecture = False
+    has_bidirectional_attention = False
     for transformer_config in _local_transformer_configs(root):
         architectures = transformer_config.get("architectures", [])
         normalized_architectures = (
@@ -257,7 +263,9 @@ def _local_checkpoint_is_embeddinggemma(root: Path) -> bool:
         model_type = str(transformer_config.get("model_type", "")).casefold()
         if model_type == "gemma3_text" or "gemma3textmodel" in normalized_architectures:
             has_gemma_architecture = True
-            break
+            has_bidirectional_attention = has_bidirectional_attention or (
+                transformer_config.get("use_bidirectional_attention") is True
+            )
 
     sentence_transformer_config = _read_json_object(
         root / "config_sentence_transformers.json"
@@ -273,7 +281,11 @@ def _local_checkpoint_is_embeddinggemma(root: Path) -> bool:
         "retrieval-document",
         "sts",
     }.issubset(prompt_names)
-    return has_gemma_architecture and has_embedding_tasks
+    return (
+        has_gemma_architecture,
+        has_bidirectional_attention,
+        has_embedding_tasks,
+    )
 
 
 def get_embedding_model_profile(model_name: str) -> EmbeddingModelProfile:
@@ -312,8 +324,20 @@ def resolve_embedding_model_profile(
 
     local_path = Path(model_name_or_path).expanduser()
     if local_path.is_dir():
-        if _local_checkpoint_is_embeddinggemma(local_path):
+        architecture, bidirectional_attention, embedding_tasks = (
+            _local_embeddinggemma_evidence(local_path)
+        )
+        if architecture and (bidirectional_attention or embedding_tasks):
             return _PROFILE_BY_KEY["embeddinggemma"]
+        if architecture and not (bidirectional_attention or embedding_tasks):
+            logger.warning(
+                "Local Gemma 3 checkpoint %s lacks both "
+                "use_bidirectional_attention=true and EmbeddingGemma task prompts; "
+                "automatic profile detection cannot prove the embedding contract. "
+                "Using the default profile; pass --model-profile embeddinggemma only "
+                "if this artifact is an EmbeddingGemma export.",
+                local_path,
+            )
         return DEFAULT_PROFILE
 
     return get_embedding_model_profile(model_name_or_path)
