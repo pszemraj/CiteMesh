@@ -828,6 +828,43 @@ def test_reference_payload_normalization_keeps_cache_and_live_contracts() -> Non
     assert SemanticScholarClient._extract_reference_ids(malformed_payload) == []
 
 
+@pytest.mark.parametrize(
+    "malformed_payload",
+    [
+        [{"unexpected": "shape"}],
+        {"paperId": "mapping-is-not-a-relation-page"},
+        "string-is-not-a-relation-page",
+    ],
+)
+def test_malformed_reference_response_is_never_cached(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    malformed_payload: object,
+) -> None:
+    """Nonempty malformed relation responses should fail without becoming evidence."""
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper_references = MagicMock(return_value=malformed_payload)
+
+    with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"Failed to fetch reference IDs after retries for malformed-seed\.",
+        ):
+            client.get_reference_ids("malformed-seed")
+
+    cache_path = s2._reference_cache_path(s2.normalize_paper_id("malformed-seed"))
+    assert not cache_path.exists()
+
+    client.client.get_paper_references = MagicMock(
+        return_value=iter([_make_reference_record("repaired-reference")])
+    )
+    assert client.get_reference_ids("malformed-seed") == ["repaired-reference"]
+    client.client.get_paper_references.assert_called_once()
+    assert json.loads(cache_path.read_text())["references"] == ["repaired-reference"]
+
+
 def test_reference_cache_resilience_contracts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

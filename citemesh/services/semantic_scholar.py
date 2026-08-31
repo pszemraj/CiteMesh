@@ -11,6 +11,7 @@ import os
 import random
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import quote
@@ -1235,16 +1236,23 @@ class SemanticScholarClient:
 
             :return List[str]: Normalized reference IDs.
             """
-            references = list(
-                self.client.get_paper_references(
-                    normalized_paper_id,
-                    fields=["paperId"],
-                )
+            raw_references = self.client.get_paper_references(
+                normalized_paper_id,
+                fields=["paperId"],
             )
+            if isinstance(raw_references, (str, bytes, Mapping)):
+                raise TypeError(
+                    "Reference relation response must be an iterable of records."
+                )
+            references = list(raw_references)
             if not references:
                 return _persist_empty()
 
-            normalized_ref_ids = self._extract_reference_ids(references)
+            normalized_ref_ids = _normalize_reference_ids(references, strict=True)
+            if normalized_ref_ids is None:
+                raise TypeError(
+                    "Non-empty reference response contained no valid paper IDs."
+                )
             self._persist_reference_cache_entry(
                 cache_path,
                 normalized_paper_id,
