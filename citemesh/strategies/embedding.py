@@ -64,8 +64,11 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
+    IdentityRegistry,
     fetch_candidate_pool,
     paper_embedding_metadata,
+    register_aliases,
+    resolve_aliases,
 )
 from citemesh.text_batching import (
     encode_texts_in_length_buckets,
@@ -2292,6 +2295,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             papers[query_seed] = resolved_seed_paper
 
+        seed_identities = IdentityRegistry()
+        register_aliases(
+            seed_identities,
+            resolved_seed_paper.paper_id,
+            resolved_seed_paper,
+        )
+
         # Compute normalized seed embedding
         logger.debug("Computing seed embedding...")
         formatted_seed_text = format_paper_for_embedding(
@@ -2312,7 +2322,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             for paper_id, paper, embedding in pool_candidates:
                 if len(papers) >= self.max_papers:
                     break
-                if paper_id in papers:
+                if paper_id in papers or resolve_aliases(seed_identities, paper):
                     continue
                 papers[paper_id] = paper
                 self.retrieval_embeddings[paper_id] = embedding
@@ -2354,6 +2364,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 citation_count=0,  # ArXiv data lacks citation counts
                 is_seed=False,
             )
+
+            if resolve_aliases(seed_identities, paper):
+                continue
 
             papers[paper_id] = paper
             self.retrieval_embeddings[paper_id] = embedding

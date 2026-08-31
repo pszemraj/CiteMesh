@@ -1919,6 +1919,67 @@ def test_collect_papers_query_seed_and_warm_cache_contracts(
     fake_load_dataset_for_hydration.assert_not_called()
 
 
+def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corpus arXiv row must not duplicate its S2-resolved seed paper."""
+    seed = Paper(
+        paper_id="a" * 40,
+        title="Recent Seed",
+        year=2026,
+        abstract="Seed abstract",
+        arxiv_id="2608.15411",
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=3,
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
+    )
+    builder.client.get_paper.return_value = seed
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_encode_texts",
+        lambda _texts, show_progress_bar=False: np.asarray(
+            [[1.0, 0.0]], dtype=np.float32
+        ),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_select_candidates",
+        lambda _seed_embedding, *, use_streaming: [
+            (
+                "arxiv:2608.15411",
+                {
+                    "title": "Recent Seed",
+                    "year": 2026,
+                    "abstract": "Seed abstract",
+                    "arxiv_id": "2608.15411",
+                    "authors": [],
+                },
+                np.asarray([1.0, 0.0], dtype=np.float32),
+            ),
+            (
+                "arxiv:2608.15412",
+                {
+                    "title": "Neighbor",
+                    "year": 2026,
+                    "abstract": "Neighbor abstract",
+                    "arxiv_id": "2608.15412",
+                    "authors": [],
+                },
+                np.asarray([0.8, 0.2], dtype=np.float32),
+            ),
+        ],
+    )
+    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+
+    papers = builder.collect_papers("arxiv:2608.15411")
+
+    assert list(papers) == [seed.paper_id, "arxiv:2608.15412"]
+    assert "arxiv:2608.15411" not in builder.retrieval_embeddings
+
+
 def test_collect_papers_formats_all_seeds_in_retrieval_query_space(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
