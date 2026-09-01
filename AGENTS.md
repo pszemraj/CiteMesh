@@ -28,7 +28,7 @@ conda run -n inf python -m pytest -m slow      # real-model smoke tests (needs e
 conda run -n inf ruff check . && conda run -n inf ruff format .
 ```
 
-The suite must be green and `ruff check` + `ruff format --check` clean before committing. CI runs lint plus tests on Linux/macOS across supported Pythons, and a no-extras install smoke (`pip install .` then `citemesh --help`), so keep optional deps lazily imported.
+The suite must be green and `ruff check` + `ruff format --check` clean before committing. CI runs lint plus representative Linux/macOS tests (Python 3.10 and 3.13), and a no-extras install smoke (`pip install .` then `citemesh --help`), so keep optional deps lazily imported.
 
 ## CI scope
 

@@ -76,6 +76,9 @@ package. Current behavior is described in the linked guides and references:
 - Added resumable full-corpus hydration, upstream growth reconciliation, and
   cache-native search. Detailed storage and hydration behavior is in
   [Caching & Data](../guides/caching.md).
+- Raised the hydration flush batch from 256 to 2048 records, matching the HDF5
+  dataset chunk size, to reduce lock and resize overhead during corpus
+  hydration.
 - Hardened reference-cache validation and atomic replacement, and reduced
   repetitive empty-hit and quantization-warning logs.
 
@@ -86,6 +89,9 @@ package. Current behavior is described in the linked guides and references:
 - Replaced per-result dashboard directories with reusable two-file collections and
   portable versioned graph packages; see
   [Output Artifacts](../reference/output-artifacts.md).
+- Made JSON exports always embed dashboard layout geometry, so every exported
+  graph JSON loads through Add Results; a JSON-only run previously produced a
+  file the dashboard rejected.
 - Added browser-side multi-file import, collection export, reading-list actions,
   and non-destructive migration from the former dashboard manifest layout.
 - Unified themes and year color scales across static and interactive renderers,
@@ -96,6 +102,17 @@ package. Current behavior is described in the linked guides and references:
 - Preserved application-selected Matplotlib backends and isolated MacOSX static
   rendering on an Agg canvas without changing global plotting state.
 - Added `darkreader-lock` and `color-scheme` metadata to HTML exports.
+- Escaped `<` as the JSON escape `\u003c` in inline dashboard JSON payloads, so titles and
+  abstracts containing markup-like sequences no longer break the rendered
+  dashboard.
+- Neutralized spreadsheet formula-leading cells in CSV exports by prefixing `'`
+  when a text cell starts with `=`, `+`, `-`, `@`, tab, or carriage return, in
+  both the CLI writer and the dashboard Export CSV button, and aligned both
+  writers on lowercase `true`/`false` for `is_seed`.
+- Escaped LaTeX special characters (`% & # $ _ ~ ^`, and backslash as
+  `\textbackslash{}`) in BibTeX exports.
+- Stripped XML-invalid control characters from GraphML text attributes so
+  emitted files always parse.
 
 ## CLI and Packaging
 

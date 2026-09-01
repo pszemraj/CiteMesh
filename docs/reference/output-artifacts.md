@@ -121,8 +121,7 @@ Top-level fields:
   queried Semantic Scholar neighborhood sources)
 - `summary` (`nodes`, `edges`)
 - `nodes` - enriched per-paper objects (see below)
-- `dashboard` (`meta` is always present; layout geometry is included when a shared
-  layout was computed)
+- `dashboard` (`meta` and the stored layout geometry are always present)
 - `edges` (`source`, `target`, `weight`, plus readable source/target title/label fields)
 
 `source`/`target` are canonical node IDs for unambiguous graph processing. The extra `*_title` and `*_label` fields are provided for readable inspection.
@@ -134,7 +133,7 @@ Each node includes:
 - external: `links` (arXiv abs/pdf URLs, DOI URL, Semantic Scholar URL)
 - `bibtex` (deterministic BibTeX entry)
 
-The JSON and dashboard formats share the same enriched node schema. When a precomputed/shared layout already exists (for example because the same run also exports `png`, `plotly`, or `dashboard`), the JSON payload also carries dashboard render metadata (`dashboard.meta.plotly_*`) so `citemesh-graph` files can be loaded back into the dashboard via **Add Results** without losing graph geometry. JSON-only exports omit those geometry arrays to avoid unnecessary layout work during data-only runs.
+The JSON and dashboard formats share the same enriched node schema. Every JSON export carries the stored dashboard render metadata and layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file can be loaded back into the dashboard via **Add Results** without losing graph geometry - including files produced by a data-only `--export json` run.
 
 ### CSV (`<strategy>.csv`)
 
