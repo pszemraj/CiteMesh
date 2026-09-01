@@ -248,6 +248,47 @@ def _select_dashboard_label_nodes(
     return set(selected)
 
 
+# Characters XML 1.0 forbids even when escaped: C0 controls other than
+# tab/newline/CR, lone surrogates, and the two non-characters U+FFFE/U+FFFF.
+_XML_INVALID_CHARS_RE = re.compile(
+    "[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff" + chr(0xFFFE) + chr(0xFFFF) + "]"
+)
+
+
+def _xml_safe_graph_value(value: object) -> object:
+    """Strip XML-invalid characters from string values bound for GraphML.
+
+    Upstream titles/abstracts occasionally carry stray control bytes;
+    ``nx.write_graphml`` passes them through and produces a file no XML
+    parser will accept.
+
+    :param object value: Raw attribute value.
+    :return object: Value with XML-invalid characters removed when a string.
+    """
+    if isinstance(value, str):
+        return _XML_INVALID_CHARS_RE.sub("", value)
+    return value
+
+
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell_guard(value: object) -> str:
+    """Neutralize spreadsheet formula interpretation for one CSV text cell.
+
+    Excel/Sheets execute cells starting with ``=``, ``+``, ``-``, ``@``, tab,
+    or CR as formulas (CWE-1236). Prefixing an apostrophe forces text
+    rendering; the dashboard's in-page CSV exporter applies the same rule.
+
+    :param object value: Raw text cell value.
+    :return str: Cell text, apostrophe-prefixed when formula-leading.
+    """
+    text = str(value)
+    if text.startswith(_CSV_FORMULA_PREFIXES):
+        return f"'{text}"
+    return text
+
+
 def _inject_darkreader_lock(path: Path | str, color_scheme: str = "light") -> None:
     """Insert dark-mode-extension defenses into a written HTML export.
 
@@ -338,6 +379,11 @@ class GraphExporter:
     def graph_payload(self) -> Dict[str, Any]:
         """Build the canonical versioned graph payload shared by JSON consumers.
 
+        Dashboard geometry is always embedded (computing a layout on demand when
+        the caller did not supply one) so every ``kind``-stamped payload can be
+        loaded back through the dashboard's Load Results flow regardless of
+        which export formats were requested or in which order exporters ran.
+
         :return Dict[str, Any]: Portable CiteMesh graph payload with dashboard data.
         """
         enriched = self._enriched_nodes()
@@ -348,7 +394,7 @@ class GraphExporter:
             node_ids=dashboard_node_ids,
             node_payloads=enriched,
             sorted_edges=sorted_edges,
-            include_plotly_geometry=self._layout is not None,
+            include_plotly_geometry=True,
         )
         portable_meta: Dict[str, Any] = {
             "strategy": dashboard_meta["strategy"],
@@ -428,23 +474,26 @@ class GraphExporter:
         for node in enriched:
             links = node.get("links") or {}
             row = {
-                "id": node.get("id", ""),
-                "title": node.get("title", ""),
+                "id": _csv_cell_guard(node.get("id", "")),
+                "title": _csv_cell_guard(node.get("title", "")),
                 "year": node.get("year", ""),
-                "authors": "; ".join(node.get("authors", [])),
+                "authors": _csv_cell_guard("; ".join(node.get("authors", []))),
                 "citation_count": node.get("citation_count", 0),
-                "venue": node.get("venue", ""),
-                "arxiv_id": node.get("arxiv_id", ""),
-                "doi": node.get("doi", ""),
-                "categories": "; ".join(node.get("categories", [])),
-                "is_seed": node.get("is_seed", False),
-                "provenance": node.get("provenance", ""),
-                "seed_relation": node.get("seed_relation", ""),
+                "venue": _csv_cell_guard(node.get("venue", "")),
+                "arxiv_id": _csv_cell_guard(node.get("arxiv_id", "")),
+                "doi": _csv_cell_guard(node.get("doi", "")),
+                "categories": _csv_cell_guard("; ".join(node.get("categories", []))),
+                # Lowercase true/false matches the dashboard's Export CSV button.
+                "is_seed": "true" if node.get("is_seed", False) else "false",
+                "provenance": _csv_cell_guard(node.get("provenance", "")),
+                "seed_relation": _csv_cell_guard(node.get("seed_relation", "")),
                 "seed_relevance": f"{node.get('seed_relevance', 0.0):.6f}",
-                "arxiv_url": links.get("arxiv_abs", ""),
-                "doi_url": links.get("doi", ""),
-                "semantic_scholar_url": links.get("semantic_scholar", ""),
-                "abstract": node.get("abstract", ""),
+                "arxiv_url": _csv_cell_guard(links.get("arxiv_abs", "")),
+                "doi_url": _csv_cell_guard(links.get("doi", "")),
+                "semantic_scholar_url": _csv_cell_guard(
+                    links.get("semantic_scholar", "")
+                ),
+                "abstract": _csv_cell_guard(node.get("abstract", "")),
             }
             writer.writerow(row)
         Path(path).write_text(buf.getvalue(), encoding="utf-8")
@@ -476,8 +525,8 @@ class GraphExporter:
         export_graph.graph[GRAPHML_LAYOUT_VERSION_KEY] = nx.__version__
         for metadata_key in sorted(self.metadata, key=str):
             graph_key = self._graphml_metadata_key(metadata_key)
-            export_graph.graph[graph_key] = self._graphml_metadata_value(
-                self.metadata[metadata_key]
+            export_graph.graph[graph_key] = _xml_safe_graph_value(
+                self._graphml_metadata_value(self.metadata[metadata_key])
             )
 
         for node, attrs in sorted_nodes:
@@ -488,6 +537,9 @@ class GraphExporter:
             if isinstance(cleaned.get("categories"), list):
                 cleaned["categories"] = ", ".join(cleaned["categories"])
             cleaned["is_seed"] = int(bool(cleaned.get("is_seed")))
+            cleaned = {
+                key: _xml_safe_graph_value(value) for key, value in cleaned.items()
+            }
             export_graph.add_node(node, **_ordered_attrs(cleaned))
 
         for u, v, data in sorted_edges:
@@ -495,7 +547,10 @@ class GraphExporter:
                 u,
                 v,
                 **_ordered_attrs(
-                    {k: float(val) if k == "weight" else val for k, val in data.items()}
+                    {
+                        k: float(val) if k == "weight" else _xml_safe_graph_value(val)
+                        for k, val in data.items()
+                    }
                 ),
             )
 
@@ -636,19 +691,9 @@ class GraphExporter:
         )
         div_id = self._plotly_div_id(prefix="citemesh-dashboard-plotly")
         payload = self._dashboard_payload(theme_obj=theme_obj, node_ids=node_ids)
-        payload_json = self._safe_script_content(
-            json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        )
-        figure_json = self._safe_script_content(
-            json.dumps(fig.to_plotly_json(), sort_keys=True, separators=(",", ":"))
-        )
-        collection_json = self._safe_script_content(
-            json.dumps(
-                self._dashboard_collection_bundle(),
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-        )
+        payload_json = self._script_safe_json(payload)
+        figure_json = self._script_safe_json(fig.to_plotly_json())
+        collection_json = self._script_safe_json(self._dashboard_collection_bundle())
         html_output = self._dashboard_template(
             theme_obj=theme_obj,
             div_id=div_id,
@@ -981,9 +1026,10 @@ class GraphExporter:
 
         :return str: Wrapped title string.
         """
-        raw_title = " ".join(
-            str(self.graph.nodes[self.seed_id].get("title", "CiteMesh")).split()
+        seed_attrs = (
+            self.graph.nodes[self.seed_id] if self.seed_id in self.graph else {}
         )
+        raw_title = " ".join(str(seed_attrs.get("title", "CiteMesh")).split())
         title_text = "<br>".join(
             textwrap.wrap(raw_title, width=72, break_long_words=False)
         )
@@ -1070,7 +1116,9 @@ class GraphExporter:
             should be embedded in the metadata.
         :return Dict[str, Any]: Dashboard metadata payload.
         """
-        strategy = self._strategy()
+        # The dashboard import contract requires a non-empty strategy token;
+        # graphs built outside the CLI/builders may carry none.
+        strategy = self._strategy() or "unknown"
         year_min, year_max = publication_year_bounds(
             node.get("year") for node in node_payloads
         )
@@ -1357,12 +1405,35 @@ class GraphExporter:
 
     @staticmethod
     def _safe_script_content(raw: str) -> str:
-        """Escape script-closing tokens in inline script payloads.
+        """Escape script-closing tokens in trusted inline script bodies.
+
+        Only suitable for trusted library code (e.g. the bundled plotly.js).
+        User-controlled data must go through :meth:`_script_safe_json`, which
+        removes every ``<`` so the HTML tokenizer can never enter the
+        script-data-escaped states (``<!--`` + ``<script``) that would swallow
+        the closing ``</script>`` tag.
 
         :param str raw: Raw script body content.
         :return str: Script-safe content.
         """
         return raw.replace("</", "<\\/")
+
+    @staticmethod
+    def _script_safe_json(payload: Any) -> str:
+        """Serialize a payload as JSON that is inert inside an HTML ``<script>``.
+
+        ``json.dumps`` leaves ``<`` unescaped, so upstream text such as
+        ``<!--<script>`` in a paper abstract would otherwise drive the HTML
+        tokenizer into the script-data-double-escaped state and break the whole
+        document. ``<`` can only occur inside JSON string literals, so the
+        global ``\\u003c`` rewrite is loss-free for ``JSON.parse``.
+
+        :param Any payload: JSON-serializable payload.
+        :return str: Compact deterministic JSON with every ``<`` escaped.
+        """
+        return json.dumps(payload, sort_keys=True, separators=(",", ":")).replace(
+            "<", "\\u003c"
+        )
 
     def _derive_links(
         self,
@@ -1426,14 +1497,25 @@ class GraphExporter:
     def _bibtex_escape(raw_value: str) -> str:
         """Escape text for conservative BibTeX field rendering.
 
+        Handles every LaTeX special: ``{ } % & # $ _`` gain a backslash,
+        ``~``/``^`` use their text-mode commands, and a literal backslash
+        becomes ``\\textbackslash{}`` (``\\\\`` would typeset a line break).
+        Backslashes are staged through a sentinel first so the escapes this
+        method itself emits are not re-escaped.
+
         :param str raw_value: Raw field value.
         :return str: Escaped value safe for brace-delimited fields.
         """
         collapsed = " ".join(str(raw_value).split())
-        collapsed = collapsed.replace("\\", "\\\\")
+        sentinel = "\x00"
+        collapsed = collapsed.replace("\\", sentinel)
         collapsed = collapsed.replace("{", "\\{")
         collapsed = collapsed.replace("}", "\\}")
-        return collapsed
+        for special in ("%", "&", "#", "$", "_"):
+            collapsed = collapsed.replace(special, f"\\{special}")
+        collapsed = collapsed.replace("~", "\\textasciitilde{}")
+        collapsed = collapsed.replace("^", "\\textasciicircum{}")
+        return collapsed.replace(sentinel, "\\textbackslash{}")
 
     def _node_bibtex(
         self, node_payload: Dict[str, Any], *, links: Dict[str, Optional[str]]
@@ -3037,7 +3119,7 @@ class GraphExporter:
     }
 
     function escapeHtml(value) {
-      return String(value || "")
+      return String(value ?? "")
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
@@ -4300,13 +4382,15 @@ class GraphExporter:
 
       document.getElementById("export-csv-btn").addEventListener("click", () => {
         const cols = ["id","title","year","authors","citation_count","venue","arxiv_id","doi","categories","is_seed","provenance","seed_relation","seed_relevance","arxiv_url","doi_url","semantic_scholar_url","abstract"];
-        function csvEscape(v) { const s = String(v == null ? "" : v); return s.includes(",") || s.includes('"') || s.includes("\\n") ? '"' + s.replace(/"/g, '""') + '"' : s; }
+        // Mirror the CLI CSV writer: neutralize formula-leading cells (CWE-1236).
+        function csvGuard(v) { const s = String(v == null ? "" : v); return /^[=+\\-@\\t\\r]/.test(s) ? "'" + s : s; }
+        function csvEscape(v) { const s = csvGuard(v); return s.includes(",") || s.includes('"') || s.includes("\\n") ? '"' + s.replace(/"/g, '""') + '"' : s; }
         const rows = [cols.join(",")];
         for (const n of (payload.nodes || [])) {
           const links = n.links || {};
           rows.push([
             n.id, n.title, n.year, (n.authors||[]).join("; "), n.citation_count, n.venue||"", n.arxiv_id||"", n.doi||"",
-            (n.categories||[]).join("; "), n.is_seed, n.provenance||"", n.seed_relation||"",
+            (n.categories||[]).join("; "), (n.is_seed ? "true" : "false"), n.provenance||"", n.seed_relation||"",
             Number(n.seed_relevance||0).toFixed(6), links.arxiv_abs||"", links.doi||"", links.semantic_scholar||"", n.abstract||""
           ].map(csvEscape).join(","));
         }
@@ -4528,10 +4612,16 @@ class GraphExporter:
 </body>
 </html>
 """
-        rendered = template
-        for token, value in vars_map.items():
-            rendered = rendered.replace(token, value)
-        return rendered
+        # Single-pass substitution over the template only: sequential
+        # str.replace would rescan already-injected values, letting a token
+        # such as __PLOTLY_DIV_ID__ inside paper metadata get rewritten (or,
+        # for the JSON tokens, corrupt the embedded payloads).
+        token_pattern = re.compile(
+            "|".join(
+                re.escape(token) for token in sorted(vars_map, key=len, reverse=True)
+            )
+        )
+        return token_pattern.sub(lambda match: vars_map[match.group(0)], template)
 
     def _sorted_nodes(self) -> list[tuple[Hashable, Dict[str, Any]]]:
         """Return nodes sorted by ID for deterministic serialization.
@@ -4666,8 +4756,8 @@ class GraphExporter:
             )
         else:
             node_data.setdefault("authors", attrs.get("authors", []))
-            node_data.setdefault("abstract", "")
-            node_data.setdefault("categories", [])
+            node_data.setdefault("abstract", attrs.get("abstract", ""))
+            node_data.setdefault("categories", attrs.get("categories", []))
 
         return node_data
 

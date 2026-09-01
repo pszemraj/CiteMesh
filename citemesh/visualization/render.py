@@ -1076,7 +1076,8 @@ def generate_output_path(
     :param str strategy: Optional strategy suffix used in filename.
     :return Path: Path object for output file
     """
-    title = graph.nodes[seed_id].get("title", "graph")
+    seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
+    title = seed_attrs.get("title", "graph")
     paper_dir = output_dir / _output_dir_name(title=title, seed_id=seed_id)
     paper_dir.mkdir(parents=True, exist_ok=True)
 

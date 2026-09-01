@@ -2957,6 +2957,15 @@ def _confirm_destructive_cache_action(
     large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
     threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
     normalized_reason = _normalized_cache_reason(reason)
+    # Namespace resolution happens after model load, so the rebuild snapshot
+    # can only show whole-directory totals; say so rather than implying the
+    # entire directory is deleted.
+    scope_note = (
+        "Snapshot covers the whole embedding cache directory; only the "
+        "resolved model namespace payload will be cleared."
+        if operation == "rebuild"
+        else None
+    )
 
     if confirmed:
         logger.warning(
@@ -2979,6 +2988,8 @@ def _confirm_destructive_cache_action(
             total_size_label,
         )
 
+    if scope_note:
+        logger.warning("%s", scope_note)
     if large_cache:
         logger.warning(
             "Large cache warning: %s >= %s. %s",
@@ -3769,8 +3780,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.include_timestamp:
                 metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             plot_metadata = _plot_overlay_metadata(metadata)
+            # JSON embeds dashboard geometry too, so it shares the run's layout
+            # (honoring --spring-iterations/--seed) instead of a default one.
             layout_required = any(
-                fmt in output_paths for fmt in ("png", "plotly", "dashboard")
+                fmt in output_paths for fmt in ("png", "plotly", "dashboard", "json")
             )
             shared_layout = (
                 compute_layout(

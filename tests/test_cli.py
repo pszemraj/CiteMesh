@@ -1427,7 +1427,7 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
 
 
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Build path should share seeded layout and skip it for JSON-only export."""
+    """Build path should share one seeded layout across PNG and JSON exports."""
     graph = build_seed_graph("seed")
 
     shared_layout = {"seed": (0.0, 0.0)}
@@ -1482,14 +1482,20 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["layout"] is shared_layout
     assert captured["visualize_layout"] is shared_layout
 
-    def _fail_compute_layout(
-        *args: Any, **kwargs: Any
-    ) -> dict[str, tuple[float, float]]:
-        del args
-        del kwargs
-        raise AssertionError("compute_layout should not run for JSON-only export")
+    # JSON embeds dashboard geometry, so a JSON-only build computes the same
+    # shared layout (with the run's parameters) instead of skipping it.
+    json_layout = {"seed": (0.5, 0.5)}
+    json_layout_params: dict[str, object] = {}
 
-    monkeypatch.setattr(cli_module, "compute_layout", _fail_compute_layout)
+    def _fake_json_compute_layout(
+        graph_arg: nx.Graph, iterations: int, layout_seed: int | None
+    ) -> dict[str, tuple[float, float]]:
+        del graph_arg
+        json_layout_params["iterations"] = iterations
+        json_layout_params["layout_seed"] = layout_seed
+        return json_layout
+
+    monkeypatch.setattr(cli_module, "compute_layout", _fake_json_compute_layout)
     captured.clear()
     monkeypatch.setattr(
         cli_module,
@@ -1514,7 +1520,8 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
         assert output.exists()
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    assert captured["layout"] is None
+    assert captured["layout"] is json_layout
+    assert json_layout_params == {"iterations": 100, "layout_seed": None}
 
 
 def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:

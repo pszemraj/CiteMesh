@@ -334,31 +334,43 @@ def test_exporter_serialization_contracts_and_determinism(
     assert edge_x[4] == pytest.approx(float(normalized_layout["z"][0]))
 
 
-def test_json_export_skips_layout_without_precomputed_geometry(
+def test_json_export_embeds_geometry_computing_layout_lazily(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """JSON export should stay data-only unless layout geometry already exists."""
+    """JSON export always embeds dashboard geometry, computing one lazy layout.
+
+    Every ``kind``-stamped payload must be loadable through the dashboard's
+    Add Results flow, so a JSON-only export may not omit the geometry arrays.
+    """
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
 
-    def _fail_compute_layout(
-        *args: Any, **kwargs: Any
+    layout_calls: list[object] = []
+
+    def _counting_compute_layout(
+        graph_arg: Any, *args: Any, **kwargs: Any
     ) -> dict[str, tuple[float, float]]:
         del args, kwargs
-        raise AssertionError("compute_layout should not run for JSON-only export")
+        layout_calls.append(graph_arg)
+        return {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
 
-    monkeypatch.setattr(export_module, "compute_layout", _fail_compute_layout)
+    monkeypatch.setattr(export_module, "compute_layout", _counting_compute_layout)
 
     json_path = tmp_path / "graph.json"
+    exporter.to_json(json_path)
     exporter.to_json(json_path)
 
     payload = json.loads(json_path.read_text())
     assert payload["meta"]["strategy"] == "citation"
     assert payload["summary"] == {"nodes": 2, "edges": 1}
-    assert payload["dashboard"]["meta"]["summary"] == {"nodes": 2, "edges": 1}
-    assert "plotly_node_order" not in payload["dashboard"]["meta"]
-    assert "plotly_positions" not in payload["dashboard"]["meta"]
-    assert "plotly_node_sizes" not in payload["dashboard"]["meta"]
+    dashboard_meta = payload["dashboard"]["meta"]
+    assert dashboard_meta["summary"] == {"nodes": 2, "edges": 1}
+    assert sorted(dashboard_meta["plotly_node_order"]) == ["related", "seed"]
+    assert len(dashboard_meta["plotly_positions"]) == 2
+    assert len(dashboard_meta["plotly_node_sizes"]) == 2
+    assert all(size > 0 for size in dashboard_meta["plotly_node_sizes"])
+    # The lazily computed layout is memoized across repeated exports.
+    assert len(layout_calls) == 1
 
 
 def test_exporter_interactive_html_contracts(
@@ -1065,7 +1077,11 @@ def test_dashboard_invalid_bootstrap_surfaces_status_in_node(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Executable dashboard bootstrap should report invalid embedded graph data."""
+    """Executable dashboard bootstrap should report invalid embedded graph data.
+
+    Strategy-less graphs now export with the ``unknown`` fallback token, so a
+    tampered payload (blanked strategy) exercises the runtime guard instead.
+    """
 
     class FakeFigure(_BaseFakeFigure):
         def to_plotly_json(self) -> dict[str, object]:
@@ -1081,6 +1097,13 @@ def test_dashboard_invalid_bootstrap_surfaces_status_in_node(
     )
     out_path = tmp_path / "invalid-bootstrap.dashboard.html"
     exporter.to_dashboard_html(out_path)
+
+    rendered = out_path.read_text(encoding="utf-8")
+    assert '"strategy":"unknown"' in rendered
+    out_path.write_text(
+        rendered.replace('"strategy":"unknown"', '"strategy":""'),
+        encoding="utf-8",
+    )
 
     result = _execute_dashboard_runtime_in_node(
         out_path,
