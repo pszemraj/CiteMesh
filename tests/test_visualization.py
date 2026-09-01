@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import types
 import xml.etree.ElementTree as ET
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Hashable
 
@@ -18,6 +20,7 @@ import networkx as nx
 import numpy as np
 import pytest
 
+from citemesh.cli import _validate_dashboard_graph_payload
 from citemesh.core import Author, Paper
 from citemesh.dashboard_contracts import (
     DASHBOARD_COLLECTION_KIND,
@@ -201,6 +204,34 @@ def _build_graph() -> tuple[nx.Graph, str]:
     return graph, seed.paper_id
 
 
+def _build_hostile_graph(
+    *,
+    title: str,
+    abstract: str = "Seed abstract",
+    author: str = "Alice Smith",
+) -> tuple[nx.Graph, str]:
+    """Create the standard graph with attacker-controlled seed metadata.
+
+    Keeps the exact node attribute shape of :func:`_build_graph` (including the
+    ``paper`` object exporters read enriched fields from) so escaping tests
+    exercise the real serialization path.
+
+    :param str title: Seed paper title.
+    :param str abstract: Seed paper abstract.
+    :param str author: Seed paper author name.
+    :return tuple[nx.Graph, str]: Graph and seed paper identifier.
+    """
+    graph, seed_id = _build_graph()
+    hostile_paper = replace(
+        graph.nodes[seed_id]["paper"],
+        title=title,
+        abstract=abstract,
+        authors=[Author(name=author)],
+    )
+    graph.nodes[seed_id].update(paper=hostile_paper, title=title, authors=[author])
+    return graph, seed_id
+
+
 def test_exporter_serialization_contracts_and_determinism(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -373,6 +404,31 @@ def test_json_export_embeds_geometry_computing_layout_lazily(
     assert len(layout_calls) == 1
 
 
+def test_json_payload_without_layout_passes_dashboard_import_contract() -> None:
+    """A layout-free JSON payload must satisfy the strict dashboard import contract.
+
+    ``_validate_dashboard_graph_payload`` mirrors the dashboard's JS importer, so
+    running it here locks the JSON -> Load Results round trip for exporters that
+    were never handed a run layout.
+    """
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+
+    payload = exporter.graph_payload()
+    validated = _validate_dashboard_graph_payload(
+        payload, result_id=f"citation:{seed_id}"
+    )
+
+    assert isinstance(validated, dict)
+    dashboard_meta = payload["dashboard"]["meta"]
+    for geometry_key in (
+        "plotly_node_order",
+        "plotly_positions",
+        "plotly_node_sizes",
+    ):
+        assert geometry_key in dashboard_meta
+
+
 def test_exporter_interactive_html_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -477,8 +533,43 @@ def test_exporter_plotly_contracts(
         exporter.to_plotly_html(tmp_path / "nodivid.plotly.html")
 
 
-def _extract_dashboard_script_json(html_text: str, script_id: str) -> dict[str, Any]:
-    """Extract embedded JSON payload from a dashboard script tag."""
+def test_plotly_html_survives_empty_and_seedless_graphs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plotly export and auto-naming must not KeyError on empty or seedless graphs."""
+    _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
+
+    empty_path = tmp_path / "empty.plotly.html"
+    GraphExporter(nx.Graph(), "seed").to_plotly_html(empty_path)
+    assert empty_path.exists()
+
+    graph, _ = _build_graph()
+    seedless_path = tmp_path / "seedless.plotly.html"
+    GraphExporter(graph, "absent-seed").to_plotly_html(seedless_path)
+    assert seedless_path.exists()
+
+    output_path = render_module.generate_output_path(
+        graph, "absent-seed", tmp_path / "out"
+    )
+    assert output_path.suffix == ".png"
+    assert output_path.parent.is_dir()
+
+
+def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
+    """GraphML must drop XML-invalid characters instead of emitting unparsable files."""
+    graph, seed_id = _build_graph()
+    graph.nodes[seed_id]["title"] = "Bad\x0btitle￾"
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+
+    graphml_path = tmp_path / "invalid-chars.graphml"
+    exporter.to_graphml(graphml_path)
+
+    assert ET.parse(graphml_path) is not None
+    assert nx.read_graphml(graphml_path).nodes[seed_id]["title"] == "Badtitle"
+
+
+def _extract_dashboard_script_text(html_text: str, script_id: str) -> str:
+    """Extract the raw text content of a dashboard JSON script tag."""
 
     match = re.search(
         rf'<script id="{re.escape(script_id)}" type="application/json">(.*?)</script>',
@@ -486,7 +577,13 @@ def _extract_dashboard_script_json(html_text: str, script_id: str) -> dict[str, 
         flags=re.DOTALL,
     )
     assert match is not None
-    return json.loads(match.group(1))
+    return match.group(1)
+
+
+def _extract_dashboard_script_json(html_text: str, script_id: str) -> dict[str, Any]:
+    """Extract embedded JSON payload from a dashboard script tag."""
+
+    return json.loads(_extract_dashboard_script_text(html_text, script_id))
 
 
 def _extract_inline_script_bodies(html_text: str) -> list[str]:
@@ -839,6 +936,120 @@ def test_exporter_does_not_relabel_legacy_collection_metadata() -> None:
     assert "kind" not in bundle
     assert "schema_version" not in bundle
     assert bundle["results"][0]["payload"] == legacy_payload
+
+
+class _JsonFakeFigure(_BaseFakeFigure):
+    """Fake Plotly figure that can serialize itself for dashboard embedding."""
+
+    def to_plotly_json(self) -> dict[str, object]:
+        """Return the captured figure spec.
+
+        :return dict[str, object]: Minimal figure payload for the embedded JSON block.
+        """
+        return {"data": self.data, "layout": self.layout}
+
+
+def _dashboard_exporter_with_collection(
+    graph: nx.Graph, seed_id: str, *, title: str
+) -> GraphExporter:
+    """Build a dashboard exporter whose collection bundle embeds the same graph.
+
+    :param nx.Graph graph: Graph to export.
+    :param str seed_id: Seed paper identifier.
+    :param str title: Result descriptor title.
+    :return GraphExporter: Exporter carrying a one-result collection bundle.
+    """
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "citation"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    result_id = f"citation:{seed_id}"
+    exporter.metadata["dashboard_collection"] = {
+        "kind": DASHBOARD_COLLECTION_KIND,
+        "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
+        "current_result_id": result_id,
+        "results": [
+            {
+                "result_id": result_id,
+                "seed_id": seed_id,
+                "title": title,
+                "strategy": "citation",
+                "summary": {"nodes": 2, "edges": 1},
+                "updated_at": "2026-09-01T12:00:00",
+                "payload": exporter.graph_payload(),
+            }
+        ],
+    }
+    return exporter
+
+
+def test_dashboard_inline_json_contains_no_raw_angle_brackets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Inline dashboard JSON must escape every ``<`` so hostile text cannot end a script.
+
+    Upstream text such as ``<!--<script>`` in an abstract would otherwise drive the
+    HTML tokenizer into the script-data-double-escaped state, swallow the closing
+    ``</script>`` tag, and blank the whole page.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+
+    hostile_title = "Closing </script> tag"
+    hostile_abstract = "<!--<script>alert(1)</script>-->"
+    graph, seed_id = _build_hostile_graph(
+        title=hostile_title, abstract=hostile_abstract
+    )
+    exporter = _dashboard_exporter_with_collection(graph, seed_id, title=hostile_title)
+
+    out_path = tmp_path / "hostile.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+    rendered = out_path.read_text()
+
+    data_json = _extract_dashboard_script_text(rendered, "citemesh-dashboard-data")
+    figure_json = _extract_dashboard_script_text(rendered, "citemesh-dashboard-figure")
+    collection_json = _extract_dashboard_script_text(
+        rendered, "citemesh-dashboard-collection"
+    )
+
+    assert figure_json
+    assert "<" not in data_json
+    assert "<" not in collection_json
+    assert "\\u003c" in data_json
+
+    seed_node = next(
+        node for node in json.loads(data_json)["nodes"] if node["id"] == seed_id
+    )
+    assert seed_node["abstract"] == hostile_abstract
+    assert seed_node["title"] == hostile_title
+
+
+def test_dashboard_template_tokens_in_metadata_survive_rendering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Template tokens inside paper metadata must survive single-pass rendering.
+
+    Sequential substitution would rescan already-injected values and rewrite a
+    ``__PLOTLY_DIV_ID__`` or ``__COLLECTION_JSON__`` token carried by a title.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+
+    hostile_title = "Tokens __PLOTLY_DIV_ID__ and __COLLECTION_JSON__ inline"
+    graph, seed_id = _build_hostile_graph(title=hostile_title)
+    exporter = _dashboard_exporter_with_collection(graph, seed_id, title=hostile_title)
+
+    out_path = tmp_path / "tokens.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+    rendered = out_path.read_text()
+
+    payload = _extract_dashboard_script_json(rendered, "citemesh-dashboard-data")
+    seed_node = next(node for node in payload["nodes"] if node["id"] == seed_id)
+    assert seed_node["title"] == hostile_title
+
+    div_id = exporter._plotly_div_id(prefix="citemesh-dashboard-plotly")
+    assert div_id.startswith("citemesh-dashboard-plotly-")
+    assert f'<div id="{div_id}"></div>' in rendered
 
 
 def test_exporter_dashboard_runtime_script_contracts(
@@ -2039,6 +2250,58 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
     bib_text = bib_path.read_text()
     assert "@article{" in bib_text
     assert "Seed Paper" in bib_text or "Related Paper" in bib_text
+
+
+def test_csv_export_neutralizes_formula_cells_and_uses_lowercase_booleans(
+    tmp_path: Path,
+) -> None:
+    """CSV cells must be formula-inert (CWE-1236) with dashboard-matching booleans."""
+    formula_title = "=cmd|'/C calc'!A0"
+    formula_author = "+Plus Author"
+    formula_abstract = "@formula abstract"
+    graph, seed_id = _build_hostile_graph(
+        title=formula_title, abstract=formula_abstract, author=formula_author
+    )
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+
+    csv_path = tmp_path / "formula.csv"
+    exporter.to_csv(csv_path)
+
+    rows = list(csv.DictReader(csv_path.read_text().splitlines()))
+    seed_row = next(row for row in rows if row["id"] == seed_id)
+    assert seed_row["title"] == f"'{formula_title}"
+    assert seed_row["authors"] == f"'{formula_author}"
+    assert seed_row["abstract"] == f"'{formula_abstract}"
+    assert {row["is_seed"] for row in rows} == {"true", "false"}
+
+
+def test_bibtex_escapes_latex_specials() -> None:
+    """BibTeX fields must escape every LaTeX special, leaving none bare."""
+    escaped = GraphExporter._bibtex_escape("100% $x$ & #tag_1 ~ ^ back\\slash {b}")
+
+    assert escaped == (
+        "100\\% \\$x\\$ \\& \\#tag\\_1 \\textasciitilde{} "
+        "\\textasciicircum{} back\\textbackslash{}slash \\{b\\}"
+    )
+    for token in (
+        "\\%",
+        "\\$",
+        "\\&",
+        "\\#",
+        "\\_",
+        "\\textasciitilde{}",
+        "\\textasciicircum{}",
+        "\\textbackslash{}",
+        "\\{",
+        "\\}",
+    ):
+        assert token in escaped
+    # No unescaped special survives: ~ and ^ become text-mode commands, and the
+    # remaining specials are always backslash-prefixed. Braces are excluded here
+    # because the emitted \textascii* commands legitimately end in "{}".
+    assert "~" not in escaped
+    assert "^" not in escaped
+    assert re.search(r"(?<!\\)[%$&#_]", escaped) is None
 
 
 @pytest.mark.parametrize(
