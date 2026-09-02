@@ -4,7 +4,7 @@ Build exploration-friendly paper graphs from a known paper with recommendation,
 citation, embedding, or hybrid strategies, or start the embedding strategy from a
 free-text query. CiteMesh ships as a single CLI with consistent visuals and export
 formats so you can switch approaches without changing tools -- an open-source,
-embeddings-powered take on the reference tool workflow.
+embeddings-powered alternative to hosted literature-mapping services.
 
 ![CiteMesh dashboard showing a hybrid graph for Attention is All you Need](assets/ui.png)
 
@@ -20,7 +20,7 @@ Start from one paper you already know, then quickly discover:
 
 The CLI defaults to the `recommendation` strategy for the fastest topical pass. Use `--strategy hybrid` when you want the tuned citation-plus-semantic workflow for this discovery pattern.
 
-## Why CiteMesh (vs. reference tool and similar tools)
+## Why CiteMesh (vs. hosted literature-mapping tools)
 
 | | CiteMesh | Typical hosted graph tools |
 | --- | --- | --- |
