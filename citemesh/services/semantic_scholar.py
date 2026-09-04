@@ -313,7 +313,7 @@ class SemanticScholarClient:
         """
         api_key = os.getenv("S2_API_KEY") or None
 
-        self.client = SemanticScholar(timeout=timeout, api_key=api_key)
+        self.client = SemanticScholar(timeout=timeout, api_key=api_key, retry=False)
         self.timeout = timeout
         self.last_request_time = 0.0
         self._session = requests.Session()

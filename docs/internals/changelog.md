@@ -17,7 +17,8 @@ package. Current behavior is described in the linked guides and references:
   version.
 - Added CONTRIBUTING.md, AGENTS.md, issue templates, and a pull request template.
 - Added authenticated Semantic Scholar pacing, a key-less usage notice, and
-  full-jitter retry handling that honors `Retry-After`.
+  full-jitter retry handling that honors `Retry-After`; disabled the SDK's
+  nested fixed-delay retry loop so CiteMesh owns one bounded retry budget.
 - Distinguished unknown paper identifiers from unavailable or rate-limited
   Semantic Scholar requests across search and graph strategies.
 - Preserved partial candidate-source success while recording source outcomes in
