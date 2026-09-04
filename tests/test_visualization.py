@@ -1017,6 +1017,7 @@ def test_dashboard_inline_json_contains_no_raw_angle_brackets(
     assert "<" not in data_json
     assert "<" not in collection_json
     assert "\\u003c" in data_json
+    assert json.loads(collection_json)["results"][0]["build"] == {}
 
     seed_node = next(
         node for node in json.loads(data_json)["nodes"] if node["id"] == seed_id

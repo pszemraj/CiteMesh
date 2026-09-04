@@ -1200,6 +1200,7 @@ class GraphExporter:
         if not isinstance(raw_bundle, dict):
             return empty_bundle
 
+        declared_kind = str(raw_bundle.get("kind") or "").strip()
         raw_results = raw_bundle.get("results")
         raw_payloads = raw_bundle.get("payloads")
         legacy_payloads = raw_payloads if isinstance(raw_payloads, dict) else {}
@@ -1231,6 +1232,11 @@ class GraphExporter:
                 build = raw_entry.get("build")
                 if isinstance(build, dict):
                     entry["build"] = build
+                elif (
+                    declared_kind == DASHBOARD_COLLECTION_KIND
+                    and "build" not in raw_entry
+                ):
+                    entry["build"] = {}
                 results.append(entry)
         current_result_id = raw_bundle.get("current_result_id")
         bundle: Dict[str, Any] = {
@@ -1241,7 +1247,6 @@ class GraphExporter:
             ),
             "results": results,
         }
-        declared_kind = str(raw_bundle.get("kind") or "").strip()
         if declared_kind:
             if (
                 declared_kind != DASHBOARD_COLLECTION_KIND
