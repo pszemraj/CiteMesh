@@ -18,7 +18,8 @@ package. Current behavior is described in the linked guides and references:
 - Added CONTRIBUTING.md, AGENTS.md, issue templates, and a pull request template.
 - Added authenticated Semantic Scholar pacing, a key-less usage notice, and
   full-jitter retry handling that honors `Retry-After`; disabled the SDK's
-  nested fixed-delay retry loop so CiteMesh owns one bounded retry budget.
+  nested fixed-delay retry loop so CiteMesh owns one bounded retry budget, and
+  unwrapped its single-attempt error so HTTP 429 remains correctly classified.
 - Distinguished unknown paper identifiers from unavailable or rate-limited
   Semantic Scholar requests across search and graph strategies.
 - Classified rejected Semantic Scholar SDK requests consistently across seed,

@@ -1216,6 +1216,23 @@ def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
         ):
             rate_limited.get_paper("seed", raise_on_unavailable=True)
 
+    sdk_attempt = MagicMock()
+    sdk_attempt.exception.return_value = ConnectionRefusedError(
+        "HTTP status 429 Too Many Requests."
+    )
+    wrapped_rate_limit = semantic_module.RetryError(sdk_attempt)
+    wrapped = SemanticScholarClient(timeout=1)
+    wrapped._rate_limit = lambda: None
+    wrapped.client.get_paper = MagicMock(side_effect=wrapped_rate_limit)
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        with pytest.raises(
+            semantic_module.SemanticScholarUnavailableError,
+            match=r"rate-limited \(HTTP 429\).*HTTP status 429",
+        ):
+            wrapped.get_paper("seed", raise_on_unavailable=True)
+    assert wrapped.client.get_paper.call_count == API_CONFIG.max_retries
+    assert sleep_mock.call_count == API_CONFIG.max_retries - 1
+
 
 @pytest.mark.parametrize(
     "error",

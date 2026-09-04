@@ -24,6 +24,7 @@ from semanticscholar.SemanticScholarException import (
 )
 from tenacity import (
     RetryCallState,
+    RetryError,
     Retrying,
     retry_if_exception_type,
     stop_after_attempt,
@@ -81,6 +82,18 @@ class SemanticScholarRequestError(RuntimeError):
 
 class _SemanticScholarResponseContractError(TypeError):
     """Raised when a successful SDK response cannot satisfy CiteMesh's schema."""
+
+
+def _unwrap_sdk_retry_error(exc: Exception) -> Exception:
+    """Recover the original exception from the SDK's one-attempt retry wrapper.
+
+    :param Exception exc: Exception raised by the Semantic Scholar SDK.
+    :return Exception: Wrapped attempt failure when available, otherwise ``exc``.
+    """
+    if not isinstance(exc, RetryError):
+        return exc
+    wrapped = exc.last_attempt.exception()
+    return wrapped if isinstance(wrapped, Exception) else exc
 
 
 def _raise_request_error(exc: Exception, context: str) -> None:
@@ -526,7 +539,8 @@ class SemanticScholarClient:
             try:
                 self._rate_limit()
                 return operation()
-            except Exception as exc:
+            except Exception as raw_exc:
+                exc = _unwrap_sdk_retry_error(raw_exc)
                 for error_type, handler in handled_exceptions:
                     if isinstance(exc, error_type):
                         return handler(exc)
