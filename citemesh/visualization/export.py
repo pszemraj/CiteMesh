@@ -1785,7 +1785,7 @@ class GraphExporter:
       grid-template-columns: minmax(220px, 1fr) 180px 160px;
     }
     .toolbar-row.secondary {
-      grid-template-columns: 140px 140px 1fr;
+      grid-template-columns: 140px 140px 1fr auto;
     }
     #provenance-filters {
       display: inline-flex;
@@ -2187,7 +2187,7 @@ class GraphExporter:
         grid-template-columns: minmax(240px, 30vw) minmax(420px, 1fr) minmax(300px, 34vw);
       }
       .toolbar-row.primary { grid-template-columns: 1fr 168px 152px; }
-      .toolbar-row.secondary { grid-template-columns: 140px 140px 1fr; }
+      .toolbar-row.secondary { grid-template-columns: 140px 140px 1fr auto; }
     }
     @media (max-width: 1100px) {
       html, body {
@@ -2222,6 +2222,14 @@ class GraphExporter:
     }
     @media (max-width: 640px) {
       #dashboard-toolbar { position: static; }
+      .toolbar-row.primary,
+      .toolbar-row.secondary {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .toolbar-row.primary #search-input,
+      #provenance-filters {
+        grid-column: auto;
+      }
     }
   </style>
 </head>
