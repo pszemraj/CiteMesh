@@ -1154,6 +1154,35 @@ def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
             rate_limited.get_paper("seed", raise_on_unavailable=True)
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            semantic_module.BadQueryParametersException("unsupported field"),
+            id="bad-query",
+        ),
+        pytest.param(PermissionError("HTTP status 403 Forbidden."), id="forbidden"),
+    ],
+)
+def test_get_paper_request_errors_are_not_retried(error: Exception) -> None:
+    """HTTP 400 and 403 SDK errors should surface as non-retryable requests."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper = MagicMock(side_effect=error)
+
+    with (
+        patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock,
+        pytest.raises(
+            semantic_module.SemanticScholarRequestError,
+            match="rejected the request",
+        ),
+    ):
+        client.get_paper("seed", raise_on_unavailable=True)
+
+    client.client.get_paper.assert_called_once()
+    sleep_mock.assert_not_called()
+
+
 def test_get_paper_not_found_still_returns_none_in_strict_mode() -> None:
     """Strict mode only changes outage handling; genuine not-found stays None."""
     from semanticscholar.SemanticScholarException import ObjectNotFoundException

@@ -18,7 +18,10 @@ from urllib.parse import quote
 
 import requests
 from semanticscholar import SemanticScholar
-from semanticscholar.SemanticScholarException import ObjectNotFoundException
+from semanticscholar.SemanticScholarException import (
+    BadQueryParametersException,
+    ObjectNotFoundException,
+)
 from tenacity import (
     RetryCallState,
     Retrying,
@@ -863,6 +866,8 @@ class SemanticScholarClient:
             :class:`SemanticScholarUnavailableError` instead of returning
             ``None``, so callers can distinguish "not found" from "API down".
         :return Optional[Paper]: Paper object or None if not found
+        :raises SemanticScholarRequestError: If Semantic Scholar rejects the
+            request because its parameters or credentials are invalid.
         """
         if not paper_id or not isinstance(paper_id, str):
             raise ValueError(f"Invalid paper ID: {paper_id}")
@@ -912,6 +917,22 @@ class SemanticScholarClient:
             )
             return None
 
+        def _request_failure(exc: Exception) -> Optional[Paper]:
+            """Surface deterministic SDK request failures without retrying.
+
+            :param Exception exc: SDK exception caused by an HTTP 400 or 403.
+            :return Optional[Paper]: This function does not return.
+            :raises SemanticScholarRequestError: Always.
+            """
+            if isinstance(exc, PermissionError):
+                remediation = "Check S2_API_KEY credentials and access permissions."
+            else:
+                remediation = "Check the paper ID and requested fields."
+            raise SemanticScholarRequestError(
+                f"Semantic Scholar rejected the request while fetching {paper_id}: "
+                f"{exc}. {remediation}"
+            ) from exc
+
         return self._call_with_retries(
             _operation,
             on_retry=lambda attempt, wait_time, exc: logger.warning(
@@ -929,6 +950,8 @@ class SemanticScholarClient:
                         logger.warning("Paper not found: %s", paper_id) or None
                     ),
                 ),
+                (BadQueryParametersException, _request_failure),
+                (PermissionError, _request_failure),
             ),
         )
 
