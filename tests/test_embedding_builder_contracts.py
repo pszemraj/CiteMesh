@@ -225,6 +225,13 @@ def _install_fake_sentence_transformers(
             encode_log.append(kwargs)
             return np.ones((len(texts), 2), dtype=np.float32)
 
+        def parameters(self) -> Iterable[object]:
+            """Yield one float32 parameter token for live dtype inspection.
+
+            :return Iterable[object]: One fake float32 parameter.
+            """
+            return iter((types.SimpleNamespace(dtype="torch.float32"),))
+
         def __getitem__(self, index: int) -> _FakeInnerBlock:
             return self._blocks[index]
 
@@ -813,6 +820,7 @@ def test_cuda_bf16_policy_rejects_emulated_only_support(
     [
         ("torch.float16", "forbids float16"),
         ("torch.bfloat16", "has not verified bfloat16 compute"),
+        ("torch.float64", "unsupported automatic weight dtype.*float64"),
     ],
 )
 def test_automatic_checkpoint_dtype_must_match_verified_runtime_policy(
@@ -856,6 +864,51 @@ def test_automatic_checkpoint_dtype_must_match_verified_runtime_policy(
     with pytest.raises(
         embedding_module.EmbeddingPrecisionCompatibilityError,
         match=message,
+    ):
+        builder._load_model()
+
+
+def test_automatic_checkpoint_dtype_inspection_must_succeed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Automatic dtype validation should fail when live parameters are inaccessible."""
+
+    class _OpaqueModel:
+        def __init__(self, _model_name: str, **_kwargs: Any):
+            """Create a fake model whose parameters cannot be inspected.
+
+            :param str _model_name: Ignored checkpoint name.
+            :param Any _kwargs: Ignored model-loading arguments.
+            """
+            pass
+
+        def parameters(self) -> Iterable[object]:
+            """Raise the simulated live-parameter inspection failure.
+
+            :return Iterable[object]: This method never returns.
+            :raises RuntimeError: Always, to simulate an opaque model.
+            """
+            raise RuntimeError("parameters unavailable")
+
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_sentence_transformer_class",
+        lambda: _OpaqueModel,
+    )
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="org/custom-embedding-model",
+        client=MagicMock(),
+    )
+
+    with pytest.raises(
+        embedding_module.EmbeddingPrecisionCompatibilityError,
+        match="Could not inspect live parameter dtypes",
     ):
         builder._load_model()
 

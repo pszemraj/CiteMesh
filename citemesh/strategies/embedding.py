@@ -605,35 +605,44 @@ def _query_seed_id(query_text: str) -> str:
     return f"query:{digest}"
 
 
-def _model_floating_dtype_names(model: Any) -> Set[str]:
-    """Return recognized floating-point parameter dtypes from a loaded model.
+def _model_floating_dtype_names(model: Any) -> Optional[Set[str]]:
+    """Return floating-point parameter dtypes from a loaded model.
 
     :param Any model: Model object that may expose ``parameters()``.
-    :return Set[str]: Normalized subset of ``float16``, ``bfloat16``, and ``float32``.
+    :return Optional[Set[str]]: Normalized dtype names, or ``None`` when live
+        parameter inspection is unavailable.
     """
     parameters = getattr(model, "parameters", None)
     if not callable(parameters):
-        return set()
+        return None
 
-    recognized: Set[str] = set()
+    observed: Set[str] = set()
     aliases = {
         "float": "float32",
         "float16": "float16",
         "half": "float16",
         "bfloat16": "bfloat16",
         "float32": "float32",
+        "double": "float64",
+        "float64": "float64",
     }
     try:
         for parameter in parameters():
-            dtype_name = str(getattr(parameter, "dtype", "")).casefold()
+            dtype = getattr(parameter, "dtype", None)
+            dtype_name = str(dtype or "").casefold()
             normalized = dtype_name.removeprefix("torch.")
+            is_floating = getattr(dtype, "is_floating_point", None)
+            if is_floating is False:
+                continue
             mapped = aliases.get(normalized)
             if mapped is not None:
-                recognized.add(mapped)
+                observed.add(mapped)
+            elif is_floating is True or normalized.startswith(("float", "bfloat")):
+                observed.add(normalized)
     except Exception:
         logger.debug("Could not inspect loaded model parameter dtypes", exc_info=True)
-        return set()
-    return recognized
+        return None
+    return observed
 
 
 class _PrecisionEncodeProxy:
@@ -1995,11 +2004,24 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             unsupported precision.
         """
         weight_dtypes = _model_floating_dtype_names(model)
+        if not weight_dtypes:
+            raise EmbeddingPrecisionCompatibilityError(
+                f"Could not inspect live parameter dtypes for embedding checkpoint "
+                f"{model_name_or_path!r}; automatic weight precision cannot be verified."
+            )
         if "float16" in weight_dtypes:
             raise EmbeddingPrecisionCompatibilityError(
                 f"Embedding checkpoint {model_name_or_path!r} resolved float16 weights "
                 "under automatic dtype loading. CiteMesh forbids float16; choose a "
                 "current checkpoint whose saved weights are float32 or bfloat16."
+            )
+        unsupported_dtypes = weight_dtypes - {"float32", "bfloat16"}
+        if unsupported_dtypes:
+            raise EmbeddingPrecisionCompatibilityError(
+                f"Embedding checkpoint {model_name_or_path!r} resolved unsupported "
+                "automatic weight dtype(s): "
+                f"{', '.join(sorted(unsupported_dtypes))}. CiteMesh supports only "
+                "float32 weights or bfloat16 weights on a verified bfloat16 runtime."
             )
         if "bfloat16" in weight_dtypes and self._source_dtype_hint != "bfloat16":
             raise EmbeddingPrecisionCompatibilityError(
