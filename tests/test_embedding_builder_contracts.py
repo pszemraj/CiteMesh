@@ -59,7 +59,7 @@ def _disable_embedding_optional_deps(
 
 @pytest.mark.parametrize(
     ("transformers_version", "expected_key"),
-    [("4.57.1", "torch_dtype"), ("5.0.0", "dtype")],
+    [("4.56.2", "torch_dtype"), ("4.57.0", "dtype"), ("5.0.0", "dtype")],
 )
 def test_transformers_auto_dtype_key_uses_supported_spelling(
     monkeypatch: pytest.MonkeyPatch,

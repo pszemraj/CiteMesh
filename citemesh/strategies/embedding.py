@@ -289,19 +289,17 @@ def _installed_transformers_major_minor(transformers: Any) -> Optional[tuple[int
 def _transformers_auto_dtype_key() -> str:
     """Return the installed Transformers keyword for automatic weight dtype.
 
-    Transformers 5 renamed ``torch_dtype`` to ``dtype`` while retaining the
-    former spelling for backward compatibility. Older supported releases only
-    understand ``torch_dtype``.
+    Transformers 4.57 deprecated ``torch_dtype`` in favor of ``dtype``. Older
+    compatibility environments still require the former spelling.
 
-    :return str: ``dtype`` on Transformers 5+, otherwise ``torch_dtype``.
+    :return str: ``dtype`` on Transformers 4.57+, otherwise ``torch_dtype``.
     """
     try:
         transformers = importlib.import_module("transformers")
     except ImportError:
         return "torch_dtype"
     detected = _installed_transformers_major_minor(transformers)
-    major = detected[0] if detected is not None else 0
-    return "dtype" if major >= 5 else "torch_dtype"
+    return "dtype" if detected is not None and detected >= (4, 57) else "torch_dtype"
 
 
 def _require_transformers_compatibility(profile: EmbeddingModelProfile) -> None:
