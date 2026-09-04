@@ -515,7 +515,7 @@ def _fake_local_search_builder(
     """Build a fake EmbeddingGraphBuilder for local-search CLI tests."""
     fake_builder = MagicMock()
     fake_builder.search_local.return_value = list(results or [])
-    fake_builder.has_persistent_embedding_artifacts.return_value = False
+    fake_builder.has_persistent_embedding_artifacts.return_value = cached_count > 0
     fake_builder.embedding_cache = SimpleNamespace(
         embedding_count=lambda: cached_count,
         last_search_total_embeddings=cached_count,
@@ -857,6 +857,7 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     assert "Local search was requested via" in message
     assert "--mode local" in message
     assert "has no vectors" in message
+    fake_builder.prepare_embedding_cache.assert_not_called()
     fake_builder.search_local.assert_not_called()
 
 
