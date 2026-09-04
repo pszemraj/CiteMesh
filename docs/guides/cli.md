@@ -70,7 +70,7 @@ Supported keys, value forms, and precedence are documented in
 | `--max-papers`, `-p` | Maximum nodes in final graph (seed included) | `40` (`hybrid`: implicit `45` when omitted) |
 | `--spring-iterations`, `-i` | Iterations used only for spring-layout fallback | `100` |
 | `--dpi`, `-d` | PNG output resolution | `150` |
-| `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`) | deterministic built-in seed |
+| `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`, `json`) | deterministic built-in seed |
 | `--include-timestamp` | Include generation time in output metadata | disabled |
 | `--export`, `-e` | `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, or `all`; repeat flag for multiple (e.g. `-e json -e dashboard`) | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` checks explicit environment hints before macOS appearance | `dark` |
@@ -83,7 +83,7 @@ Output-path normalization, file naming, and sidecar placement are defined in [Ou
 
 `--log-level`, `--log-width`, and `--log-file` are shared command options and are accepted for `build`, `search`, `cache`, and `config` command trees (including `cache scan` / `cache clear`).
 
-`--seed` controls shared layout generation for `png`, `plotly`, and `dashboard` exports. Pyvis `html` exports use vis.js browser physics and do not consume this precomputed layout.
+`--seed` controls shared layout generation for `png`, `plotly`, `dashboard`, and `json` exports. Pyvis `html` exports use vis.js browser physics and do not consume this precomputed layout.
 
 Numeric validation:
 
