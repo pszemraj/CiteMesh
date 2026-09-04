@@ -21,6 +21,8 @@ package. Current behavior is described in the linked guides and references:
   nested fixed-delay retry loop so CiteMesh owns one bounded retry budget.
 - Distinguished unknown paper identifiers from unavailable or rate-limited
   Semantic Scholar requests across search and graph strategies.
+- Classified rejected Semantic Scholar SDK requests consistently across seed,
+  relation, and reference-ID endpoints without retrying deterministic failures.
 - Preserved partial candidate-source success while recording source outcomes in
   exports; total source outages now fail instead of producing plausible
   seed-only graphs.

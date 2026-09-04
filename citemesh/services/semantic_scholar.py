@@ -79,6 +79,22 @@ class SemanticScholarRequestError(RuntimeError):
     """Raised when Semantic Scholar rejects a non-retryable client request."""
 
 
+def _raise_request_error(exc: Exception, context: str) -> None:
+    """Surface a deterministic Semantic Scholar SDK request failure.
+
+    :param Exception exc: SDK exception caused by an HTTP 400 or 403.
+    :param str context: Human-readable request operation.
+    :raises SemanticScholarRequestError: Always.
+    """
+    if isinstance(exc, PermissionError):
+        remediation = "Check S2_API_KEY credentials and access permissions."
+    else:
+        remediation = "Check the paper ID and requested fields."
+    raise SemanticScholarRequestError(
+        f"Semantic Scholar rejected the request while {context}: {exc}. {remediation}"
+    ) from exc
+
+
 _MAX_BACKOFF_SECONDS = 60.0
 
 
@@ -929,22 +945,6 @@ class SemanticScholarClient:
             )
             return None
 
-        def _request_failure(exc: Exception) -> Optional[Paper]:
-            """Surface deterministic SDK request failures without retrying.
-
-            :param Exception exc: SDK exception caused by an HTTP 400 or 403.
-            :return Optional[Paper]: This function does not return.
-            :raises SemanticScholarRequestError: Always.
-            """
-            if isinstance(exc, PermissionError):
-                remediation = "Check S2_API_KEY credentials and access permissions."
-            else:
-                remediation = "Check the paper ID and requested fields."
-            raise SemanticScholarRequestError(
-                f"Semantic Scholar rejected the request while fetching {paper_id}: "
-                f"{exc}. {remediation}"
-            ) from exc
-
         return self._call_with_retries(
             _operation,
             on_retry=lambda attempt, wait_time, exc: logger.warning(
@@ -962,8 +962,14 @@ class SemanticScholarClient:
                         logger.warning("Paper not found: %s", paper_id) or None
                     ),
                 ),
-                (BadQueryParametersException, _request_failure),
-                (PermissionError, _request_failure),
+                (
+                    BadQueryParametersException,
+                    lambda exc: _raise_request_error(exc, f"fetching {paper_id}"),
+                ),
+                (
+                    PermissionError,
+                    lambda exc: _raise_request_error(exc, f"fetching {paper_id}"),
+                ),
             ),
         )
 
@@ -1092,6 +1098,7 @@ class SemanticScholarClient:
         :param bool raise_on_unavailable: Whether exhausted operational retries
             raise instead of returning an empty list.
         :return List[Paper]: Citation Papers (may be empty).
+        :raises SemanticScholarRequestError: If Semantic Scholar rejects the request.
         """
         parsed_limit = _validate_integer_limit(limit, "limit", allow_zero=True)
         if parsed_limit == 0:
@@ -1120,6 +1127,7 @@ class SemanticScholarClient:
         :param bool raise_on_unavailable: Whether exhausted operational retries
             raise instead of returning an empty list.
         :return List[Paper]: List of Paper objects (may be shorter than limit)
+        :raises SemanticScholarRequestError: If Semantic Scholar rejects the request.
         """
         parsed_limit = _validate_integer_limit(limit, "limit", allow_zero=True)
         if parsed_limit == 0:
@@ -1226,6 +1234,18 @@ class SemanticScholarClient:
                         or []
                     ),
                 ),
+                (
+                    BadQueryParametersException,
+                    lambda exc: _raise_request_error(
+                        exc, f"fetching {relation_label} for {normalized_paper_id}"
+                    ),
+                ),
+                (
+                    PermissionError,
+                    lambda exc: _raise_request_error(
+                        exc, f"fetching {relation_label} for {normalized_paper_id}"
+                    ),
+                ),
             ),
         )
 
@@ -1239,6 +1259,7 @@ class SemanticScholarClient:
         :param bool force_refresh: Whether to bypass cache reads and fetch fresh IDs.
         :return List[str]: List of referenced paper IDs
         :raises TypeError: If the SDK or response payload violates the relation contract.
+        :raises SemanticScholarRequestError: If Semantic Scholar rejects the request.
         :raises SemanticScholarUnavailableError: If operational retries are exhausted.
         """
         normalized_paper_id = normalize_paper_id(paper_id)
@@ -1365,6 +1386,18 @@ class SemanticScholarClient:
                             normalized_paper_id,
                         )
                         or []
+                    ),
+                ),
+                (
+                    BadQueryParametersException,
+                    lambda exc: _raise_request_error(
+                        exc, f"fetching reference IDs for {normalized_paper_id}"
+                    ),
+                ),
+                (
+                    PermissionError,
+                    lambda exc: _raise_request_error(
+                        exc, f"fetching reference IDs for {normalized_paper_id}"
                     ),
                 ),
             ),

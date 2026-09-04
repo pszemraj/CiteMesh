@@ -1204,11 +1204,23 @@ def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
         pytest.param(PermissionError("HTTP status 403 Forbidden."), id="forbidden"),
     ],
 )
-def test_get_paper_request_errors_are_not_retried(error: Exception) -> None:
-    """HTTP 400 and 403 SDK errors should surface as non-retryable requests."""
+@pytest.mark.parametrize(
+    ("sdk_method", "client_method"),
+    [
+        ("get_paper", "get_paper"),
+        ("get_paper_citations", "get_paper_citations"),
+        ("get_paper_references", "get_paper_references"),
+        ("get_paper_references", "get_reference_ids"),
+    ],
+)
+def test_sdk_request_errors_are_not_retried(
+    error: Exception, sdk_method: str, client_method: str
+) -> None:
+    """HTTP 400 and 403 SDK errors should fail once at every API boundary."""
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
-    client.client.get_paper = MagicMock(side_effect=error)
+    sdk_mock = MagicMock(side_effect=error)
+    setattr(client.client, sdk_method, sdk_mock)
 
     with (
         patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock,
@@ -1217,9 +1229,13 @@ def test_get_paper_request_errors_are_not_retried(error: Exception) -> None:
             match="rejected the request",
         ),
     ):
-        client.get_paper("seed", raise_on_unavailable=True)
+        if client_method == "get_reference_ids":
+            client.get_reference_ids("seed", force_refresh=True)
+        else:
+            kwargs = {} if client_method == "get_paper" else {"limit": 5}
+            getattr(client, client_method)("seed", raise_on_unavailable=True, **kwargs)
 
-    client.client.get_paper.assert_called_once()
+    sdk_mock.assert_called_once()
     sleep_mock.assert_not_called()
 
 
