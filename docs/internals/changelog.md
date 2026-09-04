@@ -84,6 +84,8 @@ package. Current behavior is described in the linked guides and references:
   reconciliation that preserves interrupted progress, and cache-native search.
   Detailed storage and hydration behavior is in
   [Caching & Data](../guides/caching.md).
+- Clarified that `--corpus-size` caps embedded/cache rows after newest-paper
+  selection, while an explicit non-streaming split slice bounds CiteMesh's scan.
 - Raised the hydration flush batch from 256 to 2048 records, matching the HDF5
   dataset chunk size, to reduce lock and resize overhead during corpus
   hydration.

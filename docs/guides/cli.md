@@ -119,8 +119,8 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--model`, `-m`: sentence-transformer model name (default `unsloth/embeddinggemma-300m`; alternate current checkpoint: `google/embeddinggemma-300m`)
 - `--model-profile {auto,default,embeddinggemma}`: task/runtime contract selection. `auto` recognizes known Hub aliases and compatible local checkpoint metadata; use an explicit profile for stripped local fine-tune exports.
 - `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
-- `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode)
-- `--corpus-size`: maximum papers to load from corpus (default `50000`)
+- `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode and bound the rows exposed to CiteMesh after dataset preparation)
+- `--corpus-size`: maximum papers to embed/cache after scanning the selected split to select the newest submissions by arXiv ID (default `50000`); it does not cap that selection scan
 - `--all-corpus`: remove corpus-size cap and process the full selected split
 - `--all-corpus` applies within the selected `--dataset-split`; `--dataset-split train --all-corpus` means "all of `train`", not "every split published by the dataset"
 - If a same-model cache namespace was previously hydrated with a capped corpus, `--all-corpus` rebuilds that namespace; cache-clear logs label the replaced payload as `cached_*` to distinguish it from the new target.

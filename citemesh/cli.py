@@ -1606,7 +1606,10 @@ User configuration:
         "--dataset-split",
         type=_non_empty_str,
         default="train",
-        help="ArXiv dataset split (default: train = full snapshot split; combine with --corpus-size to cap runtime)",
+        help=(
+            "ArXiv dataset split (default: train; non-streaming slices such as "
+            "train[:1000] bound rows exposed to CiteMesh)"
+        ),
     )
 
     embedding_group.add_argument(
@@ -1614,8 +1617,9 @@ User configuration:
         type=_positive_int,
         default=50000,
         help=(
-            "Maximum papers to load from corpus, selecting the most recently "
-            "submitted (default: 50000; use --all-corpus to remove cap)"
+            "Maximum papers to embed/cache after scanning the selected split for "
+            "the most recently submitted (default: 50000; use --all-corpus to "
+            "remove cap)"
         ),
     )
 

@@ -867,7 +867,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_profile: str = "auto",
         model_revision: Optional[str] = None,
-        dataset_split: str = "train",  # Full snapshot split; use corpus_size to bound runtime.
+        dataset_split: str = "train",
         corpus_size: Optional[int] = 50000,
         truncate_dim: Optional[int] = None,
         top_k: int = 4,
@@ -896,7 +896,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             (``auto``, ``embeddinggemma``, or ``default``).
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: HuggingFace dataset split
-        :param Optional[int] corpus_size: Maximum papers to load from corpus (``None`` = all in split)
+        :param Optional[int] corpus_size: Maximum papers to embed and cache after
+            scanning the selected split for newest submissions (``None`` = all).
         :param Optional[int] truncate_dim: Optional embedding truncation dimension. If ``None``,
             uses profile defaults (e.g. EmbeddingGemma defaults to 256d MRL).
         :param int top_k: Number of most similar neighbors per node
