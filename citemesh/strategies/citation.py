@@ -78,6 +78,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache: Dict[str, list] = {}  # Cache reference lists
         self.seed_relations: Dict[str, str] = {}
         self.candidate_source_status: Dict[str, str] = {}
+        self.candidate_source_results: tuple[CandidateSourceResult, ...] = ()
         self._identity_aliases = IdentityRegistry()
         self._abstract_index = AbstractSimilarityIndex()
 
@@ -244,11 +245,19 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache[paper_id] = ref_ids
         return ref_ids
 
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
+    def collect_papers(
+        self,
+        seed_id: str,
+        *,
+        validate_source_availability: bool = True,
+        **kwargs: Any,
+    ) -> Dict[str, Paper]:
         """
         Collect papers via citations and references.
 
         :param str seed_id: Seed paper identifier
+        :param bool validate_source_availability: Whether to fail when every
+            requested relation source is unavailable.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -257,6 +266,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache.clear()
         self.seed_relations = {}
         self.candidate_source_status = {}
+        self.candidate_source_results = ()
         self._identity_aliases = IdentityRegistry()
         papers = {}
         source_results: list[CandidateSourceResult] = []
@@ -335,10 +345,12 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.candidate_source_status = {
             result.source: result.state.value for result in source_results
         }
-        require_available_candidate_source(
-            source_results,
-            context=f"citation acquisition for {seed.paper_id}",
-        )
+        self.candidate_source_results = tuple(source_results)
+        if validate_source_availability:
+            require_available_candidate_source(
+                source_results,
+                context=f"citation acquisition for {seed.paper_id}",
+            )
 
         reference_lists = len(self.reference_cache)
         summary = (

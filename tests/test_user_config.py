@@ -39,7 +39,11 @@ from citemesh.strategies.hybrid import HYBRID_DEFAULT_MAX_REFERENCES
 
 
 def _run_cli(args: list[str]) -> SimpleNamespace:
-    """Run the CLI in-process and capture stdout/stderr."""
+    """Run the CLI in-process and capture stdout/stderr.
+
+    :param list[str] args: CLI arguments excluding the program name.
+    :return SimpleNamespace: Return code and captured output streams.
+    """
     stdout = io.StringIO()
     stderr = io.StringIO()
     with redirect_stdout(stdout), redirect_stderr(stderr):
@@ -59,7 +63,11 @@ def _run_cli(args: list[str]) -> SimpleNamespace:
 
 
 def _parsed_build_args(argv: list[str]) -> tuple:
-    """Parse build args and return ``(args, provided, build_parser)``."""
+    """Parse build args and return ``(args, provided, build_parser)``.
+
+    :param list[str] argv: Build arguments beginning with the paper identifier.
+    :return tuple: Parsed namespace, explicit option names, and parser.
+    """
     _, build_parser, _, _ = cli_module._create_parser()
     args = build_parser.parse_args(argv)
     provided = cli_module._pop_tracked_option_dests(args)
@@ -72,12 +80,22 @@ def _parsed_build_args(argv: list[str]) -> tuple:
 
 
 def test_load_missing_file_returns_empty_config(tmp_path: Path) -> None:
+    """Missing config files should load as empty configuration.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate the empty configuration.
+    """
     config = load_user_config(tmp_path / "config.toml")
     assert config.defaults == {}
     assert config.s2_api_key is None
 
 
 def test_set_get_unset_round_trip(tmp_path: Path) -> None:
+    """Supported values should survive set, load, and unset operations.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate the persisted round trip.
+    """
     config_path = tmp_path / "config.toml"
     assert (
         set_config_value("defaults.semantic_source", "arxiv-corpus", path=config_path)
@@ -106,6 +124,11 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
 
 
 def test_set_rejects_unknown_key(tmp_path: Path) -> None:
+    """Config mutation should reject unknown and incomplete keys.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate key errors.
+    """
     with pytest.raises(ConfigKeyError, match="Unknown config key"):
         set_config_value("defaults.nope", "1", path=tmp_path / "config.toml")
     with pytest.raises(ConfigKeyError, match="Unknown config key"):
@@ -113,6 +136,11 @@ def test_set_rejects_unknown_key(tmp_path: Path) -> None:
 
 
 def test_set_rejects_invalid_value_without_writing(tmp_path: Path) -> None:
+    """Invalid values should fail without creating a config file.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate value errors and filesystem state.
+    """
     config_path = tmp_path / "config.toml"
     with pytest.raises(ConfigValueError, match="defaults.device"):
         set_config_value("defaults.device", "warp", path=config_path)
@@ -130,7 +158,10 @@ def test_set_rejects_invalid_value_without_writing(tmp_path: Path) -> None:
 
 
 def test_embedding_storage_config_rejects_float16() -> None:
-    """Core persistent-storage config should allow only int8 and float32."""
+    """Core persistent-storage config should allow only int8 and float32.
+
+    :return None: Assertions validate the float16 rejection.
+    """
     with pytest.raises(ValueError, match="storage_precision must be one of"):
         EmbeddingStorageConfig(storage_precision="float16").validate()
 
@@ -138,6 +169,12 @@ def test_embedding_storage_config_rejects_float16() -> None:
 def test_load_skips_unknown_and_invalid_entries(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Loading should skip invalid entries while preserving valid defaults.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param pytest.LogCaptureFixture caplog: Captured log fixture.
+    :return None: Assertions validate filtered defaults and warnings.
+    """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         "\n".join(
@@ -165,6 +202,13 @@ def test_load_skips_unknown_and_invalid_entries(
 def test_load_corrupt_file_warns_and_returns_empty(
     payload: bytes, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Corrupt config bytes should warn and load as empty configuration.
+
+    :param bytes payload: Invalid TOML or UTF-8 bytes.
+    :param Path tmp_path: Pytest temporary directory.
+    :param pytest.LogCaptureFixture caplog: Captured log fixture.
+    :return None: Assertions validate recovery and warning behavior.
+    """
     config_path = tmp_path / "config.toml"
     config_path.write_bytes(payload)
     with caplog.at_level(logging.WARNING, logger="citemesh.core.user_config"):
@@ -177,6 +221,12 @@ def test_load_corrupt_file_warns_and_returns_empty(
 
 @pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
 def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> None:
+    """Mutation should reject corrupt config files without overwriting them.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param bytes payload: Invalid TOML or UTF-8 bytes.
+    :return None: Assertions validate failure and byte preservation.
+    """
     config_path = tmp_path / "config.toml"
     config_path.write_bytes(payload)
     with pytest.raises(ConfigFileError, match="Cannot rewrite config file"):
@@ -186,6 +236,11 @@ def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> Non
 
 
 def test_set_preserves_unrecognized_raw_keys(tmp_path: Path) -> None:
+    """Mutation should preserve unrecognized tables and keys.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate forward-compatible preservation.
+    """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[defaults]\nfuture_key = "kept"\n[custom]\nnote = 1\n', encoding="utf-8"
@@ -198,6 +253,11 @@ def test_set_preserves_unrecognized_raw_keys(tmp_path: Path) -> None:
 
 
 def test_export_accepts_toml_list_and_int_rejects_toml_bool(tmp_path: Path) -> None:
+    """Typed TOML values should retain list and integer semantics.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate coercion and boolean rejection.
+    """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[defaults]\nexport = ["json", "png", "json"]\ntop_k = 6\n', encoding="utf-8"
@@ -212,6 +272,10 @@ def test_export_accepts_toml_list_and_int_rejects_toml_bool(tmp_path: Path) -> N
 
 
 def test_format_config_value_round_trips_cli_forms() -> None:
+    """Config values should format into accepted CLI representations.
+
+    :return None: Assertions validate each supported value form.
+    """
     assert format_config_value(True) == "true"
     assert format_config_value(False) == "false"
     assert format_config_value(["json", "png"]) == "json,png"
@@ -224,6 +288,10 @@ def test_format_config_value_round_trips_cli_forms() -> None:
 
 
 def test_config_choice_specs_match_build_parser_choices() -> None:
+    """Persisted config choices should match the build parser choices.
+
+    :return None: Assertions validate every duplicated choice set.
+    """
     _, build_parser, _, _ = cli_module._create_parser()
     parser_choices = {
         action.dest: action.choices
@@ -246,6 +314,10 @@ _NON_BUILD_CONFIG_KEYS = frozenset({"search_mode"})
 
 
 def test_config_default_keys_exist_as_build_dests() -> None:
+    """Build defaults should map to parser destinations unless exempted.
+
+    :return None: Assertions validate the config-to-parser key contract.
+    """
     args, _, _ = _parsed_build_args(["paper-id"])
     for dest in CONFIG_DEFAULT_KEY_SPECS:
         if dest in _NON_BUILD_CONFIG_KEYS:
@@ -258,6 +330,10 @@ def test_config_default_keys_exist_as_build_dests() -> None:
 
 
 def test_search_mode_choices_match_search_parser() -> None:
+    """Persisted search modes should match the search parser choices.
+
+    :return None: Assertions validate the duplicated search choices.
+    """
     parser, _, _, _ = cli_module._create_parser()
     subparsers_action = next(
         action
@@ -272,6 +348,11 @@ def test_search_mode_choices_match_search_parser() -> None:
 
 
 def test_search_mode_round_trip_and_validation(tmp_path: Path) -> None:
+    """Search mode should round-trip and reject unsupported values.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate persistence and validation.
+    """
     config_path = tmp_path / "config.toml"
     assert set_config_value("defaults.search_mode", "local", path=config_path) == (
         "local"
@@ -287,6 +368,10 @@ def test_search_mode_round_trip_and_validation(tmp_path: Path) -> None:
 
 
 def test_config_default_applied_when_flag_omitted() -> None:
+    """Config defaults should apply when their CLI flags are omitted.
+
+    :return None: Assertions validate applied values and provenance.
+    """
     args, provided, _ = _parsed_build_args(["paper-id"])
     config = UserConfig(
         path=Path("unused"), defaults={"theme": "dark", "max_papers": 22}
@@ -298,13 +383,20 @@ def test_config_default_applied_when_flag_omitted() -> None:
 
 
 def test_build_parser_uses_dark_theme_by_default() -> None:
-    """The built-in visualization theme should be dark-first."""
+    """The built-in visualization theme should be dark-first.
+
+    :return None: Assertions validate the parser default.
+    """
     args, _, _ = _parsed_build_args(["paper-id"])
 
     assert args.theme == "dark"
 
 
 def test_explicit_cli_flag_wins_over_config_default() -> None:
+    """Explicit CLI flags should override persisted defaults.
+
+    :return None: Assertions validate precedence and provenance.
+    """
     args, provided, _ = _parsed_build_args(["paper-id", "--theme", "solarized"])
     config = UserConfig(
         path=Path("unused"), defaults={"theme": "dark", "max_papers": 22}
@@ -315,7 +407,10 @@ def test_explicit_cli_flag_wins_over_config_default() -> None:
 
 
 def test_explicit_no_streaming_wins_over_enabled_config_default() -> None:
-    """The negative streaming flag should override a persisted enabled default."""
+    """The negative streaming flag should override a persisted enabled default.
+
+    :return None: Assertions validate negative-flag precedence.
+    """
     args, provided, build_parser = _parsed_build_args(
         [
             "paper-id",
@@ -364,6 +459,10 @@ def test_no_streaming_does_not_imply_or_conflict_with_candidate_mode() -> None:
 
 
 def test_config_default_outranks_hybrid_implicit_defaults() -> None:
+    """Persisted defaults should outrank hybrid mode's implicit defaults.
+
+    :return None: Assertions validate hybrid default precedence.
+    """
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "hybrid"]
     )
@@ -377,6 +476,10 @@ def test_config_default_outranks_hybrid_implicit_defaults() -> None:
 
 
 def test_cli_corpus_flag_overrides_config_semantic_source() -> None:
+    """Explicit corpus flags should override persisted candidate mode.
+
+    :return None: Assertions validate semantic-source selection.
+    """
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "embedding", "--corpus-size", "1000"]
     )
@@ -389,7 +492,10 @@ def test_cli_corpus_flag_overrides_config_semantic_source() -> None:
 
 
 def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
-    """Explicit candidate options should make unused corpus defaults inert."""
+    """Explicit candidate options should make unused corpus defaults inert.
+
+    :return None: Assertions validate candidate-mode precedence.
+    """
     args, provided, build_parser = _parsed_build_args(
         [
             "paper-id",
@@ -419,6 +525,10 @@ def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
 
 
 def test_config_semantic_source_corpus_applies_without_flags() -> None:
+    """Persisted corpus mode should apply without explicit corpus flags.
+
+    :return None: Assertions validate corpus mode and storage defaults.
+    """
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "embedding"]
     )
@@ -435,6 +545,10 @@ def test_config_semantic_source_corpus_applies_without_flags() -> None:
 
 
 def test_config_int8_normalized_in_candidate_mode() -> None:
+    """Candidate mode should normalize persisted int8 storage to float32.
+
+    :return None: Assertions validate candidate storage policy.
+    """
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "embedding"]
     )
@@ -448,6 +562,10 @@ def test_config_int8_normalized_in_candidate_mode() -> None:
 
 
 def test_config_embedding_defaults_do_not_gate_citation_strategy() -> None:
+    """Embedding-only defaults should not gate citation builds.
+
+    :return None: Completion validates strategy-specific option handling.
+    """
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "citation"]
     )
@@ -597,6 +715,11 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
 def test_config_api_key_applied_when_env_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The config API key should populate an absent environment variable.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions validate config-key application.
+    """
     monkeypatch.delenv("S2_API_KEY", raising=False)
     config = UserConfig(path=Path("unused"), s2_api_key="config-key")
     cli_module._apply_user_config_api_key(config)
@@ -604,6 +727,11 @@ def test_config_api_key_applied_when_env_absent(
 
 
 def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicitly empty environment API key should outrank config.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions validate environment precedence.
+    """
     monkeypatch.setenv("S2_API_KEY", "")
     config = UserConfig(path=Path("unused"), s2_api_key="config-key")
     cli_module._apply_user_config_api_key(config)
@@ -616,6 +744,10 @@ def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_config_cli_round_trip() -> None:
+    """The config CLI should support path, set, get, list, and unset.
+
+    :return None: Assertions validate the complete CLI round trip.
+    """
     path_result = _run_cli(["config", "path"])
     assert path_result.returncode == 0
     reported_path = Path(path_result.stdout.strip())
@@ -641,6 +773,10 @@ def test_config_cli_round_trip() -> None:
 
 
 def test_config_cli_masks_api_key_in_list() -> None:
+    """Config listing should mask API keys while direct get remains scriptable.
+
+    :return None: Assertions validate secret display behavior.
+    """
     secret = "secret-api-key-123456"
     assert _run_cli(["config", "set", "api.s2_api_key", secret]).returncode == 0
     list_result = _run_cli(["config", "list"])
@@ -653,6 +789,10 @@ def test_config_cli_masks_api_key_in_list() -> None:
 
 
 def test_config_cli_rejects_unknown_key_and_bad_value() -> None:
+    """The config CLI should reject unknown keys and invalid values.
+
+    :return None: Assertions validate CLI error responses.
+    """
     unknown = _run_cli(["config", "set", "defaults.nope", "1"])
     assert unknown.returncode == 2
     assert "Unknown config key" in unknown.stderr
@@ -663,6 +803,10 @@ def test_config_cli_rejects_unknown_key_and_bad_value() -> None:
 
 
 def test_config_cli_without_subcommand_prints_help() -> None:
+    """Invoking config without an operation should print help and fail.
+
+    :return None: Assertions validate the incomplete command response.
+    """
     result = _run_cli(["config"])
     assert result.returncode == 1
     assert "Config operations" in result.stdout
@@ -670,6 +814,11 @@ def test_config_cli_without_subcommand_prints_help() -> None:
 
 @pytest.mark.parametrize("payload", [b"not [valid toml", b"\xff"])
 def test_config_cli_list_survives_corrupt_file(payload: bytes) -> None:
+    """Config listing should remain usable with a corrupt config file.
+
+    :param bytes payload: Invalid TOML or UTF-8 bytes.
+    :return None: Assertions validate the recovery response.
+    """
     config_path = user_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_bytes(payload)
@@ -683,6 +832,10 @@ def test_config_cli_list_survives_corrupt_file(payload: bytes) -> None:
 
 
 def test_cache_clear_preserves_config_file() -> None:
+    """Cache clearing should preserve persistent user configuration.
+
+    :return None: Assertions validate selective cache removal.
+    """
     assert _run_cli(["config", "set", "defaults.theme", "dark"]).returncode == 0
     config_path = user_config_path()
     cache_root = config_path.parent
@@ -699,6 +852,10 @@ def test_cache_clear_preserves_config_file() -> None:
 
 
 def test_cache_clear_without_config_removes_root() -> None:
+    """Cache clearing may remove the root when no config file exists.
+
+    :return None: Assertions validate complete cache-root removal.
+    """
     cache_root = user_config_path().parent
     (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
     (cache_root / "embeddings" / "payload.bin").write_bytes(b"data")

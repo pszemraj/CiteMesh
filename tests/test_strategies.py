@@ -391,8 +391,14 @@ def test_recommendation_build_graph_persists_strategy_metadata() -> None:
     assert graph.graph["candidate_source_status"] == {"recommendations": "complete"}
 
 
-def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages() -> None:
-    """Candidate sources should preserve empty evidence and fail only on total outage."""
+def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate sources should preserve empty evidence and fail only on total outage.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions validate standalone and hybrid outage handling.
+    """
     from citemesh.services import SemanticScholarUnavailableError
 
     seed = _seed_paper()
@@ -492,6 +498,55 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages() -
             fetch_references=False,
             client=citation_client,
         ).collect_papers("seed")
+
+    hybrid_client = MagicMock()
+    hybrid_client.get_paper.return_value = seed
+    hybrid_client.get_paper_references.side_effect = SemanticScholarUnavailableError(
+        "references down"
+    )
+    hybrid_client.get_paper_citations.side_effect = SemanticScholarUnavailableError(
+        "citations down"
+    )
+    hybrid_client.get_recommended_papers.return_value = [_paper("rec1")]
+    hybrid_builder = HybridGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        max_semantic=1,
+        fetch_references=False,
+        client=hybrid_client,
+    )
+    assert hybrid_builder.embedding_builder is not None
+    monkeypatch.setattr(hybrid_builder.embedding_builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        hybrid_builder,
+        "_rank_candidates",
+        lambda _seed, candidates, _sources: list(candidates),
+    )
+
+    hybrid_papers = hybrid_builder.collect_papers("seed")
+
+    assert set(hybrid_papers) == {"seed", "rec1"}
+    assert hybrid_builder.candidate_source_status == {
+        "references": "unavailable",
+        "citations": "unavailable",
+        "recommendations": "complete",
+    }
+
+    hybrid_client.get_recommended_papers.side_effect = SemanticScholarUnavailableError(
+        "recommendations down"
+    )
+    with pytest.raises(
+        CandidateAcquisitionError,
+        match="references, citations, recommendations",
+    ):
+        hybrid_builder.collect_papers("seed")
+    assert hybrid_client.get_recommended_papers.call_count == 2
+    assert hybrid_builder.candidate_source_status == {
+        "references": "unavailable",
+        "citations": "unavailable",
+        "recommendations": "unavailable",
+    }
 
 
 def test_refresh_reference_cache_force_lookup_contracts() -> None:

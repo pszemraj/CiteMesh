@@ -25,11 +25,13 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
+    CandidateAcquisitionError,
     IdentityRegistry,
-    fetch_candidate_pool,
+    fetch_candidate_source,
     merge_seed_relation,
     reconcile_paper_identity,
     register_aliases,
+    require_available_candidate_source,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
@@ -573,7 +575,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")
-        citation_papers = self.citation_builder.collect_papers(seed_id)
+        if self.embedding_builder is not None and self.semantic_source == "candidates":
+            citation_papers = self.citation_builder.collect_papers(
+                seed_id,
+                validate_source_availability=False,
+            )
+        else:
+            citation_papers = self.citation_builder.collect_papers(seed_id)
         citation_source_status = getattr(
             self.citation_builder, "candidate_source_status", {}
         )
@@ -643,18 +651,34 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             else:
                 # Candidate mode: the citation branch already covers references
                 # and citations, so the semantic branch adds recommendations only.
-                self.embedding_builder._load_model()
-                pool = fetch_candidate_pool(
-                    self.client,
-                    seed_paper,
-                    max_recommendations=min(
-                        self._semantic_candidate_cap,
-                        self.embedding_builder.candidate_pool_size,
+                recommendation_result = fetch_candidate_source(
+                    "recommendations",
+                    lambda: self.client.get_recommended_papers(
+                        seed_paper.paper_id,
+                        limit=min(
+                            self._semantic_candidate_cap,
+                            self.embedding_builder.candidate_pool_size,
+                        ),
+                        raise_on_unavailable=True,
                     ),
                 )
-                self.candidate_source_status.update(pool.source_status)
-                semantic_papers = pool.papers
+                self.candidate_source_status["recommendations"] = (
+                    recommendation_result.state.value
+                )
+                require_available_candidate_source(
+                    [
+                        *self.citation_builder.candidate_source_results,
+                        recommendation_result,
+                    ],
+                    context=f"hybrid candidate acquisition for {seed_paper.paper_id}",
+                )
+                self.embedding_builder._load_model()
+                semantic_papers = {
+                    paper.paper_id: paper for paper in recommendation_result.papers
+                }
         except SemanticScholarUnavailableError:
+            raise
+        except CandidateAcquisitionError:
             raise
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
