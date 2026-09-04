@@ -75,6 +75,8 @@ package. Current behavior is described in the linked guides and references:
 - Hardened automatic checkpoint loading with live dtype verification, native-only
   CUDA bfloat16 gating, profile-scoped attention selection, encode-scoped TF32,
   and a real eager retry for lazy compile failures.
+- Added opt-in real-CUDA smokes for the installed encoder stack, live
+  dtype/attention/autocast policy, and network-free INT8 corpus hydration and search.
 - Required Transformers 5.2 and Sentence Transformers 6.0 or newer for EmbeddingGemma, used the supported `dtype="auto"` model-loading API, enforced the profile-specific floor before model loading, and invalidated caches created before bidirectional attention was guaranteed.
 - Added immutable model-artifact fingerprints and runtime-active checkpoint
   identity to persistent cache namespaces.

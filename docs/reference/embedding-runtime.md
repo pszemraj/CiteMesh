@@ -45,7 +45,7 @@ For EmbeddingGemma, the symmetric formatter is exactly `task: sentence similarit
 
 Retrieval documents and graph-similarity vectors have independent cache namespaces, formatter fingerprints, and storage contracts. The graph namespace is always float32 with no binary prefilter. This prevents a dimension match from making asymmetric retrieval vectors eligible for symmetric graph scoring.
 
-The regression suite locks in prompt routing, cache separation, and fail-closed vector completeness. A small frozen real-EmbeddingGemma MPS smoke additionally checks retrieval Recall/nDCG and a related-versus-unrelated STS margin. Per the project's solo/pre-user CI policy, that real-model check remains opt-in local/release validation (`pytest -m slow`), not another CI job.
+The regression suite locks in prompt routing, cache separation, and fail-closed vector completeness. A small frozen real-EmbeddingGemma MPS smoke additionally checks retrieval Recall/nDCG and a related-versus-unrelated STS margin. Real-CUDA smokes load the designated model through the installed encoder stack, verify its live dtype/attention/autocast contract, and round-trip a tiny network-free corpus through INT8 hydration and retrieval. Per the project's solo/pre-user CI policy, these real-model checks remain opt-in local/release validation (`pytest -m slow`, or `pytest -m "slow and cuda"` for CUDA only), not another CI job.
 
 ## Device Selection
 
@@ -68,7 +68,7 @@ Per-device precision matrix (EmbeddingGemma is the default profile):
 
 Notes:
 
-- Embedding models load with Transformers automatic dtype resolution (`dtype="auto"` on current Transformers, with the legacy `torch_dtype="auto"` spelling on older supported releases). This preserves the checkpoint/configured weight dtype instead of forcing fp32 or a reduced dtype.
+- Embedding models load with Transformers automatic dtype resolution (`dtype="auto"`). This preserves the checkpoint/configured weight dtype instead of forcing fp32 or a reduced dtype.
 - After loading, CiteMesh inspects the live parameter dtypes before binding a cache namespace. Float16 weights are rejected everywhere; bfloat16 weights are rejected when the active device/profile did not select the verified bfloat16 path. This keeps automatic loading without allowing the runtime log or cache provenance to claim float32 for bfloat16 execution.
 - Reduced-precision compute is bfloat16-only and is entered through `torch.autocast` around encode calls. If the device capability, torch API, version guard, or autocast-context probe rejects bfloat16, CiteMesh uses float32.
 - CUDA capability checks request native support (`is_bf16_supported(including_emulation=False)`), so tensor-level emulation on older GPUs does not enable bfloat16 autocast.

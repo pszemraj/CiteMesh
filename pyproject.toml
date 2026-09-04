@@ -105,6 +105,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers --tb=short -m \"not slow\""
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "cuda: marks tests that require a real CUDA device",
 ]
 
 [tool.ruff]

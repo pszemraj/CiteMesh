@@ -19,7 +19,14 @@ ruff check .
 ruff format --check .
 ```
 
-- Add or update tests for behavior you change. The suite is network-free and isolates the cache directory per test.
+The real CUDA embedding checks are opt-in because they may download the designated
+EmbeddingGemma checkpoint and require an available GPU:
+
+```bash
+python -m pytest -m "slow and cuda"
+```
+
+- Add or update tests for behavior you change. The default suite is network-free and isolates the cache directory per test.
 - If you change CLI flags, defaults, cache layout, or environment variables, update the matching page under `docs/` and add a line to `docs/internals/changelog.md`.
 - Follow the existing reST docstring style (`:param type name:`, `:return type:`).
 
