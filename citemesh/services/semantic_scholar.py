@@ -49,6 +49,9 @@ RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
 )
 SEARCH_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+# semanticscholar 0.11 raises this when S2 encodes an empty relation page as
+# ``{"data": null}`` instead of ``{"data": []}``.
+_SDK_NULL_RELATION_PAGE_ERROR = "'NoneType' object is not iterable"
 DEFAULT_PAPER_FIELDS = (
     "paperId",
     "title",
@@ -145,6 +148,15 @@ def _reference_cache_dir() -> Path:
     resolved = Path(REFERENCE_CACHE_DIR)
     resolved.mkdir(parents=True, exist_ok=True)
     return resolved
+
+
+def _is_sdk_null_relation_page(error: TypeError) -> bool:
+    """Identify the SDK failure used for a valid empty relation page.
+
+    :param TypeError error: Exception raised while the SDK decodes a relation page.
+    :return bool: Whether the exception represents an S2 ``data: null`` response.
+    """
+    return str(error) == _SDK_NULL_RELATION_PAGE_ERROR
 
 
 def _default_paper_fields() -> List[str]:
@@ -1146,7 +1158,17 @@ class SemanticScholarClient:
             :return List[Paper]: Converted relation papers for this attempt.
             """
             attempt_papers: List[Paper] = []
-            relation_records = fetch_method(normalized_paper_id, limit=limit)
+            try:
+                relation_records = fetch_method(normalized_paper_id, limit=limit)
+            except TypeError as exc:
+                if not _is_sdk_null_relation_page(exc):
+                    raise
+                logger.debug(
+                    "Semantic Scholar returned an empty %s page for %s.",
+                    relation_label,
+                    normalized_paper_id,
+                )
+                return attempt_papers
             if not relation_records:
                 return attempt_papers
 
@@ -1276,10 +1298,19 @@ class SemanticScholarClient:
 
             :return List[Any]: Raw relation records for later validation.
             """
-            raw_references = self.client.get_paper_references(
-                normalized_paper_id,
-                fields=["paperId"],
-            )
+            try:
+                raw_references = self.client.get_paper_references(
+                    normalized_paper_id,
+                    fields=["paperId"],
+                )
+            except TypeError as exc:
+                if not _is_sdk_null_relation_page(exc):
+                    raise
+                logger.debug(
+                    "Semantic Scholar returned an empty reference-ID page for %s.",
+                    normalized_paper_id,
+                )
+                return []
             if isinstance(raw_references, (str, bytes, Mapping)):
                 raise TypeError(
                     "Reference relation response must be an iterable of records."

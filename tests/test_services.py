@@ -852,6 +852,44 @@ def test_reference_cache_hit_corrupt_and_failure_paths(
     ]
 
 
+def test_sdk_null_relation_pages_are_valid_empty_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SDK failures caused by S2 ``data: null`` pages should become empty evidence.
+
+    :param Path tmp_path: Isolated reference-cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate the cache path.
+    :return None: Assertions define the regression contract.
+    """
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    null_page_error = TypeError("'NoneType' object is not iterable")
+    client.client.get_paper_references = MagicMock(side_effect=null_page_error)
+
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        assert (
+            client.get_paper_references(
+                "empty-related-papers",
+                raise_on_unavailable=True,
+            )
+            == []
+        )
+    client.client.get_paper_references.assert_called_once()
+    sleep_mock.assert_not_called()
+
+    client.client.get_paper_references = MagicMock(
+        side_effect=TypeError("'NoneType' object is not iterable")
+    )
+    with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        assert client.get_reference_ids("empty-reference-ids") == []
+    client.client.get_paper_references.assert_called_once()
+    sleep_mock.assert_not_called()
+    cache_path = s2._reference_cache_path(s2.normalize_paper_id("empty-reference-ids"))
+    assert json.loads(cache_path.read_text())["references"] == []
+
+
 def test_reference_payload_normalization_keeps_cache_and_live_contracts() -> None:
     """Cache parsing should stay strict while live relation parsing stays tolerant."""
     mixed_payload = [
