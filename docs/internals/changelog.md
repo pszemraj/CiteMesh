@@ -80,8 +80,9 @@ package. Current behavior is described in the linked guides and references:
 - Moved embedding storage to SQLite metadata plus HDF5 vector datasets with
   `int8` and `float32` storage, optional binary prefiltering, and fail-closed
   calibration and integrity checks.
-- Added resumable full-corpus hydration, upstream growth reconciliation, and
-  cache-native search. Detailed storage and hydration behavior is in
+- Added resumable full-corpus hydration, fail-closed incremental growth
+  reconciliation that preserves interrupted progress, and cache-native search.
+  Detailed storage and hydration behavior is in
   [Caching & Data](../guides/caching.md).
 - Raised the hydration flush batch from 256 to 2048 records, matching the HDF5
   dataset chunk size, to reduce lock and resize overhead during corpus

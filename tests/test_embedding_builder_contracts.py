@@ -7,7 +7,7 @@ import logging
 import types
 from pathlib import Path
 from typing import Any, Iterable
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import h5py
 import numpy as np
@@ -2760,12 +2760,110 @@ def test_full_corpus_hydrated_cache_refreshes_incremental_delta(
         allow_source_fallback=False,
     )
     assert builder.embedding_cache.clear.call_count == 0
-    builder.embedding_cache.mark_hydrated.assert_called_once_with(
-        dataset_source=source,
-        dataset_split=builder.dataset_split,
-        corpus_size=builder.corpus_size,
-        complete=True,
+    assert builder.embedding_cache.mark_hydrated.call_args_list == [
+        call(
+            dataset_source=source,
+            dataset_split=builder.dataset_split,
+            corpus_size=builder.corpus_size,
+            complete=False,
+        ),
+        call(
+            dataset_source=source,
+            dataset_split=builder.dataset_split,
+            corpus_size=builder.corpus_size,
+            complete=True,
+        ),
+    ]
+
+
+def test_full_corpus_incremental_refresh_failure_stays_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed growth refresh must not remain reusable or trigger a rebuild."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
     )
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    builder.embedding_cache.payload_stats = MagicMock(
+        return_value=CacheNamespacePayloadStats(
+            file_count=2,
+            size_bytes=1024,
+            sqlite_rows=100,
+            embedding_rows=100,
+            hydration_complete=True,
+            hydration_split="train",
+            hydration_corpus_size="all",
+            hydration_dataset_source=source,
+        )
+    )
+    events: list[tuple[str, bool | None]] = []
+    builder.embedding_cache.mark_hydrated = MagicMock(
+        side_effect=lambda **kwargs: events.append(("mark", kwargs["complete"]))
+    )
+    builder.embedding_cache.get_hydration_rowcount_reconciliation = MagicMock(
+        return_value=None
+    )
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 101)
+    monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
+
+    def fail_refresh(**_kwargs: Any) -> None:
+        """Record the first write boundary before simulating source failure."""
+        events.append(("refresh", None))
+        raise RuntimeError("source iteration failed")
+
+    monkeypatch.setattr(builder, "_hydrate_exact_hydration_source_slice", fail_refresh)
+    clear_cache_mock = MagicMock()
+    load_dataset_mock = MagicMock()
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_dataset_mock)
+
+    with pytest.raises(RuntimeError, match="source iteration failed"):
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert events == [("mark", False), ("refresh", None)]
+    builder.embedding_cache.is_hydrated.assert_called_once()
+    clear_cache_mock.assert_not_called()
+    load_dataset_mock.assert_not_called()
+
+
+def test_incomplete_full_corpus_resume_failure_preserves_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A transient resume failure must propagate without clearing cached rows."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    builder.embedding_cache.is_hydrated = MagicMock(return_value=False)
+    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
+    resume_mock = MagicMock(side_effect=RuntimeError("resume source failed"))
+    clear_cache_mock = MagicMock()
+    load_dataset_mock = MagicMock()
+    monkeypatch.setattr(builder, "_resume_incomplete_full_corpus_cache", resume_mock)
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_dataset_mock)
+
+    with pytest.raises(RuntimeError, match="resume source failed"):
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    resume_mock.assert_called_once_with(
+        use_streaming=False,
+        cached_dataset_source=source,
+    )
+    clear_cache_mock.assert_not_called()
+    load_dataset_mock.assert_not_called()
 
 
 def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
@@ -3426,12 +3524,20 @@ def test_full_corpus_incremental_refresh_reconciles_missing_ids_when_tail_scan_u
     assert hydrate_mock.call_count == 2
     assert "existing_paper_ids" in hydrate_mock.call_args_list[1].kwargs
     assert hydrate_mock.call_args_list[1].kwargs["max_new_records"] == 10
-    builder.embedding_cache.mark_hydrated.assert_called_once_with(
-        dataset_source=source,
-        dataset_split=builder.dataset_split,
-        corpus_size=builder.corpus_size,
-        complete=True,
-    )
+    assert builder.embedding_cache.mark_hydrated.call_args_list == [
+        call(
+            dataset_source=source,
+            dataset_split=builder.dataset_split,
+            corpus_size=builder.corpus_size,
+            complete=False,
+        ),
+        call(
+            dataset_source=source,
+            dataset_split=builder.dataset_split,
+            corpus_size=builder.corpus_size,
+            complete=True,
+        ),
+    ]
 
 
 def test_full_corpus_rowcount_delta_memoization_lifecycle(

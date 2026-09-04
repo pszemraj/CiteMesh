@@ -3096,18 +3096,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.corpus_size,
             dataset_source=cached_dataset_source,
         ):
-            try:
-                self._refresh_hydrated_full_corpus_cache(
-                    use_streaming=use_streaming,
-                    cached_dataset_source=cached_dataset_source,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Incremental full-corpus refresh check failed for source=%s; "
-                    "continuing with existing hydrated cache: %s",
-                    cached_dataset_source or "unknown",
-                    exc,
-                )
+            self._refresh_hydrated_full_corpus_cache(
+                use_streaming=use_streaming,
+                cached_dataset_source=cached_dataset_source,
+            )
             cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
             if self.embedding_cache.is_hydrated(
                 self.dataset_split,
@@ -3130,19 +3122,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 "all" if self.corpus_size is None else self.corpus_size,
             )
 
-        try:
-            if self._resume_incomplete_full_corpus_cache(
-                use_streaming=use_streaming,
-                cached_dataset_source=cached_dataset_source,
-            ):
-                return
-        except Exception as exc:
-            logger.warning(
-                "Incomplete full-corpus resume failed for source=%s; "
-                "performing full source revalidation: %s",
-                cached_dataset_source or "unknown",
-                exc,
-            )
+        if self._resume_incomplete_full_corpus_cache(
+            use_streaming=use_streaming,
+            cached_dataset_source=cached_dataset_source,
+        ):
+            return
 
         dataset_source: Optional[str]
         dataset: Iterable[Dict[str, Any]]
@@ -3906,11 +3890,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.embedding_cache.clear_hydration_rowcount_reconciliation()
             return
 
-        self._ensure_int8_calibration_ranges(
-            use_streaming=use_streaming,
-            dataset_source=source,
-        )
-
         previous_reconciliation = (
             self.embedding_cache.get_hydration_rowcount_reconciliation()
         )
@@ -3924,6 +3903,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 upstream_rows,
             )
             return
+
+        self.embedding_cache.mark_hydrated(
+            dataset_source=source,
+            dataset_split=self.dataset_split,
+            corpus_size=self.corpus_size,
+            complete=False,
+        )
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=source,
+        )
 
         delta_rows = upstream_rows - cached_rows
         logger.info(
