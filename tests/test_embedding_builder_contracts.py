@@ -58,31 +58,11 @@ def _disable_embedding_optional_deps(
 
 
 @pytest.mark.parametrize(
-    ("transformers_version", "expected_key"),
-    [("4.56.2", "torch_dtype"), ("4.57.0", "dtype"), ("5.0.0", "dtype")],
-)
-def test_transformers_auto_dtype_key_uses_supported_spelling(
-    monkeypatch: pytest.MonkeyPatch,
-    transformers_version: str,
-    expected_key: str,
-) -> None:
-    """Automatic model dtype should use the installed Transformers API spelling."""
-    fake_transformers = types.SimpleNamespace(__version__=transformers_version)
-    monkeypatch.setattr(
-        embedding_module.importlib,
-        "import_module",
-        lambda module_name: fake_transformers,
-    )
-
-    assert embedding_module._transformers_auto_dtype_key() == expected_key
-
-
-@pytest.mark.parametrize(
     ("model_name", "transformers_version", "should_reject"),
     [
-        (DEFAULT_EMBEDDING_MODEL_NAME, "4.56.2", True),
-        (DEFAULT_EMBEDDING_MODEL_NAME, "4.57.0", False),
-        (DEFAULT_EMBEDDING_MODEL_NAME, "5.0.0", False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "5.1.0", True),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "5.2.0", False),
+        (DEFAULT_EMBEDDING_MODEL_NAME, "5.9.0", False),
         ("org/generic-embedding-model", "4.56.2", False),
     ],
 )
@@ -114,7 +94,7 @@ def test_model_load_enforces_profile_transformers_floor(
     if should_reject:
         with pytest.raises(
             embedding_module.EmbeddingBackendCompatibilityError,
-            match=r"requires transformers>=4\.57",
+            match=r"requires transformers>=5\.2",
         ):
             builder._load_model()
         assert "attempts" not in init_log
@@ -1202,7 +1182,7 @@ def test_plain_transformers_embeddinggemma_export_resolves_from_model_contract(
     )
 
     assert builder.model_profile.schema_token == "embeddinggemma-v2"
-    assert builder.model_profile.minimum_transformers_version == (4, 57)
+    assert builder.model_profile.minimum_transformers_version == (5, 2)
     assert builder.truncate_dim == 256
 
 

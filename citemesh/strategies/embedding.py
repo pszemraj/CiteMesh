@@ -286,22 +286,6 @@ def _installed_transformers_major_minor(transformers: Any) -> Optional[tuple[int
     return _parse_major_minor(distribution_version)
 
 
-def _transformers_auto_dtype_key() -> str:
-    """Return the installed Transformers keyword for automatic weight dtype.
-
-    Transformers 4.57 deprecated ``torch_dtype`` in favor of ``dtype``. Older
-    compatibility environments still require the former spelling.
-
-    :return str: ``dtype`` on Transformers 4.57+, otherwise ``torch_dtype``.
-    """
-    try:
-        transformers = importlib.import_module("transformers")
-    except ImportError:
-        return "torch_dtype"
-    detected = _installed_transformers_major_minor(transformers)
-    return "dtype" if detected is not None and detected >= (4, 57) else "torch_dtype"
-
-
 def _require_transformers_compatibility(profile: EmbeddingModelProfile) -> None:
     """Require the Transformers floor declared by an embedding model profile.
 
@@ -312,6 +296,7 @@ def _require_transformers_compatibility(profile: EmbeddingModelProfile) -> None:
     minimum = profile.minimum_transformers_version
     if minimum is None:
         return
+    required = ".".join(str(part) for part in minimum)
 
     transformers = importlib.import_module("transformers")
     raw_version = str(getattr(transformers, "__version__", "")).strip()
@@ -320,10 +305,9 @@ def _require_transformers_compatibility(profile: EmbeddingModelProfile) -> None:
         raise EmbeddingBackendCompatibilityError(
             f"Could not determine the installed Transformers version for {profile.name}; "
             "the bidirectional-attention compatibility floor cannot be verified. "
-            "Reinstall a supported transformers>=4.57 release."
+            f"Reinstall a supported transformers>={required} release."
         )
     if detected < minimum:
-        required = ".".join(str(part) for part in minimum)
         detected_label = (
             raw_version
             if _parse_major_minor(raw_version) is not None
@@ -1953,7 +1937,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._autocast_device_type = None
         self._autocast_enabled = False
         self._encode_model = None
-        model_kwargs: Dict[str, Any] = {_transformers_auto_dtype_key(): "auto"}
+        model_kwargs: Dict[str, Any] = {"dtype": "auto"}
         if self._attention_implementation_hint is not None:
             model_kwargs["attn_implementation"] = self._attention_implementation_hint
 

@@ -55,10 +55,10 @@ viz = ["plotly>=5.18.0", "pyvis>=0.3.2"]
 embeddings = [
     "datasets>=2.14.0",
     "huggingface_hub>=0.24.0",
-    "sentence-transformers>=3.0.0",
+    "sentence-transformers>=6.0.0",
     "torch>=2.9.0; sys_platform != 'darwin'",
     "torch>=2.13.0; sys_platform == 'darwin'",
-    "transformers>=4.57.0",
+    "transformers>=5.2.0",
 ]
 recommended = ["citemesh[embeddings,viz]"]
 dev = [
@@ -68,10 +68,10 @@ dev = [
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.9.0",
-    "sentence-transformers>=3.0.0",
+    "sentence-transformers>=6.0.0",
     "torch>=2.9.0; sys_platform != 'darwin'",
     "torch>=2.13.0; sys_platform == 'darwin'",
-    "transformers>=4.57.0",
+    "transformers>=5.2.0",
 ]
 all = ["citemesh[dev,embeddings,viz]"]
 

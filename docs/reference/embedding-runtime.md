@@ -31,7 +31,7 @@ Fallback behavior:
 - When `--truncate-dim` is omitted, this profile uses its recommended dimension of
   `256`.
 - Every fallback load candidate resolves its own profile before loader kwargs, formatter fingerprints, and cache namespaces are computed.
-- The profile requires Transformers 4.57 or newer, where Gemma 3 honors the checkpoint's bidirectional-attention setting. CiteMesh checks this before constructing the model and does not treat an incompatible backend as a checkpoint-load failure eligible for fallback.
+- The profile requires Transformers 5.2 or newer, where `dtype="auto"` is the supported checkpoint-loading API and Gemma 3 honors the checkpoint's bidirectional-attention setting. CiteMesh checks this before constructing the model and does not treat an incompatible backend as a checkpoint-load failure eligible for fallback.
 
 ## Task-Specific Vector Spaces
 
@@ -95,7 +95,7 @@ and the optional binary prefilter are described in
 
 ## Dependency Floor
 
-- The `embeddings` install extra provides `torch>=2.9.0` on Linux/Windows, `torch>=2.13.0` on macOS, `transformers>=4.57.0`, SentenceTransformers, and Datasets. Candidate mode uses the encoder stack without loading Datasets; `arxiv-corpus` mode also uses Datasets for hydration. The macOS torch floor matches the release verified for MPS bf16 execution, while the Transformers floor is required for EmbeddingGemma's bidirectional attention.
+- The `embeddings` install extra provides `torch>=2.9.0` on Linux/Windows, `torch>=2.13.0` on macOS, `transformers>=5.2.0`, `sentence-transformers>=6.0.0`, and Datasets. Candidate mode uses the encoder stack without loading Datasets; `arxiv-corpus` mode also uses Datasets for hydration. The macOS torch floor matches the release verified for MPS bf16 execution, while the encoder-stack floors provide the supported automatic-dtype API and EmbeddingGemma's bidirectional attention.
 
 ## Implementation References
 
