@@ -1048,6 +1048,16 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
             ],
             "--device",
         ),
+        (
+            [
+                "build",
+                "arxiv:1706.03762",
+                "--strategy",
+                "citation",
+                "--no-streaming",
+            ],
+            "--streaming",
+        ),
     ]
     for args, token in cases:
         result = run_cli_command(args)

@@ -896,8 +896,6 @@ def _validate_build_cli_contract(
     strategy = str(args.strategy)
     _apply_hybrid_default_overrides(args, provided | set(config_defaults))
     contract_provided = set(provided)
-    if not bool(getattr(args, "streaming", False)):
-        contract_provided.discard("streaming")
     unsupported: List[str] = []
     for dest in sorted(contract_provided):
         allowed = _BUILD_STRATEGY_OPTION_SUPPORT.get(dest)
@@ -911,6 +909,8 @@ def _validate_build_cli_contract(
             f"Unsupported option(s) for --strategy {strategy}: {unsupported_text}. "
             "Use --help to view strategy-scoped option applicability."
         )
+    if not bool(getattr(args, "streaming", False)):
+        contract_provided.discard("streaming")
 
     if strategy in {"embedding", "hybrid"}:
         provided_corpus_flags = sorted(
