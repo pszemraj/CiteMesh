@@ -3537,6 +3537,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             progress_label=progress_label,
             existing_paper_ids=existing_paper_ids,
             max_new_records=max_new_records,
+            fallback_index_offset=int(row_offset or 0),
         )
         return _HydrationSourceSliceResult(
             hydrated_records=hydrated_records,
@@ -3700,6 +3701,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         progress_label: str,
         existing_paper_ids: Optional[Set[str]] = None,
         max_new_records: Optional[int] = None,
+        fallback_index_offset: int = 0,
     ) -> int:
         """Hydrate cache records from dataset iterator without clearing namespace.
 
@@ -3709,6 +3711,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param Optional[Set[str]] existing_paper_ids: Optional set used to skip
             already-cached paper IDs while hydrating.
         :param Optional[int] max_new_records: Optional cap on newly selected records.
+        :param int fallback_index_offset: Source offset for synthetic paper IDs.
         :return int: Number of records routed into cache batching.
         """
         if max_new_records is not None and int(max_new_records) < 1:
@@ -3725,11 +3728,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             disable=not stderr_isatty(),
         ) as progress:
             batch: List[Dict] = []
-            for idx, raw_record in enumerate(dataset):
-                if self.corpus_size is not None and idx >= self.corpus_size:
+            for local_idx, raw_record in enumerate(dataset):
+                if self.corpus_size is not None and local_idx >= self.corpus_size:
                     break
 
-                metadata = _extract_dataset_paper_metadata(raw_record, idx)
+                metadata = _extract_dataset_paper_metadata(
+                    raw_record,
+                    fallback_index_offset + local_idx,
+                )
                 if existing_paper_ids is not None:
                     paper_id = str(metadata.get("paper_id", "")).strip()
                     if not paper_id or paper_id in existing_paper_ids:

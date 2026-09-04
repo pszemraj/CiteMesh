@@ -3194,6 +3194,63 @@ def test_exact_hydration_slice_fails_closed_on_source_mismatch(
     hydrate_mock.assert_not_called()
 
 
+def test_exact_hydration_slice_offsets_synthetic_paper_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Offset hydration should preserve source positions in synthetic paper IDs."""
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        corpus_size=None,
+        use_streaming=False,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        MagicMock(
+            return_value=(
+                source,
+                [
+                    {"title": "First offset row"},
+                    {"title": "Second offset row"},
+                ],
+            )
+        ),
+    )
+    cached_records: list[dict[str, Any]] = []
+
+    def _capture_batch(batch: list[dict[str, Any]]) -> int:
+        """Capture hydrated records and report the number written.
+
+        :param list[dict[str, Any]] batch: Hydration batch to capture.
+        :return int: Number of captured records.
+        """
+        cached_records.extend(batch)
+        return len(batch)
+
+    monkeypatch.setattr(builder, "_cache_metadata_batch", _capture_batch)
+
+    result = builder._hydrate_exact_hydration_source_slice(
+        use_streaming=False,
+        source=source,
+        row_limit=2,
+        row_offset=100,
+        progress_total=2,
+        progress_label=f"Resuming {source}",
+        operation="Incomplete hydration resume",
+    )
+
+    assert [record["paper_id"] for record in cached_records] == [
+        "arxiv_100",
+        "arxiv_101",
+    ]
+    assert result.hydrated_records == 2
+    assert result.source_rows_consumed == 2
+    assert result.source_exhausted is True
+
+
 def test_full_corpus_hydrated_cache_skips_incremental_refresh_without_growth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
