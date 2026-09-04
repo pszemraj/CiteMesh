@@ -37,6 +37,8 @@ package. Current behavior is described in the linked guides and references:
   while config mutations fail closed instead of overwriting unreadable content.
 - Unified the default macOS and Linux cache root under `~/.cache/citemesh` and
   preserved `config.toml` during `citemesh cache clear`.
+- Rebuild reference-cache entries whose stored paper identity or references
+  payload does not match the requested cache key.
 - Added local semantic search over the active retrieval cache and the
   `auto`, `local`, and `s2` search modes documented in
   [CLI Usage](../guides/cli.md).

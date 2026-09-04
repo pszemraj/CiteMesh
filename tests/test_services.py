@@ -806,6 +806,29 @@ def test_reference_cache_hit_corrupt_and_failure_paths(
             "text",
             ["fixed-1", "fixed-2"],
         ),
+        (
+            "seed-missing-references",
+            json.dumps(
+                {
+                    "paper_id": s2.normalize_paper_id("seed-missing-references"),
+                    "version": s2.REFERENCE_CACHE_VERSION,
+                }
+            ),
+            "text",
+            ["missing-references-fixed"],
+        ),
+        (
+            "seed-wrong-identity",
+            json.dumps(
+                {
+                    "paper_id": s2.normalize_paper_id("different-paper"),
+                    "references": [],
+                    "version": s2.REFERENCE_CACHE_VERSION,
+                }
+            ),
+            "text",
+            ["wrong-identity-fixed"],
+        ),
     ]
     for paper_id, cached_payload, write_mode, rebuilt_ids in rebuild_cases:
         normalized_paper_id = s2.normalize_paper_id(paper_id)

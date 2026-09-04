@@ -1275,7 +1275,15 @@ class SemanticScholarClient:
                 if not isinstance(data, dict):
                     raise ValueError("reference cache payload must be a JSON object")
                 if data.get("version") == REFERENCE_CACHE_VERSION:
-                    cached_references = data.get("references", [])
+                    if data.get("paper_id") != normalized_paper_id:
+                        raise ValueError(
+                            "reference cache paper ID does not match its key"
+                        )
+                    if "references" not in data:
+                        raise ValueError(
+                            "reference cache payload is missing references"
+                        )
+                    cached_references = data["references"]
                     refs = _coerce_cached_reference_ids(cached_references)
                     if refs is None:
                         logger.warning(
