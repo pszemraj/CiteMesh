@@ -1272,6 +1272,25 @@ def test_get_paper_not_found_still_returns_none_in_strict_mode() -> None:
     assert client.get_paper("missing-id", raise_on_unavailable=True) is None
 
 
+@pytest.mark.parametrize("raise_on_unavailable", [False, True])
+def test_malformed_present_paper_payload_is_not_reported_as_missing(
+    raise_on_unavailable: bool,
+) -> None:
+    """A malformed successful seed response should fail once in either mode."""
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper = MagicMock(return_value={"title": "Missing ID"})
+
+    with (
+        patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock,
+        pytest.raises(TypeError, match="malformed paper payload"),
+    ):
+        client.get_paper("seed", raise_on_unavailable=raise_on_unavailable)
+
+    client.client.get_paper.assert_called_once()
+    sleep_mock.assert_not_called()
+
+
 def test_recommendations_fall_back_to_all_cs_pool() -> None:
     """Empty default-pool responses retry against the broader all-cs pool."""
     client = SemanticScholarClient(timeout=1)

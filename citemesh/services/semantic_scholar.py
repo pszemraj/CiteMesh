@@ -79,6 +79,10 @@ class SemanticScholarRequestError(RuntimeError):
     """Raised when Semantic Scholar rejects a non-retryable client request."""
 
 
+class _SemanticScholarResponseContractError(TypeError):
+    """Raised when a successful SDK response cannot satisfy CiteMesh's schema."""
+
+
 def _raise_request_error(exc: Exception, context: str) -> None:
     """Surface a deterministic Semantic Scholar SDK request failure.
 
@@ -894,6 +898,7 @@ class SemanticScholarClient:
             :class:`SemanticScholarUnavailableError` instead of returning
             ``None``, so callers can distinguish "not found" from "API down".
         :return Optional[Paper]: Paper object or None if not found
+        :raises TypeError: If a present API payload cannot be converted to a paper.
         :raises SemanticScholarRequestError: If Semantic Scholar rejects the
             request because its parameters or credentials are invalid.
         """
@@ -916,6 +921,10 @@ class SemanticScholarClient:
                 return None
 
             paper = self._convert_api_paper(api_paper)
+            if paper is None:
+                raise _SemanticScholarResponseContractError(
+                    f"Semantic Scholar returned a malformed paper payload for {paper_id}."
+                )
             if fetch_references and paper:
                 paper.references = self._extract_reference_ids(
                     getattr(api_paper, "references", None)
@@ -945,6 +954,17 @@ class SemanticScholarClient:
             )
             return None
 
+        def _raise_contract_failure(
+            exc: Exception,
+        ) -> Optional[Paper]:
+            """Surface a malformed successful response without retrying.
+
+            :param Exception exc: Local response-contract failure.
+            :return Optional[Paper]: This function does not return successfully.
+            :raises Exception: Always re-raises ``exc``.
+            """
+            raise exc
+
         return self._call_with_retries(
             _operation,
             on_retry=lambda attempt, wait_time, exc: logger.warning(
@@ -970,6 +990,7 @@ class SemanticScholarClient:
                     PermissionError,
                     lambda exc: _raise_request_error(exc, f"fetching {paper_id}"),
                 ),
+                (_SemanticScholarResponseContractError, _raise_contract_failure),
             ),
         )
 

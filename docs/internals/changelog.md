@@ -23,6 +23,8 @@ package. Current behavior is described in the linked guides and references:
   Semantic Scholar requests across search and graph strategies.
 - Classified rejected Semantic Scholar SDK requests consistently across seed,
   relation, and reference-ID endpoints without retrying deterministic failures.
+- Treated malformed successful seed responses as response-contract failures
+  instead of reporting them as unknown paper identifiers.
 - Preserved partial candidate-source success while recording source outcomes in
   exports; total source outages now fail instead of producing plausible
   seed-only graphs.
