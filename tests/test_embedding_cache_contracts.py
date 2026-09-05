@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import logging
 import multiprocessing as mp
+import sqlite3
 import tempfile
 from pathlib import Path
 from queue import Empty
@@ -17,6 +18,8 @@ import pytest
 import citemesh.data.embedding_cache as embedding_cache_module
 from citemesh.data.embedding_cache import (
     BINARY_INDEX_DATASET_NAME,
+    BINARY_INDEX_ENCODING,
+    BINARY_INDEX_ENCODING_KEY,
     CALIBRATION_SAMPLE_SIZE_KEY,
     COMPRESSION_FILTER_KEY,
     COMPRESSION_LEVEL_KEY,
@@ -315,6 +318,38 @@ def test_int8_quantization_uses_uniform_buckets_and_clips_tails() -> None:
 
     expected = np.asarray([-128, -128, -128, -1, 0, 127, 127], dtype=np.int8)
     np.testing.assert_array_equal(quantized, np.column_stack((expected, expected)))
+
+
+def test_int8_dequantization_centres_buckets_without_exceeding_ranges(
+    tmp_path: Path,
+) -> None:
+    """Bucket-centre reconstruction removes floor bias within the calibration range.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks round-trip error, average bias, and saturated endpoints.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="int8-roundtrip")
+    ranges = np.asarray([[0.0, -10.0], [255.0, 500.0]], dtype=np.float32)
+    cache.set_calibration_ranges(ranges, embedding_dim=2)
+    levels = (np.arange(25500, dtype=np.float32) + 0.5) / 100.0
+    steps = (ranges[1] - ranges[0]) / 255.0
+    embeddings = ranges[0] + levels[:, None] * steps
+    quantized = embedding_cache_module._quantize_int8_embeddings(embeddings, ranges)
+    with h5py.File(cache.h5_path, "r") as h5:
+        reconstructed = cache._dequantize_int8(h5, quantized)
+        endpoints = cache._dequantize_int8(
+            h5, np.asarray([[-128, -128], [127, 127]], dtype=np.int8)
+        )
+
+    errors = (reconstructed - embeddings) / steps
+    floors = ranges[0] + (quantized.astype(np.float32) + 128.0) * steps
+    floor_errors = (floors - embeddings) / steps
+    assert np.max(np.abs(errors)) <= 0.5
+    assert abs(float(np.mean(errors))) < 1e-5
+    assert np.mean(errors**2) < np.mean(floor_errors**2) / 3.9
+    assert np.all(endpoints >= ranges[0])
+    assert np.all(endpoints <= ranges[1])
+    np.testing.assert_array_equal(endpoints[-1], ranges[1])
 
 
 def test_embedding_cache_upsert_records_int8_saturation(
@@ -1746,6 +1781,82 @@ def test_embedding_cache_reload_rebuilds_stale_binary_index_before_next_write() 
     assert reloaded.last_search_used_binary_prefilter is True
 
 
+@pytest.mark.parametrize("index_state", ["missing", "legacy"])
+def test_embedding_cache_binary_rebuild_preserves_signs_and_prefilter_results(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, index_state: str
+) -> None:
+    """Binary writes and rebuilds must use the same persisted-vector signs.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.LogCaptureFixture caplog: Captures one-time index rebuild messages.
+    :param str index_state: Missing index or old raw-float sign encoding.
+    :return None: Checks index bytes and selected neighbors around the zero bucket.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="binary-rebuild-signs")
+    _set_test_int8_calibration(cache)
+    cache.get_embeddings(
+        {
+            "p1": {"title": "Near zero", "abstract": ""},
+            "p2": {"title": "Positive", "abstract": ""},
+        },
+        LookupEncodeModel(
+            {
+                "Near zero": np.asarray([0.001, 1.0], dtype=np.float32),
+                "Positive": np.asarray([0.01, 1.0], dtype=np.float32),
+            }
+        ),
+        show_progress=False,
+    )
+    search_args = {
+        "query_embedding": np.asarray([0.01, 1.0], dtype=np.float32),
+        "top_k": 1,
+        "binary_prefilter": True,
+        "binary_rescore_multiplier": 1,
+    }
+    original_results = cache.search(**search_args)
+    cache.mark_hydrated(
+        dataset_source="test-corpus",
+        dataset_split="train",
+        corpus_size=None,
+        complete=True,
+    )
+    with h5py.File(cache.h5_path, "a") as h5:
+        original_bits = h5[BINARY_INDEX_DATASET_NAME][:]
+        original_vectors = h5[EMBEDDINGS_DATASET_NAME][:]
+        if index_state == "legacy":
+            binary = h5[BINARY_INDEX_DATASET_NAME]
+            binary[...] = np.asarray([[192], [192]], dtype=np.uint8)
+            del binary.attrs[BINARY_INDEX_ENCODING_KEY]
+            assert not np.array_equal(binary[:], original_bits)
+        else:
+            del h5[BINARY_INDEX_DATASET_NAME]
+
+    reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="binary-rebuild-signs")
+    with h5py.File(reloaded.h5_path, "r") as h5:
+        np.testing.assert_array_equal(h5[BINARY_INDEX_DATASET_NAME][:], original_bits)
+        np.testing.assert_array_equal(h5[EMBEDDINGS_DATASET_NAME][:], original_vectors)
+        assert (
+            h5[BINARY_INDEX_DATASET_NAME].attrs[BINARY_INDEX_ENCODING_KEY]
+            == BINARY_INDEX_ENCODING
+        )
+    assert reloaded.get_cached_paper_ids() == {"p1", "p2"}
+    assert reloaded.is_hydrated(
+        dataset_source="test-corpus", dataset_split="train", corpus_size=None
+    )
+    reloaded_results = reloaded.search(**search_args)
+    assert [(result.paper_id, result.score) for result in reloaded_results] == [
+        (result.paper_id, result.score) for result in original_results
+    ]
+    assert [result.paper_id for result in original_results] == ["p2"]
+    caplog.clear()
+    EmbeddingCache(cache_dir=tmp_path, model_name="binary-rebuild-signs")
+    assert "Rebuilding binary index" not in caplog.text
+    with h5py.File(reloaded.h5_path, "a") as h5:
+        del h5[BINARY_INDEX_DATASET_NAME]
+    rebuilt = EmbeddingCache(cache_dir=tmp_path, model_name="binary-rebuild-signs")
+    assert [result.paper_id for result in rebuilt.search(**search_args)] == ["p2"]
+
+
 def test_embedding_cache_enabling_binary_prefilter_preserves_populated_namespace(
     tmp_path: Path,
 ) -> None:
@@ -1862,7 +1973,9 @@ def test_embedding_cache_serializes_multiprocess_initialization_recovery(
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
 
-def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
+def test_embedding_cache_recovery_contracts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """Legacy schema recovery and clear() should restore a healthy namespace."""
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
     _set_test_int8_calibration(cache)
@@ -1882,6 +1995,7 @@ def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
         conn.commit()
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
+    assert "rebuilding: incompatible embedding cache layout" in caplog.text
     with reloaded._connect_db() as conn:
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
@@ -1896,6 +2010,225 @@ def test_embedding_cache_recovery_contracts(tmp_path: Path) -> None:
     reloaded.clear()
     assert reloaded.db_path.exists()
     assert not reloaded.h5_path.exists()
+
+
+@pytest.mark.parametrize(
+    "error_type", [OSError, RuntimeError, ValueError, sqlite3.DatabaseError]
+)
+def test_embedding_cache_open_errors_preserve_namespace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    """Opening failures must propagate without deleting vectors or SQLite rows.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Injects the opening failure.
+    :param type[Exception] error_type: Failure previously mistaken for corruption.
+    :return None: Checks preserved bytes and successful reuse after the failure.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="open-failure")
+    _set_test_int8_calibration(cache)
+    papers = {"p1": {"title": "Seed", "abstract": "Abstract"}}
+    model = SeededRandomEncodeModel()
+    cache.get_embeddings(papers, model, show_progress=False)
+    original_payload = cache.h5_path.read_bytes()
+
+    def fail_open(*args: Any, **kwargs: Any) -> None:
+        """Raise the injected failure instead of opening HDF5.
+
+        :param Any args: HDF5 positional arguments.
+        :param Any kwargs: HDF5 keyword arguments.
+        :return None: Always raises the injected exception.
+        """
+        raise error_type("transient open failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(embedding_cache_module.h5py, "File", fail_open)
+        with pytest.raises(error_type, match="transient open failure"):
+            EmbeddingCache(cache_dir=tmp_path, model_name="open-failure")
+
+    assert cache.h5_path.read_bytes() == original_payload
+    assert cache.get_cached_paper_ids() == {"p1"}
+    reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="open-failure")
+    reloaded.get_embeddings(papers, model, show_progress=False)
+    assert model.encode_calls == 1
+
+
+def test_embedding_cache_readonly_hdf5_handle_preserves_namespace(
+    tmp_path: Path,
+) -> None:
+    """A real read-only HDF5 handle must not cause namespace deletion.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Reopens and reuses the namespace after releasing the reader.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="readonly-hdf5")
+    _set_test_int8_calibration(cache)
+    cache.get_embeddings(
+        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        SeededRandomEncodeModel(),
+        show_progress=False,
+    )
+    with h5py.File(cache.h5_path, "r"):
+        with pytest.raises(OSError):
+            EmbeddingCache(cache_dir=tmp_path, model_name="readonly-hdf5")
+        assert cache.h5_path.exists()
+        assert cache.get_cached_paper_ids() == {"p1"}
+
+    reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="readonly-hdf5")
+    assert reloaded.embedding_count() == 1
+
+
+def test_embedding_cache_reload_preserves_calibration_before_first_write(
+    tmp_path: Path,
+) -> None:
+    """A calibrated namespace without embeddings is a valid resumable state.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks that persisted ranges survive and support the first write.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path, model_name="calibration-only", compression_level=9
+    )
+    ranges = np.asarray([[-0.75, -0.5], [0.75, 0.5]], dtype=np.float32)
+    cache.set_calibration_ranges(ranges, embedding_dim=2)
+
+    reloaded = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="calibration-only",
+        compression_level=1,
+        binary_prefilter=False,
+    )
+    with h5py.File(reloaded.h5_path, "r") as h5:
+        np.testing.assert_array_equal(h5["calibration_ranges"][:], ranges)
+    reloaded.get_embeddings(
+        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        SeededRandomEncodeModel(),
+        show_progress=False,
+    )
+    assert reloaded.embedding_count() == 1
+    results = reloaded.search(
+        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=False,
+        binary_rescore_multiplier=1,
+    )
+    assert [result.paper_id for result in results] == ["p1"]
+
+
+@pytest.mark.parametrize(
+    "changed_setting, changed_value",
+    [
+        ("text_formatter_fingerprint", "new"),
+        ("calibration_sample_size", 2000),
+        ("source_torch_dtype", "bfloat16"),
+    ],
+)
+def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    changed_setting: str,
+    changed_value: object,
+) -> None:
+    """Calibration-only recovery must validate the runtime that produced ranges.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.LogCaptureFixture caplog: Captures the proven mismatch reason.
+    :param str changed_setting: Runtime identity field changed on reopen.
+    :param object changed_value: Incompatible value for that field.
+    :return None: Checks old ranges cannot silently acquire new provenance.
+    """
+    settings = {
+        "text_formatter_fingerprint": "old",
+        "calibration_sample_size": 10,
+        "source_torch_dtype": "float32",
+    }
+    cache = EmbeddingCache(
+        cache_dir=tmp_path, model_name="calibration-contract", **settings
+    )
+    _set_test_int8_calibration(cache)
+
+    settings[changed_setting] = changed_value
+    reloaded = EmbeddingCache(
+        cache_dir=tmp_path, model_name="calibration-contract", **settings
+    )
+
+    assert not reloaded.has_calibration_ranges()
+    assert not reloaded.h5_path.exists()
+    assert changed_setting in caplog.text
+    with pytest.raises(RuntimeError, match="Missing persisted int8 calibration ranges"):
+        reloaded.get_embeddings(
+            {"p1": {"title": "Seed", "abstract": "Abstract"}},
+            SeededRandomEncodeModel(),
+            show_progress=False,
+        )
+
+
+@pytest.mark.parametrize("persisted_rows", [0, 1])
+def test_embedding_cache_recovery_preserves_sqlite_ahead_prefix(
+    tmp_path: Path, persisted_rows: int
+) -> None:
+    """SQLite-ahead recovery discards only mappings whose vectors were lost.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param int persisted_rows: Number of vectors surviving the interrupted append.
+    :return None: Checks surviving vectors, incomplete hydration, and resumed writes.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="sqlite-ahead")
+    _set_test_int8_calibration(cache)
+    papers = {
+        "p1": {"title": "Seed", "abstract": "Abstract"},
+        "p2": {"title": "Other", "abstract": "Abstract"},
+    }
+    model = SeededRandomEncodeModel()
+    cache.get_embeddings(papers, model, show_progress=False)
+    cache.mark_hydrated(
+        dataset_source="test-corpus",
+        dataset_split="train",
+        corpus_size=None,
+        complete=True,
+    )
+    with h5py.File(cache.h5_path, "a") as h5:
+        h5[EMBEDDINGS_DATASET_NAME].resize((persisted_rows, 2))
+        surviving = h5[EMBEDDINGS_DATASET_NAME][:]
+
+    reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="sqlite-ahead")
+    assert reloaded.embedding_count() == persisted_rows
+    assert reloaded.get_cached_paper_ids() == ({"p1"} if persisted_rows else set())
+    with reloaded._connect_db() as conn:
+        metadata = reloaded._load_cache_metadata(conn)
+    assert metadata[HYDRATION_COMPLETE_KEY] == "0"
+    assert metadata[HYDRATION_DATASET_SOURCE_KEY] == "test-corpus"
+    with h5py.File(reloaded.h5_path, "r") as h5:
+        np.testing.assert_array_equal(h5[EMBEDDINGS_DATASET_NAME][:], surviving)
+        assert h5[BINARY_INDEX_DATASET_NAME].shape[0] == persisted_rows
+
+    reloaded.get_embeddings(papers, model, show_progress=False)
+    assert reloaded.get_cached_paper_ids() == {"p1", "p2"}
+    assert reloaded.embedding_count() == 2
+
+
+def test_embedding_cache_reload_preserves_unrecoverable_row_mapping(
+    tmp_path: Path,
+) -> None:
+    """An ambiguous mapping must fail without deleting recoverable vector data.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks that a gap does not trigger a namespace wipe.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="mapping-gap")
+    _set_test_int8_calibration(cache)
+    cache.get_embeddings(
+        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        SeededRandomEncodeModel(),
+        show_progress=False,
+    )
+    with cache._connect_db() as conn:
+        conn.execute("UPDATE papers SET row_idx = 1")
+
+    with pytest.raises(RuntimeError, match="row_idx coverage mismatch"):
+        EmbeddingCache(cache_dir=tmp_path, model_name="mapping-gap")
+    assert cache.h5_path.exists()
+    assert cache.get_cached_paper_ids() == {"p1"}
 
 
 def test_embedding_cache_recovery_truncates_orphan_h5_rows(tmp_path: Path) -> None:

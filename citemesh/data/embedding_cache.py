@@ -43,6 +43,8 @@ logger = logging.getLogger(__name__)
 SQLITE_QUERY_BATCH_SIZE = 900
 EMBEDDINGS_DATASET_NAME = "embeddings"
 BINARY_INDEX_DATASET_NAME = "binary_index"
+BINARY_INDEX_ENCODING_KEY = "encoding"
+BINARY_INDEX_ENCODING = "int8-midpoint-sign-v1"
 CALIBRATION_RANGES_DATASET_NAME = "calibration_ranges"
 EMBEDDING_CACHE_SCHEMA_VERSION = 2
 EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS = 900.0
@@ -85,6 +87,10 @@ _PAPER_ROW_COLUMNS = (
     "categories_json, venue, arxiv_id, doi"
 )
 _PAPER_ROW_LOOKUP_COLUMNS = {"paper_id", "row_idx"}
+
+
+class _EmbeddingCacheLayoutError(ValueError):
+    """A proven persisted layout mismatch that requires a namespace rebuild."""
 
 
 def _resolve_cache_lock_timeout_seconds() -> float:
@@ -298,7 +304,7 @@ def _quantize_int8_embeddings(embeddings: np.ndarray, ranges: np.ndarray) -> np.
     sanitized_ranges = _sanitize_ranges(ranges)
     starts = sanitized_ranges[0][None, :]
     steps = ((sanitized_ranges[1] - sanitized_ranges[0]) / 255.0)[None, :]
-    # Select unsigned buckets before the signed offset, as in Sentence Transformers.
+    # Select unsigned buckets before the signed offset so every bucket has equal width.
     buckets = np.clip(np.floor((matrix - starts) / steps), 0.0, 255.0)
     return (buckets - 128.0).astype(np.int8)
 
@@ -664,12 +670,6 @@ class EmbeddingCache:
                 embeddings_array,
                 dtype=_storage_dtype_for_precision(self.storage_precision),
             )
-        binary_embeddings = (
-            _quantize_ubinary_embeddings(embeddings_array)
-            if self.binary_prefilter
-            else None
-        )
-
         with (
             self._cache_lock(),
             self._connect_db() as conn,
@@ -695,6 +695,13 @@ class EmbeddingCache:
                         clipped_value_count=clipped_value_count,
                         total_value_count=clipped_total_value_count,
                     )
+            binary_embeddings = (
+                _quantize_ubinary_embeddings(
+                    self._dequantize_int8(h5, storage_embeddings)
+                )
+                if self.binary_prefilter
+                else None
+            )
 
             existing_row_count = int(embeddings_dataset.shape[0])
             latest_rows = self._load_existing_rows(
@@ -1633,7 +1640,7 @@ class EmbeddingCache:
         self,
         conn: sqlite3.Connection,
         h5_file: h5py.File,
-        embeddings_dataset: h5py.Dataset,
+        embeddings_dataset: Optional[h5py.Dataset],
         *,
         fail_mode: str,
     ) -> None:
@@ -1641,11 +1648,11 @@ class EmbeddingCache:
 
         :param sqlite3.Connection conn: Open SQLite connection for metadata table.
         :param h5py.File h5_file: Open HDF5 cache handle.
-        :param h5py.Dataset embeddings_dataset: Open embeddings matrix dataset.
-        :param str fail_mode: ``"runtime"`` to fail-closed, ``"repair"`` to signal rebuild.
+        :param Optional[h5py.Dataset] embeddings_dataset: Matrix dataset, or None before the first write.
+        :param str fail_mode: ``"runtime"`` to fail-closed, ``"repair"`` to rebuild incompatible layouts.
         :return None: Raises when metadata and payload state diverge.
-        :raises RuntimeError: If inconsistency is found and ``fail_mode == "runtime"``.
-        :raises ValueError: If inconsistency is found and ``fail_mode == "repair"``.
+        :raises RuntimeError: If row mappings are inconsistent or runtime checks fail.
+        :raises ValueError: If a layout mismatch is found in repair mode.
         """
         expected = {
             key: self._metadata_value_from_h5_attr(value)
@@ -1653,18 +1660,30 @@ class EmbeddingCache:
         }
         if self.storage_precision != "int8":
             expected.pop(CALIBRATION_SAMPLE_SIZE_KEY)
+        if embeddings_dataset is None:
+            for key in (
+                COMPRESSION_FILTER_KEY,
+                COMPRESSION_LEVEL_KEY,
+                BINARY_PREFILTER_ENABLED_KEY,
+            ):
+                expected.pop(key)
         metadata = self._load_cache_metadata(conn)
 
-        def _fail(message: str) -> None:
-            """Raise consistency error using mode-specific exception semantics."""
+        def _fail(message: str, *, layout_mismatch: bool = True) -> None:
+            """Raise a layout or row-mapping consistency error.
+
+            :param str message: Observed inconsistency.
+            :param bool layout_mismatch: Whether the persisted layout needs rebuilding.
+            :return None: Always raises the mode-appropriate exception.
+            """
             detail = (
                 "Embedding cache integrity error: "
                 f"{message}. Rebuild this cache namespace to restore consistency."
             )
-            if fail_mode == "runtime":
+            if fail_mode == "runtime" or not layout_mismatch:
                 raise RuntimeError(detail)
             if fail_mode == "repair":
-                raise ValueError(detail)
+                raise _EmbeddingCacheLayoutError(detail)
             raise ValueError(f"Unknown fail_mode={fail_mode!r}")
 
         for key, expected_value in expected.items():
@@ -1679,6 +1698,9 @@ class EmbeddingCache:
                 _fail(
                     f"HDF5 attr {key!r} mismatch ({h5_value!r} != {expected_value!r})"
                 )
+
+        if embeddings_dataset is None:
+            return
 
         target_dtype = _storage_dtype_for_precision(self.storage_precision)
         if np.dtype(embeddings_dataset.dtype) != np.dtype(target_dtype):
@@ -1706,7 +1728,8 @@ class EmbeddingCache:
         if paper_rows != row_count:
             _fail(
                 "embedding row mapping mismatch "
-                f"(metadata rows={paper_rows}, embedding rows={row_count})"
+                f"(metadata rows={paper_rows}, embedding rows={row_count})",
+                layout_mismatch=False,
             )
         valid_rows, distinct_rows = conn.execute(
             """
@@ -1721,16 +1744,17 @@ class EmbeddingCache:
         if int(valid_rows) != row_count or int(distinct_rows) != row_count:
             _fail(
                 "embedding row_idx coverage mismatch "
-                f"(valid={int(valid_rows)}, distinct={int(distinct_rows)}, expected={row_count})"
+                f"(valid={int(valid_rows)}, distinct={int(distinct_rows)}, expected={row_count})",
+                layout_mismatch=False,
             )
 
-    def _recover_trailing_h5_rows(
+    def _recover_trailing_rows(
         self,
         conn: sqlite3.Connection,
         h5_file: h5py.File,
         embeddings_dataset: h5py.Dataset,
     ) -> int:
-        """Truncate HDF5 rows appended before their SQLite transaction committed.
+        """Preserve the shared row prefix after an interrupted append.
 
         :param sqlite3.Connection conn: Open SQLite connection with committed mappings.
         :param h5py.File h5_file: Open HDF5 cache handle.
@@ -1739,18 +1763,14 @@ class EmbeddingCache:
         """
         embedding_rows = int(embeddings_dataset.shape[0])
         paper_rows = int(conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0])
-        if embedding_rows <= paper_rows:
+        if embedding_rows == paper_rows:
             return embedding_rows
 
         valid_rows, distinct_rows, minimum_row, maximum_row = conn.execute(
             """
             SELECT COUNT(row_idx), COUNT(DISTINCT row_idx), MIN(row_idx), MAX(row_idx)
             FROM papers
-            WHERE row_idx IS NOT NULL
-              AND row_idx >= 0
-              AND row_idx < ?
             """,
-            (embedding_rows,),
         ).fetchone()
         committed_prefix_is_complete = bool(
             int(valid_rows) == paper_rows
@@ -1761,6 +1781,18 @@ class EmbeddingCache:
             )
         )
         if not committed_prefix_is_complete:
+            return embedding_rows
+
+        if paper_rows > embedding_rows:
+            logger.warning(
+                "Recovering embedding cache %s by removing %d trailing SQLite "
+                "mapping(s) without persisted vectors; preserving %d row(s).",
+                self.h5_path,
+                paper_rows - embedding_rows,
+                embedding_rows,
+            )
+            conn.execute("DELETE FROM papers WHERE row_idx >= ?", (embedding_rows,))
+            self._set_cache_metadata(conn, {HYDRATION_COMPLETE_KEY: "0"})
             return embedding_rows
 
         orphan_rows = embedding_rows - paper_rows
@@ -1821,14 +1853,14 @@ class EmbeddingCache:
         """
         compression = str(dataset.compression or "").strip().lower()
         if compression not in _COMPRESSION_FILTERS:
-            raise ValueError(
+            raise _EmbeddingCacheLayoutError(
                 "incompatible embedding cache compression filter: "
                 f"{dataset.compression!r}"
             )
 
         if compression == "lzf":
             if dataset.compression_opts is not None:
-                raise ValueError(
+                raise _EmbeddingCacheLayoutError(
                     "incompatible lzf embedding cache compression options: "
                     f"{dataset.compression_opts!r}"
                 )
@@ -1836,7 +1868,7 @@ class EmbeddingCache:
         else:
             compression_options = dataset.compression_opts
             if compression_options is None:
-                raise ValueError(
+                raise _EmbeddingCacheLayoutError(
                     "incompatible gzip embedding cache: missing compression level"
                 )
             compression_level = int(compression_options)
@@ -1858,7 +1890,10 @@ class EmbeddingCache:
         self._effective_compression_level = compression_level
 
     def _ensure_h5_layout(self) -> None:
-        """Ensure cache file uses matrix-based HDF5 layout."""
+        """Recover interrupted appends and rebuild proven incompatible layouts.
+
+        :return None: Preserves valid payloads and propagates IO/open failures.
+        """
         if not self.h5_path.exists():
             with self._connect_db() as conn:
                 self._reset_effective_compression()
@@ -1890,18 +1925,39 @@ class EmbeddingCache:
             ):
                 dataset = self._get_embeddings_dataset(h5)
                 if dataset is None:
-                    raise ValueError("incompatible embedding cache layout")
+                    if (
+                        self.storage_precision == "int8"
+                        and set(h5) == {CALIBRATION_RANGES_DATASET_NAME}
+                        and conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+                        == 0
+                    ):
+                        self._require_calibration_ranges(h5)
+                        self._assert_runtime_cache_consistency(
+                            conn=conn,
+                            h5_file=h5,
+                            embeddings_dataset=None,
+                            fail_mode="repair",
+                        )
+                        self._persist_physical_layout_metadata(conn)
+                        return
+                    raise _EmbeddingCacheLayoutError(
+                        "incompatible embedding cache layout"
+                    )
                 self._adopt_existing_dataset_compression(dataset)
 
                 embedding_dim = int(dataset.shape[1])
                 if self.storage_precision == "int8":
+                    if CALIBRATION_RANGES_DATASET_NAME not in h5:
+                        raise _EmbeddingCacheLayoutError(
+                            "missing int8 calibration ranges"
+                        )
                     self._require_calibration_ranges(h5, embedding_dim)
 
                 # Prefilter state is auxiliary; toggling it does not change vector rows.
                 h5.attrs.modify(
                     BINARY_PREFILTER_ENABLED_KEY, int(self.binary_prefilter)
                 )
-                embedding_rows = self._recover_trailing_h5_rows(
+                embedding_rows = self._recover_trailing_rows(
                     conn=conn,
                     h5_file=h5,
                     embeddings_dataset=dataset,
@@ -1930,11 +1986,12 @@ class EmbeddingCache:
                     del h5[BINARY_INDEX_DATASET_NAME]
 
                 self._ensure_binary_dataset(h5, embedding_dim)
-        except (OSError, RuntimeError, ValueError, sqlite3.DatabaseError):
+        except _EmbeddingCacheLayoutError as exc:
             logger.warning(
                 "Embedding cache %s is incompatible with current schema. "
-                "Clearing namespace cache and rebuilding.",
+                "Clearing namespace cache and rebuilding: %s",
                 self.h5_path,
+                exc,
             )
             self.h5_path.unlink(missing_ok=True)
             self._reset_effective_compression()
@@ -2187,7 +2244,7 @@ class EmbeddingCache:
         if dataset is None:
             return None
         if dataset.ndim != 2:
-            raise ValueError(
+            raise _EmbeddingCacheLayoutError(
                 f"Embedding dataset '{EMBEDDINGS_DATASET_NAME}' must be 2D."
             )
         return dataset
@@ -2234,12 +2291,18 @@ class EmbeddingCache:
         embedding_rows = (
             int(embeddings_dataset.shape[0]) if embeddings_dataset is not None else 0
         )
-        if int(binary_dataset.shape[0]) != embedding_rows:
-            logger.warning(
-                "Rebuilding binary index in %s to cover %d persisted embedding row(s).",
-                self.h5_path,
-                embedding_rows,
-            )
+        if (
+            int(binary_dataset.shape[0]) != embedding_rows
+            or binary_dataset.attrs.get(BINARY_INDEX_ENCODING_KEY)
+            != BINARY_INDEX_ENCODING
+        ):
+            if embedding_rows:
+                logger.warning(
+                    "Rebuilding binary index in %s from %d persisted embedding row(s).",
+                    self.h5_path,
+                    embedding_rows,
+                )
+            binary_dataset.attrs.modify(BINARY_INDEX_ENCODING_KEY, "")
             if embeddings_dataset is None:
                 binary_dataset.resize((0, packed_dim))
             else:
@@ -2248,6 +2311,9 @@ class EmbeddingCache:
                     embeddings_dataset=embeddings_dataset,
                     binary_dataset=binary_dataset,
                 )
+            binary_dataset.attrs.modify(
+                BINARY_INDEX_ENCODING_KEY, BINARY_INDEX_ENCODING
+            )
         return binary_dataset
 
     def _rebuild_binary_dataset(
@@ -2395,16 +2461,20 @@ class EmbeddingCache:
             )
 
         if existing.ndim != 2 or existing.shape[0] != 2:
-            raise ValueError(
+            raise _EmbeddingCacheLayoutError(
                 f"Calibration ranges dataset must have shape (2, dim), got {existing.shape}."
             )
         if embedding_dim is not None and int(existing.shape[1]) != int(embedding_dim):
-            raise ValueError(
+            raise _EmbeddingCacheLayoutError(
                 "Calibration range dimension mismatch in cache: "
                 f"{int(existing.shape[1])} != {int(embedding_dim)}"
             )
 
-        return _sanitize_ranges(np.asarray(existing, dtype=np.float32))
+        ranges = np.asarray(existing, dtype=np.float32)
+        try:
+            return _sanitize_ranges(ranges)
+        except ValueError as exc:
+            raise _EmbeddingCacheLayoutError(str(exc)) from exc
 
     def _dequantize_int8(
         self, h5_file: h5py.File, int8_embeddings: np.ndarray
@@ -2423,8 +2493,9 @@ class EmbeddingCache:
         starts = ranges[0]
         steps = (ranges[1] - ranges[0]) / 255.0
 
-        float_values = int8_embeddings.astype(np.float32) + 128.0
-        return starts + float_values * steps
+        # Reconstruct floor-quantized bucket centres, keeping the final code at max.
+        float_values = int8_embeddings.astype(np.float32) + 128.5
+        return np.minimum(starts + float_values * steps, ranges[1])
 
     def _load_cached_embeddings(
         self,

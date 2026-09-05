@@ -20,7 +20,7 @@ def _default_cache_root() -> Path:
     """
     override = os.getenv("CITEMESH_CACHE_DIR")
     if override:
-        return Path(override)
+        return Path(override).expanduser()
 
     system = platform.system()
 
@@ -33,7 +33,7 @@ def _default_cache_root() -> Path:
     # macOS and Linux share the HuggingFace-style ~/.cache/citemesh layout so
     # cache paths (and config.toml) are predictable across machines.
     xdg_cache = os.getenv("XDG_CACHE_HOME")
-    cache_root = Path(xdg_cache) if xdg_cache else Path.home() / ".cache"
+    cache_root = Path(xdg_cache).expanduser() if xdg_cache else Path.home() / ".cache"
     return cache_root / "citemesh"
 
 
@@ -42,7 +42,9 @@ def legacy_macos_cache_root() -> Path | None:
 
     :return Path | None: Legacy ``~/Library/Caches/citemesh`` path or ``None``.
     """
-    if platform.system() != "Darwin":
+    if platform.system() != "Darwin" or any(
+        os.getenv(name) for name in ("CITEMESH_CACHE_DIR", "XDG_CACHE_HOME")
+    ):
         return None
     legacy = Path.home() / "Library" / "Caches" / "citemesh"
     return legacy if legacy.exists() else None

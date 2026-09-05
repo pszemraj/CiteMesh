@@ -24,6 +24,8 @@ def test_default_cache_root_honors_override_before_platform(
     monkeypatch.setattr(cache_module.platform, "system", lambda: "Windows")
 
     assert cache_module._default_cache_root() == tmp_path
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", "~/paper-cache")
+    assert cache_module._default_cache_root() == Path.home() / "paper-cache"
 
 
 def test_default_cache_root_uses_shared_xdg_layout_on_macos(
@@ -71,6 +73,8 @@ def test_legacy_macos_cache_root_requires_darwin_and_existing_path(
     :return None: Validates legacy cache discovery boundaries.
     """
     monkeypatch.setattr(cache_module.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.delenv("CITEMESH_CACHE_DIR", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
     monkeypatch.setattr(cache_module.platform, "system", lambda: "Linux")
     assert cache_module.legacy_macos_cache_root() is None
 
@@ -80,6 +84,10 @@ def test_legacy_macos_cache_root_requires_darwin_and_existing_path(
     legacy = tmp_path / "Library" / "Caches" / "citemesh"
     legacy.mkdir(parents=True)
     assert cache_module.legacy_macos_cache_root() == legacy
+    for override in ("CITEMESH_CACHE_DIR", "XDG_CACHE_HOME"):
+        monkeypatch.setenv(override, str(tmp_path / "custom"))
+        assert cache_module.legacy_macos_cache_root() is None
+        monkeypatch.delenv(override)
 
 
 def test_atomic_write_text_uses_binary_temp_descriptor(

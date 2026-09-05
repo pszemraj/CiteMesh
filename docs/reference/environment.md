@@ -13,7 +13,7 @@ Related docs:
 | Variable | Default | Accepted values | Runtime effect |
 | --- | --- | --- | --- |
 | `S2_API_KEY` | unset | string | A non-empty value authenticates requests and paces them at 1 request/second. Presence overrides configured `api.s2_api_key`; an empty value intentionally selects the anonymous 0.5 request/second pool. |
-| `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path | Overrides CiteMesh cache root used for embedding/reference caches and the `config.toml` location. |
+| `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path (`~` expanded) | Overrides CiteMesh cache root used for embedding/reference caches and the `config.toml` location. |
 | `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
 
 Implementation references:
@@ -34,6 +34,8 @@ These are not CiteMesh-specific, but CiteMesh honors them when `CITEMESH_CACHE_D
 | `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset. |
 
 Cache-root behavior details are covered in [Guides: Caching & Data](../guides/caching.md).
+Explicit `CITEMESH_CACHE_DIR` or `XDG_CACHE_HOME` overrides suppress the legacy
+macOS cache-location hint.
 
 ## Other Respected Variables
 
