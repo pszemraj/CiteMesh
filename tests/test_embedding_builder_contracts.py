@@ -1199,6 +1199,114 @@ def test_fa2_load_failure_retries_same_checkpoint_with_sdpa(
     assert builder._attention_implementation_hint == "sdpa"
 
 
+def test_verified_fa2_autocast_filters_only_redundant_load_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hide the FP32-weight warning only while verified bf16 FA2 loads.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :return None: Checks exact filtering and cleanup after a successful load.
+    """
+    _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(monkeypatch, cuda_available=True, bf16_supported=True)
+    original_cls = embedding_module._import_sentence_transformer_class()
+    transformers_logger = logging.getLogger("transformers.modeling_utils")
+
+    def load(model_name: str, **kwargs: Any) -> Any:
+        """Emit the upstream warning plus an unrelated load warning.
+
+        :param str model_name: Requested checkpoint.
+        :param Any kwargs: SentenceTransformer constructor arguments.
+        :return Any: Fake loaded model.
+        """
+        transformers_logger.warning(
+            "Flash Attention 2 only supports torch.float16 and torch.bfloat16 "
+            "dtypes, but the current dype is torch.float32."
+        )
+        transformers_logger.warning(
+            "Flash Attention 2 only supports torch.float16 and torch.bfloat16 "
+            "dtypes, but the current dype is torch.float64."
+        )
+        transformers_logger.warning("independent Transformers load warning")
+        return original_cls(model_name, **kwargs)
+
+    monkeypatch.setattr(embedding_module, "_module_available", lambda _name: True)
+    monkeypatch.setattr(
+        embedding_module, "_import_sentence_transformer_class", lambda: load
+    )
+    handler = MagicMock(spec=logging.Handler)
+    handler.level = logging.NOTSET
+    transformers_logger.addHandler(handler)
+    try:
+        EmbeddingGraphBuilder(device="cuda", client=MagicMock())._load_model()
+        transformers_logger.warning(
+            "Flash Attention 2 only supports torch.float16 and torch.bfloat16 "
+            "dtypes after loading."
+        )
+    finally:
+        transformers_logger.removeHandler(handler)
+
+    messages = [call.args[0].getMessage() for call in handler.handle.call_args_list]
+    assert "independent Transformers load warning" in messages
+    assert not any("current dype is torch.float32" in message for message in messages)
+    assert any("current dype is torch.float64" in message for message in messages)
+    assert any("dtypes after loading" in message for message in messages)
+
+
+def test_fa2_load_warning_filter_disabled_preserves_fp32_warning() -> None:
+    """Keep the upstream warning when verified bf16 FA2 is not active.
+
+    :return None: Checks the disabled filter path.
+    """
+    transformers_logger = logging.getLogger("transformers.modeling_utils")
+    handler = MagicMock(spec=logging.Handler)
+    handler.level = logging.NOTSET
+    transformers_logger.addHandler(handler)
+
+    try:
+        with embedding_module._suppress_expected_fa2_load_dtype_warning(enabled=False):
+            transformers_logger.warning(
+                "Flash Attention 2 only supports torch.float16 and torch.bfloat16 "
+                "dtypes, but the current dype is torch.float32."
+            )
+    finally:
+        transformers_logger.removeHandler(handler)
+
+    assert any(
+        "current dype is torch.float32" in call.args[0].getMessage()
+        for call in handler.handle.call_args_list
+    )
+
+
+def test_fa2_load_warning_filter_is_removed_after_failure() -> None:
+    """Restore upstream logging even when model construction raises.
+
+    :return None: Checks filter cleanup on the exceptional path.
+    """
+    transformers_logger = logging.getLogger("transformers.modeling_utils")
+    handler = MagicMock(spec=logging.Handler)
+    handler.level = logging.NOTSET
+    transformers_logger.addHandler(handler)
+
+    try:
+        with pytest.raises(RuntimeError, match="load failed"):
+            with embedding_module._suppress_expected_fa2_load_dtype_warning(
+                enabled=True
+            ):
+                raise RuntimeError("load failed")
+        transformers_logger.warning(
+            "Flash Attention 2 only supports torch.float16 and torch.bfloat16 "
+            "dtypes after failed loading."
+        )
+    finally:
+        transformers_logger.removeHandler(handler)
+
+    assert any(
+        "after failed loading" in call.args[0].getMessage()
+        for call in handler.handle.call_args_list
+    )
+
+
 def test_compile_replaces_and_restores_sentence_transformers_active_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4060,11 +4168,16 @@ def test_int8_hydration_calibration_uses_representative_prepass(
     assert builder.embedding_cache.has_calibration_ranges() is True
 
 
-def test_int8_calibration_uses_percentile_clipping(
+def test_int8_calibration_covers_sample_extrema(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """Calibration ranges should not be dominated by a single extreme outlier."""
+    """Min/max calibration must cover every coordinate in its normalized sample.
+
+    :param pytest.MonkeyPatch monkeypatch: Dependency and cache isolation.
+    :param Any tmp_path: Temporary cache directory.
+    :return None: Checks persisted extrema and absence of sample clipping.
+    """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
 
     builder = EmbeddingGraphBuilder(
@@ -4080,16 +4193,23 @@ def test_int8_calibration_uses_percentile_clipping(
         {"paper_id": f"p{idx}", "title": f"Title {idx}", "abstract": f"Abstract {idx}"}
         for idx in range(101)
     ]
+    sample_embeddings = np.tile(np.asarray([[0.6, -0.8]], dtype=np.float32), (101, 1))
+    sample_embeddings[-1] = [-1.0, 0.0]
 
     def _fake_encode_texts(
         texts: list[str],
         batch_size: int | None = None,
         show_progress_bar: bool = False,
     ) -> np.ndarray:
+        """Return normalized calibration vectors including one rare extreme.
+
+        :param list[str] texts: Unused formatted sample texts.
+        :param int | None batch_size: Unused encoder batch size.
+        :param bool show_progress_bar: Unused progress flag.
+        :return np.ndarray: Fixed FP32 sample.
+        """
         del texts, batch_size, show_progress_bar
-        base = np.zeros((100, 2), dtype=np.float32)
-        outlier = np.full((1, 2), 100.0, dtype=np.float32)
-        return np.vstack((base, outlier))
+        return sample_embeddings
 
     monkeypatch.setattr(builder, "_encode_texts", _fake_encode_texts)
     builder._initialize_calibration_ranges(sample_records)
@@ -4097,9 +4217,31 @@ def test_int8_calibration_uses_percentile_clipping(
     with h5py.File(builder.embedding_cache.h5_path, "r") as h5:
         ranges = np.asarray(h5["calibration_ranges"], dtype=np.float32)
 
-    np.testing.assert_allclose(ranges[0], np.zeros(2, dtype=np.float32))
-    assert np.all(ranges[1] < 100.0)
-    assert np.all(ranges[1] > 0.0)
+    np.testing.assert_array_equal(ranges[0], sample_embeddings.min(axis=0))
+    np.testing.assert_array_equal(ranges[1], sample_embeddings.max(axis=0))
+    assert np.all(sample_embeddings >= ranges[0])
+    assert np.all(sample_embeddings <= ranges[1])
+
+
+def test_int8_calibration_reuses_persisted_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resuming a cache must preserve even older percentile-based ranges.
+
+    :param pytest.MonkeyPatch monkeypatch: Encoder isolation.
+    :return None: Existing ranges survive without re-encoding calibration texts.
+    """
+    builder = EmbeddingGraphBuilder(semantic_source="arxiv-corpus", client=MagicMock())
+    ranges = np.asarray([[-0.1, -0.2], [0.1, 0.2]], dtype=np.float32)
+    builder.embedding_cache.set_calibration_ranges(ranges, embedding_dim=2)
+    encode = MagicMock(side_effect=AssertionError("Unexpected recalibration"))
+    monkeypatch.setattr(builder, "_encode_texts", encode)
+
+    builder._initialize_calibration_ranges([{"title": "New calibration sample"}])
+
+    encode.assert_not_called()
+    with h5py.File(builder.embedding_cache.h5_path, "r") as h5:
+        np.testing.assert_array_equal(h5["calibration_ranges"][:], ranges)
 
 
 def test_hydration_flush_size_controls_cache_write_bursting(
@@ -4976,6 +5118,7 @@ def test_embedding_real_cuda_fa2_compile_executes_graphs() -> None:
         pytest.skip("Native BF16 CUDA unavailable")
     pytest.importorskip("flash_attn")
     from torch._dynamo import config as dynamo_config
+    from transformers import modeling_flash_attention_utils as fa2_utils
 
     builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
     builder._load_model()
@@ -4999,7 +5142,57 @@ def test_embedding_real_cuda_fa2_compile_executes_graphs() -> None:
             ),
         )
     ]
-    eager = builder._encode_texts(texts, batch_size=8)
+    lazy_import_fa2 = fa2_utils.lazy_import_flash_attention
+    fa2_kernel_input_dtypes: list[tuple[torch.dtype, torch.dtype, torch.dtype]] = []
+
+    def capture_fa2_kernels(attention_backend: str) -> Any:
+        """Wrap both dense and variable-length FA2 kernels for dtype capture.
+
+        :param str attention_backend: Requested attention implementation.
+        :return Any: Wrapped kernel tuple and original kwarg processor.
+        """
+        kernels, process_kwargs = lazy_import_fa2(attention_backend)
+        dense_kernel, varlen_kernel, pad_fn, unpad_fn = kernels
+
+        def wrap_kernel(kernel: Any) -> Any:
+            """Wrap one FA2 kernel and record its Q/K/V dtypes.
+
+            :param Any kernel: Dense or variable-length FA2 callable.
+            :return Any: Dtype-recording kernel wrapper.
+            """
+
+            def capture(
+                query: Any, key: Any, value: Any, *args: Any, **kwargs: Any
+            ) -> Any:
+                """Record inputs and invoke the original kernel.
+
+                :param Any query: Query tensor.
+                :param Any key: Key tensor.
+                :param Any value: Value tensor.
+                :param Any args: Additional positional kernel arguments.
+                :param Any kwargs: Additional keyword kernel arguments.
+                :return Any: Original kernel result.
+                """
+                fa2_kernel_input_dtypes.append((query.dtype, key.dtype, value.dtype))
+                return kernel(query, key, value, *args, **kwargs)
+
+            return capture
+
+        return (
+            (wrap_kernel(dense_kernel), wrap_kernel(varlen_kernel), pad_fn, unpad_fn),
+            process_kwargs,
+        )
+
+    fa2_utils.lazy_import_flash_attention = capture_fa2_kernels
+    try:
+        eager = builder._encode_texts(texts, batch_size=8)
+    finally:
+        fa2_utils.lazy_import_flash_attention = lazy_import_fa2
+    assert fa2_kernel_input_dtypes
+    assert all(
+        query_dtype == key_dtype == value_dtype == torch.bfloat16
+        for query_dtype, key_dtype, value_dtype in fa2_kernel_input_dtypes
+    )
     logging_option = (
         "ignore_logging_functions"
         if hasattr(dynamo_config, "ignore_logging_functions")

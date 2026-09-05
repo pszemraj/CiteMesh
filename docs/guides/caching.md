@@ -95,6 +95,18 @@ int8 retrieval cache may contain:
 
 The `binary_index` is an auxiliary retrieval index, not the primary embedding store. Final ranking still uses the cached `int8` or `float32` vectors. For `int8`, calibration ranges must already exist before cache writes begin. Hydration-managed embedding workflows create and persist those ranges before the first int8 cache write; raw `EmbeddingCache` int8 writes now fail closed instead of bootstrapping ranges from an arbitrary request batch. Hydration no longer takes the first-N records for calibration. Instead, it runs a separate representative reservoir-sampling prepass over the active hydration slice and persists ranges before the main cache-write pass begins.
 
+New ranges use each dimension's minimum and maximum over that sample, following
+the [Sentence Transformers scalar quantization guidance](https://www.sbert.net/examples/sentence_transformer/applications/embedding-quantization/README.html#scalar-int8-quantization).
+They cover the entire calibration sample, though later embeddings can still fall
+outside the sampled bounds. Resumes reuse the persisted ranges, including ranges
+created by the earlier 0.1–99.9 percentile policy; updating CiteMesh does not clear
+or recalibrate an existing namespace. Ranges cannot be replaced once int8 rows
+exist, because those same ranges are required to decode the stored bytes.
+The quantizer floors into 256 unsigned buckets, clips out-of-range values, and
+then applies the signed int8 offset, matching Sentence Transformers. Existing
+rows written with the earlier rounding behavior still decode using the same
+scale and offset and remain reusable.
+
 Persistent storage supports only `int8` and `float32` via `--storage-precision`; model runtime compute dtype is configured independently. CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected). `lzf` does not support configurable levels; CiteMesh normalizes level to `0`. Runtime availability still depends on your `h5py` build. Compression is a physical HDF5 layout choice, not part of embedding semantics: an existing valid cache keeps its stored codec and level when reopened, while `--cache-compression` and `--cache-compression-level` apply when a cache is first created or explicitly rebuilt.
 
 SQLite stores metadata authority fields used for warm-cache retrieval:
@@ -143,10 +155,15 @@ All reconciliation steps are ID-aware and append only uncached paper IDs. Before
 
 When switching a namespace from a capped corpus (for example `--corpus-size 50000`) to `--all-corpus`, cache-clear logs report both the requested target and the replaced cached payload. Seeing `requested_corpus=all` alongside `cached_corpus=50000` means CiteMesh is replacing the old capped namespace before hydrating the full split; it does not mean the new run is silently limited to `50000`.
 
-When int8 calibration clipping is detected during a hydration run, CiteMesh emits
-that warning once per cache instance/run and keeps accumulating the underlying
-saturation stats in cache metadata instead of repeating the same warning every
-flush window.
+When at least 0.5% of a write's embedding coordinates fall outside the calibration
+ranges, CiteMesh warns once per cache instance/run and continues accumulating
+clipping statistics in cache metadata. This is a coordinate clipping rate, not a
+measurement of lost retrieval recall or a cache corruption error. A warning alone
+does not require stopping or rebuilding the run. If retrieval quality warrants
+new calibration, use `--force-rebuild-cache` to re-encode the namespace, optionally
+with a larger `--calibration-sample-size`; replacing only the ranges would
+reinterpret existing rows incorrectly. Increasing the sample size changes the
+namespace and starts a separate cache rather than resuming existing rows.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias mutates upstream without changing source name, treat cache reuse as a performance optimization rather than a strict reproducibility guarantee.
 

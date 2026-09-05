@@ -56,6 +56,14 @@ package. Current behavior is described in the linked guides and references:
 
 ## Semantic Discovery
 
+- Filter the redundant Transformers FP32-weight load warning only when verified
+  CUDA BF16 autocast and FA2 are selected, retaining automatic checkpoint dtype
+  loading and other diagnostics. The real CUDA smoke checks BF16 kernel inputs.
+- Use sampled per-dimension min/max for new int8 calibration ranges instead of
+  deliberately clipping the sample's tails, and align signed bucket rounding
+  with Sentence Transformers. Preserve ranges on resume, reject
+  changes that would reinterpret existing int8 rows, and clarify clipping warnings
+  and the requirement to re-encode when changing calibration.
 - Enabled CPU inference freezing during Dynamo capture and GEMM autotuning for
   `--torch-compile`, with scoped configuration and retained eager fallback weights.
   Precision validation now includes model buffers, and final normalization after

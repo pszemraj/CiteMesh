@@ -75,6 +75,11 @@ Notes:
 - bf16-on-MPS requires torch >= 2.13 (the floor verified on Apple Silicon). Older torch releases fall back to float32.
 - CPU BF16 selection checks native x86 or ARM instructions through `torch.cpu.get_capabilities()` where available, or the older x86 BF16 probe. Missing or unverified hardware support keeps CPU compute in float32. When using the precision wrapper, final embedding normalization after dimension truncation runs once in float32 outside autocast; SentenceTransformers' additional encode-time normalization is disabled. The checkpoint's own modules remain intact.
 - Attention selection is model-profile-driven. EmbeddingGemma prefers `flash_attention_2` on CUDA when `flash_attn` is installed and BF16 compute is available. Missing FA2 or FP32 compute selects SDPA; an FA2 model-load failure retries the same checkpoint with SDPA. MPS uses SDPA and CPU leaves attention automatic. Profiles without an explicit preference leave the Transformers backend automatic.
+- FP32 checkpoint weights are compatible with FA2 when encoding uses BF16 autocast:
+  Transformers converts attention inputs to the active autocast dtype before
+  calling FA2. For this verified CUDA path only, CiteMesh filters the upstream
+  FP32-weight warning during model construction. Other load warnings and runtime
+  failures remain visible; weights still load with `dtype="auto"`.
 - CiteMesh does not select OpenVINO or ONNX backends on top of torch.
 - On Ampere+ CUDA devices in eager mode, TF32 is scoped to the CUDA matmul and cuDNN convolution backends for each encode call, then the prior process settings are restored. TF32 configuration is skipped entirely for non-CUDA devices, including `--device cpu` on a CUDA host.
 

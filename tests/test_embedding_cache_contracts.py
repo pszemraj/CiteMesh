@@ -302,6 +302,21 @@ def test_embedding_cache_uses_length_bucketed_encode_batches() -> None:
     assert list(embeddings) == ["p1", "p2", "p3", "p4"]
 
 
+def test_int8_quantization_uses_uniform_buckets_and_clips_tails() -> None:
+    """Signed conversion must not merge the two buckets surrounding zero.
+
+    :return None: Checks SBERT bucket boundaries, offsets, and saturation behavior.
+    """
+    ranges = np.asarray([[0.0, 10.0], [255.0, 265.0]], dtype=np.float32)
+    values = np.asarray([-1.0, 0.0, 0.9, 127.9, 128.9, 255.0, 256.0], dtype=np.float32)
+    embeddings = np.column_stack((values, values + 10.0))
+
+    quantized = embedding_cache_module._quantize_int8_embeddings(embeddings, ranges)
+
+    expected = np.asarray([-128, -128, -128, -1, 0, 127, 127], dtype=np.int8)
+    np.testing.assert_array_equal(quantized, np.column_stack((expected, expected)))
+
+
 def test_embedding_cache_upsert_records_int8_saturation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -383,10 +398,49 @@ def test_embedding_cache_int8_saturation_warning_emits_once_per_run(
         ]
         assert len(warning_messages) == 1
         assert "Further warnings are suppressed for this run" in warning_messages[0]
+        assert "not retrieval recall" in warning_messages[0]
+        assert "--force-rebuild-cache" in warning_messages[0]
+        assert cache.h5_path.name in warning_messages[0]
 
         with h5py.File(cache.h5_path, "r") as h5:
             assert int(h5.attrs[INT8_CLIPPED_VALUE_COUNT_KEY]) == 4
             assert int(h5.attrs[INT8_TOTAL_VALUE_COUNT_KEY]) == 4
+
+
+@pytest.mark.parametrize("populated", [False, True])
+def test_embedding_cache_calibration_changes_require_empty_cache(
+    tmp_path: Path, populated: bool
+) -> None:
+    """Replacing ranges must never reinterpret already stored int8 embeddings.
+
+    :param Path tmp_path: Isolated persistent cache directory.
+    :param bool populated: Whether the cache already contains an encoded row.
+    :return None: Range changes preserve existing vectors or apply to an empty cache.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="fixed-ranges")
+    ranges = np.asarray([[-1.0, -1.0], [1.0, 1.0]], dtype=np.float32)
+    cache.set_calibration_ranges(ranges, embedding_dim=2)
+    if populated:
+        cache.upsert_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            LookupEncodeModel(
+                {"Alpha. First": np.asarray([0.6, 0.8], dtype=np.float32)}
+            ),
+            show_progress=False,
+        )
+        with h5py.File(cache.h5_path, "r") as h5:
+            stored = h5["embeddings"][:]
+        cache = EmbeddingCache(cache_dir=tmp_path, model_name="fixed-ranges")
+        with pytest.raises(ValueError, match="Cannot change int8 calibration ranges"):
+            cache.set_calibration_ranges(ranges * 2, embedding_dim=2)
+        cache.set_calibration_ranges(ranges, embedding_dim=2)
+        with h5py.File(cache.h5_path, "r") as h5:
+            np.testing.assert_array_equal(h5["calibration_ranges"][:], ranges)
+            np.testing.assert_array_equal(h5["embeddings"][:], stored)
+    else:
+        cache.set_calibration_ranges(ranges * 2, embedding_dim=2)
+        with h5py.File(cache.h5_path, "r") as h5:
+            np.testing.assert_array_equal(h5["calibration_ranges"][:], ranges * 2)
 
 
 def test_embedding_cache_repeated_attribute_updates_do_not_bloat_hdf5_metadata(

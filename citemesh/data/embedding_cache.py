@@ -298,8 +298,9 @@ def _quantize_int8_embeddings(embeddings: np.ndarray, ranges: np.ndarray) -> np.
     sanitized_ranges = _sanitize_ranges(ranges)
     starts = sanitized_ranges[0][None, :]
     steps = ((sanitized_ranges[1] - sanitized_ranges[0]) / 255.0)[None, :]
-    scaled = (matrix - starts) / steps - 128.0
-    return np.clip(scaled, -128.0, 127.0).astype(np.int8)
+    # Select unsigned buckets before the signed offset, as in Sentence Transformers.
+    buckets = np.clip(np.floor((matrix - starts) / steps), 0.0, 255.0)
+    return (buckets - 128.0).astype(np.int8)
 
 
 def _quantize_ubinary_embeddings(embeddings: np.ndarray) -> np.ndarray:
@@ -1042,6 +1043,7 @@ class EmbeddingCache:
         :param np.ndarray ranges: Range matrix with shape ``(2, embedding_dim)``.
         :param int embedding_dim: Embedding dimension used for validation.
         :return None: Mutates HDF5 state in-place.
+        :raises ValueError: If changing ranges would reinterpret existing int8 rows.
         """
         if self.storage_precision != "int8":
             return
@@ -1067,6 +1069,16 @@ class EmbeddingCache:
                     raise ValueError(
                         "Existing calibration range shape mismatch: "
                         f"{dataset.shape} != {sanitized.shape}."
+                    )
+                embeddings = h5.get(EMBEDDINGS_DATASET_NAME)
+                if (
+                    embeddings is not None
+                    and embeddings.shape[0] > 0
+                    and not np.array_equal(dataset[:], sanitized)
+                ):
+                    raise ValueError(
+                        "Cannot change int8 calibration ranges after storing embeddings. "
+                        "Rebuild the cache namespace to re-encode with new ranges."
                     )
                 dataset[...] = sanitized
 
@@ -1100,8 +1112,8 @@ class EmbeddingCache:
             and not self._int8_saturation_warning_emitted
         ):
             logger.warning(
-                "Int8 calibration saturation detected for %s: %.2f%% of values were clipped in this write (cumulative %.2f%% across cached writes). Further warnings are suppressed for this run; rebuild calibration ranges if recall degrades.",
-                self.model_name,
+                "Int8 calibration saturation detected in %s: %.2f%% of values were clipped in this write (cumulative %.2f%% across cached writes). This measures clipped coordinates, not retrieval recall. Resume keeps the saved ranges; changing them requires re-encoding this namespace with --force-rebuild-cache. Further warnings are suppressed for this run.",
+                self.h5_path.name,
                 saturation_ratio * 100.0,
                 cumulative_ratio * 100.0,
             )

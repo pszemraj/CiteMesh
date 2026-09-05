@@ -87,6 +87,9 @@ if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
 
 logger = logging.getLogger(__name__)
+_FA2_LOAD_DTYPE_WARNING_PREFIX = (
+    "Flash Attention 2 only supports torch.float16 and torch.bfloat16 dtypes"
+)
 _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
 # bf16-on-MPS is only enabled on torch releases verified on Apple Silicon; this is
 # a policy floor, not a hard technical cliff — lower it once older wheels are vetted.
@@ -138,6 +141,41 @@ _FORMATTER_FINGERPRINT_PROBES = (
     {"title": "", "abstract": "Beta"},
     {"title": "  Alpha  ", "abstract": "  Beta  "},
 )
+
+
+@contextmanager
+def _suppress_expected_fa2_load_dtype_warning(*, enabled: bool) -> Iterator[None]:
+    """Suppress Transformers' redundant FA2 warning for verified bf16 autocast.
+
+    Transformers validates the checkpoint weight dtype before the first forward
+    pass, so automatic FP32 weights trigger a warning even though its FA2 adapter
+    uses the active CUDA autocast dtype for attention inputs.
+
+    :param bool enabled: Whether verified CUDA bf16 autocast and FA2 are active.
+    :return Iterator[None]: Scoped logging filter context.
+    """
+    if not enabled:
+        yield
+        return
+
+    def keep_relevant_warning(record: logging.LogRecord) -> bool:
+        """Reject only the expected FP32 checkpoint warning.
+
+        :param logging.LogRecord record: Candidate Transformers log record.
+        :return bool: Whether the log record should be emitted.
+        """
+        message = record.getMessage()
+        return not (
+            message.startswith(_FA2_LOAD_DTYPE_WARNING_PREFIX)
+            and " is torch.float32." in message
+        )
+
+    transformers_logger = logging.getLogger("transformers.modeling_utils")
+    transformers_logger.addFilter(keep_relevant_warning)
+    try:
+        yield
+    finally:
+        transformers_logger.removeFilter(keep_relevant_warning)
 
 
 class EmbeddingTask(str, Enum):
@@ -579,8 +617,6 @@ HYDRATION_FLUSH_SIZE = EMBEDDING_DATASET_CHUNK_ROWS
 CANDIDATE_MULTIPLIER = 4
 CITATION_COUNT_ENRICHMENT_LIMIT = 20
 CALIBRATION_RESERVOIR_SEED = 0
-CALIBRATION_LOWER_PERCENTILE = 0.1
-CALIBRATION_UPPER_PERCENTILE = 99.9
 ARXIV_DATASET_CANDIDATES = (
     "librarian-bots/arxiv-metadata-snapshot",
     "CShorten/ML-ArXiv-Papers",
@@ -2383,9 +2419,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     if self.model_revision is not None:
                         st_kwargs["revision"] = self.model_revision
                     try:
-                        loaded_model = sentence_transformer_cls(
-                            candidate_model, **st_kwargs
-                        )
+                        with _suppress_expected_fa2_load_dtype_warning(
+                            enabled=(
+                                self._attention_implementation_hint
+                                == "flash_attention_2"
+                                and self._autocast_enabled
+                                and self._autocast_device_type == "cuda"
+                            )
+                        ):
+                            loaded_model = sentence_transformer_cls(
+                                candidate_model, **st_kwargs
+                            )
                     except Exception as exc:
                         if self._attention_implementation_hint != "flash_attention_2":
                             raise
@@ -4238,10 +4282,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             batch_size=self.encode_batch_size,
             show_progress_bar=False,
         )
-        ranges = np.percentile(
-            sample_embeddings,
-            [CALIBRATION_LOWER_PERCENTILE, CALIBRATION_UPPER_PERCENTILE],
-            axis=0,
+        ranges = np.stack(
+            (sample_embeddings.min(axis=0), sample_embeddings.max(axis=0))
         ).astype(np.float32)
         self.embedding_cache.set_calibration_ranges(
             ranges=ranges,
