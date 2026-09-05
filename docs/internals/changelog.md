@@ -38,6 +38,10 @@ package. Current behavior is described in the linked guides and references:
 
 ## Configuration and Search
 
+- Unified help across all commands with Rich formatting, concise usage lines,
+  grouped build settings, and examples. Simplified cache/config tables and gave
+  search titles more room while retaining copyable full IDs and raw config
+  value/path output. See [CLI Usage](../guides/cli.md#help-and-console-output).
 - Persist successful single and batch Semantic Scholar paper metadata lookups,
   so reruns resolve cached seeds before contacting the API and batch requests
   fetch only missing IDs. Metadata is shared across known paper ID aliases.

@@ -499,7 +499,7 @@ def test_search_command_prints_results_to_stdout(
     mock_client.search_papers.return_value = [
         Paper(
             paper_id=long_paper_id,
-            title="Attention Is All You Need",
+            title="[Attention] Is All You Need [/bold]",
             year=2017,
             authors=[Author(name="Ashish Vaswani")],
             citation_count=12345,
@@ -513,6 +513,8 @@ def test_search_command_prints_results_to_stdout(
     assert "Search results for 'attention'" in result.stdout
     assert "Full paper IDs:" in result.stdout
     assert long_paper_id in result.stdout
+    assert result.stdout.count(long_paper_id) == 1
+    assert "[Attention] Is All You Need [/bold]" in result.stdout
 
 
 def _fake_local_search_builder(
@@ -3096,8 +3098,16 @@ def test_programmatic_strategy_dispatch_validates_scalar_contracts(
     assert captured == {}
 
 
-def test_cli_help_contracts() -> None:
-    """CLI help output should expose stable semantic contracts."""
+@pytest.mark.parametrize("width", [60, 80, 120])
+def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every command should expose its help without color leaks or clipped lines.
+
+    :param int width: Simulated terminal width in columns.
+    :param pytest.MonkeyPatch monkeypatch: Environment override fixture.
+    :return None: Assertions verify help content, wrapping, and stream routing.
+    """
+    monkeypatch.setenv("COLUMNS", str(width))
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
     cases = [
         (
             ["--help"],
@@ -3132,12 +3142,23 @@ def test_cli_help_contracts() -> None:
             ],
         ),
         (["search", "--help"], ["search", "--limit"]),
-        (["cache", "--help"], ["clear", "scan"]),
+        (["cache", "--help"], ["clear", "scan", "Examples"]),
+        (["cache", "scan", "--help"], ["cache scan", "--log-level"]),
+        (["cache", "clear", "--help"], ["cache clear", "--yes", "config.toml"]),
+        (["config", "--help"], ["config", "set", "unset", "Examples"]),
+        (["config", "list", "--help"], ["config list", "--log-level"]),
+        (["config", "get", "--help"], ["config get KEY", "Dotted config key"]),
+        (["config", "set", "--help"], ["config set KEY VALUE", "comma-separated"]),
+        (["config", "unset", "--help"], ["config unset KEY", "Dotted config key"]),
+        (["config", "path", "--help"], ["config path", "--log-level"]),
     ]
     for args, expected_tokens in cases:
         result = run_cli_command(args)
         assert result.returncode == 0
-        lowered = result.stdout.lower()
+        assert result.stderr == ""
+        assert "\x1b[" not in result.stdout
+        assert max(map(len, result.stdout.splitlines())) <= width
+        lowered = " ".join(result.stdout.lower().split())
         for token in expected_tokens:
             assert token.lower() in lowered
 
@@ -3299,7 +3320,10 @@ def test_documented_cli_examples_are_parseable() -> None:
     for argv in commands:
         if any(token.startswith("[") or token.endswith("]") for token in argv):
             continue
-        parser.parse_args(argv)
+        try:
+            parser.parse_args(argv)
+        except SystemExit as exc:
+            assert exc.code == 0, f"Invalid documented command: {argv}"
 
 
 def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -31,9 +31,12 @@ from typing import (
 
 import networkx as nx
 from filelock import FileLock, Timeout
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group
 from rich.logging import RichHandler
 from rich.table import Table
+from rich.text import Text
+from rich_argparse import RichHelpFormatter
 
 from citemesh._runtime import stderr_isatty, stdin_isatty, stdout_isatty
 from citemesh.core import EMBEDDING_STORAGE_CONFIG
@@ -126,6 +129,71 @@ _LOGGING_CONFIGURED = False
 logger = logging.getLogger(__name__)
 _TRACKED_OPTION_DESTS_ATTR = "_citemesh_provided_option_dests"
 _TRACKED_ACTION_CACHE: Dict[type[argparse.Action], type[argparse.Action]] = {}
+
+
+class _HelpFormatter(RichHelpFormatter):
+    """Style argparse help without interpreting dataset slices as markup."""
+
+    styles = {
+        **RichHelpFormatter.styles,
+        "argparse.groups": "bold",
+        "argparse.args": "cyan",
+        "argparse.metavar": "dim cyan",
+        "argparse.prog": "bold cyan",
+    }
+    group_name_formatter = str
+    help_markup = False
+    text_markup = False
+
+    def __init__(self, prog: str) -> None:
+        """Keep option columns readable on both narrow and wide terminals.
+
+        :param str prog: Command name supplied by argparse.
+        :return None: Initialize the help renderer.
+        """
+        super().__init__(
+            prog,
+            max_help_position=32,
+            width=min(110, shutil.get_terminal_size().columns - 2),
+        )
+
+
+def _help_examples(*examples: tuple[str, str]) -> Table:
+    """Render labeled command examples that wrap with the help's terminal width.
+
+    :param tuple[str, str] examples: Description and command pairs.
+    :return Table: Borderless, single-column example block.
+    """
+    table = Table(
+        box=None,
+        show_header=False,
+        padding=(0, 2),
+        leading=1,
+        title="Examples:",
+        title_style="bold",
+        title_justify="left",
+    )
+    for label, command in examples:
+        table.add_row(Text.assemble((label + "\n", "dim"), (command + "\n", "cyan")))
+    return table
+
+
+def _output_table(title: str) -> Table:
+    """Create the shared compact table style for human-readable CLI results.
+
+    :param str title: Literal table title.
+    :return Table: Table with light rules and a left-aligned title.
+    """
+    return Table(
+        title=Text(title),
+        title_style="bold",
+        title_justify="left",
+        box=box.SIMPLE_HEAD,
+        border_style="dim",
+        header_style="bold",
+        padding=(0, 1),
+        collapse_padding=True,
+    )
 
 
 def _tracking_action_class(
@@ -369,23 +437,27 @@ def _add_logging_arguments(
         default_log_width = argparse.SUPPRESS
         default_log_file = argparse.SUPPRESS
 
-    target.add_argument(
+    group = target.add_argument_group("Logging")
+    group.add_argument(
         "--log-level",
+        metavar="LEVEL",
         choices=list(LOG_LEVEL_CHOICES),
         default=default_log_level,
-        help="Console log level (default: info)",
+        help="Console verbosity: debug, info, warning, error (default: info)",
     )
-    target.add_argument(
+    group.add_argument(
         "--log-width",
+        metavar="COLS",
         type=_non_negative_int,
         default=default_log_width,
-        help="Rich console wrap width in columns (0 = auto width; default: 0)",
+        help="Output/log width in columns; 0 uses terminal width (default: 0)",
     )
-    target.add_argument(
+    group.add_argument(
         "--log-file",
+        metavar="PATH",
         type=_non_empty_str,
         default=default_log_file,
-        help="Optional plain-text log file path (overwrites existing file).",
+        help="Write plain-text logs to PATH (overwrites an existing file)",
     )
 
 
@@ -1376,161 +1448,172 @@ def _create_parser() -> Tuple[
         Root parser, build subcommand parser, cache subcommand parser,
         config subcommand parser.
     """
-    root_logging_parent = argparse.ArgumentParser(add_help=False)
-    _add_logging_arguments(root_logging_parent)
-    command_logging_parent = argparse.ArgumentParser(add_help=False)
-    _add_logging_arguments(command_logging_parent, suppress_defaults=True)
-
     parser = argparse.ArgumentParser(
-        description="CiteMesh: Create citation graph visualizations",
-        parents=[root_logging_parent],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Citation-based graph (fast, uses S2 API)
-  citemesh build "arxiv:1706.03762" --strategy citation
-
-  # Recommendation graph (semantic-aware by default)
-  citemesh build "arxiv:1706.03762"
-
-  # Embedding-based graph (semantic similarity)
-  citemesh build "arxiv:1706.03762" --strategy embedding
-
-  # Hybrid approach (combines both)
-  citemesh build "arxiv:1706.03762" --strategy hybrid
-
-  # Custom output path
-  citemesh build "10.1038/nature14539" -o my_graph.png
-
-  # Quick test with fewer papers
-  citemesh build "arxiv:1810.04805" -p 20 --strategy citation
-
-Environment variables:
-  S2_API_KEY                                      Semantic Scholar API key (higher rate limits)
-  CITEMESH_CACHE_DIR                              Override cache directory location
-  CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS   Embedding cache lock timeout (default: 900s)
-
-User configuration:
-  Persistent defaults live in <cache_root>/config.toml (see `citemesh config --help`).
-  Precedence: explicit CLI flag > environment variable > config.toml > built-in default.
-
-  # Always default to corpus-backed semantic sourcing
-  citemesh config set defaults.semantic_source arxiv-corpus
-        """,
+        prog="citemesh",
+        description="CiteMesh — discover related research and build paper graphs.",
+        epilog=Group(
+            _help_examples(
+                (
+                    "Build a graph from a known paper",
+                    'citemesh build "arxiv:1706.03762" --strategy hybrid',
+                ),
+                ("Find a seed paper", 'citemesh search "attention mechanisms"'),
+                ("Inspect local storage", "citemesh cache scan"),
+            ),
+            Text(
+                "\nUse citemesh COMMAND --help for command-specific options.",
+                style="dim",
+            ),
+            Text("\nEnvironment", style="bold"),
+            Text(
+                "  S2_API_KEY          Semantic Scholar API key (higher rate limits)\n"
+                "  CITEMESH_CACHE_DIR  Override the cache directory"
+            ),
+            Text("\nPersonal defaults: citemesh config --help", style="dim"),
+        ),
     )
 
     subparsers = parser.add_subparsers(
         dest="command",
-        help="Commands",
+        title="Commands",
+        metavar="COMMAND",
     )
 
     # Build command
     build_parser = subparsers.add_parser(
         "build",
-        help="Build and visualize paper graph",
-        parents=[command_logging_parent],
+        help="Build a graph from a paper or topic",
+        description="Discover related papers using recommendations, citations, embeddings, or a hybrid of citations and embeddings.",
+        epilog=_help_examples(
+            (
+                "Create or extend an offline dashboard collection",
+                'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -o research',
+            ),
+            (
+                "Search 10,000 recent papers by topic",
+                'citemesh build "long-context models" -s embedding --corpus-size 10000',
+            ),
+        ),
     )
 
     # Required arguments
     build_parser.add_argument(
         "paper_id",
         type=_non_empty_str,
-        help="Paper identifier (DOI, arXiv ID, or S2 ID)",
+        metavar="PAPER",
+        help="DOI, arXiv ID/URL, S2 ID, or free text with --strategy embedding",
     )
 
+    graph_group = build_parser.add_argument_group("Graph")
+    export_group = build_parser.add_argument_group("Output")
+    citation_group = build_parser.add_argument_group("Citations and references")
+    semantic_group = build_parser.add_argument_group(
+        "Semantic discovery", "For embedding and hybrid strategies."
+    )
+    embedding_group = build_parser.add_argument_group("Embedding runtime")
+    corpus_group = build_parser.add_argument_group(
+        "arXiv corpus",
+        "These options select arxiv-corpus sourcing when --semantic-source is omitted.",
+    )
+    storage_group = build_parser.add_argument_group("Embedding cache")
+    hybrid_group = build_parser.add_argument_group("Hybrid expansion")
+
     # Strategy selection
-    build_parser.add_argument(
+    graph_group.add_argument(
         "--strategy",
         "-s",
+        metavar="NAME",
         type=str,
         choices=["recommendation", "citation", "embedding", "hybrid"],
         default="recommendation",
-        help="Graph building strategy (default: recommendation)",
+        help="recommendation, citation, embedding, hybrid (default: recommendation)",
     )
 
     # Common arguments
-    build_parser.add_argument(
+    export_group.add_argument(
         "--output",
         "-o",
         type=str,
         default=None,
         help=(
-            "Output file path for single export, or output/collection root for "
-            "multi-export runs. With dashboard export, an explicit "
-            "*.dashboard.html path keeps standalone mode; otherwise CiteMesh "
-            "writes dashboard.html + dashboard.citemesh.json under the output root."
+            "File or output directory (default: auto-named). Dashboard writes "
+            "dashboard.html + dashboard.citemesh.json; use *.dashboard.html for a standalone file."
         ),
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--export",
         "-e",
+        metavar="FORMAT",
         choices=[*EXPORT_FORMATS, "all"],
         action="append",
         default=None,
         help=(
-            "Export format; repeat for multiple (default: png). Dashboard export "
-            "normally uses collection mode (shared dashboard.html + one portable "
-            "dashboard.citemesh.json package). Use -o <name>.dashboard.html for "
-            "a standalone one-file dashboard."
+            "png, html, plotly, dashboard, json, csv, bibtex, graphml, all; "
+            "repeat for multiple (default: png)."
         ),
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--theme",
+        metavar="THEME",
         choices=["light", "dark", "solarized", "auto"],
         default="dark",
-        help="Visualization theme to use",
+        help="light, dark, solarized, auto (default: %(default)s)",
     )
 
-    build_parser.add_argument(
+    graph_group.add_argument(
         "--max-papers",
         "-p",
         type=_positive_int,
+        metavar="N",
         default=40,
         help=(
-            "Maximum papers in final graph (seed included; default: 40; "
-            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_PAPERS})"
+            "Maximum papers including the seed (default: 40; "
+            f"hybrid: {HYBRID_DEFAULT_MAX_PAPERS})"
         ),
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--spring-iterations",
         "-i",
         type=_positive_int,
+        metavar="N",
         default=100,
         help="Spring fallback layout iterations (default: 100)",
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--dpi",
         "-d",
         type=_positive_int,
+        metavar="N",
         default=150,
         help="Output image resolution (default: 150)",
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--seed",
         type=int,
+        metavar="N",
         default=None,
         help=(
             "Seed for deterministic layout generation in layout-based exports "
             "(default: deterministic built-in seed)"
         ),
     )
-    build_parser.add_argument(
+    export_group.add_argument(
         "--include-timestamp",
         action="store_true",
         help="Include generation timestamp in output metadata annotations",
     )
 
     # Citation strategy arguments
-    citation_group = build_parser.add_argument_group("citation strategy options")
     citation_group.add_argument(
         "--max-citations",
         "-c",
         type=_non_negative_int,
+        metavar="N",
         default=25,
         help=(
             "Maximum citing papers to fetch (default: 25; "
@@ -1542,6 +1625,7 @@ User configuration:
         "--max-references",
         "-r",
         type=_non_negative_int,
+        metavar="N",
         default=25,
         help=(
             "Maximum referenced papers to fetch (default: 25; "
@@ -1553,6 +1637,7 @@ User configuration:
         "--similarity-threshold",
         "-t",
         type=_threshold_float,
+        metavar="SCORE",
         default=0.2,
         help="Minimum edge similarity for citation/recommendation strategies (default: 0.2)",
     )
@@ -1572,21 +1657,21 @@ User configuration:
     )
 
     # Embedding strategy arguments
-    embedding_group = build_parser.add_argument_group("embedding strategy options")
     embedding_group.add_argument(
         "--model",
         "-m",
         type=_non_empty_str,
         default=DEFAULT_EMBEDDING_MODEL_NAME,
-        help="Sentence transformer model name",
+        help="Model name or local checkpoint path (default: %(default)s)",
     )
     embedding_group.add_argument(
         "--model-profile",
+        metavar="PROFILE",
         choices=list(EMBEDDING_MODEL_PROFILE_CHOICES),
         default="auto",
         help=(
-            "Embedding task/runtime profile (default: auto; use an explicit "
-            "profile for stripped local exports)"
+            "auto, default, embeddinggemma (default: auto). "
+            "Use an explicit profile for stripped local exports."
         ),
     )
     embedding_group.add_argument(
@@ -1599,7 +1684,7 @@ User configuration:
         ),
     )
 
-    embedding_group.add_argument(
+    corpus_group.add_argument(
         "--dataset-split",
         type=_non_empty_str,
         default="train",
@@ -1609,34 +1694,36 @@ User configuration:
         ),
     )
 
-    embedding_group.add_argument(
+    corpus_group.add_argument(
         "--corpus-size",
         type=_positive_int,
+        metavar="N",
         default=50000,
         help=(
-            "Maximum papers to embed/cache after scanning the selected split for "
-            "the most recently submitted (default: 50000; use --all-corpus to "
-            "remove cap)"
+            "Cache the N newest submissions after scanning the split "
+            "(default: 50000; --all-corpus removes the cap)"
         ),
     )
 
-    embedding_group.add_argument(
+    corpus_group.add_argument(
         "--all-corpus",
         action="store_true",
         help="Disable corpus cap and process the full selected split",
     )
 
-    embedding_group.add_argument(
+    semantic_group.add_argument(
         "--top-k",
         "-k",
         type=_positive_int,
+        metavar="N",
         default=4,
-        help="Top-k neighbors per node (default: 4)",
+        help="Neighbors per node for the embedding strategy only (default: 4)",
     )
 
     embedding_group.add_argument(
         "--truncate-dim",
         type=_positive_int,
+        metavar="N",
         default=None,
         help=(
             "Optional embedding output dimension truncation "
@@ -1645,7 +1732,7 @@ User configuration:
         ),
     )
 
-    streaming_group = embedding_group.add_mutually_exclusive_group()
+    streaming_group = corpus_group.add_mutually_exclusive_group()
     streaming_group.add_argument(
         "--streaming",
         dest="streaming",
@@ -1660,12 +1747,12 @@ User configuration:
     )
     build_parser.set_defaults(streaming=False)
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--force-rebuild-cache",
         action="store_true",
         help="Forcefully clear and rebuild embedding cache for this model before running.",
     )
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--overwrite-cache",
         action="store_true",
         help=(
@@ -1673,7 +1760,7 @@ User configuration:
             "skip interactive confirmation."
         ),
     )
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--cache-overwrite-reason",
         type=str,
         default=None,
@@ -1683,19 +1770,20 @@ User configuration:
         ),
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--storage-precision",
+        metavar="PRECISION",
         choices=["int8", "float32"],
         default=EMBEDDING_STORAGE_CONFIG.storage_precision,
-        help=("Persistent embedding cache precision (default: %(default)s)"),
+        help="Persistent vectors (default: int8 for corpus, float32 for candidates)",
     )
 
-    binary_prefilter_group = embedding_group.add_mutually_exclusive_group()
+    binary_prefilter_group = storage_group.add_mutually_exclusive_group()
     binary_prefilter_group.add_argument(
         "--binary-prefilter",
         dest="binary_prefilter",
         action="store_true",
-        help="Enable binary Hamming prefilter + rescoring (recommended for large corpora).",
+        help="Binary Hamming prefilter + rescoring (default: on for int8 corpus)",
     )
     binary_prefilter_group.add_argument(
         "--no-binary-prefilter",
@@ -1707,18 +1795,20 @@ User configuration:
         binary_prefilter=EMBEDDING_STORAGE_CONFIG.binary_prefilter
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--binary-rescore-multiplier",
         type=_positive_int,
+        metavar="N",
         default=EMBEDDING_STORAGE_CONFIG.binary_rescore_multiplier,
         help=(
             "Oversampling factor for binary prefilter rescoring (default: %(default)s)"
         ),
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--calibration-sample-size",
         type=_positive_int,
+        metavar="N",
         default=EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         help=(
             "Calibration sample size for int8 quantization ranges "
@@ -1726,20 +1816,19 @@ User configuration:
         ),
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--cache-compression",
+        metavar="FILTER",
         type=str,
         choices=list(_CACHE_COMPRESSION_CHOICES),
         default=EMBEDDING_STORAGE_CONFIG.compression,
-        help=(
-            "HDF5 compression filter for embedding cache datasets "
-            "(default: %(default)s)"
-        ),
+        help=("HDF5 compression: gzip, lzf (default: %(default)s)"),
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--cache-compression-level",
         type=_non_negative_int,
+        metavar="N",
         default=EMBEDDING_STORAGE_CONFIG.compression_level,
         help=(
             "HDF5 compression level for embedding cache datasets (default: %(default)s; "
@@ -1750,6 +1839,7 @@ User configuration:
     embedding_group.add_argument(
         "--encode-batch-size",
         type=_positive_int,
+        metavar="N",
         default=ENCODE_BATCH_SIZE,
         help=(
             "Batch size for embedding model encode passes during hydration/search "
@@ -1775,23 +1865,22 @@ User configuration:
     )
     build_parser.set_defaults(torch_compile=False)
 
-    embedding_group.add_argument(
+    semantic_group.add_argument(
         "--semantic-source",
+        metavar="SOURCE",
         dest="semantic_source",
         choices=list(SEMANTIC_SOURCE_CHOICES),
         default="candidates",
         help=(
-            "Semantic candidate sourcing: 'candidates' embeds only S2 seed "
-            "neighbors (references/citations/recommendations; fast, no local "
-            "corpus); 'arxiv-corpus' hydrates a local arXiv corpus. Corpus-only "
-            "flags imply arxiv-corpus for backwards compatibility "
-            "(default: %(default)s)."
+            "candidates embeds S2 seed neighbors; arxiv-corpus builds a local "
+            "corpus (default: %(default)s). Corpus flags imply arxiv-corpus."
         ),
     )
-    embedding_group.add_argument(
+    semantic_group.add_argument(
         "--candidate-pool-size",
         dest="candidate_pool_size",
         type=_positive_int,
+        metavar="N",
         default=DEFAULT_CANDIDATE_POOL_SIZE,
         help=(
             "Maximum S2 candidate pool size fetched in candidates mode "
@@ -1800,27 +1889,25 @@ User configuration:
     )
     embedding_group.add_argument(
         "--device",
+        metavar="DEVICE",
         dest="device",
         choices=list(EMBEDDING_DEVICE_CHOICES),
         default="auto",
         help=(
-            "Compute device for embedding model runs. 'auto' prefers CUDA, then "
-            "MPS (Apple Silicon), then CPU; explicit unavailable devices fail "
-            "fast (default: %(default)s)."
+            "auto, cuda, mps, cpu (default: auto). Auto prefers CUDA, "
+            "then MPS (Apple Silicon), then CPU."
         ),
     )
 
     # Hybrid strategy arguments
-    hybrid_group = build_parser.add_argument_group("hybrid strategy options")
     hybrid_group.add_argument(
         "--max-semantic",
         type=_non_negative_int,
+        metavar="N",
         default=None,
         help=(
-            "Maximum non-seed semantic papers to add (must be <= max-papers - 1). "
-            "When omitted, hybrid uses implicit citation-depth reservation before "
-            "semantic expansion (default cap: "
-            f"min({DEFAULT_MAX_SEMANTIC}, max-papers - 1))."
+            "Semantic additions, at most max-papers - 1; 0 disables embeddings. "
+            f"Default: reserve citation depth, then add up to {DEFAULT_MAX_SEMANTIC}."
         ),
     )
 
@@ -1829,34 +1916,47 @@ User configuration:
         "search",
         help="Search papers (local semantic index or the Semantic Scholar API)",
         description=(
-            "Find papers to pass to `citemesh build`. Mode `local` runs "
-            "semantic search over the embeddings already persisted in your "
-            "local cache (candidate vectors accumulated across builds, or a "
-            "hydrated corpus) with no Semantic Scholar traffic. Mode `s2` "
-            "runs keyword search on the Semantic Scholar API (shares an "
-            "anonymous rate-limit pool unless S2_API_KEY is set). The default "
-            "mode `auto` searches locally when your cache has embeddings and "
-            "falls back to `s2` otherwise, logging which one ran. Persist a "
-            "preference with `citemesh config set defaults.search_mode "
-            "<mode>`."
+            "Find papers to pass to citemesh build. Auto mode searches cached "
+            "embeddings when available, otherwise Semantic Scholar. Local mode "
+            "uses the same model and cache settings as your configured builds."
         ),
-        parents=[command_logging_parent],
+        epilog=_help_examples(
+            (
+                "Search available sources automatically",
+                'citemesh search "long-context language models" -n 10',
+            ),
+            (
+                "Search cached embeddings",
+                'citemesh search "long-context language models" --mode local',
+            ),
+            (
+                "Search Semantic Scholar by keyword",
+                'citemesh search "Megalodon" --mode s2',
+            ),
+        ),
     )
-    search_parser.add_argument("query", type=_non_empty_str, help="Search query")
+    search_parser.add_argument(
+        "query",
+        type=_non_empty_str,
+        metavar="QUERY",
+        help="Search text (quote phrases with spaces)",
+    )
     search_parser.add_argument(
         "--limit",
         "-n",
         type=_positive_int,
+        metavar="N",
         default=10,
         help="Maximum results (default: 10)",
     )
     search_parser.add_argument(
         "--mode",
+        metavar="MODE",
         choices=list(SEARCH_MODE_CHOICES),
         default=None,
         help=(
-            "Search mode (default: config.toml defaults.search_mode, else "
-            "auto: local when cached embeddings exist, s2 otherwise)"
+            "auto, local, s2 (default: saved search_mode, else auto). "
+            "Auto uses local embeddings when available, otherwise S2."
         ),
     )
     search_parser.add_argument(
@@ -1872,32 +1972,39 @@ User configuration:
     )
     search_parser.add_argument(
         "--model-profile",
+        metavar="PROFILE",
         choices=list(EMBEDDING_MODEL_PROFILE_CHOICES),
         default=None,
         help=(
-            "Embedding task/runtime profile for local search (implies --mode "
-            "local); must match the profile used at build time"
+            "auto, default, embeddinggemma; match the build profile "
+            "(implies --mode local)"
         ),
     )
     search_parser.add_argument(
         "--device",
+        metavar="DEVICE",
         choices=list(EMBEDDING_DEVICE_CHOICES),
         default=None,
-        help="Compute device for local query encoding (implies --mode local)",
+        help="auto, cuda, mps, cpu for query encoding (implies --mode local)",
     )
     cache_parser = subparsers.add_parser(
         "cache",
-        help="Manage local CiteMesh caches",
-        parents=[command_logging_parent],
+        help="Inspect or clear local caches",
+        description="Inspect local cache usage or delete cached data. Clearing preserves your config.toml settings.",
+        epilog=_help_examples(
+            ("Show storage by cache section", "citemesh cache scan"),
+            ("Clear cached data after confirmation", "citemesh cache clear"),
+        ),
     )
     cache_subparsers = cache_parser.add_subparsers(
         dest="cache_command",
-        help="Cache operations",
+        title="Cache operations",
+        metavar="COMMAND",
     )
     cache_clear_parser = cache_subparsers.add_parser(
         "clear",
-        help="Delete cached data under the CiteMesh cache root (config.toml is preserved)",
-        parents=[command_logging_parent],
+        help="Delete cached data; preserve config.toml",
+        description="Delete cached papers, references, and embeddings. config.toml is preserved. Prompts for confirmation; scripts require --yes.",
     )
     cache_clear_parser.add_argument(
         "--yes",
@@ -1911,36 +2018,45 @@ User configuration:
         default=None,
         help="Optional rationale string logged when cache clear is executed.",
     )
-    cache_subparsers.add_parser(
+    cache_scan_parser = cache_subparsers.add_parser(
         "scan",
-        help="Scan cache usage (sections, file counts, and total size)",
-        parents=[command_logging_parent],
+        help="Show sections, file counts, and storage usage",
+        description="Show the cache root, usage by section, and total disk space.",
     )
 
     # Config subcommand
     config_parser = subparsers.add_parser(
         "config",
-        help="Manage persistent user configuration (config.toml)",
-        parents=[command_logging_parent],
+        help="View or change personal defaults",
         description=(
             "Manage persistent CiteMesh defaults stored in config.toml under "
             "the cache root. Precedence: explicit CLI flag > environment "
             "variable > config.toml > built-in default."
         ),
+        epilog=_help_examples(
+            ("Show saved settings", "citemesh config list"),
+            (
+                "Use the local corpus by default",
+                "citemesh config set defaults.semantic_source arxiv-corpus",
+            ),
+            (
+                "Reset one setting to its default",
+                "citemesh config unset defaults.semantic_source",
+            ),
+        ),
     )
     config_subparsers = config_parser.add_subparsers(
         dest="config_command",
-        help="Config operations",
+        title="Config operations",
+        metavar="COMMAND",
     )
-    config_subparsers.add_parser(
+    config_list_parser = config_subparsers.add_parser(
         "list",
         help="Show configured values and the config file path",
-        parents=[command_logging_parent],
     )
     config_get_parser = config_subparsers.add_parser(
         "get",
         help="Print one configured value",
-        parents=[command_logging_parent],
     )
     config_get_parser.add_argument(
         "key",
@@ -1950,7 +2066,6 @@ User configuration:
     config_set_parser = config_subparsers.add_parser(
         "set",
         help="Set and persist one config value",
-        parents=[command_logging_parent],
     )
     config_set_parser.add_argument(
         "key",
@@ -1965,18 +2080,60 @@ User configuration:
     config_unset_parser = config_subparsers.add_parser(
         "unset",
         help="Remove one configured value",
-        parents=[command_logging_parent],
     )
     config_unset_parser.add_argument(
         "key",
         type=_non_empty_str,
         help="Dotted config key (for example defaults.semantic_source)",
     )
-    config_subparsers.add_parser(
+    config_path_parser = config_subparsers.add_parser(
         "path",
         help="Print the config file path",
-        parents=[command_logging_parent],
     )
+    for command_parser, synopsis in (
+        (parser, "COMMAND [options]"),
+        (build_parser, "PAPER [options]"),
+        (search_parser, "QUERY [options]"),
+        (cache_parser, "COMMAND [options]"),
+        (cache_clear_parser, "[options]"),
+        (cache_scan_parser, "[options]"),
+        (config_parser, "COMMAND [options]"),
+        (config_list_parser, "[options]"),
+        (config_get_parser, "KEY [options]"),
+        (config_set_parser, "KEY VALUE [options]"),
+        (config_unset_parser, "KEY [options]"),
+        (config_path_parser, "[options]"),
+    ):
+        command_parser.formatter_class = _HelpFormatter
+        command_parser.usage = f"%(prog)s {synopsis}"
+        command_parser._positionals.title = "Arguments"
+        command_parser._optionals.title = "Options"
+        _add_logging_arguments(
+            command_parser, suppress_defaults=command_parser is not parser
+        )
+        command_parser._action_groups.sort(
+            key=lambda group: {"Options": 1, "Logging": 2}.get(group.title, 0)
+        )
+        for action in command_parser._actions:
+            if not action.option_strings and not isinstance(
+                action, argparse._SubParsersAction
+            ):
+                action.metavar = (
+                    action.dest.upper() if action.metavar is None else action.metavar
+                )
+            elif (
+                action.option_strings
+                and action.type in (str, _non_empty_str)
+                and action.choices is None
+            ):
+                action.metavar = {
+                    "output": "PATH",
+                    "log_file": "PATH",
+                    "model": "MODEL",
+                    "model_revision": "REV",
+                    "dataset_split": "SPLIT",
+                }.get(action.dest, "TEXT")
+
     _instrument_parser_actions(parser)
     return parser, build_parser, cache_parser, config_parser
 
@@ -3166,23 +3323,20 @@ def _scan_cache_directory() -> int:
     total_files = sum(row[1] for row in section_rows)
     total_bytes = sum(row[2] for row in section_rows)
 
-    output_console.print(f"[bold]Cache root:[/bold] {cache_root}")
-    table = Table(title="CiteMesh Cache Scan")
-    table.add_column("Section")
+    output_console.print(Text.assemble(("Cache root: ", "bold"), str(cache_root)))
+    table = _output_table("CiteMesh Cache Scan")
+    table.add_column("Section", style="cyan")
     table.add_column("Files", justify="right")
     table.add_column("Size", justify="right")
 
     if section_rows:
         for name, files, size_bytes in section_rows:
-            table.add_row(name, str(files), format_bytes(size_bytes))
+            table.add_row(Text(name), f"{files:,}", format_bytes(size_bytes))
     else:
         table.add_row("(empty)", "0", "0 B")
 
-    table.add_row(
-        "[bold]TOTAL[/bold]",
-        f"[bold]{total_files}[/bold]",
-        f"[bold]{format_bytes(total_bytes)}[/bold]",
-    )
+    table.add_section()
+    table.add_row("TOTAL", f"{total_files:,}", format_bytes(total_bytes), style="bold")
     output_console.print(table)
     _log_legacy_macos_cache_hint(cache_root)
     return 0
@@ -3243,7 +3397,9 @@ def _run_config_command(
 
     if command == "list":
         user_config = load_user_config()
-        output_console.print(f"[bold]Config file:[/bold] {user_config.path}")
+        output_console.print(
+            Text.assemble(("Config file: ", "bold"), str(user_config.path))
+        )
         if not user_config.path.is_file():
             output_console.print(
                 "[dim]File does not exist yet; using built-in defaults. "
@@ -3255,12 +3411,12 @@ def _run_config_command(
         ]
         if user_config.s2_api_key:
             rows.append(("api.s2_api_key", _masked_secret(user_config.s2_api_key)))
-        table = Table(title="CiteMesh User Config")
-        table.add_column("Key")
+        table = _output_table("CiteMesh User Config")
+        table.add_column("Key", style="cyan")
         table.add_column("Value")
         if rows:
             for key, value in rows:
-                table.add_row(key, value)
+                table.add_row(Text(key), Text(value))
         else:
             table.add_row("(no values set)", "")
         output_console.print(table)
@@ -3413,14 +3569,12 @@ def _render_local_search(
         )
         return 1
 
-    table = Table(title=f"Local semantic search for '{args.query}'")
+    table = _output_table(f"Local semantic search for '{args.query}'")
+    table.leading = 1
     table.add_column("#", style="dim", width=3)
+    table.add_column("Paper / authors", ratio=1)
+    table.add_column("Year", justify="right", no_wrap=True)
     table.add_column("Score", justify="right", width=6)
-    # Keep full IDs copyable for direct use in `citemesh build`.
-    table.add_column("ID", style="cyan", overflow="fold")
-    table.add_column("Title", overflow="fold")
-    table.add_column("Year", justify="right", width=6)
-    table.add_column("Authors", max_width=30)
 
     for i, result in enumerate(results, 1):
         metadata = result.metadata or {}
@@ -3431,23 +3585,31 @@ def _render_local_search(
         year_value = metadata.get("year")
         table.add_row(
             str(i),
-            f"{float(result.score):.3f}",
-            str(result.paper_id),
-            str(metadata.get("title") or ""),
+            Text.assemble(
+                (str(metadata.get("title") or ""), "bold"),
+                ("\n" + authors_str, "dim") if authors_str else "",
+            ),
             str(year_value) if year_value is not None else "",
-            authors_str,
+            f"{float(result.score):.3f}",
         )
 
     output_console.print(table)
     total = getattr(cache, "last_search_total_embeddings", None)
     if total is not None:
         output_console.print(
-            f"[dim]Searched {int(total):,} locally cached embeddings "
-            f"(model={defaults.model}, source={defaults.semantic_source}).[/dim]"
+            Text(
+                f"Searched {int(total):,} locally cached embeddings "
+                f"(model={defaults.model}, source={defaults.semantic_source}).",
+                style="dim",
+            )
         )
     output_console.print("\n[dim]Full paper IDs:[/dim]")
     for i, result in enumerate(results, 1):
-        output_console.print(f"[dim]{i}.[/dim] {result.paper_id}")
+        output_console.print(
+            Text.assemble((f"{i}. ", "dim"), (str(result.paper_id), "cyan")),
+            soft_wrap=True,
+        )
+    output_console.print('\nUse a paper ID with: citemesh build "<ID>"', style="dim")
     return 0
 
 
@@ -3468,14 +3630,12 @@ def _run_s2_search(args: argparse.Namespace) -> int:
             logger.error("No results found.")
             return 1
 
-        table = Table(title=f"Search results for '{args.query}'")
+        table = _output_table(f"Search results for '{args.query}'")
+        table.leading = 1
         table.add_column("#", style="dim", width=3)
-        # Keep full IDs copyable for direct use in `citemesh build`.
-        table.add_column("ID", style="cyan", overflow="fold")
-        table.add_column("Title", overflow="fold")
-        table.add_column("Year", justify="right", width=6)
-        table.add_column("Citations", justify="right", width=10)
-        table.add_column("Authors", max_width=30)
+        table.add_column("Paper / authors", ratio=1)
+        table.add_column("Year", justify="right", no_wrap=True)
+        table.add_column("Citations", justify="right", no_wrap=True)
 
         for i, paper in enumerate(results, 1):
             authors_str = ", ".join(a.name for a in paper.authors[:2])
@@ -3484,20 +3644,23 @@ def _run_s2_search(args: argparse.Namespace) -> int:
 
             table.add_row(
                 str(i),
-                paper.paper_id,
-                paper.title,
+                Text.assemble(
+                    (paper.title, "bold"),
+                    ("\n" + authors_str, "dim") if authors_str else "",
+                ),
                 str(paper.year) if paper.year is not None else "",
                 f"{paper.citation_count:,}",
-                authors_str,
             )
 
         output_console.print(table)
         output_console.print("\n[dim]Full paper IDs:[/dim]")
         for i, paper in enumerate(results, 1):
-            output_console.print(f"[dim]{i}.[/dim] {paper.paper_id}")
+            output_console.print(
+                Text.assemble((f"{i}. ", "dim"), (paper.paper_id, "cyan")),
+                soft_wrap=True,
+            )
         output_console.print(
-            "\n[dim]Use the paper ID with:[/dim] "
-            'citemesh build "<ID>" --strategy recommendation'
+            '\nUse a paper ID with: citemesh build "<ID>"', style="dim"
         )
 
     except SemanticScholarUnavailableError as e:

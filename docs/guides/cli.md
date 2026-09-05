@@ -13,6 +13,34 @@ Related docs:
 
 Installation and optional extras are covered in [README](../../README.md).
 
+## Help and Console Output
+
+Every command supports `-h` / `--help`, including nested commands:
+
+```bash
+citemesh --help
+citemesh build --help
+citemesh cache --help
+citemesh cache clear --help
+citemesh config set --help
+```
+
+Help uses Rich styling, compact usage lines, grouped options, and examples.
+Build settings are grouped into graph, output, citations/references, semantic
+discovery, embedding runtime, arXiv corpus, embedding cache, and hybrid expansion.
+Help describes built-in defaults; use `citemesh config list` to see saved overrides.
+
+Help adapts to terminal width, up to 110 columns. Redirected help is plain text
+without ANSI styling under normal terminal detection. Set `NO_COLOR=1` to disable
+colors in an interactive terminal (emphasis such as bold may remain).
+`--log-width` controls result tables and logs; help uses the terminal width.
+
+Cache and config listings use compact tables. Search results show titles with
+authors underneath, followed by full paper IDs for copying into a build command.
+Queries, paper titles, and config values are displayed literally, including square
+brackets. `config get` and `config path` return raw, unwrapped values on stdout for
+shell substitution; operational logs go to stderr.
+
 ## Basic Invocation
 
 ```bash
