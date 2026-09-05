@@ -56,6 +56,10 @@ package. Current behavior is described in the linked guides and references:
 
 ## Semantic Discovery
 
+- Prefer installed FlashAttention 2 for EmbeddingGemma on BF16 CUDA, with SDPA
+  fallback when unavailable or model loading fails. Compile the active
+  SentenceTransformers 6 transformer, use dynamic shapes on CUDA, avoid the
+  FA2 conversion-log graph break, and honor `--torch-compile` during CUDA hydration.
 - Made Semantic Scholar candidate sourcing the default corpus-free path for
   embedding and hybrid builds. The arXiv corpus remains opt-in.
 - Added explicit candidate-source status tracking and conservative paper identity

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Iterable
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import h5py
 import numpy as np
@@ -52,9 +54,17 @@ def _disable_embedding_optional_deps(
     monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
     """Bypass optional dependency guards unless a test exercises them directly."""
-    if request.node.name in _REAL_DEP_CHECK_TESTS:
+    if request.node.name in _REAL_DEP_CHECK_TESTS or request.node.get_closest_marker(
+        "slow"
+    ):
         return
     disable_embedding_dep_checks(monkeypatch)
+    module_available = embedding_module._module_available
+    monkeypatch.setattr(
+        embedding_module,
+        "_module_available",
+        lambda name: False if name == "flash_attn" else module_available(name),
+    )
 
 
 @pytest.mark.parametrize(
@@ -596,7 +606,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         if expect_compiled:
             assert builder.model[0].auto_model == ("compiled", original)
             assert _fake_torch._compile_calls  # type: ignore[attr-defined]
-            assert _fake_torch._compile_calls[-1]["kwargs"] == {}  # type: ignore[attr-defined]
+            assert _fake_torch._compile_calls[-1]["kwargs"] == {"dynamic": True}  # type: ignore[attr-defined]
         else:
             assert builder.model[0].auto_model is original
             if (
@@ -1001,23 +1011,189 @@ def test_encode_texts_uses_length_bucketed_batches(
     assert embeddings[:, 0].tolist() == [float(len(text)) for text in texts]
 
 
-def test_embedding_compile_is_deferred_when_cache_not_hydrated(
+@pytest.mark.parametrize(
+    ("device", "bf16", "installed", "expected"),
+    [
+        ("cuda", True, True, "flash_attention_2"),
+        ("cuda", True, False, "sdpa"),
+        ("cuda", False, True, "sdpa"),
+        ("mps", True, True, "sdpa"),
+        ("cpu", False, True, None),
+    ],
+)
+def test_attention_selection_uses_fa2_only_on_bf16_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+    bf16: bool,
+    installed: bool,
+    expected: str | None,
+) -> None:
+    """Select installed FA2 only on the supported CUDA compute path.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param str device: Requested execution device.
+    :param bool bf16: Native CUDA BF16 availability.
+    :param bool installed: Whether the FA2 module exists.
+    :param str | None expected: Expected attention selection.
+    :return None: Checks constructor kwargs and effective runtime hint.
+    """
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch,
+        cuda_available=True,
+        bf16_supported=bf16,
+        mps_available=True,
+        torch_version="2.13.0",
+    )
+    monkeypatch.setattr(embedding_module, "_module_available", lambda _name: installed)
+    builder = EmbeddingGraphBuilder(device=device, client=MagicMock())
+    builder._load_model()
+    assert builder._attention_implementation_hint == expected
+    assert init_log["kwargs"]["model_kwargs"].get("attn_implementation") == expected
+
+
+def test_fa2_load_failure_retries_same_checkpoint_with_sdpa(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cold-cache runs should defer compile to avoid hydration slowdowns."""
+    """An unusable FA2 installation must retain the chosen checkpoint via SDPA.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :return None: Checks the fallback backend and automatic checkpoint dtype.
+    """
+    _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(monkeypatch, cuda_available=True, bf16_supported=True)
+    original_cls = embedding_module._import_sentence_transformer_class()
+    attempts = []
+
+    def load(model_name: str, **kwargs: Any) -> Any:
+        """Reject FA2 while permitting the same model through SDPA.
+
+        :param str model_name: Requested checkpoint.
+        :param Any kwargs: SentenceTransformer constructor arguments.
+        :return Any: Fake successfully loaded model.
+        """
+        attempts.append((model_name, dict(kwargs["model_kwargs"])))
+        if kwargs["model_kwargs"]["attn_implementation"] == "flash_attention_2":
+            raise ImportError("flash_attn CUDA extension cannot be loaded")
+        return original_cls(model_name, **kwargs)
+
+    monkeypatch.setattr(embedding_module, "_module_available", lambda _name: True)
+    monkeypatch.setattr(
+        embedding_module, "_import_sentence_transformer_class", lambda: load
+    )
+    builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
+    builder._load_model()
+    assert attempts == [
+        (
+            DEFAULT_EMBEDDING_MODEL_NAME,
+            {"dtype": "auto", "attn_implementation": "flash_attention_2"},
+        ),
+        (
+            DEFAULT_EMBEDDING_MODEL_NAME,
+            {"dtype": "auto", "attn_implementation": "sdpa"},
+        ),
+    ]
+    assert builder._attention_implementation_hint == "sdpa"
+
+
+def test_compile_replaces_and_restores_sentence_transformers_active_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ST6 executes .model even if assignment to the legacy alias is accepted.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :return None: Checks compilation and eager recovery target the active attribute.
+    """
+    _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(
+        monkeypatch, cuda_available=True, bf16_supported=True, compile_behavior="tagged"
+    )
+    builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
+    builder._load_model()
+    block = builder.model[0]
+    original = block.auto_model
+    block.model = original
+    builder.enable_torch_compile = True
+    builder._maybe_compile_inner_transformer()
+    assert block.model == ("compiled", original)
+    assert block.auto_model is original
+    assert builder._inner_model_compiled
+    assert builder._restore_eager_model_after_compile_failure(
+        RuntimeError("backend failure")
+    )
+    assert block.model is original
+    assert not builder._inner_model_compiled
+
+
+@pytest.mark.parametrize(
+    "logging_option", ["ignore_logging_functions", "reorderable_logging_functions"]
+)
+def test_fa2_compile_logging_configuration_is_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+    logging_option: str,
+) -> None:
+    """Compiler log controls preserve existing settings and restore on failure.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param str logging_option: Modern or older supported torch logging control.
+    :return None: Verifies restoration after an interrupted encode context.
+    """
+    _install_fake_torch(monkeypatch, cuda_available=True, bf16_supported=True)
+    builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
+    builder._inner_model_compiled = True
+    builder._attention_implementation_hint = "flash_attention_2"
+    monkeypatch.setattr(builder, "_autocast_context", nullcontext)
+    monkeypatch.setattr(builder, "_tf32_context", nullcontext)
+    existing_logger = MagicMock()
+    flash_logger = types.SimpleNamespace(warning_once=MagicMock())
+    config = types.SimpleNamespace(**{logging_option: {existing_logger}})
+    config.patch = lambda **kwargs: patch.object(
+        config, logging_option, kwargs[logging_option]
+    )
+    monkeypatch.setitem(
+        sys.modules, "torch._dynamo", types.SimpleNamespace(config=config)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers.modeling_flash_attention_utils",
+        types.SimpleNamespace(logger=flash_logger),
+    )
+    with pytest.raises(RuntimeError, match="encoding failure"):
+        with builder._precision_context():
+            assert getattr(config, logging_option) == {
+                existing_logger,
+                flash_logger.warning_once,
+            }
+            raise RuntimeError("encoding failure")
+    assert getattr(config, logging_option) == {existing_logger}
+
+
+@pytest.mark.parametrize("device", ["cuda", "mps"])
+def test_embedding_compile_hydration_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    device: str,
+) -> None:
+    """Explicit compile runs during CUDA hydration and stays deferred on MPS.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param str device: Accelerator whose hydration policy is checked.
+    :return None: Checks active compilation against cold corpus metadata.
+    """
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=True,
+        mps_available=True,
         bf16_supported=True,
         compile_behavior="tagged",
-        torch_version="2.10.0",
+        torch_version="2.13.0",
     )
 
     builder = EmbeddingGraphBuilder(
         max_papers=1,
         enable_torch_compile=True,
         semantic_source="arxiv-corpus",
+        device=device,
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder)
@@ -1026,6 +1202,11 @@ def test_embedding_compile_is_deferred_when_cache_not_hydrated(
 
     original = init_log["auto_model_before_compile"]
     assert builder.model is not None
+    if device == "cuda":
+        assert builder.model[0].auto_model == ("compiled", original)
+        assert builder._inner_model_compiled
+        assert fake_torch._compile_calls[-1]["kwargs"] == {"dynamic": True}
+        return
     assert builder.model[0].auto_model is original
     assert builder._inner_model_compiled is False
     assert builder._compile_status_reason is not None
@@ -4538,6 +4719,65 @@ def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
         cpu_builder._embedding_cache_namespace()
         != cuda_builder._embedding_cache_namespace()
     )
+
+
+@pytest.mark.slow
+def test_embedding_real_cuda_fa2_compile_executes_graphs() -> None:
+    """Exercise the real ST6 compiled forward path and compare eager embeddings.
+
+    :return None: Confirms FA2, compiled profiler events, numerical agreement,
+        and restoration of scoped compiler settings on an available CUDA host.
+    """
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(
+        including_emulation=False
+    ):
+        pytest.skip("Native BF16 CUDA unavailable")
+    pytest.importorskip("flash_attn")
+    from torch._dynamo import config as dynamo_config
+
+    builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
+    builder._load_model()
+    assert builder.model[0].model.config._attn_implementation == "flash_attention_2"
+    texts = [
+        builder.model_profile.format_document(
+            {
+                "title": title,
+                "abstract": abstract * repetitions,
+            }
+        )
+        for repetitions in range(1, 5)
+        for title, abstract in (
+            (
+                "Language model attention",
+                "Bidirectional attention encodes text for semantic retrieval. ",
+            ),
+            (
+                "Stellar evolution",
+                "Stellar spectra constrain the chemical composition of distant galaxies. ",
+            ),
+        )
+    ]
+    eager = builder._encode_texts(texts, batch_size=8)
+    logging_option = (
+        "ignore_logging_functions"
+        if hasattr(dynamo_config, "ignore_logging_functions")
+        else "reorderable_logging_functions"
+    )
+    prior_logging = set(getattr(dynamo_config, logging_option))
+    builder.enable_torch_compile = True
+    builder._maybe_compile_inner_transformer()
+    builder._encode_texts(texts, batch_size=8)
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU]
+    ) as profile:
+        compiled = builder._encode_texts(texts, batch_size=8)
+    assert builder._inner_model_compiled
+    assert any("Torch-Compiled Region" in event.key for event in profile.key_averages())
+    assert compiled.dtype == np.float32
+    assert np.isfinite(compiled).all()
+    assert np.min(np.sum(eager * compiled, axis=1)) > 0.999
+    assert getattr(dynamo_config, logging_option) == prior_logging
 
 
 @pytest.mark.slow

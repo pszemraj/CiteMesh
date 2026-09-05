@@ -1037,10 +1037,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             probe_renderer=self._format_graph_similarity_metadata,
         )
         self.truncate_dim = self._resolve_truncate_dim(truncate_dim)
+        self._source_dtype_hint = self._resolve_source_dtype_hint()
         self._attention_implementation_hint = (
             self._resolve_attention_implementation_hint()
         )
-        self._source_dtype_hint = self._resolve_source_dtype_hint()
         self.top_k = top_k
         self.model = None
         self.retrieval_embeddings: Dict[str, np.ndarray] = {}
@@ -1404,10 +1404,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             probe_renderer=self._format_graph_similarity_metadata,
         )
         self.truncate_dim = self._resolve_truncate_dim(self._requested_truncate_dim)
+        self._source_dtype_hint = self._resolve_source_dtype_hint()
         self._attention_implementation_hint = (
             self._resolve_attention_implementation_hint()
         )
-        self._source_dtype_hint = self._resolve_source_dtype_hint()
         self._embedding_cache = None
         self._graph_embedding_cache = None
         self._resolved_model_fingerprint = None
@@ -1437,7 +1437,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return None
         if preferred_attention != "flash_attention_2":
             return preferred_attention
-        if self.device == "cuda" and _module_available("flash_attn"):
+        if (
+            self.device == "cuda"
+            and self._source_dtype_hint == "bfloat16"
+            and _module_available("flash_attn")
+        ):
             return preferred_attention
         # flash_attn ships CUDA-only kernels; the profile's portable fallback is SDPA.
         return "sdpa"
@@ -2166,6 +2170,30 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         with ExitStack() as stack:
             stack.enter_context(self._tf32_context())
             stack.enter_context(self._autocast_context())
+            if (
+                self._inner_model_compiled
+                and self._attention_implementation_hint == "flash_attention_2"
+            ):
+                from torch._dynamo import config as dynamo_config
+                from transformers.modeling_flash_attention_utils import (
+                    logger as flash_logger,
+                )
+
+                # Transformers logs an autocast conversion inside attention.
+                # Tracing that log breaks the decoder loop into eager fragments.
+                logging_option = (
+                    "ignore_logging_functions"
+                    if hasattr(dynamo_config, "ignore_logging_functions")
+                    else "reorderable_logging_functions"
+                )
+                stack.enter_context(
+                    dynamo_config.patch(
+                        **{
+                            logging_option: getattr(dynamo_config, logging_option)
+                            | {flash_logger.warning_once}
+                        }
+                    )
+                )
             yield
 
     def _get_model_for_encoding(self) -> Any:
@@ -2300,6 +2328,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
         if not self.model_profile.compile_inner_transformer:
             return False
+        if self.device == "cuda":
+            return False
         if self.semantic_source != "arxiv-corpus":
             return False
         try:
@@ -2332,9 +2362,23 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                         st_kwargs["truncate_dim"] = self.truncate_dim
                     if self.model_revision is not None:
                         st_kwargs["revision"] = self.model_revision
-                    loaded_model = sentence_transformer_cls(
-                        candidate_model, **st_kwargs
-                    )
+                    try:
+                        loaded_model = sentence_transformer_cls(
+                            candidate_model, **st_kwargs
+                        )
+                    except Exception as exc:
+                        if self._attention_implementation_hint != "flash_attention_2":
+                            raise
+                        logger.warning(
+                            "FlashAttention 2 could not load for %s (%s); retrying with SDPA.",
+                            candidate_model,
+                            exc,
+                        )
+                        self._attention_implementation_hint = "sdpa"
+                        model_kwargs["attn_implementation"] = "sdpa"
+                        loaded_model = sentence_transformer_cls(
+                            candidate_model, **st_kwargs
+                        )
                     self._validate_loaded_model_precision(loaded_model, candidate_model)
                     self._validate_loaded_model_contract(loaded_model, candidate_model)
                     self.model = loaded_model
@@ -2377,7 +2421,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             self._bind_embedding_cache_to_active_model()
             self._configure_tf32_runtime()
-            if self.enable_torch_compile and self.semantic_source == "arxiv-corpus":
+            if (
+                self.enable_torch_compile
+                and self.semantic_source == "arxiv-corpus"
+                and self.device != "cuda"
+            ):
                 # Warm-cache compile policy needs the exact artifact namespace.
                 self._ensure_cache_model_fingerprint()
             if self._should_defer_compile_for_cache_hydration():
@@ -2528,7 +2576,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         SentenceTransformer itself is not compiled due wrapper incompatibilities.
         For supported profiles (currently EmbeddingGemma), we compile only
-        ``model[0].auto_model`` and keep the outer SentenceTransformer intact.
+        the active inner transformer and keep the outer SentenceTransformer intact.
 
         :return None: Mutates ``self.model`` in place when compilation succeeds.
         """
@@ -2586,7 +2634,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return
 
-        auto_model = getattr(transformer_block, "auto_model", None)
+        # SentenceTransformers 6 forwards through .model; assigning its legacy
+        # .auto_model alias can register an unused module instead.
+        model_attribute = (
+            "model" if hasattr(transformer_block, "model") else "auto_model"
+        )
+        auto_model = getattr(transformer_block, model_attribute, None)
         if auto_model is None:
             self._compile_status_reason = "inner auto_model unavailable"
             logger.warning(
@@ -2601,11 +2654,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         try:
-            compiled_model = compile_fn(auto_model)
-            transformer_block.auto_model = compiled_model
+            compile_kwargs = {"dynamic": True} if self.device == "cuda" else {}
+            compiled_model = compile_fn(auto_model, **compile_kwargs)
+            setattr(transformer_block, model_attribute, compiled_model)
         except Exception as exc:
             try:
-                transformer_block.auto_model = auto_model
+                setattr(transformer_block, model_attribute, auto_model)
             except Exception:
                 pass
             self._compile_status_reason = f"compile failed ({type(exc).__name__})"
@@ -2625,8 +2679,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 "encode will retry from the eager inner model if compilation fails."
             )
         logger.debug(
-            "Enabled torch.compile for %s inner transformer (model[0].auto_model).",
+            "Enabled torch.compile for %s inner transformer (model[0].%s).",
             self.model_name,
+            model_attribute,
         )
 
     def _restore_eager_model_after_compile_failure(self, error: Exception) -> bool:
@@ -2648,7 +2703,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
         try:
             transformer_block = self.model[0]
-            transformer_block.auto_model = self._eager_inner_transformer
+            model_attribute = (
+                "model" if hasattr(transformer_block, "model") else "auto_model"
+            )
+            setattr(transformer_block, model_attribute, self._eager_inner_transformer)
         except Exception:
             logger.warning(
                 "Compiled embedding execution failed and the eager inner model "
