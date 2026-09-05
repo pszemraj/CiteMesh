@@ -77,13 +77,19 @@ On macOS the `embeddings` extra requires torch >= 2.13 (installed automatically)
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 ```
 
-Point repeated dashboard builds at the same output root to maintain an offline
-collection:
+Omit `--output` to keep generated files under the repository's ignored `out/`
+directory. Repeated dashboard builds share an offline collection there:
 
 ```bash
-citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard -o research
-citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard -o research
+citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard
+citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard
 ```
+
+Each build saves its graph and settings as `out/<paper-slug>-<hash>/<strategy>.json`
+and `<strategy>.config.json`. The shared `out/dashboard.html` viewer and
+`out/dashboard.citemesh.json` package collect those results for browsing and sharing.
+Different seeds add results; rebuilding the same seed with the same strategy
+replaces its result. Use the dashboard's graph selector to switch papers.
 
 See [Output Artifacts](docs/reference/output-artifacts.md) for collection updates,
 standalone dashboard files, and the portable package format.
@@ -111,7 +117,7 @@ CiteMesh works without credentials using Semantic Scholar's shared anonymous poo
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
 - Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
 - Local embeddings with first-class device support: CUDA, Apple Silicon (MPS), and CPU, using bf16 autocast on supported runtimes.
-- Multi-format outputs with one shared run contract across static, interactive, and structured exports; dashboard-only collections stay at two files as results accumulate.
+- Multi-format outputs with one shared run contract across static, interactive, and structured exports; dashboard collections retain separate graph files per seed.
 - Persistent user-level caching for embeddings and reference expansion; caches are portable across machines at matching compute dtype.
 - Mode-aware `citemesh search`: offline semantic search over the active retrieval
   cache, used automatically when that namespace has vectors, with Semantic Scholar

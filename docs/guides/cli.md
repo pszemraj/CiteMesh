@@ -118,6 +118,13 @@ Supported keys, value forms, and precedence are documented in
 
 Output-path normalization, file naming, and sidecar placement are defined in [Output Artifacts](../reference/output-artifacts.md).
 
+For repository-local runs, omit `--output` to use the ignored `out/` directory.
+Dashboard builds maintain `out/dashboard.html` and `out/dashboard.citemesh.json`,
+and always save `<strategy>.json` plus `<strategy>.config.json` under
+`out/<slug>-<hash>/`. Different seeds retain separate files and accumulate in the
+collection; rerunning the same seed and strategy replaces that result. Other
+requested formats go alongside the per-paper JSON.
+
 `--log-level`, `--log-width`, and `--log-file` are shared command options and are accepted for `build`, `search`, `cache`, and `config` command trees (including `cache scan` / `cache clear`).
 
 `--seed` controls shared layout generation for `png`, `plotly`, `dashboard`, and `json` exports. Pyvis `html` exports use vis.js browser physics and do not consume this precomputed layout.
@@ -238,17 +245,17 @@ citemesh build "arxiv:1706.03762" --strategy citation -p 20
 # Hybrid graph with all export formats
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 
-# Create or update a reusable two-file dashboard collection under ./research
-citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o research --theme dark
+# Dashboard collection plus per-paper JSON and settings under ./out (the default)
+citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard --theme dark
 
 # Add another selectable result to that same dashboard/package
-citemesh build "arxiv:1810.04805" --strategy recommendation -e dashboard -o research --theme dark
+citemesh build "arxiv:1810.04805" --strategy recommendation -e dashboard --theme dark
 
-# Also retain this run's standalone graph JSON and build sidecar under its seed folder
-citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e json -o research --theme dark
+# Add CSV alongside the automatically saved graph JSON and build sidecar
+citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -e csv --theme dark
 
 # Standalone dashboard file for a one-off result
-citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o report.dashboard.html --theme dark
+citemesh build "arxiv:1706.03762" --strategy hybrid -e dashboard -o out/report.dashboard.html --theme dark
 
 # Embedding graph with a small dataset slice
 citemesh build "arxiv:1810.04805" \

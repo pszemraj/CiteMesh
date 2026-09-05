@@ -142,7 +142,9 @@ def _make_exporter_stub(
             **_method_kwargs: object,
         ) -> None:
             del _method_args, _method_kwargs
-            if method_name in requested_methods:
+            if method_name == "to_json":
+                path.write_text(json.dumps(_graph_payload()), encoding="utf-8")
+            elif method_name in requested_methods:
                 path.write_text(payloads[method_name], encoding="utf-8")
 
         def _graph_payload() -> dict[str, object]:
@@ -1544,7 +1546,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Dashboard-only collections should contain exactly one shell and package."""
+    """Dashboard collections should retain the shared viewer and per-seed graph."""
     graph = build_seed_graph("seed")
     monkeypatch.setattr(
         cli_module,
@@ -1576,9 +1578,13 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
                 str(output),
             ],
         )
+        run_dir = generate_output_path(
+            graph, "seed", output_dir=output, strategy="recommendation"
+        ).parent
         assert {path.name for path in output.iterdir()} == {
             "dashboard.html",
             DASHBOARD_PACKAGE_FILENAME,
+            run_dir.name,
         }
         package = load_dashboard_package(output / DASHBOARD_PACKAGE_FILENAME)
         assert package["kind"] == DASHBOARD_COLLECTION_KIND
@@ -1590,6 +1596,13 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         entry = package["results"][0]
         assert entry["payload"]["seed_id"] == "seed"
         assert entry["build"]["strategy"] == "recommendation"
+        assert (
+            json.loads((run_dir / "recommendation.json").read_text())
+            == entry["payload"]
+        )
+        config = json.loads((run_dir / "recommendation.config.json").read_text())
+        assert config["build"]["exports_requested"] == ["dashboard"]
+        assert config["outputs"]["json"] == str(run_dir / "recommendation.json")
         assert captured["metadata"]["dashboard_collection"] == package
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
@@ -1649,10 +1662,10 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
-def test_dashboard_default_collection_avoids_seed_directory(
+def test_dashboard_default_collection_retains_seed_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The default dashboard root should contain only its shell and package."""
+    """The default output root should retain a graph JSON and sidecar per seed."""
     graph = build_seed_graph("seed")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
@@ -1679,9 +1692,17 @@ def test_dashboard_default_collection_avoids_seed_directory(
 
     output_root = tmp_path / "out"
     assert result.returncode == 0, result.stderr
+    run_dir = generate_output_path(
+        graph, "seed", output_dir=output_root, strategy="recommendation"
+    ).parent
     assert {path.name for path in output_root.iterdir()} == {
         "dashboard.html",
         DASHBOARD_PACKAGE_FILENAME,
+        run_dir.name,
+    }
+    assert {path.name for path in run_dir.iterdir()} == {
+        "recommendation.json",
+        "recommendation.config.json",
     }
 
 
@@ -1723,6 +1744,10 @@ def test_dashboard_package_tracks_multiple_runs(
                 str(output_dir),
             ],
         )
+        first_json = generate_output_path(
+            first_graph, "seed-a", output_dir=output_dir, strategy="recommendation"
+        ).with_suffix(".json")
+        first_bytes = first_json.read_bytes()
         second_result = run_cli_command(
             [
                 "build",
@@ -1737,13 +1762,22 @@ def test_dashboard_package_tracks_multiple_runs(
         )
 
         package = load_dashboard_package(output_dir / DASHBOARD_PACKAGE_FILENAME)
+        assert first_json.read_bytes() == first_bytes
         assert (output_dir / "dashboard.html").exists()
         assert package["current_result_id"] == "recommendation:seed-b"
         assert [entry["result_id"] for entry in package["results"]] == [
             "recommendation:seed-b",
             "recommendation:seed-a",
         ]
-        assert not any(path.is_dir() for path in output_dir.iterdir())
+        for seed_graph, seed_id in ((first_graph, "seed-a"), (second_graph, "seed-b")):
+            run_dir = generate_output_path(
+                seed_graph, seed_id, output_dir=output_dir, strategy="recommendation"
+            ).parent
+            saved = json.loads((run_dir / "recommendation.json").read_text())
+            entry = next(
+                item for item in package["results"] if item["seed_id"] == seed_id
+            )
+            assert saved == entry["payload"]
         collection_bundle = captured["metadata"]["dashboard_collection"]
         assert collection_bundle["current_result_id"] == "recommendation:seed-b"
         assert len(collection_bundle["results"]) == 2
@@ -1820,6 +1854,13 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
         assert entry["result_id"] == "recommendation:seed"
         assert entry["summary"] == {"nodes": 2, "edges": 1}
         assert entry["payload"]["summary"] == {"nodes": 2, "edges": 1}
+        run_dir = generate_output_path(
+            updated_graph, "seed", output_dir=output_dir, strategy="recommendation"
+        ).parent
+        assert (
+            json.loads((run_dir / "recommendation.json").read_text())
+            == entry["payload"]
+        )
         collection_bundle = captured["metadata"]["dashboard_collection"]
         assert collection_bundle["current_result_id"] == "recommendation:seed"
         assert len(collection_bundle["results"]) == 1
@@ -2004,10 +2045,10 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
-def test_dashboard_collection_resolver_avoids_implicit_result_artifacts(
+def test_dashboard_collection_resolver_always_includes_graph_json(
     tmp_path: Path,
 ) -> None:
-    """Dashboard-only planning should resolve one shell and one package."""
+    """A collection should plan a per-seed JSON even without an explicit JSON flag."""
     graph = nx.Graph()
     graph.add_node("seed", title="Seed Title")
     assert _is_standalone_dashboard_output(
@@ -2029,7 +2070,9 @@ def test_dashboard_collection_resolver_avoids_implicit_result_artifacts(
         graph=graph,
         seed_id="seed",
     )
-    assert output_paths == {"dashboard": root / "dashboard.html"}
+    assert set(output_paths) == {"dashboard", "json"}
+    assert output_paths["dashboard"] == root / "dashboard.html"
+    implicit_json = output_paths["json"]
     assert package_path == root / DASHBOARD_PACKAGE_FILENAME
 
     output_paths, package_path = resolve_dashboard_collection_outputs(
@@ -2043,6 +2086,7 @@ def test_dashboard_collection_resolver_avoids_implicit_result_artifacts(
     assert output_paths["json"].parent.parent == root
     assert output_paths["json"].parent.name.startswith("seed-title-")
     assert output_paths["json"].name == "recommendation.json"
+    assert output_paths["json"] == implicit_json
     assert package_path == root / DASHBOARD_PACKAGE_FILENAME
 
 

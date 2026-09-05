@@ -38,6 +38,8 @@ package. Current behavior is described in the linked guides and references:
 
 ## Configuration and Search
 
+- Corrected dashboard examples to use the ignored `out/` default and clarified
+  collection filenames and replacement of same-seed, same-strategy results.
 - Unified help across all commands with Rich formatting, concise usage lines,
   grouped build settings, and examples. Simplified cache/config tables and gave
   search titles more room while retaining copyable full IDs and raw config
@@ -143,8 +145,9 @@ package. Current behavior is described in the linked guides and references:
 
 - Added one export pipeline: static PNG rendering plus Pyvis HTML, Plotly HTML,
   dashboard, JSON, CSV, BibTeX, and GraphML through `GraphExporter`.
-- Replaced per-result dashboard directories with reusable two-file collections and
-  portable versioned graph packages; see
+- Dashboard collection builds now always retain each seed's standalone graph JSON
+  and build sidecar under `out/<slug>-<hash>/`, alongside the shared viewer and
+  portable collection package. Other seeds' files remain untouched; see
   [Output Artifacts](../reference/output-artifacts.md).
 - Made JSON exports always embed dashboard layout geometry, so every exported
   graph JSON loads through Add Results; a JSON-only run previously produced a

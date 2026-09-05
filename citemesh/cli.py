@@ -1486,8 +1486,8 @@ def _create_parser() -> Tuple[
         description="Discover related papers using recommendations, citations, embeddings, or a hybrid of citations and embeddings.",
         epilog=_help_examples(
             (
-                "Create or extend an offline dashboard collection",
-                'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard -o research',
+                "Create or extend the dashboard collection in out/",
+                'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard',
             ),
             (
                 "Search 10,000 recent papers by topic",
@@ -1536,8 +1536,9 @@ def _create_parser() -> Tuple[
         type=str,
         default=None,
         help=(
-            "File or output directory (default: auto-named). Dashboard writes "
-            "dashboard.html + dashboard.citemesh.json; use *.dashboard.html for a standalone file."
+            "File or directory (default: out/ with automatic names). Dashboard collections share "
+            "dashboard.html + dashboard.citemesh.json and save each seed's JSON "
+            "under <paper-slug>-<hash>/; use *.dashboard.html for a standalone file."
         ),
     )
 
@@ -2245,11 +2246,11 @@ def resolve_dashboard_collection_outputs(
     graph: nx.Graph,
     seed_id: str,
 ) -> tuple[Dict[str, Path], Path]:
-    """Resolve shared-dashboard and explicitly requested result artifact paths.
+    """Resolve shared dashboard files and per-seed result artifacts.
 
     Dashboard state lives in one collection package at the collection root. A
-    seed-specific result directory is created only when the caller explicitly
-    requests another per-result export format.
+    seed-specific result directory always retains the graph JSON and its build
+    sidecar, alongside any additional requested formats.
 
     :param Path base_output_path: User-provided or generated base output path.
     :param List[str] selected_formats: Requested export formats.
@@ -2263,21 +2264,23 @@ def resolve_dashboard_collection_outputs(
         base_output_path,
         explicit_output=explicit_output,
     )
-    run_formats = [fmt for fmt in selected_formats if fmt != "dashboard"]
-    output_paths: Dict[str, Path] = {}
-    if run_formats:
-        run_base_output_path = generate_output_path(
-            graph,
-            seed_id,
-            output_dir=collection_root,
-            strategy=strategy,
+    run_formats = list(
+        dict.fromkeys(
+            ["json", *(fmt for fmt in selected_formats if fmt != "dashboard")]
         )
-        output_paths = resolve_output_paths(
-            base_output_path=run_base_output_path,
-            selected_formats=run_formats,
-            explicit_output=False,
-            strategy=strategy,
-        )
+    )
+    run_base_output_path = generate_output_path(
+        graph,
+        seed_id,
+        output_dir=collection_root,
+        strategy=strategy,
+    )
+    output_paths = resolve_output_paths(
+        base_output_path=run_base_output_path,
+        selected_formats=run_formats,
+        explicit_output=False,
+        strategy=strategy,
+    )
     output_paths["dashboard"] = collection_root / DASHBOARD_COLLECTION_FILENAME
     return output_paths, collection_root / DASHBOARD_PACKAGE_FILENAME
 
@@ -2319,8 +2322,7 @@ class DashboardPackageError(ValueError):
 def _dashboard_package_lock_path(package_path: Path) -> Path:
     """Return a cache-scoped lock path for a dashboard package.
 
-    Keeping coordination locks in the CiteMesh cache ensures a dashboard-only
-    collection contains exactly its viewer and portable data package.
+    Coordination locks live outside the collection's portable output files.
 
     :param Path package_path: Dashboard package path being coordinated.
     :return Path: Stable cache-local lock path derived from the resolved target.
@@ -3864,9 +3866,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.output:
                 base_output_path = Path(args.output)
             elif dashboard_collection_mode:
-                # Collection planning knows the canonical default root. Avoid the
-                # seed-directory side effect of generate_output_path for a
-                # dashboard-only build.
+                # The collection resolver places shared and per-paper artifacts.
                 base_output_path = Path("out")
             else:
                 base_output_path = generate_output_path(
@@ -3897,19 +3897,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     strategy=args.strategy,
                 )
             if dashboard_package_path is not None:
-                per_result_paths = [
-                    path for fmt, path in output_paths.items() if fmt != "dashboard"
-                ]
-                run_artifact_root = (
-                    per_result_paths[0].parent
-                    if per_result_paths
-                    else dashboard_package_path.parent
-                )
                 logger.info(
-                    "Dashboard collection mode: shell=%s package=%s run_artifacts=%s.",
+                    "Dashboard collection mode: viewer=%s package=%s graph=%s.",
                     output_paths["dashboard"],
                     dashboard_package_path,
-                    run_artifact_root,
+                    output_paths["json"],
                 )
             planned_paths = list(output_paths.values())
             if dashboard_package_path is not None:
@@ -4006,15 +3998,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selected_formats=selected_formats,
                 output_paths=config_output_paths,
             )
-            per_result_exports = [fmt for fmt in output_paths if fmt != "dashboard"]
             standalone_dashboard_only = standalone_dashboard and selected_formats == [
                 "dashboard"
             ]
-            write_config_sidecar = not standalone_dashboard_only and (
-                dashboard_package_path is None or bool(per_result_exports)
-            )
             graph_config_path: Optional[Path] = None
-            if write_config_sidecar:
+            if not standalone_dashboard_only:
                 graph_config_path = resolve_graph_config_path(
                     output_paths=output_paths,
                     strategy=args.strategy,

@@ -26,7 +26,7 @@ Visualization + Export
     ├── visualization.visualize_graph -> PNG
     ├── export.GraphExporter -> HTML / Plotly / Dashboard / JSON / CSV / BibTeX / GraphML
     ├── dashboard collection writer -> dashboard.citemesh.json + dashboard.html
-    └── cli sidecar writer -> *.config.json for explicitly retained run artifacts
+    └── per-seed exports -> <slug>-<hash>/*.json + *.config.json (also for dashboards)
 ```
 
 Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `venue`, `arxiv_id`, `doi`, `is_seed`) so visualization and export layers remain strategy-agnostic.
@@ -89,6 +89,8 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 - `citemesh/cli.py` validates, locks, and atomically upserts collection packages.
 - `GraphExporter` embeds the selected collection snapshot in the reusable viewer.
+- Every collection build also writes the current seed's graph JSON and build
+  sidecar to its own output directory, independently of the shared package.
 
 File placement, schemas, migration, browser imports, and standalone-dashboard
 behavior are described in [Output Artifacts](../reference/output-artifacts.md).
