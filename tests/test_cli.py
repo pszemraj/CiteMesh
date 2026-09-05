@@ -417,8 +417,14 @@ def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None
     assert cli_module._resolve_console_width(96, interactive=True) == 96
 
 
-def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
-    """File logging should keep debug details off the console by default."""
+def test_configure_logging_honors_debug_console_with_plaintext_log_file(
+    tmp_path: Path,
+) -> None:
+    """An explicit debug level should apply to both console and file handlers.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions verify both logging sinks honor the requested level.
+    """
     saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     log_path = tmp_path / "logs" / "cli-debug.log"
     stderr = io.StringIO()
@@ -455,7 +461,7 @@ def test_configure_logging_writes_plaintext_log_file(tmp_path: Path) -> None:
     assert "INFO" in content
     assert "info file sink test" in content
     assert "\x1b[" not in content
-    assert "debug file sink test" not in stderr.getvalue()
+    assert "debug file sink test" in stderr.getvalue()
     assert "info file sink test" in stderr.getvalue()
 
 

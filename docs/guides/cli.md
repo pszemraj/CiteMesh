@@ -160,7 +160,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
   configured `defaults.semantic_source = "arxiv-corpus"` for that run.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
-- Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in a shareable plain-text file without flooding the Rich console. `*.log` is ignored by git in this repo.
+- Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in both the Rich console and a shareable plain-text file. `*.log` is ignored by git in this repo.
 
 ### Hybrid Strategy
 

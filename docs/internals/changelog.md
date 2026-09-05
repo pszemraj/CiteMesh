@@ -67,6 +67,8 @@ package. Current behavior is described in the linked guides and references:
 
 ## Runtime and Caching
 
+- Made `--log-level debug` apply to the console even when `--log-file` is also
+  present, matching the documented console-level contract.
 - Added explicit CUDA, MPS, and CPU device resolution, verified bfloat16 autocast
   for supported accelerator profiles, and float32 fallback for unsupported
   runtimes.

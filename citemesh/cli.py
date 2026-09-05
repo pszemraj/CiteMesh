@@ -226,9 +226,6 @@ def _configure_logging(
     if level_name not in LOG_LEVEL_CHOICES:
         level_name = "info"
     resolved_level = getattr(logging, level_name.upper(), logging.INFO)
-    console_level = (
-        max(resolved_level, logging.INFO) if log_file is not None else resolved_level
-    )
     log_console = Console(
         stderr=True,
         width=_resolve_console_width(log_width, interactive=stderr_isatty()),
@@ -243,7 +240,7 @@ def _configure_logging(
         rich_tracebacks=False,
         markup=False,
     )
-    console_handler.setLevel(console_level)
+    console_handler.setLevel(resolved_level)
     handlers: list[logging.Handler] = [console_handler]
     if log_file is not None:
         resolved_log_file = Path(log_file).expanduser()
