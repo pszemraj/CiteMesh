@@ -34,6 +34,9 @@ package. Current behavior is described in the linked guides and references:
 
 ## Configuration and Search
 
+- Persist successful single and batch Semantic Scholar paper metadata lookups,
+  so reruns resolve cached seeds before contacting the API and batch requests
+  fetch only missing IDs. Metadata is shared across known paper ID aliases.
 - Added persistent `config.toml` defaults and API credentials through
   `citemesh config`; see [User Configuration](../guides/configuration.md).
 - Made invalid TOML and non-UTF-8 config files non-blocking for ordinary commands,

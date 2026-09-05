@@ -12,6 +12,7 @@ import random
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import quote
@@ -223,6 +224,47 @@ def _reference_cache_path(paper_id: str) -> Path:
     """
     digest = hashlib.sha1(paper_id.encode("utf-8")).hexdigest()
     return _reference_cache_dir() / f"{digest}.json"
+
+
+def _paper_cache_path(paper_id: str) -> Path:
+    """Locate persisted metadata for a normalized paper identifier.
+
+    :param str paper_id: Normalized requested ID or paper alias.
+    :return Path: Paper metadata JSON path.
+    """
+    digest = hashlib.sha1(paper_id.encode("utf-8")).hexdigest()
+    return get_cache_dir("papers") / f"{digest}.json"
+
+
+def _load_cached_paper(paper_id: str) -> Optional[Paper]:
+    """Read paper metadata, treating unreadable entries as cache misses.
+
+    :param str paper_id: Normalized requested paper identifier.
+    :return Optional[Paper]: Fresh paper instance, or ``None`` on a cache miss.
+    """
+    try:
+        data = json.loads(_paper_cache_path(paper_id).read_text(encoding="utf-8"))
+        data["authors"] = [Author(**author) for author in data["authors"]]
+        return Paper(**data)
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError):
+        return None
+
+
+def _persist_paper(paper: Paper, requested_id: str) -> None:
+    """Save successful metadata under the requested ID and known aliases.
+
+    :param Paper paper: Converted Semantic Scholar paper metadata.
+    :param str requested_id: Normalized identifier used for the request.
+    :return None: Writes metadata independently of embeddings and references.
+    """
+    data = asdict(paper)
+    data["references"] = []
+    data["is_seed"] = False
+    for alias in _paper_lookup_keys(paper) | {requested_id}:
+        try:
+            atomic_write_json(_paper_cache_path(alias), data)
+        except OSError as exc:
+            logger.debug("Failed to persist paper cache for %s: %s", alias, exc)
 
 
 def _reference_id_candidate(raw_value: Any) -> Optional[str]:
@@ -904,7 +946,7 @@ class SemanticScholarClient:
         raise_on_unavailable: bool = False,
     ) -> Optional[Paper]:
         """
-        Fetch a paper by ID with retry logic.
+        Fetch a paper by ID, reusing persisted metadata before calling the API.
 
         :param str paper_id: Paper identifier (DOI, arXiv ID, or S2 ID)
         :param bool fetch_references: Whether to fetch reference list (slower)
@@ -920,9 +962,22 @@ class SemanticScholarClient:
             raise ValueError(f"Invalid paper ID: {paper_id}")
 
         paper_id = normalize_paper_id(paper_id)
-        fields = _default_paper_fields()
         if fetch_references:
-            fields.append("references")
+            paper = self.get_paper(paper_id, raise_on_unavailable=raise_on_unavailable)
+            if paper is not None:
+                try:
+                    paper.references = self.get_reference_ids(paper_id)
+                except SemanticScholarUnavailableError as exc:
+                    if raise_on_unavailable:
+                        raise
+                    logger.error("Failed to fetch references for %s: %s", paper_id, exc)
+                    return None
+            return paper
+
+        cached_paper = _load_cached_paper(paper_id)
+        if cached_paper is not None:
+            return cached_paper
+        fields = _default_paper_fields()
 
         def _operation() -> Optional[Paper]:
             """Fetch and normalize one paper payload from the API client.
@@ -939,10 +994,7 @@ class SemanticScholarClient:
                 raise _SemanticScholarResponseContractError(
                     f"Semantic Scholar returned a malformed paper payload for {paper_id}."
                 )
-            if fetch_references and paper:
-                paper.references = self._extract_reference_ids(
-                    getattr(api_paper, "references", None)
-                )
+            _persist_paper(paper, paper_id)
             return paper
 
         def _final_failure(exc: Exception) -> Optional[Paper]:
@@ -1009,7 +1061,7 @@ class SemanticScholarClient:
         )
 
     def get_papers(self, paper_ids: Sequence[str]) -> Dict[str, Paper]:
-        """Fetch multiple papers by ID, preferring the batch endpoint when available.
+        """Reuse cached metadata and fetch missing papers through the batch endpoint.
 
         :param Sequence[str] paper_ids: Paper identifiers (DOI, arXiv ID, or S2 IDs).
         :return Dict[str, Paper]: Mapping of normalized requested IDs to fetched papers.
@@ -1025,13 +1077,27 @@ class SemanticScholarClient:
         if not normalized_ids:
             return {}
 
+        cached = {
+            paper_id: paper
+            for paper_id in normalized_ids
+            if (paper := _load_cached_paper(paper_id)) is not None
+        }
+        normalized_ids = [
+            paper_id for paper_id in normalized_ids if paper_id not in cached
+        ]
+        if not normalized_ids:
+            return cached
+
         batch_fetch = getattr(self.client, "get_papers", None)
         if not callable(batch_fetch):
-            return {
-                paper_id: paper
-                for paper_id in normalized_ids
-                if (paper := self.get_paper(paper_id)) is not None
-            }
+            cached.update(
+                {
+                    paper_id: paper
+                    for paper_id in normalized_ids
+                    if (paper := self.get_paper(paper_id)) is not None
+                }
+            )
+            return cached
 
         def _operation() -> Dict[str, Paper]:
             """Fetch and match a batch of paper payloads to requested identifiers.
@@ -1073,6 +1139,7 @@ class SemanticScholarClient:
                     continue
 
                 matched[matched_id] = paper
+                _persist_paper(paper, matched_id)
                 remaining_ids.remove(matched_id)
 
             return matched
@@ -1116,7 +1183,7 @@ class SemanticScholarClient:
             if paper is not None:
                 matched[paper_id] = paper
 
-        return matched
+        return {**cached, **matched}
 
     def get_paper_citations(
         self,

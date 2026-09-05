@@ -1,6 +1,6 @@
 # Caching & Data Storage
 
-CiteMesh uses persistent caches to avoid recomputing expensive datasets and embeddings.
+CiteMesh uses persistent caches to reuse paper metadata, reference IDs, datasets, and embeddings.
 
 Related docs:
 
@@ -35,6 +35,8 @@ citemesh cache root
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, text hashes, row_idx, authors/categories JSON, hydration state)
 │   ├── embeddings_<model-hash>.h5 # HDF5 matrix datasets (int8/float32 + optional binary index + calibration ranges)
 │   └── cache_<model-hash>.lock    # Inter-process lock for cache mutation
+├── papers/
+│   └── <sha1>.json                # Semantic Scholar paper metadata by requested ID and known aliases
 └── references/
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
@@ -42,6 +44,25 @@ citemesh cache root
 `config.toml` is configuration, not cache: it is documented in [User Configuration](configuration.md) and survives `citemesh cache clear`.
 
 Model hashes are the first 12 characters of `sha256(<namespace>)`. Every embedding namespace binds the runtime-active model (including a fallback checkpoint), requested revision, immutable resolved artifact fingerprint, representation role, normalization contract, resolved truncate dimension, storage precision, effective binary-prefilter mode, resolved source torch dtype, and task-formatter fingerprint; `int8` namespaces also include calibration sample size. Candidate mode (`--semantic-source candidates`, the default) adds `mode=candidates` to the retrieval-document namespace so incrementally embedded S2 candidates never mix with corpus hydrations. The graph-similarity namespace is source-mode independent because it contains only selected papers encoded under the same symmetric task contract. Namespaces intentionally carry no device token: matching contracts share a namespace whenever compute dtype also matches, including CUDA/MPS at bf16 or CPU/accelerator runtimes at float32.
+
+## Paper Metadata Cache
+
+Successful `get_paper` and `get_papers` lookups persist metadata under `papers/`,
+independently of the embedding model and encoding batch size. Lookups check this
+cache before contacting Semantic Scholar, including seed resolution at the start
+of a rerun. Batch requests send only missing IDs. Entries are shared across the
+requested identifier and known Semantic Scholar, arXiv, and DOI aliases.
+
+Metadata has no TTL and is reused until manually cleared. Failed, missing, and
+malformed API responses are not cached. Reference IDs remain in their separate
+cache and are loaded or fetched when requested; cached metadata alone does not
+mean references have been fetched. Graph-specific seed flags are not persisted.
+
+Runs made before this cache was introduced require one successful paper lookup
+to populate it. Citation/reference paper lists, recommendation results, and
+keyword search results still require live requests; cached seed metadata does
+not make an entire graph build offline. To refresh only paper metadata, remove
+`papers/` under the cache root; embedding caches remain intact.
 
 ## Embedding Cache Behavior
 
@@ -164,7 +185,7 @@ Clear cached data under the CiteMesh cache root:
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
-Omit `--yes` for interactive confirmation. `cache clear` deletes cache payloads (embeddings, references) but always preserves `config.toml`.
+Omit `--yes` for interactive confirmation. `cache clear` deletes cache payloads (embeddings, papers, references) but always preserves `config.toml`.
 
 For command syntax and defaults, see [CLI Usage](cli.md); this section focuses on cache maintenance workflows.
 
