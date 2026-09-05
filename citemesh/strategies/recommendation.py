@@ -10,7 +10,10 @@ import networkx as nx
 from citemesh.core import Paper
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
-from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.base import (
+    GraphBuilderStrategy,
+    build_capped_undirected_graph,
+)
 from citemesh.strategies.candidates import (
     IdentityRegistry,
     fetch_candidate_source,
@@ -56,6 +59,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.client = client or get_client()
         self._abstract_index = AbstractSimilarityIndex()
         self.candidate_source_status: Dict[str, str] = {}
+        self._reference_source_unavailable = False
 
     def _hydrate_references(self, paper: Paper) -> None:
         """Populate reference IDs for a paper when strategy settings require it.
@@ -63,17 +67,25 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param Paper paper: Paper record to enrich.
         :return None: Mutates ``paper.references`` in place when successful.
         """
-        if not self.fetch_references or paper.references:
+        if (
+            not self.fetch_references
+            or paper.references
+            or self._reference_source_unavailable
+        ):
             return
+
+        from citemesh.services import SemanticScholarUnavailableError
 
         try:
             paper.references = self.client.get_reference_ids(
                 paper.paper_id,
                 force_refresh=self.refresh_reference_cache,
             )
-        except Exception as exc:
-            logger.debug(
-                "Could not fetch reference IDs for recommendation %s: %s",
+        except SemanticScholarUnavailableError as exc:
+            self._reference_source_unavailable = True
+            logger.warning(
+                "Reference IDs unavailable for recommendation %s; continuing "
+                "without further reference hydration for this collection: %s",
                 paper.paper_id,
                 exc,
             )
@@ -87,11 +99,11 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         """
         papers: Dict[str, Paper] = {}
         self.candidate_source_status = {}
+        self._reference_source_unavailable = False
 
         logger.info("Fetching seed paper: %s", seed_id)
         seed = self.client.get_paper(
             seed_id,
-            fetch_references=self.fetch_references,
             raise_on_unavailable=True,
         )
         if not seed:
@@ -104,6 +116,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         papers[seed.paper_id] = seed
         identity_aliases = IdentityRegistry()
         register_aliases(identity_aliases, seed.paper_id, seed)
+        self._hydrate_references(seed)
 
         logger.info("Fetching recommendations for %s", seed.paper_id)
         recommendation_result = fetch_candidate_source(
@@ -167,7 +180,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
-        return graph, actual_seed_id
+        return build_capped_undirected_graph(graph, 3), actual_seed_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

@@ -28,6 +28,7 @@ from typing import (
 
 from citemesh.core import Paper
 from citemesh.paper_ids import (
+    external_ids_from_canonical_paper_id,
     normalize_paper_id,
     paper_identifier_aliases,
     recognize_arxiv_identifier,
@@ -591,10 +592,12 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     )
     if (not preferred.venue) and incoming.venue:
         preferred.venue = incoming.venue
-    if (not preferred.arxiv_id) and incoming.arxiv_id:
-        preferred.arxiv_id = incoming.arxiv_id
-    if (not preferred.doi) and incoming.doi:
-        preferred.doi = incoming.doi
+    for record in (preferred, incoming):
+        arxiv_id, doi = external_ids_from_canonical_paper_id(record.paper_id)
+        if not preferred.arxiv_id:
+            preferred.arxiv_id = record.arxiv_id or arxiv_id
+        if not preferred.doi:
+            preferred.doi = record.doi or doi
     if (not preferred.categories) and incoming.categories:
         preferred.categories = incoming.categories
     reference_ids: List[str] = []

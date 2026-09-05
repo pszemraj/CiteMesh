@@ -771,7 +771,7 @@ def _parse_year(paper: Dict[str, Any]) -> Optional[int]:
 
 _NEW_STYLE_ARXIV_ID_RE = re.compile(r"^(\d{2})(\d{2})\.(\d{4,5})(?:v\d+)?$")
 _OLD_STYLE_ARXIV_ID_RE = re.compile(
-    r"^[a-z][a-z-]*(?:\.[a-z]{2})?/(\d{2})(\d{2})(\d{3})(?:v\d+)?$"
+    r"^[a-z][a-z-]*(?:\.[a-z-]+)?/(\d{2})(\d{2})(\d{3})(?:v\d+)?$"
 )
 
 
@@ -804,9 +804,8 @@ def _newest_records_by_arxiv_id(
 ) -> List[Dict[str, Any]]:
     """Select the ``limit`` most recently submitted records in one bounded pass.
 
-    Records without parseable arXiv IDs are excluded from selection; when no
-    record parses at all, the head of the iterable is returned unchanged so
-    hydration still produces a deterministic capped corpus.
+    Prefer records with parseable arXiv IDs, filling any shortfall from the
+    first records without parseable IDs so hydration reaches the requested cap.
 
     :param Iterable[Dict[str, Any]] records: Dataset records to scan.
     :param int limit: Number of newest records to keep.
@@ -825,9 +824,8 @@ def _newest_records_by_arxiv_id(
             heapq.heappush(heap, entry)
         elif entry[:2] > heap[0][:2]:
             heapq.heapreplace(heap, entry)
-    if not heap:
-        return head_fallback
-    return [record for _, _, record in sorted(heap, key=lambda entry: entry[:2])]
+    selected = [record for _, _, record in sorted(heap, key=lambda entry: entry[:2])]
+    return selected + head_fallback[: limit - len(selected)]
 
 
 def _parse_authors(authors_data: Any) -> List[str]:
@@ -2878,7 +2876,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     continue
                 papers[paper_id] = paper
                 self.retrieval_embeddings[paper_id] = embedding
-            self._update_citation_counts(papers)
             return papers
 
         use_streaming = self.use_streaming
@@ -2933,9 +2930,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             max_recommendations)`` budgets.
         """
         pool_size = self.candidate_pool_size
-        max_recommendations = min(100, pool_size)
+        max_recommendations = min(100, max(1, pool_size // 4))
         remaining = max(0, pool_size - max_recommendations)
-        max_references = min(100, remaining // 2)
+        max_references = min(100, (remaining + 2) // 3)
         max_citations = max(0, remaining - max_references)
         return max_references, max_citations, max_recommendations
 
@@ -3872,8 +3869,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         snapshot ships newest-``update_date`` first, with pre-2007 IDs at the
         tail), so positional slicing cannot express "newest papers". Rows are
         instead ranked by the submission chronology encoded in their arXiv
-        IDs. Sources without parseable IDs fall back to the head of the split
-        with a warning.
+        IDs. Any shortfall is filled from rows without parseable IDs in source
+        order, with a warning.
 
         :param Iterable[Dict[str, Any]] dataset: Loaded dataset or record stream.
         :param str dataset_source: Dataset source identifier (for logging).
@@ -3902,13 +3899,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         else:
             selected = _newest_records_by_arxiv_id(dataset, limit)
 
-        boundary_keys = [
-            _arxiv_id_chronology_key(record.get("id"))
-            for record in (selected[:1] + selected[-1:])
+        chronology_keys = [
+            key
+            for record in selected
+            if (key := _arxiv_id_chronology_key(record.get("id"))) is not None
         ]
-        if (select_by_index and not selected) or (
-            selected and boundary_keys[0] is None
-        ):
+        if not chronology_keys:
             logger.warning(
                 "No parseable arXiv IDs in %s; capped hydration takes the "
                 "first %d rows instead of the newest.",
@@ -3916,16 +3912,24 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 limit,
             )
             return dataset if select_by_index else selected
-        elif selected:
+        else:
+            if len(chronology_keys) < len(selected):
+                logger.warning(
+                    "Only %d rows in %s have parseable arXiv IDs; filling "
+                    "the corpus cap with %d rows in source order.",
+                    len(chronology_keys),
+                    dataset_source,
+                    len(selected) - len(chronology_keys),
+                )
             logger.info(
                 "Selected the %d most recently submitted rows from %s by "
                 "arXiv ID chronology (submission window %04d-%02d..%04d-%02d).",
-                len(selected),
+                len(chronology_keys),
                 dataset_source,
-                boundary_keys[0][0],
-                boundary_keys[0][1],
-                boundary_keys[-1][0],
-                boundary_keys[-1][1],
+                chronology_keys[0][0],
+                chronology_keys[0][1],
+                chronology_keys[-1][0],
+                chronology_keys[-1][1],
             )
         if select_by_index:
             return dataset.select(
@@ -4327,11 +4331,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         targets = [
             (pid, paper)
-            for pid, paper in list(papers.items())[:CITATION_COUNT_ENRICHMENT_LIMIT]
+            for pid, paper in papers.items()
             if not paper.is_seed
             and not (isinstance(pid, str) and pid.startswith("query:"))
             and not (isinstance(pid, str) and pid.startswith("arxiv_"))
-        ]
+        ][:CITATION_COUNT_ENRICHMENT_LIMIT]
 
         if not targets:
             return
@@ -4341,53 +4345,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             len(targets),
         )
 
-        progress_enabled = stderr_isatty() and len(targets) > 1
-        progress_bar = (
-            tqdm(
-                targets,
-                desc="Citation counts",
-                unit="papers",
-                dynamic_ncols=True,
-                leave=False,
-            )
-            if progress_enabled
-            else None
+        batch_results = self.client.get_papers(
+            [paper_id for paper_id, _paper in targets]
         )
-        iterator = progress_bar if progress_bar is not None else targets
-
-        batch_results: Dict[str, Paper] = {}
-        batch_fetch = getattr(self.client, "get_papers", None)
-        if callable(batch_fetch):
-            try:
-                batch_response = batch_fetch([paper_id for paper_id, _paper in targets])
-                if isinstance(batch_response, dict):
-                    batch_results = {
-                        normalize_paper_id(str(paper_id)): paper
-                        for paper_id, paper in batch_response.items()
-                        if isinstance(paper, Paper)
-                    }
-                else:
-                    logger.debug(
-                        "Ignoring unexpected batch citation-count response type %s.",
-                        type(batch_response).__name__,
-                    )
-            except Exception as exc:
-                logger.warning("Could not batch fetch citation counts: %s", exc)
-
-        for paper_id, paper in iterator:
+        for paper_id, paper in targets:
             batch_paper = batch_results.get(normalize_paper_id(paper_id))
             if batch_paper is not None:
                 paper.citation_count = batch_paper.citation_count
-                continue
-            try:
-                s2_paper = self.client.get_paper(paper_id)
-                if s2_paper:
-                    paper.citation_count = s2_paper.citation_count
-            except Exception as exc:
-                logger.warning(f"Could not fetch citation count for {paper_id}: {exc}")
-
-        if progress_bar is not None:
-            progress_bar.close()
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

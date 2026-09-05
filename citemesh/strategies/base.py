@@ -233,7 +233,7 @@ class GraphBuilderStrategy(ABC):
         :param Paper paper1: First paper
         :param Paper paper2: Second paper
         :param float similarity: Computed similarity score
-        :return bool: True if edge should be created. Uses ``self.similarity_threshold``
+        :return bool: True for a positive score meeting ``self.similarity_threshold``
             when present, otherwise defaults to ``0.0``.
         """
         del paper1
@@ -243,7 +243,7 @@ class GraphBuilderStrategy(ABC):
             threshold = float(raw_threshold)
         except (TypeError, ValueError):
             threshold = 0.0
-        return similarity >= threshold
+        return similarity > 0.0 and similarity >= threshold
 
     def get_collection_summary(self) -> Optional[str]:
         """
@@ -386,6 +386,9 @@ class GraphBuilderStrategy(ABC):
             if has_bibliographic_coupling
             else 0.0
         )
+        # Publication era and citation popularity alone do not establish topic relevance.
+        if abstract_similarity <= 0.0 and bibliographic_coupling <= 0.0:
+            return 0.0
         weights = (
             with_references_weights
             if has_bibliographic_coupling

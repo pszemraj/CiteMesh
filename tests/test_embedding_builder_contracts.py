@@ -2549,6 +2549,7 @@ def test_arxiv_id_chronology_key_parses_both_styles() -> None:
     assert key("solv-int/9912015") == (1999, 12, 15)
     assert key("math.GT/0309136") == (2003, 9, 136)
     assert key("hep-th/0504010v3") == (2005, 4, 10)
+    assert key("cond-mat.stat-mech/0504010v3") == (2005, 4, 10)
     assert key("fallback-paper") is None
     assert key("") is None
     assert key(None) is None
@@ -2612,6 +2613,42 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
     )
     _, dataset = builder._load_dataset_for_hydration(use_streaming=True)
     assert [record["title"] for record in dataset] == ["Paper 0", "Paper 1", "Paper 2"]
+
+
+@pytest.mark.parametrize("use_column_selection", [True, False])
+def test_capped_hydration_fills_partial_chronology_with_source_order_rows(
+    use_column_selection: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Mixed-ID sources must fill the cap and disclose incomplete chronology.
+
+    :param bool use_column_selection: Exercise Arrow columns or iterable selection.
+    :param pytest.LogCaptureFixture caplog: Captured hydration warning.
+    :return None: Assertions verify exact cap, no duplicate fills, and stable order.
+    """
+    rows = [
+        {"id": "unknown-1"},
+        {"id": "2601.00001"},
+        {"id": "unknown-2"},
+        {"id": "unknown-3"},
+    ]
+    dataset = MagicMock()
+    dataset.column_names = ["id"]
+    dataset.__getitem__.side_effect = lambda column: [row[column] for row in rows]
+    dataset.select.side_effect = lambda indices: [rows[idx] for idx in indices]
+    builder = EmbeddingGraphBuilder(corpus_size=3, client=MagicMock())
+
+    with caplog.at_level(logging.WARNING):
+        selected = builder._select_newest_corpus_rows(
+            dataset if use_column_selection else iter(rows), "fake/source"
+        )
+
+    expected = (
+        ["unknown-1", "2601.00001", "unknown-2"]
+        if use_column_selection
+        else ["2601.00001", "unknown-1", "unknown-2"]
+    )
+    assert [row["id"] for row in selected] == expected
+    assert "filling the corpus cap with 2 rows in source order" in caplog.text
 
 
 def test_select_newest_corpus_rows_uses_dataset_id_column() -> None:
@@ -4558,6 +4595,43 @@ def test_embedding_citation_enrichment_logs_target_count(
         in message
         for message in log_messages
     )
+
+
+def test_citation_enrichment_limit_excludes_seed_and_keeps_partial_batch_counts() -> (
+    None
+):
+    """Twenty eligible papers are batched once, retaining available partial counts.
+
+    :return None: Assertions validate eligible targets and absence of per-ID retries.
+    """
+    client = MagicMock()
+    builder = EmbeddingGraphBuilder(client=client)
+    papers = {
+        "seed": Paper(paper_id="seed", title="Seed", year=2024, is_seed=True),
+        "arxiv_0": Paper(paper_id="arxiv_0", title="Unresolved", year=2024),
+    }
+    papers.update(
+        {
+            f"arxiv:2401.{idx:05d}": Paper(
+                paper_id=f"arxiv:2401.{idx:05d}", title=f"Corpus {idx}", year=2024
+            )
+            for idx in range(25)
+        }
+    )
+    client.get_papers.return_value = {
+        "arxiv:2401.00000": Paper(
+            paper_id="arxiv:2401.00000", title="Cached", year=2024, citation_count=77
+        )
+    }
+
+    builder._update_citation_counts(papers)
+
+    client.get_papers.assert_called_once_with(
+        [f"arxiv:2401.{idx:05d}" for idx in range(20)]
+    )
+    client.get_paper.assert_not_called()
+    assert papers["arxiv:2401.00000"].citation_count == 77
+    assert papers["arxiv:2401.00001"].citation_count == 0
 
 
 def test_embedding_build_graph_persists_runtime_metadata(

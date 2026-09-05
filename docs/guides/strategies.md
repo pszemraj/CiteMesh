@@ -25,6 +25,9 @@ Related docs:
 - Strengths: fast, low setup, good for topical exploration.
 - Limitations: depends on Semantic Scholar availability and coverage.
 - Typical use: quick graphing from a known paper ID.
+- Edges require positive topical similarity or shared-reference evidence and meet
+  the configured similarity threshold. At most three edges touch each paper;
+  the strongest eligible edges are retained deterministically.
 
 ## Citation Strategy
 
@@ -34,6 +37,13 @@ Related docs:
   evidence.
 - Limitations: coverage varies by paper and field; requires reference lists for full bibliographic coupling.
 - Typical use: citation-derived neighborhoods and reference-aware similarity.
+- As with recommendation graphs, dates and citation popularity alone cannot
+  create an edge, and each paper has at most three edges. The default 40-paper
+  graph therefore has at most 60 edges.
+
+Both strategies warn when reference hydration exhausts its retries, then skip
+further reference hydration for that collection. Existing reference lists remain
+available for scoring; a subsequent collection tries the source again.
 
 ## Embedding Strategy
 
@@ -45,6 +55,11 @@ Two semantic sources, selected with `--semantic-source`:
   embedding seed instead starts with up to 20 S2 keyword results and expands
   recommendations from the top anchor. Candidate vectors persist incrementally;
   no local corpus is downloaded.
+  Known-paper budgets are split approximately 1:2:1 across references, citations,
+  and recommendations, with references and recommendations each capped at 100.
+  Pools of at least three include all three sources; a one-paper budget requests
+  recommendations, and a two-paper budget also requests one reference. Candidate
+  metadata already includes citation counts, so this mode does not refetch them.
 - `arxiv-corpus` (opt-in): hydrates and searches a local arXiv abstract corpus from
   HuggingFace. This can surface papers with no citation path to the seed but needs
   the `datasets` dependency and substantially more cold-cache work. Selection,
@@ -65,6 +80,9 @@ Embedding cache behavior, hydration, and precision controls are defined in [Cach
 - `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
 - Semantic enrichment failures stop the build; hybrid does not silently downgrade
   to citation-only output.
+- If citation/reference endpoints are unavailable after the seed resolves,
+  semantic enrichment can still proceed from recommendations or the local arXiv
+  corpus. Source availability is recorded in the graph metadata.
 - Hybrid defaults are tuned for the seed-paper discovery workflow (recent
   follow-up + foundational prior work); the evaluation rationale is documented in
   the defaults study.

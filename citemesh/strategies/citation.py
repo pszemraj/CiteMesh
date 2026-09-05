@@ -17,7 +17,10 @@ from citemesh._runtime import stderr_isatty
 from citemesh.core import Paper
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
-from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.base import (
+    GraphBuilderStrategy,
+    build_capped_undirected_graph,
+)
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
     IdentityRegistry,
@@ -81,6 +84,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.candidate_source_results: tuple[CandidateSourceResult, ...] = ()
         self._identity_aliases = IdentityRegistry()
         self._abstract_index = AbstractSimilarityIndex()
+        self._reference_source_unavailable = False
 
     def _ensure_paper_references(self, paper: Paper) -> None:
         """Hydrate reference IDs for a paper without clobbering existing payload.
@@ -103,15 +107,18 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         if cached_refs is not None:
             paper.references = list(cached_refs)
             return
+        if self._reference_source_unavailable:
+            return
 
         from citemesh.services import SemanticScholarUnavailableError
 
         try:
             paper.references = self._get_references(paper_id)
         except SemanticScholarUnavailableError as exc:
+            self._reference_source_unavailable = True
             logger.warning(
                 "Reference IDs unavailable for related paper %s; continuing "
-                "without bibliographic-coupling data for that paper: %s",
+                "without further reference hydration for this collection: %s",
                 paper_id,
                 exc,
             )
@@ -264,6 +271,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         # Scope in-memory references to one collection request so stale entries do
         # not leak across caller boundaries when builders are reused.
         self.reference_cache.clear()
+        self._reference_source_unavailable = False
         self.seed_relations = {}
         self.candidate_source_status = {}
         self.candidate_source_results = ()
@@ -275,7 +283,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         logger.info(f"Fetching seed paper: {seed_id}")
         seed = self.client.get_paper(
             seed_id,
-            fetch_references=self.fetch_references,
             raise_on_unavailable=True,
         )
 
@@ -290,9 +297,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.seed_relations[seed.paper_id] = "seed"
         register_aliases(self._identity_aliases, seed.paper_id, seed)
 
-        # Store seed references in cache
-        if self.fetch_references and seed.references:
-            self.reference_cache[seed.paper_id] = seed.references
+        self._ensure_paper_references(seed)
 
         logger.info("Seed: %s", seed.title)
 
@@ -379,7 +384,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
-        return graph, actual_seed_id
+        return build_capped_undirected_graph(graph, 3), actual_seed_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

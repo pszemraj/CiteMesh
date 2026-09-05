@@ -101,13 +101,14 @@ def _make_constant_similarity_builder(
         cap = 1
         monkeypatch.setattr(HYBRID_CONFIG, "max_edges_per_node", cap)
     else:
-        cap = 1
+        cap = 3
 
     papers = {
         "seed": Paper(paper_id="seed", title="Seed", year=2024, abstract="seed"),
         "a": Paper(paper_id="a", title="A", year=2024, abstract="alpha"),
         "b": Paper(paper_id="b", title="B", year=2024, abstract="beta"),
         "c": Paper(paper_id="c", title="C", year=2024, abstract="gamma"),
+        "d": Paper(paper_id="d", title="D", year=2024, abstract="delta"),
     }
     papers["seed"].is_seed = True
 
@@ -152,6 +153,98 @@ def test_citation_and_recommendation_should_create_edge_thresholds() -> None:
     assert not recommendation.should_create_edge(seed, related, 0.19)
 
 
+@pytest.mark.parametrize(
+    "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
+)
+@pytest.mark.parametrize("references", [[], ["unshared"]])
+def test_indexed_graphs_require_topical_or_shared_reference_evidence(
+    builder_type: type[GraphBuilderStrategy], references: list[str]
+) -> None:
+    """Same-year popularity must not connect papers without topical evidence.
+
+    :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
+    :param list[str] references: Missing or disjoint reference payload.
+    :return None: Assertions verify irrelevant edges are absent and supported ones remain.
+    """
+    seed = Paper(
+        paper_id="seed",
+        title="Algebra",
+        abstract="Polynomial rings theorem",
+        year=2024,
+        citation_count=100,
+        references=["shared"],
+    )
+    other = Paper(
+        paper_id="other",
+        title="Biology",
+        abstract="Marine coral ecosystem",
+        year=2024,
+        citation_count=100,
+        references=references,
+    )
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [other]
+    client.get_paper_citations.return_value = []
+    client.get_recommended_papers.return_value = [other]
+    client.get_reference_ids.return_value = []
+    builder = builder_type(client=client, similarity_threshold=0.0)
+
+    graph, _ = builder.build_graph("seed")
+
+    assert set(graph) == {"seed", "other"}
+    assert graph.number_of_edges() == 0
+    assert builder.compute_similarity(seed, other) == 0.0
+    other.references = ["shared"]
+    graph, _ = builder.build_graph("seed")
+    assert graph.has_edge("seed", "other")
+
+
+@pytest.mark.parametrize(
+    "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
+)
+def test_reference_outage_warns_and_stops_hydration_until_next_collection(
+    builder_type: type[GraphBuilderStrategy], caplog: pytest.LogCaptureFixture
+) -> None:
+    """One exhausted reference call skips remaining hydration and resets next build.
+
+    :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
+    :param pytest.LogCaptureFixture caplog: Captured user-visible warnings.
+    :return None: Assertions validate outage visibility, retry scope, and contract errors.
+    """
+    from citemesh.services import SemanticScholarUnavailableError
+
+    client = MagicMock()
+    client.get_paper.return_value = _paper("seed", refs=["seed-ref"])
+    related = [_paper("first"), _paper("second")]
+    client.get_recommended_papers.return_value = related
+    client.get_paper_references.return_value = related
+    client.get_paper_citations.return_value = []
+    client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
+    builder = builder_type(client=client)
+
+    with caplog.at_level(logging.WARNING):
+        papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", "first", "second"}
+    client.get_reference_ids.assert_called_once_with("first", force_refresh=False)
+    assert len(caplog.records) == 1
+    assert "without further reference hydration" in caplog.text
+    client.get_reference_ids.reset_mock(side_effect=True)
+    client.get_reference_ids.return_value = ["restored"]
+
+    papers = builder.collect_papers("seed")
+
+    assert client.get_reference_ids.call_count == 2
+    assert papers["first"].references == ["restored"]
+    assert papers["second"].references == ["restored"]
+    for paper in related:
+        paper.references = []
+    client.get_reference_ids.side_effect = ValueError("malformed references")
+    with pytest.raises(ValueError, match="malformed references"):
+        builder.collect_papers("seed")
+
+
 def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_refs() -> (
     None
 ):
@@ -177,6 +270,7 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
             ),
         ]
         mock_get_client.return_value = mock_client
+        mock_client.get_reference_ids.return_value = []
 
         builder = RecommendationGraphBuilder(max_papers=3, fetch_references=True)
         papers = builder.collect_papers("seed")
@@ -184,7 +278,7 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
     assert "valid" in papers
     assert "missing" not in papers
     assert papers["valid"].references == ["r1", "r2"]
-    mock_client.get_reference_ids.assert_not_called()
+    mock_client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
 
 
 def test_citation_collect_populates_reference_cache_and_summary() -> None:
@@ -590,6 +684,52 @@ def test_refresh_reference_cache_force_lookup_contracts() -> None:
     )
 
 
+def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A working local corpus must remain usable when both S2 relations fail.
+
+    :param pytest.MonkeyPatch monkeypatch: Offline collection and ranking stubs.
+    :return None: Assertions validate retained source status and semantic candidates.
+    """
+    from citemesh.services import SemanticScholarUnavailableError
+
+    seed = _seed_paper()
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.side_effect = SemanticScholarUnavailableError("offline")
+    client.get_paper_citations.side_effect = SemanticScholarUnavailableError("offline")
+    client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        max_semantic=1,
+        semantic_source="arxiv-corpus",
+        client=client,
+    )
+    assert builder.embedding_builder is not None
+    collect_corpus = MagicMock(
+        return_value={"seed": seed, "semantic": _paper("semantic")}
+    )
+    monkeypatch.setattr(builder.embedding_builder, "collect_papers", collect_corpus)
+    monkeypatch.setattr(
+        builder, "_rank_candidates", lambda _seed, papers, _sources: list(papers)
+    )
+
+    papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", "semantic"}
+    assert builder.candidate_source_status == {
+        "references": "unavailable",
+        "citations": "unavailable",
+    }
+    collect_corpus.assert_called_once_with("seed", seed_paper=seed)
+    client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
+    client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
+    client.get_recommended_papers.assert_not_called()
+
+
 def test_citation_related_paper_reference_failure_remains_uncached() -> None:
     """One unavailable related-paper reference list should not abort collection."""
     from citemesh.services import SemanticScholarUnavailableError
@@ -611,6 +751,7 @@ def test_citation_related_paper_reference_failure_remains_uncached() -> None:
     )
 
     client.get_reference_ids.side_effect = RuntimeError("local hydration bug")
+    builder = CitationGraphBuilder(fetch_references=True, client=client)
     with pytest.raises(RuntimeError, match="local hydration bug"):
         builder._ensure_paper_references(_paper("broken-paper"))
 
@@ -1281,6 +1422,14 @@ def test_max_papers_is_total_node_cap_including_seed(
     ("builder_factory", "expected_strategy"),
     [
         (
+            lambda: CitationGraphBuilder(max_papers=5, client=MagicMock()),
+            "citation",
+        ),
+        (
+            lambda: RecommendationGraphBuilder(max_papers=5, client=MagicMock()),
+            "recommendation",
+        ),
+        (
             lambda: EmbeddingGraphBuilder(max_papers=4, top_k=1, client=MagicMock()),
             "embedding",
         ),
@@ -1316,7 +1465,7 @@ def test_degree_capping_preserves_per_node_limit(
         )
     }
 
-    assert graph.number_of_nodes() == 4
+    assert graph.number_of_nodes() == 5
     assert graph.graph["strategy"] == expected_strategy
     assert graph.number_of_edges() == len(expected_edges)
     assert all(degree <= max_edges_per_node for _, degree in graph.degree())
@@ -1887,6 +2036,68 @@ def test_merge_paper_metadata_keeps_maximum_citation_count_in_either_order() -> 
     assert merge_paper_metadata(high_count, low_count).citation_count == 100
 
 
+@pytest.mark.parametrize(
+    ("paper_id", "arxiv_id", "doi"),
+    [
+        ("arxiv:2508.12345v2", "2508.12345", ""),
+        ("10.1000/example", "", "10.1000/example"),
+    ],
+)
+@pytest.mark.parametrize("canonical_has_external_id", [True, False])
+def test_metadata_merge_preserves_external_ids_from_primary_identifiers(
+    paper_id: str, arxiv_id: str, doi: str, canonical_has_external_id: bool
+) -> None:
+    """Collapsed records must retain primary external identifiers for export.
+
+    :param str paper_id: External primary identifier before merging.
+    :param str arxiv_id: Expected preserved arXiv metadata.
+    :param str doi: Expected preserved DOI metadata.
+    :param bool canonical_has_external_id: Whether the retained record has the external ID.
+    :return None: Assertions validate both canonical and discarded identifiers.
+    """
+    from citemesh.strategies.candidates import merge_paper_metadata
+
+    preferred = _paper(paper_id if canonical_has_external_id else "a" * 40)
+    incoming = _paper("a" * 40 if canonical_has_external_id else paper_id)
+
+    merged = merge_paper_metadata(preferred, incoming)
+
+    assert merged is preferred
+    assert merged.arxiv_id == arxiv_id
+    assert merged.doi == doi
+
+
+@pytest.mark.parametrize(
+    ("pool_size", "expected"),
+    [
+        (1, (0, 0, 1)),
+        (2, (1, 0, 1)),
+        (3, (1, 1, 1)),
+        (4, (1, 2, 1)),
+        (20, (5, 10, 5)),
+        (100, (25, 50, 25)),
+        (400, (100, 200, 100)),
+    ],
+)
+def test_embedding_candidate_budgets_include_every_source_when_possible(
+    pool_size: int, expected: tuple[int, int, int]
+) -> None:
+    """Small pools must keep relation sources without exceeding the total budget.
+
+    :param int pool_size: Candidate fetch budget.
+    :param tuple[int, int, int] expected: Reference, citation, recommendation budgets.
+    :return None: Assertions preserve default allocation and source coverage.
+    """
+    builder = EmbeddingGraphBuilder(candidate_pool_size=pool_size, client=MagicMock())
+
+    budgets = builder._candidate_pool_budgets()
+
+    assert budgets == expected
+    assert sum(budgets) == pool_size
+    if pool_size >= 3:
+        assert all(budget > 0 for budget in budgets)
+
+
 def test_citation_seed_relations_use_shared_precedence_rules() -> None:
     """Citation relation updates should retain the shared seed-label semantics."""
     builder = CitationGraphBuilder(client=MagicMock())
@@ -1965,7 +2176,6 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
 
     monkeypatch.setattr(builder, "_ensure_cache_hydrated", _raise_hydration)
     monkeypatch.setattr(builder, "_load_model", lambda: None)
-    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
     fingerprint_checks: list[str] = []
     monkeypatch.setattr(
         builder,
@@ -1979,6 +2189,8 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
     assert "seed" in papers
     assert len(papers) == 4
     assert client.get_recommended_papers.called
+    client.get_papers.assert_not_called()
+    client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
     non_seed = [paper_id for paper_id in papers if paper_id != "seed"]
     for paper_id in non_seed:
         assert paper_id in builder.retrieval_embeddings

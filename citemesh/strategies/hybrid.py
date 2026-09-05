@@ -575,7 +575,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")
-        if self.embedding_builder is not None and self.semantic_source == "candidates":
+        if self.embedding_builder is not None:
             citation_papers = self.citation_builder.collect_papers(
                 seed_id,
                 validate_source_availability=False,
