@@ -11,6 +11,29 @@ package. Current behavior is described in the linked guides and references:
 
 ## Public Release Readiness
 
+- Preserve embedding namespaces on transient HDF5/SQLite failures, recover
+  interrupted trailing writes in either direction, and retain valid calibration
+  before the first embedding write. INT8 reconstruction uses bucket midpoints;
+  binary prefilters consistently use reconstructed stored vectors, including a
+  one-time auxiliary rebuild for older indexes.
+- Preserve Semantic Scholar HTTP failure classifications, skip deterministic
+  contract-error retries, and stop redundant per-paper fallback requests after
+  an exhausted outage. The 30-attempt budget and 60-second local per-backoff cap
+  remain unchanged. Unresolved references yield a visible empty result, and
+  hybrid corpus searches can continue through relation-source outages.
+- Balance small candidate pools across sources, fill capped corpus selections
+  when only some IDs provide chronology, and accept legacy dotted arXiv subjects.
+  Derive external IDs during candidate collapse and avoid redundant citation-count
+  refreshes in candidate mode.
+- Require topical evidence for citation/recommendation edges and apply their
+  existing shared degree cap. Normalize nullable GraphML attributes, accept
+  integral float years, and reject non-finite edge weights before JSON/dashboard
+  output can replace a valid artifact.
+- Add `build --refresh-paper-cache` for fresh metadata and citation counts.
+  Pass configured API keys directly to clients without exporting them to child
+  processes. Correct config-origin and negated-option diagnostics, report ignored
+  corpus defaults at INFO, and omit inactive settings from config sidecars.
+  Expand `~` in cache overrides and suppress legacy macOS hints for explicit roots.
 - Extended Semantic Scholar retries from 3 to 30 total attempts per operation,
   using Tenacity on both SDK and direct HTTP paths with shared exponential full
   jitter. Server `Retry-After` delays can exceed the local 60-second backoff cap,

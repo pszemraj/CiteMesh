@@ -233,6 +233,16 @@ Top-level fields:
 - `hybrid` for resolved `max_semantic`.
 - `embedding` for embedding/hybrid semantic settings, including the requested `device` and `model_profile` tokens.
 
+Inactive source and storage options are omitted: candidate runs do not record
+corpus-hydration flags, corpus runs do not record candidate-pool budgets, and
+FP32 storage does not record INT8 calibration or prefilter settings.
+`build.refresh_paper_cache` records whether fresh paper metadata was requested.
+
+Exports accept integral numeric years (including values such as `2017.0`);
+fractional or non-finite years are treated as missing. GraphML writes nullable
+text fields as empty values. Non-finite edge weights are rejected before JSON
+or dashboard artifacts replace existing files.
+
 `metadata` includes:
 
 - common run metadata (`paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`)

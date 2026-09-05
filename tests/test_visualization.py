@@ -556,9 +556,12 @@ def test_plotly_html_survives_empty_and_seedless_graphs(
 
 
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
-    """GraphML must drop XML-invalid characters instead of emitting unparsable files."""
+    """GraphML should round-trip nullable metadata and XML-invalid text."""
     graph, seed_id = _build_graph()
     graph.nodes[seed_id]["title"] = "Bad\x0btitle￾"
+    graph.nodes[seed_id].pop("paper", None)
+    for field in ("venue", "doi", "arxiv_id", "abstract", "authors", "categories"):
+        graph.nodes[seed_id][field] = None
     exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
 
     graphml_path = tmp_path / "invalid-chars.graphml"
@@ -566,6 +569,32 @@ def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
 
     assert ET.parse(graphml_path) is not None
     assert nx.read_graphml(graphml_path).nodes[seed_id]["title"] == "Badtitle"
+
+
+@pytest.mark.parametrize("weight", [float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize("method", ["to_json", "to_dashboard_html"])
+def test_exports_reject_nonfinite_weights_without_replacing_outputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, weight: float, method: str
+) -> None:
+    """Invalid weights must not overwrite a usable JSON file or dashboard.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Optional plotting dependency stub.
+    :param float weight: Non-finite edge weight.
+    :param str method: Export entry point under test.
+    :return None: Checks the failure and preservation of the prior artifact.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    graph.edges["seed", "related"]["weight"] = weight
+    path = tmp_path / "existing-output"
+    path.write_text("previous valid output")
+    with pytest.raises(ValueError, match="non-finite edge weight"):
+        getattr(exporter, method)(path)
+    assert path.read_text() == "previous valid output"
 
 
 def _extract_dashboard_script_text(html_text: str, script_id: str) -> str:
@@ -1804,7 +1833,7 @@ def test_publication_year_coercion_is_shared_across_visual_surfaces() -> None:
     """String, NumPy, and invalid years should resolve consistently everywhere."""
     graph = nx.Graph()
     graph.add_node("seed", title="Seed", year="2024", is_seed=True)
-    graph.add_node("older", title="Older", year=np.int64(2020))
+    graph.add_node("older", title="Older", year=np.float64(2020.0))
     graph.add_node("invalid", title="Invalid", year="unknown")
     layout = {"seed": (0.0, 0.0), "older": (1.0, 0.0), "invalid": (0.5, 1.0)}
 
@@ -1828,7 +1857,11 @@ def test_publication_year_coercion_is_shared_across_visual_surfaces() -> None:
         (np.int64(2023), 2023),
         (" 2022 ", 2022),
         (True, 0),
-        (2021.0, 0),
+        (2021.0, 2021),
+        (np.float32(2017.0), 2017),
+        (2021.5, 0),
+        (float("nan"), 0),
+        (float("inf"), 0),
         ("unknown", 0),
         (None, 0),
     ],

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import numbers
 from collections.abc import Iterable
 
@@ -19,6 +20,10 @@ def coerce_publication_year(raw_year: object) -> int:
         return 0
     if isinstance(raw_year, numbers.Integral):
         return int(raw_year)
+    if isinstance(raw_year, numbers.Real):
+        if math.isfinite(raw_year) and float(raw_year).is_integer():
+            return int(raw_year)
+        return 0
     if isinstance(raw_year, str):
         try:
             return int(raw_year)

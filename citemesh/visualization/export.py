@@ -256,15 +256,17 @@ _XML_INVALID_CHARS_RE = re.compile(
 
 
 def _xml_safe_graph_value(value: object) -> object:
-    """Strip XML-invalid characters from string values bound for GraphML.
+    """Normalize nullable attributes and XML-invalid text bound for GraphML.
 
     Upstream titles/abstracts occasionally carry stray control bytes;
     ``nx.write_graphml`` passes them through and produces a file no XML
     parser will accept.
 
     :param object value: Raw attribute value.
-    :return object: Value with XML-invalid characters removed when a string.
+    :return object: Empty text for nulls, otherwise an XML-safe attribute value.
     """
+    if value is None:
+        return ""
     if isinstance(value, str):
         return _XML_INVALID_CHARS_RE.sub("", value)
     return value
@@ -1436,9 +1438,9 @@ class GraphExporter:
         :param Any payload: JSON-serializable payload.
         :return str: Compact deterministic JSON with every ``<`` escaped.
         """
-        return json.dumps(payload, sort_keys=True, separators=(",", ":")).replace(
-            "<", "\\u003c"
-        )
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).replace("<", "\\u003c")
 
     def _derive_links(
         self,
@@ -4655,8 +4657,15 @@ class GraphExporter:
 
         :return list[tuple[Hashable, Hashable, Dict[str, Any]]]: Sorted edge tuples in
             ``(u, v, attrs)`` form.
+        :raises ValueError: If an edge weight cannot be represented in JSON.
         """
-        return ordered_edges_with_data(self.graph)
+        edges = ordered_edges_with_data(self.graph)
+        for left, right, attrs in edges:
+            if not math.isfinite(float(attrs.get("weight", 0.0))):
+                raise ValueError(
+                    f"Cannot export non-finite edge weight for {left!r} -> {right!r}."
+                )
+        return edges
 
     def _get_layout(self) -> Dict[Hashable, Iterable[float]]:
         """Compute or reuse cached graph layout.
