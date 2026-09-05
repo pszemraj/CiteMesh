@@ -64,7 +64,7 @@ Per-device precision matrix (EmbeddingGemma is the default profile):
 | --- | --- | --- | --- |
 | `cuda` | bfloat16 when native support is reported, otherwise float32 | float32 | bfloat16 only for profiles that opt in |
 | `mps` | bfloat16 when torch >= 2.13 and the context is accepted, otherwise float32 | float32 | bfloat16 only for profiles that opt in |
-| `cpu` | float32 | float32 | off |
+| `cpu` | bfloat16 when native support is reported, otherwise float32 | float32 | bfloat16 only for profiles that opt in |
 
 Notes:
 
@@ -73,7 +73,7 @@ Notes:
 - Reduced-precision compute is bfloat16-only and is entered through `torch.autocast` around encode calls. If the device capability, torch API, version guard, or autocast-context probe rejects bfloat16, CiteMesh uses float32.
 - CUDA capability checks request native support (`is_bf16_supported(including_emulation=False)`), so tensor-level emulation on older GPUs does not enable bfloat16 autocast.
 - bf16-on-MPS requires torch >= 2.13 (the floor verified on Apple Silicon). Older torch releases fall back to float32.
-- CPU stays float32: reduced precision on CPU is slower, not faster. An automatically loaded bfloat16 checkpoint is rejected on this path rather than silently sharing a float32 cache namespace.
+- CPU BF16 selection checks native x86 or ARM instructions through `torch.cpu.get_capabilities()` where available, or the older x86 BF16 probe. Missing or unverified hardware support keeps CPU compute in float32. Final embedding normalization runs in float32 after autocast so BF16 rounding does not change the unit-length output contract.
 - Attention selection is model-profile-driven. EmbeddingGemma prefers `flash_attention_2` on CUDA when `flash_attn` is installed and BF16 compute is available. Missing FA2 or FP32 compute selects SDPA; an FA2 model-load failure retries the same checkpoint with SDPA. MPS uses SDPA and CPU leaves attention automatic. Profiles without an explicit preference leave the Transformers backend automatic.
 - CiteMesh does not select OpenVINO or ONNX backends on top of torch.
 - On Ampere+ CUDA devices in eager mode, TF32 is scoped to the CUDA matmul and cuDNN convolution backends for each encode call, then the prior process settings are restored. TF32 configuration is skipped entirely for non-CUDA devices, including `--device cpu` on a CUDA host.
@@ -81,9 +81,9 @@ Notes:
 Compile policy:
 
 - `torch.compile` is best-effort, profile-gated, and disabled by default.
-- Compile is only attempted on `cuda` and `mps`. On CPU it is declined: Inductor warm-up for a short-lived CLI run has no payoff.
-- Inductor-on-Metal (`mps`) is experimental. Because compilation is lazy, a first-encode failure restores the original eager inner model and retries the complete encode request once; no partial bucket result is persisted.
-- Enable it explicitly with `--torch-compile` when you want to pay the warm-up cost. CUDA honors this flag during corpus hydration, including resumed hydration, and uses dynamic shapes for variable-length batches. MPS continues to defer compilation during cold-cache hydration.
+- Compile can be enabled on `cuda`, `cpu`, and `mps`; Inductor-on-Metal (`mps`) remains experimental.
+- Because compilation is lazy, a compiled-call failure restores the original eager inner model and retries the affected encode batch once. This applies to direct encoding, cached candidates, graph embeddings, and corpus updates; cache writes occur only after all batches finish successfully.
+- Enable it explicitly with `--torch-compile` when you want to pay the warm-up cost. CUDA and CPU honor this flag during corpus hydration, including resumed hydration, and use dynamic shapes for variable-length batches. MPS continues to defer compilation during cold-cache hydration.
 - CiteMesh replaces SentenceTransformers 6's active `model[0].model` for compilation and eager recovery (with support for the legacy `auto_model` layout). Replacing only the legacy alias can leave the real forward pass uncompiled.
 - During compiled FA2 encode calls, CiteMesh scopes a compiler setting that ignores Transformers' autocast-conversion log call while tracing (or defers it on older torch releases). This prevents a logging-induced graph break inside the decoder loop; the prior compiler settings are restored after encoding.
 - Legacy note: on torch `2.9`/`2.10` with compile enabled, the runtime scopes `torch.set_float32_matmul_precision("high")` to encode calls instead of mixing it with the `fp32_precision` API. Later torch releases scope the CUDA-specific modern controls the same way.

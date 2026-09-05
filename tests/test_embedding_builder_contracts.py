@@ -746,21 +746,26 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
     )
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda", "mps"])
 def test_embedding_bf16_autocast_rejection_falls_back_to_float32(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    device: str,
 ) -> None:
     """A rejected bf16 autocast context must keep compute in float32."""
     init_log, _ = _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, autocast_log, _fake_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=True,
+        mps_available=True,
         bf16_supported=True,
         autocast_behavior="raise",
+        torch_version="2.13.0",
     )
+    _fake_torch.cpu = types.SimpleNamespace(get_capabilities=lambda: {"bf16": True})
 
     with caplog.at_level(logging.WARNING):
-        builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+        builder = EmbeddingGraphBuilder(max_papers=1, device=device, client=MagicMock())
     builder._load_model()
 
     assert builder._source_dtype_hint == "float32"
@@ -771,11 +776,62 @@ def test_embedding_bf16_autocast_rejection_falls_back_to_float32(
         )
         == "auto"
     )
-    assert autocast_log == [("call", "cuda", _bf16_token), ("enter",)]
+    assert autocast_log == [("call", device, _bf16_token), ("enter",)]
     assert any(
         "runtime rejected that context" in record.getMessage()
         for record in caplog.records
     )
+
+
+@pytest.mark.parametrize(
+    ("capabilities", "legacy", "expected"),
+    [
+        ({"avx512_bf16": True}, None, True),
+        ({"amx_bf16": True}, None, True),
+        ({"bf16": True}, None, True),
+        ({"sve_bf16": True}, None, True),
+        ({"avx2": True}, None, False),
+        (None, True, True),
+        (None, False, False),
+        (None, None, False),
+    ],
+)
+def test_cpu_bf16_autocast_uses_native_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    capabilities: dict[str, bool] | None,
+    legacy: bool | None,
+    expected: bool,
+) -> None:
+    """Enable CPU BF16 only with reported native instructions and valid autocast.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param dict[str, bool] | None capabilities: Modern CPU feature mapping.
+    :param bool | None legacy: Older torch x86 BF16 probe result, if available.
+    :param bool expected: Expected BF16 runtime selection.
+    :return None: Checks precision, outputs, automatic weights, and portable attention.
+    """
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    token, autocast_log, torch = _install_fake_torch(
+        monkeypatch,
+        cuda_available=False,
+        bf16_supported=False,
+    )
+    torch.cpu = types.SimpleNamespace()
+    if capabilities is not None:
+        torch.cpu.get_capabilities = lambda: capabilities
+    if legacy is not None:
+        torch.cpu._is_avx512_bf16_supported = lambda: legacy
+    builder = EmbeddingGraphBuilder(device="cpu", client=MagicMock())
+    builder._load_model()
+    output = builder._encode_texts(["paper"])
+    assert output.dtype == np.float32
+    assert builder._source_dtype_hint == ("bfloat16" if expected else "float32")
+    assert builder._autocast_enabled is expected
+    assert builder._tf32_mode == "off"
+    assert init_log["kwargs"]["model_kwargs"] == {"dtype": "auto"}
+    assert (("call", "cpu", token) in autocast_log) is expected
+    if expected:
+        np.testing.assert_allclose(np.linalg.norm(output, axis=1), 1.0, atol=1e-6)
 
 
 def test_cuda_bf16_policy_rejects_emulated_only_support(
@@ -1168,12 +1224,12 @@ def test_fa2_compile_logging_configuration_is_scoped(
     assert getattr(config, logging_option) == {existing_logger}
 
 
-@pytest.mark.parametrize("device", ["cuda", "mps"])
+@pytest.mark.parametrize("device", ["cuda", "mps", "cpu"])
 def test_embedding_compile_hydration_policy(
     monkeypatch: pytest.MonkeyPatch,
     device: str,
 ) -> None:
-    """Explicit compile runs during CUDA hydration and stays deferred on MPS.
+    """CPU and CUDA compile during hydration; MPS stays deferred.
 
     :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
     :param str device: Accelerator whose hydration policy is checked.
@@ -1202,7 +1258,7 @@ def test_embedding_compile_hydration_policy(
 
     original = init_log["auto_model_before_compile"]
     assert builder.model is not None
-    if device == "cuda":
+    if device in {"cuda", "cpu"}:
         assert builder.model[0].auto_model == ("compiled", original)
         assert builder._inner_model_compiled
         assert fake_torch._compile_calls[-1]["kwargs"] == {"dynamic": True}
@@ -4555,11 +4611,11 @@ def test_embedding_mps_never_probes_flash_attn(
 def test_embedding_compile_device_gating(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """torch.compile should run on cuda/mps but be declined on cpu."""
-    for device_setup, expect_compiled in [
-        ({"cuda_available": True, "mps_available": False}, True),
-        ({"cuda_available": False, "mps_available": True}, True),
-        ({"cuda_available": False, "mps_available": False}, False),
+    """Explicit compilation should run on each supported device."""
+    for device_setup in [
+        {"cuda_available": True, "mps_available": False},
+        {"cuda_available": False, "mps_available": True},
+        {"cuda_available": False, "mps_available": False},
     ]:
         _install_fake_sentence_transformers(monkeypatch)
         _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
@@ -4581,17 +4637,29 @@ def test_embedding_compile_device_gating(
         )
         builder._load_model()
 
-        assert builder._inner_model_compiled is expect_compiled
-        if not expect_compiled:
-            assert builder._compile_status_reason == "compile disabled for device=cpu"
-            assert fake_torch._compile_calls == []
+        assert builder._inner_model_compiled
+        assert fake_torch._compile_calls
+        assert fake_torch._compile_calls[-1]["kwargs"] == (
+            {} if builder.device == "mps" else {"dynamic": True}
+        )
 
 
-def test_lazy_compile_failure_restores_eager_model_and_retries_full_encode(
+@pytest.mark.parametrize("encode_path", ["direct", "retrieval", "graph", "hydration"])
+@pytest.mark.parametrize("device", ["cpu", "mps"])
+def test_lazy_compile_failure_restores_eager_model_and_retries_batch(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    encode_path: str,
+    device: str,
 ) -> None:
-    """First-call compiler failures should deliver the promised eager fallback."""
+    """Direct and cached encodes must recover from lazy compilation failure.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param pytest.LogCaptureFixture caplog: Captured fallback log messages.
+    :param str encode_path: Direct or cache-writing encode entry point.
+    :param str device: CPU or Metal execution policy.
+    :return None: Checks successful eager recovery through each entry point.
+    """
     _install_fake_torch(
         monkeypatch,
         cuda_available=False,
@@ -4602,14 +4670,16 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_full_encode(
     )
     builder = EmbeddingGraphBuilder(
         max_papers=1,
+        device=device,
         enable_torch_compile=True,
         client=MagicMock(),
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     original_inner = object()
 
     class _InnerBlock:
         def __init__(self) -> None:
-            self.auto_model = original_inner
+            self.model = original_inner
 
     class _LazyFailureModel:
         def __init__(self) -> None:
@@ -4633,8 +4703,8 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_full_encode(
             :return np.ndarray: One float32 row per input.
             """
             self.encode_attempts += 1
-            if isinstance(self.block.auto_model, tuple):
-                raise RuntimeError("Inductor Metal codegen failed")
+            if isinstance(self.block.model, tuple):
+                raise RuntimeError("Inductor codegen failed")
             return np.ones((len(texts), 2), dtype=np.float32)
 
     model = _LazyFailureModel()
@@ -4642,44 +4712,75 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_full_encode(
     builder._maybe_compile_inner_transformer()
 
     assert builder._inner_model_compiled is True
-    assert isinstance(model.block.auto_model, tuple)
+    assert isinstance(model.block.model, tuple)
     with caplog.at_level(logging.WARNING):
-        embeddings = builder._encode_texts(["seed"])
+        papers = {"seed": Paper(paper_id="seed", title="Seed", year=2024)}
+        if encode_path == "direct":
+            embeddings = builder._encode_texts(["seed"])
+        elif encode_path == "retrieval":
+            embeddings = np.asarray(list(builder.embed_papers(papers).values()))
+        elif encode_path == "graph":
+            embeddings = np.asarray(
+                list(builder.materialize_graph_embeddings(papers).values())
+            )
+        else:
+            builder._ensure_cache_model_fingerprint()
+            assert (
+                builder._cache_metadata_batch([{"paper_id": "seed", "title": "Seed"}])
+                == 1
+            )
+            embeddings = np.asarray(list(builder.embed_papers(papers).values()))
 
     assert embeddings.shape == (1, 2)
     assert model.encode_attempts == 2
-    assert model.block.auto_model is original_inner
+    assert model.block.model is original_inner
     assert builder._inner_model_compiled is False
     assert "restored eager model" in str(builder._compile_status_reason)
     assert any(
-        "retrying the complete encode request" in record.getMessage()
+        "retrying the affected encode batch" in record.getMessage()
         for record in caplog.records
     )
 
 
+@pytest.mark.parametrize("device", ["cpu", "mps"])
 def test_embedding_tf32_skipped_for_non_cuda_device(
     monkeypatch: pytest.MonkeyPatch,
+    device: str,
 ) -> None:
-    """Explicit non-CUDA device on a CUDA host must not flip global TF32 state."""
+    """Explicit non-CUDA devices must not touch global CUDA precision controls.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param str device: Explicit non-CUDA device to exercise.
+    :return None: Checks TF32 stays off through loading and encoding.
+    """
     _install_fake_sentence_transformers(monkeypatch)
     _bf16_token, _autocast_log, fake_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=True,
+        mps_available=True,
         bf16_supported=True,
         torch_version="2.13.0",
     )
-    builder = EmbeddingGraphBuilder(max_papers=1, device="cpu", client=MagicMock())
+    builder = EmbeddingGraphBuilder(max_papers=1, device=device, client=MagicMock())
     builder._load_model()
+    builder._encode_texts(["seed"])
 
-    assert builder.device == "cpu"
+    assert builder.device == device
     assert builder._tf32_mode == "off"
     assert fake_torch.backends.fp32_precision == "none"
 
 
+@pytest.mark.parametrize("cpu_bf16", [False, True])
 def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
     monkeypatch: pytest.MonkeyPatch,
+    cpu_bf16: bool,
 ) -> None:
-    """bf16 caches must share a namespace across cuda/mps; cpu-fp32 differs."""
+    """Matching BF16 compute shares a namespace; CPU FP32 remains distinct.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param bool cpu_bf16: Whether CPU hardware reports native BF16 support.
+    :return None: Checks cross-device cache identity for each CPU compute mode.
+    """
     _install_fake_sentence_transformers(monkeypatch)
 
     _install_fake_torch(
@@ -4699,26 +4800,79 @@ def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
     )
     mps_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
 
-    _install_fake_torch(
+    _, _, cpu_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=False,
         bf16_supported=False,
         mps_available=False,
         torch_version="2.13.0",
     )
+    cpu_torch.cpu = types.SimpleNamespace(
+        get_capabilities=lambda: {"avx512_bf16": cpu_bf16}
+    )
     cpu_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
 
     assert cuda_builder._source_dtype_hint == "bfloat16"
     assert mps_builder._source_dtype_hint == "bfloat16"
-    assert cpu_builder._source_dtype_hint == "float32"
+    assert cpu_builder._source_dtype_hint == ("bfloat16" if cpu_bf16 else "float32")
     assert (
         cuda_builder._embedding_cache_namespace()
         == mps_builder._embedding_cache_namespace()
     )
     assert (
         cpu_builder._embedding_cache_namespace()
-        != cuda_builder._embedding_cache_namespace()
-    )
+        == cuda_builder._embedding_cache_namespace()
+    ) is cpu_bf16
+
+
+@pytest.mark.slow
+def test_embedding_real_cpu_bf16_compile_executes_graphs() -> None:
+    """Compare native BF16 eager and compiled CPU inference on the real model.
+
+    :return None: Checks actual compiled profiler regions and FP32 unit vectors.
+    """
+    torch = pytest.importorskip("torch")
+    if not embedding_module._cpu_native_bf16_supported(torch):
+        pytest.skip("Native CPU BF16 unavailable")
+    previous_threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(4)
+        builder = EmbeddingGraphBuilder(device="cpu", client=MagicMock())
+        builder._load_model()
+        assert builder._autocast_enabled
+        assert builder._source_dtype_hint == "bfloat16"
+        assert builder._tf32_mode == "off"
+        texts = [
+            builder.model_profile.format_document(
+                {"title": "Research", "abstract": abstract * repetitions}
+            )
+            for repetitions in range(1, 5)
+            for abstract in (
+                "Bidirectional attention encodes text for semantic retrieval. ",
+                "Stellar spectra constrain the composition of distant galaxies. ",
+            )
+        ]
+        eager = builder._encode_texts(texts, batch_size=8)
+        builder.enable_torch_compile = True
+        builder._maybe_compile_inner_transformer()
+        builder._encode_texts(texts, batch_size=8)
+        with torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as profile:
+            compiled = builder._encode_texts(texts, batch_size=8)
+        assert builder._inner_model_compiled
+        assert any(
+            "Torch-Compiled Region" in event.key for event in profile.key_averages()
+        )
+        for embeddings in (eager, compiled):
+            assert embeddings.dtype == np.float32
+            assert np.isfinite(embeddings).all()
+            np.testing.assert_allclose(
+                np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-6
+            )
+        assert np.min(np.sum(eager * compiled, axis=1)) > 0.999
+    finally:
+        torch.set_num_threads(previous_threads)
 
 
 @pytest.mark.slow

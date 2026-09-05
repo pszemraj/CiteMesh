@@ -92,7 +92,7 @@ _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
 # a policy floor, not a hard technical cliff — lower it once older wheels are vetted.
 _MPS_MIN_TORCH_VERSION = (2, 13)
 EMBEDDING_DEVICE_CHOICES = ("auto", "cuda", "mps", "cpu")
-_COMPILE_ELIGIBLE_DEVICES = frozenset({"cuda", "mps"})
+_COMPILE_ELIGIBLE_DEVICES = frozenset({"cuda", "mps", "cpu"})
 # Legacy release-branch workaround window where Inductor conflicted with the
 # fp32_precision TF32 API; later torch releases use the modern API directly.
 _TF32_COMPILE_BRIDGE_TORCH_VERSIONS = frozenset({(2, 9), (2, 10)})
@@ -405,6 +405,33 @@ def _cuda_native_bf16_supported(torch: Any) -> bool:
         return False
 
 
+def _cpu_native_bf16_supported(torch: Any) -> bool:
+    """Check native CPU BF16 instructions using available torch capability APIs.
+
+    :param Any torch: Imported torch module object.
+    :return bool: Whether x86 or ARM BF16 support can be established.
+    """
+    cpu_module = getattr(torch, "cpu", None)
+    capabilities = getattr(cpu_module, "get_capabilities", None)
+    try:
+        if callable(capabilities):
+            supported = capabilities()
+            return any(
+                supported.get(name, False)
+                for name in (
+                    "avx512_bf16",
+                    "amx_bf16",
+                    "bf16",
+                    "sve_bf16",
+                )
+            )
+        # Older supported torch versions expose only this x86 BF16 probe.
+        probe = getattr(cpu_module, "_is_avx512_bf16_supported", None)
+        return bool(probe()) if callable(probe) else False
+    except Exception:
+        return False
+
+
 def resolve_embedding_device(requested: Optional[str]) -> str:
     """Resolve a requested device token to a concrete torch device string.
 
@@ -628,16 +655,24 @@ def _model_floating_dtype_names(model: Any) -> Optional[Set[str]]:
 
 
 class _PrecisionEncodeProxy:
-    """Wrap model encode calls in a precision context manager."""
+    """Apply encode-time precision and lazy-compile recovery for every caller."""
 
-    def __init__(self, model: Any, context_factory: Callable[[], Any]):
+    def __init__(
+        self,
+        model: Any,
+        context_factory: Callable[[], Any],
+        restore_eager: Callable[[Exception], bool],
+    ):
         """Create a model proxy for encode-time precision controls.
 
         :param Any model: Wrapped model object exposing ``encode``.
         :param Callable[[], Any] context_factory: Callable returning a context manager.
+        :param Callable[[Exception], bool] restore_eager: Restore eager execution
+            after a compiled-call failure; return whether the call can be retried.
         """
         self._model = model
         self._context_factory = context_factory
+        self._restore_eager = restore_eager
 
     def encode(self, *args: Any, **kwargs: Any) -> Any:
         """Run ``encode`` within the configured context manager.
@@ -646,8 +681,22 @@ class _PrecisionEncodeProxy:
         :param Any kwargs: Keyword arguments forwarded to ``encode``.
         :return Any: Model ``encode`` return value.
         """
-        with self._context_factory():
-            return self._model.encode(*args, **kwargs)
+        try:
+            with self._context_factory():
+                embeddings = self._model.encode(*args, **kwargs)
+        except Exception as exc:
+            compiled_failure = exc
+            if not self._restore_eager(compiled_failure):
+                raise
+            try:
+                with self._context_factory():
+                    embeddings = self._model.encode(*args, **kwargs)
+            except Exception as eager_error:
+                raise eager_error from compiled_failure
+        # CPU autocast can leave ST's normalization rounded to BF16 precision.
+        if kwargs.get("normalize_embeddings"):
+            return l2_normalize_embeddings(embeddings)
+        return embeddings
 
     def __getattr__(self, name: str) -> Any:
         """Delegate unknown attributes to the wrapped model.
@@ -1456,9 +1505,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         except ImportError:
             return "float32"
 
-        if self.device == "cpu":
-            return "float32"
-
         preferred_dtype = (self.model_profile.preferred_compute_dtype or "").lower()
         if preferred_dtype == "bfloat16" and self._bf16_autocast_allowed(torch):
             return "bfloat16"
@@ -1488,7 +1534,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return False
 
-        if self.device == "cuda":
+        if self.device == "cpu":
+            if not _cpu_native_bf16_supported(torch):
+                return False
+        elif self.device == "cuda":
             if not _cuda_native_bf16_supported(torch):
                 return False
         elif self.device == "mps" and not self._mps_bf16_allowed(torch):
@@ -1952,10 +2001,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self._source_dtype_hint = "float32"
             return model_kwargs
 
-        if self.device == "cpu":
-            self._source_dtype_hint = "float32"
-            return model_kwargs
-
         if self._source_dtype_hint != "bfloat16":
             return model_kwargs
 
@@ -2204,15 +2249,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self.model is None:
             raise RuntimeError("Embedding model is not loaded.")
 
-        if not self._autocast_enabled and self._tf32_mode not in {
-            "tf32",
-            "tf32-matmul-high",
-        }:
+        if (
+            not self._inner_model_compiled
+            and not self._autocast_enabled
+            and self._tf32_mode not in {"tf32", "tf32-matmul-high"}
+        ):
             return self.model
 
         if self._encode_model is None:
             self._encode_model = _PrecisionEncodeProxy(
-                self.model, self._precision_context
+                self.model,
+                self._precision_context,
+                self._restore_eager_model_after_compile_failure,
             )
 
         return self._encode_model
@@ -2235,45 +2283,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if effective_batch_size < 1:
             raise ValueError("batch_size must be at least 1 when provided")
 
-        try:
-            return self._encode_texts_once(
-                encode_model,
-                texts,
-                effective_batch_size=effective_batch_size,
-                show_progress_bar=show_progress_bar,
-            )
-        except Exception as compile_error:
-            compiled_failure = compile_error
-            if not self._restore_eager_model_after_compile_failure(compiled_failure):
-                raise
-
-        eager_encode_model = self._get_model_for_encoding()
-        try:
-            return self._encode_texts_once(
-                eager_encode_model,
-                texts,
-                effective_batch_size=effective_batch_size,
-                show_progress_bar=show_progress_bar,
-            )
-        except Exception as eager_error:
-            raise eager_error from compiled_failure
-
-    def _encode_texts_once(
-        self,
-        encode_model: Any,
-        texts: List[str],
-        *,
-        effective_batch_size: int,
-        show_progress_bar: bool,
-    ) -> np.ndarray:
-        """Execute one complete length-bucketed encode attempt.
-
-        :param Any encode_model: Model or precision-context proxy exposing ``encode``.
-        :param List[str] texts: Text payloads to encode.
-        :param int effective_batch_size: Validated maximum rows per batch.
-        :param bool show_progress_bar: Whether model batches may display progress.
-        :return np.ndarray: Normalized float32 embeddings in original order.
-        """
         return encode_texts_in_length_buckets(
             texts,
             batch_size=min(effective_batch_size, len(texts)),
@@ -2328,7 +2337,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
         if not self.model_profile.compile_inner_transformer:
             return False
-        if self.device == "cuda":
+        if self.device in {"cuda", "cpu"}:
             return False
         if self.semantic_source != "arxiv-corpus":
             return False
@@ -2424,7 +2433,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if (
                 self.enable_torch_compile
                 and self.semantic_source == "arxiv-corpus"
-                and self.device != "cuda"
+                and self.device == "mps"
             ):
                 # Warm-cache compile policy needs the exact artifact namespace.
                 self._ensure_cache_model_fingerprint()
@@ -2654,7 +2663,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         try:
-            compile_kwargs = {"dynamic": True} if self.device == "cuda" else {}
+            compile_kwargs = {"dynamic": True} if self.device in {"cuda", "cpu"} else {}
             compiled_model = compile_fn(auto_model, **compile_kwargs)
             setattr(transformer_block, model_attribute, compiled_model)
         except Exception as exc:
@@ -2689,8 +2698,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         ``torch.compile`` normally defers backend compilation until the first
         invocation, so wrapping the module successfully is not proof that it can
-        execute. Retrying the whole encode request is safe because no embeddings
-        are returned or persisted until all length buckets finish.
+        execute. Retrying the failed encode batch is safe: cache writes happen
+        only after all batches finish encoding successfully.
 
         :param Exception error: Failure raised while the compiled model executed.
         :return bool: Whether an eager model was restored for one retry.
@@ -2723,7 +2732,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
         logger.warning(
             "Compiled embedding execution failed for %s (%s: %s); retrying the "
-            "complete encode request with the eager inner model.",
+            "affected encode batch with the eager inner model.",
             self.model_name,
             type(error).__name__,
             error,

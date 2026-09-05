@@ -153,7 +153,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--cache-compression-level`: HDF5 compression level for cache datasets (gzip
   default `1`). Selecting `lzf` without an explicit level normalizes the level to
   `0`; combining `lzf` with an explicit level is rejected.
-- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). CUDA honors the flag during cold or resumed corpus hydration using dynamic shapes; MPS defers compilation until the corpus cache is hydrated. The first encode pays compilation warm-up cost.
+- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). CUDA and CPU honor the flag during cold or resumed corpus hydration using dynamic shapes; MPS defers compilation until the corpus cache is hydrated. The first encode pays compilation warm-up cost.
 - `--device {auto,cuda,mps,cpu}`: compute device for embedding model runs (default `auto`, which prefers CUDA, then MPS on Apple Silicon, then CPU). Explicit unavailable devices fail fast. Shared with hybrid.
 - `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing
   (default `candidates`, which uses an S2-derived pool without a corpus download).
@@ -246,7 +246,7 @@ citemesh build "<paper-id-from-search>" --strategy recommendation
 
 The default mode is `auto`: local search when your cache has embeddings, S2 keyword search otherwise, with a log line saying which backend ran and why. Persist a preference with `citemesh config set defaults.search_mode <auto|local|s2>` (explicit `--mode` still wins). Passing `--model`, `--model-profile`, or `--device` implies local mode. Explicitly requesting `local` (flag or config) with an empty cache is an error with guidance rather than a silent fallback.
 
-Local search targets the same retrieval-document cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. It does not search the separate graph-similarity cache. Namespaces are keyed by the runtime-active model artifact, requested revision, model profile, representation contract, formatter, dimensions, and compute dtype. Pass `--model` for a non-default model and `--model-profile` when the build used an explicit profile override; CPU (float32) and CUDA/MPS (bfloat16) runs use distinct namespaces, while CUDA and MPS share a namespace when both resolve to bf16.
+Local search targets the same retrieval-document cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. It does not search the separate graph-similarity cache. Namespaces are keyed by the runtime-active model artifact, requested revision, model profile, representation contract, formatter, dimensions, and compute dtype. Pass `--model` for a non-default model and `--model-profile` when the build used an explicit profile override; float32 and bfloat16 runs use distinct namespaces, while CPU, CUDA, and MPS share a namespace when their effective compute dtype and other contracts match.
 
 ## Troubleshooting
 

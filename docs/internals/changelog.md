@@ -56,6 +56,12 @@ package. Current behavior is described in the linked guides and references:
 
 ## Semantic Discovery
 
+- Enabled native-hardware-gated BF16 CPU autocast with float32 output normalization
+  and opt-in CPU compilation, including dynamic shapes during corpus hydration.
+  CPUs without verified BF16 support retain float32 compute.
+- Applied lazy-compile eager recovery at the shared encoder boundary so cached
+  candidate, graph, and corpus encoding recover from compiler failures as well
+  as direct encoding, including on MPS.
 - Prefer installed FlashAttention 2 for EmbeddingGemma on BF16 CUDA, with SDPA
   fallback when unavailable or model loading fails. Compile the active
   SentenceTransformers 6 transformer, use dynamic shapes on CUDA, avoid the

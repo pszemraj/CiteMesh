@@ -2174,7 +2174,7 @@ def test_model_profiles_match_expected_formatters() -> None:
     gemma = get_embedding_model_profile("google/embeddinggemma-300m")
     assert gemma.name == "google/embeddinggemma"
     assert gemma.preferred_compute_dtype == "bfloat16"
-    assert gemma.autocast_devices == ("cuda", "mps")
+    assert gemma.autocast_devices == ("cuda", "mps", "cpu")
     assert gemma.compile_inner_transformer is True
     assert gemma.available_truncate_dims == (768, 512, 256, 128)
     assert gemma.recommended_truncate_dim == 256
