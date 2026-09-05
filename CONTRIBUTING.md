@@ -27,7 +27,8 @@ python -m pytest -m "slow and cuda"
 ```
 
 - Add or update tests for behavior you change. The default suite is network-free and isolates the cache directory per test.
-- If you change CLI flags, defaults, cache layout, or environment variables, update the matching page under `docs/` and add a line to `docs/internals/changelog.md`.
+- If you change CLI flags, defaults, cache layout, or environment variables, update the matching page under `docs/`.
+- Release notes are the sole change history; no separate changelog is maintained.
 - Follow the existing reST docstring style (`:param type name:`, `:return type:`).
 
 Agent-assisted development notes live in [AGENTS.md](AGENTS.md).

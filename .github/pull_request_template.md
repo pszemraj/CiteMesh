@@ -7,4 +7,4 @@
 - [ ] `python -m pytest` is green
 - [ ] `ruff check .` and `ruff format --check .` pass
 - [ ] Tests added/updated for changed behavior
-- [ ] Docs updated (`docs/guides/`, `docs/reference/`) and a `docs/internals/changelog.md` line added, if flags/defaults/layout changed
+- [ ] Docs updated (`docs/guides/`, `docs/reference/`) if flags/defaults/layout changed

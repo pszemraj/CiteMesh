@@ -7,6 +7,7 @@
 - Strategy selection: [Strategy guide](guides/strategies.md)
 - Cache behavior and maintenance: [Caching guide](guides/caching.md)
 - Persistent user defaults (`citemesh config`): [Configuration guide](guides/configuration.md)
+- Change history: [Release notes](https://github.com/pszemraj/CiteMesh/releases)
 
 ## Reference
 
@@ -18,4 +19,3 @@
 ## Internals
 
 - Package structure and execution flow: [internals/architecture.md](internals/architecture.md)
-- Change history and notable shifts: [internals/changelog.md](internals/changelog.md)

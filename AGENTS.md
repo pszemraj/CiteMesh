@@ -50,7 +50,9 @@ separate CI job, until a concrete release requirement justifies that cost.
 
 ## Docs rule
 
-CLI flags, defaults, cache layout, or environment variables changed? Update the matching page under `docs/guides/` or `docs/reference/`, and add a line to `docs/internals/changelog.md`. The docs are contract-style; stale docs are treated as bugs.
+CLI flags, defaults, cache layout, or environment variables changed? Update the matching page under `docs/guides/` or `docs/reference/`. The docs are contract-style; stale docs are treated as bugs.
+
+Release notes are the sole change history. Do not create or maintain a separate changelog.
 
 ## Runtime data
 

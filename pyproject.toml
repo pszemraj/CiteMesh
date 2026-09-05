@@ -84,7 +84,7 @@ Homepage = "https://github.com/pszemraj/CiteMesh"
 Repository = "https://github.com/pszemraj/CiteMesh.git"
 Issues = "https://github.com/pszemraj/CiteMesh/issues"
 Documentation = "https://github.com/pszemraj/CiteMesh/tree/main/docs"
-Changelog = "https://github.com/pszemraj/CiteMesh/blob/main/docs/internals/changelog.md"
+"Release notes" = "https://github.com/pszemraj/CiteMesh/releases"
 
 [tool.setuptools]
 include-package-data = true
