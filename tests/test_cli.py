@@ -2718,11 +2718,19 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
 def test_embedding_build_logs_side_effect_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Embedding build should emit concise runtime config logs."""
+    """Embedding build should keep detailed runtime configuration at debug.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :return None: Assertions verify routine configuration does not fill info logs.
+    """
     graph = build_seed_graph("seed")
 
+    debug_mock = MagicMock()
     info_mock = MagicMock()
+    warning_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "debug", debug_mock)
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
+    monkeypatch.setattr(cli_module.logger, "warning", warning_mock)
     monkeypatch.setattr(
         cli_module,
         "_build_strategy_graph",
@@ -2751,8 +2759,19 @@ def test_embedding_build_logs_side_effect_contract(
         assert output.exists()
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    messages = [str(call.args[0]) for call in info_mock.call_args_list if call.args]
-    assert any("Embedding config:" in msg for msg in messages)
+    debug_messages = [
+        str(call.args[0]) for call in debug_mock.call_args_list if call.args
+    ]
+    info_messages = [
+        str(call.args[0]) for call in info_mock.call_args_list if call.args
+    ]
+    warning_messages = [
+        str(call.args[0]) for call in warning_mock.call_args_list if call.args
+    ]
+    assert any("Embedding config:" in msg for msg in debug_messages)
+    assert not any("Embedding config:" in msg for msg in info_messages)
+    assert any("No embedding cache found" in msg for msg in info_messages)
+    assert not any("No embedding cache found" in msg for msg in warning_messages)
 
 
 def test_hybrid_disabled_semantic_branch_skips_embedding_side_effect_logs(

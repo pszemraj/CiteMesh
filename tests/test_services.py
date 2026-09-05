@@ -353,6 +353,62 @@ def test_retry_and_backoff_contracts() -> None:
         )
 
 
+def test_successful_retry_attempts_are_debug_only(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Recovered SDK and direct HTTP failures should not emit warnings.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :param pytest.LogCaptureFixture caplog: Captured logging fixture.
+    :return None: Assertions verify both retry paths are debug-only before exhaustion.
+    """
+    api_paper = SimpleNamespace(
+        paperId="seed",
+        title="Seed",
+        year=2020,
+        authors=[],
+        citationCount=1,
+        abstract="abstract",
+        fieldsOfStudy=[],
+    )
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper = MagicMock(side_effect=[Exception("temporary"), api_paper])
+    monkeypatch.setattr("citemesh.services.semantic_scholar.time.sleep", lambda _: None)
+
+    with caplog.at_level(logging.DEBUG, logger="citemesh.services.semantic_scholar"):
+        result = client.get_paper("seed")
+
+    assert result is not None
+    retry_records = [
+        record for record in caplog.records if "Retrying in" in record.getMessage()
+    ]
+    assert len(retry_records) == 1
+    assert retry_records[0].levelno == logging.DEBUG
+
+    client._session.get = MagicMock(
+        side_effect=[
+            _MockResponse(status_code=429, headers={"Retry-After": "1"}),
+            _MockResponse(
+                status_code=200,
+                payload={"data": [_paper_payload(paper_id="result")]},
+            ),
+        ]
+    )
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="citemesh.services.semantic_scholar"):
+        results = client.search_papers("attention")
+
+    assert [paper.paper_id for paper in results] == ["result"]
+    direct_retry_records = [
+        record
+        for record in caplog.records
+        if "Rate limited by Semantic Scholar" in record.getMessage()
+    ]
+    assert len(direct_retry_records) == 1
+    assert direct_retry_records[0].levelno == logging.DEBUG
+
+
 def test_related_paper_retry_discards_partial_attempt_results() -> None:
     """A failed relation conversion attempt must not duplicate earlier rows."""
     client = SemanticScholarClient(timeout=1)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import logging
 import multiprocessing as mp
 import tempfile
 from pathlib import Path
@@ -1920,7 +1921,12 @@ def test_embedding_cache_clear_releases_file_handles(tmp_path: Path) -> None:
 def test_embedding_cache_clear_logs_cached_hydration_scope(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """clear() logs should describe the cached payload being replaced."""
+    """Material cache clears should warn concisely and debug full scope.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param pytest.LogCaptureFixture caplog: Captured logging fixture.
+    :return None: Assertions verify warning and debug detail separation.
+    """
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="clear-log-scope")
     _set_test_int8_calibration(cache)
     cache.get_embeddings(
@@ -1935,11 +1941,45 @@ def test_embedding_cache_clear_logs_cached_hydration_scope(
         complete=True,
     )
 
-    with caplog.at_level("WARNING"):
+    caplog.clear()
+    with caplog.at_level("DEBUG"):
         cache.clear(reason="scope test")
 
+    warnings = [
+        record.message for record in caplog.records if record.levelno == logging.WARNING
+    ]
+    debug_messages = [
+        record.message for record in caplog.records if record.levelno == logging.DEBUG
+    ]
+    assert any("1 cached paper(s)" in message for message in warnings)
+    assert not any("clear-log-scope" in message for message in warnings)
     assert any(
         "cached_split=train, cached_corpus=newest:50000, "
-        "cached_source=librarian-bots/arxiv-metadata-snapshot" in record.message
+        "cached_source=librarian-bots/arxiv-metadata-snapshot" in message
+        for message in debug_messages
+    )
+
+
+def test_embedding_cache_clear_keeps_empty_namespace_reset_at_debug(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Resetting metadata-only cache files should not emit a warning.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :param pytest.LogCaptureFixture caplog: Captured logging fixture.
+    :return None: Assertions verify empty namespace resets remain debug-only.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="empty-clear-log")
+
+    caplog.clear()
+    with caplog.at_level("DEBUG"):
+        cache.clear(reason="empty scope test")
+
+    assert not [
+        record for record in caplog.records if record.levelno >= logging.WARNING
+    ]
+    assert any(
+        "Embedding cache clear details: namespace=empty-clear-log" in record.message
         for record in caplog.records
+        if record.levelno == logging.DEBUG
     )

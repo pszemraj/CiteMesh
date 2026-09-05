@@ -1330,15 +1330,19 @@ class EmbeddingCache:
         normalized_reason = str(reason).strip() or "unspecified"
         with self._cache_lock():
             stats = self._collect_namespace_payload_stats_locked()
-            if (
-                stats.file_count > 0
-                or stats.sqlite_rows > 0
-                or stats.embedding_rows > 0
-            ):
+            cached_rows = max(stats.sqlite_rows, stats.embedding_rows)
+            if cached_rows > 0:
                 logger.warning(
-                    "Clearing embedding cache namespace '%s' (reason=%s, files=%d, "
-                    "size=%s, sqlite_rows=%d, embedding_rows=%d, hydrated=%s, "
-                    "cached_split=%s, cached_corpus=%s, cached_source=%s).",
+                    "Clearing embedding cache with %d cached paper(s) (%s); "
+                    "see debug logs for namespace and reason.",
+                    cached_rows,
+                    format_bytes(stats.size_bytes),
+                )
+            if stats.file_count > 0 or cached_rows > 0:
+                logger.debug(
+                    "Embedding cache clear details: namespace=%s, reason=%s, "
+                    "files=%d, size=%s, sqlite_rows=%d, embedding_rows=%d, "
+                    "hydrated=%s, cached_split=%s, cached_corpus=%s, cached_source=%s.",
                     self.model_name,
                     normalized_reason,
                     stats.file_count,
@@ -1351,7 +1355,7 @@ class EmbeddingCache:
                     stats.hydration_dataset_source or "unknown",
                 )
             else:
-                logger.info(
+                logger.debug(
                     "Embedding cache namespace '%s' is already empty (reason=%s).",
                     self.model_name,
                     normalized_reason,

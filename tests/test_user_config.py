@@ -687,8 +687,8 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
         path=Path("cfg-home") / "config.toml",
         defaults={"corpus_size": 1234, "streaming": True},
     )
-    info = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "info", info)
+    debug = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "debug", debug)
 
     applied = cli_module._apply_user_config_defaults(args, provided, config)
     cli_module._validate_build_cli_contract(
@@ -699,7 +699,7 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
         config_path=config.path,
     )
 
-    messages = str(info.call_args_list)
+    messages = str(debug.call_args_list)
     assert "Loaded config defaults" in messages
     assert "Ignoring corpus-only config default(s)" in messages
     assert "defaults.corpus_size" in messages

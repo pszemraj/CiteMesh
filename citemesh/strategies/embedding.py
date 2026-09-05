@@ -1582,7 +1582,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 requested_revision=requested_revision,
             )
             if local_artifact_fingerprint is not None:
-                logger.warning(
+                logger.debug(
                     "Could not resolve Hugging Face commit SHA for %s (revision=%s). "
                     "Using a content fingerprint of the complete local inference "
                     "artifact manifest.",
@@ -1655,7 +1655,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 continue
             candidate = str(parts[idx + 1]).strip()
             if re.fullmatch(r"[0-9a-f]{40}", candidate, flags=re.IGNORECASE):
-                logger.warning(
+                logger.debug(
                     "Resolved Hugging Face snapshot SHA for %s (revision=%s) from local cache.",
                     model_id,
                     requested_revision,

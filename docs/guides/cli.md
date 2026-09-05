@@ -161,6 +161,10 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 - Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in both the Rich console and a shareable plain-text file. `*.log` is ignored by git in this repo.
+- `info` keeps user-facing phase progress and one-time runtime summaries. Detailed
+  option routing, effective embedding configuration, retry attempts, model
+  provenance, and cache namespace diagnostics appear at `debug`. Warnings are
+  reserved for exhausted/degraded operations, recovery, and material cache clears.
 
 ### Hybrid Strategy
 

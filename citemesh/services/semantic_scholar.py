@@ -853,12 +853,12 @@ class SemanticScholarClient:
                 retry_state.next_action.sleep if retry_state.next_action else 0.0
             )
             if isinstance(exc, _RetryableRequestError):
-                logger.warning(
+                logger.debug(
                     "Rate limited by Semantic Scholar. Waiting %.1fs before retry.",
                     wait_seconds,
                 )
             else:
-                logger.warning(
+                logger.debug(
                     "Request failed (attempt %s) for %s: %s. Retrying in %.1fs",
                     retry_state.attempt_number,
                     url,
@@ -981,8 +981,8 @@ class SemanticScholarClient:
 
         return self._call_with_retries(
             _operation,
-            on_retry=lambda attempt, wait_time, exc: logger.warning(
-                "Attempt %s failed for %s: %s. Retrying in %ss",
+            on_retry=lambda attempt, wait_time, exc: logger.debug(
+                "Attempt %s failed for %s: %s. Retrying in %.1fs",
                 attempt,
                 paper_id,
                 exc,
@@ -1079,8 +1079,8 @@ class SemanticScholarClient:
 
         matched = self._call_with_retries(
             _operation,
-            on_retry=lambda attempt, wait_time, exc: logger.warning(
-                "Failed to batch fetch papers (attempt %s). Retrying in %ss: %s",
+            on_retry=lambda attempt, wait_time, exc: logger.debug(
+                "Failed to batch fetch papers (attempt %s). Retrying in %.1fs: %s",
                 attempt,
                 wait_time,
                 exc,
@@ -1249,8 +1249,8 @@ class SemanticScholarClient:
 
         return self._call_with_retries(
             _operation,
-            on_retry=lambda attempt, wait_time, exc: logger.warning(
-                "Failed to fetch %s for %s (attempt %s). Retrying in %ss",
+            on_retry=lambda attempt, wait_time, exc: logger.debug(
+                "Failed to fetch %s for %s (attempt %s). Retrying in %.1fs",
                 relation_label,
                 normalized_paper_id,
                 attempt,
@@ -1394,15 +1394,9 @@ class SemanticScholarClient:
             """Raise an availability error after operational retry exhaustion.
 
             :param Exception exc: Final exception raised by the API client.
-            :raises SemanticScholarUnavailableError: Always after logging.
+            :raises SemanticScholarUnavailableError: Always with failure context.
             :return List[Any]: This function does not return successfully.
             """
-            logger.warning(
-                "Failed to fetch reference IDs for %s after %s attempts: %s",
-                normalized_paper_id,
-                API_CONFIG.max_retries,
-                exc,
-            )
             raise self._unavailable_error(
                 f"fetching reference IDs for {normalized_paper_id}",
                 f": {exc}",
@@ -1411,8 +1405,8 @@ class SemanticScholarClient:
 
         references = self._call_with_retries(
             _operation,
-            on_retry=lambda attempt, wait_time, exc: logger.warning(
-                "Failed to fetch reference IDs for %s (attempt %s). Retrying in %ss",
+            on_retry=lambda attempt, wait_time, exc: logger.debug(
+                "Failed to fetch reference IDs for %s (attempt %s). Retrying in %.1fs",
                 normalized_paper_id,
                 attempt,
                 wait_time,

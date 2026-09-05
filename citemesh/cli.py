@@ -739,7 +739,7 @@ def _apply_user_config_defaults(
             f"{dest}={format_config_value(user_config.defaults[dest])}"
             for dest in sorted(applied)
         )
-        logger.info("Loaded config defaults from %s: %s", user_config.path, summary)
+        logger.debug("Loaded config defaults from %s: %s", user_config.path, summary)
     return applied
 
 
@@ -928,13 +928,13 @@ def _validate_build_cli_contract(
                 )
             if provided_corpus_flags:
                 args.semantic_source = "arxiv-corpus"
-                logger.info(
+                logger.debug(
                     "Corpus option(s) %s imply --semantic-source arxiv-corpus.",
                     ", ".join(provided_corpus_flags),
                 )
             elif provided_candidate_flags:
                 args.semantic_source = "candidates"
-                logger.info(
+                logger.debug(
                     "Candidate option(s) %s imply --semantic-source candidates.",
                     ", ".join(provided_candidate_flags),
                 )
@@ -947,7 +947,7 @@ def _validate_build_cli_contract(
                     f"defaults.{dest}" for dest in ignored_config_corpus_dests
                 )
                 source = str(config_path) if config_path is not None else "config.toml"
-                logger.info(
+                logger.debug(
                     "Ignoring corpus-only config default(s) %s from %s because "
                     "the effective semantic source is candidates; set "
                     "defaults.semantic_source='arxiv-corpus' to apply them.",
@@ -972,7 +972,7 @@ def _validate_build_cli_contract(
             if args.storage_precision == "int8":
                 # Normalize the implicit int8 default to candidate-mode storage.
                 args.storage_precision = "float32"
-                logger.info(
+                logger.debug(
                     "Candidate mode stores embeddings as float32 "
                     "(int8 calibration requires corpus hydration)."
                 )
@@ -1093,7 +1093,7 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     """Log build side-effect contract summary for transparency before execution.
 
     :param argparse.Namespace args: Parsed build arguments.
-    :return None: Emits info-level contract summary logs.
+    :return None: Emits contract details at their appropriate logging levels.
     """
     if not _embedding_branch_enabled(args):
         return
@@ -1102,7 +1102,7 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     _, cache_files, _ = _embedding_cache_directory_stats()
     if cache_files == 0:
         if corpus_mode:
-            logger.warning(
+            logger.info(
                 "No embedding cache found; model and corpus downloads may be "
                 "required (network access needed, may take several minutes on "
                 "first use)."
@@ -1118,7 +1118,7 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     logger.debug("Embedding cache namespace root: %s.", cache_root)
     if corpus_mode:
         corpus_label = "all" if args.all_corpus else str(args.corpus_size)
-        logger.info(
+        logger.debug(
             "Embedding config: model=%s@%s device=%s source=arxiv-corpus split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
             args.model,
             revision_label,
@@ -1130,7 +1130,7 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
             int(args.encode_batch_size),
         )
     else:
-        logger.info(
+        logger.debug(
             "Embedding config: model=%s@%s device=%s source=%s pool=%s storage=%s encode_batch=%s.",
             args.model,
             revision_label,
