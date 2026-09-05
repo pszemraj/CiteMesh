@@ -987,7 +987,14 @@ def visualize_graph(
         reuse.
     :param Optional[int] layout_seed: Optional seed used when computing layout internally.
     :return None: Writes output image to the given path.
+    :raises ValueError: If an edge weight is null or non-finite.
     """
+    for left, right, attrs in ordered_edges_with_data(graph):
+        weight = attrs.get("weight", 0.0)
+        if weight is None or not math.isfinite(float(weight)):
+            raise ValueError(
+                f"Cannot export null or non-finite edge weight for {left!r} -> {right!r}."
+            )
     if dpi is None:
         dpi = VIZ_CONFIG.dpi
 
@@ -1038,7 +1045,8 @@ def visualize_graph(
     draw_labels(ax, graph, pos, seed_id, theme, sizes=sizes)
 
     # Add title
-    title = graph.nodes[seed_id].get("title", "Unknown")
+    seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
+    title = seed_attrs.get("title", "Unknown")
     wrapped_title = textwrap.fill(
         " ".join(str(title).split()),
         width=72,

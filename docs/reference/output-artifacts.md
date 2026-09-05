@@ -178,9 +178,16 @@ The JSON and dashboard formats share the same enriched node schema. Every JSON e
 
 Flat table with one row per paper. Columns: `id`, `title`, `year`, `authors` (semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`, `categories` (semicolon-separated), `is_seed`, `provenance`, `seed_relation`, `seed_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
 
+An empty graph still writes the column header. Both CLI and dashboard exports
+quote fields containing commas, quotes, newlines, or carriage returns.
+
 ### BibTeX (`<strategy>.bib`)
 
 Combined BibTeX entries for all papers in the graph, one `@article` per paper. Ready for direct import into reference managers or LaTeX projects.
+
+Citation keys combine a readable paper-ID slug with a stable ID-derived suffix,
+so IDs differing only in punctuation or letter case retain distinct keys.
+An empty graph produces an empty bibliography.
 
 ### Dashboard HTML
 
@@ -240,8 +247,11 @@ FP32 storage does not record INT8 calibration or prefilter settings.
 
 Exports accept integral numeric years (including values such as `2017.0`);
 fractional or non-finite years are treated as missing. GraphML writes nullable
-text fields as empty values. Non-finite edge weights are rejected before JSON
-or dashboard artifacts replace existing files.
+text fields as empty values. Null or non-finite edge weights raise a clear error
+before exports replace existing files. GraphExporter rejects empty node IDs and
+IDs with surrounding whitespace, matching the dashboard's import contract.
+Plotly marker labels display upstream markup as literal text. Static PNG exports
+use an `Unknown` title when the requested seed is absent, including empty graphs.
 
 `metadata` includes:
 

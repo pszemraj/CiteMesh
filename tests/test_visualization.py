@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import html
+import io
 import json
 import math
 import os
@@ -553,6 +555,13 @@ def test_plotly_html_survives_empty_and_seedless_graphs(
     )
     assert output_path.suffix == ".png"
     assert output_path.parent.is_dir()
+    for name, candidate, candidate_seed, layout in (
+        ("empty", nx.Graph(), "seed", {}),
+        ("seedless", graph, "absent-seed", {"seed": (0.0, 0.0), "related": (1.0, 1.0)}),
+    ):
+        png_path = tmp_path / f"{name}.png"
+        visualize_graph(candidate, candidate_seed, png_path, layout=layout, dpi=40)
+        assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
@@ -571,20 +580,41 @@ def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
     assert nx.read_graphml(graphml_path).nodes[seed_id]["title"] == "Badtitle"
 
 
-@pytest.mark.parametrize("weight", [float("nan"), float("inf"), -float("inf")])
-@pytest.mark.parametrize("method", ["to_json", "to_dashboard_html"])
+@pytest.mark.parametrize("weight", [None, float("nan"), float("inf"), -float("inf")])
+@pytest.mark.parametrize(
+    "method",
+    [
+        "to_json",
+        "to_dashboard_html",
+        "to_csv",
+        "to_bibtex",
+        "to_graphml",
+        "to_plotly_html",
+        "to_interactive_html",
+        "png",
+    ],
+)
 def test_exports_reject_nonfinite_weights_without_replacing_outputs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, weight: float, method: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, weight: float | None, method: str
 ) -> None:
     """Invalid weights must not overwrite a usable JSON file or dashboard.
 
     :param Path tmp_path: Isolated output directory.
     :param pytest.MonkeyPatch monkeypatch: Optional plotting dependency stub.
-    :param float weight: Non-finite edge weight.
+    :param float | None weight: Null or non-finite edge weight.
     :param str method: Export entry point under test.
     :return None: Checks the failure and preservation of the prior artifact.
     """
     _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
+    monkeypatch.setattr(
+        export_module,
+        "_load_pyvis_network_class",
+        lambda: (
+            lambda **kwargs: types.SimpleNamespace(
+                set_options=lambda *_args: None, add_node=lambda *_args, **_kwargs: None
+            )
+        ),
+    )
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
         graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
@@ -593,8 +623,63 @@ def test_exports_reject_nonfinite_weights_without_replacing_outputs(
     path = tmp_path / "existing-output"
     path.write_text("previous valid output")
     with pytest.raises(ValueError, match="non-finite edge weight"):
-        getattr(exporter, method)(path)
+        if method == "png":
+            visualize_graph(graph, seed_id, path)
+        else:
+            getattr(exporter, method)(path)
     assert path.read_text() == "previous valid output"
+
+
+@pytest.mark.parametrize("node_id", ["", " ", " seed", "seed\t"])
+def test_export_rejects_whitespace_ids_before_writing(
+    tmp_path: Path, node_id: str
+) -> None:
+    """Exports must not emit IDs that their own dashboard importer rejects.
+
+    :param Path tmp_path: Isolated artifact directory.
+    :param str node_id: Empty or non-canonical graph node identifier.
+    :return None: Checks a clear error preserves the prior artifact.
+    """
+    graph = nx.Graph()
+    graph.add_node(node_id, title="Seed", is_seed=True)
+    exporter = GraphExporter(graph, node_id, layout={node_id: (0.0, 0.0)})
+    path = tmp_path / "existing.json"
+    path.write_text("previous valid output")
+    with pytest.raises(ValueError, match="non-canonical node ID"):
+        exporter.to_json(path)
+    assert path.read_text() == "previous valid output"
+
+
+@pytest.mark.parametrize("for_dashboard", [False, True])
+def test_plotly_marker_labels_escape_upstream_markup(
+    monkeypatch: pytest.MonkeyPatch, for_dashboard: bool
+) -> None:
+    """Marker labels must display author/title markup as literal text.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs a capture-only Plotly figure.
+    :param bool for_dashboard: Initial standalone or dashboard trace generation.
+    :return None: Checks both author-derived and title-only labels.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
+    graph, seed_id = _build_graph()
+    graph.nodes[seed_id]["paper"] = replace(
+        graph.nodes[seed_id]["paper"], authors=[Author(name="A <b>Smith</b>")]
+    )
+    graph.nodes["related"].pop("paper")
+    graph.nodes["related"]["title"] = "<i>Title & text</i>"
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+    figure, _ = exporter._build_plotly_figure(
+        go=export_module._load_plotly_graph_objects(),
+        theme_obj=get_theme("dark"),
+        for_dashboard=for_dashboard,
+    )
+    marker = next(trace for trace in figure.data if trace.get("name") == "nodes")
+    assert marker["text"] == [
+        html.escape("<i>Title & text</i>"),
+        html.escape("<b>Smith</b>, 2020"),
+    ]
 
 
 def _extract_dashboard_script_text(html_text: str, script_id: str) -> str:
@@ -1200,6 +1285,42 @@ def test_exporter_dashboard_runtime_script_contracts(
     assert '`Year: ${node.year || "n.d."}' not in runtime_script
     assert "setControlsCollapsed(true);" in runtime_script
     assert "escapeRegExp" not in runtime_script
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is unavailable for dashboard export validation")
+    functions = []
+    for name in ("escapeHtml", "dashboardNodeLabel"):
+        match = re.search(
+            rf"    function {name}\([^\n]*\n.*?\n    }}", runtime_script, re.DOTALL
+        )
+        assert match is not None
+        functions.append(match.group(0))
+    for name in ("csvGuard", "csvEscape"):
+        match = re.search(rf"        function {name}\(v\).*", runtime_script)
+        assert match is not None
+        functions.append(match.group(0))
+    program = (
+        "\n".join(functions)
+        + r"""
+const value = "before\rafter";
+process.stdout.write(JSON.stringify({
+  csv: csvEscape(value),
+  author: dashboardNodeLabel({authors: ["A <b>Smith</b>"], year: 2020}, "seed"),
+  title: dashboardNodeLabel({title: "<b>Title</b>"}, "other"),
+}));
+"""
+    )
+    completed = subprocess.run(
+        [node, "-e", program], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert list(csv.reader(io.StringIO(result["csv"], newline=""))) == [
+        ["before\rafter"]
+    ]
+    assert result["author"] == "&lt;b&gt;Smith&lt;/b&gt;, 2020"
+    assert result["title"] == "&lt;b&gt;Title&lt;/b&gt;"
 
 
 def _execute_dashboard_runtime_in_node(
@@ -2312,6 +2433,47 @@ def test_csv_export_neutralizes_formula_cells_and_uses_lowercase_booleans(
     assert seed_row["authors"] == f"'{formula_author}"
     assert seed_row["abstract"] == f"'{formula_abstract}"
     assert {row["is_seed"] for row in rows} == {"true", "false"}
+
+
+def test_empty_csv_preserves_columns_and_bibtex_has_no_entries(tmp_path: Path) -> None:
+    """An empty graph still exports a parseable CSV schema and empty bibliography.
+
+    :param Path tmp_path: Isolated output directory.
+    :return None: Checks no paper rows or bibliography records are invented.
+    """
+    exporter = GraphExporter(nx.Graph(), "seed")
+    csv_path = tmp_path / "empty.csv"
+    bib_path = tmp_path / "empty.bib"
+    exporter.to_csv(csv_path)
+    exporter.to_bibtex(bib_path)
+    with csv_path.open(newline="") as handle:
+        reader = csv.DictReader(handle)
+        assert reader.fieldnames is not None
+        assert reader.fieldnames[0] == "id"
+        assert reader.fieldnames[-1] == "abstract"
+        assert list(reader) == []
+    assert bib_path.read_text().strip() == ""
+
+
+def test_bibtex_keys_distinguish_ids_with_the_same_slug(tmp_path: Path) -> None:
+    """Distinct paper IDs must retain distinct, order-independent citation keys.
+
+    :param Path tmp_path: Isolated bibliography directory.
+    :return None: Checks colliding punctuation and letter-case slugs in real exports.
+    """
+    node_ids = ["a-b", "a_b", "a/b", "A-B"]
+    key_sets = []
+    for index, ordering in enumerate((node_ids, list(reversed(node_ids)))):
+        graph = nx.Graph()
+        for node_id in ordering:
+            graph.add_node(node_id, title=node_id)
+        path = tmp_path / f"collisions-{index}.bib"
+        GraphExporter(graph, node_ids[0]).to_bibtex(path)
+        keys = re.findall(r"@article\{([^,]+),", path.read_text())
+        assert len(keys) == len(node_ids)
+        assert len(set(keys)) == len(node_ids)
+        key_sets.append(keys)
+    assert key_sets[0] == key_sets[1]
 
 
 def test_bibtex_escapes_latex_specials() -> None:

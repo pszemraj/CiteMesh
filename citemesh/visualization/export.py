@@ -445,12 +445,11 @@ class GraphExporter:
 
         Includes all enriched fields for direct import into pandas or
         spreadsheets.
+
+        :param Path path: Destination CSV file.
+        :return None: Writes column headers even when the graph is empty.
         """
         enriched = self._enriched_nodes()
-        if not enriched:
-            Path(path).write_text("")
-            return
-
         columns = [
             "id",
             "title",
@@ -844,6 +843,7 @@ class GraphExporter:
                 xanchor="left",
                 title=dict(text="Year", side="right"),
             )
+        node_labels = [html.escape(label) for label in node_labels]
 
         seed_relations = self._seed_relation_map()
         provenance_map = self._provenance_map()
@@ -1493,12 +1493,13 @@ class GraphExporter:
         """Build deterministic BibTeX entry keys from node IDs.
 
         :param str node_id: Graph node ID.
-        :return str: BibTeX entry key.
+        :return str: Readable node slug plus a stable identifier-derived suffix.
         """
         normalized = re.sub(r"[^0-9a-zA-Z]+", "_", node_id).strip("_").lower()
         if not normalized:
             normalized = "paper"
-        return f"citemesh_{normalized}"
+        suffix = hashlib.sha256(node_id.encode("utf-8")).hexdigest()[:12]
+        return f"citemesh_{normalized}_{suffix}"
 
     @staticmethod
     def _bibtex_escape(raw_value: str) -> str:
@@ -2501,10 +2502,10 @@ class GraphExporter:
       const firstAuthor = String(authors[0] || "").trim();
       if (firstAuthor) {
         const surname = firstAuthor.split(/\\s+/).pop();
-        return `${surname}, ${node.year || "n.d."}`;
+        return escapeHtml(`${surname}, ${node.year || "n.d."}`);
       }
       const title = String(node.title || nodeId || "Unknown");
-      return title.length <= 26 ? title : `${title.slice(0, 23)}...`;
+      return escapeHtml(title.length <= 26 ? title : `${title.slice(0, 23)}...`);
     }
 
     function currentSeedRingColor() {
@@ -4399,7 +4400,7 @@ class GraphExporter:
         const cols = ["id","title","year","authors","citation_count","venue","arxiv_id","doi","categories","is_seed","provenance","seed_relation","seed_relevance","arxiv_url","doi_url","semantic_scholar_url","abstract"];
         // Mirror the CLI CSV writer: neutralize formula-leading cells (CWE-1236).
         function csvGuard(v) { const s = String(v == null ? "" : v); return /^[=+\\-@\\t\\r]/.test(s) ? "'" + s : s; }
-        function csvEscape(v) { const s = csvGuard(v); return s.includes(",") || s.includes('"') || s.includes("\\n") ? '"' + s.replace(/"/g, '""') + '"' : s; }
+        function csvEscape(v) { const s = csvGuard(v); return s.includes(",") || s.includes('"') || s.includes("\\n") || s.includes("\\r") ? '"' + s.replace(/"/g, '""') + '"' : s; }
         const rows = [cols.join(",")];
         for (const n of (payload.nodes || [])) {
           const links = n.links || {};
@@ -4646,24 +4647,34 @@ class GraphExporter:
 
         :return list[tuple[Hashable, Dict[str, Any]]]: Sorted ``(node_id, attrs)``
             pairs.
+        :raises ValueError: If an ID is empty or has surrounding whitespace.
         """
-        return [
+        nodes = [
             (node_id, self.graph.nodes[node_id])
             for node_id in ordered_nodes(self.graph)
         ]
+        for node_id, _ in nodes:
+            identifier = str(node_id)
+            if not identifier or identifier != identifier.strip():
+                raise ValueError(
+                    f"Cannot export non-canonical node ID {node_id!r}: "
+                    "IDs must be non-empty and have no surrounding whitespace."
+                )
+        return nodes
 
     def _sorted_edges(self) -> list[tuple[Hashable, Hashable, Dict[str, Any]]]:
         """Return undirected edges with canonical endpoints in stable order.
 
         :return list[tuple[Hashable, Hashable, Dict[str, Any]]]: Sorted edge tuples in
             ``(u, v, attrs)`` form.
-        :raises ValueError: If an edge weight cannot be represented in JSON.
+        :raises ValueError: If an edge weight is null or non-finite.
         """
         edges = ordered_edges_with_data(self.graph)
         for left, right, attrs in edges:
-            if not math.isfinite(float(attrs.get("weight", 0.0))):
+            weight = attrs.get("weight", 0.0)
+            if weight is None or not math.isfinite(float(weight)):
                 raise ValueError(
-                    f"Cannot export non-finite edge weight for {left!r} -> {right!r}."
+                    f"Cannot export null or non-finite edge weight for {left!r} -> {right!r}."
                 )
         return edges
 
