@@ -3385,7 +3385,7 @@ def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
 
 
 def test_documented_cli_examples_are_parseable() -> None:
-    """README and CLI guide command examples should remain parseable in CI."""
+    """README and CLI guide command examples should remain parseable."""
     parser, _, _, _ = cli_module._create_parser()
     docs = [Path("README.md"), Path("docs/guides/cli.md")]
 

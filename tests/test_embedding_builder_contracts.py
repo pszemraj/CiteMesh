@@ -5344,7 +5344,7 @@ def test_embedding_real_cuda_fa2_compile_executes_graphs() -> None:
 def test_embedding_real_mps_task_space_quality_smoke() -> None:
     """Validate frozen retrieval and symmetric-task behavior on real MPS.
 
-    Requires real Metal access: skips on Linux CI and inside sandboxes that
+    Requires real Metal access: skips on Linux and inside sandboxes that
     hide the MPS device. Run escalated on Apple Silicon for a meaningful pass.
     """
     torch = pytest.importorskip("torch")

@@ -28,18 +28,7 @@ conda run -n inf python -m pytest -m slow      # real-model smoke tests (needs e
 conda run -n inf ruff check . && conda run -n inf ruff format .
 ```
 
-The suite must be green and `ruff check` + `ruff format --check` clean before committing. CI runs lint plus representative Linux/macOS tests (Python 3.10 and 3.13), and a no-extras install smoke (`pip install .` then `citemesh --help`), so keep optional deps lazily imported.
-
-## CI scope
-
-CiteMesh is currently a solo-maintained, pre-user project. Keep CI intentionally
-small: one lint/format job, representative Linux/macOS boundary tests, and one
-no-extras install smoke. Do not add broad version matrices, release services,
-duplicated jobs, or external-service integration runs without a concrete bug or
-release requirement. Package-installing jobs fetch Git history because
-`setuptools-scm` needs tags for an accurate version; lint-only jobs stay shallow.
-Real-model and MPS quality smokes remain opt-in local/release validation, not a
-separate CI job, until a concrete release requirement justifies that cost.
+Run validation locally: the suite must be green and `ruff check` + `ruff format --check` clean before committing. Real-model and MPS quality smokes remain opt-in local validation on the relevant hardware. Do not add CI workflows unless the maintainer explicitly requests them.
 
 ## Code conventions
 

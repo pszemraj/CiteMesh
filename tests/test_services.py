@@ -1398,7 +1398,7 @@ def test_rate_limit_pace_is_key_aware(monkeypatch: pytest.MonkeyPatch) -> None:
     assert keyed.client.retry is False
     assert keyed._session.headers["x-api-key"] == "test-key"
 
-    # Empty env value means "explicitly anonymous" (CI convention).
+    # Empty env value means "explicitly anonymous".
     monkeypatch.setenv("S2_API_KEY", "")
     explicit_anonymous = SemanticScholarClient(timeout=1)
     assert explicit_anonymous.requests_per_second == API_CONFIG.requests_per_second

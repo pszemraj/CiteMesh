@@ -3,7 +3,7 @@
 out/*
 cache/*
 citemesh/_version.py
-# stray run configs at repo root only — never .github/workflows/*.yaml
+# stray run configs at repo root only
 /*.yaml
 .claude/
 
