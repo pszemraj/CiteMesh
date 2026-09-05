@@ -27,7 +27,9 @@ Related docs:
 - Typical use: quick graphing from a known paper ID.
 - Edges require positive topical similarity or shared-reference evidence and meet
   the configured similarity threshold. At most three edges touch each paper;
-  the strongest eligible edges are retained deterministically.
+  the seed's strongest eligible edges are reserved first, then remaining edges
+  are selected by strength within each paper's cap. The seed retains up to three
+  existing neighbors; capping never invents unsupported edges.
 
 ## Citation Strategy
 
@@ -39,7 +41,8 @@ Related docs:
 - Typical use: citation-derived neighborhoods and reference-aware similarity.
 - As with recommendation graphs, dates and citation popularity alone cannot
   create an edge, and each paper has at most three edges. The default 40-paper
-  graph therefore has at most 60 edges.
+  graph therefore has at most 60 edges. The seed's strongest eligible edges are
+  reserved before selecting the remaining edges.
 
 Both strategies warn when reference hydration exhausts its retries, then skip
 further reference hydration for that collection. Existing reference lists remain
@@ -64,8 +67,12 @@ Two semantic sources, selected with `--semantic-source`:
   HuggingFace. This can surface papers with no citation path to the seed but needs
   the `datasets` dependency and substantially more cold-cache work. Selection,
   resumption, and storage behavior are described in [Caching & Data](caching.md).
+  Citation-count enrichment is optional: a rejected Semantic Scholar batch warns
+  and retains the selected papers with their existing counts.
 
 - Strengths: captures semantic similarity even when citations are missing.
+- Edge selection reserves the seed's strongest eligible neighbors before the
+  remaining edges, while preserving the per-paper `top_k` cap.
 - Typical use: semantic exploration and discovery beyond citation graphs.
 
 Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md). Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](../reference/embedding-runtime.md).
@@ -87,8 +94,13 @@ Embedding cache behavior, hydration, and precision controls are defined in [Cach
   follow-up + foundational prior work); the evaluation rationale is documented in
   the defaults study.
 - Typical use: balanced graphs when you want citation evidence plus semantic recall.
+- Edge selection reserves the seed's strongest eligible neighbors before the
+  remaining edges, while preserving the configured per-paper degree cap.
 
 ## Choosing a Strategy
+
+All strategies warn when no selected paper pair meets the edge criteria and the
+resulting graph contains no edges.
 
 - Start with `recommendation` for fast topical graphs.
 - Use `citation` when a citation-derived neighborhood is most important.

@@ -4345,9 +4345,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             len(targets),
         )
 
-        batch_results = self.client.get_papers(
-            [paper_id for paper_id, _paper in targets]
-        )
+        from citemesh.services import SemanticScholarRequestError
+
+        try:
+            batch_results = self.client.get_papers(
+                [paper_id for paper_id, _paper in targets]
+            )
+        except SemanticScholarRequestError as exc:
+            logger.warning(
+                "Citation-count enrichment was rejected; continuing with "
+                "existing citation counts: %s",
+                exc,
+            )
+            return
         for paper_id, paper in targets:
             batch_paper = batch_results.get(normalize_paper_id(paper_id))
             if batch_paper is not None:
@@ -4422,7 +4432,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             sorted(self.candidate_source_status.items())
         )
         # Enforce a strict per-node top-k cap by greedily keeping strongest edges.
-        filtered_graph = build_capped_undirected_graph(graph, self.top_k)
+        filtered_graph = build_capped_undirected_graph(
+            graph, self.top_k, seed_id=actual_seed_id
+        )
 
         logger.info(
             f"Filtered graph: {filtered_graph.number_of_nodes()} nodes, "

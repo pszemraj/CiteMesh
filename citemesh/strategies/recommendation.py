@@ -180,7 +180,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         graph.graph["candidate_source_status"] = dict(
             sorted(self.candidate_source_status.items())
         )
-        return build_capped_undirected_graph(graph, 3), actual_seed_id
+        return (
+            build_capped_undirected_graph(graph, 3, seed_id=actual_seed_id),
+            actual_seed_id,
+        )
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

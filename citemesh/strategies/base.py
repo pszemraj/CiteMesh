@@ -101,12 +101,15 @@ def deterministic_sort_key(
 def select_capped_undirected_edges(
     edges: Iterable[Tuple[Any, Any, Mapping[str, Any]]],
     max_edges_per_node: int,
+    *,
+    seed_id: Optional[Any] = None,
 ) -> List[Tuple[Any, Any, float]]:
     """Select edges for an undirected graph while capping per-node degree.
 
     :param Iterable[Tuple[Any, Any, Mapping[str, Any]]] edges: Edge tuples with optional
         ``weight`` metadata.
     :param int max_edges_per_node: Maximum degree per node.
+    :param Optional[Any] seed_id: Reserve this seed's strongest existing edges first.
     :return List[Tuple[Any, Any, float]]: Selected canonicalized edges with weights.
     """
     canonical_edges: Dict[Tuple[str, str], Tuple[Any, Any, float]] = {}
@@ -125,7 +128,10 @@ def select_capped_undirected_edges(
 
     sorted_edges = sorted(
         canonical_edges.values(),
-        key=lambda item: deterministic_sort_key(item[2], item[0], item[1]),
+        key=lambda item: (
+            seed_id is not None and seed_id not in item[:2],
+            deterministic_sort_key(item[2], item[0], item[1]),
+        ),
     )
 
     if max_edges_per_node <= 0:
@@ -151,11 +157,14 @@ def select_capped_undirected_edges(
     return selected_edges
 
 
-def build_capped_undirected_graph(graph: nx.Graph, max_edges_per_node: int) -> nx.Graph:
+def build_capped_undirected_graph(
+    graph: nx.Graph, max_edges_per_node: int, *, seed_id: Optional[Any] = None
+) -> nx.Graph:
     """Copy a graph while retaining only the strongest capped undirected edges.
 
     :param nx.Graph graph: Source graph whose nodes and metadata should be preserved.
     :param int max_edges_per_node: Maximum degree per node in the rebuilt graph.
+    :param Optional[Any] seed_id: Reserve this seed's strongest existing edges first.
     :return nx.Graph: Rebuilt graph with selected weighted edges.
     """
     filtered_graph = nx.Graph()
@@ -163,7 +172,7 @@ def build_capped_undirected_graph(graph: nx.Graph, max_edges_per_node: int) -> n
     filtered_graph.add_nodes_from(graph.nodes(data=True))
 
     for u, v, weight in select_capped_undirected_edges(
-        graph.edges(data=True), max_edges_per_node
+        graph.edges(data=True), max_edges_per_node, seed_id=seed_id
     ):
         filtered_graph.add_edge(u, v, weight=weight)
 
@@ -340,6 +349,11 @@ class GraphBuilderStrategy(ABC):
             graph.number_of_nodes(),
             edges_created,
         )
+        if edges_created == 0:
+            logger.warning(
+                "Graph contains no edges: no selected paper pair met the "
+                "strategy's edge criteria."
+            )
         return graph, actual_seed_id
 
     def _resolved_strategy_name(self) -> str:

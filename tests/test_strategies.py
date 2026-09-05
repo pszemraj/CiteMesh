@@ -158,12 +158,15 @@ def test_citation_and_recommendation_should_create_edge_thresholds() -> None:
 )
 @pytest.mark.parametrize("references", [[], ["unshared"]])
 def test_indexed_graphs_require_topical_or_shared_reference_evidence(
-    builder_type: type[GraphBuilderStrategy], references: list[str]
+    builder_type: type[GraphBuilderStrategy],
+    references: list[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Same-year popularity must not connect papers without topical evidence.
 
     :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
     :param list[str] references: Missing or disjoint reference payload.
+    :param pytest.LogCaptureFixture caplog: Captured graph warnings.
     :return None: Assertions verify irrelevant edges are absent and supported ones remain.
     """
     seed = Paper(
@@ -194,10 +197,13 @@ def test_indexed_graphs_require_topical_or_shared_reference_evidence(
 
     assert set(graph) == {"seed", "other"}
     assert graph.number_of_edges() == 0
+    assert "Graph contains no edges" in caplog.text
     assert builder.compute_similarity(seed, other) == 0.0
     other.references = ["shared"]
+    caplog.clear()
     graph, _ = builder.build_graph("seed")
     assert graph.has_edge("seed", "other")
+    assert "Graph contains no edges" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -1419,6 +1425,120 @@ def test_max_papers_is_total_node_cap_including_seed(
 
 
 @pytest.mark.parametrize(
+    "builder_type",
+    [
+        CitationGraphBuilder,
+        RecommendationGraphBuilder,
+        EmbeddingGraphBuilder,
+        HybridGraphBuilder,
+    ],
+)
+@pytest.mark.parametrize("eligible_neighbors", [0, 1, 2, 8])
+def test_strategy_caps_reserve_existing_seed_neighbors(
+    builder_type: type[GraphBuilderStrategy],
+    eligible_neighbors: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stronger candidate clusters must not consume the seed's available edges.
+
+    :param type[GraphBuilderStrategy] builder_type: Capped strategy constructor.
+    :param int eligible_neighbors: Seed neighbors meeting the edge threshold.
+    :param pytest.MonkeyPatch monkeypatch: Controlled collection and similarity scores.
+    :return None: Asserts the seed retains its strongest existing edges within every cap.
+    """
+    papers = {"seed": _seed_paper(), **{f"p{i}": _paper(f"p{i}") for i in range(8)}}
+    builder = builder_type(max_papers=9, client=MagicMock())
+    monkeypatch.setattr(builder, "collect_papers", lambda _seed: papers)
+    monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _papers: None)
+    if isinstance(builder, EmbeddingGraphBuilder):
+        cap = builder.top_k
+    elif isinstance(builder, HybridGraphBuilder):
+        cap = HYBRID_CONFIG.max_edges_per_node
+    else:
+        cap = 3
+    base_score = 0.60 if isinstance(builder, HybridGraphBuilder) else 0.30
+
+    def score(left: Paper, right: Paper) -> float:
+        """Score the candidate cluster above all eligible seed edges.
+
+        :param Paper left: First paper.
+        :param Paper right: Second paper.
+        :return float: Eligible edge weight or zero for an unsupported seed pair.
+        """
+        if left.is_seed or right.is_seed:
+            neighbor = right if left.is_seed else left
+            index = int(neighbor.paper_id[1:])
+            return base_score + index * 0.001 if index < eligible_neighbors else 0.0
+        return base_score + 0.05
+
+    monkeypatch.setattr(builder, "compute_similarity", score)
+    graph, seed_id = builder.build_graph("seed")
+
+    expected_seed_neighbors = {
+        f"p{i}" for i in range(max(0, eligible_neighbors - cap), eligible_neighbors)
+    }
+    assert set(graph.neighbors(seed_id)) == expected_seed_neighbors
+    assert graph.degree(seed_id) == min(cap, eligible_neighbors)
+    assert all(degree <= cap for _, degree in graph.degree())
+    assert all(score(papers[left], papers[right]) > 0 for left, right in graph.edges())
+    papers = dict(reversed(list(papers.items())))
+    reordered, _ = builder.build_graph("seed")
+    assert {frozenset(edge) for edge in graph.edges()} == {
+        frozenset(edge) for edge in reordered.edges()
+    }
+
+
+def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An optional batch rejection must not discard completed semantic retrieval.
+
+    :param pytest.MonkeyPatch monkeypatch: Offline model and corpus retrieval stubs.
+    :param pytest.LogCaptureFixture caplog: Captured optional-enrichment warning.
+    :return None: Asserts papers and vectors survive with their existing citation counts.
+    """
+    from citemesh.services import SemanticScholarRequestError
+
+    client = MagicMock()
+    seed = _seed_paper()
+    seed.citation_count = 7
+    client.get_paper.return_value = seed
+    client.get_papers.side_effect = SemanticScholarRequestError("HTTP 403")
+    builder = EmbeddingGraphBuilder(
+        max_papers=2, semantic_source="arxiv-corpus", client=client
+    )
+    vector = np.asarray([1.0, 0.0], dtype=np.float32)
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(builder, "_encode_texts", lambda *_args, **_kwargs: [vector])
+    monkeypatch.setattr(
+        builder,
+        "_select_candidates",
+        lambda *_args, **_kwargs: [
+            (
+                "arxiv:2501.00001",
+                {"title": "Selected corpus paper", "year": 2025},
+                vector,
+            )
+        ],
+    )
+
+    papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", "arxiv:2501.00001"}
+    assert papers["seed"].citation_count == 7
+    assert papers["arxiv:2501.00001"].citation_count == 0
+    assert set(builder.retrieval_embeddings) == set(papers)
+    assert "Citation-count enrichment was rejected" in caplog.text
+    assert "HTTP 403" in caplog.text
+    client.get_papers.assert_called_once_with(["arxiv:2501.00001"])
+    client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
+    client.get_papers.side_effect = ValueError("invalid local payload")
+    with pytest.raises(ValueError, match="invalid local payload"):
+        builder._update_citation_counts(papers)
+
+
+@pytest.mark.parametrize(
     ("builder_factory", "expected_strategy"),
     [
         (
@@ -1461,7 +1581,9 @@ def test_degree_capping_preserves_per_node_limit(
     expected_edges = {
         (min(u, v), max(u, v))
         for u, v, _ in select_capped_undirected_edges(
-            complete_graph_edges, max_edges_per_node
+            complete_graph_edges,
+            max_edges_per_node,
+            seed_id="seed",
         )
     }
 
@@ -1772,6 +1894,15 @@ def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
     assert set(pool.papers) == {primary_a, primary_b}
     assert pool.papers[primary_a].doi == "10.1000/a"
     assert pool._aliases["id:10.1000/b"] == primary_b
+
+    # Direct registry callers can refresh an unmerged payload; the conflict
+    # branch must also quarantine its contradictory aliases at this boundary.
+    registry = IdentityRegistry()
+    register_aliases(registry, primary_a, canonical)
+    register_aliases(registry, primary_a, conflicting_refresh)
+    assert registry["id:10.1000/a"] == primary_a
+    assert registry.get("id:10.1000/b") is None
+    assert registry.evidence(primary_a).strong_ids["doi"] == frozenset({"10.1000/a"})
 
 
 def test_identity_transitive_weak_bridge_cannot_collapse_conflicting_classes() -> None:

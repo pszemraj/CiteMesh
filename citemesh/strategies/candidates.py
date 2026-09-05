@@ -325,7 +325,8 @@ class IdentityRegistry:
         )
         for alias in paper_identity_aliases(paper):
             if conflicting_refresh:
-                # Re-register only the retained canonical payload's aliases.
+                # Existing aliases already describe the retained payload; do not
+                # add any aliases from a contradictory direct-register refresh.
                 continue
             self._owners.setdefault(alias, set()).add(canonical_id)
 
