@@ -988,7 +988,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param Optional[int] corpus_size: Maximum papers to embed and cache after
             scanning the selected split for newest submissions (``None`` = all).
         :param Optional[int] truncate_dim: Optional embedding truncation dimension. If ``None``,
-            uses profile defaults (e.g. EmbeddingGemma defaults to 256d MRL).
+            uses profile defaults (e.g. EmbeddingGemma defaults to 512d MRL).
         :param int top_k: Number of most similar neighbors per node
         :param bool use_streaming: Whether to stream the HuggingFace dataset instead of loading it
         :param bool force_rebuild_cache: Whether to force an explicit cache rebuild.

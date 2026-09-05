@@ -571,7 +571,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         embeddings = builder._encode_texts(["seed"], show_progress_bar=False)
 
         assert init_log["model_name"] == DEFAULT_EMBEDDING_MODEL_NAME
-        assert init_log["kwargs"]["truncate_dim"] == 256
+        assert init_log["kwargs"]["truncate_dim"] == 512
         assert embeddings.shape == (1, 2)
         assert init_log["kwargs"]["model_kwargs"]["attn_implementation"] == "sdpa"
         assert (
@@ -1547,7 +1547,7 @@ def test_local_embeddinggemma_artifacts_resolve_task_profile(
     )
 
     assert builder.model_profile.schema_token == "embeddinggemma-v2"
-    assert builder.truncate_dim == 256
+    assert builder.truncate_dim == 512
     assert query == "task: search result | query: Attention Models. An abstract."
     assert document == "title: Attention Models | text: An abstract."
     assert similarity == (
@@ -1578,7 +1578,7 @@ def test_plain_transformers_embeddinggemma_export_resolves_from_model_contract(
 
     assert builder.model_profile.schema_token == "embeddinggemma-v2"
     assert builder.model_profile.minimum_transformers_version == (5, 2)
-    assert builder.truncate_dim == 256
+    assert builder.truncate_dim == 512
 
 
 def test_ambiguous_local_gemma_checkpoint_warns_before_default_profile(
@@ -1642,7 +1642,7 @@ def test_local_model_profile_override_and_generic_detection(
     assert generic.model_profile.schema_token == "default-v1"
     assert generic.truncate_dim is None
     assert forced_embeddinggemma.model_profile.schema_token == "embeddinggemma-v2"
-    assert forced_embeddinggemma.truncate_dim == 256
+    assert forced_embeddinggemma.truncate_dim == 512
     assert recognized_but_forced_default.model_profile.schema_token == "default-v1"
     assert recognized_but_forced_default.truncate_dim is None
     with pytest.raises(ValueError, match="Unknown model profile"):
@@ -1754,10 +1754,10 @@ def test_embedding_fallback_rebinds_profile_before_model_load(
 
     assert init_log["attempts"] == [requested_model, str(fallback_model)]
     assert "truncate_dim" not in init_log["attempt_kwargs"][0]
-    assert init_log["attempt_kwargs"][1]["truncate_dim"] == 256
+    assert init_log["attempt_kwargs"][1]["truncate_dim"] == 512
     assert builder._active_model_name == str(fallback_model)
     assert builder.model_profile.schema_token == "embeddinggemma-v2"
-    assert builder.truncate_dim == 256
+    assert builder.truncate_dim == 512
     assert f"model={fallback_model}" in builder.embedding_cache.model_name
     assert "profile=embeddinggemma-v2" in builder.embedding_cache.model_name
 
@@ -1943,10 +1943,17 @@ def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
     )
 
 
+@pytest.mark.parametrize("semantic_source", ["candidates", "arxiv-corpus"])
 def test_embedding_cache_namespace_matches_default_and_explicit_truncate_dim(
     monkeypatch: pytest.MonkeyPatch,
+    semantic_source: str,
 ) -> None:
-    """Default resolved truncate dim should match explicit equivalent namespace."""
+    """Default caches should match explicit 512d and stay separate from 256d.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param str semantic_source: Retrieval cache sourcing mode.
+    :return None: Checks retrieval and graph cache identities after the default change.
+    """
     monkeypatch.setattr(
         EmbeddingGraphBuilder,
         "_resolve_source_dtype_hint",
@@ -1957,16 +1964,35 @@ def test_embedding_cache_namespace_matches_default_and_explicit_truncate_dim(
         max_papers=1,
         model_name="google/embeddinggemma-300m",
         truncate_dim=None,
+        semantic_source=semantic_source,
         client=MagicMock(),
     )
     explicit = EmbeddingGraphBuilder(
         max_papers=1,
         model_name="google/embeddinggemma-300m",
+        truncate_dim=512,
+        semantic_source=semantic_source,
+        client=MagicMock(),
+    )
+    previous_default = EmbeddingGraphBuilder(
+        max_papers=1,
+        model_name="google/embeddinggemma-300m",
         truncate_dim=256,
+        semantic_source=semantic_source,
         client=MagicMock(),
     )
 
     assert implicit.embedding_cache.model_name == explicit.embedding_cache.model_name
+    assert (
+        implicit.graph_embedding_cache.model_name
+        == explicit.graph_embedding_cache.model_name
+    )
+    assert previous_default.truncate_dim == 256
+    assert previous_default.embedding_cache.h5_path != implicit.embedding_cache.h5_path
+    assert (
+        previous_default.graph_embedding_cache.h5_path
+        != implicit.graph_embedding_cache.h5_path
+    )
 
 
 def test_embedding_model_revision_forwards_to_model_loader(
@@ -5019,6 +5045,8 @@ def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
     )
     cpu_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
 
+    assert cuda_builder.truncate_dim == mps_builder.truncate_dim == 512
+    assert cpu_builder.truncate_dim == 512
     assert cuda_builder._source_dtype_hint == "bfloat16"
     assert mps_builder._source_dtype_hint == "bfloat16"
     assert cpu_builder._source_dtype_hint == ("bfloat16" if cpu_bf16 else "float32")

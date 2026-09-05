@@ -45,6 +45,14 @@ citemesh cache root
 
 Model hashes are the first 12 characters of `sha256(<namespace>)`. Every embedding namespace binds the runtime-active model (including a fallback checkpoint), requested revision, immutable resolved artifact fingerprint, representation role, normalization contract, resolved truncate dimension, storage precision, effective binary-prefilter mode, resolved source torch dtype, and task-formatter fingerprint; `int8` namespaces also include calibration sample size. Candidate mode (`--semantic-source candidates`, the default) adds `mode=candidates` to the retrieval-document namespace so incrementally embedded S2 candidates never mix with corpus hydrations. The graph-similarity namespace is source-mode independent because it contains only selected papers encoded under the same symmetric task contract. Namespaces intentionally carry no device token: CPU, CUDA, and MPS share a namespace whenever compute dtype and the other contracts match, whether bf16 or float32.
 
+EmbeddingGemma now defaults to 512 dimensions. Because the resolved dimension is
+part of both retrieval and graph-similarity cache identities, default runs use
+separate namespaces from older 256-dimensional runs. Existing 256-dimensional
+caches are preserved; `--truncate-dim 256` selects them when the other cache
+settings match. A configured `defaults.truncate_dim = 256` also keeps that choice
+for builds and local search; unset it to adopt the profile default. The change
+does not clear the independent paper-metadata or reference caches.
+
 ## Paper Metadata Cache
 
 Successful `get_paper` and `get_papers` lookups persist metadata under `papers/`,

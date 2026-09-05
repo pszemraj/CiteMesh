@@ -189,7 +189,7 @@ EMBEDDING_MODEL_PROFILES = (
         requires_bidirectional_attention=True,
         compile_inner_transformer=True,
         available_truncate_dims=(768, 512, 256, 128),
-        recommended_truncate_dim=256,
+        recommended_truncate_dim=512,
         notes=(
             "Adds recommended retrieval-query, retrieval-document, and symmetric "
             "sentence-similarity prompts for EmbeddingGemma. "

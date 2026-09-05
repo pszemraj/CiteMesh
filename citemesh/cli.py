@@ -1640,7 +1640,8 @@ User configuration:
         default=None,
         help=(
             "Optional embedding output dimension truncation "
-            "(for EmbeddingGemma: 768, 512, 256, 128; default uses profile recommendation)"
+            "(for EmbeddingGemma: 768, 512, 256, 128; default: 512; "
+            "other models use their profile recommendation)"
         ),
     )
 

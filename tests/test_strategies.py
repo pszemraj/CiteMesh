@@ -1956,6 +1956,7 @@ def test_embedding_candidate_mode_skips_corpus_and_persists(
 
     builder = EmbeddingGraphBuilder(max_papers=4, client=client)
     assert builder.semantic_source == "candidates"
+    assert builder.truncate_dim == 512
     assert builder.storage_precision == "float32"
     assert "mode=candidates" in builder.embedding_cache.model_name
 
@@ -2045,6 +2046,7 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
     )
     assert builder.semantic_source == "candidates"
     assert builder.embedding_builder is not None
+    assert builder.embedding_builder.truncate_dim == 512
 
     citation_papers = {
         "seed": _seed_paper(),

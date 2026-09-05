@@ -137,7 +137,9 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
 - `--truncate-dim`: optional embedding output-dimension truncation (for
   EmbeddingGemma: `768`, `512`, `256`, `128`; omitted uses the model profile's
-  recommendation)
+  recommendation, **`512` for EmbeddingGemma**). See the
+  [dimension study](../reference/defaults-tuning-study.md#embedding-dimensions-september-2026)
+  for the retrieval, storage, and search-time tradeoffs.
 - `--streaming` / `--no-streaming`: stream the HuggingFace dataset or load cached shards. Streaming requires a non-sliced split (for example `train`); the negative form overrides an enabled `defaults.streaming` config value for one run.
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)
 - `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows)

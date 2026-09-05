@@ -2177,7 +2177,7 @@ def test_model_profiles_match_expected_formatters() -> None:
     assert gemma.autocast_devices == ("cuda", "mps", "cpu")
     assert gemma.compile_inner_transformer is True
     assert gemma.available_truncate_dims == (768, 512, 256, 128)
-    assert gemma.recommended_truncate_dim == 256
+    assert gemma.recommended_truncate_dim == 512
     assert gemma.format_query("  attention  ").startswith(
         "task: search result | query:"
     )

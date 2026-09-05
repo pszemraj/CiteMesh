@@ -73,7 +73,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `max_citations` | Default `--max-citations` |
 | `max_references` | Default `--max-references` |
 | `top_k` | Default `--top-k` |
-| `truncate_dim` | Default `--truncate-dim` |
+| `truncate_dim` | Default `--truncate-dim`; unset uses the model profile (`512` for EmbeddingGemma) |
 | `corpus_size` | Default `--corpus-size` |
 | `dataset_split` | Default `--dataset-split` |
 | `streaming` | Default `--streaming` / `--no-streaming` toggle |

@@ -56,6 +56,12 @@ package. Current behavior is described in the linked guides and references:
 
 ## Semantic Discovery
 
+- Raised the shared EmbeddingGemma default from 256 to 512 dimensions for builds,
+  local search, and graph-similarity encoding on all devices. A paired 100,000-paper,
+  30-seed study found higher full-model neighbor retention at similar GPU encoding
+  time; storage and search costs are recorded in the
+  [dimension study](../reference/defaults-tuning-study.md#embedding-dimensions-september-2026).
+  Explicit dimension overrides still apply, and older 256d caches remain separate.
 - Filter the redundant Transformers FP32-weight load warning only when verified
   CUDA BF16 autocast and FA2 are selected, retaining automatic checkpoint dtype
   loading and other diagnostics. The real CUDA smoke checks BF16 kernel inputs.

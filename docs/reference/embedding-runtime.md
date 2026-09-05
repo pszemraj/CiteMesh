@@ -29,7 +29,13 @@ Fallback behavior:
 - `--model-profile embeddinggemma` binds the same contract for stripped/custom fine-tune exports; `--model-profile default` explicitly disables family-specific behavior.
 - This means both receive the same prompt formatting, truncate-dim policy, and compile eligibility behavior.
 - When `--truncate-dim` is omitted, this profile uses its recommended dimension of
-  `256`.
+  `512`. This applies to embedding/hybrid builds, local search, and symmetric
+  graph-similarity encoding on CUDA, MPS, and CPU, including recognized local
+  checkpoints and the Google fallback. Explicit CLI or configuration values take
+  precedence. Supported dimensions remain `768`, `512`, `256`, and `128`.
+- The [September 2026 dimension study](defaults-tuning-study.md#embedding-dimensions-september-2026)
+  motivates the default: better retention of full-model neighbors at similar GPU
+  encoding cost, with larger vector storage and slower local searches.
 - Every fallback load candidate resolves its own profile before loader kwargs, formatter fingerprints, and cache namespaces are computed.
 - The profile requires Transformers 5.2 or newer, where `dtype="auto"` is the supported checkpoint-loading API and Gemma 3 honors the checkpoint's bidirectional-attention setting. CiteMesh checks this before constructing the model and does not treat an incompatible backend as a checkpoint-load failure eligible for fallback.
 
