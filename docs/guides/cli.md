@@ -105,6 +105,7 @@ Supported keys, value forms, and precedence are documented in
 | --- | --- | --- |
 | `--strategy`, `-s` | `recommendation`, `citation`, `embedding`, or `hybrid` | `recommendation` |
 | `--max-papers`, `-p` | Maximum nodes in final graph (seed included) | `40` (`hybrid`: implicit `45` when omitted) |
+| `--refresh-paper-cache` | Fetch fresh Semantic Scholar paper metadata and citation counts without rebuilding embeddings; failed refreshes retain cached metadata | disabled |
 | `--spring-iterations`, `-i` | Iterations used only for spring-layout fallback | `100` |
 | `--dpi`, `-d` | PNG output resolution | `150` |
 | `--seed` | Seed for layout computation used by layout-based exports (`png`, `plotly`, `dashboard`, `json`) | deterministic built-in seed |

@@ -86,6 +86,14 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | --- | --- |
 | `s2_api_key` | Semantic Scholar API key used only when `S2_API_KEY` is absent. Masked in `config list` output; `config get` prints the full value. |
 
+The configured key is passed directly to the API client; CiteMesh does not add it
+to subprocess environments. Keys explicitly supplied through `S2_API_KEY` retain
+normal environment inheritance.
+
+Corpus-only defaults ignored in candidate mode are reported at INFO level and
+omitted from the build sidecar's embedding settings. The sidecar records settings
+applicable to the selected source and storage precision.
+
 Example `config.toml`:
 
 ```toml

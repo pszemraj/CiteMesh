@@ -9,10 +9,13 @@ import logging
 import numbers
 import os
 import random
+import re
 import threading
 import time
+import weakref
 from collections.abc import Mapping
 from dataclasses import asdict
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 from urllib.parse import quote
@@ -51,7 +54,8 @@ REFERENCE_CACHE_VERSION = 1
 RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
 )
-SEARCH_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+PAPER_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper"
+SEARCH_BASE_URL = f"{PAPER_BASE_URL}/search"
 # semanticscholar 0.11 raises this when S2 encodes an empty relation page as
 # ``{"data": null}`` instead of ``{"data": []}``.
 _SDK_NULL_RELATION_PAGE_ERROR = "'NoneType' object is not iterable"
@@ -312,6 +316,24 @@ def _reference_id_candidate(raw_value: Any) -> Optional[str]:
     return None
 
 
+def _is_unresolved_reference(record: Any) -> bool:
+    """Recognize a valid relation record with an explicitly null paper identifier.
+
+    :param Any record: SDK relation record or equivalent mapping.
+    :return bool: Whether a paper ID is present and null on the relation's paper.
+    """
+    paper = (
+        record.get("paper", record)
+        if isinstance(record, dict)
+        else getattr(record, "paper", record)
+    )
+    # SDK properties default to None even when the response omits the field.
+    paper = getattr(paper, "raw_data", paper)
+    if isinstance(paper, dict):
+        return "paperId" in paper and paper["paperId"] is None
+    return hasattr(paper, "paperId") and paper.paperId is None
+
+
 def _normalize_reference_ids(payload: Any, *, strict: bool) -> Optional[List[str]]:
     """Normalize reference payloads under cache or live-response rules.
 
@@ -385,18 +407,35 @@ class SemanticScholarClient:
     - Direct recommendation and search endpoint support
     """
 
-    def __init__(self, timeout: float = API_CONFIG.default_timeout):
+    def __init__(
+        self,
+        timeout: float = API_CONFIG.default_timeout,
+        *,
+        api_key: Optional[str] = None,
+        refresh_paper_cache: bool = False,
+    ):
         """
         Initialize the API client.
 
-        :param float timeout: Request timeout in seconds
+        :param float timeout: Request timeout in seconds.
+        :param Optional[str] api_key: Explicit API key, or ``None`` to read S2_API_KEY.
+            An empty string explicitly selects anonymous access.
+        :param bool refresh_paper_cache: Bypass persisted paper metadata on reads.
         """
-        api_key = os.getenv("S2_API_KEY") or None
+        if api_key is None:
+            api_key = os.getenv("S2_API_KEY") or None
 
         self.client = SemanticScholar(timeout=timeout, api_key=api_key, retry=False)
+        self.refresh_paper_cache = refresh_paper_cache
         self.timeout = timeout
         self.last_request_time = 0.0
         self._session = requests.Session()
+        # SDK 0.11 has no public transport hook and discards unrecognized HTTP
+        # statuses. Replace only this client's requester; retain SDK pagination.
+        # A weak owner prevents a requester/client cycle from delaying session close.
+        self.client._AsyncSemanticScholar._requester.get_data_async = partial(
+            type(self)._request_sdk_json, weakref.proxy(self)
+        )
         self._closed = False
         self.requests_per_second = (
             API_CONFIG.authenticated_requests_per_second
@@ -406,7 +445,7 @@ class SemanticScholarClient:
 
         if api_key:
             self._session.headers["x-api-key"] = api_key
-            logger.info("Using Semantic Scholar API key from S2_API_KEY")
+            logger.info("Using Semantic Scholar API key")
         else:
             global _anonymous_pool_announced
             if not _anonymous_pool_announced:
@@ -501,7 +540,16 @@ class SemanticScholarClient:
         :param Exception error: Exception from request/client layer.
         :return bool: ``True`` when the error indicates HTTP 429.
         """
-        return "429" in str(error)
+        error = _unwrap_sdk_retry_error(error)
+        if isinstance(error, _RetryableRequestError):
+            return True
+        response = getattr(error, "response", None)
+        if response is not None:
+            return getattr(response, "status_code", None) == 429
+        # The SDK discards response objects and uses this built-in exception.
+        return isinstance(error, ConnectionRefusedError) and bool(
+            re.search(r"\bHTTP(?: status)? 429\b", str(error))
+        )
 
     @staticmethod
     def _get_retry_after(error: Exception) -> Optional[float]:
@@ -583,10 +631,14 @@ class SemanticScholarClient:
         retryer = Retrying(
             stop=stop_after_attempt(API_CONFIG.max_retries),
             wait=_S2BackoffWait(),
-            retry=retry_if_exception_type(Exception)
-            & retry_if_not_exception_type(
-                tuple(kind for kind, _handler in handled_exceptions)
-            ),
+            retry=(
+                retry_if_exception_type(Exception)
+                & retry_if_not_exception_type(
+                    (TypeError, ValueError, SemanticScholarRequestError)
+                    + tuple(kind for kind, _handler in handled_exceptions)
+                )
+            )
+            | retry_if_exception_type(json.JSONDecodeError),
             before_sleep=_before_sleep,
             sleep=lambda seconds: time.sleep(seconds),
             reraise=True,
@@ -600,9 +652,15 @@ class SemanticScholarClient:
                     except Exception as raw_exc:
                         raise _unwrap_sdk_retry_error(raw_exc)
         except Exception as exc:
-            for error_type, handler in handled_exceptions:
-                if isinstance(exc, error_type):
-                    return handler(exc)
+            # SDK JSON decoding can fail on transient HTML/plain-text error bodies.
+            if not isinstance(exc, json.JSONDecodeError):
+                for error_type, handler in handled_exceptions:
+                    if isinstance(exc, error_type):
+                        return handler(exc)
+                if isinstance(
+                    exc, (TypeError, ValueError, SemanticScholarRequestError)
+                ):
+                    raise
             return on_final_failure(exc)
 
         raise AssertionError("retry loop exhausted without returning")
@@ -847,6 +905,84 @@ class SemanticScholarClient:
             f"S2_API_KEY for a dedicated rate limit (free keys: {S2_API_KEY_SIGNUP_URL})."
         )
 
+    async def _request_sdk_json(
+        self,
+        url: str,
+        parameters: str,
+        headers: Optional[Dict[str, str]],
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Supply status-preserving responses to the SDK's synchronous wrapper.
+
+        :param str url: SDK endpoint URL.
+        :param str parameters: SDK-encoded query parameters.
+        :param Optional[Dict[str, str]] headers: SDK authentication headers.
+        :param Optional[Dict[str, Any]] payload: Batch POST body, or no body for GET.
+        :return Any: Decoded response consumed by SDK pagination/conversion.
+        :raises ObjectNotFoundException: When the endpoint returns HTTP 404.
+        """
+        data = self._request_json_once(
+            url,
+            parameters.lstrip("&"),
+            context=f"requesting {url}",
+            headers=headers,
+            payload=payload,
+        )
+        if data is None:
+            raise ObjectNotFoundException(f"Paper not found: {url}")
+        if url.endswith(("/references", "/citations")) and (
+            not isinstance(data, dict) or "data" not in data
+        ):
+            raise _SemanticScholarResponseContractError(
+                "Semantic Scholar returned a malformed relation payload without data."
+            )
+        return data
+
+    def _request_json_once(
+        self,
+        url: str,
+        params: Dict[str, Any] | str,
+        *,
+        context: str,
+        headers: Optional[Dict[str, str]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Issue one HTTP request without adding another retry budget.
+
+        :param str url: Semantic Scholar endpoint URL.
+        :param Dict[str, Any] | str params: Mapping or pre-encoded query parameters.
+        :param str context: Description included in request errors.
+        :param Optional[Dict[str, str]] headers: Optional SDK authentication headers.
+        :param Optional[Dict[str, Any]] payload: POST body, or ``None`` for GET.
+        :return Any: Decoded JSON, or ``None`` for HTTP 404.
+        """
+        kwargs: Dict[str, Any] = {"params": params, "timeout": self.timeout}
+        if headers is not None:
+            kwargs["headers"] = headers
+        response = (
+            self._session.get(url, **kwargs)
+            if payload is None
+            else self._session.post(url, json=payload, **kwargs)
+        )
+        if response.status_code == 404:
+            return None
+        if response.status_code == 429:
+            raise _RetryableRequestError(
+                f"HTTP 429 from {url}",
+                retry_after=self._safe_retry_after(response),
+            )
+        if 400 <= response.status_code < 500:
+            if response.status_code in {401, 403}:
+                remediation = "Check S2_API_KEY credentials and access permissions."
+            else:
+                remediation = "Check request parameters and requested fields."
+            raise SemanticScholarRequestError(
+                f"Semantic Scholar rejected the request while {context} "
+                f"(HTTP {response.status_code}). {remediation}"
+            )
+        response.raise_for_status()
+        return response.json()
+
     def _request_json(
         self,
         url: str,
@@ -875,25 +1011,7 @@ class SemanticScholarClient:
             :return Optional[Dict[str, Any]]: Parsed payload or ``None`` on 404.
             """
             self._rate_limit()
-            response = self._session.get(url, params=params, timeout=self.timeout)
-            if response.status_code == 404:
-                return None
-            if response.status_code == 429:
-                raise _RetryableRequestError(
-                    f"HTTP 429 from {url}",
-                    retry_after=self._safe_retry_after(response),
-                )
-            if 400 <= response.status_code < 500:
-                if response.status_code in {401, 403}:
-                    remediation = "Check S2_API_KEY credentials and access permissions."
-                else:
-                    remediation = "Check request parameters and requested fields."
-                raise SemanticScholarRequestError(
-                    f"Semantic Scholar rejected the request while {context} "
-                    f"(HTTP {response.status_code}). {remediation}"
-                )
-            response.raise_for_status()
-            return response.json()
+            return self._request_json_once(url, params, context=context)
 
         def _log_before_sleep(retry_state: RetryCallState) -> None:
             """Log the upcoming retry with its computed wait.
@@ -984,96 +1102,35 @@ class SemanticScholarClient:
                     return None
             return paper
 
-        cached_paper = _load_cached_paper(paper_id)
-        if cached_paper is not None:
-            return cached_paper
-        fields = _default_paper_fields()
-
-        def _operation() -> Optional[Paper]:
-            """Fetch and normalize one paper payload from the API client.
-
-            :return Optional[Paper]: Converted paper or ``None`` when absent.
-            """
-            api_paper = self.client.get_paper(paper_id, fields=fields)
-            if not api_paper:
-                logger.warning("Paper not found: %s", paper_id)
-                return None
-
-            paper = self._convert_api_paper(api_paper)
-            if paper is None:
-                raise _SemanticScholarResponseContractError(
-                    f"Semantic Scholar returned a malformed paper payload for {paper_id}."
-                )
-            _persist_paper(paper, paper_id)
-            return paper
-
-        def _final_failure(exc: Exception) -> Optional[Paper]:
-            """Report exhausted retries per the caller's failure contract.
-
-            :param Exception exc: Last captured exception.
-            :return Optional[Paper]: ``None`` in tolerant mode.
-            """
-            if raise_on_unavailable:
-                raise self._unavailable_error(
-                    f"fetching {paper_id}",
-                    f": {exc}",
-                    rate_limited=self._is_rate_limit_error(exc),
-                    issue_hint=(
-                        "This is a service availability issue, not a bad paper ID"
-                    ),
-                ) from exc
-            logger.error(
-                "Failed to fetch paper %s after %s attempts: %s",
-                paper_id,
-                API_CONFIG.max_retries,
-                exc,
-            )
-            return None
-
-        def _raise_contract_failure(
-            exc: Exception,
-        ) -> Optional[Paper]:
-            """Surface a malformed successful response without retrying.
-
-            :param Exception exc: Local response-contract failure.
-            :return Optional[Paper]: This function does not return successfully.
-            :raises Exception: Always re-raises ``exc``.
-            """
-            raise exc
-
-        return self._call_with_retries(
-            _operation,
-            on_retry=lambda attempt, wait_time, exc: logger.debug(
-                "Attempt %s failed for %s: %s. Retrying in %.1fs",
-                attempt,
-                paper_id,
-                exc,
-                wait_time,
-            ),
-            on_final_failure=_final_failure,
-            handled_exceptions=(
-                (
-                    ObjectNotFoundException,
-                    lambda _exc: (
-                        logger.warning("Paper not found: %s", paper_id) or None
-                    ),
-                ),
-                (
-                    BadQueryParametersException,
-                    lambda exc: _raise_request_error(exc, f"fetching {paper_id}"),
-                ),
-                (
-                    PermissionError,
-                    lambda exc: _raise_request_error(exc, f"fetching {paper_id}"),
-                ),
-                (_SemanticScholarResponseContractError, _raise_contract_failure),
-            ),
+        if not self.refresh_paper_cache:
+            cached_paper = _load_cached_paper(paper_id)
+            if cached_paper is not None:
+                return cached_paper
+        # The SDK silently maps unrecognized HTTP statuses to an empty paper.
+        api_paper = self._request_json(
+            f"{PAPER_BASE_URL}/{quote(paper_id, safe='')}",
+            {"fields": ",".join(_default_paper_fields())},
+            raise_on_unavailable=raise_on_unavailable,
+            context=f"fetching {paper_id}",
         )
+        if api_paper is None:
+            return None
+        paper = self._convert_api_paper(api_paper)
+        if paper is None:
+            raise _SemanticScholarResponseContractError(
+                f"Semantic Scholar returned a malformed paper payload for {paper_id}."
+            )
+        _persist_paper(paper, paper_id)
+        return paper
 
-    def get_papers(self, paper_ids: Sequence[str]) -> Dict[str, Paper]:
+    def get_papers(
+        self, paper_ids: Sequence[str], *, raise_on_unavailable: bool = False
+    ) -> Dict[str, Paper]:
         """Reuse cached metadata and fetch missing papers through the batch endpoint.
 
         :param Sequence[str] paper_ids: Paper identifiers (DOI, arXiv ID, or S2 IDs).
+        :param bool raise_on_unavailable: Whether exhausted retries raise instead
+            of returning cached results without further per-paper requests.
         :return Dict[str, Paper]: Mapping of normalized requested IDs to fetched papers.
         :raises ValueError: If any requested ID is missing or not a string.
         """
@@ -1090,7 +1147,8 @@ class SemanticScholarClient:
         cached = {
             paper_id: paper
             for paper_id in normalized_ids
-            if (paper := _load_cached_paper(paper_id)) is not None
+            if not self.refresh_paper_cache
+            and (paper := _load_cached_paper(paper_id)) is not None
         }
         normalized_ids = [
             paper_id for paper_id in normalized_ids if paper_id not in cached
@@ -1100,13 +1158,16 @@ class SemanticScholarClient:
 
         batch_fetch = getattr(self.client, "get_papers", None)
         if not callable(batch_fetch):
-            cached.update(
-                {
-                    paper_id: paper
-                    for paper_id in normalized_ids
-                    if (paper := self.get_paper(paper_id)) is not None
-                }
-            )
+            for paper_id in normalized_ids:
+                try:
+                    paper = self.get_paper(paper_id, raise_on_unavailable=True)
+                except SemanticScholarUnavailableError as exc:
+                    if raise_on_unavailable:
+                        raise
+                    logger.warning("Stopping single-paper batch lookups: %s", exc)
+                    break
+                if paper is not None:
+                    cached[paper_id] = paper
             return cached
 
         def _operation() -> Dict[str, Paper]:
@@ -1154,6 +1215,27 @@ class SemanticScholarClient:
 
             return matched
 
+        def _final_failure(exc: Exception) -> None:
+            """Stop the batch after exhaustion without restarting retries per ID.
+
+            :param Exception exc: Last operational failure.
+            :raises SemanticScholarUnavailableError: In strict mode.
+            :return None: Signals an unavailable batch in tolerant mode.
+            """
+            if raise_on_unavailable:
+                raise self._unavailable_error(
+                    "batch fetching papers",
+                    f": {exc}",
+                    rate_limited=self._is_rate_limit_error(exc),
+                ) from exc
+            logger.warning(
+                "Failed to batch fetch %s papers after %s attempts: %s",
+                len(normalized_ids),
+                API_CONFIG.max_retries,
+                exc,
+            )
+            return None
+
         matched = self._call_with_retries(
             _operation,
             on_retry=lambda attempt, wait_time, exc: logger.debug(
@@ -1162,15 +1244,7 @@ class SemanticScholarClient:
                 wait_time,
                 exc,
             ),
-            on_final_failure=lambda exc: (
-                logger.warning(
-                    "Failed to batch fetch %s papers after %s attempts: %s",
-                    len(normalized_ids),
-                    API_CONFIG.max_retries,
-                    exc,
-                )
-                or {}
-            ),
+            on_final_failure=_final_failure,
             handled_exceptions=(
                 (
                     ObjectNotFoundException,
@@ -1187,6 +1261,9 @@ class SemanticScholarClient:
             ),
         )
 
+        if matched is None:
+            return cached
+
         unresolved_ids = [
             paper_id for paper_id in normalized_ids if paper_id not in matched
         ]
@@ -1197,7 +1274,13 @@ class SemanticScholarClient:
             )
 
         for paper_id in unresolved_ids:
-            paper = self.get_paper(paper_id)
+            try:
+                paper = self.get_paper(paper_id, raise_on_unavailable=True)
+            except SemanticScholarUnavailableError as exc:
+                if raise_on_unavailable:
+                    raise
+                logger.warning("Stopping unresolved batch lookups: %s", exc)
+                break
             if paper is not None:
                 matched[paper_id] = paper
 
@@ -1529,6 +1612,13 @@ class SemanticScholarClient:
 
         normalized_ref_ids = _normalize_reference_ids(references, strict=True)
         if normalized_ref_ids is None:
+            if all(_is_unresolved_reference(record) for record in references):
+                logger.warning(
+                    "All references for %s are outside Semantic Scholar's resolved "
+                    "paper corpus; no reference IDs are available.",
+                    normalized_paper_id,
+                )
+                return _persist_empty()
             raise TypeError(
                 "Non-empty reference response contained no valid paper IDs."
             )
@@ -1595,9 +1685,12 @@ class SemanticScholarClient:
                         f"fetching all-cs recommendations for {normalized_paper_id}"
                     ),
                 )
-            except SemanticScholarUnavailableError as exc:
+            except (
+                SemanticScholarUnavailableError,
+                SemanticScholarRequestError,
+            ) as exc:
                 logger.warning(
-                    "The optional all-cs recommendation fallback was unavailable "
+                    "The optional all-cs recommendation fallback failed "
                     "for %s; preserving the successful empty recent-pool result: %s",
                     normalized_paper_id,
                     exc,

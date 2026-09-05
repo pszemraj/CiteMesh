@@ -1067,7 +1067,7 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
                 "citation",
                 "--no-streaming",
             ],
-            "--streaming",
+            "--no-streaming",
         ),
     ]
     for args, token in cases:
@@ -3012,6 +3012,15 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         assert seed_id == "seed"
         assert graph.number_of_nodes() == 1
         assert captured == expected_kwargs
+        client_factory = MagicMock()
+        monkeypatch.setattr(cli_module, "SemanticScholarClient", client_factory)
+        namespace.refresh_paper_cache = True
+        namespace._s2_api_key = "configured-key"
+        cli_module._build_strategy_graph(namespace, strategy, validate_contract=False)
+        client_factory.assert_called_once_with(
+            api_key="configured-key", refresh_paper_cache=True
+        )
+        assert captured == {**expected_kwargs, "client": client_factory.return_value}
 
 
 def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
@@ -3171,6 +3180,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "--seed",
                 "dashboard",
                 "--all-corpus",
+                "--refresh-paper-cache",
                 "--storage-precision",
                 "--binary-prefilter",
                 "--binary-rescore-multiplier",

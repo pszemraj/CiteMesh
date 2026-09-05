@@ -644,16 +644,29 @@ def test_config_device_validation_names_the_config_source(
     assert "update or unset" in message
 
 
-def test_config_max_semantic_validation_names_the_config_source() -> None:
+@pytest.mark.parametrize(
+    ("max_semantic", "flags", "expected"),
+    [
+        (100, [], "--max-semantic must be between"),
+        (0, ["--torch-compile"], "disabled by defaults.max_semantic=0"),
+        (0, ["--no-torch-compile"], "--no-torch-compile"),
+    ],
+)
+def test_config_max_semantic_validation_names_the_config_source(
+    max_semantic: int, flags: list[str], expected: str
+) -> None:
     """Hybrid budget failures should identify config-sourced values.
 
+    :param int max_semantic: Configured semantic budget.
+    :param list[str] flags: Explicit embedding options.
+    :param str expected: Required diagnostic text.
     :return None: Assertions verify actionable config provenance.
     """
     args, provided, build_parser = _parsed_build_args(
-        ["paper-id", "--strategy", "hybrid"]
+        ["paper-id", "--strategy", "hybrid", *flags]
     )
     config = UserConfig(
-        path=Path("cfg-home") / "config.toml", defaults={"max_semantic": 100}
+        path=Path("cfg-home") / "config.toml", defaults={"max_semantic": max_semantic}
     )
     applied = cli_module._apply_user_config_defaults(args, provided, config)
 
@@ -667,7 +680,7 @@ def test_config_max_semantic_validation_names_the_config_source() -> None:
         )
 
     message = str(error.value)
-    assert "--max-semantic must be between" in message
+    assert expected in message
     assert "defaults.max_semantic" in message
     assert str(config.path) in message
 
@@ -688,7 +701,9 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
         defaults={"corpus_size": 1234, "streaming": True},
     )
     debug = MagicMock()
+    info = MagicMock()
     monkeypatch.setattr(cli_module.logger, "debug", debug)
+    monkeypatch.setattr(cli_module.logger, "info", info)
 
     applied = cli_module._apply_user_config_defaults(args, provided, config)
     cli_module._validate_build_cli_contract(
@@ -699,12 +714,20 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
         config_path=config.path,
     )
 
-    messages = str(debug.call_args_list)
-    assert "Loaded config defaults" in messages
+    assert "Loaded config defaults" in str(debug.call_args_list)
+    messages = str(info.call_args_list)
     assert "Ignoring corpus-only config default(s)" in messages
     assert "defaults.corpus_size" in messages
     assert "defaults.streaming" in messages
     assert "defaults.semantic_source='arxiv-corpus'" in messages
+    payload = cli_module._build_graph_config_payload(
+        args, "seed", {}, ["json"], {"json": Path("graph.json")}
+    )
+    embedding = payload["build"]["embedding"]
+    assert embedding["semantic_source"] == "candidates"
+    assert embedding["candidate_pool_size"] == args.candidate_pool_size
+    assert not set(embedding) & cli_module._CORPUS_ONLY_OPTION_DESTS
+    assert "calibration_sample_size" not in embedding
 
 
 # ---------------------------------------------------------------------------
@@ -712,18 +735,27 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
 # ---------------------------------------------------------------------------
 
 
-def test_config_api_key_applied_when_env_absent(
+def test_config_api_key_resolved_without_environment_export(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The config API key should populate an absent environment variable.
+    """The config API key should reach the client without subprocess inheritance.
 
     :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
     :return None: Assertions validate config-key application.
     """
     monkeypatch.delenv("S2_API_KEY", raising=False)
     config = UserConfig(path=Path("unused"), s2_api_key="config-key")
-    cli_module._apply_user_config_api_key(config)
-    assert os.environ["S2_API_KEY"] == "config-key"
+    key = cli_module._resolve_user_config_api_key(config)
+    assert key == "config-key"
+    assert "S2_API_KEY" not in os.environ
+    factory = MagicMock()
+    monkeypatch.setattr(cli_module, "SemanticScholarClient", factory)
+    kwargs = cli_module._configured_client_kwargs(
+        argparse.Namespace(_s2_api_key=key, refresh_paper_cache=True)
+    )
+    factory.assert_called_once_with(api_key="config-key", refresh_paper_cache=True)
+    assert kwargs["client"] is factory.return_value
+    assert "S2_API_KEY" not in os.environ
 
 
 def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -734,7 +766,7 @@ def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> No
     """
     monkeypatch.setenv("S2_API_KEY", "")
     config = UserConfig(path=Path("unused"), s2_api_key="config-key")
-    cli_module._apply_user_config_api_key(config)
+    assert cli_module._resolve_user_config_api_key(config) == ""
     assert os.environ["S2_API_KEY"] == ""
 
 

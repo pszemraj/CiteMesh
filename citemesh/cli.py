@@ -69,7 +69,11 @@ from citemesh.data import (
 )
 from citemesh.data.cache import atomic_write_json, legacy_macos_cache_root
 from citemesh.paper_ids import normalize_paper_id
-from citemesh.services import SemanticScholarUnavailableError, get_client
+from citemesh.services import (
+    SemanticScholarClient,
+    SemanticScholarUnavailableError,
+    get_client,
+)
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
@@ -592,6 +596,23 @@ _CANDIDATE_ONLY_OPTION_DESTS: Set[str] = {"candidate_pool_size"}
 _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
     dest: f"--{dest.replace('_', '-')}" for dest in _BUILD_STRATEGY_OPTION_SUPPORT
 }
+
+
+def _build_option_label(args: argparse.Namespace, dest: str) -> str:
+    """Name a build option with its effective boolean polarity.
+
+    :param argparse.Namespace args: Parsed option values.
+    :param str dest: Parser destination to describe.
+    :return str: Positive or negated long option spelling.
+    """
+    label = _BUILD_OPTION_PRIMARY_FLAG[dest]
+    if dest in {"streaming", "binary_prefilter", "torch_compile"} and not getattr(
+        args, dest
+    ):
+        return "--no-" + label[2:]
+    return label
+
+
 _CACHE_COMPRESSION_CHOICES = ("gzip", "lzf")
 _HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
     "max_papers": HYBRID_DEFAULT_MAX_PAPERS,
@@ -601,6 +622,7 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
 _PROGRAMMATIC_BUILD_VALUE_DESTS: Set[str] = set(_BUILD_STRATEGY_OPTION_SUPPORT) | {
     "paper_id",
     "max_papers",
+    "refresh_paper_cache",
 }
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
@@ -642,6 +664,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
     :return Dict[str, object]: Shared kwargs consumed by embedding/hybrid builders.
     """
     return {
+        **_configured_client_kwargs(cli_args),
         "model_name": cli_args.model,
         "model_profile": cli_args.model_profile,
         "model_revision": cli_args.model_revision,
@@ -864,19 +887,35 @@ def _build_contract_error(
     error_sink.error(f"{message}{context}")
 
 
-def _apply_user_config_api_key(user_config: UserConfig) -> None:
-    """Export the configured S2 API key unless the environment already set one.
+def _resolve_user_config_api_key(user_config: UserConfig) -> str | None:
+    """Resolve the S2 API key without exposing config secrets to subprocesses.
 
     Environment presence wins even for an empty value, so ``S2_API_KEY=""``
     still explicitly disables the configured key.
 
     :param UserConfig user_config: Loaded user configuration snapshot.
-    :return None: May set ``S2_API_KEY`` in the process environment.
+    :return str | None: Environment key, configured key, or no configured value.
     """
-    if not user_config.s2_api_key or "S2_API_KEY" in os.environ:
-        return
-    os.environ["S2_API_KEY"] = user_config.s2_api_key
-    logger.debug("Using api.s2_api_key from %s.", user_config.path)
+    if "S2_API_KEY" in os.environ:
+        return os.environ["S2_API_KEY"]
+    if user_config.s2_api_key:
+        logger.debug("Using api.s2_api_key from %s.", user_config.path)
+    return user_config.s2_api_key or None
+
+
+def _configured_client_kwargs(args: argparse.Namespace) -> Dict[str, object]:
+    """Inject a client only when this command has API-specific settings.
+
+    :param argparse.Namespace args: Parsed arguments and resolved API key.
+    :return Dict[str, object]: Optional client constructor argument for builders.
+    """
+    api_key = getattr(args, "_s2_api_key", None)
+    refresh = bool(getattr(args, "refresh_paper_cache", False))
+    if api_key is None and not refresh:
+        return {}
+    return {
+        "client": SemanticScholarClient(api_key=api_key, refresh_paper_cache=refresh)
+    }
 
 
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
@@ -971,7 +1010,7 @@ def _validate_build_cli_contract(
         if allowed is None:
             continue
         if strategy not in allowed:
-            unsupported.append(_BUILD_OPTION_PRIMARY_FLAG[dest])
+            unsupported.append(_build_option_label(args, dest))
     if unsupported:
         unsupported_text = ", ".join(unsupported)
         build_parser.error(
@@ -983,12 +1022,12 @@ def _validate_build_cli_contract(
 
     if strategy in {"embedding", "hybrid"}:
         provided_corpus_flags = sorted(
-            _BUILD_OPTION_PRIMARY_FLAG[dest]
+            _build_option_label(args, dest)
             for dest in contract_provided
             if dest in _CORPUS_ONLY_OPTION_DESTS
         )
         provided_candidate_flags = sorted(
-            _BUILD_OPTION_PRIMARY_FLAG[dest]
+            _build_option_label(args, dest)
             for dest in contract_provided
             if dest in _CANDIDATE_ONLY_OPTION_DESTS
         )
@@ -1019,7 +1058,7 @@ def _validate_build_cli_contract(
                     f"defaults.{dest}" for dest in ignored_config_corpus_dests
                 )
                 source = str(config_path) if config_path is not None else "config.toml"
-                logger.debug(
+                logger.info(
                     "Ignoring corpus-only config default(s) %s from %s because "
                     "the effective semantic source is candidates; set "
                     "defaults.semantic_source='arxiv-corpus' to apply them.",
@@ -1142,23 +1181,35 @@ def _validate_build_cli_contract(
 
         if resolved_max_semantic == 0:
             ignored_embedding_options = sorted(
-                _BUILD_OPTION_PRIMARY_FLAG[dest]
+                _build_option_label(args, dest)
                 for dest in contract_provided
                 if dest in _HYBRID_EMBEDDING_OPTION_DESTS
             )
             if ignored_embedding_options:
                 option_text = ", ".join(ignored_embedding_options)
                 if args.max_semantic is None:
-                    build_parser.error(
+                    message = (
                         "Hybrid semantic branch is disabled (effective --max-semantic "
                         "is 0 from --max-papers defaulting); remove embedding-only "
                         f"option(s): {option_text}."
                     )
+                elif "max_semantic" in config_defaults:
+                    message = (
+                        "Hybrid semantic branch is disabled by defaults.max_semantic=0; "
+                        f"remove embedding-only option(s): {option_text}."
+                    )
                 else:
-                    build_parser.error(
+                    message = (
                         "Hybrid semantic branch is disabled with --max-semantic 0; "
                         f"remove embedding-only option(s): {option_text}."
                     )
+                _build_contract_error(
+                    build_parser,
+                    message,
+                    related_dests={"max_semantic", "max_papers"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
+                )
 
 
 def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
@@ -1307,6 +1358,7 @@ def _synchronize_namespace_values(
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
     "citation": _StrategyDispatchSpec(
         factory=lambda cli_args: CitationGraphBuilder(
+            **_configured_client_kwargs(cli_args),
             max_papers=cli_args.max_papers,
             max_citations=cli_args.max_citations,
             max_references=cli_args.max_references,
@@ -1317,6 +1369,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
     ),
     "recommendation": _StrategyDispatchSpec(
         factory=lambda cli_args: RecommendationGraphBuilder(
+            **_configured_client_kwargs(cli_args),
             max_papers=cli_args.max_papers,
             fetch_references=not cli_args.no_references,
             refresh_reference_cache=cli_args.refresh_reference_cache,
@@ -1505,6 +1558,11 @@ def _create_parser() -> Tuple[
     )
 
     graph_group = build_parser.add_argument_group("Graph")
+    graph_group.add_argument(
+        "--refresh-paper-cache",
+        action="store_true",
+        help="Fetch fresh S2 paper metadata and citation counts, retaining embedding caches.",
+    )
     export_group = build_parser.add_argument_group("Output")
     citation_group = build_parser.add_argument_group("Citations and references")
     semantic_group = build_parser.add_argument_group(
@@ -3013,6 +3071,18 @@ def _build_graph_config_payload(
                 getattr(cli_args, "cache_overwrite_reason", None)
             ),
         }
+        if cli_args.semantic_source != "arxiv-corpus":
+            for dest in _CORPUS_ONLY_OPTION_DESTS:
+                embedding_config.pop(dest, None)
+        else:
+            embedding_config.pop("candidate_pool_size")
+        if cli_args.storage_precision != "int8":
+            for dest in (
+                "binary_prefilter",
+                "binary_rescore_multiplier",
+                "calibration_sample_size",
+            ):
+                embedding_config.pop(dest)
 
     payload = {
         "schema_version": 1,
@@ -3022,6 +3092,9 @@ def _build_graph_config_payload(
             "seed_id": seed_id,
             "strategy": strategy,
             "max_papers": int(cli_args.max_papers),
+            "refresh_paper_cache": bool(
+                getattr(cli_args, "refresh_paper_cache", False)
+            ),
             "citation": _build_citation_config_payload(cli_args, strategy=strategy),
             "hybrid": (
                 {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}
@@ -3244,7 +3317,8 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
         logger.info("Cache clear aborted.")
         return 1
 
-    # Clear cache payloads but never the persistent user config file.
+    # An explicit cache-root override designates this entire directory as cache.
+    # Preserve config.toml; --yes already acknowledges deletion at the logged root.
     config_path = cache_root / USER_CONFIG_FILENAME
     preserved_config = config_path.is_file()
     try:
@@ -3431,6 +3505,7 @@ def _run_config_command(
             config_parser.error(str(exc))
         user_config = load_user_config()
         if table_name == "api":
+            # Direct get is intentionally raw for shell substitution; list is masked.
             value: Any = user_config.s2_api_key
         else:
             value = user_config.defaults.get(key)
@@ -3515,6 +3590,7 @@ def _prepare_local_search_builder(
         effective build-equivalent defaults namespace.
     """
     defaults = build_parser.parse_args(["local-search-placeholder-seed"])
+    defaults._s2_api_key = _resolve_user_config_api_key(user_config)
     _pop_tracked_option_dests(defaults)
     config_default_dests = _apply_user_config_defaults(
         defaults, {"strategy"}, user_config
@@ -3622,7 +3698,7 @@ def _run_s2_search(args: argparse.Namespace) -> int:
     :return int: Process-style exit code.
     """
     try:
-        client = get_client()
+        client = _configured_client_kwargs(args).get("client") or get_client()
         logger.info(f"Searching for: {args.query}")
         results = client.search_papers(
             args.query, limit=args.limit, raise_on_unavailable=True
@@ -3813,7 +3889,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_config_command(args, config_parser)
 
     user_config = load_user_config()
-    _apply_user_config_api_key(user_config)
+    args._s2_api_key = _resolve_user_config_api_key(user_config)
 
     if args.command == "build":
         config_default_dests = _apply_user_config_defaults(
