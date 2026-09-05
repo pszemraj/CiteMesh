@@ -46,6 +46,7 @@ from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
+    get_cache_dir,
     resolve_embedding_model_profile,
     validate_compression_filter,
 )
@@ -3126,7 +3127,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         :return bool: Whether at least one HDF5 embedding payload exists.
         """
-        cache_directory = self.embedding_cache.h5_path.parent
+        cache_directory = (
+            self._embedding_cache.h5_path.parent
+            if self._embedding_cache is not None
+            else get_cache_dir("embeddings", create=False)
+        )
         return any(cache_directory.glob("embeddings_*.h5"))
 
     def _select_candidates(

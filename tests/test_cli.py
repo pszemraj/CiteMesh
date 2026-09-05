@@ -393,6 +393,8 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
         ["build", "arxiv:1706.03762", "--log-width", "0"],
         ["--log-file", "run.log", "build", "arxiv:1706.03762"],
         ["build", "arxiv:1706.03762", "--log-file", "run.log"],
+        ["--log-level", "debug", "build", "seed", "--strategy", "hybrid"],
+        ["--log-level", "debug", "cache", "--log-width", "0", "clear", "--yes"],
     ]
 
     for argv in cases:
@@ -403,6 +405,17 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
             assert parsed.log_width == 0
         if "--log-file" in argv:
             assert parsed.log_file == "run.log"
+        expected_provided = {
+            token.removeprefix("--").replace("-", "_")
+            for token in argv
+            if token.startswith("--")
+        }
+        assert cli_module._pop_tracked_option_dests(parsed) == expected_provided
+
+    assert (
+        cli_module._pop_tracked_option_dests(parser.parse_args(["cache", "scan"]))
+        == set()
+    )
 
 
 def test_resolve_console_width_uses_auto_width_for_tty_streams() -> None:
@@ -419,12 +432,15 @@ def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None
     assert cli_module._resolve_console_width(96, interactive=True) == 96
 
 
+@pytest.mark.parametrize("preconfigured", [False, True])
 def test_configure_logging_honors_debug_console_with_plaintext_log_file(
     tmp_path: Path,
+    preconfigured: bool,
 ) -> None:
     """An explicit debug level should apply to both console and file handlers.
 
     :param Path tmp_path: Pytest temporary directory.
+    :param bool preconfigured: Whether a library already installed a root handler.
     :return None: Assertions verify both logging sinks honor the requested level.
     """
     saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
@@ -436,6 +452,8 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
     }
 
     try:
+        if preconfigured:
+            logging.getLogger().addHandler(logging.NullHandler())
         with redirect_stderr(stderr):
             cli_module._configure_logging(
                 log_level="debug",
@@ -800,11 +818,11 @@ def test_search_auto_uses_local_when_cache_populated(
 def test_search_auto_resolves_artifact_namespace_when_cache_files_exist(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Auto search should resolve an exact cache after a placeholder miss."""
+    """Auto search must resolve the artifact before opening any cache namespace."""
     fake_builder = _fake_local_search_builder(
         cached_count=0, results=[_FAKE_LOCAL_RESULT]
     )
-    fake_builder.embedding_cache.embedding_count = MagicMock(side_effect=[0, 42])
+    fake_builder.embedding_cache.embedding_count = MagicMock(return_value=42)
     fake_builder.has_persistent_embedding_artifacts.return_value = True
     monkeypatch.setattr(
         cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
@@ -816,6 +834,11 @@ def test_search_auto_resolves_artifact_namespace_when_cache_files_exist(
 
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     fake_builder.prepare_embedding_cache.assert_called_once_with()
+    fake_builder.embedding_cache.embedding_count.assert_called_once_with()
+    assert fake_builder.method_calls[:2] == [
+        ("has_persistent_embedding_artifacts", (), {}),
+        ("prepare_embedding_cache", (), {}),
+    ]
     fake_builder.search_local.assert_called_once_with("cached topic", top_k=1)
     client_factory.assert_not_called()
 
@@ -848,6 +871,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
     assert "Search results for 'attention'" in result.stdout
     assert "searching the Semantic Scholar API instead" in str(info_mock.call_args_list)
     fake_builder.search_local.assert_not_called()
+    fake_builder.prepare_embedding_cache.assert_not_called()
 
 
 def test_search_mode_local_empty_cache_fails_with_guidance(

@@ -1806,6 +1806,30 @@ def test_embedding_fingerprint_uses_active_fallback_model_identity(
     assert f"artifact={fingerprint}" in builder.embedding_cache.model_name
 
 
+def test_embedding_artifact_probe_does_not_create_provisional_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Discovery should inspect existing files without creating an unresolved cache.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patching fixture.
+    :return None: Verify both absent and present artifact discovery is read-only.
+    """
+    _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    cache_dir = embedding_module.get_cache_dir("embeddings", create=False)
+    assert not cache_dir.exists()
+    assert not builder.has_persistent_embedding_artifacts()
+    assert builder._embedding_cache is None
+    assert not cache_dir.exists()
+
+    cache_dir.mkdir(parents=True)
+    payload = cache_dir / "embeddings_existing.h5"
+    payload.touch()
+    assert builder.has_persistent_embedding_artifacts()
+    assert builder._embedding_cache is None
+    assert list(cache_dir.iterdir()) == [payload]
+
+
 def test_embedding_cache_namespace_partition_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

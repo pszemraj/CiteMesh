@@ -224,6 +224,15 @@ def _tracking_action_class(
             values: object,
             option_string: str | None = None,
         ) -> None:
+            """Record options and retain parent options across subparser namespaces.
+
+            :param argparse.ArgumentParser parser: Parser invoking this action.
+            :param argparse.Namespace namespace: Destination namespace.
+            :param object values: Parsed action values.
+            :param str | None option_string: Explicit option spelling, if any.
+            :return None: Apply the action and merge presence tracking.
+            """
+            parent_provided = set(getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, set()))
             if self.option_strings:
                 provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, None)
                 if not isinstance(provided, set):
@@ -231,6 +240,14 @@ def _tracking_action_class(
                     setattr(namespace, _TRACKED_OPTION_DESTS_ATTR, provided)
                 provided.add(self.dest)
             super().__call__(parser, namespace, values, option_string)
+            if isinstance(self, argparse._SubParsersAction):
+                # argparse copies a fresh child namespace over its parent.
+                child_provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, set())
+                setattr(
+                    namespace,
+                    _TRACKED_OPTION_DESTS_ATTR,
+                    parent_provided | child_provided,
+                )
 
     _TrackedAction.__name__ = f"CiteMeshTracked{action_cls.__name__}"
     _TRACKED_ACTION_CACHE[action_cls] = _TrackedAction
@@ -248,9 +265,9 @@ def _instrument_parser_actions(parser: argparse.ArgumentParser) -> None:
     :return None: Mutates parser action classes in place.
     """
     for action in parser._actions:
-        if action.option_strings and not getattr(
-            action.__class__, "_citemesh_tracks_presence", False
-        ):
+        if (
+            action.option_strings or isinstance(action, argparse._SubParsersAction)
+        ) and not getattr(action.__class__, "_citemesh_tracks_presence", False):
             tracked_cls = _tracking_action_class(action.__class__)
             try:
                 action.__class__ = tracked_cls
@@ -336,6 +353,7 @@ def _configure_logging(
         format="%(message)s",
         datefmt="[%X]",
         handlers=handlers,
+        force=True,
     )
     # Keep third-party HTTP logs concise without import-time side effects.
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -3320,7 +3338,7 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
     # An explicit cache-root override designates this entire directory as cache.
     # Preserve config.toml; --yes already acknowledges deletion at the logged root.
     config_path = cache_root / USER_CONFIG_FILENAME
-    preserved_config = config_path.is_file()
+    preserved_config = config_path.exists() or config_path.is_symlink()
     try:
         for child in sorted(cache_root.iterdir()):
             if child == config_path:
@@ -3799,19 +3817,13 @@ def _run_search_command(
         builder, defaults = _prepare_local_search_builder(
             args, build_parser, user_config
         )
-        if mode == "local" and not builder.has_persistent_embedding_artifacts():
-            cached_count = 0
-        else:
-            if mode == "local":
-                builder.prepare_embedding_cache()
-            cached_count = builder.embedding_cache.embedding_count()
-        if (
-            mode == "auto"
-            and cached_count == 0
-            and builder.has_persistent_embedding_artifacts()
-        ):
+        # Resolve the artifact before opening a namespace: opening the provisional
+        # cache just to count rows leaves unused metadata and lock files behind.
+        if builder.has_persistent_embedding_artifacts():
             builder.prepare_embedding_cache()
             cached_count = builder.embedding_cache.embedding_count()
+        else:
+            cached_count = 0
     except Exception as exc:
         if mode == "auto":
             logger.info(
@@ -3852,14 +3864,13 @@ def _run_search_command(
         )
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
-            "has no vectors for model=%s semantic-source=%s (cache: %s). "
+            "has no vectors for model=%s semantic-source=%s. "
             "Local search covers papers your builds have already embedded - "
             "run `citemesh build` with the embedding or hybrid strategy to "
             "populate it, or use --mode s2 for keyword search.",
             requested_via,
             defaults.model,
             defaults.semantic_source,
-            builder.embedding_cache.h5_path,
         )
         return 1
     return _render_local_search(args, builder, defaults)

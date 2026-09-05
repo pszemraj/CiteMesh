@@ -863,13 +863,21 @@ def test_config_cli_list_survives_corrupt_file(payload: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_cache_clear_preserves_config_file() -> None:
+@pytest.mark.parametrize("config_kind", ["file", "directory", "broken_symlink"])
+def test_cache_clear_preserves_config_file(config_kind: str) -> None:
     """Cache clearing should preserve persistent user configuration.
 
+    :param str config_kind: Kind of the entry occupying the reserved config path.
     :return None: Assertions validate selective cache removal.
     """
     assert _run_cli(["config", "set", "defaults.theme", "dark"]).returncode == 0
     config_path = user_config_path()
+    if config_kind != "file":
+        config_path.unlink()
+        if config_kind == "directory":
+            config_path.mkdir()
+        else:
+            config_path.symlink_to("missing-config.toml")
     cache_root = config_path.parent
     (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
     (cache_root / "embeddings" / "payload.bin").write_bytes(b"data")
@@ -877,10 +885,11 @@ def test_cache_clear_preserves_config_file() -> None:
 
     result = _run_cli(["cache", "clear", "--yes"])
     assert result.returncode == 0
-    assert config_path.is_file()
+    assert config_path.exists() or config_path.is_symlink()
     assert not (cache_root / "embeddings").exists()
     assert not (cache_root / "references").exists()
-    assert load_user_config().defaults == {"theme": "dark"}
+    if config_kind == "file":
+        assert load_user_config().defaults == {"theme": "dark"}
 
 
 def test_cache_clear_without_config_removes_root() -> None:
