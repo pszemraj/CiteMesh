@@ -145,6 +145,8 @@ package. Current behavior is described in the linked guides and references:
 
 - Added one export pipeline: static PNG rendering plus Pyvis HTML, Plotly HTML,
   dashboard, JSON, CSV, BibTeX, and GraphML through `GraphExporter`.
+- Resize dashboard graphs when filters, import messages, or result switching
+  change the pane size, so the drawing stays inside the visible area.
 - Dashboard collection builds now always retain each seed's standalone graph JSON
   and build sidecar under `out/<slug>-<hash>/`, alongside the shared viewer and
   portable collection package. Other seeds' files remain untouched; see

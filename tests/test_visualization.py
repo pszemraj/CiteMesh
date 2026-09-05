@@ -1260,6 +1260,9 @@ global.window = {
   open: noOp,
   setTimeout: noOp,
 };
+global.ResizeObserver = class {
+  observe() {}
+};
 let plotlyCalled = false;
 global.Plotly = {
   react() {

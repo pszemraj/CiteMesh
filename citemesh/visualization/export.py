@@ -4601,6 +4601,9 @@ class GraphExporter:
         setDashboardStatus(bootstrapStatusMessage, "warning");
       }
       setupControls();
+      // Toolbar changes resize the pane without triggering a window resize.
+      const graphResizeObserver = new ResizeObserver(() => Plotly.Plots.resize(graphDiv));
+      graphResizeObserver.observe(graphDiv);
       renderTimeline();
       const initialResultId = currentResultIdForPayload(payload);
       if (collectionResultId && collectionResultId !== initialResultId) {
