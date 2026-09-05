@@ -240,9 +240,13 @@ This was the deciding signal within the initial sweep matrix.
 
 Per-run elapsed time has heavy-tail behavior driven by network-bound citation-count enrichment. Use median and upper-quantile runtime when comparing configs; means alone are noisy.
 
-### Remaining Work
+### Retry Policy
 
-- Citation-count enrichment is now batched and visible in progress output, but it can still dominate tail latency on some runs; tighter timeout/retry budgets would make end-to-end runtime more predictable.
+Citation-count enrichment is batched and visible in progress output. Long
+retries deliberately favor completing resumable builds over predictable tail
+latency; the current policy allows 30 attempts per operation without an
+elapsed-time deadline. An exhausted batch does not restart per-paper retry
+budgets. See [CLI Usage](../guides/cli.md) for backoff and interruption behavior.
 
 ### Default Decision
 

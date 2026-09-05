@@ -52,7 +52,9 @@ initial request. Both SDK and direct HTTP calls use Tenacity with exponential
 full jitter: the random wait ceiling doubles from 2 seconds (4 seconds for HTTP
 429) up to 60 seconds. A numeric `Retry-After` header sets the minimum wait, even
 when it exceeds 60 seconds. This budget applies per operation, not to the whole
-build; a prolonged outage can take many minutes before it is reported.
+build. There is deliberately no elapsed-time deadline: long retries favor
+finishing resumable builds, and 60 seconds caps each backoff rather than total
+waiting time. A prolonged outage can take many minutes before it is reported.
 Invalid request parameters and rejected credentials fail immediately. Ctrl+C
 interrupts retries. Retry details appear at `--log-level debug`.
 

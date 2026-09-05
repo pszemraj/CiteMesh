@@ -426,14 +426,23 @@ class SemanticScholarClient:
             api_key = os.getenv("S2_API_KEY") or None
 
         self.client = SemanticScholar(timeout=timeout, api_key=api_key, retry=False)
+        try:
+            requester = self.client._AsyncSemanticScholar._requester
+            if not callable(requester.get_data_async):
+                raise AttributeError("get_data_async is not callable")
+        except AttributeError as exc:
+            raise RuntimeError(
+                "Unsupported Semantic Scholar SDK transport. "
+                "Install semanticscholar>=0.8.0,<0.13 with CiteMesh's dependencies."
+            ) from exc
         self.refresh_paper_cache = refresh_paper_cache
         self.timeout = timeout
         self.last_request_time = 0.0
         self._session = requests.Session()
-        # SDK 0.11 has no public transport hook and discards unrecognized HTTP
+        # SDK 0.8-0.12 has no public transport hook and discards unrecognized HTTP
         # statuses. Replace only this client's requester; retain SDK pagination.
         # A weak owner prevents a requester/client cycle from delaying session close.
-        self.client._AsyncSemanticScholar._requester.get_data_async = partial(
+        requester.get_data_async = partial(
             type(self)._request_sdk_json, weakref.proxy(self)
         )
         self._closed = False
@@ -638,7 +647,9 @@ class SemanticScholarClient:
                     + tuple(kind for kind, _handler in handled_exceptions)
                 )
             )
-            | retry_if_exception_type(json.JSONDecodeError),
+            | retry_if_exception_type(
+                (json.JSONDecodeError, requests.exceptions.JSONDecodeError)
+            ),
             before_sleep=_before_sleep,
             sleep=lambda seconds: time.sleep(seconds),
             reraise=True,
@@ -653,7 +664,9 @@ class SemanticScholarClient:
                         raise _unwrap_sdk_retry_error(raw_exc)
         except Exception as exc:
             # SDK JSON decoding can fail on transient HTML/plain-text error bodies.
-            if not isinstance(exc, json.JSONDecodeError):
+            if not isinstance(
+                exc, (json.JSONDecodeError, requests.exceptions.JSONDecodeError)
+            ):
                 for error_type, handler in handled_exceptions:
                     if isinstance(exc, error_type):
                         return handler(exc)
@@ -1132,7 +1145,8 @@ class SemanticScholarClient:
         :param bool raise_on_unavailable: Whether exhausted retries raise instead
             of returning cached results without further per-paper requests.
         :return Dict[str, Paper]: Mapping of normalized requested IDs to fetched papers.
-        :raises ValueError: If any requested ID is missing or not a string.
+        :raises ValueError: If an ID is missing/not a string or over 500 uncached
+            IDs would require one batch request.
         """
         normalized_ids: list[str] = []
         for raw_paper_id in paper_ids:
@@ -1156,63 +1170,39 @@ class SemanticScholarClient:
         if not normalized_ids:
             return cached
 
-        batch_fetch = getattr(self.client, "get_papers", None)
-        if not callable(batch_fetch):
-            for paper_id in normalized_ids:
-                try:
-                    paper = self.get_paper(paper_id, raise_on_unavailable=True)
-                except SemanticScholarUnavailableError as exc:
-                    if raise_on_unavailable:
-                        raise
-                    logger.warning("Stopping single-paper batch lookups: %s", exc)
-                    break
-                if paper is not None:
-                    cached[paper_id] = paper
-            return cached
+        if len(normalized_ids) > 500:
+            raise ValueError("A batch request supports at most 500 paper IDs.")
 
         def _operation() -> Dict[str, Paper]:
-            """Fetch and match a batch of paper payloads to requested identifiers.
+            """Fetch positional batch results, preserving authoritative null entries.
 
-            :return Dict[str, Paper]: Matched batch results keyed by requested ID.
+            :return Dict[str, Paper]: Successful results keyed by requested ID.
             """
-            api_response = batch_fetch(
-                normalized_ids,
-                fields=_default_paper_fields(),
-                return_not_found=True,
+            api_papers = self._request_json_once(
+                f"{PAPER_BASE_URL}/batch",
+                {"fields": ",".join(_default_paper_fields())},
+                context="batch fetching papers",
+                payload={"ids": normalized_ids},
             )
-            if isinstance(api_response, tuple):
-                api_papers = api_response[0]
-            elif isinstance(api_response, list):
-                api_papers = api_response
-            else:
-                raise TypeError(
-                    "Unexpected response type from Semantic Scholar batch fetch: "
-                    f"{type(api_response).__name__}"
+            if api_papers is None:
+                return {}
+            if not isinstance(api_papers, list) or len(api_papers) != len(
+                normalized_ids
+            ):
+                raise _SemanticScholarResponseContractError(
+                    "Semantic Scholar batch response must contain one result per requested ID."
                 )
-
             matched: Dict[str, Paper] = {}
-            remaining_ids = set(normalized_ids)
-            for api_paper in api_papers:
+            for requested_id, api_paper in zip(normalized_ids, api_papers):
+                if api_paper is None:
+                    continue
                 paper = self._convert_api_paper(api_paper)
                 if paper is None:
-                    continue
-
-                lookup_keys = _paper_lookup_keys(paper)
-                matched_id = next(
-                    (
-                        requested_id
-                        for requested_id in normalized_ids
-                        if requested_id in remaining_ids and requested_id in lookup_keys
-                    ),
-                    None,
-                )
-                if matched_id is None:
-                    continue
-
-                matched[matched_id] = paper
-                _persist_paper(paper, matched_id)
-                remaining_ids.remove(matched_id)
-
+                    raise _SemanticScholarResponseContractError(
+                        f"Semantic Scholar returned a malformed batch paper for {requested_id}."
+                    )
+                matched[requested_id] = paper
+                _persist_paper(paper, requested_id)
             return matched
 
         def _final_failure(exc: Exception) -> None:
@@ -1245,44 +1235,10 @@ class SemanticScholarClient:
                 exc,
             ),
             on_final_failure=_final_failure,
-            handled_exceptions=(
-                (
-                    ObjectNotFoundException,
-                    lambda _exc: {},
-                ),
-                (
-                    BadQueryParametersException,
-                    lambda exc: _raise_request_error(exc, "batch fetching papers"),
-                ),
-                (
-                    PermissionError,
-                    lambda exc: _raise_request_error(exc, "batch fetching papers"),
-                ),
-            ),
         )
 
         if matched is None:
             return cached
-
-        unresolved_ids = [
-            paper_id for paper_id in normalized_ids if paper_id not in matched
-        ]
-        if unresolved_ids:
-            logger.debug(
-                "Falling back to single-paper fetch for %d unresolved batch IDs.",
-                len(unresolved_ids),
-            )
-
-        for paper_id in unresolved_ids:
-            try:
-                paper = self.get_paper(paper_id, raise_on_unavailable=True)
-            except SemanticScholarUnavailableError as exc:
-                if raise_on_unavailable:
-                    raise
-                logger.warning("Stopping unresolved batch lookups: %s", exc)
-                break
-            if paper is not None:
-                matched[paper_id] = paper
 
         return {**cached, **matched}
 

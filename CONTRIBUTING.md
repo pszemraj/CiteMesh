@@ -11,6 +11,10 @@ pip install -e ".[all]"
 
 Python >= 3.10. The `embeddings` extra needs torch (`>=2.9` Linux/Windows, `>=2.13` macOS); everything else runs without it.
 
+Semantic Scholar SDK support is bounded to `>=0.8.0,<0.13` because CiteMesh adapts
+its requester to preserve HTTP status codes. Check the service transport and
+pagination tests before widening that range.
+
 ## Before you open a PR
 
 ```bash

@@ -61,6 +61,9 @@ cache before contacting Semantic Scholar, including seed resolution at the start
 of a rerun. Batch requests send only missing IDs. Entries are shared across the
 requested identifier and known Semantic Scholar, arXiv, and DOI aliases.
 
+A null entry in a successful batch response means that requested paper is absent;
+CiteMesh skips an individual follow-up lookup and does not cache the miss.
+
 Metadata has no TTL and is reused until manually refreshed or cleared. Failed, missing, and
 malformed API responses are not cached. Reference IDs remain in their separate
 cache and are loaded or fetched when requested; cached metadata alone does not
