@@ -110,7 +110,7 @@ CiteMesh works without credentials using Semantic Scholar's shared anonymous poo
 
 - One CLI for recommendation, citation, embedding, and hybrid graphs.
 - Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
-- Local embeddings with first-class device support: CUDA, Apple Silicon (MPS), and CPU, using bf16 autocast only on supported accelerator runtimes.
+- Local embeddings with first-class device support: CUDA, Apple Silicon (MPS), and CPU, using bf16 autocast on supported runtimes.
 - Multi-format outputs with one shared run contract across static, interactive, and structured exports; dashboard-only collections stay at two files as results accumulate.
 - Persistent user-level caching for embeddings and reference expansion; caches are portable across machines at matching compute dtype.
 - Mode-aware `citemesh search`: offline semantic search over the active retrieval

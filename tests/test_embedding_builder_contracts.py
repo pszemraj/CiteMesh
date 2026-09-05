@@ -6,9 +6,9 @@ import json
 import logging
 import sys
 import types
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 from unittest.mock import MagicMock, call, patch
 
 import h5py
@@ -439,6 +439,28 @@ def _install_fake_torch(
     fake_torch._matmul_precision_calls = matmul_precision_calls
     fake_torch._bf16_support_calls = bf16_support_calls
     fake_torch._compile_calls = compile_calls
+    inductor_config = types.SimpleNamespace(
+        freezing=False, freezing_discard_parameters=False
+    )
+
+    @contextmanager
+    def _patch_inductor_config(**updates: bool) -> Iterator[None]:
+        """Apply fake scoped compiler settings and restore them on every exit.
+
+        :param bool updates: Temporary compiler configuration values.
+        :return Iterator[None]: Scope with the requested settings active.
+        """
+        previous = {key: getattr(inductor_config, key) for key in updates}
+        try:
+            for key, value in updates.items():
+                setattr(inductor_config, key, value)
+            yield
+        finally:
+            for key, value in previous.items():
+                setattr(inductor_config, key, value)
+
+    inductor_config.patch = _patch_inductor_config
+    fake_torch._inductor = types.SimpleNamespace(config=inductor_config)
     fake_torch.cuda = cuda_module
     fake_torch.backends = fake_backends
     monkeypatch.setattr(embedding_module, "_import_torch", lambda: fake_torch)
@@ -791,6 +813,7 @@ def test_embedding_bf16_autocast_rejection_falls_back_to_float32(
         ({"bf16": True}, None, True),
         ({"sve_bf16": True}, None, True),
         ({"avx2": True}, None, False),
+        ({"avx512_f": True, "avx_ne_convert": True}, None, False),
         (None, True, True),
         (None, False, False),
         (None, None, False),
@@ -810,7 +833,7 @@ def test_cpu_bf16_autocast_uses_native_capabilities(
     :param bool expected: Expected BF16 runtime selection.
     :return None: Checks precision, outputs, automatic weights, and portable attention.
     """
-    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    init_log, encode_log = _install_fake_sentence_transformers(monkeypatch)
     token, autocast_log, torch = _install_fake_torch(
         monkeypatch,
         cuda_available=False,
@@ -831,6 +854,7 @@ def test_cpu_bf16_autocast_uses_native_capabilities(
     assert init_log["kwargs"]["model_kwargs"] == {"dtype": "auto"}
     assert (("call", "cpu", token) in autocast_log) is expected
     if expected:
+        assert encode_log[-1]["normalize_embeddings"] is False
         np.testing.assert_allclose(np.linalg.norm(output, axis=1), 1.0, atol=1e-6)
 
 
@@ -866,15 +890,24 @@ def test_cuda_bf16_policy_rejects_emulated_only_support(
     [
         ("torch.float16", "forbids float16"),
         ("torch.bfloat16", "has not verified bfloat16 compute"),
-        ("torch.float64", "unsupported automatic weight dtype.*float64"),
+        ("torch.float64", "unsupported automatic tensor dtype.*float64"),
     ],
 )
+@pytest.mark.parametrize("dtype_location", ["parameter", "buffer"])
 def test_automatic_checkpoint_dtype_must_match_verified_runtime_policy(
     monkeypatch: pytest.MonkeyPatch,
     weight_dtype: str,
     message: str,
+    dtype_location: str,
 ) -> None:
-    """Live automatic weight dtypes must not contradict float32 provenance."""
+    """Live parameter and buffer dtypes must respect the precision policy.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param str weight_dtype: Fake floating dtype token to reject.
+    :param str message: Expected diagnostic pattern.
+    :param str dtype_location: Whether the incompatible tensor is a buffer or parameter.
+    :return None: Confirms invalid precision is rejected before inference.
+    """
 
     class _Parameter:
         def __init__(self, dtype: str):
@@ -882,7 +915,14 @@ def test_automatic_checkpoint_dtype_must_match_verified_runtime_policy(
 
     class _DtypeModel:
         def __init__(self, _model_name: str, **_kwargs: Any):
-            self._parameters = [_Parameter(weight_dtype)]
+            self._parameters = [
+                _Parameter(
+                    weight_dtype if dtype_location == "parameter" else "torch.float32"
+                )
+            ]
+            self._buffers = (
+                [_Parameter(weight_dtype)] if dtype_location == "buffer" else []
+            )
 
         def parameters(self) -> Iterable[_Parameter]:
             """Iterate fake parameters for live dtype inspection.
@@ -890,6 +930,13 @@ def test_automatic_checkpoint_dtype_must_match_verified_runtime_policy(
             :return Iterable[_Parameter]: One configured fake parameter.
             """
             return iter(self._parameters)
+
+        def buffers(self) -> Iterable[_Parameter]:
+            """Iterate fake buffers for live dtype inspection.
+
+            :return Iterable[_Parameter]: Configured fake buffers, if any.
+            """
+            return iter(self._buffers)
 
     monkeypatch.setattr(
         embedding_module,
@@ -954,7 +1001,7 @@ def test_automatic_checkpoint_dtype_inspection_must_succeed(
 
     with pytest.raises(
         embedding_module.EmbeddingPrecisionCompatibilityError,
-        match="Could not inspect live parameter dtypes",
+        match="Could not inspect live parameter and buffer dtypes",
     ):
         builder._load_model()
 
@@ -1261,7 +1308,10 @@ def test_embedding_compile_hydration_policy(
     if device in {"cuda", "cpu"}:
         assert builder.model[0].auto_model == ("compiled", original)
         assert builder._inner_model_compiled
-        assert fake_torch._compile_calls[-1]["kwargs"] == {"dynamic": True}
+        expected_kwargs: dict[str, Any] = {"dynamic": True}
+        if device == "cpu":
+            expected_kwargs["options"] = {"max_autotune": True}
+        assert fake_torch._compile_calls[-1]["kwargs"] == expected_kwargs
         return
     assert builder.model[0].auto_model is original
     assert builder._inner_model_compiled is False
@@ -4639,9 +4689,12 @@ def test_embedding_compile_device_gating(
 
         assert builder._inner_model_compiled
         assert fake_torch._compile_calls
-        assert fake_torch._compile_calls[-1]["kwargs"] == (
+        expected_kwargs: dict[str, Any] = (
             {} if builder.device == "mps" else {"dynamic": True}
         )
+        if builder.device == "cpu":
+            expected_kwargs["options"] = {"max_autotune": True}
+        assert fake_torch._compile_calls[-1]["kwargs"] == expected_kwargs
 
 
 @pytest.mark.parametrize("encode_path", ["direct", "retrieval", "graph", "hydration"])
@@ -4660,7 +4713,7 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_batch(
     :param str device: CPU or Metal execution policy.
     :return None: Checks successful eager recovery through each entry point.
     """
-    _install_fake_torch(
+    _, _, fake_torch = _install_fake_torch(
         monkeypatch,
         cuda_available=False,
         bf16_supported=False,
@@ -4675,6 +4728,9 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_batch(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder)
+    compiler_config = fake_torch._inductor.config
+    compiler_config.freezing_discard_parameters = True
+    compiler_states: list[tuple[bool, bool]] = []
     original_inner = object()
 
     class _InnerBlock:
@@ -4703,6 +4759,9 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_batch(
             :return np.ndarray: One float32 row per input.
             """
             self.encode_attempts += 1
+            compiler_states.append(
+                (compiler_config.freezing, compiler_config.freezing_discard_parameters)
+            )
             if isinstance(self.block.model, tuple):
                 raise RuntimeError("Inductor codegen failed")
             return np.ones((len(texts), 2), dtype=np.float32)
@@ -4735,6 +4794,12 @@ def test_lazy_compile_failure_restores_eager_model_and_retries_batch(
     assert model.encode_attempts == 2
     assert model.block.model is original_inner
     assert builder._inner_model_compiled is False
+    assert compiler_states == [
+        (True, False) if device == "cpu" else (False, True),
+        (False, True),
+    ]
+    assert compiler_config.freezing is False
+    assert compiler_config.freezing_discard_parameters is True
     assert "restored eager model" in str(builder._compile_status_reason)
     assert any(
         "retrying the affected encode batch" in record.getMessage()
@@ -4826,21 +4891,35 @@ def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
 
 
 @pytest.mark.slow
-def test_embedding_real_cpu_bf16_compile_executes_graphs() -> None:
-    """Compare native BF16 eager and compiled CPU inference on the real model.
+@pytest.mark.parametrize("compute_dtype", ["float32", "bfloat16"])
+def test_embedding_real_cpu_compile_executes_graphs(
+    monkeypatch: pytest.MonkeyPatch,
+    compute_dtype: str,
+) -> None:
+    """Compare FP32 or native BF16 eager and compiled CPU inference.
 
+    :param pytest.MonkeyPatch monkeypatch: Isolated CPU BF16 capability override.
+    :param str compute_dtype: Real FP32 fallback or native BF16 execution policy.
     :return None: Checks actual compiled profiler regions and FP32 unit vectors.
     """
     torch = pytest.importorskip("torch")
-    if not embedding_module._cpu_native_bf16_supported(torch):
+    from torch._inductor import config as inductor_config
+
+    if compute_dtype == "bfloat16" and not embedding_module._cpu_native_bf16_supported(
+        torch
+    ):
         pytest.skip("Native CPU BF16 unavailable")
+    if compute_dtype == "float32":
+        monkeypatch.setattr(
+            embedding_module, "_cpu_native_bf16_supported", lambda _: False
+        )
     previous_threads = torch.get_num_threads()
     try:
         torch.set_num_threads(4)
         builder = EmbeddingGraphBuilder(device="cpu", client=MagicMock())
         builder._load_model()
-        assert builder._autocast_enabled
-        assert builder._source_dtype_hint == "bfloat16"
+        assert builder._autocast_enabled is (compute_dtype == "bfloat16")
+        assert builder._source_dtype_hint == compute_dtype
         assert builder._tf32_mode == "off"
         texts = [
             builder.model_profile.format_document(
@@ -4855,11 +4934,14 @@ def test_embedding_real_cpu_bf16_compile_executes_graphs() -> None:
         eager = builder._encode_texts(texts, batch_size=8)
         builder.enable_torch_compile = True
         builder._maybe_compile_inner_transformer()
-        builder._encode_texts(texts, batch_size=8)
-        with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU]
-        ) as profile:
-            compiled = builder._encode_texts(texts, batch_size=8)
+        with inductor_config.patch(freezing=False, freezing_discard_parameters=True):
+            builder._encode_texts(texts, batch_size=8)
+            with torch.profiler.profile(
+                activities=[torch.profiler.ProfilerActivity.CPU]
+            ) as profile:
+                compiled = builder._encode_texts(texts, batch_size=8)
+            assert inductor_config.freezing is False
+            assert inductor_config.freezing_discard_parameters is True
         assert builder._inner_model_compiled
         assert any(
             "Torch-Compiled Region" in event.key for event in profile.key_averages()
@@ -4871,6 +4953,11 @@ def test_embedding_real_cpu_bf16_compile_executes_graphs() -> None:
                 np.linalg.norm(embeddings, axis=1), 1.0, atol=1e-6
             )
         assert np.min(np.sum(eager * compiled, axis=1)) > 0.999
+        assert builder._restore_eager_model_after_compile_failure(
+            RuntimeError("exercise fallback after weight packing")
+        )
+        restored = builder._encode_texts(texts, batch_size=8)
+        np.testing.assert_allclose(restored, eager, atol=1e-6)
     finally:
         torch.set_num_threads(previous_threads)
 

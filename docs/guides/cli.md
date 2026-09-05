@@ -153,7 +153,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--cache-compression-level`: HDF5 compression level for cache datasets (gzip
   default `1`). Selecting `lzf` without an explicit level normalizes the level to
   `0`; combining `lzf` with an explicit level is rejected.
-- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). CUDA and CPU honor the flag during cold or resumed corpus hydration using dynamic shapes; MPS defers compilation until the corpus cache is hydrated. The first encode pays compilation warm-up cost.
+- `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). CUDA and CPU honor the flag during cold or resumed corpus hydration using dynamic shapes; CPU also freezes inference weights and autotunes GEMMs. MPS defers compilation until the corpus cache is hydrated. The first encode pays compilation and autotuning warm-up cost where applicable.
 - `--device {auto,cuda,mps,cpu}`: compute device for embedding model runs (default `auto`, which prefers CUDA, then MPS on Apple Silicon, then CPU). Explicit unavailable devices fail fast. Shared with hybrid.
 - `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing
   (default `candidates`, which uses an S2-derived pool without a corpus download).

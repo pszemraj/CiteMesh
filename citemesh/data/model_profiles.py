@@ -193,7 +193,7 @@ EMBEDDING_MODEL_PROFILES = (
         notes=(
             "Adds recommended retrieval-query, retrieval-document, and symmetric "
             "sentence-similarity prompts for EmbeddingGemma. "
-            "Runs bf16 through autocast on supported CUDA and MPS runtimes; "
+            "Runs bf16 through autocast on supported CUDA, MPS, and CPU runtimes; "
             "otherwise uses float32."
         ),
     ),

@@ -56,6 +56,10 @@ package. Current behavior is described in the linked guides and references:
 
 ## Semantic Discovery
 
+- Enabled CPU inference freezing during Dynamo capture and GEMM autotuning for
+  `--torch-compile`, with scoped configuration and retained eager fallback weights.
+  Precision validation now includes model buffers, and final normalization after
+  truncation runs once in float32 outside autocast.
 - Enabled native-hardware-gated BF16 CPU autocast with float32 output normalization
   and opt-in CPU compilation, including dynamic shapes during corpus hydration.
   CPUs without verified BF16 support retain float32 compute.

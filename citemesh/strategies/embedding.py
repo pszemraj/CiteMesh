@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha1, sha256
 from importlib import metadata as importlib_metadata
-from itertools import islice
+from itertools import chain, islice
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -615,15 +615,16 @@ def _query_seed_id(query_text: str) -> str:
 
 
 def _model_floating_dtype_names(model: Any) -> Optional[Set[str]]:
-    """Return floating-point parameter dtypes from a loaded model.
+    """Return floating-point parameter and buffer dtypes from a loaded model.
 
     :param Any model: Model object that may expose ``parameters()``.
     :return Optional[Set[str]]: Normalized dtype names, or ``None`` when live
-        parameter inspection is unavailable.
+        tensor inspection is unavailable.
     """
     parameters = getattr(model, "parameters", None)
     if not callable(parameters):
         return None
+    buffers = getattr(model, "buffers", None)
 
     observed: Set[str] = set()
     aliases = {
@@ -636,8 +637,8 @@ def _model_floating_dtype_names(model: Any) -> Optional[Set[str]]:
         "float64": "float64",
     }
     try:
-        for parameter in parameters():
-            dtype = getattr(parameter, "dtype", None)
+        for tensor in chain(parameters(), buffers() if callable(buffers) else ()):
+            dtype = getattr(tensor, "dtype", None)
             dtype_name = str(dtype or "").casefold()
             normalized = dtype_name.removeprefix("torch.")
             is_floating = getattr(dtype, "is_floating_point", None)
@@ -649,7 +650,7 @@ def _model_floating_dtype_names(model: Any) -> Optional[Set[str]]:
             elif is_floating is True or normalized.startswith(("float", "bfloat")):
                 observed.add(normalized)
     except Exception:
-        logger.debug("Could not inspect loaded model parameter dtypes", exc_info=True)
+        logger.debug("Could not inspect loaded model tensor dtypes", exc_info=True)
         return None
     return observed
 
@@ -681,6 +682,9 @@ class _PrecisionEncodeProxy:
         :param Any kwargs: Keyword arguments forwarded to ``encode``.
         :return Any: Model ``encode`` return value.
         """
+        normalize_embeddings = kwargs.get("normalize_embeddings", False)
+        if normalize_embeddings:
+            kwargs["normalize_embeddings"] = False
         try:
             with self._context_factory():
                 embeddings = self._model.encode(*args, **kwargs)
@@ -693,8 +697,8 @@ class _PrecisionEncodeProxy:
                     embeddings = self._model.encode(*args, **kwargs)
             except Exception as eager_error:
                 raise eager_error from compiled_failure
-        # CPU autocast can leave ST's normalization rounded to BF16 precision.
-        if kwargs.get("normalize_embeddings"):
+        # Normalize once in FP32; CPU autocast would round ST's division to BF16.
+        if normalize_embeddings:
             return l2_normalize_embeddings(embeddings)
         return embeddings
 
@@ -2024,50 +2028,49 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """Reject automatic checkpoint dtypes outside the verified compute policy.
 
         CiteMesh deliberately keeps Transformers automatic checkpoint loading so
-        compatible weights are not needlessly coerced. The live loaded parameters
+        compatible weights are not needlessly coerced. Live parameters and buffers
         are therefore the authoritative dtype check: float16 is forbidden
-        everywhere, and bfloat16 weights are accepted only when this runtime has
+        everywhere, and bfloat16 tensors are accepted only when this runtime has
         already selected the verified bfloat16 autocast path.
 
         :param Any model: Newly loaded SentenceTransformer-compatible model.
         :param str model_name_or_path: Candidate checkpoint that produced ``model``.
         :return None: The model's automatic dtype is compatible.
-        :raises EmbeddingPrecisionCompatibilityError: If live weights resolve to an
+        :raises EmbeddingPrecisionCompatibilityError: If live tensors resolve to an
             unsupported precision.
         """
-        weight_dtypes = _model_floating_dtype_names(model)
-        if not weight_dtypes:
+        tensor_dtypes = _model_floating_dtype_names(model)
+        if not tensor_dtypes:
             raise EmbeddingPrecisionCompatibilityError(
-                f"Could not inspect live parameter dtypes for embedding checkpoint "
-                f"{model_name_or_path!r}; automatic weight precision cannot be verified."
+                f"Could not inspect live parameter and buffer dtypes for embedding "
+                f"checkpoint {model_name_or_path!r}; automatic precision cannot be verified."
             )
-        if "float16" in weight_dtypes:
+        if "float16" in tensor_dtypes:
             raise EmbeddingPrecisionCompatibilityError(
-                f"Embedding checkpoint {model_name_or_path!r} resolved float16 weights "
+                f"Embedding checkpoint {model_name_or_path!r} resolved float16 tensors "
                 "under automatic dtype loading. CiteMesh forbids float16; choose a "
                 "current checkpoint whose saved weights are float32 or bfloat16."
             )
-        unsupported_dtypes = weight_dtypes - {"float32", "bfloat16"}
+        unsupported_dtypes = tensor_dtypes - {"float32", "bfloat16"}
         if unsupported_dtypes:
             raise EmbeddingPrecisionCompatibilityError(
                 f"Embedding checkpoint {model_name_or_path!r} resolved unsupported "
-                "automatic weight dtype(s): "
+                "automatic tensor dtype(s): "
                 f"{', '.join(sorted(unsupported_dtypes))}. CiteMesh supports only "
                 "float32 weights or bfloat16 weights on a verified bfloat16 runtime."
             )
-        if "bfloat16" in weight_dtypes and self._source_dtype_hint != "bfloat16":
+        if "bfloat16" in tensor_dtypes and self._source_dtype_hint != "bfloat16":
             raise EmbeddingPrecisionCompatibilityError(
-                f"Embedding checkpoint {model_name_or_path!r} resolved bfloat16 weights "
+                f"Embedding checkpoint {model_name_or_path!r} resolved bfloat16 tensors "
                 f"on device={self.device}, but this runtime has not verified bfloat16 "
                 "compute for the active model profile. Choose a float32 checkpoint "
                 "instead of mixing bfloat16 execution into a float32 cache namespace."
             )
-        if weight_dtypes:
-            logger.debug(
-                "%s automatic weight dtype(s): %s.",
-                model_name_or_path,
-                ", ".join(sorted(weight_dtypes)),
-            )
+        logger.debug(
+            "%s automatic parameter/buffer dtype(s): %s.",
+            model_name_or_path,
+            ", ".join(sorted(tensor_dtypes)),
+        )
 
     def _validate_loaded_model_contract(
         self,
@@ -2215,6 +2218,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         with ExitStack() as stack:
             stack.enter_context(self._tf32_context())
             stack.enter_context(self._autocast_context())
+            if self.device == "cpu" and self._inner_model_compiled:
+                # Dynamo must see freezing while capturing weights; backend-only
+                # compile options arrive too late. Keep eager fallback weights.
+                stack.enter_context(
+                    _import_torch()._inductor.config.patch(
+                        freezing=True, freezing_discard_parameters=False
+                    )
+                )
             if (
                 self._inner_model_compiled
                 and self._attention_implementation_hint == "flash_attention_2"
@@ -2663,7 +2674,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return
 
         try:
-            compile_kwargs = {"dynamic": True} if self.device in {"cuda", "cpu"} else {}
+            compile_kwargs: Dict[str, Any] = (
+                {"dynamic": True} if self.device in {"cuda", "cpu"} else {}
+            )
+            if self.device == "cpu":
+                compile_kwargs["options"] = {"max_autotune": True}
             compiled_model = compile_fn(auto_model, **compile_kwargs)
             setattr(transformer_block, model_attribute, compiled_model)
         except Exception as exc:
