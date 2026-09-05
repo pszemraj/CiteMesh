@@ -11,6 +11,10 @@ package. Current behavior is described in the linked guides and references:
 
 ## Public Release Readiness
 
+- Extended Semantic Scholar retries from 3 to 30 total attempts per operation,
+  using Tenacity on both SDK and direct HTTP paths with shared exponential full
+  jitter. Server `Retry-After` delays can exceed the local 60-second backoff cap,
+  including on HTTP 5xx responses; invalid batch requests fail without retries.
 - Added intentionally small GitHub Actions coverage for lint/format,
   representative Linux and macOS tests, and a no-extras CLI smoke. The
   package-installing jobs fetch Git tags so `setuptools-scm` resolves an accurate

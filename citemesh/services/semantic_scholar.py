@@ -28,6 +28,7 @@ from tenacity import (
     RetryError,
     Retrying,
     retry_if_exception_type,
+    retry_if_not_exception_type,
     stop_after_attempt,
 )
 from tenacity.wait import wait_base
@@ -131,14 +132,14 @@ def _jittered_backoff(
     :param int attempt_number: 1-based retry attempt number.
     :param Optional[float] retry_after: Server-provided Retry-After seconds.
     :param bool rate_limited: Whether the failure was an HTTP 429.
-    :return float: Wait duration in seconds, capped at ``_MAX_BACKOFF_SECONDS``.
+    :return float: Capped jitter delay, or the server's longer requested wait.
     """
     multiplier = API_CONFIG.retry_delay * (2.0 if rate_limited else 1.0)
     cap = min(multiplier * (2.0 ** (attempt_number - 1)), _MAX_BACKOFF_SECONDS)
     wait = random.uniform(0.0, cap)
     if retry_after is not None:
         wait = max(retry_after, wait)
-    return min(wait, _MAX_BACKOFF_SECONDS)
+    return wait
 
 
 class _RetryableRequestError(RuntimeError):
@@ -164,10 +165,14 @@ class _S2BackoffWait(wait_base):
         :return float: Wait duration in seconds.
         """
         exc = retry_state.outcome.exception() if retry_state.outcome else None
+        retry_after = getattr(exc, "retry_after", None)
+        if retry_after is None and exc is not None:
+            retry_after = SemanticScholarClient._get_retry_after(exc)
         return _jittered_backoff(
             retry_state.attempt_number,
-            retry_after=getattr(exc, "retry_after", None),
-            rate_limited=isinstance(exc, _RetryableRequestError),
+            retry_after=retry_after,
+            rate_limited=exc is not None
+            and SemanticScholarClient._is_rate_limit_error(exc),
         )
 
 
@@ -498,19 +503,6 @@ class SemanticScholarClient:
         """
         return "429" in str(error)
 
-    def _retry_wait_time(self, error: Optional[Exception], attempt: int) -> float:
-        """Compute adaptive retry delay for transient failures.
-
-        :param Optional[Exception] error: Captured exception, if any.
-        :param int attempt: Zero-based retry attempt index.
-        :return float: Delay in seconds before retry.
-        """
-        retry_after = self._get_retry_after(error) if error else None
-        rate_limited = self._is_rate_limit_error(error) if error else False
-        return _jittered_backoff(
-            attempt + 1, retry_after=retry_after, rate_limited=rate_limited
-        )
-
     @staticmethod
     def _get_retry_after(error: Exception) -> Optional[float]:
         """Extract Retry-After from library or HTTP errors.
@@ -577,23 +569,41 @@ class SemanticScholarClient:
             Exception-specific handlers that short-circuit normal retry handling.
         :return Any: Result produced by ``operation`` or one of the failure handlers.
         """
-        for attempt in range(API_CONFIG.max_retries):
-            try:
-                self._rate_limit()
-                return operation()
-            except Exception as raw_exc:
-                exc = _unwrap_sdk_retry_error(raw_exc)
-                for error_type, handler in handled_exceptions:
-                    if isinstance(exc, error_type):
-                        return handler(exc)
 
-                if attempt < API_CONFIG.max_retries - 1:
-                    wait_time = self._retry_wait_time(exc, attempt)
-                    on_retry(attempt + 1, wait_time, exc)
-                    time.sleep(wait_time)
-                    continue
+        def _before_sleep(state: RetryCallState) -> None:
+            """Report the scheduled retry using the endpoint's existing logger.
 
-                return on_final_failure(exc)
+            :param RetryCallState state: Failed attempt with its next sleep action.
+            :return None: Invokes the endpoint's retry callback.
+            """
+            on_retry(
+                state.attempt_number, state.next_action.sleep, state.outcome.exception()
+            )
+
+        retryer = Retrying(
+            stop=stop_after_attempt(API_CONFIG.max_retries),
+            wait=_S2BackoffWait(),
+            retry=retry_if_exception_type(Exception)
+            & retry_if_not_exception_type(
+                tuple(kind for kind, _handler in handled_exceptions)
+            ),
+            before_sleep=_before_sleep,
+            sleep=lambda seconds: time.sleep(seconds),
+            reraise=True,
+        )
+        try:
+            for attempt in retryer:
+                with attempt:
+                    try:
+                        self._rate_limit()
+                        return operation()
+                    except Exception as raw_exc:
+                        raise _unwrap_sdk_retry_error(raw_exc)
+        except Exception as exc:
+            for error_type, handler in handled_exceptions:
+                if isinstance(exc, error_type):
+                    return handler(exc)
+            return on_final_failure(exc)
 
         raise AssertionError("retry loop exhausted without returning")
 
@@ -1165,6 +1175,14 @@ class SemanticScholarClient:
                 (
                     ObjectNotFoundException,
                     lambda _exc: {},
+                ),
+                (
+                    BadQueryParametersException,
+                    lambda exc: _raise_request_error(exc, "batch fetching papers"),
+                ),
+                (
+                    PermissionError,
+                    lambda exc: _raise_request_error(exc, "batch fetching papers"),
                 ),
             ),
         )

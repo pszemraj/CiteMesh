@@ -1460,6 +1460,7 @@ def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
     ("sdk_method", "client_method"),
     [
         ("get_paper", "get_paper"),
+        ("get_papers", "get_papers"),
         ("get_paper_citations", "get_paper_citations"),
         ("get_paper_references", "get_paper_references"),
         ("get_paper_references", "get_reference_ids"),
@@ -1483,6 +1484,8 @@ def test_sdk_request_errors_are_not_retried(
     ):
         if client_method == "get_reference_ids":
             client.get_reference_ids("seed", force_refresh=True)
+        elif client_method == "get_papers":
+            client.get_papers(["seed"])
         else:
             kwargs = {} if client_method == "get_paper" else {"limit": 5}
             getattr(client, client_method)("seed", raise_on_unavailable=True, **kwargs)
@@ -1613,13 +1616,90 @@ def test_jittered_backoff_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert all(low == 0.0 for low, _high in drawn_bounds)
 
-    # Retry-After floors the wait but never exceeds the global cap.
+    # The server's minimum wait takes precedence over the local jitter cap.
     monkeypatch.setattr(semantic_module.random, "uniform", lambda low, high: 0.0)
     assert semantic_module._jittered_backoff(1, retry_after=7.5) == 7.5
-    assert (
-        semantic_module._jittered_backoff(1, retry_after=999.0)
-        == semantic_module._MAX_BACKOFF_SECONDS
-    )
+    assert semantic_module._jittered_backoff(1, retry_after=999.0) == 999.0
+
+
+@pytest.mark.parametrize("endpoint", ["sdk", "rest"])
+def test_long_outage_recovers_on_last_attempt(endpoint: str) -> None:
+    """Both retry paths must outlast the old budget and recover on attempt thirty.
+
+    :param str endpoint: SDK paper lookup or direct REST search request.
+    :return None: Verifies the default budget without real waiting or network calls.
+    """
+    assert API_CONFIG.max_retries == 30
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        if endpoint == "sdk":
+            fetch = MagicMock(
+                side_effect=[ConnectionError("HTTP 429")] * 29 + [_paper_payload()]
+            )
+            client.client.get_paper = fetch
+        else:
+            fetch = MagicMock(
+                side_effect=[_MockResponse(status_code=503)] * 29
+                + [_MockResponse(status_code=200, payload={"data": [_paper_payload()]})]
+            )
+            client._session.get = fetch
+        with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+            result = (
+                client.get_paper("p1", raise_on_unavailable=True)
+                if endpoint == "sdk"
+                else client.search_papers("attention", raise_on_unavailable=True)
+            )
+        assert result
+        assert fetch.call_count == 30
+        assert sleep_mock.call_count == 29
+
+
+@pytest.mark.parametrize("endpoint", ["sdk", "rest"])
+def test_server_retry_after_can_exceed_local_cap(endpoint: str) -> None:
+    """Long server cooldowns must be honored on SDK and direct server failures.
+
+    :param str endpoint: SDK lookup or REST search retry path.
+    :return None: Checks Retry-After propagation through the actual retry engine.
+    """
+    response = _MockResponse(status_code=503, headers={"Retry-After": "120"})
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client.client.get_paper = MagicMock(
+            side_effect=[requests.HTTPError(response=response), _paper_payload()]
+        )
+        client._session.get = MagicMock(
+            side_effect=[response, _MockResponse(status_code=200, payload={"data": []})]
+        )
+        with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+            if endpoint == "sdk":
+                client.get_paper("p1", raise_on_unavailable=True)
+            else:
+                client.search_papers("attention", raise_on_unavailable=True)
+        sleep_mock.assert_called_once_with(120.0)
+
+
+@pytest.mark.parametrize("endpoint", ["sdk", "rest"])
+def test_retry_wait_can_be_interrupted(endpoint: str) -> None:
+    """User cancellation must escape both retry engines immediately.
+
+    :param str endpoint: SDK lookup or REST search retry path.
+    :return None: Checks KeyboardInterrupt is neither retried nor converted.
+    """
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client.client.get_paper = MagicMock(side_effect=ConnectionError("HTTP 429"))
+        client._session.get = MagicMock(return_value=_MockResponse(status_code=429))
+        with patch(
+            "citemesh.services.semantic_scholar.time.sleep",
+            side_effect=KeyboardInterrupt,
+        ):
+            with pytest.raises(KeyboardInterrupt):
+                if endpoint == "sdk":
+                    client.get_paper("p1", raise_on_unavailable=True)
+                else:
+                    client.search_papers("attention", raise_on_unavailable=True)
+        fetch = client.client.get_paper if endpoint == "sdk" else client._session.get
+        fetch.assert_called_once()
 
 
 def test_search_raise_on_unavailable_distinguishes_rate_limit() -> None:

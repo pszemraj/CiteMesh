@@ -135,7 +135,7 @@ class APIConfig:
     default_timeout: float = 30.0
 
     # Retry settings
-    max_retries: int = 3
+    max_retries: int = 30
     retry_delay: float = 2.0  # Initial delay, increases exponentially
 
     # Rate limiting: anonymous requests share a small public pool; authenticated
