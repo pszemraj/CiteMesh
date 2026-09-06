@@ -83,9 +83,6 @@ class HybridSimilarityConfig:
     citation_citation_weights: Tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
     mixed_weights: Tuple[float, float, float, float] = (0.4, 0.3, 0.2, 0.1)
 
-    # Co-citation boost
-    co_citation_boost: float = 0.2
-
     # Edge limiting
     max_edges_per_node: int = 5
 

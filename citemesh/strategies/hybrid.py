@@ -746,6 +746,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Paper paper2: Second paper
         :return float: Similarity score (0.0 to 1.0)
         """
+        if self.embedding_builder is None:
+            return self.citation_builder.compute_similarity(paper1, paper2)
+
         source1 = self.paper_sources.get(paper1.paper_id, "citation")
         source2 = self.paper_sources.get(paper2.paper_id, "citation")
 
@@ -768,6 +771,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 self.embedding_builder.embeddings[paper2.paper_id]
             )
             embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
+
+        if embed_sim <= 0.0 and biblio_coupling <= 0.0:
+            return 0.0
 
         source1_has_semantic = source1 in {"semantic", "both"}
         source2_has_semantic = source2 in {"semantic", "both"}
@@ -799,14 +805,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             + weights[2] * citation_sim
             + weights[3] * biblio_coupling
         )
-
-        # Add co-citation boost if papers are from same era
-        if (
-            paper1.year is not None
-            and paper2.year is not None
-            and abs(paper1.year - paper2.year) < 2
-        ):
-            similarity += HYBRID_CONFIG.co_citation_boost
 
         return min(similarity, 1.0)  # Cap at 1.0
 
@@ -867,6 +865,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param float similarity: Computed similarity
         :return bool: True if edge should be created
         """
+        if self.embedding_builder is None:
+            return self.citation_builder.should_create_edge(paper1, paper2, similarity)
+
         # Basic threshold
         if similarity < 0.2:
             return False

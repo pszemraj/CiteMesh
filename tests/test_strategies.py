@@ -891,7 +891,6 @@ def test_embedding_and_hybrid_similarity_normalize_scaled_embeddings(
         * hybrid_builder.citation_similarity(paper_a, paper_b)
         + HYBRID_CONFIG.semantic_semantic_weights[3]
         * hybrid_builder.bibliographic_coupling(paper_a, paper_b)
-        + HYBRID_CONFIG.co_citation_boost
     )
     assert hybrid_builder.compute_similarity(paper_a, paper_b) == pytest.approx(
         min(expected_hybrid_similarity, 1.0)
@@ -921,16 +920,7 @@ def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() 
     ) == pytest.approx(1.0)
 
     graph_score = builder.compute_similarity(seed, candidate)
-    expected_without_embedding = (
-        HYBRID_CONFIG.semantic_semantic_weights[1]
-        * builder.temporal_similarity(seed, candidate)
-        + HYBRID_CONFIG.semantic_semantic_weights[2]
-        * builder.citation_similarity(seed, candidate)
-        + HYBRID_CONFIG.semantic_semantic_weights[3]
-        * builder.bibliographic_coupling(seed, candidate)
-        + HYBRID_CONFIG.co_citation_boost
-    )
-    assert graph_score == pytest.approx(expected_without_embedding)
+    assert graph_score == 0.0
 
 
 def test_hybrid_graph_preparation_fails_closed_on_sts_inference() -> None:
@@ -1107,7 +1097,7 @@ def test_hybrid_thresholds_and_default_budget(
 ) -> None:
     """Hybrid should enforce seed/non-seed threshold and semantic budget rules."""
 
-    builder = HybridGraphBuilder(max_papers=3, max_semantic=0, client=MagicMock())
+    builder = HybridGraphBuilder(max_papers=3, max_semantic=1, client=MagicMock())
     seed = _paper("seed")
     seed.is_seed = True
     other = _paper("other")
@@ -2442,3 +2432,69 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
         assert builder.seed_relations[paper_id] == "semantic_only"
     # Candidate vectors flow through the persistent cache namespace.
     assert "mode=candidates" in builder.embedding_builder.embedding_cache.model_name
+
+
+@pytest.mark.parametrize(
+    "sources",
+    [
+        ("citation", "citation"),
+        ("semantic", "semantic"),
+        ("citation", "semantic"),
+        ("both", "both"),
+    ],
+)
+def test_hybrid_edges_require_semantic_or_bibliographic_evidence(
+    sources: tuple[str, str],
+) -> None:
+    """Publication era and popularity cannot create hybrid edges alone.
+
+    :param tuple[str, str] sources: Candidate provenance for both papers.
+    :return None: Verifies absent unsupported edges and retained bibliographic evidence.
+    """
+    builder = HybridGraphBuilder(max_papers=2, client=MagicMock())
+    builder.paper_sources = dict(zip(("a", "b"), sources))
+    builder.embedding_builder.embeddings = {
+        "a": np.array([1.0, 0.0], dtype=np.float32),
+        "b": np.array([0.0, 1.0], dtype=np.float32),
+    }
+    a = _paper("a")
+    b = _paper("b")
+    score = builder.compute_similarity(a, b)
+    assert score == 0.0
+    assert not builder.should_create_edge(a, b, score)
+    a.references = b.references = ["shared"]
+    assert builder.compute_similarity(a, b) > 0.0
+
+
+def test_hybrid_without_embeddings_keeps_citation_topical_scoring() -> None:
+    """Disabling embeddings retains lexical evidence and citation edge eligibility.
+
+    :return None: Verifies a complete build and a bibliographic-only edge.
+    """
+    seed = Paper("seed", "Quantum field theory", 2024, citation_count=100)
+    related = Paper("related", "Quantum field interactions", 2024, citation_count=100)
+    unrelated = Paper("unrelated", "Medieval pottery", 2024, citation_count=100)
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [related, unrelated]
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        max_semantic=0,
+        max_references=2,
+        max_citations=0,
+        fetch_references=False,
+        client=client,
+    )
+    graph, _ = builder.build_graph("seed")
+    assert graph.has_edge("seed", "related")
+    assert graph.degree("unrelated") == 0
+    assert builder.compute_similarity(seed, related) == pytest.approx(
+        builder.citation_builder.compute_similarity(seed, related)
+    )
+    builder.citation_builder.fetch_references = True
+    seed.references = unrelated.references = ["shared"]
+    unrelated.year = 2000
+    seed.is_seed = False
+    score = builder.compute_similarity(seed, unrelated)
+    assert 0.2 < score < 0.5
+    assert builder.should_create_edge(seed, unrelated, score)

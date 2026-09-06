@@ -86,6 +86,8 @@ Embedding cache behavior, hydration, and precision controls are defined in [Cach
 - Limitations: inherits dependency and cache requirements from the embedding path.
 - Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.
 - `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
+- Graph edges require positive symmetric semantic similarity or shared references before temporal and citation-count weights contribute. Publication proximity has no separate co-citation bonus.
+- With `--max-semantic 0`, hybrid uses the citation strategy's TF-IDF/bibliographic scorer and edge threshold, retaining the hybrid per-paper degree cap.
 - Semantic enrichment failures stop the build; hybrid does not silently downgrade
   to citation-only output.
 - If citation/reference endpoints are unavailable after the seed resolves,
