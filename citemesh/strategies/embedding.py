@@ -3511,6 +3511,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return False
 
+        # Cached unique IDs are not a source offset after reordered growth.
+        # Exhausting the tail alone cannot establish a duplicate-ID deficit.
+        if upstream_rows is not None and updated_rows < upstream_rows:
+            reconciled = self._hydrate_exact_hydration_source_slice(
+                use_streaming=use_streaming,
+                source=source,
+                progress_total=upstream_rows,
+                progress_label=f"Reconciling {source}",
+                operation="Resume missing-ID reconciliation",
+                existing_paper_ids=self.embedding_cache.get_cached_paper_ids(),
+            )
+            resumed_records += reconciled.hydrated_records
+            updated_rows = self._cached_payload_row_count()
+
         rows_reconciled = self._finalize_full_corpus_hydration_rows(
             source=source,
             updated_rows=updated_rows,
@@ -3520,7 +3534,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not rows_reconciled:
             logger.info(
                 "Incomplete full-corpus resume for %s/%s exhausted its expected "
-                "source slice with cache_rows=%d and upstream_rows=%d; recording "
+                "source and reconciled missing IDs with cache_rows=%d and upstream_rows=%d; recording "
                 "the duplicate/invalid-ID row-count deficit.",
                 source,
                 self.dataset_split,

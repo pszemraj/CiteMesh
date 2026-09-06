@@ -3481,84 +3481,85 @@ def test_incomplete_full_corpus_resume_without_row_count_marks_clean_eof_complet
     clear_cache_mock.assert_not_called()
 
 
-def test_incomplete_full_corpus_resume_memoizes_duplicate_id_deficit(
+@pytest.mark.parametrize("inserted_id", ["2601.00004", "2601.00001"])
+@pytest.mark.parametrize("fail_reconciliation", [False, True])
+def test_incomplete_full_corpus_resume_reconciles_missing_ids(
     monkeypatch: pytest.MonkeyPatch,
+    inserted_id: str,
+    fail_reconciliation: bool,
 ) -> None:
-    """A fully consumed resume slice should not rebuild for duplicate source IDs."""
+    """Resume reconciles reordered sources before memoizing duplicate deficits.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param str inserted_id: New or duplicate paper inserted before cached rows.
+    :param bool fail_reconciliation: Whether the full scan fails once.
+    :return None: Verifies completion, searchable IDs, and reuse of cached vectors.
+    """
     source = "librarian-bots/arxiv-metadata-snapshot"
     builder = EmbeddingGraphBuilder(
-        max_papers=2,
-        storage_precision="float32",
-        corpus_size=None,
-        use_streaming=False,
-        client=MagicMock(),
+        storage_precision="float32", corpus_size=None, client=MagicMock()
     )
-    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
-    builder.embedding_cache.is_hydrated = MagicMock(return_value=False)
-    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
-    builder.embedding_cache.payload_stats = MagicMock(
-        side_effect=[
-            CacheNamespacePayloadStats(
-                file_count=2,
-                size_bytes=1024,
-                sqlite_rows=2,
-                embedding_rows=2,
-                hydration_complete=False,
-                hydration_split="train",
-                hydration_corpus_size="all",
-                hydration_dataset_source=source,
-            ),
-            CacheNamespacePayloadStats(
-                file_count=2,
-                size_bytes=1024,
-                sqlite_rows=4,
-                embedding_rows=4,
-                hydration_complete=False,
-                hydration_split="train",
-                hydration_corpus_size="all",
-                hydration_dataset_source=source,
-            ),
-        ]
+    model = ConstantEncodeModel()
+    model.encode = MagicMock(wraps=model.encode)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    original_ids = ["2601.00001", "2601.00002", "2601.00003"]
+    records = [
+        {"id": paper_id, "title": paper_id, "abstract": "Abstract"}
+        for paper_id in [inserted_id, *original_ids]
+    ]
+    builder._hydrate_dataset_records(
+        dataset=records[1:], progress_total=3, progress_label="Initial fixture"
     )
-    builder.embedding_cache.mark_hydrated = MagicMock()
-    builder.embedding_cache.set_hydration_rowcount_reconciliation = MagicMock()
-    clear_cache_mock = MagicMock()
-    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 5)
-    monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
-    load_mock = MagicMock(
-        return_value=(
-            source,
-            [
-                {"id": "p0", "title": "Duplicate", "abstract": "A"},
-                {"id": "p2", "title": "Two", "abstract": "A"},
-                {"id": "p3", "title": "Three", "abstract": "A"},
-            ],
-        )
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source=source, dataset_split="train", corpus_size=None, complete=False
     )
-    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
-    monkeypatch.setattr(builder, "_cache_metadata_batch", lambda batch: len(batch))
+    model.encode.reset_mock()
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 4)
 
-    builder._ensure_cache_hydrated(use_streaming=False)
+    def load_source(**kwargs: Any) -> tuple[str, list[dict[str, str]]]:
+        """Serve a reordered source, optionally interrupting reconciliation.
 
-    load_mock.assert_called_once_with(
-        use_streaming=False,
-        preferred_dataset_source=source,
-        row_limit=3,
-        row_offset=2,
-        allow_source_fallback=False,
+        :param Any kwargs: Hydration slice options.
+        :return tuple[str, list[dict[str, str]]]: Source and requested records.
+        """
+        if fail_reconciliation and kwargs["row_offset"] is None:
+            raise RuntimeError("reconciliation interrupted")
+        offset = kwargs["row_offset"] or 0
+        limit = kwargs["row_limit"]
+        return source, records[offset : None if limit is None else offset + limit]
+
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_source)
+    if fail_reconciliation:
+        with pytest.raises(RuntimeError, match="reconciliation interrupted"):
+            builder._resume_incomplete_full_corpus_cache(
+                use_streaming=False, cached_dataset_source=source
+            )
+        assert not cache.payload_stats().hydration_complete
+        assert cache.get_hydration_rowcount_reconciliation() is None
+        fail_reconciliation = False
+
+    assert builder._resume_incomplete_full_corpus_cache(
+        use_streaming=False, cached_dataset_source=source
     )
-    clear_cache_mock.assert_not_called()
-    builder.embedding_cache.mark_hydrated.assert_called_once_with(
-        dataset_source=source,
-        dataset_split=builder.dataset_split,
-        corpus_size=builder.corpus_size,
-        complete=True,
+    expected_ids = {f"arxiv:{paper_id}" for paper_id in [inserted_id, *original_ids]}
+    assert cache.get_cached_paper_ids() == expected_ids
+    assert cache.is_hydrated("train", None, dataset_source=source)
+    assert cache.get_hydration_rowcount_reconciliation() == (
+        (4, 3) if inserted_id in original_ids else None
     )
-    builder.embedding_cache.set_hydration_rowcount_reconciliation.assert_called_once_with(
-        upstream_rows=5,
-        cached_rows=4,
+    results = cache.search(
+        np.array([1.0, 0.0], dtype=np.float32),
+        top_k=4,
+        binary_prefilter=False,
+        binary_rescore_multiplier=1,
     )
+    assert {result.paper_id for result in results} == expected_ids
+    assert model.encode.call_count == (0 if inserted_id in original_ids else 1)
+    builder._refresh_hydrated_full_corpus_cache(
+        use_streaming=False, cached_dataset_source=source
+    )
+    assert cache.get_cached_paper_ids() == expected_ids
 
 
 def test_incomplete_full_corpus_resume_does_not_complete_failed_iteration(
