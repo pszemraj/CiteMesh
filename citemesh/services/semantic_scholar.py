@@ -658,7 +658,6 @@ class SemanticScholarClient:
             for attempt in retryer:
                 with attempt:
                     try:
-                        self._rate_limit()
                         return operation()
                     except Exception as raw_exc:
                         raise _unwrap_sdk_retry_error(raw_exc)
@@ -960,7 +959,7 @@ class SemanticScholarClient:
         headers: Optional[Dict[str, str]] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        """Issue one HTTP request without adding another retry budget.
+        """Issue one paced HTTP request without adding another retry budget.
 
         :param str url: Semantic Scholar endpoint URL.
         :param Dict[str, Any] | str params: Mapping or pre-encoded query parameters.
@@ -972,6 +971,7 @@ class SemanticScholarClient:
         kwargs: Dict[str, Any] = {"params": params, "timeout": self.timeout}
         if headers is not None:
             kwargs["headers"] = headers
+        self._rate_limit()
         response = (
             self._session.get(url, **kwargs)
             if payload is None
@@ -1023,7 +1023,6 @@ class SemanticScholarClient:
 
             :return Optional[Dict[str, Any]]: Parsed payload or ``None`` on 404.
             """
-            self._rate_limit()
             return self._request_json_once(url, params, context=context)
 
         def _log_before_sleep(retry_state: RetryCallState) -> None:

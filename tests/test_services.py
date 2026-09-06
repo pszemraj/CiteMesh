@@ -2129,32 +2129,70 @@ def test_real_sdk_transport_auth_rejection_fails_once(method: str) -> None:
         assert not s2._paper_cache_path("p1").exists()
 
 
-def test_real_sdk_transport_keeps_relation_pagination() -> None:
-    """Successful reference pages should retain the SDK's existing next-offset flow.
+@pytest.mark.parametrize("api_key, interval", [("", 2.0), ("test-key", 1.0)])
+def test_real_sdk_transport_keeps_relation_pagination(
+    monkeypatch: pytest.MonkeyPatch, api_key: str, interval: float
+) -> None:
+    """Pace every page and subsequent direct requests using the same request budget.
 
-    :return None: Checks that two pages produce both IDs without repeating offset zero.
+    :param pytest.MonkeyPatch monkeypatch: Fixture for replacing the clock.
+    :param str api_key: Anonymous or authenticated request configuration.
+    :param float interval: Minimum spacing between HTTP requests.
+    :return None: Verifies complete pagination and exactly one pacing interval per send.
     """
-    with SemanticScholarClient(timeout=1) as client:
-        client._rate_limit = MagicMock()
-        client._session.get = MagicMock(
-            side_effect=[
-                _MockResponse(
-                    200,
-                    {
-                        "offset": 0,
-                        "next": 100,
-                        "data": [{"citedPaper": {"paperId": "r1"}}],
-                    },
-                ),
-                _MockResponse(
-                    200, {"offset": 100, "data": [{"citedPaper": {"paperId": "r2"}}]}
-                ),
-            ]
-        )
-        assert client.get_reference_ids("p1") == ["r1", "r2"]
+    clock = [100.0]
+    request_times = []
+
+    def sleep(seconds: float) -> None:
+        """Advance simulated time without delaying the test.
+
+        :param float seconds: Requested wait duration.
+        :return None: Updates the simulated clock.
+        """
+        clock[0] += seconds
+
+    monkeypatch.setattr(
+        semantic_module, "time", SimpleNamespace(time=lambda: clock[0], sleep=sleep)
+    )
+    responses = iter(
+        [
+            _MockResponse(
+                200,
+                {
+                    "offset": 0,
+                    "next": 100,
+                    "data": [{"citedPaper": {"paperId": f"r{i}"}} for i in range(100)],
+                },
+            ),
+            _MockResponse(
+                200, {"offset": 100, "data": [{"citedPaper": {"paperId": "r100"}}]}
+            ),
+            _MockResponse(200, _paper_payload()),
+            _MockResponse(200, [_paper_payload(paper_id="p2")]),
+        ]
+    )
+
+    def send(*args: object, **kwargs: object) -> _MockResponse:
+        """Record a request start and simulate a short response latency.
+
+        :param object args: Transport positional arguments.
+        :param object kwargs: Transport keyword arguments.
+        :return _MockResponse: Next successful response.
+        """
+        request_times.append(clock[0])
+        clock[0] += 0.01
+        return next(responses)
+
+    with SemanticScholarClient(timeout=1, api_key=api_key) as client:
+        client._session.get = MagicMock(side_effect=send)
+        client._session.post = MagicMock(side_effect=send)
+        assert client.get_reference_ids("p1") == [f"r{i}" for i in range(101)]
         assert client._session.get.call_count == 2
         assert "offset=0" in client._session.get.call_args_list[0].kwargs["params"]
         assert "offset=100" in client._session.get.call_args_list[1].kwargs["params"]
+        assert client.get_paper("p1") is not None
+        assert client.get_papers(["p2"])
+        assert request_times == pytest.approx([100.0 + i * interval for i in range(4)])
 
 
 @pytest.mark.parametrize("batch", [False, True])
