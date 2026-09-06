@@ -25,7 +25,10 @@ from citemesh.data.embedding_cache import (
     CacheNamespacePayloadStats,
     CacheSearchResult,
 )
-from citemesh.services.semantic_scholar import SemanticScholarUnavailableError
+from citemesh.services.semantic_scholar import (
+    SemanticScholarClient,
+    SemanticScholarUnavailableError,
+)
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
     ENCODE_BATCH_SIZE,
@@ -4619,6 +4622,56 @@ def test_embedding_citation_enrichment_logs_target_count(
         in message
         for message in log_messages
     )
+
+
+def test_embedding_citation_enrichment_skips_invalid_batch_rows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Citation enrichment should retain an invalid row's original count.
+
+    :param pytest.LogCaptureFixture caplog: Captured batch-row warning.
+    :return None: Checks a valid sibling is enriched when another row fails validation.
+    """
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client._request_json_once = MagicMock(
+            return_value=[
+                {
+                    "paperId": "invalid",
+                    "title": "Invalid",
+                    "year": 2024,
+                    "citationCount": -1,
+                    "authors": [],
+                    "fieldsOfStudy": [],
+                },
+                {
+                    "paperId": "valid",
+                    "title": "Valid",
+                    "year": 2024,
+                    "citationCount": 77,
+                    "authors": [],
+                    "fieldsOfStudy": [],
+                },
+            ]
+        )
+        builder = EmbeddingGraphBuilder(client=client)
+        papers = {
+            "invalid": Paper(
+                paper_id="invalid", title="Invalid", year=2024, citation_count=2
+            ),
+            "valid": Paper(
+                paper_id="valid", title="Valid", year=2024, citation_count=1
+            ),
+        }
+
+        with caplog.at_level(
+            logging.WARNING, logger="citemesh.services.semantic_scholar"
+        ):
+            builder._update_citation_counts(papers)
+
+    assert papers["valid"].citation_count == 77
+    assert papers["invalid"].citation_count == 2
+    assert "Skipping malformed batch paper for invalid." in caplog.text
 
 
 def test_citation_enrichment_limit_excludes_seed_and_keeps_partial_batch_counts() -> (

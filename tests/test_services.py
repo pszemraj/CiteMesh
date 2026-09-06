@@ -2331,9 +2331,22 @@ def test_real_requests_json_decode_failure_is_retryable() -> None:
         sleep_mock.assert_called_once()
 
 
-def test_doi_lookup_preserves_percent_encoded_slashes_in_prepared_path() -> None:
-    """The live-verified DOI route must remain encoded through requests preparation.
+@pytest.mark.parametrize(
+    ("paper_id", "expected_path"),
+    [
+        ("10.18653/v1/N18-3011", "10.18653/v1/N18-3011"),
+        ("DOI:10.18653/v1/N18-3011", "10.18653/v1/N18-3011"),
+        ("arxiv:math/0301234v1", "arxiv%3Amath/0301234"),
+        ("10.1234/a b?c#d", "10.1234/a%20b%3Fc%23d"),
+    ],
+)
+def test_paper_lookup_preserves_slashes_in_prepared_path(
+    paper_id: str, expected_path: str
+) -> None:
+    """Graph IDs retain slashes while URL delimiters remain escaped.
 
+    :param str paper_id: DOI or legacy arXiv identifier to request.
+    :param str expected_path: Escaped identifier expected on the wire.
     :return None: Checks the exact requested URL without using the network.
     """
     with SemanticScholarClient(timeout=1) as client:
@@ -2342,13 +2355,10 @@ def test_doi_lookup_preserves_percent_encoded_slashes_in_prepared_path() -> None
         response.status_code = 200
         response._content = json.dumps(_paper_payload()).encode()
         client._session.send = MagicMock(return_value=response)
-        assert client.get_paper("10.18653/v1/N18-3011").paper_id == "p1"
+        assert client.get_paper(paper_id).paper_id == "p1"
         client._session.send.assert_called_once()
         prepared = client._session.send.call_args.args[0]
-        assert (
-            prepared.url.split("?")[0]
-            == f"{s2.PAPER_BASE_URL}/10.18653%2Fv1%2FN18-3011"
-        )
+        assert prepared.url.split("?")[0] == f"{s2.PAPER_BASE_URL}/{expected_path}"
 
 
 def test_all_null_batch_omits_missing_ids_without_negative_cache() -> None:
@@ -2369,13 +2379,13 @@ def test_all_null_batch_omits_missing_ids_without_negative_cache() -> None:
         assert not s2._paper_cache_path("missing-two").exists()
 
 
-@pytest.mark.parametrize(
-    "payload", [{}, [], [_paper_payload(), None], [{"title": "No ID"}]]
-)
-def test_malformed_batch_rows_fail_without_individual_fallback(payload: object) -> None:
-    """Batch positions cannot be guessed when response cardinality or rows are invalid.
+@pytest.mark.parametrize("payload", [{}, [], [_paper_payload(), None]])
+def test_malformed_batch_responses_fail_without_individual_fallback(
+    payload: object,
+) -> None:
+    """Batch positions cannot be guessed when response cardinality is invalid.
 
-    :param object payload: Malformed array or paper row for a one-ID batch request.
+    :param object payload: Malformed array for a one-ID batch request.
     :return None: Checks one deterministic failure and no single-paper retries.
     """
     with SemanticScholarClient(timeout=1) as client:
@@ -2384,9 +2394,38 @@ def test_malformed_batch_rows_fail_without_individual_fallback(payload: object) 
         client._session.get = MagicMock()
         with (
             patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock,
-            pytest.raises(TypeError, match="batch response|malformed batch paper"),
+            pytest.raises(TypeError, match="batch response"),
         ):
             client.get_papers(["p1"])
         client._session.post.assert_called_once()
         client._session.get.assert_not_called()
         sleep_mock.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"title": "No ID"}],
+        [{**_paper_payload(), "citationCount": -1}],
+    ],
+)
+def test_invalid_batch_rows_warn_and_are_skipped(
+    payload: object, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Invalid batch rows should not invalidate valid positional batch results.
+
+    :param object payload: One invalid paper row returned for the requested ID.
+    :param pytest.LogCaptureFixture caplog: Captured row-conversion warning.
+    :return None: Checks the invalid row is omitted without individual fallback.
+    """
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client._session.post = MagicMock(return_value=_MockResponse(200, payload))
+        client._session.get = MagicMock()
+        with caplog.at_level(
+            logging.WARNING, logger="citemesh.services.semantic_scholar"
+        ):
+            assert client.get_papers(["p1"]) == {}
+        client._session.post.assert_called_once()
+        client._session.get.assert_not_called()
+    assert "Skipping malformed batch paper for p1." in caplog.text

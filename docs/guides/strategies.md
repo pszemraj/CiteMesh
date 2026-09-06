@@ -68,7 +68,8 @@ Two semantic sources, selected with `--semantic-source`:
   the `datasets` dependency and substantially more cold-cache work. Selection,
   resumption, and storage behavior are described in [Caching & Data](caching.md).
   Citation-count enrichment is optional: a rejected Semantic Scholar batch warns
-  and retains the selected papers with their existing counts.
+  and retains the selected papers with their existing counts. Invalid individual
+  batch rows are skipped so valid rows can still enrich their selected papers.
 
 - Strengths: captures semantic similarity even when citations are missing.
 - Edge selection reserves the seed's strongest eligible neighbors before the

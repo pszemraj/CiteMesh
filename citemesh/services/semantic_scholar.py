@@ -1120,8 +1120,9 @@ class SemanticScholarClient:
             if cached_paper is not None:
                 return cached_paper
         # The SDK silently maps unrecognized HTTP statuses to an empty paper.
+        # The graph endpoint requires literal slashes in DOI and legacy arXiv IDs.
         api_paper = self._request_json(
-            f"{PAPER_BASE_URL}/{quote(paper_id, safe='')}",
+            f"{PAPER_BASE_URL}/{quote(paper_id, safe='/')}",
             {"fields": ",".join(_default_paper_fields())},
             raise_on_unavailable=raise_on_unavailable,
             context=f"fetching {paper_id}",
@@ -1198,9 +1199,10 @@ class SemanticScholarClient:
                     continue
                 paper = self._convert_api_paper(api_paper)
                 if paper is None:
-                    raise _SemanticScholarResponseContractError(
-                        f"Semantic Scholar returned a malformed batch paper for {requested_id}."
+                    logger.warning(
+                        "Skipping malformed batch paper for %s.", requested_id
                     )
+                    continue
                 matched[requested_id] = paper
                 _persist_paper(paper, requested_id)
             return matched
