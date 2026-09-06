@@ -2052,6 +2052,7 @@ def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
 
     builder.embedding_cache.get_model_fingerprint = MagicMock(return_value="fp-old")
     builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
+    builder.embedding_cache.has_current_corpus_metadata = MagicMock(return_value=True)
     builder.embedding_cache.clear = MagicMock()
     builder.embedding_cache.set_model_fingerprint = MagicMock()
     builder.embedding_cache.get_hydrated_dataset_source = MagicMock(
@@ -2597,6 +2598,124 @@ def test_embedding_dataset_ids_share_arxiv_recognition(
 ) -> None:
     """Dataset ID normalization should use shared arXiv recognition rules."""
     assert embedding_module._canonicalize_embedding_paper_id(raw_id) == expected
+
+
+@pytest.mark.parametrize(
+    ("record", "expected_year"),
+    [
+        ({"id": "1210.8272", "update_date": "2026-08-28"}, 2012),
+        ({"id": "hep-th/9912015", "update_date": "2026-08-28"}, 1999),
+        ({"id": "arXiv:1706.03762v5"}, 2017),
+        ({"id": "1210.8272", "year": 2013, "update_date": "2026-08-28"}, 2013),
+        ({"id": "unknown", "update_date": "2026-08-28"}, None),
+    ],
+)
+def test_corpus_year_uses_publication_or_submission(
+    record: dict[str, Any], expected_year: int | None
+) -> None:
+    """Source updates must not change publication chronology.
+
+    :param dict[str, Any] record: Source date and identifier fields.
+    :param int | None expected_year: Publication or initial submission year.
+    :return None: Checks the shared corpus metadata adapter.
+    """
+    assert _extract_dataset_paper_metadata(record, 0)["year"] == expected_year
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_corpus_metadata_backfill_preserves_vectors_and_selection(
+    monkeypatch: pytest.MonkeyPatch, storage_precision: str, interrupt: bool
+) -> None:
+    """Backfill old cached metadata once, without encoding or changing corpus IDs.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param str storage_precision: Persistent vector representation.
+    :param bool interrupt: Whether the first metadata scan is interrupted.
+    :return None: Checks corrected identities, resumability and byte-identical HDF5.
+    """
+    from citemesh.strategies.candidates import (
+        IdentityRegistry,
+        register_aliases,
+        resolve_aliases,
+    )
+
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        corpus_size=1,
+        storage_precision=storage_precision,
+        client=MagicMock(),
+    )
+    model = ConstantEncodeModel()
+    model.encode = MagicMock(wraps=model.encode)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    monkeypatch.setattr(embedding_module, "HYDRATION_FLUSH_SIZE", 1)
+    cache = builder.embedding_cache
+    if storage_precision == "int8":
+        cache.set_calibration_ranges(
+            np.array([[-1.0, -1.0], [1.0, 1.0]], dtype=np.float32), embedding_dim=2
+        )
+    raw = {
+        "id": "1210.8272",
+        "title": "Confined polymers",
+        "abstract": "Original text",
+        "update_date": "2026-08-28",
+        "doi": "https://doi.org/10.1039/c3sm27410a",
+    }
+    old_metadata = {**_extract_dataset_paper_metadata(raw, 0), "year": 2026, "doi": ""}
+    builder._cache_metadata_batch([old_metadata])
+    cache.mark_hydrated(
+        dataset_source=source, dataset_split="train", corpus_size=1, complete=True
+    )
+    original_h5 = cache.h5_path.read_bytes()
+    model.encode.reset_mock()
+
+    def source_rows() -> Iterator[dict[str, Any]]:
+        """Include an old cached paper and a newer uncached source row.
+
+        :return Iterator[dict[str, Any]]: Rows with an optional interrupted read.
+        """
+        yield {**raw, "abstract": "Changed upstream text"}
+        if interrupt:
+            raise RuntimeError("metadata read interrupted")
+        yield {"id": "2608.00001", "title": "New uncached paper", "abstract": "New"}
+
+    load_dataset = MagicMock(side_effect=lambda *args, **kwargs: source_rows())
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load_dataset),
+    )
+    if interrupt:
+        with pytest.raises(RuntimeError, match="metadata read interrupted"):
+            builder._ensure_cache_hydrated(use_streaming=False)
+        assert not cache.has_current_corpus_metadata()
+        interrupt = False
+    builder._ensure_cache_hydrated(use_streaming=False)
+    load_dataset.assert_called_with(source, split="train", streaming=False)
+    assert cache.has_current_corpus_metadata()
+    assert cache.get_cached_paper_ids() == {"arxiv:1210.8272"}
+    assert cache.h5_path.read_bytes() == original_h5
+    model.encode.assert_not_called()
+    result = cache.search(
+        np.array([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=False,
+        binary_rescore_multiplier=1,
+    )[0]
+    assert result.metadata["year"] == 2012
+    assert result.metadata["doi"] == "10.1039/c3sm27410a"
+    assert result.metadata["abstract"] == "Original text"
+    seed = Paper("a" * 40, "Confined polymers", 2013, doi="10.1039/c3sm27410a")
+    aliases = IdentityRegistry()
+    register_aliases(aliases, seed.paper_id, seed)
+    corpus_paper = Paper(paper_id=result.paper_id, **result.metadata)
+    assert resolve_aliases(aliases, corpus_paper) == [seed.paper_id]
+    load_dataset.reset_mock()
+    builder._ensure_cache_hydrated(use_streaming=False)
+    load_dataset.assert_not_called()
 
 
 def test_capped_hydration_selects_newest_rows_by_arxiv_id(

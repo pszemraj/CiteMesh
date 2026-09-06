@@ -63,6 +63,8 @@ HYDRATION_DATASET_SOURCE_KEY = "hydration_dataset_source"
 HYDRATION_SPLIT_KEY = "hydration_split"
 HYDRATION_CORPUS_SIZE_KEY = "hydration_corpus_size"
 HYDRATION_COMPLETE_KEY = "hydration_complete"
+CORPUS_METADATA_VERSION_KEY = "corpus_metadata_version"
+CORPUS_METADATA_VERSION = "1"
 HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY = "hydration_reconciled_upstream_rows"
 HYDRATION_RECONCILED_CACHE_ROWS_KEY = "hydration_reconciled_cache_rows"
 MODEL_FINGERPRINT_KEY = "model_fingerprint"
@@ -1214,6 +1216,37 @@ class EmbeddingCache:
         cached_source = metadata.get(HYDRATION_DATASET_SOURCE_KEY)
         return cached_source if cached_source else None
 
+    def has_current_corpus_metadata(self) -> bool:
+        """Return whether corpus years and DOIs use the current source adapter.
+
+        :return bool: Whether a full metadata pass completed with this adapter.
+        """
+        with self._cache_lock(), self._connect_db() as conn:
+            metadata = self._load_cache_metadata(conn)
+        return metadata.get(CORPUS_METADATA_VERSION_KEY) == CORPUS_METADATA_VERSION
+
+    def mark_corpus_metadata_current(self) -> None:
+        """Record successful corpus metadata hydration or backfill.
+
+        :return None: Persists the completed metadata adapter version.
+        """
+        with self._cache_lock(), self._connect_db() as conn:
+            self._set_cache_metadata(
+                conn, {CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION}
+            )
+
+    def update_corpus_metadata(self, papers: Sequence[Dict]) -> None:
+        """Correct years and DOIs on existing corpus rows without touching vectors.
+
+        :param Sequence[Dict] papers: Source metadata with paper IDs, years and DOIs.
+        :return None: Updates only matching SQLite records.
+        """
+        with self._cache_lock(), self._connect_db() as conn:
+            conn.executemany(
+                "UPDATE papers SET year = ?, doi = ? WHERE paper_id = ?",
+                [(paper["year"], paper["doi"], paper["paper_id"]) for paper in papers],
+            )
+
     def get_model_fingerprint(self) -> Optional[str]:
         """Return model fingerprint captured for this cache namespace.
 
@@ -2018,6 +2051,7 @@ class EmbeddingCache:
                 HYDRATION_SPLIT_KEY: "",
                 HYDRATION_CORPUS_SIZE_KEY: "",
                 HYDRATION_COMPLETE_KEY: "0",
+                CORPUS_METADATA_VERSION_KEY: "",
                 HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY: "",
                 HYDRATION_RECONCILED_CACHE_ROWS_KEY: "",
             },

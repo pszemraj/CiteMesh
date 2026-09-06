@@ -151,6 +151,10 @@ A vector is recomputed when:
 
 Metadata-only changes (`year`, `authors`, `categories`, or other stored fields that do not alter embedding input text) refresh SQLite metadata rows without re-encoding vectors.
 
+Corpus metadata retains the source DOI alongside its arXiv ID. Years come from an explicit publication year when available, otherwise the initial submission year encoded in the arXiv ID; `update_date` is never used as a publication date.
+
+On the next corpus build, caches created before this adapter correction receive a one-time year/DOI backfill from their recorded source and selected split. The pass updates only existing SQLite rows: it preserves the original corpus selection, stored text, and HDF5 vectors, including INT8 calibration. A `corpus_metadata_version` completion marker is saved only after the source pass succeeds, so interrupted backfills retry on the next build. Local search remains offline and uses persisted metadata; run a corpus build to apply the backfill before searching an older cache.
+
 Rewriting compressed HDF5 rows can leave unused space in the file, so its byte
 size may grow while the embedding row count stays fixed. CiteMesh does not
 compact files automatically; this allocation behavior does not indicate lost
@@ -177,7 +181,7 @@ The namespace also records a stable model-profile schema token. Automatic profil
 
 Model loading fallback is resolved before persistent vectors are read or written, so the active checkpoint, not merely the requested model token, selects the namespace. Changing a local artifact in place or moving a mutable Hub revision to new contents selects a different cache while preserving the old one; switching revision A to B and back to A therefore reopens A's prior cache. If no reliable commit or complete local artifact identity can be established, CiteMesh refuses persistent cache access. It never adopts an unidentified legacy payload or an `offline-unverified` assumption. A fingerprint mismatch inside an identified namespace is treated as corruption and cleared before use.
 
-When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs fully from cache and skips HuggingFace corpus loading.
+When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs from cache and skips HuggingFace corpus loading after any required one-time metadata backfill.
 
 For hydrated full-corpus runs (`--all-corpus`), CiteMesh performs an incremental growth check using upstream split row counts. When upstream rows increased, it uses a staged reconciliation flow:
 

@@ -760,14 +760,9 @@ def _parse_year(paper: Dict[str, Any]) -> Optional[int]:
         except (TypeError, ValueError):
             pass
 
-    update_date = paper.get("update_date")
-    if update_date:
-        try:
-            return int(str(update_date)[:4])
-        except (TypeError, ValueError):
-            pass
-
-    return None
+    raw_id = paper.get("id") or paper.get("paper_id") or paper.get("paperId")
+    chronology = _arxiv_id_chronology_key(raw_id)
+    return chronology[0] if chronology is not None else None
 
 
 _NEW_STYLE_ARXIV_ID_RE = re.compile(r"^(\d{2})(\d{2})\.(\d{4,5})(?:v\d+)?$")
@@ -917,6 +912,12 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
     )
     paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
     arxiv_id, doi = external_ids_from_canonical_paper_id(paper_id)
+    source_doi = str(paper.get("doi") or "").strip()
+    if source_doi:
+        _, normalized_doi = external_ids_from_canonical_paper_id(
+            normalize_paper_id(source_doi)
+        )
+        doi = normalized_doi or doi
     title = paper.get("title", "Unknown")
     if not isinstance(title, str) or not title.strip():
         title = "Unknown"
@@ -3225,6 +3226,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.corpus_size,
             dataset_source=cached_dataset_source,
         ):
+            self._refresh_cached_corpus_metadata(cached_dataset_source, use_streaming)
             self._refresh_hydrated_full_corpus_cache(
                 use_streaming=use_streaming,
                 cached_dataset_source=cached_dataset_source,
@@ -3255,6 +3257,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             use_streaming=use_streaming,
             cached_dataset_source=cached_dataset_source,
         ):
+            self._refresh_cached_corpus_metadata(cached_dataset_source, use_streaming)
             return
 
         dataset_source: Optional[str]
@@ -3276,6 +3279,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.corpus_size,
             dataset_source=dataset_source,
         ):
+            self._refresh_cached_corpus_metadata(dataset_source, use_streaming)
             return
 
         logger.info(
@@ -3343,6 +3347,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return
 
+        self.embedding_cache.mark_corpus_metadata_current()
         if self.corpus_size is None and ":" not in str(self.dataset_split):
             upstream_rows = self._resolve_dataset_split_row_count(dataset_source)
             updated_rows = self._cached_payload_row_count()
@@ -3370,6 +3375,41 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             corpus_size=self.corpus_size,
             complete=True,
         )
+
+    def _refresh_cached_corpus_metadata(
+        self, source: Optional[str], use_streaming: bool
+    ) -> None:
+        """Backfill corpus years and DOIs without changing persisted vectors.
+
+        :param Optional[str] source: Dataset recorded on the matching cache.
+        :param bool use_streaming: Whether source rows should be streamed.
+        :return None: Refreshes existing SQLite rows once after an adapter change.
+        """
+        cache = self.embedding_cache
+        if (
+            not source
+            or cache.has_current_corpus_metadata()
+            or not cache.has_cached_payload()
+        ):
+            return
+
+        logger.info("Refreshing cached publication years and DOIs from %s.", source)
+        # A capped cache retains its original paper selection. Inspect the full
+        # selected split so older cached papers can still receive metadata fixes.
+        dataset = _import_datasets_module().load_dataset(
+            source, split=self.dataset_split, streaming=use_streaming
+        )
+        batch: List[Dict] = []
+        for index, record in enumerate(dataset):
+            batch.append(_extract_dataset_paper_metadata(record, index))
+            if len(batch) >= HYDRATION_FLUSH_SIZE:
+                cache.update_corpus_metadata(batch)
+                batch = []
+        if batch:
+            cache.update_corpus_metadata(batch)
+        # Older resume code could memoize a deficit without reconciling IDs.
+        cache.clear_hydration_rowcount_reconciliation()
+        cache.mark_corpus_metadata_current()
 
     def _resume_incomplete_full_corpus_cache(
         self,
