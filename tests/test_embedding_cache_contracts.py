@@ -7,9 +7,10 @@ import logging
 import multiprocessing as mp
 import sqlite3
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from queue import Empty
-from typing import Any
+from typing import Any, Iterator
 
 import h5py
 import numpy as np
@@ -2207,28 +2208,110 @@ def test_embedding_cache_recovery_preserves_sqlite_ahead_prefix(
     assert reloaded.embedding_count() == 2
 
 
+@pytest.mark.parametrize("duplicate_interior_row", [False, True])
 def test_embedding_cache_reload_preserves_unrecoverable_row_mapping(
     tmp_path: Path,
+    duplicate_interior_row: bool,
 ) -> None:
     """An ambiguous mapping must fail without deleting recoverable vector data.
 
     :param Path tmp_path: Isolated cache directory.
+    :param bool duplicate_interior_row: Corrupt coverage while keeping valid bounds.
     :return None: Checks that a gap does not trigger a namespace wipe.
     """
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="mapping-gap")
     _set_test_int8_calibration(cache)
+    papers = {
+        paper_id: {"title": "Seed", "abstract": "Abstract"}
+        for paper_id in (["p1", "p2", "p3"] if duplicate_interior_row else ["p1"])
+    }
     cache.get_embeddings(
-        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        papers,
         SeededRandomEncodeModel(),
         show_progress=False,
     )
     with cache._connect_db() as conn:
-        conn.execute("UPDATE papers SET row_idx = 1")
+        if duplicate_interior_row:
+            conn.execute("UPDATE papers SET row_idx = 0 WHERE paper_id = 'p2'")
+        else:
+            conn.execute("UPDATE papers SET row_idx = 1")
+
+    with pytest.raises(
+        RuntimeError, match="row.*mapping mismatch|row_idx coverage mismatch"
+    ):
+        cache.get_embeddings(
+            {"p1": papers["p1"]}, SeededRandomEncodeModel(), show_progress=False
+        )
 
     with pytest.raises(RuntimeError, match="row_idx coverage mismatch"):
         EmbeddingCache(cache_dir=tmp_path, model_name="mapping-gap")
     assert cache.h5_path.exists()
-    assert cache.get_cached_paper_ids() == {"p1"}
+    assert cache.get_cached_paper_ids() == set(papers)
+
+
+@pytest.mark.parametrize("operation", ["hit", "append", "search"])
+def test_embedding_cache_operation_sql_cost_does_not_scan_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    """A small cache operation must not scan unrelated metadata as the corpus grows.
+
+    :param Path tmp_path: Isolated persistent cache.
+    :param pytest.MonkeyPatch monkeypatch: Instruments SQLite execution cost.
+    :param str operation: Public cache operation whose SQL cost is measured.
+    :return None: A 64-fold corpus increase leaves metadata work bounded.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, storage_precision="float32")
+    model = SeededRandomEncodeModel()
+    connect = cache._connect_db
+    steps = 0
+
+    def count_steps() -> int:
+        """Count SQLite work in fixed instruction blocks.
+
+        :return int: Zero allows SQLite execution to continue.
+        """
+        nonlocal steps
+        steps += 1
+        return 0
+
+    @contextmanager
+    def measured_connection() -> Iterator[sqlite3.Connection]:
+        """Instrument connections used by the public cache operations.
+
+        :return Iterator[sqlite3.Connection]: Connection counting every 100 VM steps.
+        """
+        with connect() as conn:
+            conn.set_progress_handler(count_steps, 100)
+            yield conn
+
+    monkeypatch.setattr(cache, "_connect_db", measured_connection)
+    costs = []
+    previous = 0
+    for size in (128, 8192):
+        cache.upsert_embeddings(
+            {f"p{i}": {"title": f"Title {i}"} for i in range(previous, size)},
+            model,
+            show_progress=False,
+        )
+        steps = 0
+        if operation == "hit":
+            assert "p0" in cache.get_embeddings(
+                {"p0": {"title": "Title 0"}}, model, show_progress=False
+            )
+        elif operation == "append":
+            cache.upsert_embeddings(
+                {f"new-{size}": {"title": "New paper"}}, model, show_progress=False
+            )
+        else:
+            assert cache.search(
+                np.array([1.0, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=False,
+                binary_rescore_multiplier=8,
+            )
+        costs.append(steps)
+        previous = size
+    assert costs[1] <= costs[0] + 20, costs
 
 
 def test_embedding_cache_recovery_truncates_orphan_h5_rows(tmp_path: Path) -> None:

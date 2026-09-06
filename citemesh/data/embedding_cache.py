@@ -1757,6 +1757,22 @@ class EmbeddingCache:
                 )
 
         row_count = int(embeddings_dataset.shape[0])
+        if fail_mode == "runtime":
+            # Separate MIN/MAX subqueries each use the row_idx index endpoint.
+            # Full coverage is checked once on open, not for every hydration batch.
+            first_row, last_row = conn.execute(
+                "SELECT (SELECT MIN(row_idx) FROM papers), "
+                "(SELECT MAX(row_idx) FROM papers)"
+            ).fetchone()
+            expected_bounds = (0, row_count - 1) if row_count else (None, None)
+            if (first_row, last_row) != expected_bounds:
+                _fail(
+                    "embedding row mapping mismatch "
+                    f"(metadata bounds={(first_row, last_row)}, expected={expected_bounds})",
+                    layout_mismatch=False,
+                )
+            return
+
         paper_rows = int(conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0])
         if paper_rows != row_count:
             _fail(
@@ -2218,10 +2234,18 @@ class EmbeddingCache:
         for value_chunk in _chunked(lookup_values, SQLITE_QUERY_BATCH_SIZE):
             placeholders = ",".join("?" for _ in value_chunk)
             query = (
-                f"SELECT {_PAPER_ROW_COLUMNS} FROM papers "
+                f"SELECT {_PAPER_ROW_COLUMNS}, "
+                "(SELECT COUNT(*) FROM papers AS owners "
+                "WHERE owners.row_idx = papers.row_idx) FROM papers "
                 f"WHERE {lookup_column} IN ({placeholders})"
             )
-            yield from conn.execute(query, value_chunk)
+            for row in conn.execute(query, value_chunk):
+                if row[-1] != 1:
+                    raise RuntimeError(
+                        "Embedding cache integrity error: row_idx coverage mismatch "
+                        f"for accessed paper {row[0]!r}."
+                    )
+                yield row[:-1]
 
     @staticmethod
     def _decode_paper_row(

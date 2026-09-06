@@ -162,6 +162,13 @@ vectors or duplicate cache rows.
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races. The expensive encode step runs outside that lock; the lock only wraps short lookup and commit phases, and the commit phase re-checks cache misses before assigning final rows. Lock acquisition timeout defaults to `900` seconds and can be overridden with `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
+Opening a cache performs exhaustive row-coverage validation and interrupted-append
+recovery. Normal lookups, writes, and searches check runtime settings and indexed
+row bounds without recounting the entire corpus. Search also requires metadata
+for every returned vector, and accessed rows must have a unique paper mapping.
+Interior mapping corruption outside the accessed rows
+is detected by the full validation on the next cache opening.
+
 Hydration write policy:
 
 - Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--encode-batch-size`.
