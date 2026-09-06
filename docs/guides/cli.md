@@ -173,7 +173,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - If a same-model cache namespace was previously hydrated with a capped corpus, `--all-corpus` rebuilds that namespace; cache-clear logs label the replaced payload as `cached_*` to distinguish it from the new target.
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
-- `--min-semantic-similarity`: semantic cosine required for embedding/hybrid graph edges (default `0.72`). Hybrid can also admit pairs with shared references. Set a persistent override with `citemesh config set defaults.min_semantic_similarity VALUE`. This setting changes graph eligibility without rebuilding embeddings.
+- `--min-semantic-similarity`: semantic cosine required for embedding/hybrid graph edges (default `0.74`). Hybrid can also admit pairs with shared references. Set a persistent override with `citemesh config set defaults.min_semantic_similarity VALUE`. This setting changes graph eligibility without rebuilding embeddings.
 - `--truncate-dim`: optional embedding output-dimension truncation (for
   EmbeddingGemma: `768`, `512`, `256`, `128`; omitted uses the model profile's
   recommendation, **`512` for EmbeddingGemma**). See the

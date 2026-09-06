@@ -2002,12 +2002,13 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         ):
             logger.warning(
                 "Semantic edge threshold %.3f is uncalibrated for profile=%s, "
-                "dimension=%s. The default 0.72 was calibrated for EmbeddingGemma "
+                "dimension=%s. The default %.3f was calibrated for EmbeddingGemma "
                 "at 512 dimensions. Evaluate related/unrelated pairs and set "
                 "--min-semantic-similarity or defaults.min_semantic_similarity.",
                 self.min_semantic_similarity,
                 self.model_profile.name,
                 self.truncate_dim or "native",
+                EMBEDDING_CONFIG.min_semantic_similarity,
             )
 
         available_dims = self.model_profile.available_truncate_dims

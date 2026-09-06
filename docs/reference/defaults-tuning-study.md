@@ -1,6 +1,6 @@
 # Defaults Tuning Studies
 
-Measurements and tradeoffs behind CiteMesh's embedding dimension and hybrid
+Measurements and tradeoffs behind CiteMesh's semantic threshold, embedding dimension, and hybrid
 discovery defaults.
 
 Related docs:
@@ -8,6 +8,65 @@ Related docs:
 - CLI defaults and flags: [CLI Usage](../guides/cli.md)
 - Strategy behavior overview: [Strategy Guide](../guides/strategies.md)
 - Embedding runtime policy: [Embedding Runtime](embedding-runtime.md)
+
+## Semantic Edge Threshold (September 2026)
+
+Use **0.74** as the default semantic eligibility threshold for EmbeddingGemma's
+symmetric STS embeddings at 512 dimensions. The development set selects it by
+maximum F1 on a fixed 0.65–0.80 grid in 0.01 increments, breaking ties by precision
+and then higher threshold. A separate validation set assesses the selected value.
+
+Two independent fixture evaluations used full primary-source arXiv abstracts,
+with pair labels fixed before inspecting scores. Development has 14 papers from
+translation, pretrained language models, dense retrieval, graph learning,
+diffusion, and residual vision networks. Its 81 included pairs contain 13
+positives and 68 negatives; 16 negatives deliberately share a nearby ML topic.
+Ten ambiguous attention/efficiency/representation-lineage pairs are excluded and
+listed explicitly in the fixture. Transformer/BERT and Transformer/RoBERTa are
+positives because architectural lineage matters for discovery even across tasks.
+
+Validation has 10 different papers from object detection, semantic segmentation,
+speech recognition, and policy optimization: 8 positives and 37 negatives. Nine
+detection-versus-segmentation pairs are its nearest negative boundary. Labels
+describe the same core research problem or an explicit core methodological
+continuation, rather than requiring identical methods.
+
+Both evaluations use `unsloth/embeddinggemma-300m`, the shipped graph-similarity
+formatter, CPU inference with four threads, automatic checkpoint dtype selection,
+verified BF16 autocast, and normalized FP32 outputs. Frozen texts, source links,
+and labels live in `tests/_semantic_abstracts.py`; measured outputs stay outside
+the repository. The slow suite recomputes the development selection and checks
+edge decisions through both embedding and hybrid scorers. Equal years and
+citation counts isolate the semantic gate from demographic weights.
+
+| Set | Threshold | Related retained | Unrelated admitted | Precision | Recall | F1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Development | 0.71 | 12/13 | 3/68 | 0.800 | 0.923 | 0.857 |
+| Development | 0.72 | 10/13 | 3/68 | 0.769 | 0.769 | 0.769 |
+| Development | **0.74** | **10/13** | **0/68** | **1.000** | **0.769** | **0.870** |
+| Validation | 0.71 | 8/8 | 3/37 | 0.727 | 1.000 | 0.842 |
+| Validation | 0.72 | 8/8 | 2/37 | 0.800 | 1.000 | 0.889 |
+| Validation | **0.74** | **7/8** | **1/37** | **0.875** | **0.875** | **0.875** |
+
+The higher threshold favors precision: combined false edges drop from five to
+one, at the cost of one additional missed related pair. Validation F1 slightly
+decreases; 0.74 is a development-selected precision tradeoff, not a universal
+optimum. In validation, RetinaNet/YOLO (0.7392) becomes a false negative and
+Faster R-CNN/FCN (0.7445) remains a false positive under these labels.
+Transformer/BERT (0.7146) remains below the gate. Lowering the threshold to 0.71
+recovers it but admits additional unrelated edges. Shared references can still
+qualify pairs independently in hybrid graphs.
+
+These small, manually labeled fixtures are regressions rather than a representative
+benchmark of scientific relevance. They do not calibrate other checkpoints or
+dimensions. Set `--min-semantic-similarity` or `defaults.min_semantic_similarity`
+after evaluating the intended representation and discovery tradeoff.
+
+With the designated model cached locally:
+
+```bash
+python -m pytest -m slow tests/test_semantic_quality.py
+```
 
 ## Embedding Dimensions (September 2026)
 

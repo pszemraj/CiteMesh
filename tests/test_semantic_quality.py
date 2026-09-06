@@ -1,4 +1,4 @@
-"""Handwritten topical pairs for a bounded semantic-quality evaluation."""
+"""Synthetic and real-abstract fixtures for bounded semantic-quality evaluation."""
 
 from itertools import combinations
 from pathlib import Path
@@ -17,10 +17,11 @@ from citemesh.strategies.embedding import (
 )
 from citemesh.strategies.hybrid import HybridGraphBuilder
 from tests._helpers import LookupEncodeModel
+from tests._semantic_abstracts import DEVELOPMENT, VALIDATION
 
 pytestmark = pytest.mark.slow
 
-# The first six topics select the boundary; the last six are held out.
+# Original synthetic development and held-out topics remain regression controls.
 # Within each topic the two descriptions address the same research problem.
 # Across topics they address different problems, including neighboring ML tasks.
 CASES = [
@@ -246,22 +247,6 @@ def test_real_model_semantic_edge_precision(monkeypatch: pytest.MonkeyPatch) -> 
     hybrid = HybridGraphBuilder(client=MagicMock())
     hybrid.embedding_builder = builder
 
-    # Select once on development topics; held-out topics never set the threshold.
-    development = [
-        (float(vectors[i] @ vectors[j]), i // 2 == j // 2)
-        for i, j in combinations(range(12), 2)
-    ]
-    positive_floor = min(score for score, related in development if related)
-    negative_ceiling = max(score for score, related in development if not related)
-    assert negative_ceiling < EMBEDDING_CONFIG.min_semantic_similarity < positive_floor
-    assert (
-        abs(
-            EMBEDDING_CONFIG.min_semantic_similarity
-            - (positive_floor + negative_ceiling) / 2
-        )
-        < 0.02
-    )
-
     for offset in (0, 12):
         for i, j in combinations(range(offset, offset + 12), 2):
             left, right = papers[i], papers[j]
@@ -281,6 +266,89 @@ def test_real_model_semantic_edge_precision(monkeypatch: pytest.MonkeyPatch) -> 
                     right.paper_id,
                     score,
                 )
+
+
+@pytest.mark.parametrize(
+    ("fixture", "minimum_true_positives", "maximum_false_positives"),
+    [(DEVELOPMENT, 10, 0), (VALIDATION, 7, 1)],
+    ids=["development", "validation"],
+)
+def test_real_abstract_semantic_edge_quality(
+    monkeypatch: pytest.MonkeyPatch,
+    fixture: dict,
+    minimum_true_positives: int,
+    maximum_false_positives: int,
+) -> None:
+    """Keep measured precision/recall bounds on frozen, full real abstracts.
+
+    :param pytest.MonkeyPatch monkeypatch: Keeps model resolution offline.
+    :param dict fixture: Source texts and predeclared pair labels.
+    :param int minimum_true_positives: Minimum retained related pairs.
+    :param int maximum_false_positives: Maximum admitted unrelated pairs.
+    :return None: Both graph scorers preserve the calibrated semantic decisions.
+    """
+    builder = _quality_builder(monkeypatch)
+    # Equal year/count metadata isolates semantic eligibility in both scorers.
+    papers = [
+        Paper(paper_id, title, 2024, abstract=abstract, citation_count=100)
+        for paper_id, title, abstract, _source in fixture["papers"]
+    ]
+    vectors = builder._encode_texts(
+        [
+            format_paper_for_embedding(
+                profile=builder.model_profile,
+                paper=paper,
+                task=EmbeddingTask.GRAPH_SIMILARITY,
+            )
+            for paper in papers
+        ]
+    )
+    builder.embeddings = dict(zip((p.paper_id for p in papers), vectors))
+    hybrid = HybridGraphBuilder(client=MagicMock())
+    hybrid.embedding_builder = builder
+    hybrid.paper_sources = {paper.paper_id: "citation" for paper in papers}
+    positives = {frozenset(pair) for pair in fixture["positive_pairs"]}
+    excluded = {frozenset(pair) for pair in fixture["excluded_pairs"]}
+    true_positives = false_positives = 0
+    calibration_pairs = []
+    for left, right in combinations(papers, 2):
+        pair = frozenset((left.paper_id, right.paper_id))
+        if pair in excluded:
+            continue
+        calibration_pairs.append(
+            (
+                float(
+                    builder.embeddings[left.paper_id]
+                    @ builder.embeddings[right.paper_id]
+                ),
+                pair in positives,
+            )
+        )
+        score = builder.compute_similarity(left, right)
+        admitted = bool(builder.should_create_edge(left, right, score))
+        hybrid_score = hybrid.compute_similarity(left, right)
+        assert bool(hybrid.should_create_edge(left, right, hybrid_score)) == admitted
+        true_positives += int(admitted and pair in positives)
+        false_positives += int(admitted and pair not in positives)
+    assert true_positives >= minimum_true_positives
+    assert false_positives <= maximum_false_positives
+    if fixture is DEVELOPMENT:
+        # Validation is never used to choose the threshold.
+        candidates = []
+        for hundredths in range(65, 81):
+            threshold = hundredths / 100
+            tp = sum(
+                related and score >= threshold for score, related in calibration_pairs
+            )
+            fp = sum(
+                not related and score >= threshold
+                for score, related in calibration_pairs
+            )
+            fn = len(positives) - tp
+            f1 = 2 * tp / (2 * tp + fp + fn)
+            precision = tp / (tp + fp) if tp + fp else 0.0
+            candidates.append((f1, precision, threshold))
+        assert max(candidates)[2] == EMBEDDING_CONFIG.min_semantic_similarity
 
 
 def test_real_model_persistent_retrieval_recall(

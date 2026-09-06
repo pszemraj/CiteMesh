@@ -72,7 +72,7 @@ Two semantic sources, selected with `--semantic-source`:
   batch rows are skipped so valid rows can still enrich their selected papers.
 
 - Strengths: captures semantic similarity even when citations are missing.
-- Graph edges require symmetric semantic cosine of at least **0.72** before publication year, category overlap, and shared authors modify their weights. This boundary is calibrated for the default EmbeddingGemma model, STS formatting, and 512 dimensions; it is not a probability or a model-independent relevance scale.
+- Graph edges require symmetric semantic cosine of at least **0.74** before publication year, category overlap, and shared authors modify their weights. This boundary is calibrated for the default EmbeddingGemma model, STS formatting, and 512 dimensions; it is not a probability or a model-independent relevance scale.
 - Edge selection reserves the seed's strongest eligible neighbors before the
   remaining edges, while preserving the per-paper `top_k` cap.
 - Typical use: semantic exploration and discovery beyond citation graphs.
@@ -87,13 +87,15 @@ default boundary is uncalibrated for those representations. Evaluate labeled
 related and unrelated pairs before choosing an override; smaller dimensions do
 not necessarily preserve the same cosine boundary.
 
-The semantic boundary comes from six hand-labeled development topics: the midpoint
-between the largest unrelated cosine (0.657) and smallest related cosine (0.773),
-rounded to 0.72. Six separate held-out topics check the resulting edge decisions,
-including neighboring ML tasks. This is a bounded regression evaluation, not a
-claim of general scientific relevance accuracy. With the default model already
-cached, run it offline with
-`python -m pytest -m slow tests/test_semantic_quality.py`.
+The semantic boundary is selected on 14 full real abstracts and checked on 10
+independent real abstracts. At 0.74, the combined fixtures retain 17 of 21 related
+pairs and admit 1 of 105 unrelated pairs; 0.72 retains 18 and admits 5. This favors
+precision and still misses some useful architectural relationships, including
+Transformer/BERT. See the [semantic threshold study](../reference/defaults-tuning-study.md#semantic-edge-threshold-september-2026)
+for label exclusions, selection method, and validation tradeoffs. These are
+bounded regression fixtures, not general scientific relevance accuracy estimates.
+With the default model already cached, run the real-abstract and original
+synthetic controls offline with `python -m pytest -m slow tests/test_semantic_quality.py`.
 The same evaluation checks recall@2 against two labeled relevant papers per query
 and compares FP32, INT8, and binary-prefilter retrieval. The 24-document fixture
 uses the default 8× prefilter rescore budget (16 candidates), so this check
@@ -108,7 +110,7 @@ calibration drift as a corpus grows.
 - Limitations: inherits dependency and cache requirements from the embedding path.
 - Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.
 - `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
-- Graph edges require symmetric semantic cosine of at least **0.72** or shared references before temporal and citation-count weights contribute. Publication proximity has no separate co-citation bonus.
+- Graph edges require symmetric semantic cosine of at least **0.74** or shared references before temporal and citation-count weights contribute. Publication proximity has no separate co-citation bonus.
 - With `--max-semantic 0`, hybrid uses the citation strategy's TF-IDF/bibliographic scorer and edge threshold, retaining the hybrid per-paper degree cap.
 - Semantic enrichment failures stop the build; hybrid does not silently downgrade
   to citation-only output.

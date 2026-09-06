@@ -32,8 +32,8 @@ class TemporalConfig:
 class EmbeddingSimilarityConfig:
     """Configuration for embedding-based similarity."""
 
-    # Midpoint of labeled related/unrelated development pairs; see semantic quality test.
-    min_semantic_similarity: float = 0.72
+    # Real-abstract development grid winner; see the semantic quality fixtures.
+    min_semantic_similarity: float = 0.74
 
     # Multi-factor similarity weights.
     semantic_weight: float = 0.5
