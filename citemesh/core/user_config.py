@@ -152,6 +152,23 @@ def _choice_caster(choices: Tuple[str, ...]) -> Callable[[Any], str]:
     return _cast
 
 
+def _cast_similarity(value: Any) -> float:
+    """Parse a finite cosine threshold in the supported range.
+
+    :param Any value: Raw TOML or CLI-provided value.
+    :return float: Threshold between zero and one, inclusive.
+    """
+    if isinstance(value, bool):
+        raise ConfigValueError("expected a float, got a boolean")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigValueError("expected a float") from exc
+    if not 0.0 <= parsed <= 1.0:
+        raise ConfigValueError("expected a finite float between 0.0 and 1.0")
+    return parsed
+
+
 def _cast_export(value: Any) -> list[str]:
     """Validate an export format list (TOML array or comma-separated string).
 
@@ -202,6 +219,7 @@ CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigCaster] = {
     "max_references": _int_caster(0),
     "top_k": _int_caster(1),
     "truncate_dim": _int_caster(1),
+    "min_semantic_similarity": _cast_similarity,
     "corpus_size": _int_caster(1),
     "dataset_split": _cast_str,
     "streaming": _cast_bool,

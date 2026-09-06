@@ -47,6 +47,7 @@ Value forms for `config set`:
 
 - Booleans: `true` / `false` (also `1/0`, `yes/no`, `on/off`)
 - Export lists: comma-separated, e.g. `citemesh config set defaults.export json,dashboard`
+- Similarity thresholds: decimal numbers between `0.0` and `1.0`
 - Everything else: plain strings/integers
 
 Invalid keys and values are rejected at `set` time with the list of valid options. Invalid entries, malformed TOML, and non-UTF-8 files are ignored with a warning during ordinary CLI loads, so a bad config never blocks unrelated commands. Mutating `config set`/`unset` operations fail instead of overwriting an unreadable file. Unknown keys already in the file are preserved when CiteMesh rewrites it (comments are not - the TOML round-trip is value-level).
@@ -74,6 +75,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `max_references` | Default `--max-references` |
 | `top_k` | Default `--top-k` |
 | `truncate_dim` | Default `--truncate-dim`; unset uses the model profile (`512` for EmbeddingGemma) |
+| `min_semantic_similarity` | Default `--min-semantic-similarity` for embedding/hybrid edge eligibility; CLI flags override this value |
 | `corpus_size` | Default `--corpus-size` |
 | `dataset_split` | Default `--dataset-split` |
 | `streaming` | Default `--streaming` / `--no-streaming` toggle |

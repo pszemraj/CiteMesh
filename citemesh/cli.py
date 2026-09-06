@@ -39,7 +39,7 @@ from rich.text import Text
 from rich_argparse import RichHelpFormatter
 
 from citemesh._runtime import stderr_isatty, stdin_isatty, stdout_isatty
-from citemesh.core import EMBEDDING_STORAGE_CONFIG
+from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG
 from citemesh.core.user_config import (
     SEARCH_MODE_CHOICES,
     USER_CONFIG_FILENAME,
@@ -583,6 +583,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "all_corpus": {"embedding", "hybrid"},
     "top_k": {"embedding"},
     "truncate_dim": {"embedding", "hybrid"},
+    "min_semantic_similarity": {"embedding", "hybrid"},
     "streaming": {"embedding", "hybrid"},
     "force_rebuild_cache": {"embedding", "hybrid"},
     "overwrite_cache": {"embedding", "hybrid"},
@@ -650,6 +651,7 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "corpus_size",
     "all_corpus",
     "truncate_dim",
+    "min_semantic_similarity",
     "streaming",
     "force_rebuild_cache",
     "overwrite_cache",
@@ -689,6 +691,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "dataset_split": cli_args.dataset_split,
         "corpus_size": None if cli_args.all_corpus else cli_args.corpus_size,
         "truncate_dim": cli_args.truncate_dim,
+        "min_semantic_similarity": cli_args.min_semantic_similarity,
         "use_streaming": cli_args.streaming,
         "force_rebuild_cache": cli_args.force_rebuild_cache,
         "force_rebuild_reason": getattr(cli_args, "cache_overwrite_reason", None),
@@ -1806,6 +1809,16 @@ def _create_parser() -> Tuple[
             "Optional embedding output dimension truncation "
             "(for EmbeddingGemma: 768, 512, 256, 128; default: 512; "
             "other models use their profile recommendation)"
+        ),
+    )
+
+    semantic_group.add_argument(
+        "--min-semantic-similarity",
+        type=_threshold_float,
+        default=EMBEDDING_CONFIG.min_semantic_similarity,
+        help=(
+            "Minimum semantic cosine for embedding/hybrid graph edges "
+            "(default: %(default)s; calibrated for EmbeddingGemma at 512 dimensions)"
         ),
     )
 
@@ -3073,6 +3086,7 @@ def _build_graph_config_payload(
             "corpus_size": None if cli_args.all_corpus else int(cli_args.corpus_size),
             "all_corpus": bool(cli_args.all_corpus),
             "truncate_dim": cli_args.truncate_dim,
+            "min_semantic_similarity": cli_args.min_semantic_similarity,
             "streaming": bool(cli_args.streaming),
             "storage_precision": cli_args.storage_precision,
             "binary_prefilter": bool(cli_args.binary_prefilter),

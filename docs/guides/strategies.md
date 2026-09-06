@@ -79,6 +79,14 @@ Two semantic sources, selected with `--semantic-source`:
 
 Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md). Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](../reference/embedding-runtime.md).
 
+Override the semantic boundary for either embedding or hybrid graphs with
+`--min-semantic-similarity VALUE`, or persist it with
+`citemesh config set defaults.min_semantic_similarity VALUE`. CiteMesh warns when
+the active profile is not EmbeddingGemma or the dimension is not 512 because the
+default boundary is uncalibrated for those representations. Evaluate labeled
+related and unrelated pairs before choosing an override; smaller dimensions do
+not necessarily preserve the same cosine boundary.
+
 The semantic boundary comes from six hand-labeled development topics: the midpoint
 between the largest unrelated cosine (0.657) and smallest related cosine (0.773),
 rounded to 0.72. Six separate held-out topics check the resulting edge decisions,

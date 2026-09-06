@@ -132,6 +132,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         semantic_source: str = "candidates",
         candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
         client: Optional[SemanticScholarClient] = None,
+        min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
     ):
         """
         Initialize hybrid graph builder.
@@ -150,6 +151,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param str dataset_split: ArXiv dataset split
         :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
+        :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
         :param bool use_streaming: Whether to stream the embedding corpus.
         :param bool force_rebuild_cache: Whether to clear embedding cache before semantic enrichment.
         :param Optional[str] force_rebuild_reason: Optional operator rationale logged
@@ -220,6 +222,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 dataset_split=dataset_split,
                 corpus_size=corpus_size,
                 truncate_dim=truncate_dim,
+                min_semantic_similarity=min_semantic_similarity,
                 use_streaming=use_streaming,
                 force_rebuild_cache=force_rebuild_cache,
                 force_rebuild_reason=force_rebuild_reason,
@@ -778,7 +781,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
 
         if (
-            embed_sim < EMBEDDING_CONFIG.min_semantic_similarity
+            embed_sim < self.embedding_builder.min_semantic_similarity
             and biblio_coupling <= 0.0
         ):
             return 0.0

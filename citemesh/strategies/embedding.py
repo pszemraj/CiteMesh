@@ -976,6 +976,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         semantic_source: str = "candidates",
         candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
         client: Optional[SemanticScholarClient] = None,
+        min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
     ):
         """
         Initialize embedding graph builder.
@@ -1017,6 +1018,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int candidate_pool_size: Maximum S2 candidate pool size fetched
             in ``candidates`` mode.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
+        :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
         """
         normalized_semantic_source = str(semantic_source).strip().lower()
         if normalized_semantic_source not in SEMANTIC_SOURCE_CHOICES:
@@ -1027,6 +1029,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
         if candidate_pool_size < 1:
             raise ValueError("candidate_pool_size must be at least 1")
+        if not 0.0 <= min_semantic_similarity <= 1.0:
+            raise ValueError("min_semantic_similarity must be between 0.0 and 1.0")
+        self.min_semantic_similarity = float(min_semantic_similarity)
         if normalized_semantic_source != "arxiv-corpus" and storage_precision == "int8":
             # int8 calibration ranges are only computed during corpus hydration;
             # candidate pools are small enough that float32 storage is free.
@@ -1984,9 +1989,26 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             cache.set_model_fingerprint(model_fingerprint)
 
     def _log_dimension_policy(self) -> None:
-        """Emit one-time debug log for active embedding dimensionality."""
+        """Log dimensionality and warn once about uncalibrated semantic gates.
+
+        :return None: Reports the active profile's calibration limits.
+        """
         if self._dim_logged:
             return
+        self._dim_logged = True
+        if (
+            self.model_profile.name != "google/embeddinggemma"
+            or self.truncate_dim != 512
+        ):
+            logger.warning(
+                "Semantic edge threshold %.3f is uncalibrated for profile=%s, "
+                "dimension=%s. The default 0.72 was calibrated for EmbeddingGemma "
+                "at 512 dimensions. Evaluate related/unrelated pairs and set "
+                "--min-semantic-similarity or defaults.min_semantic_similarity.",
+                self.min_semantic_similarity,
+                self.model_profile.name,
+                self.truncate_dim or "native",
+            )
 
         available_dims = self.model_profile.available_truncate_dims
         if available_dims:
@@ -2012,7 +2034,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     selected_dim,
                     available_text,
                 )
-            self._dim_logged = True
             return
 
         if self.truncate_dim is not None:
@@ -2021,7 +2042,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 self.model_name,
                 self.truncate_dim,
             )
-            self._dim_logged = True
 
     def _resolve_model_kwargs(self) -> Dict[str, Any]:
         """Compute SentenceTransformer kwargs and configure autocast policy.
@@ -4441,7 +4461,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         else:
             semantic_sim = 0.0
 
-        if semantic_sim < EMBEDDING_CONFIG.min_semantic_similarity:
+        if semantic_sim < self.min_semantic_similarity:
             return 0.0
 
         # Temporal factor

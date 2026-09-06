@@ -2584,3 +2584,55 @@ def test_embedding_graph_requires_calibrated_semantic_evidence(
     graph, _ = builder.build_graph("seed")
     assert graph.has_edge("seed", "related")
     assert graph.degree("unrelated") == 0
+
+
+@pytest.mark.parametrize("threshold", [0.65, 0.75])
+@pytest.mark.parametrize("strategy", [EmbeddingGraphBuilder, HybridGraphBuilder])
+def test_semantic_threshold_override_changes_edge_eligibility(
+    strategy: type, threshold: float
+) -> None:
+    """Both scorers use the instance threshold without changing global defaults.
+
+    :param type strategy: Embedding-aware graph builder class.
+    :param float threshold: Threshold below or above the fixture cosine.
+    :return None: The override controls the actual graph edge decision.
+    """
+    builder = strategy(client=MagicMock(), min_semantic_similarity=threshold)
+    encoder = (
+        builder if strategy is EmbeddingGraphBuilder else builder.embedding_builder
+    )
+    encoder.embeddings = {
+        "a": np.array([1.0, 0.0], dtype=np.float32),
+        "b": np.array([0.7, np.sqrt(1.0 - 0.7**2)], dtype=np.float32),
+    }
+    a, b = _paper("a"), _paper("b")
+    if strategy is HybridGraphBuilder:
+        builder.paper_sources = {"a": "citation", "b": "citation"}
+    score = builder.compute_similarity(a, b)
+    assert bool(builder.should_create_edge(a, b, score)) == (threshold < 0.7)
+
+
+@pytest.mark.parametrize(
+    ("profile", "dimension", "warns"),
+    [("auto", 512, False), ("auto", 128, True), ("default", 512, True)],
+)
+def test_semantic_calibration_warning_matches_profile_and_dimension(
+    caplog: pytest.LogCaptureFixture, profile: str, dimension: int, warns: bool
+) -> None:
+    """Warn once when the active representation lacks calibration.
+
+    :param pytest.LogCaptureFixture caplog: Captures calibration notices.
+    :param str profile: Selected formatting profile.
+    :param int dimension: Selected truncation dimension.
+    :param bool warns: Whether the representation is outside calibration coverage.
+    :return None: Checks the warning and its user-facing override guidance.
+    """
+    builder = EmbeddingGraphBuilder(
+        client=MagicMock(), model_profile=profile, truncate_dim=dimension
+    )
+    builder._log_dimension_policy()
+    builder._log_dimension_policy()
+    notices = [r.message for r in caplog.records if "is uncalibrated" in r.message]
+    assert len(notices) == int(warns)
+    if warns:
+        assert "--min-semantic-similarity" in notices[0]

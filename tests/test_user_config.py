@@ -406,6 +406,39 @@ def test_explicit_cli_flag_wins_over_config_default() -> None:
     assert args.theme == "solarized"
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_semantic_threshold_config_reaches_builder_kwargs(
+    tmp_path: Path, explicit: bool
+) -> None:
+    """Persisted thresholds route to both strategies with CLI precedence.
+
+    :param Path tmp_path: Isolated config file location.
+    :param bool explicit: Whether the CLI overrides the persisted threshold.
+    :return None: Checks persisted float parsing and shared builder dispatch.
+    """
+    path = tmp_path / "config.toml"
+    set_config_value("defaults.min_semantic_similarity", "0.68", path=path)
+    config = load_user_config(path=path)
+    flags = ["--min-semantic-similarity", "0.75"] if explicit else []
+    args, provided, _ = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding", *flags]
+    )
+    cli_module._apply_user_config_defaults(args, provided, config)
+    kwargs = cli_module._shared_embedding_builder_kwargs(args)
+    assert kwargs["min_semantic_similarity"] == (0.75 if explicit else 0.68)
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-0.1", "1.1", True])
+def test_semantic_threshold_config_rejects_invalid_values(value: object) -> None:
+    """Keep persisted thresholds within the same range as CLI arguments.
+
+    :param object value: Invalid threshold representation.
+    :return None: Checks config's existing validation contract.
+    """
+    with pytest.raises(ConfigValueError):
+        CONFIG_DEFAULT_KEY_SPECS["min_semantic_similarity"](value)
+
+
 def test_explicit_no_streaming_wins_over_enabled_config_default() -> None:
     """The negative streaming flag should override a persisted enabled default.
 
