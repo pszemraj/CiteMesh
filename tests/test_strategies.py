@@ -13,6 +13,7 @@ import pytest
 
 from citemesh.core import EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
 from citemesh.data.model_profiles import compose_title_abstract_text
+from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies import hybrid as hybrid_strategy
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -2498,3 +2499,45 @@ def test_hybrid_without_embeddings_keeps_citation_topical_scoring() -> None:
     score = builder.compute_similarity(seed, unrelated)
     assert 0.2 < score < 0.5
     assert builder.should_create_edge(seed, unrelated, score)
+
+
+@pytest.mark.parametrize("prebuilt", [False, True])
+def test_text_index_handles_empty_vocabulary(prebuilt: bool) -> None:
+    """Stop-word-only titles produce no lexical evidence, including after a rebuild.
+
+    :param bool prebuilt: Whether the index previously contained usable text.
+    :return None: Verifies zero similarity without an exception or stale scores.
+    """
+    index = AbstractSimilarityIndex()
+    if prebuilt:
+        index.build(
+            {
+                paper_id: Paper(paper_id, "Quantum field theory", 2024)
+                for paper_id in ("a", "b")
+            }
+        )
+        assert index.similarity("a", "b") == pytest.approx(1.0)
+    index.build(
+        {
+            "a": Paper("a", "To be or not to be", 2024),
+            "b": Paper("b", "What is it", 2024),
+        }
+    )
+    assert index.similarity("a", "b") == 0.0
+
+
+def test_citation_build_retains_shared_references_with_empty_vocabulary() -> None:
+    """Title-only stop words do not prevent a bibliographically supported graph.
+
+    :return None: Verifies successful graph construction with a shared-reference edge.
+    """
+    seed = Paper("seed", "To be or not to be", 2024, references=["shared"])
+    peer = Paper("peer", "What is it", 2024, references=["shared"])
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [peer]
+    builder = CitationGraphBuilder(
+        max_papers=2, max_references=1, max_citations=0, client=client
+    )
+    graph, _ = builder.build_graph("seed")
+    assert graph.has_edge("seed", "peer")
