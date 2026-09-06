@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 import networkx as nx
 import numpy as np
 
-from citemesh.core import EMBEDDING_STORAGE_CONFIG, HYBRID_CONFIG, Paper
+from citemesh.core import (
+    EMBEDDING_CONFIG,
+    EMBEDDING_STORAGE_CONFIG,
+    HYBRID_CONFIG,
+    Paper,
+)
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.services import get_client
 from citemesh.strategies.base import (
@@ -772,7 +777,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             )
             embed_sim = float(np.clip(np.dot(emb1, emb2), -1.0, 1.0))
 
-        if embed_sim <= 0.0 and biblio_coupling <= 0.0:
+        if (
+            embed_sim < EMBEDDING_CONFIG.min_semantic_similarity
+            and biblio_coupling <= 0.0
+        ):
             return 0.0
 
         source1_has_semantic = source1 in {"semantic", "both"}

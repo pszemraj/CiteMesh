@@ -2444,19 +2444,22 @@ def test_hybrid_candidate_mode_uses_recommendations_not_corpus(
         ("both", "both"),
     ],
 )
+@pytest.mark.parametrize("cosine", [0.0, 0.48, 0.71])
 def test_hybrid_edges_require_semantic_or_bibliographic_evidence(
     sources: tuple[str, str],
+    cosine: float,
 ) -> None:
     """Publication era and popularity cannot create hybrid edges alone.
 
     :param tuple[str, str] sources: Candidate provenance for both papers.
+    :param float cosine: Insufficient semantic similarity despite positive scores.
     :return None: Verifies absent unsupported edges and retained bibliographic evidence.
     """
     builder = HybridGraphBuilder(max_papers=2, client=MagicMock())
     builder.paper_sources = dict(zip(("a", "b"), sources))
     builder.embedding_builder.embeddings = {
         "a": np.array([1.0, 0.0], dtype=np.float32),
-        "b": np.array([0.0, 1.0], dtype=np.float32),
+        "b": np.array([cosine, np.sqrt(1.0 - cosine**2)], dtype=np.float32),
     }
     a = _paper("a")
     b = _paper("b")
@@ -2543,8 +2546,8 @@ def test_citation_build_retains_shared_references_with_empty_vocabulary() -> Non
     assert graph.has_edge("seed", "peer")
 
 
-@pytest.mark.parametrize("cosine", [0.0, -0.1])
-def test_embedding_graph_requires_positive_semantic_evidence(
+@pytest.mark.parametrize("cosine", [0.0, -0.1, 0.48, 0.71])
+def test_embedding_graph_requires_calibrated_semantic_evidence(
     monkeypatch: pytest.MonkeyPatch, cosine: float
 ) -> None:
     """Metadata bonuses cannot connect semantically unsupported paper pairs.

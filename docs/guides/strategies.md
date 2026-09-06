@@ -72,12 +72,20 @@ Two semantic sources, selected with `--semantic-source`:
   batch rows are skipped so valid rows can still enrich their selected papers.
 
 - Strengths: captures semantic similarity even when citations are missing.
-- Graph edges require positive symmetric semantic similarity before publication year, category overlap, and shared authors modify their weights.
+- Graph edges require symmetric semantic cosine of at least **0.72** before publication year, category overlap, and shared authors modify their weights. This boundary is calibrated for the default EmbeddingGemma model, STS formatting, and 512 dimensions; it is not a probability or a model-independent relevance scale.
 - Edge selection reserves the seed's strongest eligible neighbors before the
   remaining edges, while preserving the per-paper `top_k` cap.
 - Typical use: semantic exploration and discovery beyond citation graphs.
 
 Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md). Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](../reference/embedding-runtime.md).
+
+The semantic boundary comes from six hand-labeled development topics: the midpoint
+between the largest unrelated cosine (0.657) and smallest related cosine (0.773),
+rounded to 0.72. Six separate held-out topics check the resulting edge decisions,
+including neighboring ML tasks. This is a bounded regression evaluation, not a
+claim of general scientific relevance accuracy. With the default model already
+cached, run it offline with
+`python -m pytest -m slow tests/test_semantic_quality.py`.
 
 ## Hybrid Strategy
 
@@ -87,7 +95,7 @@ Embedding cache behavior, hydration, and precision controls are defined in [Cach
 - Limitations: inherits dependency and cache requirements from the embedding path.
 - Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.
 - `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
-- Graph edges require positive symmetric semantic similarity or shared references before temporal and citation-count weights contribute. Publication proximity has no separate co-citation bonus.
+- Graph edges require symmetric semantic cosine of at least **0.72** or shared references before temporal and citation-count weights contribute. Publication proximity has no separate co-citation bonus.
 - With `--max-semantic 0`, hybrid uses the citation strategy's TF-IDF/bibliographic scorer and edge threshold, retaining the hybrid per-paper degree cap.
 - Semantic enrichment failures stop the build; hybrid does not silently downgrade
   to citation-only output.

@@ -4438,7 +4438,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         else:
             semantic_sim = 0.0
 
-        if semantic_sim <= 0.0:
+        if semantic_sim < EMBEDDING_CONFIG.min_semantic_similarity:
             return 0.0
 
         # Temporal factor
