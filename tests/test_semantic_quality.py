@@ -1,18 +1,22 @@
 """Handwritten topical pairs for a bounded semantic-quality evaluation."""
 
 from itertools import combinations
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import huggingface_hub.constants
+import numpy as np
 import pytest
 
 from citemesh.core import EMBEDDING_CONFIG, Paper
+from citemesh.data.embedding_cache import EmbeddingCache
 from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,
     EmbeddingTask,
     format_paper_for_embedding,
 )
 from citemesh.strategies.hybrid import HybridGraphBuilder
+from tests._helpers import LookupEncodeModel
 
 pytestmark = pytest.mark.slow
 
@@ -276,4 +280,64 @@ def test_real_model_semantic_edge_precision(monkeypatch: pytest.MonkeyPatch) -> 
                     left.paper_id,
                     right.paper_id,
                     score,
+                )
+
+
+def test_real_model_persistent_retrieval_recall(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Compare labeled retrieval through FP32, INT8, and binary-prefilter search.
+
+    :param pytest.MonkeyPatch monkeypatch: Keeps model resolution offline.
+    :param Path tmp_path: Isolates generated cache payloads.
+    :return None: All modes retain both relevant papers for each topical query.
+    """
+    builder = _quality_builder(monkeypatch)
+    papers = _quality_papers()
+    metadata = {
+        paper.paper_id: {"title": paper.title, "abstract": paper.abstract}
+        for paper in papers
+    }
+    document_texts = [
+        builder.model_profile.format_document(record) for record in metadata.values()
+    ]
+    document_vectors = builder._encode_texts(document_texts)
+    query_vectors = builder._encode_texts(
+        [builder.model_profile.format_query(query) for _, query, _ in CASES]
+    )
+    # Reuse actual model outputs so all storage modes receive identical vectors.
+    model = LookupEncodeModel(dict(zip(document_texts, document_vectors)))
+    for precision in ("float32", "int8"):
+        cache = EmbeddingCache(
+            cache_dir=tmp_path / precision,
+            storage_precision=precision,
+            calibration_sample_size=len(papers),
+        )
+        if precision == "int8":
+            cache.set_calibration_ranges(
+                np.stack([document_vectors.min(axis=0), document_vectors.max(axis=0)]),
+                embedding_dim=document_vectors.shape[1],
+            )
+        cache.upsert_embeddings(
+            metadata,
+            model,
+            show_progress=False,
+            text_builder=builder.model_profile.format_document,
+        )
+        for binary in (False, True) if precision == "int8" else (False,):
+            for (topic, _, _), query in zip(CASES, query_vectors):
+                expected = {f"{topic}-0", f"{topic}-1"}
+                exact = {
+                    papers[int(index)].paper_id
+                    for index in np.argsort(-(document_vectors @ query))[:2]
+                }
+                assert exact == expected, (topic, exact)
+                results = cache.search(
+                    query, top_k=2, binary_prefilter=binary, binary_rescore_multiplier=8
+                )
+                actual = {result.paper_id for result in results}
+                assert actual == expected, (precision, binary, topic, actual)
+                assert cache.last_search_used_binary_prefilter is binary
+                assert cache.last_search_rescored_embeddings == (
+                    16 if binary else len(papers)
                 )

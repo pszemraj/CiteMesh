@@ -86,6 +86,11 @@ including neighboring ML tasks. This is a bounded regression evaluation, not a
 claim of general scientific relevance accuracy. With the default model already
 cached, run it offline with
 `python -m pytest -m slow tests/test_semantic_quality.py`.
+The same evaluation checks recall@2 against two labeled relevant papers per query
+and compares FP32, INT8, and binary-prefilter retrieval. The 24-document fixture
+uses the default 8× prefilter rescore budget (16 candidates), so this check
+exercises actual candidate exclusion. It does not measure full-corpus recall or
+calibration drift as a corpus grows.
 
 ## Hybrid Strategy
 
