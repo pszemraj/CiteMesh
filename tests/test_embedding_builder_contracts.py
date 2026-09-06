@@ -2622,6 +2622,83 @@ def test_corpus_year_uses_publication_or_submission(
     assert _extract_dataset_paper_metadata(record, 0)["year"] == expected_year
 
 
+@pytest.mark.parametrize(
+    ("source_doi", "expected"),
+    [
+        ("10.1234/first 10.5678/second", "10.1234/first"),
+        ("10.1234/first,10.5678/second", "10.1234/first"),
+        ("10.1234/first; 10.5678/second", "10.1234/first"),
+        ("https://doi.org/10.1234/first\n10.5678/second", "10.1234/first"),
+        ("doi:10.1234/first", "10.1234/first"),
+        ("not-a-doi", ""),
+        ("", ""),
+    ],
+)
+def test_corpus_metadata_keeps_first_source_doi(source_doi: str, expected: str) -> None:
+    """Keep one normalized DOI when the source lists multiple publications.
+
+    :param str source_doi: Raw source DOI field.
+    :param str expected: First normalized DOI, or empty for invalid input.
+    :return None: Checks the adapter shared by hydration and backfill.
+    """
+    metadata = _extract_dataset_paper_metadata(
+        {"id": "1706.03762", "doi": source_doi}, 0
+    )
+    assert metadata["doi"] == expected
+
+
+def test_fresh_hydration_resume_skips_metadata_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Current-adapter rows need no metadata scan after an interrupted first build.
+
+    :param pytest.MonkeyPatch monkeypatch: Supplies local data and fake encoding.
+    :return None: Resumes persisted rows without loading a backfill dataset.
+    """
+    source = "librarian-bots/arxiv-metadata-snapshot"
+    builder = EmbeddingGraphBuilder(
+        storage_precision="float32", corpus_size=None, client=MagicMock()
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", ConstantEncodeModel)
+    monkeypatch.setattr(embedding_module, "HYDRATION_FLUSH_SIZE", 1)
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    records = [
+        {"id": "1706.03762", "title": "First", "abstract": "First abstract"},
+        {"id": "1810.04805", "title": "Second", "abstract": "Second abstract"},
+    ]
+
+    def interrupted_rows() -> Iterator[dict[str, str]]:
+        """Fail after flushing the first record.
+
+        :return Iterator[dict[str, str]]: One current-adapter source row.
+        """
+        yield records[0]
+        raise RuntimeError("hydration interrupted")
+
+    load = MagicMock(side_effect=[(source, interrupted_rows()), (source, records[1:])])
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load)
+    backfill = MagicMock()
+    monkeypatch.setattr(
+        embedding_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=backfill),
+    )
+    with pytest.raises(RuntimeError, match="hydration interrupted"):
+        builder._ensure_cache_hydrated(use_streaming=False)
+    cache = builder.embedding_cache
+    assert cache.has_current_corpus_metadata()
+    assert cache.get_cached_paper_ids() == {"arxiv:1706.03762"}
+    assert not cache.payload_stats().hydration_complete
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.is_hydrated("train", None, dataset_source=source)
+    assert cache.get_cached_paper_ids() == {"arxiv:1706.03762", "arxiv:1810.04805"}
+    assert load.call_count == 2
+    backfill.assert_not_called()
+
+
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 @pytest.mark.parametrize("interrupt", [False, True])
 def test_corpus_metadata_backfill_preserves_vectors_and_selection(

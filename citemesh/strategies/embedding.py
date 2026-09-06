@@ -912,12 +912,13 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
     )
     paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
     arxiv_id, doi = external_ids_from_canonical_paper_id(paper_id)
-    source_doi = str(paper.get("doi") or "").strip()
+    source_doi = re.split(r"[\s,;]+", str(paper.get("doi") or "").strip())[0]
     if source_doi:
         _, normalized_doi = external_ids_from_canonical_paper_id(
             normalize_paper_id(source_doi)
         )
-        doi = normalized_doi or doi
+        if normalized_doi and normalized_doi.startswith("10."):
+            doi = normalized_doi
     title = paper.get("title", "Unknown")
     if not isinstance(title, str) or not title.strip():
         title = "Unknown"
@@ -3322,6 +3323,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             corpus_size=self.corpus_size,
             complete=False,
         )
+        # The cleared namespace contains only rows from the current adapter,
+        # including when this hydration is interrupted and resumed later.
+        self.embedding_cache.mark_corpus_metadata_current()
 
         progress_total = self._resolve_hydration_progress_total(
             dataset,
@@ -3347,7 +3351,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
             return
 
-        self.embedding_cache.mark_corpus_metadata_current()
         if self.corpus_size is None and ":" not in str(self.dataset_split):
             upstream_rows = self._resolve_dataset_split_row_count(dataset_source)
             updated_rows = self._cached_payload_row_count()
