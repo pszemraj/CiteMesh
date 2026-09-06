@@ -3553,7 +3553,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         # Cached unique IDs are not a source offset after reordered growth.
         # Exhausting the tail alone cannot establish a duplicate-ID deficit.
-        if upstream_rows is not None and updated_rows < upstream_rows:
+        if upstream_rows is None or updated_rows < upstream_rows:
             reconciled = self._hydrate_exact_hydration_source_slice(
                 use_streaming=use_streaming,
                 source=source,
