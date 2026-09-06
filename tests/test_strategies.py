@@ -2541,3 +2541,43 @@ def test_citation_build_retains_shared_references_with_empty_vocabulary() -> Non
     )
     graph, _ = builder.build_graph("seed")
     assert graph.has_edge("seed", "peer")
+
+
+@pytest.mark.parametrize("cosine", [0.0, -0.1])
+def test_embedding_graph_requires_positive_semantic_evidence(
+    monkeypatch: pytest.MonkeyPatch, cosine: float
+) -> None:
+    """Metadata bonuses cannot connect semantically unsupported paper pairs.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture for replacing acquisition and inference.
+    :param float cosine: Unsupported candidate's cosine against the seed.
+    :return None: Verifies the supported edge survives and the unrelated paper stays isolated.
+    """
+    papers = {
+        paper_id: Paper(
+            paper_id,
+            title,
+            2024,
+            authors=[Author(name="Shared Author")],
+            categories=["Computer Science"],
+            is_seed=paper_id == "seed",
+        )
+        for paper_id, title in (
+            ("seed", "Quantum field theory"),
+            ("related", "Quantum field interactions"),
+            ("unrelated", "Medieval pottery"),
+        )
+    }
+    builder = EmbeddingGraphBuilder(max_papers=3, client=MagicMock())
+    monkeypatch.setattr(builder, "collect_papers", MagicMock(return_value=papers))
+    monkeypatch.setattr(builder, "prepare_graph_scoring", MagicMock())
+    builder.embeddings = {
+        "seed": np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        "related": np.array([0.8, 0.6, 0.0], dtype=np.float32),
+        "unrelated": np.array(
+            [cosine, 0.0, np.sqrt(1.0 - cosine**2)], dtype=np.float32
+        ),
+    }
+    graph, _ = builder.build_graph("seed")
+    assert graph.has_edge("seed", "related")
+    assert graph.degree("unrelated") == 0

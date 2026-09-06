@@ -72,6 +72,7 @@ Two semantic sources, selected with `--semantic-source`:
   batch rows are skipped so valid rows can still enrich their selected papers.
 
 - Strengths: captures semantic similarity even when citations are missing.
+- Graph edges require positive symmetric semantic similarity before publication year, category overlap, and shared authors modify their weights.
 - Edge selection reserves the seed's strongest eligible neighbors before the
   remaining edges, while preserving the per-paper `top_k` cap.
 - Typical use: semantic exploration and discovery beyond citation graphs.

@@ -4438,6 +4438,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         else:
             semantic_sim = 0.0
 
+        if semantic_sim <= 0.0:
+            return 0.0
+
         # Temporal factor
         temporal_factor = self.temporal_similarity(paper1, paper2)
 
