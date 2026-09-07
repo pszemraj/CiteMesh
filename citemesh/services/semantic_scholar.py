@@ -147,7 +147,7 @@ def _jittered_backoff(
 
 
 class _RetryableRequestError(RuntimeError):
-    """Internal marker for retryable direct-REST failures (HTTP 429)."""
+    """Internal marker for transient request failures worth retrying."""
 
     def __init__(self, message: str, retry_after: Optional[float] = None) -> None:
         """Create a retryable request error.
@@ -931,7 +931,10 @@ class SemanticScholarClient:
         :param Optional[Dict[str, str]] headers: SDK authentication headers.
         :param Optional[Dict[str, Any]] payload: Batch POST body, or no body for GET.
         :return Any: Decoded response consumed by SDK pagination/conversion.
-        :raises ObjectNotFoundException: When the endpoint returns HTTP 404.
+        :raises ObjectNotFoundException: When the first page returns HTTP 404.
+        :raises _RetryableRequestError: When a later pagination page returns
+            HTTP 404, so partially fetched relations are never misread as a
+            missing paper.
         """
         data = self._request_json_once(
             url,
@@ -941,6 +944,15 @@ class SemanticScholarClient:
             payload=payload,
         )
         if data is None:
+            offset_match = re.search(r"(?:^|&)offset=(\d+)", parameters)
+            if offset_match is not None and int(offset_match.group(1)) > 0:
+                # The paper was served moments ago on an earlier page, so a
+                # 404 here is a transient service inconsistency. Mapping it to
+                # not-found would discard the fetched records and persist an
+                # empty relation list for a paper that has relations.
+                raise _RetryableRequestError(
+                    f"HTTP 404 at pagination offset {offset_match.group(1)} from {url}"
+                )
             raise ObjectNotFoundException(f"Paper not found: {url}")
         if url.endswith(("/references", "/citations")) and (
             not isinstance(data, dict) or "data" not in data

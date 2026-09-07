@@ -2101,6 +2101,41 @@ def test_real_sdk_transport_preserves_outages_and_stops_failed_pagination(
             assert not s2._paper_cache_path("p1").exists()
 
 
+def test_mid_pagination_404_is_an_outage_not_an_empty_reference_list() -> None:
+    """A 404 on a later relation page must not persist an empty reference list.
+
+    :return None: Checks the real SDK pagination path with a two-page response.
+    """
+    first_page = {
+        "offset": 0,
+        "next": 100,
+        "data": [{"citedPaper": _paper_payload()} for _ in range(100)],
+    }
+
+    def _respond(url: str, **kwargs: Any) -> _MockResponse:
+        """Serve a full first page, then HTTP 404 for every later page.
+
+        :param str url: Requested endpoint URL.
+        :param Any kwargs: Request keyword arguments carrying the params string.
+        :return _MockResponse: Page payload or a pagination 404.
+        """
+        params = str(kwargs.get("params", ""))
+        if "offset=0" in params or "offset=" not in params:
+            return _MockResponse(200, first_page)
+        return _MockResponse(404)
+
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=_respond)
+        with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+            with pytest.raises(semantic_module.SemanticScholarUnavailableError):
+                client.get_reference_ids("p1")
+        assert sleep_mock.call_count == API_CONFIG.max_retries - 1
+        # Each attempt refetches page one and then hits the pagination 404.
+        assert client._session.get.call_count == API_CONFIG.max_retries * 2
+        assert not s2._reference_cache_path("p1").exists()
+
+
 @pytest.mark.parametrize(
     "method",
     ["get_papers", "get_paper_references", "get_paper_citations", "get_reference_ids"],
