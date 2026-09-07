@@ -13,6 +13,7 @@ import logging
 import math
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -161,6 +162,33 @@ class _HelpFormatter(RichHelpFormatter):
             max_help_position=32,
             width=min(110, shutil.get_terminal_size().columns - 2),
         )
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """Argparse parser that styles usage errors like the rest of the CLI.
+
+    ``RichHelpFormatter`` only styles help and usage rendering; argparse still
+    reports ``error()`` through a plain ``sys.stderr`` write. Subparsers default
+    to their parent's class, so building the root parser from this class styles
+    every command's usage errors without a per-parser opt-in.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        """Report a usage error through the Rich console, then exit.
+
+        :param str message: Failure description supplied by argparse.
+        :return NoReturn: Always exits with argparse's usage status code.
+        """
+        self.print_usage(sys.stderr)
+        log_console.print(
+            Text.assemble(
+                (f"{self.prog}: ", "bold"),
+                ("error: ", "bold red"),
+                (message, "red"),
+            ),
+            soft_wrap=True,
+        )
+        self.exit(2)
 
 
 def _help_examples(*examples: tuple[str, str]) -> Table:
@@ -1525,7 +1553,7 @@ def _create_parser() -> Tuple[
         Root parser, build subcommand parser, cache subcommand parser,
         config subcommand parser.
     """
-    parser = argparse.ArgumentParser(
+    parser = _ArgumentParser(
         prog="citemesh",
         description="CiteMesh — discover related research and build paper graphs.",
         epilog=Group(
