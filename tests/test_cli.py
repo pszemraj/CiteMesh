@@ -2130,23 +2130,55 @@ def test_dashboard_collection_resolver_always_includes_graph_json(
     ],
     ids=["malformed-json", "invalid-utf8", "unsupported-schema"],
 )
+@pytest.mark.parametrize("stat_error", [False, True])
 def test_dashboard_package_existing_errors_fail_closed(
-    tmp_path: Path, existing_bytes: bytes
+    tmp_path: Path,
+    existing_bytes: bytes,
+    monkeypatch: pytest.MonkeyPatch,
+    stat_error: bool,
 ) -> None:
-    """Invalid existing packages must remain byte-for-byte untouched."""
+    """Invalid or uninspectable packages must remain byte-for-byte untouched.
+
+    :param Path tmp_path: Isolated output directory.
+    :param bytes existing_bytes: Persisted invalid package.
+    :param pytest.MonkeyPatch monkeypatch: Filesystem fault injection fixture.
+    :param bool stat_error: Emulate suppressed filesystem errors on Python 3.14.
+    :return None: Checks that an update cannot replace unreadable prior results.
+    """
     package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
     package_path.write_bytes(existing_bytes)
     graph = build_seed_graph("seed")
 
-    with pytest.raises(DashboardPackageError):
-        update_dashboard_package(
-            package_path,
-            graph=graph,
-            seed_id="seed",
-            strategy="recommendation",
-            payload=_dashboard_graph_payload(graph, "seed", "recommendation"),
-            build={"strategy": "recommendation"},
-        )
+    original_stat, original_exists = Path.stat, Path.exists
+
+    def fail_stat(path: Path, **kwargs: Any) -> Any:
+        """Fail one package inspection while leaving other paths usable.
+
+        :param Path path: Inspected path.
+        :param Any kwargs: Remaining stat options.
+        :return Any: Statistics for unaffected paths.
+        """
+        if path == package_path:
+            raise OSError("package stat unavailable")
+        return original_stat(path, **kwargs)
+
+    with monkeypatch.context() as fault:
+        if stat_error:
+            fault.setattr(Path, "stat", fail_stat)
+            fault.setattr(
+                Path,
+                "exists",
+                lambda path: False if path == package_path else original_exists(path),
+            )
+        with pytest.raises((DashboardPackageError, OSError)):
+            update_dashboard_package(
+                package_path,
+                graph=graph,
+                seed_id="seed",
+                strategy="recommendation",
+                payload=_dashboard_graph_payload(graph, "seed", "recommendation"),
+                build={"strategy": "recommendation"},
+            )
 
     assert package_path.read_bytes() == existing_bytes
 

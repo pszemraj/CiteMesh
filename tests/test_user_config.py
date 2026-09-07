@@ -235,16 +235,28 @@ def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> Non
     assert config_path.read_bytes() == payload
 
 
-def test_set_preserves_unrecognized_raw_keys(tmp_path: Path) -> None:
+@pytest.mark.parametrize("is_file_false", [False, True])
+def test_set_preserves_unrecognized_raw_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, is_file_false: bool
+) -> None:
     """Mutation should preserve unrecognized tables and keys.
 
     :param Path tmp_path: Pytest temporary directory.
+    :param pytest.MonkeyPatch monkeypatch: Filesystem probe override.
+    :param bool is_file_false: Emulate an is_file probe hiding an inspection error.
     :return None: Assertions validate forward-compatible preservation.
     """
     config_path = tmp_path / "config.toml"
     config_path.write_text(
         '[defaults]\nfuture_key = "kept"\n[custom]\nnote = 1\n', encoding="utf-8"
     )
+    if is_file_false:
+        original_is_file = Path.is_file
+        monkeypatch.setattr(
+            Path,
+            "is_file",
+            lambda path: False if path == config_path else original_is_file(path),
+        )
     set_config_value("defaults.theme", "dark", path=config_path)
     raw = config_path.read_text(encoding="utf-8")
     assert "future_key" in raw

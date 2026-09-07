@@ -13,6 +13,22 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 
+def path_exists(path: Path) -> bool:
+    """Distinguish an absent persisted file from a failed filesystem inspection.
+
+    ``Path.exists()`` suppresses all OS errors on Python 3.14 and later.
+
+    :param Path path: Persisted file path to inspect.
+    :return bool: Whether the path exists.
+    :raises OSError: If inspection fails for a reason other than absence.
+    """
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _default_cache_root() -> Path:
     """Return user-level cache root honoring platform conventions.
 

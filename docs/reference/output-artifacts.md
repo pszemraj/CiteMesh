@@ -130,8 +130,9 @@ the next collection build. CiteMesh reads valid legacy entries and merges them i
 `dashboard.citemesh.json`; migration does not rewrite or delete the legacy manifest
 or its referenced artifacts.
 
-An existing malformed or unsupported package fails validation before CiteMesh makes
-API calls or starts model work, and the file is left untouched. Package persistence
+An existing malformed, unsupported, or inaccessible package stops the build before
+CiteMesh makes API calls or starts model work, and the file is left untouched.
+Failed filesystem inspection never counts as a missing package. Package persistence
 precedes viewer refresh so an unexpected HTML-rendering failure cannot discard a
 completed graph: the error reports the saved package path, which can be loaded from
 another current dashboard with **Add Results**, or the command can be rerun after the

@@ -337,11 +337,11 @@ def load_user_config(path: Optional[Path] = None) -> UserConfig:
     :return UserConfig: Validated configuration snapshot.
     """
     config_path = path if path is not None else user_config_path()
-    if not config_path.is_file():
-        return UserConfig(path=config_path)
     try:
         with config_path.open("rb") as handle:
             document = tomllib.load(handle)
+    except FileNotFoundError:
+        return UserConfig(path=config_path)
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         logger.warning("Ignoring unreadable config file %s: %s", config_path, exc)
         return UserConfig(path=config_path)
@@ -371,11 +371,11 @@ def _read_raw_document(config_path: Path) -> Dict[str, Any]:
     :param Path config_path: Config file path.
     :return Dict[str, Any]: Parsed document (empty when the file is missing).
     """
-    if not config_path.is_file():
-        return {}
     try:
         with config_path.open("rb") as handle:
             return tomllib.load(handle)
+    except FileNotFoundError:
+        return {}
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         raise ConfigFileError(
             f"Cannot rewrite config file {config_path}: {exc}. "

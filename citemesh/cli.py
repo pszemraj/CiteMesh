@@ -67,7 +67,7 @@ from citemesh.data import (
     get_cache_dir,
     validate_compression_filter,
 )
-from citemesh.data.cache import atomic_write_json, legacy_macos_cache_root
+from citemesh.data.cache import atomic_write_json, legacy_macos_cache_root, path_exists
 from citemesh.paper_ids import normalize_paper_id
 from citemesh.services import (
     SemanticScholarClient,
@@ -2949,7 +2949,7 @@ def update_dashboard_package(
     lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)
     try:
         with lock:
-            if package_path.exists():
+            if path_exists(package_path):
                 existing_package = load_dashboard_package(package_path)
                 existing_results = existing_package["results"]
             else:
@@ -3951,7 +3951,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     explicit_output=explicit_output,
                 )
                 preflight_package_path = collection_root / DASHBOARD_PACKAGE_FILENAME
-                if preflight_package_path.exists():
+                if path_exists(preflight_package_path):
                     load_dashboard_package(preflight_package_path)
 
             if not _confirm_force_rebuild_cache(args):
