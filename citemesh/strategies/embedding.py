@@ -32,6 +32,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Sequence,
     Set,
     Tuple,
 )
@@ -3406,6 +3407,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._ensure_int8_calibration_ranges(
             use_streaming=use_streaming,
             dataset_source=dataset_source,
+            selected_dataset=dataset if isinstance(dataset, list) else None,
         )
 
         hydrated_records = self._hydrate_dataset_records(
@@ -3876,11 +3878,16 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         *,
         use_streaming: bool,
         dataset_source: str,
+        selected_dataset: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> None:
         """Initialize representative int8 calibration ranges before hydration writes.
 
         :param bool use_streaming: Whether the hydration source streams records.
         :param str dataset_source: Resolved dataset source token for hydration.
+        :param Optional[Sequence[Dict[str, Any]]] selected_dataset: Already
+            materialized hydration rows to sample instead of reloading the
+            source — a capped streaming selection has fully drained the remote
+            stream once and must not pay a second pass for calibration.
         :return None: Persists calibration ranges in cache when required.
         :raises RuntimeError: If calibration source resolution or sampling fails.
         """
@@ -3892,18 +3899,23 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             dataset_source,
             self.calibration_sample_size,
         )
-        calibration_dataset = self._load_exact_hydration_source_slice(
-            use_streaming=use_streaming,
-            source=dataset_source,
-            operation="Calibration prepass",
-        )
+        if selected_dataset is not None:
+            calibration_dataset: Iterable[Dict[str, Any]] = selected_dataset
+            progress_total: Optional[int] = len(selected_dataset)
+        else:
+            calibration_dataset = self._load_exact_hydration_source_slice(
+                use_streaming=use_streaming,
+                source=dataset_source,
+                operation="Calibration prepass",
+            )
+            progress_total = self._resolve_hydration_progress_total(
+                calibration_dataset,
+                use_streaming=use_streaming,
+            )
 
         calibration_records = self._sample_calibration_records(
             calibration_dataset,
-            progress_total=self._resolve_hydration_progress_total(
-                calibration_dataset,
-                use_streaming=use_streaming,
-            ),
+            progress_total=progress_total,
             progress_label=f"Calibrating {dataset_source}",
         )
         if not calibration_records:
@@ -4028,6 +4040,12 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 limit,
             )
         else:
+            logger.warning(
+                "Newest-first selection must scan the entire %s stream to rank "
+                "submissions before hydration begins; use --no-streaming or an "
+                "explicit --dataset-split slice to avoid the full pass.",
+                dataset_source,
+            )
             selected = _newest_records_by_arxiv_id(dataset, limit)
 
         chronology_keys = [

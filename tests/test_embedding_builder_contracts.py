@@ -2172,6 +2172,89 @@ def test_candidate_mode_int8_option_errors_name_the_semantic_source(
             **int8_option,
         )
 
+
+def test_streaming_capped_selection_reuses_rows_for_calibration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Calibration must sample the materialized selection, not redrain the stream.
+
+    :param pytest.MonkeyPatch monkeypatch: Calibration and source-loading stubs.
+    :return None: Assertions verify no second source pass occurs.
+    """
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        semantic_source="arxiv-corpus",
+        corpus_size=3,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_needs_explicit_int8_calibration", lambda: True)
+    monkeypatch.setattr(
+        builder,
+        "_load_exact_hydration_source_slice",
+        lambda **_kwargs: pytest.fail("calibration reloaded the source"),
+    )
+    initialized: list[list] = []
+    monkeypatch.setattr(
+        builder,
+        "_initialize_calibration_ranges",
+        lambda records: initialized.append(list(records)),
+    )
+    selected_rows = [
+        {"id": f"2401.0000{idx}", "title": f"T{idx}", "abstract": f"A{idx}"}
+        for idx in range(3)
+    ]
+
+    builder._ensure_int8_calibration_ranges(
+        use_streaming=True,
+        dataset_source="dataset",
+        selected_dataset=selected_rows,
+    )
+
+    assert len(initialized) == 1
+    assert len(initialized[0]) == 3
+
+
+def test_newest_first_selection_drains_streams_with_a_cost_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Streamed capped selection must warn about the full-stream ranking pass.
+
+    :param pytest.MonkeyPatch monkeypatch: Namespace resolution stub.
+    :param pytest.LogCaptureFixture caplog: Captured logging fixture.
+    :return None: Assertions verify newest-first output and the cost warning.
+    """
+    monkeypatch.setattr(
+        EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        lambda self: "float32",
+    )
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        semantic_source="arxiv-corpus",
+        corpus_size=2,
+        client=MagicMock(),
+    )
+    stream = (
+        {"id": arxiv_id, "title": arxiv_id, "abstract": arxiv_id}
+        for arxiv_id in ["2301.00001", "2505.00002", "2401.00003", "2503.00004"]
+    )
+
+    with caplog.at_level(logging.WARNING, logger="citemesh.strategies.embedding"):
+        selected = builder._select_newest_corpus_rows(stream, "dataset")
+
+    assert [record["id"] for record in selected] == ["2503.00004", "2505.00002"]
+    assert any(
+        "scan the entire dataset stream" in record.getMessage()
+        for record in caplog.records
+    )
+
     f32_default = EmbeddingGraphBuilder(
         max_papers=1,
         storage_precision="float32",
@@ -4725,12 +4808,7 @@ def test_int8_hydration_calibration_uses_representative_prepass(
         {"id": f"p{idx}", "title": f"Title {idx}", "abstract": f"Abstract {idx}"}
         for idx in range(5)
     ]
-    load_mock = MagicMock(
-        side_effect=[
-            (source, list(records)),
-            (source, list(records)),
-        ]
-    )
+    load_mock = MagicMock(return_value=(source, list(records)))
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
     captured_texts: list[list[str]] = []
@@ -4762,7 +4840,8 @@ def test_int8_hydration_calibration_uses_representative_prepass(
             {"title": "Title 2", "abstract": "Abstract 2"}
         ),
     ]
-    assert load_mock.call_count == 2
+    # Materialized selections are sampled directly; no second source pass.
+    assert load_mock.call_count == 1
     assert captured_texts == [expected_calibration_texts]
     assert captured_texts[0] != [
         builder.model_profile.format_document(
