@@ -15,31 +15,9 @@ Installation and optional extras are covered in [README](../../README.md).
 
 ## Help and Console Output
 
-Every command supports `-h` / `--help`, including nested commands:
+Every command supports `-h` / `--help`, including nested commands (`citemesh build --help`, `citemesh cache clear --help`). Help is Rich-styled with grouped options and examples, adapts to terminal width up to 110 columns, and describes built-in defaults - use `citemesh config list` to see saved overrides. Redirected help is plain text; set `NO_COLOR=1` to disable colors in an interactive terminal (emphasis such as bold may remain). `--log-width` controls result tables and logs; help always uses the terminal width.
 
-```bash
-citemesh --help
-citemesh build --help
-citemesh cache --help
-citemesh cache clear --help
-citemesh config set --help
-```
-
-Help uses Rich styling, compact usage lines, grouped options, and examples.
-Build settings are grouped into graph, output, citations/references, semantic
-discovery, embedding runtime, arXiv corpus, embedding cache, and hybrid expansion.
-Help describes built-in defaults; use `citemesh config list` to see saved overrides.
-
-Help adapts to terminal width, up to 110 columns. Redirected help is plain text
-without ANSI styling under normal terminal detection. Set `NO_COLOR=1` to disable
-colors in an interactive terminal (emphasis such as bold may remain).
-`--log-width` controls result tables and logs; help uses the terminal width.
-
-Cache and config listings use compact tables. Search results show titles with
-authors underneath, followed by full paper IDs for copying into a build command.
-Queries, paper titles, and config values are displayed literally, including square
-brackets. `config get` and `config path` return raw, unwrapped values on stdout for
-shell substitution; operational logs go to stderr.
+Queries, paper titles, and config values are displayed literally, including square brackets. `config get` and `config path` return raw, unwrapped values on stdout for shell substitution; operational logs go to stderr.
 
 ## Basic Invocation
 
@@ -47,14 +25,14 @@ shell substitution; operational logs go to stderr.
 citemesh build "<paper-id>" [options]
 ```
 
-Semantic Scholar operations allow up to **30 total attempts**, including the initial request. Both SDK and direct HTTP calls use Tenacity with exponential full jitter: the random wait ceiling doubles from 2 seconds (4 seconds for HTTP 429) up to 60 seconds. A numeric `Retry-After` header sets the minimum wait beyond the jitter ceiling, honored up to 300 seconds per delay. This budget applies per operation, not to the whole build. There is deliberately no elapsed-time deadline: long retries favor finishing resumable builds, and the caps bound each delay rather than total waiting time. A prolonged outage can take many minutes before it is reported; any single wait of 30 seconds or longer is announced at the default log level. Invalid request parameters and rejected credentials fail immediately. Ctrl+C interrupts retries. Full retry details appear at `--log-level debug`.
+Semantic Scholar calls retry automatically with exponential backoff - up to 30 attempts per operation with no overall deadline; the full policy is under [Troubleshooting](#troubleshooting).
 
 Other command groups:
 
 ```bash
 # Find seed paper IDs (auto: local semantic search when your cache has
 # embeddings, otherwise Semantic Scholar keyword search)
-citemesh search "<query>" [--limit N|-n N]
+citemesh search "<query>" [--limit N|-n N]   # default limit 10
 
 # Force a mode: local cache semantic search or S2 keyword search
 citemesh search "<query>" --mode local [--model M] [--model-profile P] [--device D]
@@ -64,7 +42,7 @@ citemesh search "<query>" --mode s2
 citemesh cache scan
 citemesh cache scan --log-level debug
 citemesh build "arxiv:1706.03762" --strategy hybrid --log-level debug --log-file out/run.log
-citemesh cache clear [--yes] [--reason "<text>"]
+citemesh cache clear [--yes|-y] [--reason "<text>"]
 
 # Persistent user configuration (config.toml at the cache root)
 citemesh config list
@@ -112,7 +90,7 @@ Supported keys, value forms, and precedence are documented in
 
 Output-path normalization, file naming, and sidecar placement are defined in [Output Artifacts](../reference/output-artifacts.md).
 
-For repository-local runs, omit `--output` to use the ignored `out/` directory.
+Omit `--output` to write to `out/` under the current working directory (a source checkout already gitignores that path).
 Dashboard builds maintain `out/dashboard.html` and `out/dashboard.citemesh.json`,
 and always save `<strategy>.json` plus `<strategy>.config.json` under
 `out/<slug>-<hash>/`. Different seeds retain separate files and accumulate in the
@@ -126,7 +104,7 @@ requested formats go alongside the per-paper JSON.
 Numeric validation:
 
 - `build <paper-id>` and `search <query>` require non-empty strings.
-- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, and `search --limit` must be at least `1`.
+- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, `--encode-batch-size`, `--candidate-pool-size`, and `search --limit` must be at least `1`.
 - `--max-citations` and `--max-references` must be at least `0`.
 - `--calibration-sample-size` is valid only with `--storage-precision int8`.
 - `--cache-compression-level` must be at least `0` and is valid only with `--cache-compression gzip`.
@@ -141,7 +119,8 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 
 ### Cross-Strategy Behavior
 
-- `--similarity-threshold` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (default `0.2`).
+- `--similarity-threshold`, `-t` applies to `recommendation` and `citation` strategies as the minimum edge similarity threshold (default `0.2`).
+- `recommendation` and `citation` cap each paper at 3 edges (fixed, not configurable); `--top-k` applies only to `embedding`, and `hybrid` uses its own per-node cap of 5.
 - `--no-references` applies to `recommendation`, `citation`, and the citation branch of `hybrid`.
 - `--refresh-reference-cache` applies to `recommendation`, `citation`, and the citation branch of `hybrid` to bypass persisted reference-cache reads.
 - `embedding` uses embedding-specific controls (`--dataset-split`, `--corpus-size`, `--all-corpus`, `--truncate-dim`, `--streaming`, `--top-k`, storage/cache flags below).
@@ -172,8 +151,8 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
   for the retrieval, storage, and search-time tradeoffs.
 - `--streaming` / `--no-streaming`: stream the HuggingFace dataset or load cached shards. Streaming requires a non-sliced split (for example `train`); the negative form overrides an enabled `defaults.streaming` config value for one run.
 - `--force-rebuild-cache`: clear and rebuild embedding cache for this model before running (requires confirmation by default)
-- `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows)
-- `--cache-overwrite-reason`: optional rationale string logged when `--force-rebuild-cache` clears embedding cache state
+- `--overwrite-cache`: acknowledge destructive overwrite for `--force-rebuild-cache` and skip interactive confirmation (required for non-interactive/scripting workflows); rejected without `--force-rebuild-cache`
+- `--cache-overwrite-reason`: optional rationale string logged when `--force-rebuild-cache` clears embedding cache state; rejected without `--force-rebuild-cache`
 - `--storage-precision {int8,float32}`: persistent embedding-cache precision. Corpus mode defaults to `int8`; the default candidates mode normalizes an implicit `int8` setting to `float32` because corpus calibration is unavailable.
 - `--binary-prefilter` / `--no-binary-prefilter`: enable/disable binary Hamming prefilter for quantized search. It defaults on for int8 corpus mode and is normalized off in candidates mode. Explicit `--binary-prefilter` requires `--storage-precision int8`.
 - `--binary-rescore-multiplier`: oversampling factor for binary-prefilter rescoring.
@@ -192,8 +171,10 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
   Explicit corpus-only flags (`--dataset-split`, `--corpus-size`, `--all-corpus`,
   `--streaming`) imply `arxiv-corpus` when `--semantic-source` is omitted; the
   candidate-only `--candidate-pool-size` flag likewise implies `candidates`. An
-  explicit source that conflicts with a mode-only flag is rejected. Candidate mode
-  stores vectors as float32 (`--storage-precision int8` requires `arxiv-corpus`).
+  explicit source that conflicts with a mode-only flag is rejected, as is
+  supplying corpus-only and candidate-only flags together while
+  `--semantic-source` is omitted. Candidate mode stores vectors as float32
+  (`--storage-precision int8` requires `arxiv-corpus`).
 - `--candidate-pool-size`: S2 source-fetch budget for known-paper seeds in
   candidates mode (default `400`; candidates mode only). A free-text seed first
   adds up to 20 keyword-search results, then applies the recommendation budget to
@@ -201,7 +182,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
   configured `defaults.semantic_source = "arxiv-corpus"` for that run.
 - Runtime defaults and execution policy details (default checkpoint chain, precision policy, and compile guard behavior) are documented in [Embedding Runtime](../reference/embedding-runtime.md).
 - Default-value tuning context for recent-paper workflows is summarized in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
-- Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in both the Rich console and a shareable plain-text file. `*.log` is ignored by git in this repo.
+- Use `--log-level debug --log-file out/run.log` when you want detailed embedding/cache diagnostics in both the Rich console and a shareable plain-text file (a source checkout gitignores `*.log`).
 - `info` keeps user-facing phase progress and one-time runtime summaries. Detailed
   option routing, effective embedding configuration, retry attempts, model
   provenance, and cache namespace diagnostics appear at `debug`. Warnings are
@@ -274,9 +255,9 @@ citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
 ```
 
-`citemesh search` has two backends selected by `--mode`. Mode `local` is semantic search over the embeddings already persisted in your local cache: candidate vectors accumulate across embedding/hybrid builds (every build grows your searchable library), or the full hydrated corpus in `arxiv-corpus` mode. The query is encoded locally in the model's query prompt space and ranked against every cached vector - no Semantic Scholar traffic, works offline once the model is downloaded. Results include cosine scores and full paper IDs ready for `citemesh build`. Mode `s2` is remote keyword search on the Semantic Scholar API - a convenience for finding seed paper IDs. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless `S2_API_KEY` is set; when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results.
+`citemesh search` has two backends selected by `--mode`. Mode `local` is semantic search over the embeddings already persisted in your local cache: candidate vectors accumulate across embedding/hybrid builds (every build grows your searchable library), or the full hydrated corpus in `arxiv-corpus` mode. The query is encoded locally in the model's query prompt space and ranked against every cached vector - no Semantic Scholar traffic, works offline once the model is downloaded. Results include cosine scores and full paper IDs ready for `citemesh build`. Mode `s2` is remote keyword search on the Semantic Scholar API - a convenience for finding seed paper IDs. It shares the anonymous S2 rate-limit pool (the endpoint most prone to 429s) unless an API key is configured (`S2_API_KEY` or `api.s2_api_key`); when the pool is saturated the command reports the rate limit honestly instead of pretending there were no results.
 
-The default mode is `auto`: local search when your cache has embeddings, S2 keyword search otherwise, with a log line saying which backend ran and why. Persist a preference with `citemesh config set defaults.search_mode <auto|local|s2>` (explicit `--mode` still wins). Passing `--model`, `--model-profile`, or `--device` implies local mode when `--mode` is omitted; an explicit `--mode auto` keeps its Semantic Scholar fallback. Explicitly requesting `local` (flag or config) with an empty cache is an error with guidance rather than a silent fallback.
+The default mode is `auto`: local search when your cache has embeddings, S2 keyword search otherwise, with a log line saying which backend ran and why. Persist a preference with `citemesh config set defaults.search_mode <auto|local|s2>` (explicit `--mode` still wins). Passing `--model`, `--model-profile`, or `--device` implies local mode when `--mode` is omitted; an explicit `--mode auto` keeps its Semantic Scholar fallback, and combining `--mode s2` with any of those flags is rejected. Requesting `local` with an empty cache - via `--mode local`, via an implying `--model`/`--model-profile`/`--device`, or via `defaults.search_mode` - is an error naming which of those requested it, rather than a silent fallback.
 
 Local search targets the same retrieval-document cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. It does not search the separate graph-similarity cache. Namespaces are keyed by the runtime-active model artifact, requested revision, model profile, representation contract, formatter, dimensions, and compute dtype. Pass `--model` for a non-default model and `--model-profile` when the build used an explicit profile override; float32 and bfloat16 runs use distinct namespaces, while CPU, CUDA, and MPS share a namespace when their effective compute dtype and other contracts match.
 
@@ -287,7 +268,8 @@ Local search targets the same retrieval-document cache namespace a flagless buil
   requested neighborhood source completed. Export metadata records each attempted
   source as `complete`, `empty`, or `unavailable`; a total source outage exits
   nonzero instead of producing a plausible seed-only graph.
-- **Slow first embedding run**: see [Caching & Data](caching.md) for hydration behavior, cache reuse, and tuning guidance.
+- **Slow first embedding run**: the cold path downloads the embedding checkpoint and encodes every candidate or corpus paper; later runs reuse the persistent cache and skip encoding. See [Caching & Data](caching.md) for cache layout and reuse.
 - **Full-corpus run still mentions `50000`**: that usually means CiteMesh is replacing an older capped namespace before hydrating the requested full selected split. Check the compact config log line for `split=...` and `corpus=all`.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
 - **API limits**: configure `S2_API_KEY`; see [Environment Variables](../reference/environment.md).
+- **Rate limits and long retries**: Semantic Scholar operations allow up to **30 total attempts**, including the initial request. Both SDK and direct HTTP calls use Tenacity with exponential full jitter: the random wait ceiling doubles from 2 seconds (4 seconds for HTTP 429) up to 60 seconds. A numeric `Retry-After` header sets the minimum wait beyond the jitter ceiling, honored up to 300 seconds per delay. This budget applies per operation, not to the whole build. There is deliberately no elapsed-time deadline: long retries favor finishing resumable builds, and the caps bound each delay rather than total waiting time. A prolonged outage can take many minutes before it is reported; any single wait of 30 seconds or longer is announced at the default log level. Invalid request parameters and rejected credentials fail immediately. Ctrl+C interrupts retries. Full retry details appear at `--log-level debug`.
