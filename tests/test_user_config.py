@@ -765,6 +765,51 @@ def test_config_semantic_source_corpus_applies_without_flags() -> None:
     assert args.storage_precision == "int8"
 
 
+@pytest.mark.parametrize(
+    ("flags", "expected_corpus_size", "expected_all_corpus"),
+    [
+        ([], 1234, False),
+        (["--corpus-size", "5678"], 5678, False),
+        (["--all-corpus"], None, True),
+    ],
+)
+def test_configured_corpus_cap_and_full_split_override(
+    flags: list[str],
+    expected_corpus_size: int | None,
+    expected_all_corpus: bool,
+) -> None:
+    """Corpus caps should apply unless an explicit full-split flag overrides them.
+
+    :param list[str] flags: Corpus-size flag variation.
+    :param int | None expected_corpus_size: Expected builder hydration cap.
+    :param bool expected_all_corpus: Expected sidecar full-split marker.
+    :return None: Assertions validate config and CLI precedence.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding", *flags]
+    )
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml",
+        defaults={"semantic_source": "arxiv-corpus", "corpus_size": 1234},
+    )
+
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    cli_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied, config_path=config.path
+    )
+
+    assert args.semantic_source == "arxiv-corpus"
+    assert cli_module._shared_embedding_builder_kwargs(args)["corpus_size"] == (
+        expected_corpus_size
+    )
+    payload = cli_module._build_graph_config_payload(
+        args, "seed", {}, ["json"], {"json": Path("graph.json")}
+    )
+    embedding = payload["build"]["embedding"]
+    assert embedding.get("corpus_size") == expected_corpus_size
+    assert embedding["all_corpus"] is expected_all_corpus
+
+
 def test_config_int8_normalized_in_candidate_mode() -> None:
     """Candidate mode should normalize persisted int8 storage to float32.
 
@@ -928,7 +973,7 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
         == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
     )
     assert args.dataset_split == "train"
-    assert args.corpus_size == 50000
+    assert args.corpus_size is None
     for dest, expected in cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS.items():
         assert build_parser.get_default(dest) == expected
 

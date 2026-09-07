@@ -751,6 +751,7 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     )
     assert builder.embedding_builder is not None
     assert builder.embedding_builder.dataset_source == "example/arxiv"
+    assert builder.embedding_builder.corpus_size is None
     collect_corpus = MagicMock(
         return_value={"seed": seed, "semantic": _paper("semantic")}
     )

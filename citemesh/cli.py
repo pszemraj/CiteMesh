@@ -649,7 +649,7 @@ _CORPUS_ONLY_OPTION_DESTS: Set[str] = {
 _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: Dict[str, object] = {
     "dataset_source": DEFAULT_DATASET_SOURCE,
     "dataset_split": "train",
-    "corpus_size": 50000,
+    "corpus_size": None,
     "all_corpus": False,
     "streaming": False,
 }
@@ -1345,7 +1345,11 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     revision_label = args.model_revision or "default"
     logger.debug("Embedding cache namespace root: %s.", cache_root)
     if corpus_mode:
-        corpus_label = "all" if args.all_corpus else str(args.corpus_size)
+        corpus_label = (
+            "all"
+            if args.all_corpus or args.corpus_size is None
+            else str(args.corpus_size)
+        )
         logger.debug(
             "Embedding config: model=%s@%s device=%s source=arxiv-corpus dataset=%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
             args.model,
@@ -1873,17 +1877,17 @@ def _create_parser() -> Tuple[
         "--corpus-size",
         type=_positive_int,
         metavar="N",
-        default=50000,
+        default=None,
         help=(
-            "Cache the N newest submissions after scanning the split "
-            "(default: 50000; --all-corpus removes the cap)"
+            "Opt in to caching only the N newest submissions after scanning the split "
+            "(default: full selected split)"
         ),
     )
 
     corpus_group.add_argument(
         "--all-corpus",
         action="store_true",
-        help="Disable corpus cap and process the full selected split",
+        help="Use the full selected split (the default), overriding a configured corpus cap",
     )
 
     semantic_group.add_argument(
@@ -3188,8 +3192,12 @@ def _build_graph_config_payload(
             "candidate_pool_size": int(cli_args.candidate_pool_size),
             "dataset_source": cli_args.dataset_source,
             "dataset_split": cli_args.dataset_split,
-            "corpus_size": None if cli_args.all_corpus else int(cli_args.corpus_size),
-            "all_corpus": bool(cli_args.all_corpus),
+            "corpus_size": (
+                None
+                if cli_args.all_corpus or cli_args.corpus_size is None
+                else int(cli_args.corpus_size)
+            ),
+            "all_corpus": bool(cli_args.all_corpus or cli_args.corpus_size is None),
             "truncate_dim": cli_args.truncate_dim,
             "min_semantic_similarity": cli_args.min_semantic_similarity,
             "streaming": bool(cli_args.streaming),

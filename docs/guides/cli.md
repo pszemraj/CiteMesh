@@ -138,10 +138,10 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
 - `--dataset-source`: HuggingFace arXiv metadata dataset repository (default `librarian-bots/arxiv-metadata-snapshot`). It must provide the existing ArXiv metadata record shape: `id` (or `paper_id` / `paperId`), `title`, and `abstract` (or `summary`); `authors`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal` are used when present.
 - `--dataset-split`: HuggingFace split from the selected dataset source (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode and bound the rows exposed to CiteMesh after dataset preparation)
-- `--corpus-size`: maximum papers to embed/cache after scanning the selected split to select the newest submissions by arXiv ID (default `50000`); it does not cap that selection scan
-- `--all-corpus`: remove corpus-size cap and process the full selected split
+- `--corpus-size`: opt in to embedding/caching only the N newest submissions by arXiv ID from the selected split; it does not cap the selection scan. Without this flag or a configured cap, CiteMesh hydrates the full selected split.
+- `--all-corpus`: process the full selected split (the default), overriding a configured corpus-size cap
 - `--all-corpus` applies within the selected `--dataset-split`; `--dataset-split train --all-corpus` means "all of `train`", not "every split published by the dataset"
-- If a same-model cache namespace was previously hydrated with a capped corpus, `--all-corpus` rebuilds that namespace; cache-clear logs label the replaced payload as `cached_*` to distinguish it from the new target.
+- If a same-model cache namespace was previously hydrated with a capped corpus, a full-split run rebuilds that namespace; cache-clear logs label the replaced payload as `cached_*` to distinguish it from the new target.
 - `--all-corpus` cannot be combined with an explicit `--corpus-size` value
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
 - `--min-semantic-similarity`: semantic cosine required for embedding/hybrid graph edges (default `0.74`). Hybrid can also admit pairs with shared references. Set a persistent override with `citemesh config set defaults.min_semantic_similarity VALUE`. This setting changes graph eligibility without rebuilding embeddings.
@@ -237,7 +237,6 @@ citemesh build "arxiv:1810.04805" \
 citemesh build "arxiv:2404.08801" \
   --strategy hybrid \
   --dataset-split train \
-  --all-corpus \
   --export all \
   --theme dark \
   --log-level debug \
@@ -262,7 +261,7 @@ Local search targets the same retrieval-document cache namespace a flagless buil
   source as `complete`, `empty`, or `unavailable`; a total source outage exits
   nonzero instead of producing a plausible seed-only graph.
 - **Slow first embedding run**: the cold path downloads the embedding checkpoint and encodes every candidate or corpus paper; later runs reuse the persistent cache and skip encoding. See [Caching & Data](caching.md) for cache layout and reuse.
-- **Full-corpus run still mentions `50000`**: that usually means CiteMesh is replacing an older capped namespace before hydrating the requested full selected split. Check the compact config log line for `split=...` and `corpus=all`.
+- **Full-split run still mentions `50000`**: that usually means CiteMesh is replacing an older capped namespace before hydrating the requested full selected split. Check the compact config log line for `split=...` and `corpus=all`.
 - **Missing exports**: verify `--export` values; unknown strings are rejected by argparse.
 - **API limits**: configure `S2_API_KEY`; see [Environment Variables](../reference/environment.md).
 - **Rate limits and long retries**: Semantic Scholar operations allow up to **30 total attempts**, including the initial request. Both SDK and direct HTTP calls use Tenacity with exponential full jitter: the random wait ceiling doubles from 2 seconds (4 seconds for HTTP 429) up to 60 seconds. A numeric `Retry-After` header sets the minimum wait beyond the jitter ceiling, honored up to 300 seconds per delay. This budget applies per operation, not to the whole build. There is deliberately no elapsed-time deadline: long retries favor finishing resumable builds, and the caps bound each delay rather than total waiting time. A prolonged outage can take many minutes before it is reported; any single wait of 30 seconds or longer is announced at the default log level. Invalid request parameters and rejected credentials fail immediately. Ctrl+C interrupts retries. Full retry details appear at `--log-level debug`.

@@ -216,7 +216,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "model_revision": None,
         "dataset_source": DEFAULT_DATASET_SOURCE,
         "dataset_split": "train",
-        "corpus_size": 50000,
+        "corpus_size": None,
         "all_corpus": False,
         "top_k": 4,
         "truncate_dim": None,
@@ -740,6 +740,70 @@ def test_search_local_uses_configured_corpus_dataset_source(
     builder_kwargs = builder_factory.call_args.kwargs
     assert builder_kwargs["semantic_source"] == "arxiv-corpus"
     assert builder_kwargs["dataset_source"] == dataset_source
+
+
+def test_configured_local_corpus_hybrid_build_uses_full_split(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Configured corpus builds should hydrate the full selected split by default.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing runtime dependencies.
+    :param Path tmp_path: Isolated dashboard collection location.
+    :return None: Assertions verify the builder and generated sidecar contracts.
+    """
+    captured_builder: dict[str, object] = {}
+    graph = build_seed_graph("arxiv:2609.03430")
+    monkeypatch.setattr(
+        cli_module,
+        "load_user_config",
+        lambda: UserConfig(
+            path=Path("cfg-home") / "config.toml",
+            defaults={
+                "search_mode": "local",
+                "semantic_source": "arxiv-corpus",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "HybridGraphBuilder",
+        _make_builder_stub(
+            captured_builder,
+            graph=graph,
+            seed_id="arxiv:2609.03430",
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        _make_exporter_stub({}, methods=("to_dashboard_html",)),
+    )
+
+    output_dir = tmp_path / "dashboard"
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:2609.03430",
+            "--strategy",
+            "hybrid",
+            "--export",
+            "dashboard",
+            "-o",
+            str(output_dir),
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert captured_builder["semantic_source"] == "arxiv-corpus"
+    assert captured_builder["corpus_size"] is None
+    config_files = sorted(output_dir.rglob("*.config.json"))
+    assert len(config_files) == 1
+    payload = json.loads(config_files[0].read_text(encoding="utf-8"))
+    embedding = payload["build"]["embedding"]
+    assert embedding["semantic_source"] == "arxiv-corpus"
+    assert embedding.get("corpus_size") is None
+    assert embedding["all_corpus"] is True
 
 
 @pytest.mark.parametrize("search_args", [[], ["--mode", "local"]])
@@ -3888,6 +3952,8 @@ def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:
     cli_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "candidates"
     assert args.storage_precision == "float32"
+    assert args.corpus_size is None
+    assert args.candidate_pool_size == 400
 
 
 def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:

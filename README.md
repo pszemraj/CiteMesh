@@ -90,7 +90,7 @@ citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
 citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-corpus
 ```
 
-The default recommendation strategy does not download an embedding model or corpus. The first embedding or hybrid run downloads the `unsloth/embeddinggemma-300m` checkpoint (~300M parameters). With the default Semantic Scholar candidate source, it encodes up to 400 candidate abstracts; arXiv corpus mode instead downloads the dataset and embeds the 50,000 newest submissions by default. Later runs reuse the persistent embedding cache. See [CLI Usage](docs/guides/cli.md) for corpus size and loading options.
+The default recommendation strategy does not download an embedding model or corpus. The first embedding or hybrid run downloads the `unsloth/embeddinggemma-300m` checkpoint (~300M parameters). With the default Semantic Scholar candidate source, it encodes up to 400 candidate abstracts. When you opt into arXiv corpus mode, CiteMesh hydrates the full selected split by default; add `--corpus-size N` to choose a smaller newest-first corpus. Later runs reuse the persistent embedding cache. See [CLI Usage](docs/guides/cli.md) for corpus size and loading options.
 
 Omit `--output` and generated files land in `out/` under the current working directory (a source checkout already gitignores that path). Repeated dashboard builds share an offline collection there:
 

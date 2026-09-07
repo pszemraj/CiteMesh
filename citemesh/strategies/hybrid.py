@@ -116,7 +116,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         model_profile: str = "auto",
         model_revision: Optional[str] = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
-        corpus_size: Optional[int] = 50000,
+        corpus_size: Optional[int] = None,
         truncate_dim: Optional[int] = None,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
@@ -152,7 +152,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
         :param str dataset_source: HuggingFace dataset repository with arXiv metadata fields.
-        :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
+        :param Optional[int] corpus_size: Optional cap on papers loaded for semantic search
+            (default ``None`` = full selected split).
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
         :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
         :param bool use_streaming: Whether to stream the embedding corpus.

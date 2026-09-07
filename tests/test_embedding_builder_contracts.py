@@ -2810,6 +2810,7 @@ def test_metadata_and_streaming_loader_contracts(
     builder = EmbeddingGraphBuilder(
         max_papers=1, use_streaming=True, client=MagicMock()
     )
+    assert builder.corpus_size is None
     selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=True)
 
     assert selected_name == DEFAULT_DATASET_SOURCE
