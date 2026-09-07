@@ -3439,7 +3439,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         hydrated_records = self._hydrate_dataset_records(
             dataset=dataset,
             progress_total=progress_total,
-            progress_label=f"Hydrating {dataset_source}",
+            progress_label="Hydrating dataset",
         )
 
         if hydrated_records == 0:
@@ -3620,7 +3620,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             row_limit=row_limit,
             row_offset=cached_rows,
             progress_total=row_limit,
-            progress_label=f"Resuming {source}",
+            progress_label="Resuming dataset",
             operation="Incomplete hydration resume",
         )
         resumed_records = resume_result.hydrated_records
@@ -3664,7 +3664,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 use_streaming=use_streaming,
                 source=source,
                 progress_total=upstream_rows,
-                progress_label=f"Reconciling {source}",
+                progress_label="Reconciling dataset",
                 operation="Resume missing-ID reconciliation",
                 existing_paper_ids=self.embedding_cache.get_cached_paper_ids(),
             )
@@ -3943,7 +3943,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         calibration_records = self._sample_calibration_records(
             calibration_dataset,
             progress_total=progress_total,
-            progress_label=f"Calibrating {dataset_source}",
+            progress_label="Calibrating dataset",
         )
         if not calibration_records:
             logger.warning(
@@ -4238,7 +4238,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             row_limit=delta_rows,
             row_offset=cached_rows,
             progress_total=delta_rows,
-            progress_label=f"Refreshing {source}",
+            progress_label="Refreshing dataset",
             operation="Incremental refresh",
         ).hydrated_records
         updated_rows = self._cached_payload_row_count()
@@ -4293,7 +4293,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                         row_limit=row_limit,
                         row_offset=row_offset,
                         progress_total=progress_total,
-                        progress_label=f"Reconciling {progress_scope} {source}",
+                        progress_label=f"Reconciling {progress_scope}",
                         operation=operation,
                         existing_paper_ids=cached_paper_ids,
                         max_new_records=(remaining_rows if pass_index == 0 else None),

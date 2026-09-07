@@ -20,7 +20,9 @@ from rich.progress import (
     TaskID,
     TextColumn,
     TimeElapsedColumn,
+    TimeRemainingColumn,
 )
+from rich.table import Column
 
 from ._runtime import stderr_isatty
 
@@ -60,10 +62,12 @@ def _columns(unit: str) -> Sequence[ProgressColumn]:
     """
     return (
         TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
+        BarColumn(bar_width=None, table_column=Column(ratio=1)),
+        MofNCompleteColumn(table_column=Column(no_wrap=True)),
         TextColumn("{task.fields[unit]}", style="dim"),
         TimeElapsedColumn(),
+        TextColumn("ETA", style="dim"),
+        TimeRemainingColumn(),
         TextColumn("{task.fields[postfix]}", style="dim"),
     )
 
@@ -131,6 +135,7 @@ def progress_task(
         *_columns(unit),
         console=_resolve_console(),
         disable=not show,
+        expand=True,
     )
     with progress:
         task_id = progress.add_task(

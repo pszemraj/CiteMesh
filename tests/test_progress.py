@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from functools import partial
 from typing import Any, Iterator
 
 import pytest
@@ -87,6 +88,43 @@ def test_progress_iterator_with_zero_total_renders_a_bounded_bar(
     assert task.total == 0
     assert task.percentage == 0.0
     assert "0/0" in progress_console.export_text()
+
+
+def test_dataset_progress_keeps_total_and_eta_visible_at_80_columns(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+) -> None:
+    """Dataset counts and a measured ETA should fit a standard terminal width.
+
+    :param pytest.MonkeyPatch monkeypatch: Supplies a deterministic progress clock.
+    :param Console progress_console: Recording console with an 80-column width.
+    :return None: Checks the rendered count and ETA share an untruncated line.
+    """
+    clock = [0.0]
+    monkeypatch.setattr(
+        progress_module,
+        "Progress",
+        partial(Progress, get_time=lambda: clock[0], auto_refresh=False),
+    )
+    with progress_module.progress_task(
+        total=3156800,
+        description="Calibrating dataset",
+        unit="papers",
+        enabled=True,
+    ) as task:
+        clock[0] = 1.0
+        task.update(1000)
+        clock[0] = 2.0
+        task.update(1000)
+
+    lines = progress_console.export_text().splitlines()
+    assert any(
+        "Calibrating dataset" in line
+        and "2000/3156800 papers" in line
+        and "ETA 0:52:35" in line
+        and len(line) <= 80
+        for line in lines
+    )
 
 
 def test_progress_iterator_without_a_total_renders_indeterminate_counts(
