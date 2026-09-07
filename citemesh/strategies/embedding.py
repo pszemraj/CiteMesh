@@ -38,9 +38,7 @@ from typing import (
 
 import networkx as nx
 import numpy as np
-from tqdm.auto import tqdm
 
-from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
@@ -63,6 +61,7 @@ from citemesh.paper_ids import (
     normalize_paper_id,
     recognize_arxiv_identifier,
 )
+from citemesh.progress import progress_task
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -3831,12 +3830,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         rng = random.Random(CALIBRATION_RESERVOIR_SEED)
         sampled_records: List[Dict] = []
 
-        with tqdm(
+        with progress_task(
             total=progress_total,
-            desc=progress_label,
+            description=progress_label,
             unit="papers",
-            dynamic_ncols=True,
-            disable=not stderr_isatty(),
         ) as progress:
             for idx, raw_record in enumerate(dataset):
                 if self.corpus_size is not None and idx >= self.corpus_size:
@@ -3927,12 +3924,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         hydrated_records = 0
         selected_records = 0
 
-        with tqdm(
+        with progress_task(
             total=progress_total,
-            desc=progress_label,
+            description=progress_label,
             unit="papers",
-            dynamic_ncols=True,
-            disable=not stderr_isatty(),
         ) as progress:
             batch: List[Dict] = []
             for local_idx, raw_record in enumerate(dataset):

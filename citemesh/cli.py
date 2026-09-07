@@ -69,6 +69,7 @@ from citemesh.data import (
 )
 from citemesh.data.cache import atomic_write_json, legacy_macos_cache_root, path_exists
 from citemesh.paper_ids import normalize_paper_id
+from citemesh.progress import set_progress_console
 from citemesh.services import (
     SemanticScholarClient,
     SemanticScholarUnavailableError,
@@ -322,6 +323,8 @@ def _configure_logging(
     output_console = Console(
         width=_resolve_console_width(log_width, interactive=stdout_isatty())
     )
+    # Progress bars share the logging console so records render above a live bar.
+    set_progress_console(log_console)
     console_handler = RichHandler(
         console=log_console,
         show_time=False,

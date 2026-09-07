@@ -11,10 +11,10 @@ import logging
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 import networkx as nx
-from tqdm.auto import tqdm
 
 from citemesh._runtime import stderr_isatty
 from citemesh.core import Paper
+from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import (
@@ -136,7 +136,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param Dict[str, Paper] papers: Collected paper mapping updated in-place.
         :param Paper seed: Canonical seed paper in ``papers``.
         :param list[Paper] relation_records: Reference/citation papers from the API.
-        :param bool progress_enabled: Whether to wrap records with ``tqdm``.
+        :param bool progress_enabled: Whether to wrap records with a progress bar.
         :param str progress_description: Progress-bar description label.
         :return list[str]: Processed relation paper IDs in traversal order.
         """
@@ -147,11 +147,10 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             # lines in some terminals when rapidly cleared.
             should_show_progress = progress_enabled and len(relation_records) > 25
             if should_show_progress:
-                progress_bar = tqdm(
+                progress_bar = progress_iterator(
                     relation_records,
-                    desc=progress_description,
+                    description=progress_description,
                     unit="papers",
-                    dynamic_ncols=True,
                 )
                 relation_iterator = progress_bar
             else:

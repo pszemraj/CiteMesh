@@ -27,9 +27,9 @@ from typing import (
 import h5py
 import numpy as np
 from filelock import FileLock, Timeout
-from tqdm.auto import tqdm
 
 from citemesh._runtime import stderr_isatty
+from citemesh.progress import progress_iterator
 from citemesh.text_batching import (
     encode_texts_in_length_buckets,
     l2_normalize_embeddings,
@@ -527,11 +527,11 @@ class EmbeddingCache:
 
         items = list(papers.items())
         progress_enabled = show_progress and stderr_isatty() and len(items) > 50
-        iterator: Iterable[Tuple[str, Dict]] = tqdm(
+        iterator: Iterable[Tuple[str, Dict]] = progress_iterator(
             items,
-            desc="Checking cache",
+            description="Checking cache",
             unit="papers",
-            disable=not progress_enabled,
+            enabled=progress_enabled,
         )
 
         calibration_ranges: Optional[np.ndarray] = None
