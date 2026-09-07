@@ -148,6 +148,10 @@ def _make_exporter_stub(
                 path.write_text(payloads[method_name], encoding="utf-8")
 
         def _graph_payload() -> dict[str, object]:
+            """Build the package-compatible payload for a JSON export.
+
+            :return dict[str, object]: Canonical graph payload for the stub exporter.
+            """
             metadata = kwargs.get("metadata")
             strategy = (
                 str(metadata.get("strategy") or "")
@@ -1535,6 +1539,13 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     def _fake_json_compute_layout(
         graph_arg: nx.Graph, iterations: int, layout_seed: int | None
     ) -> dict[str, tuple[float, float]]:
+        """Record JSON layout options and return the shared fake layout.
+
+        :param nx.Graph graph_arg: Graph passed to the layout function.
+        :param int iterations: Requested spring-layout iterations.
+        :param int | None layout_seed: Requested layout seed.
+        :return dict[str, tuple[float, float]]: Shared layout for the JSON export.
+        """
         del graph_arg
         json_layout_params["iterations"] = iterations
         json_layout_params["layout_seed"] = layout_seed
@@ -3593,6 +3604,11 @@ def test_build_rejects_unavailable_explicit_device(
     """Explicitly requesting an unavailable device fails as a clean parser error."""
 
     def _raise_unavailable(_requested: str) -> str:
+        """Simulate rejecting a requested unavailable device.
+
+        :param str _requested: Requested device token, ignored by this fixed stub.
+        :return str: No value; this stub always raises ``ValueError``.
+        """
         raise ValueError(
             "device='cuda' was requested but CUDA is not available in this runtime."
         )
