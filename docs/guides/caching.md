@@ -202,9 +202,9 @@ Hydration write policy:
 
 For capped hydration, `--corpus-size` limits how many of the newest submissions are embedded and cached, not how many selected-split rows are inspected to determine that ordering. In streaming mode CiteMesh warns that newest-first selection must drain the whole stream before hydration starts; `--no-streaming` or an explicit `--dataset-split` slice avoids that pass. If too few records have parseable submission IDs, CiteMesh fills the remaining budget from records with unparseable IDs in source order and emits a warning. A non-streaming `--dataset-split` slice bounds the rows exposed to CiteMesh, although a cold Hugging Face dataset builder may still prepare its complete underlying Arrow split before applying the slice.
 
-Previously completed capped caches are reused as recorded. To replace an older
-cache that under-filled because some IDs were unparseable, use the explicit
-rebuild workflow below.
+Completed capped caches retain their original paper selection. The default newest-50,000 selection is determined when the cache is built; it does not roll forward as the upstream dataset gains papers. Use the explicit rebuild workflow below to reselect papers and refresh their embeddings. A rebuild can only include records already available in the selected dataset, so upstream ingestion delays still apply.
+
+Full-corpus mode checks for row-count growth as described below, but does not comprehensively detect same-count replacements or revised abstracts. Use an explicit rebuild when you need those content updates. Automatic upstream snapshot revalidation is tracked in [issue #13](https://github.com/pszemraj/CiteMesh/issues/13).
 
 Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)). The rebuild clears both the retrieval-document and graph-similarity namespaces for the resolved model contract. By default, CiteMesh asks for confirmation before applying this destructive rebuild. Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts). Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata; namespace rebuild/clear logs record `reason=unspecified` when no rationale is supplied.
 
