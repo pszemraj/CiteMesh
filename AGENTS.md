@@ -2,6 +2,21 @@
 
 Practical conventions for working on CiteMesh (humans and coding agents).
 
+## Scope
+
+- Do not add CI, release infrastructure, compatibility layers, support for hypothetical platforms/users, or security/integrity machinery unless requested or intrinsic to the task.
+- Do not generate checksums, verification manifests, or extra reporting artifacts for ordinary local work.
+- Keep the input validation and error handling that real failure modes require; do not invent trust boundaries or defensive frameworks.
+- Ask before expanding the request's or the repo's natural scope.
+- Use sub-agents when sensible.
+
+## Git workflow
+
+- Complete work atomically and commit as you go, at logical increments — not one batch commit of unrelated changes at the end.
+- Assume squash-merge; raise it if that seems wrong for the change at hand.
+- Never commit generated outputs, comparison JSONs, or caches.
+- Ask before destructive git operations. NEVER `git push` without explicit instruction or approval in the prior turn.
+
 ## Environment
 
 - Python >= 3.10. The maintainer's dev environment is the conda env `inf` (Python 3.12, torch 2.13+); install with `pip install -e ".[all]"`.
@@ -28,10 +43,11 @@ conda run -n inf python -m pytest -m slow      # real-model smoke tests (needs e
 conda run -n inf ruff check . && conda run -n inf ruff format .
 ```
 
-Run validation locally: the suite must be green and `ruff check` + `ruff format --check` clean before committing. Real-model and MPS quality smokes remain opt-in local validation on the relevant hardware. Do not add CI workflows unless the maintainer explicitly requests them.
+Run validation locally: the suite must be green and `ruff check` + `ruff format --check` clean before committing. Real-model and MPS quality smokes remain opt-in local validation on the relevant hardware.
 
 ## Code conventions
 
+- Explicit over clever.
 - Docstrings: reST field style (`:param type name:`, `:return type:`) on every function, including tests' helpers where present.
 - Comments state constraints the code can't, not narration of the change.
 - Optional dependencies (torch, sentence-transformers, datasets, plotly, pyvis) must stay lazily imported so the core CLI works with no extras.
@@ -40,6 +56,8 @@ Run validation locally: the suite must be green and `ruff check` + `ruff format 
 ## Docs rule
 
 CLI flags, defaults, cache layout, or environment variables changed? Update the matching page under `docs/guides/` or `docs/reference/`. The docs are contract-style; stale docs are treated as bugs.
+
+Never hard-wrap Markdown; editors soft-wrap.
 
 Release notes are the sole change history. Do not create or maintain a separate changelog.
 
