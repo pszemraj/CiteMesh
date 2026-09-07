@@ -3938,9 +3938,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         return hydrated_records
 
     def _cached_payload_row_count(self) -> int:
-        """Return best-effort hydrated payload row count for this namespace.
+        """Return the inspected hydrated payload row count for this namespace.
 
         :return int: Maximum of SQLite and HDF5 embedding row counts.
+        :raises RuntimeError: If either stored row count cannot be read.
         """
         stats = self.embedding_cache.payload_stats()
         return max(int(stats.sqlite_rows), int(stats.embedding_rows))

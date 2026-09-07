@@ -5,6 +5,7 @@ from __future__ import annotations
 import builtins
 import logging
 import multiprocessing as mp
+import os
 import sqlite3
 import tempfile
 from contextlib import contextmanager
@@ -35,6 +36,7 @@ from citemesh.data.embedding_cache import (
     INT8_CLIPPED_VALUE_COUNT_KEY,
     INT8_TOTAL_VALUE_COUNT_KEY,
     MODEL_FINGERPRINT_KEY,
+    SCHEMA_VERSION_KEY,
     SOURCE_TORCH_DTYPE_KEY,
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
@@ -94,6 +96,45 @@ def _multiprocess_cache_init_worker(cache_dir: str, queue: mp.Queue) -> None:
         queue.put(("err", repr(exc)))
 
 
+def _replacement_interrupt_worker(
+    cache_dir: str, model_name: str, storage_precision: str
+) -> None:
+    """Persist a replacement vector and terminate before its SQLite commit.
+
+    :param str cache_dir: Isolated cache directory shared with the parent test.
+    :param str model_name: Existing namespace model name.
+    :param str storage_precision: Persisted vector format under test.
+    :return None: Does not return because it terminates the child process.
+    """
+    cache = EmbeddingCache(
+        cache_dir=cache_dir,
+        model_name=model_name,
+        storage_precision=storage_precision,
+    )
+    model = LookupEncodeModel(
+        {
+            "Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            "Replacement. Abstract": np.asarray([-1.0, 0.0], dtype=np.float32),
+        }
+    )
+
+    def exit_after_flush(h5_file: h5py.File) -> None:
+        """Terminate after the replacement rows have reached HDF5 storage.
+
+        :param h5py.File h5_file: HDF5 handle containing the replaced rows.
+        :return None: Does not return because it exits the child process.
+        """
+        h5_file.flush()
+        os._exit(91)
+
+    cache._flush_h5_file = exit_after_flush  # type: ignore[method-assign]
+    cache.get_embeddings(
+        {"p1": {"title": "Replacement", "abstract": "Abstract"}},
+        model,
+        show_progress=False,
+    )
+
+
 def test_embedding_cache_lifecycle_contract() -> None:
     """Cache lifecycle should handle hit/miss, rewrites, and quantized layout."""
     model = SeededRandomEncodeModel()
@@ -146,6 +187,495 @@ def test_embedding_cache_lifecycle_contract() -> None:
     assert rows == [("p1", 0), ("p2", 1)]
     assert row_idx_after_update == 0
     assert p2_metadata_after_refresh == 2024
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_embedding_cache_replacement_journal_recovers_failed_sqlite_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage_precision: str,
+) -> None:
+    """A failed replacement commit must restore its old metadata/vector pair.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Replaces only the final SQLite commit.
+    :param str storage_precision: Persisted vector format under test.
+    :return None: Checks immediate same-instance undo recovery.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=f"replacement-sqlite-{storage_precision}",
+        storage_precision=storage_precision,
+    )
+    _set_test_int8_calibration(cache)
+    original = {"p1": {"title": "Original", "abstract": "Abstract"}}
+    replacement = {
+        "p1": {"title": "Replacement", "abstract": "Abstract"},
+        "p2": {"title": "Other", "abstract": "Abstract"},
+    }
+    model = LookupEncodeModel(
+        {
+            "Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            "Replacement. Abstract": np.asarray([-1.0, 0.0], dtype=np.float32),
+            "Other. Abstract": np.asarray([0.0, 1.0], dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(original, model, show_progress=False)
+    with h5py.File(cache.h5_path, "r") as h5:
+        original_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
+        original_binary = (
+            h5[BINARY_INDEX_DATASET_NAME][:].copy()
+            if BINARY_INDEX_DATASET_NAME in h5
+            else None
+        )
+
+    connection_count = 0
+
+    @contextmanager
+    def fail_final_commit() -> Iterator[sqlite3.Connection]:
+        """Fail the metadata transaction after its undo journal has committed.
+
+        :return Iterator[sqlite3.Connection]: SQLite connection used by one cache phase.
+        """
+        nonlocal connection_count
+        conn = sqlite3.connect(cache.db_path)
+        connection_count += 1
+        try:
+            yield conn
+            if connection_count == 2:
+                raise sqlite3.OperationalError("forced final commit failure")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "_connect_db", fail_final_commit)
+        with pytest.raises(sqlite3.OperationalError, match="forced final commit"):
+            cache.get_embeddings(replacement, model, show_progress=False)
+
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 1
+        )
+        assert (
+            conn.execute("SELECT title FROM papers WHERE paper_id = 'p1'").fetchone()[0]
+            == "Original"
+        )
+    with h5py.File(cache.h5_path, "r") as h5:
+        assert not np.array_equal(h5[EMBEDDINGS_DATASET_NAME][:], original_embedding)
+
+    cache.get_embeddings(original, model, show_progress=False)
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 0
+        )
+        assert (
+            conn.execute("SELECT title FROM papers WHERE paper_id = 'p1'").fetchone()[0]
+            == "Original"
+        )
+        assert conn.execute(
+            "SELECT paper_id FROM papers ORDER BY paper_id"
+        ).fetchall() == [("p1",)]
+    with h5py.File(cache.h5_path, "r") as h5:
+        np.testing.assert_array_equal(
+            h5[EMBEDDINGS_DATASET_NAME][:], original_embedding
+        )
+        if original_binary is not None:
+            np.testing.assert_array_equal(
+                h5[BINARY_INDEX_DATASET_NAME][:], original_binary
+            )
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=f"replacement-sqlite-{storage_precision}",
+        storage_precision=storage_precision,
+    )
+    assert reopened.get_cached_paper_ids() == {"p1"}
+    with h5py.File(reopened.h5_path, "r") as h5:
+        np.testing.assert_array_equal(
+            h5[EMBEDDINGS_DATASET_NAME][:], original_embedding
+        )
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_embedding_cache_replacement_journal_recovers_vector_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage_precision: str,
+) -> None:
+    """A failed replacement vector write must leave a replayable undo record.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Injects one HDF5 vector-write failure.
+    :param str storage_precision: Persisted vector format under test.
+    :return None: Checks journal cleanup after recovery.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=f"replacement-vector-{storage_precision}",
+        storage_precision=storage_precision,
+    )
+    _set_test_int8_calibration(cache)
+    original = {"p1": {"title": "Original", "abstract": "Abstract"}}
+    replacement = {"p1": {"title": "Replacement", "abstract": "Abstract"}}
+    model = LookupEncodeModel(
+        {
+            "Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            "Replacement. Abstract": np.asarray([-1.0, 0.0], dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(original, model, show_progress=False)
+    with h5py.File(cache.h5_path, "r") as h5:
+        original_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
+
+    original_setitem = h5py.Dataset.__setitem__
+    failed = False
+
+    def fail_replacement_vector_write(
+        dataset: h5py.Dataset, key: object, value: object
+    ) -> None:
+        """Raise once when the replacement writes the primary vector matrix.
+
+        :param h5py.Dataset dataset: HDF5 dataset accepting an assignment.
+        :param object key: Dataset row/slice receiving the assignment.
+        :param object value: Replacement value.
+        :return None: Delegates after the injected failure.
+        """
+        nonlocal failed
+        if dataset.name == f"/{EMBEDDINGS_DATASET_NAME}" and not failed:
+            failed = True
+            raise OSError("forced vector write failure")
+        original_setitem(dataset, key, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(h5py.Dataset, "__setitem__", fail_replacement_vector_write)
+        with pytest.raises(OSError, match="forced vector write failure"):
+            cache.get_embeddings(replacement, model, show_progress=False)
+
+    assert failed
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 1
+        )
+    assert cache.embedding_count() == 1
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 0
+        )
+    with h5py.File(cache.h5_path, "r") as h5:
+        np.testing.assert_array_equal(
+            h5[EMBEDDINGS_DATASET_NAME][:], original_embedding
+        )
+
+
+def test_embedding_cache_replacement_journal_recovers_binary_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed binary replacement write must restore vector and binary rows.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Injects one packed-binary write failure.
+    :return None: Checks binary prefilter data is restored with the primary vector.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="replacement-binary")
+    _set_test_int8_calibration(cache)
+    original = {"p1": {"title": "Original", "abstract": "Abstract"}}
+    replacement = {"p1": {"title": "Replacement", "abstract": "Abstract"}}
+    model = LookupEncodeModel(
+        {
+            "Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            "Replacement. Abstract": np.asarray([-1.0, 0.0], dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(original, model, show_progress=False)
+    with h5py.File(cache.h5_path, "r") as h5:
+        original_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
+        original_binary = h5[BINARY_INDEX_DATASET_NAME][:].copy()
+
+    original_setitem = h5py.Dataset.__setitem__
+    failed = False
+
+    def fail_replacement_binary_write(
+        dataset: h5py.Dataset, key: object, value: object
+    ) -> None:
+        """Raise once when the replacement writes the packed binary index.
+
+        :param h5py.Dataset dataset: HDF5 dataset accepting an assignment.
+        :param object key: Dataset row/slice receiving the assignment.
+        :param object value: Replacement value.
+        :return None: Delegates after the injected failure.
+        """
+        nonlocal failed
+        if dataset.name == f"/{BINARY_INDEX_DATASET_NAME}" and not failed:
+            failed = True
+            raise OSError("forced binary write failure")
+        original_setitem(dataset, key, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(h5py.Dataset, "__setitem__", fail_replacement_binary_write)
+        with pytest.raises(OSError, match="forced binary write failure"):
+            cache.get_embeddings(replacement, model, show_progress=False)
+
+    assert failed
+    with h5py.File(cache.h5_path, "a") as h5:
+        del h5[BINARY_INDEX_DATASET_NAME]
+    with pytest.raises(RuntimeError, match="binary index that is unavailable"):
+        cache.search(
+            np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=1,
+        )
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 1
+        )
+    with h5py.File(cache.h5_path, "a") as h5:
+        binary = h5.create_dataset(
+            BINARY_INDEX_DATASET_NAME,
+            data=np.zeros_like(original_binary),
+            dtype=np.uint8,
+        )
+        binary.attrs[BINARY_INDEX_ENCODING_KEY] = BINARY_INDEX_ENCODING
+    assert (
+        cache.search(
+            np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=1,
+        )[0].paper_id
+        == "p1"
+    )
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 0
+        )
+    with h5py.File(cache.h5_path, "r") as h5:
+        np.testing.assert_array_equal(
+            h5[EMBEDDINGS_DATASET_NAME][:], original_embedding
+        )
+        np.testing.assert_array_equal(h5[BINARY_INDEX_DATASET_NAME][:], original_binary)
+
+
+def test_embedding_cache_replacement_journal_retains_rows_when_fsync_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed HDF5 fsync must retain the undo journal for a later replay.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fails the explicit OS durability sync.
+    :return None: Checks recovery remains possible after the sync failure.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="replacement-fsync",
+        storage_precision="float32",
+    )
+    original = {"p1": {"title": "Original", "abstract": "Abstract"}}
+    replacement = {"p1": {"title": "Replacement", "abstract": "Abstract"}}
+    model = LookupEncodeModel(
+        {
+            "Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            "Replacement. Abstract": np.asarray([-1.0, 0.0], dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(original, model, show_progress=False)
+
+    sync_calls = 0
+
+    def fail_fsync(file_descriptor: int) -> None:
+        """Raise instead of durably syncing the HDF5 file descriptor.
+
+        :param int file_descriptor: Descriptor selected for synchronization.
+        :return None: Always raises the injected storage error.
+        """
+        nonlocal sync_calls
+        del file_descriptor
+        sync_calls += 1
+        raise OSError("forced fsync failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(embedding_cache_module.os, "fsync", fail_fsync)
+        with pytest.raises(RuntimeError, match="failed to durably flush"):
+            cache.get_embeddings(replacement, model, show_progress=False)
+
+    assert sync_calls == 1
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 1
+        )
+
+    cache.get_embeddings(original, model, show_progress=False)
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 0
+        )
+
+
+def test_embedding_cache_rebuilds_binary_index_after_disabled_replacement(
+    tmp_path: Path,
+) -> None:
+    """Re-enabling binary prefilter must rebuild rows changed while disabled.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks binary signs track a replacement after toggle/reopen.
+    """
+    model_name = "binary-toggle-replacement"
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name=model_name)
+    _set_test_int8_calibration(cache, embedding_dim=8)
+    original = {
+        "p1": {"title": "First", "abstract": "Abstract"},
+        "p2": {"title": "Second", "abstract": "Abstract"},
+    }
+    replacement = {"p1": {"title": "Updated", "abstract": "Abstract"}}
+    model = LookupEncodeModel(
+        {
+            "First. Abstract": np.ones(8, dtype=np.float32),
+            "Second. Abstract": np.asarray(
+                [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 1.0],
+                dtype=np.float32,
+            ),
+            "Updated. Abstract": -np.ones(8, dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(original, model, show_progress=False)
+
+    disabled = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=model_name,
+        binary_prefilter=False,
+    )
+    disabled.get_embeddings(replacement, model, show_progress=False)
+    with h5py.File(disabled.h5_path, "r") as h5:
+        assert BINARY_INDEX_DATASET_NAME not in h5
+
+    reenabled = EmbeddingCache(cache_dir=tmp_path, model_name=model_name)
+    results = reenabled.search(
+        -np.ones(8, dtype=np.float32),
+        top_k=1,
+        binary_prefilter=True,
+        binary_rescore_multiplier=1,
+    )
+    assert [result.paper_id for result in results] == ["p1"]
+    assert reenabled.last_search_used_binary_prefilter is True
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_embedding_cache_replacement_journal_recovers_interruption_on_reopen(
+    tmp_path: Path,
+    storage_precision: str,
+) -> None:
+    """A process exit after HDF5 flush must replay rows when reopening.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param str storage_precision: Persisted vector format under test.
+    :return None: Checks constructor-time replay before data is readable.
+    """
+    model_name = f"replacement-interrupt-{storage_precision}"
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=model_name,
+        storage_precision=storage_precision,
+    )
+    _set_test_int8_calibration(cache)
+    original = {"p1": {"title": "Original", "abstract": "Abstract"}}
+    model = LookupEncodeModel(
+        {
+            "Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32),
+            "Replacement. Abstract": np.asarray([-1.0, 0.0], dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(original, model, show_progress=False)
+    with h5py.File(cache.h5_path, "r") as h5:
+        original_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
+        original_binary = (
+            h5[BINARY_INDEX_DATASET_NAME][:].copy()
+            if BINARY_INDEX_DATASET_NAME in h5
+            else None
+        )
+
+    process = mp.Process(
+        target=_replacement_interrupt_worker,
+        args=(str(tmp_path), model_name, storage_precision),
+    )
+    process.start()
+    process.join(timeout=30)
+    if process.is_alive():
+        process.terminate()
+        process.join()
+    assert process.exitcode == 91
+
+    with cache._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 1
+        )
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=model_name,
+        storage_precision=storage_precision,
+    )
+    with reopened._connect_db() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 0
+        )
+        assert (
+            conn.execute("SELECT title FROM papers WHERE paper_id = 'p1'").fetchone()[0]
+            == "Original"
+        )
+    with h5py.File(reopened.h5_path, "r") as h5:
+        np.testing.assert_array_equal(
+            h5[EMBEDDINGS_DATASET_NAME][:], original_embedding
+        )
+        if original_binary is not None:
+            np.testing.assert_array_equal(
+                h5[BINARY_INDEX_DATASET_NAME][:], original_binary
+            )
+
+
+def test_embedding_cache_reencodes_legacy_schema_before_reusing_vectors(
+    tmp_path: Path,
+) -> None:
+    """A schema-v2 namespace must not be trusted after unsafe replacements existed.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks the schema boundary clears old vectors before re-encoding.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="replacement-schema-invalidation",
+        storage_precision="float32",
+    )
+    original = {"p1": {"title": "Original", "abstract": "Abstract"}}
+    original_model = LookupEncodeModel(
+        {"Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}
+    )
+    cache.get_embeddings(original, original_model, show_progress=False)
+    with h5py.File(cache.h5_path, "a") as h5:
+        h5[EMBEDDINGS_DATASET_NAME][0] = np.asarray([-1.0, 0.0], dtype=np.float32)
+        h5.attrs.modify(SCHEMA_VERSION_KEY, 2)
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="replacement-schema-invalidation",
+        storage_precision="float32",
+    )
+    assert reopened.get_cached_paper_ids() == set()
+    assert reopened.embedding_count() == 0
+
+    reencoded = reopened.get_embeddings(
+        original,
+        LookupEncodeModel(
+            {"Original. Abstract": np.asarray([0.0, 1.0], dtype=np.float32)}
+        ),
+        show_progress=False,
+    )
+    np.testing.assert_array_equal(
+        reencoded["p1"], np.asarray([0.0, 1.0], dtype=np.float32)
+    )
 
 
 def test_embedding_cache_rejects_float16_persistent_storage() -> None:
@@ -1602,7 +2132,11 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
             }
             if case["include_source_arg_after_invalidation"]:
                 hydrated_kwargs["dataset_source"] = source
-            assert not cache.is_hydrated(**hydrated_kwargs), case["label"]
+            if case["label"] == "orphaned embedding metadata rows":
+                with pytest.raises(RuntimeError, match="cache files were preserved"):
+                    cache.is_hydrated(**hydrated_kwargs)
+            else:
+                assert not cache.is_hydrated(**hydrated_kwargs), case["label"]
 
 
 def test_embedding_cache_mark_hydrated_rejects_empty_source_when_complete() -> None:
@@ -2016,14 +2550,35 @@ def test_embedding_cache_recovery_contracts(
 @pytest.mark.parametrize(
     "error_type", [OSError, RuntimeError, ValueError, sqlite3.DatabaseError]
 )
+@pytest.mark.parametrize(
+    ("operation", "backend"),
+    [
+        ("open", "hdf5"),
+        ("hydration", "hdf5"),
+        ("hydration", "sqlite"),
+        ("stats", "hdf5"),
+        ("stats", "sqlite"),
+        ("presence", "sqlite"),
+        ("open", "stat-hdf5"),
+        ("hydration", "stat-hdf5"),
+        ("stats", "stat-hdf5"),
+        ("presence", "stat-sqlite"),
+    ],
+)
 def test_embedding_cache_open_errors_preserve_namespace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    operation: str,
+    backend: str,
 ) -> None:
-    """Opening failures must propagate without deleting vectors or SQLite rows.
+    """Storage inspection failures must preserve vectors and SQLite rows.
 
     :param Path tmp_path: Isolated cache directory.
     :param pytest.MonkeyPatch monkeypatch: Injects the opening failure.
     :param type[Exception] error_type: Failure previously mistaken for corruption.
+    :param str operation: Cache opening or state inspection operation.
+    :param str backend: Storage backend whose read fails.
     :return None: Checks preserved bytes and successful reuse after the failure.
     """
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="open-failure")
@@ -2031,21 +2586,71 @@ def test_embedding_cache_open_errors_preserve_namespace(
     papers = {"p1": {"title": "Seed", "abstract": "Abstract"}}
     model = SeededRandomEncodeModel()
     cache.get_embeddings(papers, model, show_progress=False)
+    cache.mark_hydrated(
+        dataset_source="fixture/source",
+        dataset_split="train",
+        corpus_size=1,
+        complete=True,
+    )
     original_payload = cache.h5_path.read_bytes()
+    injected_error = error_type("transient open failure")
+    original_stat = Path.stat
+    original_exists = Path.exists
+    stat_target = cache.db_path if backend == "stat-sqlite" else cache.h5_path
 
     def fail_open(*args: Any, **kwargs: Any) -> None:
-        """Raise the injected failure instead of opening HDF5.
+        """Raise the injected failure instead of opening storage.
 
-        :param Any args: HDF5 positional arguments.
-        :param Any kwargs: HDF5 keyword arguments.
+        :param Any args: Storage positional arguments.
+        :param Any kwargs: Storage keyword arguments.
         :return None: Always raises the injected exception.
         """
-        raise error_type("transient open failure")
+        raise injected_error
+
+    def fail_stat(path: Path, **kwargs: Any) -> Any:
+        """Fail inspection of one payload path.
+
+        :param Path path: Filesystem path under inspection.
+        :param Any kwargs: Path.stat keyword arguments.
+        :return Any: Real file statistics for unaffected paths.
+        """
+        if path == stat_target:
+            raise injected_error
+        return original_stat(path, **kwargs)
+
+    def suppress_exists_error(path: Path, **kwargs: Any) -> bool:
+        """Emulate Python 3.14's exists error suppression on every test runtime.
+
+        :param Path path: Filesystem path under inspection.
+        :param Any kwargs: Path.exists keyword arguments.
+        :return bool: False for the inaccessible target, actual presence otherwise.
+        """
+        return False if path == stat_target else original_exists(path, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(embedding_cache_module.h5py, "File", fail_open)
-        with pytest.raises(error_type, match="transient open failure"):
-            EmbeddingCache(cache_dir=tmp_path, model_name="open-failure")
+        if backend.startswith("stat-"):
+            patch.setattr(Path, "stat", fail_stat)
+            patch.setattr(Path, "exists", suppress_exists_error)
+        elif backend == "hdf5":
+            patch.setattr(embedding_cache_module.h5py, "File", fail_open)
+        else:
+            patch.setattr(cache, "_connect_db", fail_open)
+        if operation == "open":
+            with pytest.raises(error_type, match="transient open failure"):
+                EmbeddingCache(cache_dir=tmp_path, model_name="open-failure")
+        else:
+            with pytest.raises(
+                RuntimeError, match="cache files were preserved"
+            ) as caught:
+                if operation == "hydration":
+                    cache.is_hydrated("train", 1, dataset_source="fixture/source")
+                elif operation == "stats":
+                    cache.payload_stats()
+                else:
+                    cache.has_cached_payload()
+            assert caught.value.__cause__ is injected_error
+            assert str(cache.db_path) in str(caught.value)
+            assert str(cache.h5_path) in str(caught.value)
 
     assert cache.h5_path.read_bytes() == original_payload
     assert cache.get_cached_paper_ids() == {"p1"}

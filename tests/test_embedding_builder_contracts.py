@@ -3630,6 +3630,86 @@ def test_incomplete_full_corpus_resume_failure_preserves_progress(
     load_dataset_mock.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("corpus_size", "complete", "failing_read"),
+    [(2, True, 1), (None, True, 1), (None, False, 2)],
+    ids=["completed-capped", "completed-full", "interrupted-full-stats"],
+)
+def test_hydration_read_failure_preserves_cached_work(
+    monkeypatch: pytest.MonkeyPatch,
+    corpus_size: int | None,
+    complete: bool,
+    failing_read: int,
+) -> None:
+    """One failed storage observation must not delete reusable corpus vectors.
+
+    :param pytest.MonkeyPatch monkeypatch: Storage fault injection fixture.
+    :param int | None corpus_size: Capped or full corpus selection.
+    :param bool complete: Persisted hydration completion state.
+    :param int failing_read: HDF5 read to fail, counting hydration and stats probes.
+    :return None: Asserts retained metadata, exact vector bytes, and successful retry.
+    """
+    source = "fixture/source"
+    builder = EmbeddingGraphBuilder(
+        storage_precision="float32", corpus_size=corpus_size, client=MagicMock()
+    )
+    cache = builder.embedding_cache
+    model = ConstantEncodeModel()
+    papers = {"p1": {"title": "Original title", "abstract": "Original abstract"}}
+    cache.get_embeddings(papers, model, show_progress=False)
+    cache.mark_hydrated(
+        dataset_source=source,
+        dataset_split=builder.dataset_split,
+        corpus_size=corpus_size,
+        complete=complete,
+    )
+    cache.mark_corpus_metadata_current()
+    original_h5 = cache.h5_path.read_bytes()
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 1)
+    monkeypatch.setattr(
+        builder, "_load_dataset_for_hydration", lambda **_: (source, [])
+    )
+    original_file = h5py.File
+    read_count = 0
+    injected_error = OSError("injected transient HDF5 read failure")
+
+    def fail_one_read(filename: Any, mode: str = "r", **kwargs: Any) -> Any:
+        """Fail hydration reads, or exactly one resume statistics read.
+
+        :param Any filename: HDF5 path.
+        :param str mode: Requested open mode.
+        :param Any kwargs: Remaining HDF5 options.
+        :return Any: Real file handle unless this is the targeted read.
+        """
+        nonlocal read_count
+        if Path(filename) == cache.h5_path and mode == "r":
+            read_count += 1
+            if complete or read_count == failing_read:
+                raise injected_error
+        return original_file(filename, mode, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(h5py, "File", fail_one_read)
+        fault.setattr(
+            builder,
+            "_ensure_int8_calibration_ranges",
+            MagicMock(side_effect=RuntimeError("replacement hydration reached")),
+        )
+        with pytest.raises(RuntimeError) as caught:
+            builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {"p1"}
+    assert cache.h5_path.read_bytes() == original_h5
+    assert caught.value.__cause__ is injected_error
+    assert str(cache.h5_path) in str(caught.value)
+    assert "preserved" in str(caught.value)
+    assert read_count == failing_read
+    builder._ensure_cache_hydrated(use_streaming=False)
+    assert cache.get_cached_paper_ids() == {"p1"}
+    assert cache.h5_path.read_bytes() == original_h5
+
+
 def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

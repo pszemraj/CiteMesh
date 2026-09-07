@@ -133,6 +133,9 @@ and index rebuilds, keeping their sign-bit representation consistent. Existing
 indexes without the current midpoint-sign encoding marker are rebuilt once when
 the namespace is reopened. That auxiliary rebuild reads persisted int8 rows;
 it preserves vectors, paper metadata, and hydration state without model encoding.
+Opening a namespace with its binary prefilter disabled drops the auxiliary
+index. Re-enabling it rebuilds from persisted vectors, so updates made while
+disabled cannot leave stale sign bits in later searches.
 
 Persistent storage supports only `int8` and `float32` via `--storage-precision`; model runtime compute dtype is configured independently. CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected). `lzf` does not support configurable levels; CiteMesh normalizes level to `0`. Runtime availability still depends on your `h5py` build. Compression is a physical HDF5 layout choice, not part of embedding semantics: an existing valid cache keeps its stored codec and level when reopened, while `--cache-compression` and `--cache-compression-level` apply when a cache is first created or explicitly rebuilt.
 
@@ -190,6 +193,13 @@ Model loading fallback is resolved before persistent vectors are read or written
 
 When hydration metadata matches the requested split/corpus cap, records a non-empty dataset source, and points to a queryable embedding+metadata row mapping, embedding retrieval runs from cache and skips HuggingFace corpus loading after any required one-time metadata backfill.
 
+Hydration and resume inspect cache state strictly. A failed filesystem, SQLite,
+or HDF5 inspection
+stops the operation with the cache paths and original error; it does not count
+as a metadata mismatch or an empty cache, and existing files are preserved.
+Retry after resolving the storage error. Best-effort counts are used only to
+report the impact of a clear that has already been requested.
+
 For hydrated full-corpus runs (`--all-corpus`), CiteMesh performs an incremental growth check using upstream split row counts. When upstream rows increased, it uses a staged reconciliation flow:
 
 `--all-corpus` means "the full selected `--dataset-split`". For example, `--dataset-split train --all-corpus` hydrates the full `train` split; it does not merge `train`, `validation`, and `test` into one cache namespace.
@@ -215,6 +225,21 @@ namespace and starts a separate cache rather than resuming existing rows.
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias mutates upstream without changing source name, treat cache reuse as a performance optimization rather than a strict reproducibility guarantee.
 
 During cache-native search, scored embedding rows must map to metadata rows. Missing metadata row mappings now fail closed with an integrity error instead of returning partial top-k results.
+
+Existing-row replacements use a durable SQLite undo journal under the namespace
+lock. Before overwriting a vector, CiteMesh commits its previous stored vector
+and binary-index row to the journal. It flushes and synchronizes the replacement
+HDF5 data before atomically committing the new paper metadata and removing the
+journal entries. If that commit fails or the process stops, the next access
+restores the journaled rows and removes uncommitted trailing appends before
+reading vectors or checking their mappings.
+Failed restoration stops access and retains the journal for another attempt.
+
+Embedding cache schema **3** requires one-time re-encoding of older namespaces
+when they are next opened. Earlier in-place updates could leave old text paired
+with a replacement vector after a failed commit; row counts cannot identify
+those entries. The existing schema mismatch reset therefore rebuilds each old
+namespace instead of reusing potentially inconsistent vectors.
 
 An interrupted append preserves the contiguous row prefix shared by SQLite and
 HDF5. Extra HDF5 rows are truncated; extra SQLite mappings whose vectors were
