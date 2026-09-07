@@ -1065,9 +1065,13 @@ def _validate_build_cli_contract(
             unsupported.append(_build_option_label(args, dest))
     if unsupported:
         unsupported_text = ", ".join(unsupported)
-        build_parser.error(
+        _build_contract_error(
+            build_parser,
             f"Unsupported option(s) for --strategy {strategy}: {unsupported_text}. "
-            "Use --help to view strategy-scoped option applicability."
+            "Use --help to view strategy-scoped option applicability.",
+            related_dests={"strategy"},
+            config_defaults=config_defaults,
+            config_path=config_path,
         )
     if not bool(getattr(args, "streaming", False)):
         contract_provided.discard("streaming")
@@ -1119,18 +1123,26 @@ def _validate_build_cli_contract(
                 )
             if provided_corpus_flags:
                 option_text = ", ".join(provided_corpus_flags)
-                build_parser.error(
+                _build_contract_error(
+                    build_parser,
                     f"Corpus-only option(s) require --semantic-source arxiv-corpus: "
-                    f"{option_text}."
+                    f"{option_text}.",
+                    related_dests={"semantic_source"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
                 )
             if (
                 "storage_precision" in contract_provided
                 and args.storage_precision == "int8"
             ):
-                build_parser.error(
+                _build_contract_error(
+                    build_parser,
                     "--storage-precision int8 requires --semantic-source "
                     "arxiv-corpus (int8 calibration ranges are computed during "
-                    "corpus hydration)."
+                    "corpus hydration).",
+                    related_dests={"semantic_source"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
                 )
             if args.storage_precision == "int8":
                 # Normalize the implicit int8 default to candidate-mode storage.
@@ -1140,8 +1152,12 @@ def _validate_build_cli_contract(
                     "(int8 calibration requires corpus hydration)."
                 )
         elif provided_candidate_flags:
-            build_parser.error(
-                "--candidate-pool-size requires --semantic-source candidates."
+            _build_contract_error(
+                build_parser,
+                "--candidate-pool-size requires --semantic-source candidates.",
+                related_dests={"semantic_source"},
+                config_defaults=config_defaults,
+                config_path=config_path,
             )
         if (
             args.semantic_source == "arxiv-corpus"
@@ -1202,16 +1218,28 @@ def _validate_build_cli_contract(
         args.cache_compression_level = int(resolved_compression_level)
         if str(args.storage_precision) != "int8":
             if "binary_prefilter" in contract_provided and bool(args.binary_prefilter):
-                build_parser.error(
-                    "--binary-prefilter requires --storage-precision int8."
+                _build_contract_error(
+                    build_parser,
+                    "--binary-prefilter requires --storage-precision int8.",
+                    related_dests={"storage_precision"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
                 )
             if "binary_rescore_multiplier" in contract_provided:
-                build_parser.error(
-                    "--binary-rescore-multiplier requires --storage-precision int8."
+                _build_contract_error(
+                    build_parser,
+                    "--binary-rescore-multiplier requires --storage-precision int8.",
+                    related_dests={"storage_precision"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
                 )
             if "calibration_sample_size" in contract_provided:
-                build_parser.error(
-                    "--calibration-sample-size requires --storage-precision int8."
+                _build_contract_error(
+                    build_parser,
+                    "--calibration-sample-size requires --storage-precision int8.",
+                    related_dests={"storage_precision"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
                 )
             # Normalize implicit non-int8 defaults to effective values to avoid
             # strategy-level runtime warnings about ignored options.

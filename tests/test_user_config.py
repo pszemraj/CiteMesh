@@ -704,6 +704,33 @@ def test_config_device_validation_names_the_config_source(
     assert "update or unset" in message
 
 
+def test_config_strategy_gating_names_the_config_source() -> None:
+    """Strategy-gated option failures must identify a config-sourced strategy.
+
+    :return None: Assertions verify the user is pointed at defaults.strategy
+        instead of a --strategy flag they never passed.
+    """
+    args, provided, build_parser = _parsed_build_args(["paper-id", "--top-k", "9"])
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"strategy": "citation"}
+    )
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+
+    with pytest.raises(ValueError) as error:
+        cli_module._validate_build_cli_contract(
+            args,
+            cli_module._ValueErrorParserErrorSink(),
+            provided,
+            config_defaults=applied,
+            config_path=config.path,
+        )
+
+    message = str(error.value)
+    assert "Unsupported option(s) for --strategy citation" in message
+    assert "defaults.strategy" in message
+    assert str(config.path) in message
+
+
 @pytest.mark.parametrize(
     ("max_semantic", "flags", "expected"),
     [
