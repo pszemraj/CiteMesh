@@ -901,6 +901,63 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     fake_builder.search_local.assert_not_called()
 
 
+def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit --mode auto must keep its S2 fallback despite --model.
+
+    :param pytest.MonkeyPatch monkeypatch: Builder and client stubs.
+    :return None: Assertions verify the fallback path runs instead of erroring.
+    """
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    mock_client = MagicMock()
+    mock_client.search_papers.return_value = [
+        Paper(
+            paper_id="0123456789abcdef0123456789abcdef01234567",
+            title="Fallback Result",
+            year=2020,
+            abstract="fallback",
+        )
+    ]
+    monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+    info_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+
+    result = run_cli_command(
+        ["search", "anything", "--mode", "auto", "--model", "custom/model"]
+    )
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert "searching the Semantic Scholar API instead" in str(info_mock.call_args_list)
+    mock_client.search_papers.assert_called_once()
+    fake_builder.search_local.assert_not_called()
+
+
+def test_search_namespace_flag_empty_cache_error_names_the_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The implied-local error must not claim the user passed --mode local.
+
+    :param pytest.MonkeyPatch monkeypatch: Builder stub and error capture.
+    :return None: Assertions pin the namespace-flag attribution text.
+    """
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+
+    result = run_cli_command(["search", "anything", "--model", "custom/model"])
+    assert result.returncode == 1
+    message = str(error_mock.call_args)
+    assert "namespace flags imply" in message
+    assert "--mode local" not in message
+    fake_builder.search_local.assert_not_called()
+
+
 def test_search_mode_from_config_local_empty_cache_cites_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

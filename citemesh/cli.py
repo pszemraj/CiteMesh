@@ -3841,10 +3841,11 @@ def _run_search_command(
                 "semantic search; drop them or use --mode local."
             )
             return 2
-        if mode != "local":
+        if origin != "flag" and mode != "local":
             # Namespace-selecting flags are explicit local intent; they
-            # outrank a config-level s2/auto default.
-            mode, origin = "local", "flag"
+            # outrank a config-level s2/auto default but never an explicit
+            # --mode, so --mode auto keeps its S2 fallback.
+            mode, origin = "local", "namespace-flag"
     if args.device:
         try:
             resolve_embedding_device(args.device)
@@ -3905,11 +3906,14 @@ def _run_search_command(
 
     # Explicit local mode: an empty cache is an error, not a fallback.
     if cached_count == 0:
-        requested_via = (
-            "--mode local"
-            if origin == "flag"
-            else f"defaults.search_mode in {user_config.path}"
-        )
+        if origin == "flag":
+            requested_via = "--mode local"
+        elif origin == "namespace-flag":
+            requested_via = (
+                "--model/--model-profile/--device (namespace flags imply local search)"
+            )
+        else:
+            requested_via = f"defaults.search_mode in {user_config.path}"
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
             "has no vectors for model=%s semantic-source=%s. "
