@@ -157,8 +157,7 @@ Top-level fields:
 - `kind` (`"citemesh-graph"`)
 - `schema_version` (`1`)
 - `seed_id`
-- `meta` (`strategy`, `year_range`, and `candidate_source_status` when the build
-  queried Semantic Scholar neighborhood sources)
+- `meta` (`strategy`, `year_range`, and `candidate_source_status` when the build queried Semantic Scholar neighborhood sources). `year_range` is `{"min": ..., "max": ...}` over the papers with a known publication year, and `null` when no paper has one.
 - `summary` (`nodes`, `edges`)
 - `nodes` - enriched per-paper objects (see below)
 - `dashboard` (`meta` and the stored layout geometry are always present)

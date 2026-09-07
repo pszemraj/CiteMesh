@@ -41,7 +41,7 @@ from .render import (
 from .themes import Theme, get_theme
 from .years import (
     coerce_publication_year,
-    publication_year_bounds,
+    optional_publication_year_bounds,
     publication_year_scale,
 )
 
@@ -58,6 +58,9 @@ DASHBOARD_FOOTER_MARGIN = 78
 DASHBOARD_LABEL_CAP = 8
 DASHBOARD_LABEL_MIN_DISTANCE = 0.18
 DASHBOARD_MAX_NODE_DIAMETER = 58.0
+# Identifier fields BibTeX consumers resolve verbatim, so LaTeX escaping them
+# would break every machine reader.
+_BIBTEX_VERBATIM_FIELDS = frozenset({"doi", "url"})
 
 
 def _load_pyvis_network_class() -> Any:
@@ -497,7 +500,9 @@ class GraphExporter:
                 "abstract": _csv_cell_guard(node.get("abstract", "")),
             }
             writer.writerow(row)
-        Path(path).write_text(buf.getvalue(), encoding="utf-8")
+        # csv writes RFC 4180 "\r\n" terminators itself; newline="" keeps the
+        # text layer from translating them again into "\r\r\n" on Windows.
+        atomic_write_text(Path(path), buf.getvalue())
 
     def to_bibtex(self, path: Path) -> None:
         """Export all papers as a single BibTeX file."""
@@ -1031,7 +1036,11 @@ class GraphExporter:
         seed_attrs = (
             self.graph.nodes[self.seed_id] if self.seed_id in self.graph else {}
         )
-        raw_title = " ".join(str(seed_attrs.get("title", "CiteMesh")).split())
+        # Plotly renders titles as pseudo-HTML, so upstream markup must be escaped
+        # before wrapping; only the "<br>" joins below stay live markup.
+        raw_title = html.escape(
+            " ".join(str(seed_attrs.get("title", "CiteMesh")).split())
+        )
         title_text = "<br>".join(
             textwrap.wrap(raw_title, width=72, break_long_words=False)
         )
@@ -1121,10 +1130,12 @@ class GraphExporter:
         # The dashboard import contract requires a non-empty strategy token;
         # graphs built outside the CLI/builders may carry none.
         strategy = self._strategy() or "unknown"
-        year_min, year_max = publication_year_bounds(
+        # Null rather than the color-scale sentinel: the timeline renders "-" for
+        # a missing range and would otherwise show years no paper carries.
+        bounds = optional_publication_year_bounds(
             node.get("year") for node in node_payloads
         )
-        year_range = {"min": year_min, "max": year_max}
+        year_range = {"min": bounds[0], "max": bounds[1]} if bounds else None
 
         meta: Dict[str, Any] = {
             "seed_id": str(self.seed_id),
@@ -1234,19 +1245,23 @@ class GraphExporter:
                 build = raw_entry.get("build")
                 if isinstance(build, dict):
                     entry["build"] = build
-                elif (
-                    declared_kind == DASHBOARD_COLLECTION_KIND
-                    and "build" not in raw_entry
-                ):
+                elif declared_kind == DASHBOARD_COLLECTION_KIND:
+                    # Versioned entries must carry build metadata; the viewer
+                    # rejects the whole bundle when the key is missing.
                     entry["build"] = {}
                 results.append(entry)
-        current_result_id = raw_bundle.get("current_result_id")
+        raw_current_result_id = raw_bundle.get("current_result_id")
+        current_result_id = (
+            str(raw_current_result_id).strip()
+            if raw_current_result_id is not None
+            else None
+        )
+        if current_result_id not in {entry["result_id"] for entry in results}:
+            # Malformed entries are dropped above, and the viewer rejects a bundle
+            # whose current_result_id names no included result.
+            current_result_id = results[0]["result_id"] if results else None
         bundle: Dict[str, Any] = {
-            "current_result_id": (
-                str(current_result_id).strip()
-                if current_result_id is not None
-                else None
-            ),
+            "current_result_id": current_result_id,
             "results": results,
         }
         if declared_kind:
@@ -1476,6 +1491,27 @@ class GraphExporter:
             links["arxiv_abs"] = f"https://arxiv.org/abs/{quote(arxiv_id, safe='')}"
             links["arxiv_pdf"] = f"https://arxiv.org/pdf/{quote(arxiv_id, safe='')}.pdf"
 
+        doi_value = self._derive_doi_value(node_id, node_payload=node_payload)
+        if doi_value:
+            links["doi"] = f"https://doi.org/{quote(doi_value, safe='/()[]:._;-')}"
+        return links
+
+    @staticmethod
+    def _derive_doi_value(
+        node_id: str,
+        *,
+        node_payload: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Resolve the raw DOI of a node from metadata or its canonical ID.
+
+        Callers that build URLs percent-encode the result themselves; BibTeX and
+        other identifier consumers need this unencoded form.
+
+        :param str node_id: Canonical graph node identifier.
+        :param Optional[Dict[str, Any]] node_payload: Optional node payload carrying
+            an explicit ``doi`` value.
+        :return str: Raw DOI without prefix or encoding, empty when unknown.
+        """
         doi_value = ""
         if isinstance(node_payload, dict):
             doi_value = str(node_payload.get("doi") or "").strip()
@@ -1484,9 +1520,7 @@ class GraphExporter:
                 doi_value = node_id.split(":", 1)[1].strip()
             elif re.match(r"^10\.\d{4,9}/\S+$", node_id):
                 doi_value = node_id
-        if doi_value:
-            links["doi"] = f"https://doi.org/{quote(doi_value, safe='/()[]:._;-')}"
-        return links
+        return doi_value
 
     @staticmethod
     def _bibtex_entry_key(node_id: str) -> str:
@@ -1525,6 +1559,20 @@ class GraphExporter:
         collapsed = collapsed.replace("^", "\\textasciicircum{}")
         return collapsed.replace(sentinel, "\\textbackslash{}")
 
+    @staticmethod
+    def _bibtex_verbatim(raw_value: str) -> str:
+        """Render an identifier field without LaTeX escaping.
+
+        ``doi`` and ``url`` are consumed by machines, so escaping ``_`` or ``%``
+        would corrupt them. They stay literal; only whitespace and the characters
+        that would unbalance the surrounding braces are removed.
+
+        :param str raw_value: Raw identifier value.
+        :return str: Value safe to place inside a brace-delimited field.
+        """
+        collapsed = " ".join(str(raw_value).split())
+        return re.sub(r"[{}\\]", "", collapsed)
+
     def _node_bibtex(
         self, node_payload: Dict[str, Any], *, links: Dict[str, Optional[str]]
     ) -> str:
@@ -1552,9 +1600,10 @@ class GraphExporter:
         if year > 0:
             fields.append(("year", str(year)))
 
-        doi_url = links.get("doi")
-        if doi_url:
-            doi_value = doi_url.replace("https://doi.org/", "", 1)
+        doi_value = self._derive_doi_value(
+            str(node_payload.get("id", "")), node_payload=node_payload
+        )
+        if doi_value:
             fields.append(("doi", doi_value))
 
         primary_url = (
@@ -1569,7 +1618,12 @@ class GraphExporter:
 
         lines = [f"@article{{{key},"]
         for field, value in fields:
-            lines.append(f"  {field} = {{{self._bibtex_escape(value)}}},")
+            rendered = (
+                self._bibtex_verbatim(value)
+                if field in _BIBTEX_VERBATIM_FIELDS
+                else self._bibtex_escape(value)
+            )
+            lines.append(f"  {field} = {{{rendered}}},")
         lines.append("}")
         return "\n".join(lines)
 
@@ -2967,6 +3021,11 @@ class GraphExporter:
 
     rebuildDerivedData();
 
+    // Full persisted reading list for the active result key, including IDs the
+    // current graph no longer contains: the key survives rebuilds, so persisting
+    // only the displayable subset would erase saves whenever a node drops out.
+    let persistedSavedIds = new Set();
+
     const state = {
       selectedId: (payload.meta && payload.meta.seed_id) || null,
       hoverId: null,
@@ -3034,20 +3093,24 @@ class GraphExporter:
       );
     }
 
-    function loadSavedIdSet() {
+    function loadPersistedSavedIds() {
       try {
         const raw = window.localStorage.getItem(savedStorageKey());
         const parsed = raw ? JSON.parse(raw) : [];
-        const savedIds = new Set(Array.isArray(parsed) ? parsed.map(String) : []);
-        return pruneSavedIdsForPayload(savedIds);
+        return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
       } catch (err) {
         return new Set();
       }
     }
 
+    function loadSavedIdSet() {
+      persistedSavedIds = loadPersistedSavedIds();
+      return pruneSavedIdsForPayload(persistedSavedIds);
+    }
+
     function persistSavedIds() {
       try {
-        window.localStorage.setItem(savedStorageKey(), JSON.stringify(Array.from(state.savedIds)));
+        window.localStorage.setItem(savedStorageKey(), JSON.stringify(Array.from(persistedSavedIds)));
       } catch (err) {
         // Storage unavailable (strict privacy mode, some file:// contexts):
         // the reading list still works for the current session.
@@ -3090,8 +3153,10 @@ class GraphExporter:
       }
       if (state.savedIds.has(key)) {
         state.savedIds.delete(key);
+        persistedSavedIds.delete(key);
       } else {
         state.savedIds.add(key);
+        persistedSavedIds.add(key);
       }
       persistSavedIds();
       if (!state.savedIds.size) {
@@ -3141,6 +3206,11 @@ class GraphExporter:
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+    }
+
+    function markdownLinkText(value) {
+      // An unescaped bracket in a title closes the Markdown link label early.
+      return String(value ?? "").replace(/([\\[\\]])/g, "\\\\$1");
     }
 
     function hasYear(node) {
@@ -4372,10 +4442,12 @@ class GraphExporter:
 
       function seedSlug() {
         const seedNode = nodeById.get((payload.meta && payload.meta.seed_id) || "");
-        if (seedNode && seedNode.title) {
-          return seedNode.title.replace(/[^a-zA-Z0-9]+/g, "_").substring(0, 40).replace(/_+$/, "").toLowerCase();
-        }
-        return "citemesh";
+        const slug = seedNode && seedNode.title
+          ? seedNode.title.replace(/[^a-zA-Z0-9]+/g, "_").substring(0, 40).replace(/_+$/, "").toLowerCase()
+          : "";
+        // Titles without ASCII alphanumerics slug to "", which would name the
+        // download ".json" and give the browser no stem to disambiguate.
+        return slug || "citemesh";
       }
 
       document.getElementById("export-json-btn").addEventListener("click", () => {
@@ -4434,7 +4506,9 @@ class GraphExporter:
           );
           const yearText = hasYear(n) ? ` (${n.year})` : "";
           const title = String(n.title || n.id);
-          return href ? `- [${title}](${href})${yearText}` : `- ${title}${yearText}`;
+          return href
+            ? `- [${markdownLinkText(title)}](${href})${yearText}`
+            : `- ${title}${yearText}`;
         });
         if (!lines.length) {
           return;

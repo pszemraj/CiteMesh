@@ -32,19 +32,39 @@ def coerce_publication_year(raw_year: object) -> int:
     return 0
 
 
-def publication_year_bounds(raw_years: Iterable[object]) -> tuple[int, int]:
-    """Return valid publication-year bounds with a deterministic fallback.
+def optional_publication_year_bounds(
+    raw_years: Iterable[object],
+) -> tuple[int, int] | None:
+    """Return valid publication-year bounds, or ``None`` when none are known.
+
+    Surfaces that display years to readers must use this instead of the
+    sentinel-backed bounds, which would show invented years.
 
     :param Iterable[object] raw_years: Raw year values to inspect.
-    :return tuple[int, int]: Minimum and maximum usable years.
+    :return tuple[int, int] | None: Minimum and maximum years, or ``None``.
     """
     valid_years = [
         year
         for year in (coerce_publication_year(value) for value in raw_years)
         if year > 0
     ]
-    if valid_years:
-        return min(valid_years), max(valid_years)
+    if not valid_years:
+        return None
+    return min(valid_years), max(valid_years)
+
+
+def publication_year_bounds(raw_years: Iterable[object]) -> tuple[int, int]:
+    """Return valid publication-year bounds with a deterministic fallback.
+
+    The fallback is a nondegenerate sentinel range for color-scale math, not a
+    claim about the data.
+
+    :param Iterable[object] raw_years: Raw year values to inspect.
+    :return tuple[int, int]: Minimum and maximum usable years.
+    """
+    bounds = optional_publication_year_bounds(raw_years)
+    if bounds is not None:
+        return bounds
     return MISSING_YEAR_FALLBACK_MIN, MISSING_YEAR_FALLBACK_MAX
 
 

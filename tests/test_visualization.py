@@ -682,6 +682,30 @@ def test_plotly_marker_labels_escape_upstream_markup(
     ]
 
 
+def test_plotly_figure_title_escapes_upstream_markup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Figure titles must render seed-title markup as literal text.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs a capture-only Plotly figure.
+    :return None: Checks the layout title of a markup-carrying seed.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
+    hostile_title = "<i>Deep</i> & </script> Wide"
+    graph, seed_id = _build_hostile_graph(title=hostile_title)
+    exporter = GraphExporter(
+        graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    )
+
+    figure, _ = exporter._build_plotly_figure(
+        go=export_module._load_plotly_graph_objects(),
+        theme_obj=get_theme("light"),
+        for_dashboard=False,
+    )
+
+    assert figure.layout["title"] == f"CiteMesh: {html.escape(hostile_title)}"
+
+
 def _extract_dashboard_script_text(html_text: str, script_id: str) -> str:
     """Extract the raw text content of a dashboard JSON script tag."""
 
@@ -1054,6 +1078,117 @@ def test_exporter_does_not_relabel_legacy_collection_metadata() -> None:
     assert bundle["results"][0]["payload"] == legacy_payload
 
 
+def _collection_metadata(
+    *,
+    current_result_id: str,
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build versioned collection metadata for exporter bundle tests.
+
+    :param str current_result_id: Result ID the bundle should open with.
+    :param list[dict[str, Any]] results: Raw result descriptors under test.
+    :return dict[str, Any]: Collection metadata accepted by the exporter.
+    """
+    return {
+        "kind": DASHBOARD_COLLECTION_KIND,
+        "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
+        "current_result_id": current_result_id,
+        "results": results,
+    }
+
+
+def test_collection_bundle_never_emits_a_dangling_current_result_id() -> None:
+    """Skipping a malformed entry must repoint current_result_id at a real result.
+
+    The viewer rejects a whole bundle whose ``current_result_id`` names no
+    included result, so the emitter must never produce one.
+
+    :return None: Checks both a surviving result and an entirely empty bundle.
+    """
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "citation"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    payload = exporter.graph_payload()
+    dropped_entry = {
+        "result_id": "citation:dropped",
+        "seed_id": "dropped",
+        "title": "Dropped",
+        "strategy": "citation",
+        "summary": {"nodes": 0, "edges": 0},
+        "updated_at": "2026-09-01T12:00:00",
+        "payload": None,
+    }
+    kept_entry = {
+        "result_id": f"citation:{seed_id}",
+        "seed_id": seed_id,
+        "title": "Seed Paper",
+        "strategy": "citation",
+        "summary": {"nodes": 2, "edges": 1},
+        "updated_at": "2026-09-01T12:00:00",
+        "payload": payload,
+    }
+    exporter.metadata["dashboard_collection"] = _collection_metadata(
+        current_result_id="citation:dropped",
+        results=[dropped_entry, kept_entry],
+    )
+
+    bundle = exporter._dashboard_collection_bundle()
+
+    assert [entry["result_id"] for entry in bundle["results"]] == [
+        f"citation:{seed_id}"
+    ]
+    assert bundle["current_result_id"] == f"citation:{seed_id}"
+
+    exporter.metadata["dashboard_collection"] = _collection_metadata(
+        current_result_id="citation:dropped",
+        results=[dropped_entry],
+    )
+
+    assert exporter._dashboard_collection_bundle() == {
+        "kind": DASHBOARD_COLLECTION_KIND,
+        "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
+        "current_result_id": None,
+        "results": [],
+    }
+
+
+def test_collection_bundle_normalizes_non_dict_build_metadata() -> None:
+    """A present-but-null build must normalize to ``{}`` for versioned bundles.
+
+    :return None: Checks the emitted entry keeps the key the viewer requires.
+    """
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "citation"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    exporter.metadata["dashboard_collection"] = _collection_metadata(
+        current_result_id=f"citation:{seed_id}",
+        results=[
+            {
+                "result_id": f"citation:{seed_id}",
+                "seed_id": seed_id,
+                "title": "Seed Paper",
+                "strategy": "citation",
+                "summary": {"nodes": 2, "edges": 1},
+                "updated_at": "2026-09-01T12:00:00",
+                "build": None,
+                "payload": exporter.graph_payload(),
+            }
+        ],
+    )
+
+    bundle = exporter._dashboard_collection_bundle()
+
+    assert bundle["results"][0]["build"] == {}
+
+
 class _JsonFakeFigure(_BaseFakeFigure):
     """Fake Plotly figure that can serialize itself for dashboard embedding."""
 
@@ -1280,8 +1415,9 @@ def test_exporter_dashboard_runtime_script_contracts(
         "color: colorWithAlpha(dashboardEdgeColor, 0.07 + (0.25 * strength))"
         in runtime_script
     )
-    assert "return pruneSavedIdsForPayload(savedIds);" in runtime_script
+    assert "return pruneSavedIdsForPayload(persistedSavedIds);" in runtime_script
     assert "`citemesh-saved:${strategy}:${seedId}`" in runtime_script
+    assert "`- [${markdownLinkText(title)}](${href})${yearText}`" in runtime_script
     assert '`Year: ${node.year || "n.d."}' not in runtime_script
     assert "setControlsCollapsed(true);" in runtime_script
     assert "escapeRegExp" not in runtime_script
@@ -1300,14 +1436,29 @@ def test_exporter_dashboard_runtime_script_contracts(
         match = re.search(rf"        function {name}\(v\).*", runtime_script)
         assert match is not None
         functions.append(match.group(0))
+    slug_match = re.search(
+        r"      function seedSlug\(\)[^\n]*\n.*?\n      \}", runtime_script, re.DOTALL
+    )
+    assert slug_match is not None
+    functions.append(slug_match.group(0))
     program = (
         "\n".join(functions)
         + r"""
+const nodeById = new Map([
+  ["ascii", { title: "Deep Learning Survey" }],
+  ["nonlatin", { title: "\u4e2d\u6587\u6807\u9898" }],
+]);
+let payload = { meta: { seed_id: "ascii" } };
+const asciiSlug = seedSlug();
+payload = { meta: { seed_id: "nonlatin" } };
+const nonLatinSlug = seedSlug();
 const value = "before\rafter";
 process.stdout.write(JSON.stringify({
   csv: csvEscape(value),
   author: dashboardNodeLabel({authors: ["A <b>Smith</b>"], year: 2020}, "seed"),
   title: dashboardNodeLabel({title: "<b>Title</b>"}, "other"),
+  asciiSlug,
+  nonLatinSlug,
 }));
 """
     )
@@ -1321,30 +1472,17 @@ process.stdout.write(JSON.stringify({
     ]
     assert result["author"] == "&lt;b&gt;Smith&lt;/b&gt;, 2020"
     assert result["title"] == "&lt;b&gt;Title&lt;/b&gt;"
+    assert result["asciiSlug"] == "deep_learning_survey"
+    # A title with no ASCII alphanumerics must still name the download.
+    assert result["nonLatinSlug"] == "citemesh"
 
 
-def _execute_dashboard_runtime_in_node(
-    path: Path,
-    *,
-    expected_status: str,
-    expect_plotly: bool,
-) -> subprocess.CompletedProcess[str]:
-    """Execute one generated dashboard runtime against a minimal DOM harness.
-
-    :param Path path: Generated dashboard artifact.
-    :param str expected_status: Status-banner substring required after bootstrap.
-    :param bool expect_plotly: Whether valid initial graph data should reach Plotly.
-    :return subprocess.CompletedProcess[str]: Completed Node.js process.
-    """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is unavailable for dashboard runtime validation")
-
-    harness = r"""
+# Minimal DOM/Plotly stubs shared by every harness that runs a generated
+# dashboard runtime. The runtime is read from process.argv[1] and the initial
+# localStorage contents from CITEMESH_SAVED_STORE (a JSON array of pairs).
+_DASHBOARD_NODE_HARNESS_PRELUDE = r"""
 const fs = require("fs");
 const html = fs.readFileSync(process.argv[1], "utf8");
-const expectedStatus = process.argv[2];
-const expectPlotly = process.argv[3] === "true";
 function scriptText(id) {
   const pattern = new RegExp(`<script id="${id}"[^>]*>([\\s\\S]*?)<\\/script>`);
   const match = pattern.exec(html);
@@ -1404,8 +1542,12 @@ global.document = {
   querySelectorAll() { return []; },
   createElement() { return fallbackElement; },
 };
+const savedStore = new Map(JSON.parse(process.env.CITEMESH_SAVED_STORE || "[]"));
 global.window = {
-  localStorage: { getItem() { return null; }, setItem() {} },
+  localStorage: {
+    getItem(key) { return savedStore.has(key) ? savedStore.get(key) : null; },
+    setItem(key, value) { savedStore.set(key, String(value)); },
+  },
   addEventListener: noOp,
   open: noOp,
   setTimeout: noOp,
@@ -1419,8 +1561,35 @@ global.Plotly = {
     plotlyCalled = true;
     return new Promise(() => {});
   },
+  restyle: noOp,
+  Plots: { resize: noOp },
 };
 global.getComputedStyle = () => ({ getPropertyValue() { return ""; } });
+"""
+
+
+def _execute_dashboard_runtime_in_node(
+    path: Path,
+    *,
+    expected_status: str,
+    expect_plotly: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Execute one generated dashboard runtime against a minimal DOM harness.
+
+    :param Path path: Generated dashboard artifact.
+    :param str expected_status: Status-banner substring required after bootstrap.
+    :param bool expect_plotly: Whether valid initial graph data should reach Plotly.
+    :return subprocess.CompletedProcess[str]: Completed Node.js process.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is unavailable for dashboard runtime validation")
+
+    harness = (
+        _DASHBOARD_NODE_HARNESS_PRELUDE
+        + r"""
+const expectedStatus = process.argv[2];
+const expectPlotly = process.argv[3] === "true";
 eval(runtime);
 if (!classes.has("visible")) throw new Error("status banner remained hidden");
 if (!status.textContent.includes(expectedStatus)) {
@@ -1431,6 +1600,7 @@ if (plotlyCalled !== expectPlotly) {
 }
 process.stdout.write(status.textContent);
 """
+    )
     return subprocess.run(
         [node, "-e", harness, str(path), expected_status, str(expect_plotly).lower()],
         cwd=Path(__file__).parents[1],
@@ -1438,6 +1608,50 @@ process.stdout.write(status.textContent);
         text=True,
         check=False,
     )
+
+
+def _probe_dashboard_runtime_in_node(
+    path: Path,
+    expression: str,
+    *,
+    saved_store: dict[str, str] | None = None,
+) -> Any:
+    """Evaluate one expression inside a bootstrapped dashboard runtime scope.
+
+    The runtime's helpers are module-scoped in the generated ``<script>``, so the
+    probe is appended to the evaluated source rather than reaching in from
+    outside.
+
+    :param Path path: Generated dashboard artifact.
+    :param str expression: JavaScript expression evaluated after bootstrap.
+    :param dict[str, str] | None saved_store: Initial ``localStorage`` contents.
+    :return Any: JSON-decoded expression result.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is unavailable for dashboard runtime validation")
+
+    harness = (
+        _DASHBOARD_NODE_HARNESS_PRELUDE
+        + r"""
+eval(runtime + "\n;globalThis.citemeshProbe = (source) => eval(source);");
+const probed = globalThis.citemeshProbe(process.argv[2]);
+process.stdout.write(JSON.stringify(probed === undefined ? null : probed));
+"""
+    )
+    completed = subprocess.run(
+        [node, "-e", harness, str(path), expression],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            **os.environ,
+            "CITEMESH_SAVED_STORE": json.dumps(sorted((saved_store or {}).items())),
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+    return json.loads(completed.stdout)
 
 
 def test_dashboard_invalid_bootstrap_surfaces_status_in_node(
@@ -1520,6 +1734,122 @@ def test_dashboard_invalid_embedded_collection_keeps_current_graph_in_node(
 
     assert result.returncode == 0, result.stderr
     assert "Unsupported collection kind" in result.stdout
+
+
+def test_saved_reading_list_survives_a_rebuild_that_dropped_a_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saving a paper must not erase persisted IDs missing from the current graph.
+
+    The storage key is stable across rebuilds, so a persisted ID whose node was
+    dropped has to survive the next save toggle.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks the persisted superset and the pruned display set.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "saved.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        "(() => {"
+        ' toggleSaved("related");'
+        " return {"
+        " stored: JSON.parse(window.localStorage.getItem(savedStorageKey())),"
+        " displayed: Array.from(state.savedIds),"
+        " };"
+        "})()",
+        saved_store={
+            "citemesh-saved:citation:seed": json.dumps(["seed", "dropped-by-rebuild"])
+        },
+    )
+
+    assert sorted(probed["stored"]) == ["dropped-by-rebuild", "related", "seed"]
+    assert sorted(probed["displayed"]) == ["related", "seed"]
+
+
+def test_copy_saved_links_escapes_bracketed_titles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Brackets in a title must not terminate the copied Markdown link label.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks the Markdown label escaper used by Copy Saved Links.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "markdown.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        '[markdownLinkText("Attention [Is] All You Need"), markdownLinkText("Plain")]',
+    )
+
+    assert probed == ["Attention \\[Is\\] All You Need", "Plain"]
+
+
+def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A yearless graph must report no range instead of the color-scale sentinel.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks both exported metadata and the rendered timeline labels.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph = nx.Graph()
+    graph.graph["strategy"] = "citation"
+    graph.add_node("seed", title="Seed Paper", citation_count=3, is_seed=True)
+    graph.add_node("related", title="Related Paper", citation_count=1)
+    graph.add_edge("seed", "related", weight=0.5)
+    exporter = GraphExporter(
+        graph,
+        "seed",
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "yearless.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    payload = _extract_dashboard_script_json(
+        out_path.read_text(), "citemesh-dashboard-data"
+    )
+    assert payload["meta"]["year_range"] is None
+    assert exporter.graph_payload()["meta"]["year_range"] is None
+
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        "(() => {"
+        " renderTimeline();"
+        " return {"
+        " yearRange: yearRange,"
+        " minLabel: controls.timelineYearMin.textContent,"
+        " maxLabel: controls.timelineYearMax.textContent,"
+        " };"
+        "})()",
+    )
+
+    assert probed["yearRange"] == {}
+    assert probed["minLabel"] == "-"
+    assert probed["maxLabel"] == "-"
 
 
 def test_dashboard_labels_balance_priority_and_spacing() -> None:
@@ -2435,6 +2765,48 @@ def test_csv_export_neutralizes_formula_cells_and_uses_lowercase_booleans(
     assert {row["is_seed"] for row in rows} == {"true", "false"}
 
 
+def test_csv_export_preserves_single_crlf_row_terminators(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CSV rows must keep the writer's CRLF terminators without re-translation.
+
+    These bytes are platform-independent only while the write disables text-mode
+    newline translation, so the writer routing is asserted alongside them.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Records the newline policy in use.
+    :return None: Checks the raw bytes of a header plus two paper rows.
+    """
+    newline_modes: list[str | None] = []
+    write_text = export_module.atomic_write_text
+
+    def record_newline_mode(
+        path: Path, content: str, *, newline: str | None = ""
+    ) -> None:
+        """Record the newline policy, then delegate to the real atomic writer.
+
+        :param Path path: Target text file path.
+        :param str content: Complete text payload.
+        :param str | None newline: Text-mode newline translation policy.
+        :return None: Writes the target file through the real writer.
+        """
+        newline_modes.append(newline)
+        write_text(path, content, newline=newline)
+
+    monkeypatch.setattr(export_module, "atomic_write_text", record_newline_mode)
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    csv_path = tmp_path / "terminators.csv"
+
+    exporter.to_csv(csv_path)
+
+    raw = csv_path.read_bytes()
+    assert newline_modes == [""]
+    assert b"\r\r\n" not in raw
+    assert raw.count(b"\r\n") == 3
+    assert raw.count(b"\n") == raw.count(b"\r\n")
+
+
 def test_empty_csv_preserves_columns_and_bibtex_has_no_entries(tmp_path: Path) -> None:
     """An empty graph still exports a parseable CSV schema and empty bibliography.
 
@@ -2503,6 +2875,44 @@ def test_bibtex_escapes_latex_specials() -> None:
     assert "~" not in escaped
     assert "^" not in escaped
     assert re.search(r"(?<!\\)[%$&#_]", escaped) is None
+
+
+def test_bibtex_identifier_fields_are_not_latex_escaped(tmp_path: Path) -> None:
+    """``doi`` and ``url`` must stay verbatim while prose fields keep escaping.
+
+    :param Path tmp_path: Isolated bibliography directory.
+    :return None: Checks an underscore DOI and a bracketed Wiley-style DOI.
+    """
+    underscore_doi = "10.1007/978-3-642-11745-9_11"
+    wiley_doi = "10.1002/(SICI)1097-0142(19960101)77:1<138::AID-CNCR23>3.0.CO;2-2"
+    graph = nx.Graph()
+    graph.add_node(
+        "underscore",
+        title="Underscore DOI",
+        year=2010,
+        doi=underscore_doi,
+        is_seed=True,
+    )
+    graph.add_node("wiley", title="Wiley_Style DOI", year=1996, doi=wiley_doi)
+    graph.add_edge("underscore", "wiley", weight=0.5)
+    exporter = GraphExporter(graph, "underscore", metadata={"strategy": "citation"})
+    bib_path = tmp_path / "identifiers.bib"
+
+    exporter.to_bibtex(bib_path)
+
+    rendered = bib_path.read_text()
+    assert sorted(re.findall(r"^  doi = \{(.*)\},$", rendered, flags=re.M)) == sorted(
+        [underscore_doi, wiley_doi]
+    )
+    assert sorted(re.findall(r"^  url = \{(.*)\},$", rendered, flags=re.M)) == sorted(
+        [
+            f"https://doi.org/{underscore_doi}",
+            "https://doi.org/10.1002/(SICI)1097-0142(19960101)77:1%3C138"
+            "::AID-CNCR23%3E3.0.CO;2-2",
+        ]
+    )
+    # Prose fields keep LaTeX escaping; only identifier fields are verbatim.
+    assert "  title = {Wiley\\_Style DOI}," in rendered
 
 
 @pytest.mark.parametrize(
