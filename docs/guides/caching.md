@@ -137,6 +137,7 @@ it preserves vectors, paper metadata, and hydration state without model encoding
 Opening a namespace with its binary prefilter disabled drops the auxiliary
 index. Re-enabling it rebuilds from persisted vectors, so updates made while
 disabled cannot leave stale sign bits in later searches.
+Newly encoded `int8` vectors are returned only after that same store-and-decode round trip, so a paper's returned vector is identical on the run that encodes it and on every later cache hit; `float32` namespaces return the model output unchanged.
 
 Persistent storage supports only `int8` and `float32` via `--storage-precision`; model runtime compute dtype is configured independently. CLI-managed compression filters are `gzip` and `lzf` (`szip` is intentionally rejected). `lzf` does not support configurable levels; CiteMesh normalizes level to `0`. Runtime availability still depends on your `h5py` build. Compression is a physical HDF5 layout choice, not part of embedding semantics: an existing valid cache keeps its stored codec and level when reopened, while `--cache-compression` and `--cache-compression-level` apply when a cache is first created or explicitly rebuilt.
 
@@ -236,14 +237,7 @@ Current limitation: hydration compatibility is keyed to dataset source/split/cor
 
 During cache-native search, scored embedding rows must map to metadata rows. Missing metadata row mappings now fail closed with an integrity error instead of returning partial top-k results.
 
-Existing-row replacements use a durable SQLite undo journal under the namespace
-lock. Before overwriting a vector, CiteMesh commits its previous stored vector
-and binary-index row to the journal. It flushes and synchronizes the replacement
-HDF5 data before atomically committing the new paper metadata and removing the
-journal entries. If that commit fails or the process stops, the next access
-restores the journaled rows and removes uncommitted trailing appends before
-reading vectors or checking their mappings.
-Failed restoration stops access and retains the journal for another attempt.
+Existing-row replacements use a durable SQLite undo journal under the namespace lock. Before overwriting a vector, CiteMesh commits its previous stored vector and binary-index row to the journal. Every write that maps rows, appends included, flushes and synchronizes its HDF5 data before atomically committing the new paper metadata and removing any journal entries, so a durable row mapping never outlives the vector it points at. If that commit fails or the process stops, the next access restores the journaled rows and removes uncommitted trailing appends before reading vectors or checking their mappings. Failed restoration stops access and retains the journal for another attempt.
 
 Embedding cache schema **3** requires one-time re-encoding of older namespaces
 when they are next opened. Earlier in-place updates could leave old text paired
@@ -251,16 +245,7 @@ with a replacement vector after a failed commit; row counts cannot identify
 those entries. The existing schema mismatch reset therefore rebuilds each old
 namespace instead of reusing potentially inconsistent vectors.
 
-An interrupted append preserves the contiguous row prefix shared by SQLite and
-HDF5. Extra HDF5 rows are truncated; extra SQLite mappings whose vectors were
-lost are removed and hydration is marked incomplete. A calibration-only file
-before the first embedding write is preserved for resume when its runtime and
-calibration contract still matches; changed formatter, dtype, or calibration
-sample settings invalidate those old ranges. Ambiguous row mappings
-and file-open, lock, or IO failures propagate without clearing the namespace.
-Proven incompatible layouts or invalid calibration metadata still reset that
-namespace, with the specific mismatch included in the warning; a missing HDF5
-file clears its stale SQLite mappings.
+An interrupted append preserves the contiguous row prefix shared by SQLite and HDF5. Extra HDF5 rows are truncated; extra SQLite mappings whose vectors were lost are removed and hydration is marked incomplete. A calibration-only file before the first embedding write is preserved for resume when its runtime and calibration contract still matches; changed formatter, dtype, or calibration sample settings invalidate those old ranges. A file holding no datasets and no schema attributes, which is what an interrupted first encode leaves behind, is an empty namespace rather than a proven mismatch: reopening keeps hydration and corpus-metadata markers and writes into it. Stored runtime consistency keys are seeded once and then compared on every reopen, and are restamped only after that check passes or the namespace is rebuilt. Ambiguous row mappings and file-open, lock, or IO failures propagate without clearing the namespace. Proven incompatible layouts or invalid calibration metadata still reset that namespace, with the specific mismatch included in the warning; a missing HDF5 file clears its stale SQLite mappings.
 
 ## Semantic Scholar Reference Cache
 

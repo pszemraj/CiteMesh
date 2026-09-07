@@ -29,6 +29,8 @@ from citemesh.data.embedding_cache import (
     EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS,
     EMBEDDING_DATASET_CHUNK_ROWS,
     EMBEDDINGS_DATASET_NAME,
+    H5_LAYOUT_KEY,
+    H5_LAYOUT_MATRIX_VERSION,
     HYDRATION_COMPLETE_KEY,
     HYDRATION_CORPUS_SIZE_KEY,
     HYDRATION_DATASET_SOURCE_KEY,
@@ -515,6 +517,64 @@ def test_embedding_cache_replacement_journal_retains_rows_when_fsync_fails(
         )
 
 
+def test_embedding_cache_append_syncs_vectors_before_mapping_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Appended vectors must be durable before SQLite maps rows onto them.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the ordering recorders.
+    :return None: Checks the append path shares the replacement path's durability.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="append-durability",
+        storage_precision="float32",
+    )
+    events: list[str] = []
+    open_connection = cache._connect_db
+
+    @contextmanager
+    def recording_connect_db() -> Iterator[sqlite3.Connection]:
+        """Record the row-mapping upsert issued on a cache connection.
+
+        :return Iterator[sqlite3.Connection]: Context manager yielding a traced connection.
+        """
+
+        def record_statement(statement: str) -> None:
+            """Append the upsert marker when row mappings are written.
+
+            :param str statement: SQL statement submitted on this connection.
+            :return None: Mutates the shared ordering log.
+            """
+            if "INSERT OR REPLACE INTO papers" in statement:
+                events.append("sqlite-upsert")
+
+        with open_connection() as conn:
+            conn.set_trace_callback(record_statement)
+            yield conn
+
+    def recording_flush(h5_file: h5py.File) -> None:
+        """Record the durability sync before performing it.
+
+        :param h5py.File h5_file: Writable HDF5 handle for the namespace.
+        :return None: Mutates the shared ordering log and syncs the file.
+        """
+        events.append("h5-sync")
+        EmbeddingCache._flush_h5_file(h5_file)
+
+    monkeypatch.setattr(cache, "_connect_db", recording_connect_db)
+    monkeypatch.setattr(cache, "_flush_h5_file", recording_flush)
+    cache.get_embeddings(
+        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+
+    assert events == ["h5-sync", "sqlite-upsert"]
+    assert cache.embedding_count() == 1
+
+
 def test_embedding_cache_rebuilds_binary_index_after_disabled_replacement(
     tmp_path: Path,
 ) -> None:
@@ -881,6 +941,39 @@ def test_int8_dequantization_centres_buckets_without_exceeding_ranges(
     assert np.all(endpoints >= ranges[0])
     assert np.all(endpoints <= ranges[1])
     np.testing.assert_array_equal(endpoints[-1], ranges[1])
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_embedding_cache_returns_stored_vector_fidelity_on_first_encode(
+    tmp_path: Path, storage_precision: str
+) -> None:
+    """Encoding and later hits must return the same vector for a paper.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param str storage_precision: Persisted vector format under test.
+    :return None: Checks int8 misses return the persisted round-trip, not raw output.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=f"stored-fidelity-{storage_precision}",
+        storage_precision=storage_precision,
+    )
+    _set_test_int8_calibration(cache)
+    papers = {"p1": {"title": "Seed", "abstract": "Abstract"}}
+    encoded = np.asarray([0.6, 0.8], dtype=np.float32)
+    miss = cache.get_embeddings(
+        papers,
+        LookupEncodeModel({"Seed. Abstract": encoded}),
+        show_progress=False,
+    )
+    # An empty lookup would raise if this call re-encoded instead of hitting.
+    hit = cache.get_embeddings(papers, LookupEncodeModel({}), show_progress=False)
+
+    np.testing.assert_array_equal(miss["p1"], hit["p1"])
+    if storage_precision == "int8":
+        assert not np.array_equal(miss["p1"], encoded)
+    else:
+        np.testing.assert_array_equal(miss["p1"], encoded)
 
 
 def test_embedding_cache_upsert_records_int8_saturation(
@@ -2276,6 +2369,89 @@ def test_embedding_cache_recovery_when_h5_missing_clears_stale_sqlite_rows() -> 
     assert metadata[HYDRATION_CORPUS_SIZE_KEY] == ""
 
 
+def test_embedding_cache_reopen_keeps_namespace_after_failed_first_encode(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The datasetless file a failed first encode leaves is an empty cache.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.LogCaptureFixture caplog: Captures any layout-rebuild warning.
+    :return None: Checks the namespace survives and stays writable after reopen.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="failed-first-encode",
+        storage_precision="float32",
+    )
+    cache.set_model_fingerprint("fingerprint-1")
+    cache.mark_corpus_metadata_current()
+    papers = {"p1": {"title": "Seed", "abstract": "Abstract"}}
+    with pytest.raises(KeyError):
+        cache.get_embeddings(papers, LookupEncodeModel({}), show_progress=False)
+
+    assert cache.h5_path.exists()
+    with h5py.File(cache.h5_path, "r") as h5:
+        assert len(h5) == 0
+        assert len(h5.attrs) == 0
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        reopened = EmbeddingCache(
+            cache_dir=tmp_path,
+            model_name="failed-first-encode",
+            storage_precision="float32",
+        )
+
+    assert "incompatible with current schema" not in caplog.text
+    assert reopened.get_model_fingerprint() == "fingerprint-1"
+    assert reopened.has_current_corpus_metadata()
+    reopened.get_embeddings(
+        papers,
+        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    assert reopened.embedding_count() == 1
+
+
+def test_embedding_cache_reopen_rebuilds_datasetless_file_with_schema_attrs(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Losing the matrix from a stamped namespace is still a proven mismatch.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.LogCaptureFixture caplog: Captures the layout-rebuild warning.
+    :return None: Checks schema attrs without vectors keep taking the repair path.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="datasetless-with-attrs",
+        storage_precision="float32",
+    )
+    cache.mark_corpus_metadata_current()
+    cache.get_embeddings(
+        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    with h5py.File(cache.h5_path, "a") as h5:
+        del h5[EMBEDDINGS_DATASET_NAME]
+        assert len(h5.attrs) > 0
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        reopened = EmbeddingCache(
+            cache_dir=tmp_path,
+            model_name="datasetless-with-attrs",
+            storage_precision="float32",
+        )
+
+    assert "incompatible with current schema" in caplog.text
+    assert not reopened.h5_path.exists()
+    assert not reopened.has_current_corpus_metadata()
+    with reopened._connect_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("binary_rows", [1, 3])
 def test_embedding_cache_search_falls_back_when_binary_index_rows_mismatch(
     binary_rows: int,
@@ -2823,6 +2999,49 @@ def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
         )
 
 
+def test_embedding_cache_detects_diverged_sqlite_contract_value(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Stored contract values must be compared on reopen, not silently restamped.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.LogCaptureFixture caplog: Captures the proven mismatch reason.
+    :return None: Checks a diverged SQLite contract value reaches the repair path.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="sqlite-contract-divergence",
+        storage_precision="float32",
+    )
+    cache.get_embeddings(
+        {"p1": {"title": "Seed", "abstract": "Abstract"}},
+        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    with cache._connect_db() as conn:
+        conn.execute(
+            "UPDATE cache_metadata SET value = ? WHERE key = ?",
+            ("matrix-v1-legacy", H5_LAYOUT_KEY),
+        )
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        reopened = EmbeddingCache(
+            cache_dir=tmp_path,
+            model_name="sqlite-contract-divergence",
+            storage_precision="float32",
+        )
+
+    assert "incompatible with current schema" in caplog.text
+    assert H5_LAYOUT_KEY in caplog.text
+    assert reopened.embedding_count() == 0
+    with reopened._connect_db() as conn:
+        stored_layout = conn.execute(
+            "SELECT value FROM cache_metadata WHERE key = ?", (H5_LAYOUT_KEY,)
+        ).fetchone()[0]
+    assert stored_layout == H5_LAYOUT_MATRIX_VERSION
+
+
 @pytest.mark.parametrize("persisted_rows", [0, 1])
 def test_embedding_cache_recovery_preserves_sqlite_ahead_prefix(
     tmp_path: Path, persisted_rows: int
@@ -3096,7 +3315,8 @@ def test_embedding_cache_clear_keeps_empty_namespace_reset_at_debug(
 
     :param Path tmp_path: Pytest temporary directory.
     :param pytest.LogCaptureFixture caplog: Captured logging fixture.
-    :return None: Assertions verify empty namespace resets remain debug-only.
+    :return None: Assertions verify empty namespace resets remain debug-only
+        and that an omitted reason is reported as unspecified.
     """
     cache = EmbeddingCache(cache_dir=tmp_path, model_name="empty-clear-log")
 
@@ -3109,6 +3329,16 @@ def test_embedding_cache_clear_keeps_empty_namespace_reset_at_debug(
     ]
     assert any(
         "Embedding cache clear details: namespace=empty-clear-log" in record.message
+        for record in caplog.records
+        if record.levelno == logging.DEBUG
+    )
+
+    caplog.clear()
+    with caplog.at_level("DEBUG"):
+        cache.clear()
+
+    assert any(
+        "reason=unspecified" in record.message
         for record in caplog.records
         if record.levelno == logging.DEBUG
     )

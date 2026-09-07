@@ -704,12 +704,24 @@ class EmbeddingCache:
                         clipped_value_count=clipped_value_count,
                         total_value_count=clipped_total_value_count,
                     )
-            binary_embeddings = (
-                _quantize_ubinary_embeddings(
-                    self._dequantize_int8(h5, storage_embeddings)
-                )
-                if self.binary_prefilter
+            dequantized_embeddings = (
+                self._dequantize_int8(h5, storage_embeddings)
+                if self.storage_precision == "int8"
+                and (self.binary_prefilter or return_embeddings)
                 else None
+            )
+            binary_embeddings = (
+                _quantize_ubinary_embeddings(dequantized_embeddings)
+                if self.binary_prefilter and dequantized_embeddings is not None
+                else None
+            )
+            # Callers must see the vectors this cache will return forever after,
+            # so int8 rows are round-tripped through storage before being handed
+            # back; otherwise the encoding run and every later hit disagree.
+            returned_embeddings = (
+                l2_normalize_embeddings(dequantized_embeddings)
+                if return_embeddings and dequantized_embeddings is not None
+                else embeddings_array
             )
 
             existing_row_count = int(embeddings_dataset.shape[0])
@@ -732,13 +744,14 @@ class EmbeddingCache:
             ] = []
 
             for idx, record in enumerate(papers_to_embed):
-                embedding = embeddings_array[idx]
                 storage_embedding = storage_embeddings[idx]
                 binary_embedding = (
                     None if binary_embeddings is None else binary_embeddings[idx]
                 )
                 if return_embeddings:
-                    new_embeddings[record.paper_id] = embedding
+                    new_embeddings[record.paper_id] = np.asarray(
+                        returned_embeddings[idx], dtype=np.float32
+                    )
                 existing_row = latest_rows.get(record.paper_id)
                 latest_row_idx = (
                     existing_row["row_idx"] if existing_row is not None else None
@@ -846,8 +859,10 @@ class EmbeddingCache:
                     )
 
             if rows_to_upsert:
-                if replacement_rows:
-                    self._flush_h5_file(h5)
+                # SQLite commits durably, so its row mappings must never become
+                # durable ahead of the vectors they point at: an interrupted
+                # append would otherwise be recovered by discarding committed rows.
+                self._flush_h5_file(h5)
                 cursor.executemany(
                     """
                     INSERT OR REPLACE INTO papers
@@ -1455,7 +1470,7 @@ class EmbeddingCache:
         :param Optional[str] reason: Optional rationale for the clear operation.
         :return None: Removes namespace payload files and reinitializes metadata.
         """
-        normalized_reason = str(reason).strip() or "unspecified"
+        normalized_reason = str(reason or "").strip() or "unspecified"
         with self._cache_lock():
             stats = self._collect_namespace_payload_stats_locked()
             cached_rows = max(stats.sqlite_rows, stats.embedding_rows)
@@ -1803,21 +1818,16 @@ class EmbeddingCache:
                 """
             )
 
-            runtime_values = self._runtime_contract_values()
+            # Contract values are seeded, never re-stamped, here: overwriting them
+            # would make _assert_runtime_cache_consistency compare the runtime
+            # against itself. Absent keys seed as a fresh namespace would; stored
+            # ones survive to be compared, and are restamped once validated or
+            # repaired. Physical compression and hydration state likewise survive
+            # process restarts.
             self._set_cache_metadata(
                 conn,
                 {
-                    key: value
-                    for key, value in runtime_values.items()
-                    if key not in {COMPRESSION_FILTER_KEY, COMPRESSION_LEVEL_KEY}
-                },
-            )
-            # Physical compression and hydration state survive process restarts.
-            self._set_cache_metadata(
-                conn,
-                {
-                    COMPRESSION_FILTER_KEY: runtime_values[COMPRESSION_FILTER_KEY],
-                    COMPRESSION_LEVEL_KEY: runtime_values[COMPRESSION_LEVEL_KEY],
+                    **self._runtime_contract_values(),
                     HYDRATION_COMPLETE_KEY: "0",
                     HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY: "",
                     HYDRATION_RECONCILED_CACHE_ROWS_KEY: "",
@@ -2192,20 +2202,17 @@ class EmbeddingCache:
         self._effective_compression = self.compression
         self._effective_compression_level = self.compression_level
 
-    def _persist_physical_layout_metadata(self, conn: sqlite3.Connection) -> None:
-        """Persist effective HDF5 physical-layout settings in SQLite metadata.
+    def _persist_runtime_contract_metadata(self, conn: sqlite3.Connection) -> None:
+        """Stamp the active runtime cache contract into SQLite metadata.
+
+        Only legitimate once the persisted namespace is known to match this
+        runtime: either the consistency check passed, the namespace was rebuilt,
+        or it holds no vectors yet.
 
         :param sqlite3.Connection conn: Open SQLite connection.
-        :return None: Updates compression metadata in-place.
+        :return None: Updates runtime contract metadata in-place.
         """
-        self._set_cache_metadata(
-            conn,
-            {
-                H5_LAYOUT_KEY: H5_LAYOUT_MATRIX_VERSION,
-                COMPRESSION_FILTER_KEY: self._effective_compression,
-                COMPRESSION_LEVEL_KEY: self._effective_compression_level,
-            },
-        )
+        self._set_cache_metadata(conn, self._runtime_contract_values())
 
     def _adopt_existing_dataset_compression(self, dataset: h5py.Dataset) -> None:
         """Adopt immutable compression layout from an existing embedding matrix.
@@ -2290,7 +2297,7 @@ class EmbeddingCache:
                     )
                     conn.execute("DELETE FROM papers")
                     self._reset_hydration_metadata(conn)
-                self._persist_physical_layout_metadata(conn)
+                self._persist_runtime_contract_metadata(conn)
                 return
 
         try:
@@ -2301,6 +2308,14 @@ class EmbeddingCache:
                 self._recover_pending_replacements_locked(conn=conn, h5_file=h5)
                 dataset = self._get_embeddings_dataset(h5)
                 if dataset is None:
+                    if len(h5) == 0 and len(h5.attrs) == 0:
+                        # An interrupted first encode leaves the file this
+                        # namespace creates before writing anything: no datasets
+                        # and no schema attrs. That is an empty cache to fill in,
+                        # not a layout this runtime can prove incompatible.
+                        self._discard_vectorless_row_mappings(conn)
+                        self._persist_runtime_contract_metadata(conn)
+                        return
                     if (
                         self.storage_precision == "int8"
                         and set(h5) == {CALIBRATION_RANGES_DATASET_NAME}
@@ -2314,7 +2329,7 @@ class EmbeddingCache:
                             embeddings_dataset=None,
                             fail_mode="repair",
                         )
-                        self._persist_physical_layout_metadata(conn)
+                        self._persist_runtime_contract_metadata(conn)
                         return
                     raise _EmbeddingCacheLayoutError(
                         "incompatible embedding cache layout"
@@ -2329,9 +2344,14 @@ class EmbeddingCache:
                         )
                     self._require_calibration_ranges(h5, embedding_dim)
 
-                # Prefilter state is auxiliary; toggling it does not change vector rows.
+                # Prefilter state is auxiliary; toggling it does not change vector
+                # rows, so both witnesses adopt it instead of failing the check.
                 h5.attrs.modify(
                     BINARY_PREFILTER_ENABLED_KEY, int(self.binary_prefilter)
+                )
+                self._set_cache_metadata(
+                    conn,
+                    {BINARY_PREFILTER_ENABLED_KEY: int(self.binary_prefilter)},
                 )
                 embedding_rows = self._recover_trailing_rows(
                     conn=conn,
@@ -2374,11 +2394,29 @@ class EmbeddingCache:
             with self._connect_db() as conn:
                 conn.execute("DELETE FROM papers")
                 self._reset_hydration_metadata(conn)
-                self._persist_physical_layout_metadata(conn)
+                self._persist_runtime_contract_metadata(conn)
             return
 
         with self._connect_db() as conn:
-            self._set_cache_metadata(conn, {H5_LAYOUT_KEY: H5_LAYOUT_MATRIX_VERSION})
+            self._persist_runtime_contract_metadata(conn)
+
+    @staticmethod
+    def _discard_vectorless_row_mappings(conn: sqlite3.Connection) -> None:
+        """Drop row mappings left behind by a namespace holding no vectors.
+
+        :param sqlite3.Connection conn: Open SQLite connection for the namespace.
+        :return None: Deletes unusable mappings and marks hydration incomplete.
+        """
+        paper_rows = int(conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0])
+        if paper_rows == 0:
+            return
+        logger.warning(
+            "Recovering embedding cache by removing %d SQLite mapping(s) whose "
+            "vectors were never persisted; the embedding matrix is empty.",
+            paper_rows,
+        )
+        conn.execute("DELETE FROM papers")
+        EmbeddingCache._set_cache_metadata(conn, {HYDRATION_COMPLETE_KEY: "0"})
 
     @staticmethod
     def _reset_hydration_metadata(conn: sqlite3.Connection) -> None:
