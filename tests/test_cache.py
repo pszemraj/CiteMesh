@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -158,6 +159,26 @@ def test_atomic_write_text_uses_binary_temp_descriptor(
 
     assert observed_text_modes == [False]
     assert destination.read_bytes() == b"first\nsecond\n"
+
+
+def test_atomic_writes_without_fchmod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Atomic text and JSON writes must work without the Unix-only descriptor API.
+
+    :param Path tmp_path: Temporary directory for atomic-write targets.
+    :param pytest.MonkeyPatch monkeypatch: Fixture simulating older Windows Python.
+    :return None: Validates both shared-writer entry points persist their payloads.
+    """
+    monkeypatch.delattr(cache_module.os, "fchmod", raising=False)
+    text_path = tmp_path / "config.toml"
+    json_path = tmp_path / "paper.json"
+
+    cache_module.atomic_write_text(text_path, 'theme = "dark"\n', mode=0o600)
+    cache_module.atomic_write_json(json_path, {"paper_id": "seed"})
+
+    assert text_path.read_text(encoding="utf-8") == 'theme = "dark"\n'
+    assert json.loads(json_path.read_text(encoding="utf-8")) == {"paper_id": "seed"}
 
 
 def test_atomic_write_text_preserves_target_permissions(tmp_path: Path) -> None:

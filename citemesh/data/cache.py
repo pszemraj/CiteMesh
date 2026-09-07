@@ -122,7 +122,7 @@ def _atomic_write_text_payload(
                 current_umask = os.umask(0)
                 os.umask(current_umask)
                 mode = 0o666 & ~current_umask
-        os.fchmod(fd, mode)
+        tmp_path.chmod(mode)
         with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as tmp_file:
             writer(tmp_file)
             tmp_file.flush()
