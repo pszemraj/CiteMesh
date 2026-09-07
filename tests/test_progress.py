@@ -146,6 +146,41 @@ def test_progress_iterator_without_a_total_renders_indeterminate_counts(
     assert "2/?" in progress_console.export_text()
 
 
+def test_progress_eta_retains_slow_work_after_a_fast_update_burst(
+    monkeypatch: pytest.MonkeyPatch,
+    progress_console: Console,
+) -> None:
+    """Rapid row updates must not evict the time spent on a slow batch.
+
+    :param pytest.MonkeyPatch monkeypatch: Supplies a deterministic progress clock.
+    :param Console progress_console: Console used for the progress display.
+    :return None: Checks the estimate retains slow work and final counts are exact.
+    """
+    clock = [0.0]
+    display = Progress(
+        console=progress_console, get_time=lambda: clock[0], auto_refresh=False
+    )
+    monkeypatch.setattr(progress_module, "Progress", lambda *args, **kwargs: display)
+
+    with progress_module.progress_task(
+        total=40000, description="Hydrating dataset", enabled=True
+    ) as task:
+        clock[0] = 0.5
+        task.update(1000)
+        clock[0] = 10.5
+        task.update(1000)
+        for _ in range(5000):
+            clock[0] += 0.00001
+            task.update(1)
+        assert task.n == 7000
+        clock[0] = 11.0
+        task.update(0)
+        assert 50 < display.tasks[0].time_remaining < 70
+        task.update(3)
+
+    assert display.tasks[0].completed == 7003
+
+
 def test_progress_iterator_disabled_yields_items_without_rendering(
     progress_console: Console,
     recorded_displays: list[Progress],

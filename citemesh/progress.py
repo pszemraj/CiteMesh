@@ -84,6 +84,8 @@ class ProgressTask:
         """
         self._progress = progress
         self._task_id = task_id
+        self._pending_advance = 0
+        self._last_update = progress.get_time()
 
     @property
     def n(self) -> int:
@@ -93,7 +95,7 @@ class ProgressTask:
         """
         for task in self._progress.tasks:
             if task.id == self._task_id:
-                return int(task.completed)
+                return int(task.completed) + self._pending_advance
         return 0
 
     def update(self, advance: int = 1) -> None:
@@ -102,7 +104,21 @@ class ProgressTask:
         :param int advance: Steps to add to the completed count.
         :return None: Updates the live display.
         """
-        self._progress.advance(self._task_id, advance)
+        self._pending_advance += advance
+        # Rich keeps at most 1,000 speed samples. Per-row bursts would discard
+        # the time spent encoding and leave an ETA based on bookkeeping speed.
+        if self._progress.get_time() - self._last_update >= 0.5:
+            self._flush()
+
+    def _flush(self) -> None:
+        """Report accumulated progress as one speed sample.
+
+        :return None: Advances the display and resets the reporting interval.
+        """
+        if self._pending_advance:
+            self._progress.advance(self._task_id, self._pending_advance)
+            self._pending_advance = 0
+            self._last_update = self._progress.get_time()
 
     def set_postfix_str(self, text: str) -> None:
         """Set the trailing status text shown after the timer.
@@ -144,7 +160,11 @@ def progress_task(
             unit=unit,
             postfix="",
         )
-        yield ProgressTask(progress, task_id)
+        task = ProgressTask(progress, task_id)
+        try:
+            yield task
+        finally:
+            task._flush()
 
 
 def progress_iterator(

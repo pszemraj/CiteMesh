@@ -4006,8 +4006,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 batch.append(metadata)
                 if len(batch) >= HYDRATION_FLUSH_SIZE:
                     hydrated_records += self._cache_metadata_batch(batch)
+                    progress.update(len(batch))
                     batch = []
-                progress.update(1)
                 if max_new_records is not None and selected_records >= int(
                     max_new_records
                 ):
@@ -4015,6 +4015,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
             if batch:
                 hydrated_records += self._cache_metadata_batch(batch)
+                progress.update(len(batch))
 
             if progress_total is None:
                 progress.set_postfix_str(f"processed {progress.n}")
