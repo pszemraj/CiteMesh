@@ -1032,7 +1032,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if not 0.0 <= min_semantic_similarity <= 1.0:
             raise ValueError("min_semantic_similarity must be between 0.0 and 1.0")
         self.min_semantic_similarity = float(min_semantic_similarity)
-        if normalized_semantic_source != "arxiv-corpus" and storage_precision == "int8":
+        int8_rewritten_for_candidates = (
+            normalized_semantic_source != "arxiv-corpus" and storage_precision == "int8"
+        )
+        if int8_rewritten_for_candidates:
             # int8 calibration ranges are only computed during corpus hydration;
             # candidate pools are small enough that float32 storage is free.
             logger.debug("Candidate mode does not support int8 storage; using float32.")
@@ -1096,18 +1099,33 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if binary_rescore_multiplier is None
             else int(binary_rescore_multiplier)
         )
+
+        def _int8_option_error(option: str) -> ValueError:
+            """Name the actual constraint an int8-only option violated.
+
+            After the candidate-mode rewrite the caller may well have passed
+            int8; telling them the option "requires int8" would be
+            self-contradictory. The real constraint is the semantic source.
+
+            :param str option: CLI spelling of the rejected option.
+            :return ValueError: Error naming the violated constraint.
+            """
+            if int8_rewritten_for_candidates:
+                return ValueError(
+                    f"{option} with int8 storage requires "
+                    "semantic_source='arxiv-corpus' (int8 calibration ranges "
+                    "are computed during corpus hydration)."
+                )
+            return ValueError(f"{option} requires storage_precision='int8'")
+
         if storage_precision != "int8" and resolved_prefilter:
-            raise ValueError("--binary-prefilter requires storage_precision='int8'")
+            raise _int8_option_error("--binary-prefilter")
         if storage_precision != "int8" and requested_multiplier != 1:
-            raise ValueError(
-                "--binary-rescore-multiplier requires storage_precision='int8'"
-            )
+            raise _int8_option_error("--binary-rescore-multiplier")
         if storage_precision != "int8" and int(calibration_sample_size) != int(
             EMBEDDING_STORAGE_CONFIG.calibration_sample_size
         ):
-            raise ValueError(
-                "--calibration-sample-size requires storage_precision='int8'"
-            )
+            raise _int8_option_error("--calibration-sample-size")
         self.binary_prefilter = bool(resolved_prefilter)
         self.binary_rescore_multiplier = int(requested_multiplier)
         self.calibration_sample_size = int(calibration_sample_size)

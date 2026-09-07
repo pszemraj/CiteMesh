@@ -651,6 +651,38 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
     }
 
 
+def test_hybrid_candidate_recommendation_limit_stays_within_source_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Oversized budgets must not push the recommendation fetch past S2's cap.
+
+    :param pytest.MonkeyPatch monkeypatch: Offline model and ranking stubs.
+    :return None: Assertions pin the per-source recommendation request limit.
+    """
+    client = MagicMock()
+    client.get_paper.return_value = _seed_paper()
+    client.get_paper_references.return_value = []
+    client.get_paper_citations.return_value = []
+    client.get_recommended_papers.return_value = [_paper("rec1")]
+    builder = HybridGraphBuilder(
+        max_papers=800,
+        max_semantic=400,
+        candidate_pool_size=600,
+        fetch_references=False,
+        client=client,
+    )
+    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda _seed, candidates, _sources: list(candidates),
+    )
+
+    builder.collect_papers("seed")
+
+    assert client.get_recommended_papers.call_args.kwargs["limit"] == 100
+
+
 def test_refresh_reference_cache_force_lookup_contracts() -> None:
     """Refresh mode should bypass stale memory entries and force service lookups."""
     citation_client = MagicMock()

@@ -663,7 +663,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     "recommendations",
                     lambda: self.client.get_recommended_papers(
                         seed_paper.paper_id,
+                        # Per-source fetches stay within S2's endpoint limits,
+                        # matching EmbeddingGraphBuilder._candidate_pool_budgets.
                         limit=min(
+                            100,
                             self._semantic_candidate_cap,
                             self.embedding_builder.candidate_pool_size,
                         ),

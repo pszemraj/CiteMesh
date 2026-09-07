@@ -2143,6 +2143,35 @@ def test_embedding_cache_namespace_rejects_binary_prefilter_outside_int8(
             client=MagicMock(),
         )
 
+
+@pytest.mark.parametrize(
+    "int8_option",
+    [
+        {"binary_prefilter": True},
+        {"binary_rescore_multiplier": 8},
+        {"calibration_sample_size": 128},
+    ],
+)
+def test_candidate_mode_int8_option_errors_name_the_semantic_source(
+    int8_option: dict,
+) -> None:
+    """Explicit int8 plus int8-only options in candidate mode must blame the source.
+
+    The candidate-mode rewrite downgrades int8 to float32 before validation, so
+    telling an int8 caller the option "requires int8" would be contradictory.
+
+    :param dict int8_option: One explicit int8-only constructor option.
+    :return None: Assertions pin the corpus-requirement error message.
+    """
+    with pytest.raises(ValueError, match="requires semantic_source='arxiv-corpus'"):
+        EmbeddingGraphBuilder(
+            max_papers=1,
+            semantic_source="candidates",
+            storage_precision="int8",
+            client=MagicMock(),
+            **int8_option,
+        )
+
     f32_default = EmbeddingGraphBuilder(
         max_papers=1,
         storage_precision="float32",
