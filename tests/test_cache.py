@@ -90,6 +90,43 @@ def test_legacy_macos_cache_root_requires_darwin_and_existing_path(
         assert cache_module.legacy_macos_cache_root() is None
         monkeypatch.delenv(override)
 
+    def _denied(_path: Path) -> bool:
+        """Simulate an inspection failure that is not absence.
+
+        :param Path _path: Ignored inspected path.
+        :return bool: Never returns; always raises.
+        """
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(cache_module, "path_exists", _denied)
+    assert cache_module.legacy_macos_cache_root() == legacy
+
+
+def test_path_exists_propagates_inspection_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only absence may read as False; other OS errors must propagate.
+
+    :param Path tmp_path: Temporary directory with a real file.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to fake a stat failure.
+    :return None: Validates the helper's error contract.
+    """
+    assert cache_module.path_exists(tmp_path) is True
+    assert cache_module.path_exists(tmp_path / "absent") is False
+
+    def _denied_stat(_self: Path) -> None:
+        """Simulate a stat call rejected by the OS.
+
+        :param Path _self: Ignored inspected path.
+        :return None: Never returns; always raises.
+        """
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(cache_module.Path, "stat", _denied_stat)
+    with pytest.raises(PermissionError):
+        cache_module.path_exists(tmp_path)
+
 
 def test_atomic_write_text_uses_binary_temp_descriptor(
     tmp_path: Path,

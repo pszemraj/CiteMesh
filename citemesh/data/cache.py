@@ -63,7 +63,12 @@ def legacy_macos_cache_root() -> Path | None:
     ):
         return None
     legacy = Path.home() / "Library" / "Caches" / "citemesh"
-    return legacy if legacy.exists() else None
+    try:
+        return legacy if path_exists(legacy) else None
+    except OSError:
+        # Inspection failed for a reason other than absence: the directory is
+        # present but unreadable, which is exactly when the hint matters.
+        return legacy
 
 
 def get_cache_dir(*parts: str, create: bool = True) -> Path:

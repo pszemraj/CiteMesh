@@ -2891,7 +2891,7 @@ def _load_legacy_dashboard_results(collection_root: Path) -> list[Dict[str, Any]
     :return list[Dict[str, Any]]: Valid normalized package entries in manifest order.
     """
     manifest_path = collection_root / LEGACY_DASHBOARD_MANIFEST_FILENAME
-    if not manifest_path.exists():
+    if not path_exists(manifest_path):
         return []
     try:
         manifest = _read_json_object(manifest_path, label="legacy dashboard manifest")
@@ -3229,7 +3229,7 @@ def _embedding_cache_directory_stats() -> tuple[Path, int, int]:
     embedding_cache_dir = (
         get_cache_dir("embeddings", create=False).expanduser().resolve()
     )
-    if not embedding_cache_dir.exists():
+    if not path_exists(embedding_cache_dir):
         return embedding_cache_dir, 0, 0
     files, size_bytes = _scan_path_stats(embedding_cache_dir)
     return embedding_cache_dir, files, size_bytes
@@ -3403,7 +3403,7 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
         logger.error("Refusing to clear home directory path: %s", cache_root)
         return 1
 
-    if not cache_root.exists():
+    if not path_exists(cache_root):
         logger.info("Cache directory does not exist: %s", cache_root)
         return 0
 
@@ -3477,7 +3477,7 @@ def _scan_cache_directory() -> int:
     raw_cache_root = get_cache_dir(create=False)
     cache_root = raw_cache_root.expanduser().resolve()
 
-    if not cache_root.exists():
+    if not path_exists(cache_root):
         logger.info("Cache directory does not exist: %s", cache_root)
         _log_legacy_macos_cache_hint(cache_root)
         return 0
