@@ -1160,6 +1160,60 @@ def test_embedding_cache_search_and_calibration_reuse_contract() -> None:
 
 
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_embedding_cache_search_normalizes_scaled_queries(
+    storage_precision: str,
+) -> None:
+    """Scaled copies of one query should produce identical rankings and scores.
+
+    :param str storage_precision: Persisted vector format under test.
+    :return None: Assertions verify query-scale-independent search results.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name=f"scaled-query-{storage_precision}",
+            storage_precision=storage_precision,
+        )
+        _set_test_int8_calibration(cache)
+        papers = {
+            "p1": {"title": "Alpha", "abstract": "First"},
+            "p2": {"title": "Beta", "abstract": "Second"},
+        }
+        cache.get_embeddings(
+            papers,
+            LookupEncodeModel(
+                {
+                    "Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32),
+                    "Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32),
+                }
+            ),
+            show_progress=False,
+        )
+
+        query = np.asarray([1.0, 0.25], dtype=np.float32)
+        baseline = cache.search(
+            query_embedding=query,
+            top_k=2,
+            binary_prefilter=False,
+            binary_rescore_multiplier=1,
+        )
+        scaled = cache.search(
+            query_embedding=query * 2.0,
+            top_k=2,
+            binary_prefilter=False,
+            binary_rescore_multiplier=1,
+        )
+
+    assert [result.paper_id for result in baseline] == [
+        result.paper_id for result in scaled
+    ]
+    np.testing.assert_allclose(
+        [result.score for result in baseline],
+        [result.score for result in scaled],
+    )
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 def test_embedding_cache_search_keeps_tied_top_k_order_across_chunks(
     monkeypatch: pytest.MonkeyPatch,
     storage_precision: str,

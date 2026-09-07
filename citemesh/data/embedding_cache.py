@@ -925,6 +925,7 @@ class EmbeddingCache:
             raise ValueError("query_embedding must be 1-dimensional")
         if not np.all(np.isfinite(query)):
             raise ValueError("query_embedding must contain only finite values")
+        query = l2_normalize_embeddings(query)
         with (
             self._cache_lock(),
             self._connect_db() as conn,
@@ -2987,7 +2988,7 @@ class EmbeddingCache:
         :param Optional[np.ndarray] row_indices: Optional candidate subset.
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
         """
-        query = l2_normalize_embeddings(query_embedding)
+        query = query_embedding
         if row_indices is not None:
             rows = np.unique(np.asarray(row_indices, dtype=np.int64))
             if rows.size == 0:
