@@ -119,6 +119,10 @@ def _raise_request_error(exc: Exception, context: str) -> None:
 
 
 _MAX_BACKOFF_SECONDS = 60.0
+# Servers under sustained saturation have answered with hour-scale cooldowns;
+# a bounded honor window keeps a single sleep from silently stalling a build.
+_MAX_RETRY_AFTER_SECONDS = 300.0
+_LONG_RETRY_WARNING_SECONDS = 30.0
 
 
 def _jittered_backoff(
@@ -136,13 +140,14 @@ def _jittered_backoff(
     :param int attempt_number: 1-based retry attempt number.
     :param Optional[float] retry_after: Server-provided Retry-After seconds.
     :param bool rate_limited: Whether the failure was an HTTP 429.
-    :return float: Capped jitter delay, or the server's longer requested wait.
+    :return float: Capped jitter delay, or the server's longer requested wait
+        bounded by ``_MAX_RETRY_AFTER_SECONDS``.
     """
     multiplier = API_CONFIG.retry_delay * (2.0 if rate_limited else 1.0)
     cap = min(multiplier * (2.0 ** (attempt_number - 1)), _MAX_BACKOFF_SECONDS)
     wait = random.uniform(0.0, cap)
     if retry_after is not None:
-        wait = max(retry_after, wait)
+        wait = max(min(retry_after, _MAX_RETRY_AFTER_SECONDS), wait)
     return wait
 
 
@@ -157,6 +162,28 @@ class _RetryableRequestError(RuntimeError):
         """
         super().__init__(message)
         self.retry_after = retry_after
+
+
+def _warn_on_long_wait(retry_state: RetryCallState) -> None:
+    """Announce outage-scale retry sleeps at the default log level.
+
+    Per-endpoint retry callbacks stay debug-only for quick blips; a wait at or
+    above the warning threshold means the API is effectively down and silence
+    would read as a hang.
+
+    :param RetryCallState retry_state: Failed attempt with its next sleep action.
+    :return None: Emits one WARNING when the upcoming sleep is long.
+    """
+    sleep_seconds = retry_state.next_action.sleep if retry_state.next_action else 0.0
+    if sleep_seconds >= _LONG_RETRY_WARNING_SECONDS:
+        logger.warning(
+            "Semantic Scholar unavailable (attempt %s/%s); waiting %.0fs "
+            "before retrying: %s",
+            retry_state.attempt_number,
+            API_CONFIG.max_retries,
+            sleep_seconds,
+            retry_state.outcome.exception() if retry_state.outcome else None,
+        )
 
 
 class _S2BackoffWait(wait_base):
@@ -633,6 +660,7 @@ class SemanticScholarClient:
             :param RetryCallState state: Failed attempt with its next sleep action.
             :return None: Invokes the endpoint's retry callback.
             """
+            _warn_on_long_wait(state)
             on_retry(
                 state.attempt_number, state.next_action.sleep, state.outcome.exception()
             )
@@ -1042,6 +1070,7 @@ class SemanticScholarClient:
 
             :param RetryCallState retry_state: Tenacity retry state.
             """
+            _warn_on_long_wait(retry_state)
             exc = retry_state.outcome.exception() if retry_state.outcome else None
             wait_seconds = (
                 retry_state.next_action.sleep if retry_state.next_action else 0.0

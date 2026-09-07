@@ -47,16 +47,7 @@ shell substitution; operational logs go to stderr.
 citemesh build "<paper-id>" [options]
 ```
 
-Semantic Scholar operations allow up to **30 total attempts**, including the
-initial request. Both SDK and direct HTTP calls use Tenacity with exponential
-full jitter: the random wait ceiling doubles from 2 seconds (4 seconds for HTTP
-429) up to 60 seconds. A numeric `Retry-After` header sets the minimum wait, even
-when it exceeds 60 seconds. This budget applies per operation, not to the whole
-build. There is deliberately no elapsed-time deadline: long retries favor
-finishing resumable builds, and 60 seconds caps each backoff rather than total
-waiting time. A prolonged outage can take many minutes before it is reported.
-Invalid request parameters and rejected credentials fail immediately. Ctrl+C
-interrupts retries. Retry details appear at `--log-level debug`.
+Semantic Scholar operations allow up to **30 total attempts**, including the initial request. Both SDK and direct HTTP calls use Tenacity with exponential full jitter: the random wait ceiling doubles from 2 seconds (4 seconds for HTTP 429) up to 60 seconds. A numeric `Retry-After` header sets the minimum wait beyond the jitter ceiling, honored up to 300 seconds per delay. This budget applies per operation, not to the whole build. There is deliberately no elapsed-time deadline: long retries favor finishing resumable builds, and the caps bound each delay rather than total waiting time. A prolonged outage can take many minutes before it is reported; any single wait of 30 seconds or longer is announced at the default log level. Invalid request parameters and rejected credentials fail immediately. Ctrl+C interrupts retries. Full retry details appear at `--log-level debug`.
 
 Other command groups:
 

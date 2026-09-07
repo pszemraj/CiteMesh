@@ -427,6 +427,41 @@ def test_successful_retry_attempts_are_debug_only(
     assert direct_retry_records[0].levelno == logging.DEBUG
 
 
+def test_long_retry_waits_are_visible_at_default_log_level(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A retry sleep at or above the warning threshold must emit a WARNING.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :param pytest.LogCaptureFixture caplog: Captured logging fixture.
+    :return None: Checks outage visibility without real waiting.
+    """
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client._session.get = MagicMock(
+        side_effect=[
+            _MockResponse(status_code=503, headers={"Retry-After": "45"}),
+            _MockResponse(
+                status_code=200,
+                payload={"data": [_paper_payload(paper_id="result")]},
+            ),
+        ]
+    )
+    monkeypatch.setattr("citemesh.services.semantic_scholar.time.sleep", lambda _: None)
+
+    with caplog.at_level(logging.WARNING, logger="citemesh.services.semantic_scholar"):
+        results = client.search_papers("attention")
+
+    assert [paper.paper_id for paper in results] == ["result"]
+    warning_records = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "waiting 45s before retrying" in record.getMessage()
+    ]
+    assert len(warning_records) == 1
+
+
 def test_related_paper_retry_discards_partial_attempt_results() -> None:
     """A failed relation conversion attempt must not duplicate earlier rows."""
     client = SemanticScholarClient(timeout=1)
@@ -1632,10 +1667,15 @@ def test_jittered_backoff_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert all(low == 0.0 for low, _high in drawn_bounds)
 
-    # The server's minimum wait takes precedence over the local jitter cap.
+    # The server's minimum wait takes precedence over the local jitter cap but
+    # is itself bounded so one response cannot stall a build for hours.
     monkeypatch.setattr(semantic_module.random, "uniform", lambda low, high: 0.0)
     assert semantic_module._jittered_backoff(1, retry_after=7.5) == 7.5
-    assert semantic_module._jittered_backoff(1, retry_after=999.0) == 999.0
+    assert semantic_module._jittered_backoff(1, retry_after=120.0) == 120.0
+    assert (
+        semantic_module._jittered_backoff(1, retry_after=999.0)
+        == semantic_module._MAX_RETRY_AFTER_SECONDS
+    )
 
 
 @pytest.mark.parametrize("endpoint", ["sdk", "rest"])

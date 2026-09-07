@@ -135,7 +135,8 @@ class APIConfig:
     default_timeout: float = 30.0
 
     # Long waits are intentional for resumable builds: bound attempts, not total
-    # elapsed time. Each exponential backoff is capped by the service retry policy.
+    # elapsed time. The service retry policy caps each delay (60s jitter ceiling,
+    # 300s honored Retry-After ceiling) but sets no aggregate deadline.
     max_retries: int = 30
     retry_delay: float = 2.0  # Initial delay, increases exponentially
 
