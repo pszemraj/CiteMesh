@@ -580,8 +580,9 @@ def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
 
     assert args.semantic_source == "candidates"
     assert args.candidate_pool_size == 50
-    assert args.streaming is True
-    assert args.dataset_split == "train[:5%]"
+    # Ignored corpus defaults are reset outright, not merely left unused.
+    assert args.streaming is False
+    assert args.dataset_split == "train"
 
 
 def test_config_semantic_source_corpus_applies_without_flags() -> None:
@@ -729,6 +730,42 @@ def test_config_strategy_gating_names_the_config_source() -> None:
     assert "Unsupported option(s) for --strategy citation" in message
     assert "defaults.strategy" in message
     assert str(config.path) in message
+
+
+def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
+    """Corpus-only config defaults announced as ignored must not reach builders.
+
+    :return None: Assertions verify the values reset to built-in defaults and
+        that the reset table matches the real parser defaults.
+    """
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding"]
+    )
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml",
+        defaults={
+            "streaming": True,
+            "dataset_split": "train[:99]",
+            "corpus_size": 123,
+        },
+    )
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    assert args.streaming is True
+
+    cli_module._validate_build_cli_contract(
+        args,
+        cli_module._ValueErrorParserErrorSink(),
+        provided,
+        config_defaults=applied,
+        config_path=config.path,
+    )
+
+    assert args.semantic_source == "candidates"
+    assert args.streaming is False
+    assert args.dataset_split == "train"
+    assert args.corpus_size == 50000
+    for dest, expected in cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS.items():
+        assert build_parser.get_default(dest) == expected
 
 
 @pytest.mark.parametrize(

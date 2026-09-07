@@ -3396,6 +3396,27 @@ def test_output_path_and_slug_contracts() -> None:
             strategy="hybrid",
         )
         assert paths == expected
+
+
+def test_single_format_output_writes_into_an_existing_directory(
+    tmp_path: Path,
+) -> None:
+    """An existing --output directory must receive the artifact, not name it.
+
+    :param Path tmp_path: Temporary directory serving as the output target.
+    :return None: Assertions pin file-or-directory semantics for one format.
+    """
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+
+    paths = resolve_output_paths(
+        base_output_path=results_dir,
+        selected_formats=["json"],
+        explicit_output=True,
+        strategy="citation",
+    )
+
+    assert paths == {"json": results_dir / "citation.json"}
     config_cases = [
         (
             {"png": Path("out/seed/hybrid.png")},
@@ -3718,6 +3739,22 @@ def test_export_metadata_records_effective_device() -> None:
     )
     assert metadata["effective_device"] == "mps"
     assert metadata["effective_compute_dtype"] == "bfloat16"
+
+
+def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:
+    """Corpus builds must not record a candidate pool size they never consult.
+
+    :return None: Assertions align export metadata with the config sidecar.
+    """
+    corpus_metadata = cli_module._embedding_export_metadata(
+        _dispatch_namespace(semantic_source="arxiv-corpus")
+    )
+    candidates_metadata = cli_module._embedding_export_metadata(
+        _dispatch_namespace(semantic_source="candidates", candidate_pool_size=400)
+    )
+
+    assert "candidate_pool_size" not in corpus_metadata
+    assert candidates_metadata["candidate_pool_size"] == 400
 
 
 def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:

@@ -640,6 +640,14 @@ _CORPUS_ONLY_OPTION_DESTS: Set[str] = {
     "all_corpus",
     "streaming",
 }
+# Built-in parser defaults restored when corpus-only config values are ignored
+# in candidates mode; kept in sync with the build parser by a contract test.
+_CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: Dict[str, object] = {
+    "dataset_split": "train",
+    "corpus_size": 50000,
+    "all_corpus": False,
+    "streaming": False,
+}
 # Explicit candidate-only options imply candidate sourcing just as explicit
 # corpus-only options imply corpus sourcing.
 _CANDIDATE_ONLY_OPTION_DESTS: Set[str] = {"candidate_pool_size"}
@@ -797,7 +805,7 @@ def _embedding_export_metadata(
         if isinstance(raw_graph_representation, str) and raw_graph_representation:
             graph_representation = raw_graph_representation
 
-    return {
+    payload: Dict[str, object] = {
         "effective_vector_dtype": "float32",
         "effective_device": effective_device,
         "effective_compute_dtype": effective_compute_dtype,
@@ -816,6 +824,11 @@ def _embedding_export_metadata(
             getattr(cli_args, "cache_overwrite_reason", None)
         ),
     }
+    if payload["semantic_source"] == "arxiv-corpus":
+        # Corpus builds never consult the candidate pool; recording its default
+        # here contradicted the config sidecar, which omits it.
+        payload.pop("candidate_pool_size")
+    return payload
 
 
 def _plot_overlay_metadata(export_metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -1121,6 +1134,11 @@ def _validate_build_cli_contract(
                     ignored_text,
                     source,
                 )
+                # "Ignored" must mean ignored: reset the values so the builder
+                # never receives corpus settings a candidates run announced it
+                # would not apply.
+                for dest in ignored_config_corpus_dests:
+                    setattr(args, dest, _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS[dest])
             if provided_corpus_flags:
                 option_text = ", ".join(provided_corpus_flags)
                 _build_contract_error(
@@ -2334,6 +2352,14 @@ def resolve_output_paths(
 
         if has_known_suffix:
             output_paths[fmt] = Path(stripped_base + desired_ext)
+            return output_paths
+
+        if base_output_path.is_dir():
+            # --output promises file-or-directory semantics; an existing
+            # directory receives the artifact inside it, matching the
+            # multi-format branch, instead of becoming a sibling filename stem.
+            basename = strategy or "graph"
+            output_paths[fmt] = base_output_path / f"{basename}{desired_ext}"
             return output_paths
 
         output_paths[fmt] = Path(base_str + desired_ext)
