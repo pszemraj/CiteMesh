@@ -2760,7 +2760,8 @@ def test_embedding_cache_recovery_contracts(
         conn.commit()
 
     reloaded = EmbeddingCache(cache_dir=tmp_path, model_name="legacy-recovery")
-    assert "rebuilding: incompatible embedding cache layout" in caplog.text
+    assert "REBUILDING EMBEDDING CACHE" in caplog.text
+    assert "Reason: incompatible embedding cache layout" in caplog.text
     with reloaded._connect_db() as conn:
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 

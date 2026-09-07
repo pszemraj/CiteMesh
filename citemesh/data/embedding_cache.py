@@ -2036,12 +2036,11 @@ class EmbeddingCache:
             :param bool layout_mismatch: Whether the persisted layout needs rebuilding.
             :return None: Always raises the mode-appropriate exception.
             """
-            detail = (
-                "Embedding cache integrity error: "
-                f"{message}. Rebuild this cache namespace to restore consistency."
-            )
+            detail = f"Embedding cache integrity error: {message}."
             if fail_mode == "runtime" or not layout_mismatch:
-                raise RuntimeError(detail)
+                raise RuntimeError(
+                    f"{detail} Rebuild this cache namespace to restore consistency."
+                )
             if fail_mode == "repair":
                 raise _EmbeddingCacheLayoutError(detail)
             raise ValueError(f"Unknown fail_mode={fail_mode!r}")
@@ -2384,8 +2383,10 @@ class EmbeddingCache:
                 self._ensure_binary_dataset(h5, embedding_dim)
         except _EmbeddingCacheLayoutError as exc:
             logger.warning(
-                "Embedding cache %s is incompatible with current schema. "
-                "Clearing namespace cache and rebuilding: %s",
+                "REBUILDING EMBEDDING CACHE — please hang tight. "
+                "Embeddings will be regenerated automatically; this may take a while. "
+                "No action is needed.\n"
+                "Cache %s is incompatible with current schema. Reason: %s",
                 self.h5_path,
                 exc,
             )

@@ -1353,6 +1353,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 else nullcontext()
             )
             with operation_lock:
+                logger.warning(
+                    "REBUILDING EMBEDDING CACHE — please hang tight. "
+                    "Embeddings will be regenerated automatically; this may take a while. "
+                    "No action is needed. Reason: explicit rebuild request."
+                )
                 self._embedding_cache.clear(reason=self._pending_force_rebuild_reason)
                 self.graph_embedding_cache.clear(
                     reason=self._pending_force_rebuild_reason
@@ -2009,8 +2014,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             cached_fingerprint = cache.get_model_fingerprint()
             if has_cached_payload and cached_fingerprint != model_fingerprint:
                 logger.warning(
-                    "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
-                    "Clearing namespace cache.",
+                    "REBUILDING EMBEDDING CACHE — please hang tight. "
+                    "Embeddings will be regenerated automatically; this may take a while. "
+                    "No action is needed. "
+                    "Reason: embedding cache model fingerprint mismatch (cached=%s, active=%s).",
                     cached_fingerprint or "missing",
                     model_fingerprint,
                 )
@@ -3347,6 +3354,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         dataset_source: Optional[str]
         dataset: Iterable[Dict[str, Any]]
+
+        if cached_dataset_source or self.embedding_cache.has_cached_payload():
+            logger.warning(
+                "REBUILDING EMBEDDING CACHE — please hang tight. "
+                "Embeddings will be regenerated automatically; this may take a while. "
+                "No action is needed. "
+                "Reason: the cached corpus no longer matches the requested source, "
+                "split, size, or hydration state. Preparing the dataset first."
+            )
 
         try:
             dataset_source, dataset = self._load_dataset_for_hydration(
