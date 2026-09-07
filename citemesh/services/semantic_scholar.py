@@ -1169,10 +1169,20 @@ class SemanticScholarClient:
         )
         if api_paper is None:
             return None
-        paper = self._convert_api_paper(api_paper)
+        try:
+            paper = self._convert_payload_paper(
+                api_paper,
+                category_keys=("fields", "fieldsOfStudy"),
+            )
+        except Exception as exc:
+            raise _SemanticScholarResponseContractError(
+                f"Semantic Scholar returned a malformed paper payload for "
+                f"{paper_id}: {exc}"
+            ) from exc
         if paper is None:
             raise _SemanticScholarResponseContractError(
-                f"Semantic Scholar returned a malformed paper payload for {paper_id}."
+                f"Semantic Scholar returned a malformed paper payload without a "
+                f"paper ID for {paper_id}."
             )
         _persist_paper(paper, paper_id)
         return paper

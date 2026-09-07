@@ -1574,6 +1574,29 @@ def test_malformed_present_paper_payload_is_not_reported_as_missing(
     sleep_mock.assert_not_called()
 
 
+def test_unconvertible_paper_payload_error_names_the_cause() -> None:
+    """A payload that fails Paper conversion must surface the conversion error.
+
+    :return None: Checks the single-paper strict path chains its root cause.
+    """
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client._request_json = MagicMock(
+        return_value={
+            "paperId": "Z",
+            "title": "T",
+            "year": 3000,
+            "authors": [],
+            "citationCount": 1,
+            "abstract": "a",
+            "externalIds": {},
+        }
+    )
+
+    with pytest.raises(TypeError, match="malformed paper payload.*Invalid year"):
+        client.get_paper("Z")
+
+
 def test_recommendations_fall_back_to_all_cs_pool() -> None:
     """Empty default-pool responses retry against the broader all-cs pool."""
     client = SemanticScholarClient(timeout=1)
