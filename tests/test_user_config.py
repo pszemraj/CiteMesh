@@ -105,6 +105,12 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
         set_config_value("defaults.semantic_source", "arxiv-corpus", path=config_path)
         == "arxiv-corpus"
     )
+    assert (
+        set_config_value(
+            "defaults.dataset_source", "research/arxiv-snapshot", path=config_path
+        )
+        == "research/arxiv-snapshot"
+    )
     assert set_config_value("defaults.max_papers", "25", path=config_path) == 25
     assert set_config_value("defaults.streaming", "true", path=config_path) is True
     assert set_config_value("defaults.export", "json,dashboard", path=config_path) == [
@@ -115,6 +121,7 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
     config = load_user_config(config_path)
     assert config.defaults == {
         "semantic_source": "arxiv-corpus",
+        "dataset_source": "research/arxiv-snapshot",
         "max_papers": 25,
         "streaming": True,
         "export": ["json", "dashboard"],
@@ -125,6 +132,7 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
     reloaded = load_user_config(config_path)
     assert "streaming" not in reloaded.defaults
     assert reloaded.defaults["semantic_source"] == "arxiv-corpus"
+    assert reloaded.defaults["dataset_source"] == "research/arxiv-snapshot"
 
 
 def test_config_file_is_written_owner_only(tmp_path: Path) -> None:
@@ -535,6 +543,37 @@ def test_semantic_threshold_config_reaches_builder_kwargs(
     assert kwargs["min_semantic_similarity"] == (0.75 if explicit else 0.68)
 
 
+def test_configured_dataset_source_is_ignored_in_candidate_mode(
+    tmp_path: Path,
+) -> None:
+    """A corpus-only persisted metadata source must stay inert in candidate mode.
+
+    :param Path tmp_path: Isolated config file location.
+    :return None: Assertions validate reset to the built-in source.
+    """
+    path = tmp_path / "config.toml"
+    dataset_source = "research/arxiv-snapshot"
+    set_config_value("defaults.dataset_source", dataset_source, path=path)
+    config = load_user_config(path=path)
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding"]
+    )
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    cli_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied, config_path=config.path
+    )
+
+    assert args.semantic_source == "candidates"
+    assert (
+        args.dataset_source
+        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+    )
+    assert (
+        cli_module._shared_embedding_builder_kwargs(args)["dataset_source"]
+        == (cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"])
+    )
+
+
 @pytest.mark.parametrize("value", ["nan", "inf", "-0.1", "1.1", True])
 def test_semantic_threshold_config_rejects_invalid_values(value: object) -> None:
     """Keep persisted thresholds within the same range as CLI arguments.
@@ -631,6 +670,33 @@ def test_cli_corpus_flag_overrides_config_semantic_source() -> None:
     assert args.semantic_source == "arxiv-corpus"
 
 
+def test_cli_dataset_source_overrides_config_default() -> None:
+    """An explicit metadata source should outrank a persisted source.
+
+    :return None: Assertions validate CLI-over-config precedence in corpus mode.
+    """
+    cli_source = "cli/arxiv-snapshot"
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", "embedding", "--dataset-source", cli_source]
+    )
+    config = UserConfig(
+        path=Path("unused"),
+        defaults={
+            "semantic_source": "arxiv-corpus",
+            "dataset_source": "config/arxiv-snapshot",
+        },
+    )
+    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    cli_module._validate_build_cli_contract(
+        args, build_parser, provided, config_defaults=applied
+    )
+
+    assert "dataset_source" in provided
+    assert "dataset_source" not in applied
+    assert args.semantic_source == "arxiv-corpus"
+    assert args.dataset_source == cli_source
+
+
 def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
     """Explicit candidate options should make unused corpus defaults inert.
 
@@ -649,6 +715,7 @@ def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
         path=Path("unused"),
         defaults={
             "semantic_source": "arxiv-corpus",
+            "dataset_source": "research/arxiv-snapshot",
             "streaming": True,
             "dataset_split": "train[:5%]",
         },
@@ -662,6 +729,10 @@ def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
     assert args.candidate_pool_size == 50
     # Ignored corpus defaults are reset outright, not merely left unused.
     assert args.streaming is False
+    assert (
+        args.dataset_source
+        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+    )
     assert args.dataset_split == "train"
 
 
@@ -673,14 +744,23 @@ def test_config_semantic_source_corpus_applies_without_flags() -> None:
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "embedding"]
     )
+    dataset_source = "research/arxiv-snapshot"
     config = UserConfig(
-        path=Path("unused"), defaults={"semantic_source": "arxiv-corpus"}
+        path=Path("unused"),
+        defaults={
+            "semantic_source": "arxiv-corpus",
+            "dataset_source": dataset_source,
+        },
     )
     applied = cli_module._apply_user_config_defaults(args, provided, config)
     cli_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     assert args.semantic_source == "arxiv-corpus"
+    assert args.dataset_source == dataset_source
+    assert cli_module._shared_embedding_builder_kwargs(args)["dataset_source"] == (
+        dataset_source
+    )
     # Corpus mode keeps the int8 storage default (no candidate-mode downgrade).
     assert args.storage_precision == "int8"
 
@@ -824,6 +904,7 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
     config = UserConfig(
         path=Path("cfg-home") / "config.toml",
         defaults={
+            "dataset_source": "research/arxiv-snapshot",
             "streaming": True,
             "dataset_split": "train[:99]",
             "corpus_size": 123,
@@ -842,6 +923,10 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
 
     assert args.semantic_source == "candidates"
     assert args.streaming is False
+    assert (
+        args.dataset_source
+        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+    )
     assert args.dataset_split == "train"
     assert args.corpus_size == 50000
     for dest, expected in cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS.items():
@@ -902,7 +987,11 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     )
     config = UserConfig(
         path=Path("cfg-home") / "config.toml",
-        defaults={"corpus_size": 1234, "streaming": True},
+        defaults={
+            "dataset_source": "research/arxiv-snapshot",
+            "corpus_size": 1234,
+            "streaming": True,
+        },
     )
     debug = MagicMock()
     info = MagicMock()
@@ -922,6 +1011,7 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     messages = str(info.call_args_list)
     assert "Ignoring corpus-only config default(s)" in messages
     assert "defaults.corpus_size" in messages
+    assert "defaults.dataset_source" in messages
     assert "defaults.streaming" in messages
     assert "defaults.semantic_source='arxiv-corpus'" in messages
     payload = cli_module._build_graph_config_payload(

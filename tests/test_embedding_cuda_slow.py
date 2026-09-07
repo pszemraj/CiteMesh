@@ -137,36 +137,22 @@ def test_real_cuda_int8_corpus_cache_round_trip(
             "categories": "q-bio.BM",
         },
     ]
-    loader_calls: list[tuple[str | None, int | None, int | None, bool]] = []
+    loader_calls: list[tuple[int | None, int | None]] = []
 
     def load_local_dataset(
         use_streaming: bool,
-        preferred_dataset_source: str | None = None,
         row_limit: int | None = None,
         row_offset: int | None = None,
-        allow_source_fallback: bool = True,
     ) -> tuple[str, list[dict[str, Any]]]:
         """Return a fresh slice of the network-free CUDA smoke corpus.
 
         :param bool use_streaming: Requested dataset loading mode.
-        :param Optional[str] preferred_dataset_source: Exact source requested by
-            calibration or refresh paths.
         :param Optional[int] row_limit: Optional number of records to return.
         :param Optional[int] row_offset: Optional starting record index.
-        :param bool allow_source_fallback: Whether source fallback was permitted.
         :return tuple[str, list[dict[str, Any]]]: Source token and copied rows.
         """
         assert use_streaming is False
-        if preferred_dataset_source is not None:
-            assert preferred_dataset_source == source
-        loader_calls.append(
-            (
-                preferred_dataset_source,
-                row_limit,
-                row_offset,
-                allow_source_fallback,
-            )
-        )
+        loader_calls.append((row_limit, row_offset))
         start = int(row_offset or 0)
         stop = None if row_limit is None else start + int(row_limit)
         return source, [dict(record) for record in records[start:stop]]
@@ -176,6 +162,7 @@ def test_real_cuda_int8_corpus_cache_round_trip(
         max_papers=2,
         device="cuda",
         semantic_source="arxiv-corpus",
+        dataset_source=source,
         corpus_size=len(records),
         storage_precision="int8",
         calibration_sample_size=len(records),

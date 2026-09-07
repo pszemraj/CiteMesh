@@ -83,6 +83,7 @@ from citemesh.strategies.candidates import (
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
+    DEFAULT_DATASET_SOURCE,
     EMBEDDING_DEVICE_CHOICES,
     ENCODE_BATCH_SIZE,
     EmbeddingGraphBuilder,
@@ -610,6 +611,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "model": {"embedding", "hybrid"},
     "model_profile": {"embedding", "hybrid"},
     "model_revision": {"embedding", "hybrid"},
+    "dataset_source": {"embedding", "hybrid"},
     "dataset_split": {"embedding", "hybrid"},
     "corpus_size": {"embedding", "hybrid"},
     "all_corpus": {"embedding", "hybrid"},
@@ -636,6 +638,7 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
 # Flags that only affect arxiv-corpus hydration; providing them implies (or
 # requires) --semantic-source arxiv-corpus.
 _CORPUS_ONLY_OPTION_DESTS: Set[str] = {
+    "dataset_source",
     "dataset_split",
     "corpus_size",
     "all_corpus",
@@ -644,6 +647,7 @@ _CORPUS_ONLY_OPTION_DESTS: Set[str] = {
 # Built-in parser defaults restored when corpus-only config values are ignored
 # in candidates mode; kept in sync with the build parser by a contract test.
 _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: Dict[str, object] = {
+    "dataset_source": DEFAULT_DATASET_SOURCE,
     "dataset_split": "train",
     "corpus_size": 50000,
     "all_corpus": False,
@@ -687,6 +691,7 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
     "model_profile",
     "model_revision",
+    "dataset_source",
     "dataset_split",
     "corpus_size",
     "all_corpus",
@@ -728,6 +733,7 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "model_name": cli_args.model,
         "model_profile": cli_args.model_profile,
         "model_revision": cli_args.model_revision,
+        "dataset_source": cli_args.dataset_source,
         "dataset_split": cli_args.dataset_split,
         "corpus_size": None if cli_args.all_corpus else cli_args.corpus_size,
         "truncate_dim": cli_args.truncate_dim,
@@ -1341,10 +1347,11 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     if corpus_mode:
         corpus_label = "all" if args.all_corpus else str(args.corpus_size)
         logger.debug(
-            "Embedding config: model=%s@%s device=%s source=arxiv-corpus split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
+            "Embedding config: model=%s@%s device=%s source=arxiv-corpus dataset=%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
             args.model,
             revision_label,
             args.device,
+            args.dataset_source,
             args.dataset_split,
             corpus_label,
             bool(args.streaming),
@@ -1843,6 +1850,16 @@ def _create_parser() -> Tuple[
     )
 
     corpus_group.add_argument(
+        "--dataset-source",
+        type=_non_empty_str,
+        default=DEFAULT_DATASET_SOURCE,
+        help=(
+            "HuggingFace arXiv metadata dataset source "
+            f"(default: {DEFAULT_DATASET_SOURCE})"
+        ),
+    )
+
+    corpus_group.add_argument(
         "--dataset-split",
         type=_non_empty_str,
         default="train",
@@ -2299,6 +2316,7 @@ def _create_parser() -> Tuple[
                     "log_file": "PATH",
                     "model": "MODEL",
                     "model_revision": "REV",
+                    "dataset_source": "DATASET",
                     "dataset_split": "SPLIT",
                 }.get(action.dest, "TEXT")
 
@@ -3168,6 +3186,7 @@ def _build_graph_config_payload(
             "model_revision": cli_args.model_revision,
             "semantic_source": str(cli_args.semantic_source),
             "candidate_pool_size": int(cli_args.candidate_pool_size),
+            "dataset_source": cli_args.dataset_source,
             "dataset_split": cli_args.dataset_split,
             "corpus_size": None if cli_args.all_corpus else int(cli_args.corpus_size),
             "all_corpus": bool(cli_args.all_corpus),

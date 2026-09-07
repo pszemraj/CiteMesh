@@ -40,6 +40,7 @@ from citemesh.strategies.candidates import (
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
+    DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
     EmbeddingGraphBuilder,
     EmbeddingTask,
@@ -133,6 +134,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
         client: Optional[SemanticScholarClient] = None,
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
+        dataset_source: str = DEFAULT_DATASET_SOURCE,
     ):
         """
         Initialize hybrid graph builder.
@@ -149,6 +151,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param str model_profile: Model task/runtime profile override.
         :param Optional[str] model_revision: Optional model revision token for hub-backed models.
         :param str dataset_split: ArXiv dataset split
+        :param str dataset_source: HuggingFace dataset repository with arXiv metadata fields.
         :param Optional[int] corpus_size: Maximum papers loaded for semantic search.
         :param Optional[int] truncate_dim: Optional embedding dimension truncation.
         :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
@@ -219,6 +222,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 model_name=model_name,
                 model_profile=model_profile,
                 model_revision=model_revision,
+                dataset_source=dataset_source,
                 dataset_split=dataset_split,
                 corpus_size=corpus_size,
                 truncate_dim=truncate_dim,

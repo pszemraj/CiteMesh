@@ -136,7 +136,8 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
 - `--model`, `-m`: sentence-transformer model name (default `unsloth/embeddinggemma-300m`; alternate current checkpoint: `google/embeddinggemma-300m`)
 - `--model-profile {auto,default,embeddinggemma}`: task/runtime contract selection. `auto` recognizes known Hub aliases and compatible local checkpoint metadata; use an explicit profile for stripped local fine-tune exports.
 - `--model-revision`: optional model revision token (branch/tag/commit) for hub-backed models
-- `--dataset-split`: HuggingFace split (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode and bound the rows exposed to CiteMesh after dataset preparation)
+- `--dataset-source`: HuggingFace arXiv metadata dataset repository (default `librarian-bots/arxiv-metadata-snapshot`). It must provide the existing ArXiv metadata record shape: `id` (or `paper_id` / `paperId`), `title`, and `abstract` (or `summary`); `authors`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal` are used when present.
+- `--dataset-split`: HuggingFace split from the selected dataset source (default `train`; sliced forms like `train[:5%]` are supported in non-streaming mode and bound the rows exposed to CiteMesh after dataset preparation)
 - `--corpus-size`: maximum papers to embed/cache after scanning the selected split to select the newest submissions by arXiv ID (default `50000`); it does not cap that selection scan
 - `--all-corpus`: remove corpus-size cap and process the full selected split
 - `--all-corpus` applies within the selected `--dataset-split`; `--dataset-split train --all-corpus` means "all of `train`", not "every split published by the dataset"
@@ -166,15 +167,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
   `0`; combining `lzf` with an explicit level is rejected.
 - `--torch-compile` / `--no-torch-compile`: enable/disable best-effort inner-model `torch.compile` for supported profiles (default disabled). CUDA and CPU honor the flag during cold or resumed corpus hydration using dynamic shapes; CPU also freezes inference weights and autotunes GEMMs. MPS defers compilation until the corpus cache is hydrated. The first encode pays compilation and autotuning warm-up cost where applicable.
 - `--device {auto,cuda,mps,cpu}`: compute device for embedding model runs (default `auto`, which prefers CUDA, then MPS on Apple Silicon, then CPU). Explicit unavailable devices fail fast. Shared with hybrid.
-- `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing
-  (default `candidates`, which uses an S2-derived pool without a corpus download).
-  Explicit corpus-only flags (`--dataset-split`, `--corpus-size`, `--all-corpus`,
-  `--streaming`) imply `arxiv-corpus` when `--semantic-source` is omitted; the
-  candidate-only `--candidate-pool-size` flag likewise implies `candidates`. An
-  explicit source that conflicts with a mode-only flag is rejected, as is
-  supplying corpus-only and candidate-only flags together while
-  `--semantic-source` is omitted. Candidate mode stores vectors as float32
-  (`--storage-precision int8` requires `arxiv-corpus`).
+- `--semantic-source {candidates,arxiv-corpus}`: semantic candidate sourcing (default `candidates`, which uses an S2-derived pool without a corpus download). Explicit corpus-only flags (`--dataset-source`, `--dataset-split`, `--corpus-size`, `--all-corpus`, `--streaming`) imply `arxiv-corpus` when `--semantic-source` is omitted; the candidate-only `--candidate-pool-size` flag likewise implies `candidates`. An explicit source that conflicts with a mode-only flag is rejected, as is supplying corpus-only and candidate-only flags together while `--semantic-source` is omitted. Candidate mode stores vectors as float32 (`--storage-precision int8` requires `arxiv-corpus`).
 - `--candidate-pool-size`: S2 source-fetch budget for known-paper seeds in
   candidates mode (default `400`; candidates mode only). A free-text seed first
   adds up to 20 keyword-search results, then applies the recommendation budget to
@@ -259,7 +252,7 @@ citemesh build "<paper-id-from-search>" --strategy recommendation
 
 The default mode is `auto`: local search when your cache has embeddings, S2 keyword search otherwise, with a log line saying which backend ran and why. Persist a preference with `citemesh config set defaults.search_mode <auto|local|s2>` (explicit `--mode` still wins). Passing `--model`, `--model-profile`, or `--device` implies local mode when `--mode` is omitted; an explicit `--mode auto` keeps its Semantic Scholar fallback, and combining `--mode s2` with any of those flags is rejected. Requesting `local` with an empty cache - via `--mode local`, via an implying `--model`/`--model-profile`/`--device`, or via `defaults.search_mode` - is an error naming which of those requested it, rather than a silent fallback.
 
-Local search targets the same retrieval-document cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. It does not search the separate graph-similarity cache. Namespaces are keyed by the runtime-active model artifact, requested revision, model profile, representation contract, formatter, dimensions, and compute dtype. Pass `--model` for a non-default model and `--model-profile` when the build used an explicit profile override; float32 and bfloat16 runs use distinct namespaces, while CPU, CUDA, and MPS share a namespace when their effective compute dtype and other contracts match.
+Local search targets the same retrieval-document cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. It does not search the separate graph-similarity cache. In `arxiv-corpus` mode, its configured `dataset_source` must match the source recorded when the corpus cache was hydrated; build the requested source first if it differs. Namespaces are keyed by the runtime-active model artifact, requested revision, model profile, representation contract, formatter, dimensions, and compute dtype. Pass `--model` for a non-default model and `--model-profile` when the build used an explicit profile override; float32 and bfloat16 runs use distinct namespaces, while CPU, CUDA, and MPS share a namespace when their effective compute dtype and other contracts match.
 
 ## Troubleshooting
 

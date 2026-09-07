@@ -619,11 +619,7 @@ HYDRATION_FLUSH_SIZE = EMBEDDING_DATASET_CHUNK_ROWS
 CANDIDATE_MULTIPLIER = 4
 CITATION_COUNT_ENRICHMENT_LIMIT = 20
 CALIBRATION_RESERVOIR_SEED = 0
-ARXIV_DATASET_CANDIDATES = (
-    "librarian-bots/arxiv-metadata-snapshot",
-    "CShorten/ML-ArXiv-Papers",
-    "gfissore/arxiv-abstracts-2021",
-)
+DEFAULT_DATASET_SOURCE = "librarian-bots/arxiv-metadata-snapshot"
 
 
 def _canonicalize_embedding_paper_id(raw_id: Any) -> str:
@@ -978,6 +974,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
         client: Optional[SemanticScholarClient] = None,
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
+        dataset_source: str = DEFAULT_DATASET_SOURCE,
     ):
         """
         Initialize embedding graph builder.
@@ -1020,6 +1017,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             in ``candidates`` mode.
         :param Optional[SemanticScholarClient] client: Optional injected S2 client.
         :param float min_semantic_similarity: Minimum semantic cosine for graph edges.
+        :param str dataset_source: HuggingFace dataset repository with arXiv metadata fields.
         """
         normalized_semantic_source = str(semantic_source).strip().lower()
         if normalized_semantic_source not in SEMANTIC_SOURCE_CHOICES:
@@ -1051,6 +1049,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         normalized_dataset_split = str(dataset_split).strip()
         if not normalized_dataset_split:
             raise ValueError("dataset_split must be a non-empty string")
+        normalized_dataset_source = str(dataset_source).strip()
+        if not normalized_dataset_source:
+            raise ValueError("dataset_source must be a non-empty string")
         if corpus_size is not None:
             if isinstance(corpus_size, bool):
                 raise ValueError("corpus_size must be at least 1 when provided")
@@ -1083,6 +1084,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             str(model_revision).strip() if model_revision is not None else ""
         )
         self.model_revision = normalized_revision or None
+        self.dataset_source = normalized_dataset_source
         self.dataset_split = normalized_dataset_split
         self.corpus_size = corpus_size
         self.storage_precision = str(storage_precision)
@@ -2425,11 +2427,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
 
         :return bool: ``True`` when active cache namespace has a matching hydrated payload.
         """
-        cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
         return self.embedding_cache.is_hydrated(
             self.dataset_split,
             self.corpus_size,
-            dataset_source=cached_dataset_source,
+            dataset_source=self.dataset_source,
         )
 
     def _should_defer_compile_for_cache_hydration(self) -> bool:
@@ -3151,6 +3152,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param int top_k: Number of results to return.
         :return List[CacheSearchResult]: Ranked results with cached metadata.
         :raises ValueError: If the query is empty or ``top_k`` is below 1.
+        :raises RuntimeError: If the corpus cache records another dataset source.
         """
         normalized_query = str(query).strip()
         if not normalized_query:
@@ -3166,6 +3168,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             else nullcontext()
         )
         with operation_lock:
+            if self.semantic_source == "arxiv-corpus":
+                cached_source = cache.get_hydrated_dataset_source()
+                if cached_source and cached_source != self.dataset_source:
+                    raise RuntimeError(
+                        f"Local corpus cache contains {cached_source!r}, but the "
+                        f"configured dataset source is {self.dataset_source!r}. "
+                        "Run an embedding or hybrid build with "
+                        f"--dataset-source {self.dataset_source!r} first."
+                    )
             return cache.search(
                 query_embedding=np.asarray(query_embedding, dtype=np.float32),
                 top_k=int(top_k),
@@ -3298,7 +3309,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self.embedding_cache.is_hydrated(
             self.dataset_split,
             self.corpus_size,
-            dataset_source=cached_dataset_source,
+            dataset_source=self.dataset_source,
         ):
             self._refresh_cached_corpus_metadata(cached_dataset_source, use_streaming)
             self._refresh_hydrated_full_corpus_cache(
@@ -3309,7 +3320,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if self.embedding_cache.is_hydrated(
                 self.dataset_split,
                 self.corpus_size,
-                dataset_source=cached_dataset_source,
+                dataset_source=self.dataset_source,
             ):
                 logger.debug(
                     "Embedding cache already hydrated for split=%s corpus_size=%s source=%s; "
@@ -3340,11 +3351,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         try:
             dataset_source, dataset = self._load_dataset_for_hydration(
                 use_streaming=use_streaming,
-                preferred_dataset_source=cached_dataset_source,
             )
         except Exception as exc:
             raise RuntimeError(
-                "Failed to resolve hydration dataset source; refusing to reuse "
+                f"Failed to resolve hydration dataset source {self.dataset_source!r}; refusing to reuse "
                 "existing hydrated cache without source revalidation."
             ) from exc
 
@@ -3508,7 +3518,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
 
         source = str(cached_dataset_source or "").strip()
-        if not source:
+        if source != self.dataset_source:
             return False
 
         stats = self.embedding_cache.payload_stats()
@@ -3690,10 +3700,8 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         """
         resolved_source, dataset = self._load_dataset_for_hydration(
             use_streaming=use_streaming,
-            preferred_dataset_source=source,
             row_limit=row_limit,
             row_offset=row_offset,
-            allow_source_fallback=False,
         )
         if resolved_source != source:
             raise RuntimeError(
@@ -4306,18 +4314,14 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
     def _load_dataset_for_hydration(
         self,
         use_streaming: bool,
-        preferred_dataset_source: Optional[str] = None,
         row_limit: Optional[int] = None,
         row_offset: Optional[int] = None,
-        allow_source_fallback: bool = True,
     ) -> Tuple[str, Iterable[Dict[str, Any]]]:
-        """Load first available ArXiv dataset for hydration.
+        """Load the configured arXiv metadata dataset for hydration.
 
         :param bool use_streaming: Whether to load streaming dataset iterator.
-        :param Optional[str] preferred_dataset_source: Preferred source if already cached.
         :param Optional[int] row_limit: Optional row cap override for dataset loading.
         :param Optional[int] row_offset: Optional row offset for delta refresh loading.
-        :param bool allow_source_fallback: Whether alternate sources may be tried.
         :return Tuple[str, Iterable[Dict[str, Any]]]: Dataset source name and iterable.
         """
         load_dataset = _import_datasets_module().load_dataset
@@ -4332,87 +4336,52 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if parsed_row_offset < 0:
             raise ValueError("row_offset must be at least 0 when provided")
 
-        last_error: Optional[Exception] = None
-        if preferred_dataset_source is not None and not allow_source_fallback:
-            dataset_names = (preferred_dataset_source,)
-        elif (
-            preferred_dataset_source is not None
-            and preferred_dataset_source in ARXIV_DATASET_CANDIDATES
+        split_for_load = self.dataset_split
+        if not use_streaming and parsed_row_offset > 0 and ":" in split_for_load:
+            raise ValueError(
+                "row_offset requires a non-sliced dataset_split in non-streaming mode"
+            )
+        if (
+            not use_streaming
+            and ":" not in split_for_load
+            and (parsed_row_limit is not None or parsed_row_offset > 0)
         ):
-            dataset_names = (
-                preferred_dataset_source,
-                *[
-                    dataset_name
-                    for dataset_name in ARXIV_DATASET_CANDIDATES
-                    if dataset_name != preferred_dataset_source
-                ],
+            start_idx = str(parsed_row_offset) if parsed_row_offset else ""
+            stop_idx = (
+                ""
+                if parsed_row_limit is None
+                else str(parsed_row_offset + parsed_row_limit)
             )
-        else:
-            dataset_names = ARXIV_DATASET_CANDIDATES
-
-        for dataset_name in dataset_names:
-            split_for_load = self.dataset_split
-            if not use_streaming and parsed_row_offset > 0 and ":" in split_for_load:
-                raise ValueError(
-                    "row_offset requires a non-sliced dataset_split in non-streaming mode"
-                )
-            if (
-                not use_streaming
-                and ":" not in split_for_load
-                and (parsed_row_limit is not None or parsed_row_offset > 0)
-            ):
-                start_idx = str(parsed_row_offset) if parsed_row_offset else ""
-                stop_idx = (
-                    ""
-                    if parsed_row_limit is None
-                    else str(parsed_row_offset + parsed_row_limit)
-                )
-                split_for_load = f"{split_for_load}[{start_idx}:{stop_idx}]"
-            try:
-                dataset = load_dataset(
-                    dataset_name,
-                    split=split_for_load,
-                    streaming=use_streaming,
-                )
-            except Exception as exc:  # pragma: no cover - source/network dependent
-                last_error = exc
-                logger.warning(
-                    "Could not load dataset %s for hydration: %s. Trying fallback.",
-                    dataset_name,
-                    exc,
-                )
-                continue
-            if use_streaming and (
-                parsed_row_limit is not None or parsed_row_offset > 0
-            ):
-                stop_idx = (
-                    None
-                    if parsed_row_limit is None
-                    else parsed_row_offset + parsed_row_limit
-                )
-                dataset = islice(dataset, parsed_row_offset, stop_idx)
-            elif (
-                self.corpus_size is not None
-                and parsed_row_limit is None
-                and parsed_row_offset == 0
-                and ":" not in str(self.dataset_split)
-            ):
-                # Newest-first capped hydration: snapshot row order does not
-                # track submission time, so select by arXiv ID chronology.
-                dataset = self._select_newest_corpus_rows(dataset, dataset_name)
-            logger.debug(
-                "Hydration dataset selected: %s (split=%s, streaming=%s, row_limit=%s, row_offset=%s).",
-                dataset_name,
-                split_for_load,
-                use_streaming,
-                "none" if parsed_row_limit is None else parsed_row_limit,
-                parsed_row_offset,
+            split_for_load = f"{split_for_load}[{start_idx}:{stop_idx}]"
+        dataset = load_dataset(
+            self.dataset_source,
+            split=split_for_load,
+            streaming=use_streaming,
+        )
+        if use_streaming and (parsed_row_limit is not None or parsed_row_offset > 0):
+            stop_idx = (
+                None
+                if parsed_row_limit is None
+                else parsed_row_offset + parsed_row_limit
             )
-            return dataset_name, dataset
-
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("Could not load any ArXiv dataset for hydration.")
+            dataset = islice(dataset, parsed_row_offset, stop_idx)
+        elif (
+            self.corpus_size is not None
+            and parsed_row_limit is None
+            and parsed_row_offset == 0
+            and ":" not in str(self.dataset_split)
+        ):
+            # Snapshot row order does not track submission time.
+            dataset = self._select_newest_corpus_rows(dataset, self.dataset_source)
+        logger.debug(
+            "Hydration dataset selected: %s (split=%s, streaming=%s, row_limit=%s, row_offset=%s).",
+            self.dataset_source,
+            split_for_load,
+            use_streaming,
+            "none" if parsed_row_limit is None else parsed_row_limit,
+            parsed_row_offset,
+        )
+        return self.dataset_source, dataset
 
     def _initialize_calibration_ranges(self, records: List[Dict]) -> None:
         """Compute and persist int8 calibration ranges from metadata records.

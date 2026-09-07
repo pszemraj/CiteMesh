@@ -66,7 +66,7 @@ Two semantic sources, selected with `--semantic-source`:
 - `arxiv-corpus` (opt-in): hydrates and searches a local arXiv abstract corpus from
   HuggingFace. This can surface papers with no citation path to the seed but needs
   the `datasets` dependency and substantially more cold-cache work.
-  The corpus is `librarian-bots/arxiv-metadata-snapshot` (with `CShorten/ML-ArXiv-Papers` and `gfissore/arxiv-abstracts-2021` as load-failure fallbacks) and is not user-selectable; `--dataset-split` names splits of whichever of those loads.
+  The default corpus is `librarian-bots/arxiv-metadata-snapshot`. Set `--dataset-source OWNER/DATASET` to select another HuggingFace repository with the [supported arXiv metadata fields](cli.md); `--dataset-split` selects a split within that repository. CiteMesh loads only the selected source and reports loading failures without switching datasets. Custom column mappings are not supported.
   The default `--corpus-size 50000` scans the full selected split to rank submissions newest-first before embedding the top 50k, so a cold run reads the whole snapshot before capping.
   Selection, resumption, and storage behavior are described in [Caching & Data](caching.md).
   Citation-count enrichment is optional: a rejected Semantic Scholar batch warns

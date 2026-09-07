@@ -33,6 +33,7 @@ from citemesh.services.semantic_scholar import (
 )
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
+    DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
     EmbeddingGraphBuilder,
     EmbeddingTask,
@@ -298,6 +299,7 @@ def _concurrent_hydration_worker(
         builder = object.__new__(EmbeddingGraphBuilder)
         builder._embedding_cache = cache
         builder._resolved_model_fingerprint = "concurrent-test-artifact"
+        builder.dataset_source = source
         builder.dataset_split = split
         builder.corpus_size = corpus_size
         builder.storage_precision = "float32"
@@ -669,6 +671,8 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
         EmbeddingGraphBuilder(max_papers=1, model_name="   ", client=MagicMock())
     with pytest.raises(ValueError, match="dataset_split must be a non-empty string"):
         EmbeddingGraphBuilder(max_papers=1, dataset_split=" ", client=MagicMock())
+    with pytest.raises(ValueError, match="dataset_source must be a non-empty string"):
+        EmbeddingGraphBuilder(max_papers=1, dataset_source=" ", client=MagicMock())
     with pytest.raises(
         ValueError, match="corpus_size must be at least 1 when provided"
     ):
@@ -2745,7 +2749,7 @@ def test_paper_embedding_task_dispatcher_uses_id_fallback() -> None:
 def test_metadata_and_streaming_loader_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Metadata parsing and streaming hydration fallback should stay deterministic."""
+    """Metadata parsing and configured-source loading should stay deterministic."""
 
     snapshot = _extract_dataset_paper_metadata(
         {
@@ -2778,15 +2782,20 @@ def test_metadata_and_streaming_loader_contracts(
     def fake_load_dataset(
         dataset_name: str, split: str, streaming: bool = False
     ) -> list[dict[str, Any]]:
+        """Record the selected source and return one arXiv metadata row.
+
+        :param str dataset_name: Requested dataset repository.
+        :param str split: Requested split or slice.
+        :param bool streaming: Whether loading uses streaming.
+        :return list[dict[str, Any]]: Single-paper fixture.
+        """
         load_calls.append((dataset_name, split, streaming))
-        if dataset_name == "librarian-bots/arxiv-metadata-snapshot":
-            raise RuntimeError("primary unavailable")
         return [
             {
-                "id": "fallback-paper",
-                "title": "Fallback Title",
-                "abstract": "Fallback abstract.",
-                "year": 2020,
+                "id": "2609.03430",
+                "title": "Corpus paper",
+                "abstract": "Corpus abstract.",
+                "year": 2026,
             }
         ]
 
@@ -2803,11 +2812,8 @@ def test_metadata_and_streaming_loader_contracts(
     )
     selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=True)
 
-    assert selected_name == "CShorten/ML-ArXiv-Papers"
-    assert [name for name, _, _ in load_calls] == [
-        "librarian-bots/arxiv-metadata-snapshot",
-        "CShorten/ML-ArXiv-Papers",
-    ]
+    assert selected_name == DEFAULT_DATASET_SOURCE
+    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True)]
     assert len(list(dataset)) == 1
     assert load_calls[0][1] == "train"
 
@@ -2817,13 +2823,11 @@ def test_metadata_and_streaming_loader_contracts(
         use_streaming=False,
         corpus_size=5,
         client=MagicMock(),
+        dataset_source="example/arxiv",
     )
     selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=False)
-    assert selected_name == "CShorten/ML-ArXiv-Papers"
-    assert [name for name, _, _ in load_calls] == [
-        "librarian-bots/arxiv-metadata-snapshot",
-        "CShorten/ML-ArXiv-Papers",
-    ]
+    assert selected_name == "example/arxiv"
+    assert load_calls == [("example/arxiv", "train", False)]
     # Capped hydration loads the full split; newest-N selection happens by
     # arXiv ID chronology after load, not via positional split slicing.
     assert load_calls[0][1] == "train"
@@ -2835,11 +2839,8 @@ def test_metadata_and_streaming_loader_contracts(
         row_limit=3,
         row_offset=5,
     )
-    assert selected_name == "CShorten/ML-ArXiv-Papers"
-    assert [name for name, _, _ in load_calls] == [
-        "librarian-bots/arxiv-metadata-snapshot",
-        "CShorten/ML-ArXiv-Papers",
-    ]
+    assert selected_name == "example/arxiv"
+    assert load_calls == [("example/arxiv", "train[5:8]", False)]
     assert load_calls[0][1] == "train[5:8]"
     assert len(list(dataset)) == 1
 
@@ -2852,11 +2853,8 @@ def test_metadata_and_streaming_loader_contracts(
         row_limit=1,
         row_offset=1,
     )
-    assert selected_name == "CShorten/ML-ArXiv-Papers"
-    assert [name for name, _, _ in load_calls] == [
-        "librarian-bots/arxiv-metadata-snapshot",
-        "CShorten/ML-ArXiv-Papers",
-    ]
+    assert selected_name == DEFAULT_DATASET_SOURCE
+    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True)]
     assert load_calls[0][1] == "train"
     assert len(list(dataset)) == 0
 
@@ -3600,93 +3598,149 @@ def test_embedding_build_prepares_graph_vectors_before_edge_scoring(
     assert graph.has_edge("seed", "peer")
 
 
-def test_collect_papers_dataset_source_revalidation_contracts(
+@pytest.mark.parametrize(
+    "semantic_source,cached_source,mismatch",
+    [
+        ("arxiv-corpus", "example/arxiv", False),
+        ("arxiv-corpus", "example/previous-arxiv", True),
+        ("candidates", "example/previous-arxiv", False),
+    ],
+)
+def test_local_search_respects_configured_dataset_source(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Any,
+    semantic_source: str,
+    cached_source: str,
+    mismatch: bool,
 ) -> None:
-    """Dataset-source mismatches should revalidate or fail closed when unresolved."""
-    source = "librarian-bots/arxiv-metadata-snapshot"
+    """Local corpus search must not return another repository's cached papers.
 
-    def _build_hydrated_builder(cache_root: str) -> EmbeddingGraphBuilder:
-        monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / cache_root))
-        local_builder = EmbeddingGraphBuilder(
-            max_papers=2,
-            storage_precision="float32",
-            use_streaming=False,
-            client=MagicMock(),
-        )
-        _pin_model_fingerprint(monkeypatch, local_builder)
-        local_builder.embedding_cache.mark_hydrated(
-            dataset_source=source,
-            dataset_split=local_builder.dataset_split,
-            corpus_size=local_builder.corpus_size,
-            complete=True,
-        )
-        return local_builder
+    :param pytest.MonkeyPatch monkeypatch: Replaces cache discovery and encoding.
+    :param str semantic_source: Corpus or candidate search mode.
+    :param str cached_source: Repository recorded by the existing cache.
+    :param bool mismatch: Whether the selected corpus must be built first.
+    :return None: Verifies source mismatch errors and matching-cache search.
+    """
+    builder = EmbeddingGraphBuilder(
+        storage_precision="float32",
+        semantic_source=semantic_source,
+        dataset_source="example/arxiv",
+        client=MagicMock(),
+    )
+    cache = MagicMock()
+    cache.get_hydrated_dataset_source.return_value = cached_source
+    cache.search.return_value = []
+    monkeypatch.setattr(builder, "prepare_embedding_cache", lambda: cache)
+    monkeypatch.setattr(
+        builder, "_encode_texts", lambda _: np.asarray([[1.0, 0.0]], dtype=np.float32)
+    )
 
-    revalidate_builder = _build_hydrated_builder("cache-root-revalidate")
-    mark_hydrated_spy = MagicMock(
-        wraps=revalidate_builder.embedding_cache.mark_hydrated
+    if mismatch:
+        with pytest.raises(RuntimeError, match="--dataset-source 'example/arxiv'"):
+            builder.search_local("query", top_k=1)
+        cache.search.assert_not_called()
+    else:
+        assert builder.search_local("query", top_k=1) == []
+        cache.search.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "corpus_size,complete", [(1, True), (None, True), (None, False)]
+)
+def test_configured_dataset_source_replaces_previous_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+    corpus_size: int | None,
+    complete: bool,
+) -> None:
+    """A source change must replace old rows instead of reusing or resuming them.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces network and model calls.
+    :param int | None corpus_size: Capped or full-corpus selection.
+    :param bool complete: Whether the previous hydration completed.
+    :return None: Verifies that only the selected source's rows remain cached.
+    """
+    source = "example/arxiv"
+    builder = EmbeddingGraphBuilder(
+        storage_precision="float32",
+        semantic_source="arxiv-corpus",
+        dataset_source=source,
+        corpus_size=corpus_size,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder._ensure_cache_model_fingerprint()
+    cache = builder.embedding_cache
+    _put_concurrent_hydration_record(cache, "arxiv:1706.03762")
+    cache.mark_hydrated(
+        dataset_source=DEFAULT_DATASET_SOURCE,
+        dataset_split="train",
+        corpus_size=corpus_size,
+        complete=complete,
+    )
+    load = MagicMock(
+        return_value=[{"id": "2609.03430", "title": "New corpus", "abstract": "A"}]
     )
     monkeypatch.setattr(
-        revalidate_builder.embedding_cache, "mark_hydrated", mark_hydrated_spy
+        embedding_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load),
     )
-    loaded_sources: list[tuple[bool, str | None]] = []
+    monkeypatch.setattr(builder, "_get_model_for_encoding", ConstantEncodeModel)
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 1)
 
-    def fake_load_dataset_for_hydration(
-        use_streaming: bool, preferred_dataset_source: str | None = None
-    ) -> tuple[str, list[dict[str, Any]]]:
-        loaded_sources.append((use_streaming, preferred_dataset_source))
-        return "CShorten/ML-ArXiv-Papers", []
+    assert not builder._cache_hydrated_for_active_spec()
+    builder._ensure_cache_hydrated(use_streaming=False)
 
-    monkeypatch.setattr(
-        revalidate_builder,
-        "_load_dataset_for_hydration",
-        fake_load_dataset_for_hydration,
-    )
-    monkeypatch.setattr(
-        revalidate_builder,
-        "_get_model_for_encoding",
-        lambda: ConstantEncodeModel(),
-    )
+    load.assert_called_once_with(source, split="train", streaming=False)
+    assert cache.get_cached_paper_ids() == {"arxiv:2609.03430"}
+    assert cache.is_hydrated("train", corpus_size, dataset_source=source)
+    assert builder._cache_hydrated_for_active_spec()
 
-    candidates = revalidate_builder._select_candidates(
-        np.asarray([1.0, 0.0], dtype=np.float32),
-        use_streaming=False,
-    )
-    assert candidates == []
-    assert loaded_sources == [(False, source)]
-    complete_flags = [
-        call.kwargs["complete"] for call in mark_hydrated_spy.call_args_list
-    ]
-    assert complete_flags == [False]
 
-    fail_closed_builder = _build_hydrated_builder("cache-root-fail-closed")
-    is_hydrated_spy = MagicMock(wraps=fail_closed_builder.embedding_cache.is_hydrated)
-    monkeypatch.setattr(
-        fail_closed_builder.embedding_cache,
-        "is_hydrated",
-        is_hydrated_spy,
+@pytest.mark.parametrize("source", [DEFAULT_DATASET_SOURCE, "example/arxiv"])
+def test_dataset_load_failure_preserves_cache_without_fallback(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """Unavailable selected sources must not fall back or replace cached data.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces dataset loading with a failure.
+    :param str source: Default or explicitly configured source.
+    :return None: Verifies the exact source call and preservation of existing rows.
+    """
+    builder = EmbeddingGraphBuilder(
+        storage_precision="float32",
+        semantic_source="arxiv-corpus",
+        dataset_source=source,
+        client=MagicMock(),
     )
+    _pin_model_fingerprint(monkeypatch, builder)
+    builder._ensure_cache_model_fingerprint()
+    cache = builder.embedding_cache
+    _put_concurrent_hydration_record(cache, "arxiv:1706.03762")
+    cache.mark_hydrated(
+        dataset_source="example/previous-arxiv",
+        dataset_split="train",
+        corpus_size=builder.corpus_size,
+        complete=True,
+    )
+    load = MagicMock(side_effect=RuntimeError("dataset unavailable"))
     monkeypatch.setattr(
-        fail_closed_builder,
-        "_load_dataset_for_hydration",
-        MagicMock(side_effect=RuntimeError("dataset unavailable")),
+        embedding_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load),
     )
 
     with pytest.raises(
         RuntimeError,
         match="Failed to resolve hydration dataset source",
     ) as exc_info:
-        fail_closed_builder._select_candidates(
-            np.asarray([1.0, 0.0], dtype=np.float32),
-            use_streaming=False,
-        )
+        builder._ensure_cache_hydrated(use_streaming=False)
 
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert str(exc_info.value.__cause__) == "dataset unavailable"
-    assert is_hydrated_spy.call_count == 1
-    assert is_hydrated_spy.call_args.kwargs.get("dataset_source") == source
+    assert source in str(exc_info.value)
+    load.assert_called_once_with(source, split="train", streaming=False)
+    assert cache.get_cached_paper_ids() == {"arxiv:1706.03762"}
+    assert cache.get_hydrated_dataset_source() == "example/previous-arxiv"
 
 
 def test_full_corpus_hydrated_cache_refreshes_incremental_delta(
@@ -3750,10 +3804,8 @@ def test_full_corpus_hydrated_cache_refreshes_incremental_delta(
 
     builder._load_dataset_for_hydration.assert_called_once_with(
         use_streaming=False,
-        preferred_dataset_source=source,
         row_limit=10,
         row_offset=100,
-        allow_source_fallback=False,
     )
     assert builder.embedding_cache.clear.call_count == 0
     assert builder.embedding_cache.mark_hydrated.call_args_list == [
@@ -3883,7 +3935,10 @@ def test_hydration_read_failure_preserves_cached_work(
     """
     source = "fixture/source"
     builder = EmbeddingGraphBuilder(
-        storage_precision="float32", corpus_size=corpus_size, client=MagicMock()
+        storage_precision="float32",
+        dataset_source=source,
+        corpus_size=corpus_size,
+        client=MagicMock(),
     )
     cache = builder.embedding_cache
     model = ConstantEncodeModel()
@@ -4003,10 +4058,8 @@ def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
 
     load_mock.assert_called_once_with(
         use_streaming=False,
-        preferred_dataset_source=source,
         row_limit=50,
         row_offset=100,
-        allow_source_fallback=False,
     )
     clear_cache_mock.assert_not_called()
     builder.embedding_cache.mark_hydrated.assert_called_once_with(
@@ -4273,7 +4326,7 @@ def test_exact_hydration_slice_fails_closed_on_source_mismatch(
         use_streaming=False,
         client=MagicMock(),
     )
-    load_mock = MagicMock(return_value=("CShorten/ML-ArXiv-Papers", []))
+    load_mock = MagicMock(return_value=("example/unexpected-arxiv", []))
     hydrate_mock = MagicMock()
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
     monkeypatch.setattr(builder, "_hydrate_dataset_records", hydrate_mock)
@@ -4291,10 +4344,8 @@ def test_exact_hydration_slice_fails_closed_on_source_mismatch(
 
     load_mock.assert_called_once_with(
         use_streaming=False,
-        preferred_dataset_source=source,
         row_limit=10,
         row_offset=100,
-        allow_source_fallback=False,
     )
     hydrate_mock.assert_not_called()
 
@@ -4436,7 +4487,6 @@ def test_full_corpus_hydrated_cache_revalidates_when_upstream_rows_shrink(
 
     load_mock.assert_called_once_with(
         use_streaming=False,
-        preferred_dataset_source=source,
     )
     clear_cache_mock.assert_called_once()
     complete_flags = [
@@ -4536,17 +4586,13 @@ def test_full_corpus_incremental_refresh_reconciles_missing_ids_when_tail_scan_u
     second_call = builder._load_dataset_for_hydration.call_args_list[1]
     assert first_call.kwargs == {
         "use_streaming": False,
-        "preferred_dataset_source": source,
         "row_limit": 10,
         "row_offset": 100,
-        "allow_source_fallback": False,
     }
     assert second_call.kwargs == {
         "use_streaming": False,
-        "preferred_dataset_source": source,
         "row_limit": 10,
         "row_offset": 0,
-        "allow_source_fallback": False,
     }
     assert hydrate_mock.call_count == 2
     assert "existing_paper_ids" in hydrate_mock.call_args_list[1].kwargs
@@ -4716,7 +4762,7 @@ def test_hydration_reset_restores_model_fingerprint(
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
-        lambda use_streaming, preferred_dataset_source=None: (
+        lambda use_streaming: (
             "mini-dataset",
             [{"id": "p1", "title": "Paper 1", "abstract": "A"}],
         ),
@@ -4950,7 +4996,7 @@ def test_hydration_flush_size_controls_cache_write_bursting(
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
-        lambda use_streaming, preferred_dataset_source=None: (
+        lambda use_streaming: (
             "mini-dataset",
             [
                 {"id": f"p{i}", "title": f"Paper {i}", "abstract": f"A{i}"}
@@ -5039,7 +5085,7 @@ def test_empty_hydration_run_remains_incomplete_and_returns_no_candidates(
     monkeypatch.setattr(
         builder,
         "_load_dataset_for_hydration",
-        lambda use_streaming, preferred_dataset_source=None, **_kwargs: (
+        lambda use_streaming, **_kwargs: (
             "empty-snapshot",
             [],
         ),

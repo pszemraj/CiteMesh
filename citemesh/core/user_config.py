@@ -224,6 +224,7 @@ CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigCaster] = {
     "truncate_dim": _int_caster(1),
     "min_semantic_similarity": _cast_similarity,
     "corpus_size": _int_caster(1),
+    "dataset_source": _cast_str,
     "dataset_split": _cast_str,
     "streaming": _cast_bool,
     "torch_compile": _cast_bool,

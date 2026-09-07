@@ -40,7 +40,7 @@ from citemesh.core import Author, Paper
 from citemesh.core.user_config import UserConfig
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.strategies.candidates import CandidateAcquisitionError
-from citemesh.strategies.embedding import ENCODE_BATCH_SIZE
+from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, ENCODE_BATCH_SIZE
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
@@ -214,6 +214,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "model": DEFAULT_EMBEDDING_MODEL_NAME,
         "model_profile": "auto",
         "model_revision": None,
+        "dataset_source": DEFAULT_DATASET_SOURCE,
         "dataset_split": "train",
         "corpus_size": 50000,
         "all_corpus": False,
@@ -703,7 +704,42 @@ def test_search_mode_local_prints_cached_results(
     builder_kwargs = builder_factory.call_args.kwargs
     assert builder_kwargs["model_name"] == DEFAULT_EMBEDDING_MODEL_NAME
     assert builder_kwargs["semantic_source"] == "candidates"
+    assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
     assert builder_kwargs["storage_precision"] == "float32"
+
+
+def test_search_local_uses_configured_corpus_dataset_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local corpus search should target the configured metadata source.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing local runtime dependencies.
+    :return None: Assertions validate the build-defaults namespace passed to search.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+    dataset_source = "research/arxiv-snapshot"
+    monkeypatch.setattr(
+        cli_module,
+        "load_user_config",
+        lambda: UserConfig(
+            path=Path("cfg-home") / "config.toml",
+            defaults={
+                "semantic_source": "arxiv-corpus",
+                "dataset_source": dataset_source,
+            },
+        ),
+    )
+
+    result = run_cli_command(["search", "cached topic", "--mode", "local"])
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
+    assert builder_kwargs["dataset_source"] == dataset_source
 
 
 @pytest.mark.parametrize("search_args", [[], ["--mode", "local"]])
@@ -735,6 +771,7 @@ def test_search_forces_embedding_strategy_over_configured_build_strategy(
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     builder_kwargs = builder_factory.call_args.kwargs
     assert builder_kwargs["semantic_source"] == "candidates"
+    assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
     assert builder_kwargs["storage_precision"] == "float32"
     assert builder_kwargs["binary_prefilter"] is False
     client_factory.assert_not_called()
@@ -3119,6 +3156,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
             {
                 "model": "m",
                 "model_profile": "embeddinggemma",
+                "dataset_source": "research/arxiv-snapshot",
                 "corpus_size": 1234,
                 "all_corpus": False,
                 "top_k": 4,
@@ -3134,6 +3172,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "model_name": "m",
                 "model_profile": "embeddinggemma",
                 "model_revision": None,
+                "dataset_source": "research/arxiv-snapshot",
                 "dataset_split": "train",
                 "corpus_size": 1234,
                 "truncate_dim": 64,
@@ -3165,6 +3204,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "max_semantic": 5,
                 "model": "m",
                 "model_profile": "embeddinggemma",
+                "dataset_source": "research/arxiv-snapshot",
                 "corpus_size": 1234,
                 "all_corpus": False,
                 "truncate_dim": 64,
@@ -3184,6 +3224,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "model_name": "m",
                 "model_profile": "embeddinggemma",
                 "model_revision": None,
+                "dataset_source": "research/arxiv-snapshot",
                 "dataset_split": "train",
                 "corpus_size": 1234,
                 "truncate_dim": 64,
@@ -3847,3 +3888,41 @@ def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:
     cli_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "candidates"
     assert args.storage_precision == "float32"
+
+
+def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
+    """A selected metadata source should activate and describe corpus hydration.
+
+    :return None: Assertions validate corpus routing and sidecar provenance.
+    """
+    _, build_parser, _, _ = cli_module._create_parser()
+    dataset_source = "research/arxiv-snapshot"
+    args = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--dataset-source", dataset_source]
+    )
+    provided = cli_module._pop_tracked_option_dests(args)
+    cli_module._validate_build_cli_contract(args, build_parser, provided)
+
+    assert args.semantic_source == "arxiv-corpus"
+    payload = cli_module._build_graph_config_payload(
+        cli_args=args,
+        seed_id="seed",
+        metadata={"strategy": "embedding"},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/embedding.json")},
+    )
+    assert payload["build"]["embedding"]["dataset_source"] == dataset_source
+
+    candidate_args = build_parser.parse_args(["seed", "--strategy", "embedding"])
+    candidate_provided = cli_module._pop_tracked_option_dests(candidate_args)
+    cli_module._validate_build_cli_contract(
+        candidate_args, build_parser, candidate_provided
+    )
+    candidate_payload = cli_module._build_graph_config_payload(
+        cli_args=candidate_args,
+        seed_id="seed",
+        metadata={"strategy": "embedding"},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/embedding.json")},
+    )
+    assert "dataset_source" not in candidate_payload["build"]["embedding"]

@@ -28,8 +28,8 @@ Config values behave like personal built-in defaults, not like explicit flags:
 
 - They never trigger "unsupported option for strategy" errors. Setting `defaults.device` does not break `--strategy citation` runs; the value is simply unused there.
 - They outrank tuned implicit defaults (for example the hybrid strategy's implicit citation/reference budgets).
-- Explicit corpus-only CLI flags (for example `--corpus-size`) still imply `--semantic-source arxiv-corpus`, overriding a configured `defaults.semantic_source = "candidates"` for that run.
-- Explicit candidate-only CLI flags work symmetrically: `--candidate-pool-size` implies `--semantic-source candidates`, overriding a configured `defaults.semantic_source = "arxiv-corpus"`. Corpus-only settings that came only from config (for example streaming plus a sliced dataset split) stay inert in that candidate run.
+- Explicit corpus-only CLI flags (for example `--dataset-source` or `--corpus-size`) still imply `--semantic-source arxiv-corpus`, overriding a configured `defaults.semantic_source = "candidates"` for that run.
+- Explicit candidate-only CLI flags work symmetrically: `--candidate-pool-size` implies `--semantic-source candidates`, overriding a configured `defaults.semantic_source = "arxiv-corpus"`. Corpus-only settings that came only from config (for example a dataset source plus streaming) stay inert in that candidate run.
 
 When config defaults are applied to a build, CiteMesh logs one DEBUG line listing the applied keys and the config file path.
 
@@ -77,6 +77,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `truncate_dim` | Default `--truncate-dim`; unset uses the model profile (`512` for EmbeddingGemma) |
 | `min_semantic_similarity` | Default `--min-semantic-similarity` for embedding/hybrid edge eligibility; CLI flags override this value |
 | `corpus_size` | Default `--corpus-size` |
+| `dataset_source` | Default `--dataset-source` (the HuggingFace repository for ArXiv metadata records) |
 | `dataset_split` | Default `--dataset-split` |
 | `streaming` | Default `--streaming` / `--no-streaming` toggle |
 | `torch_compile` | Default `--torch-compile` toggle |
