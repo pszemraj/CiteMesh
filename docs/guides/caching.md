@@ -42,7 +42,7 @@ citemesh cache root
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
-`config.toml` is configuration, not cache: it is documented in [User Configuration](configuration.md) and survives `citemesh cache clear`.
+`config.toml` is configuration, not cache: it is documented in [User Configuration](configuration.md) and survives `citemesh cache clear`. Atomic text writes preserve an existing file's permission bits (new files follow the process umask); `config.toml` is the exception and is always written `0600` because it can hold `api.s2_api_key`.
 
 Model hashes are the first 12 characters of `sha256(<namespace>)`. Every embedding namespace binds the runtime-active model (including a fallback checkpoint), requested revision, immutable resolved artifact fingerprint, representation role, normalization contract, resolved truncate dimension, storage precision, effective binary-prefilter mode, resolved source torch dtype, and task-formatter fingerprint; `int8` namespaces also include calibration sample size. Candidate mode (`--semantic-source candidates`, the default) adds `mode=candidates` to the retrieval-document namespace so incrementally embedded S2 candidates never mix with corpus hydrations. The graph-similarity namespace is source-mode independent because it contains only selected papers encoded under the same symmetric task contract. Namespaces intentionally carry no device token: CPU, CUDA, and MPS share a namespace whenever compute dtype and the other contracts match, whether bf16 or float32.
 
@@ -84,6 +84,17 @@ separate `--refresh-reference-cache` control.
 
 `EmbeddingCache` stores each paper embedding once per namespace. Vectors are kept in a resizable HDF5 matrix, while SQLite tracks metadata and `row_idx` mappings.
 
+### What you need to know
+
+- Embedding vectors persist across runs in two independent namespaces per model contract: a retrieval-document cache (candidate or corpus papers, what local `citemesh search` reads) and a graph-similarity cache (selected graph papers only).
+- Default storage precision is float32 in candidate mode and int8 in arXiv-corpus mode. Changing model, revision, profile, dimension, or precision selects a different namespace rather than invalidating the old one.
+- A cached vector is re-encoded only when the paper is new to the namespace or its embedding input text changed; metadata-only updates never trigger re-encoding.
+- `--force-rebuild-cache` (plus `--overwrite-cache` in scripts) is the supported way to re-encode a namespace, for example after persistent calibration-clipping warnings.
+
+The rest of this section documents the exact storage contracts; routine use does not require it.
+
+### Storage layout and behavior
+
 Embedding and hybrid builds use two physical cache roles. Prompt routing and
 formatter behavior are described in [Embedding Runtime](../reference/embedding-runtime.md):
 
@@ -114,7 +125,7 @@ int8 retrieval cache may contain:
 - `calibration_ranges`: float32 per-dimension min/max (`2 x dim`)
 - `binary_index`: packed `uint8` matrix (`N x ceil(dim/8)`) used for Hamming prefiltering
 
-The `binary_index` is an auxiliary retrieval index, not the primary embedding store. Final ranking still uses the cached `int8` or `float32` vectors. For `int8`, calibration ranges must already exist before cache writes begin. Hydration-managed embedding workflows create and persist those ranges before the first int8 cache write; raw `EmbeddingCache` int8 writes now fail closed instead of bootstrapping ranges from an arbitrary request batch. Hydration no longer takes the first-N records for calibration. Instead, it runs a separate representative reservoir-sampling prepass over the active hydration slice and persists ranges before the main cache-write pass begins.
+The `binary_index` is an auxiliary retrieval index, not the primary embedding store. Final ranking still uses the cached `int8` or `float32` vectors. For `int8`, calibration ranges must already exist before cache writes begin. Hydration-managed embedding workflows create and persist those ranges before the first int8 cache write; raw `EmbeddingCache` int8 writes now fail closed instead of bootstrapping ranges from an arbitrary request batch. Hydration no longer takes the first-N records for calibration. Instead, it runs a separate representative reservoir-sampling prepass over the active hydration slice and persists ranges before the main cache-write pass begins. When a capped streaming selection has already materialized its rows, the prepass samples those rows directly instead of re-reading the source.
 
 New ranges use each dimension's minimum and maximum over that sample, following
 the [Sentence Transformers scalar quantization guidance](https://www.sbert.net/examples/sentence_transformer/applications/embedding-quantization/README.html#scalar-int8-quantization).
@@ -143,7 +154,7 @@ Persistent storage supports only `int8` and `float32` via `--storage-precision`;
 
 SQLite stores metadata authority fields used for warm-cache retrieval:
 
-- `title`, `abstract`, `year`
+- `title`, `abstract`, `year`, `venue`, `arxiv_id`, `doi`
 - `authors_json`, `categories_json`
 - runtime cache consistency keys (`storage_precision`, source torch dtype, effective embedding vector dtype, text-formatter fingerprint, binary-prefilter mode, physical compression filter/level, and `int8` calibration sample size)
 - hydration metadata keys (`dataset source`, `split`, `corpus cap`, completion flag)
@@ -188,13 +199,13 @@ Hydration write policy:
 - Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--encode-batch-size`.
 - Cache persistence flushes metadata/embedding appends in larger bursts (`2048` records, matching the HDF5 dataset chunk size) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
 
-For capped hydration, `--corpus-size` limits how many of the newest submissions are embedded and cached, not how many selected-split rows are inspected to determine that ordering. If too few records have parseable submission IDs, CiteMesh fills the remaining budget from records with unparseable IDs in source order and emits a warning. A non-streaming `--dataset-split` slice bounds the rows exposed to CiteMesh, although a cold Hugging Face dataset builder may still prepare its complete underlying Arrow split before applying the slice.
+For capped hydration, `--corpus-size` limits how many of the newest submissions are embedded and cached, not how many selected-split rows are inspected to determine that ordering. In streaming mode CiteMesh warns that newest-first selection must drain the whole stream before hydration starts; `--no-streaming` or an explicit `--dataset-split` slice avoids that pass. If too few records have parseable submission IDs, CiteMesh fills the remaining budget from records with unparseable IDs in source order and emits a warning. A non-streaming `--dataset-split` slice bounds the rows exposed to CiteMesh, although a cold Hugging Face dataset builder may still prepare its complete underlying Arrow split before applying the slice.
 
 Previously completed capped caches are reused as recorded. To replace an older
 cache that under-filled because some IDs were unparseable, use the explicit
 rebuild workflow below.
 
-Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)). The rebuild clears both the retrieval-document and graph-similarity namespaces for the resolved model contract. By default, CiteMesh asks for confirmation before applying this destructive rebuild. Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts). Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata.
+Embedding/hybrid workflows can trigger a namespace rebuild using `--force-rebuild-cache` (see [CLI Usage](cli.md)). The rebuild clears both the retrieval-document and graph-similarity namespaces for the resolved model contract. By default, CiteMesh asks for confirmation before applying this destructive rebuild. Use `--overwrite-cache` to skip the prompt (required for non-interactive scripts). Use `--cache-overwrite-reason "<text>"` to attach a human-readable rationale to rebuild logs and config metadata; namespace rebuild/clear logs record `reason=unspecified` when no rationale is supplied.
 
 Before persistent cache access, CiteMesh resolves an immutable artifact fingerprint and makes it part of the physical namespace. Hugging Face repositories use the resolved commit SHA when available; an explicitly requested 40-character commit is already immutable and works offline. A standard local Hugging Face snapshot also exposes its commit SHA without an API request. If a cached snapshot does not expose a SHA, CiteMesh hashes its complete inference-relevant artifact manifest. The same manifest policy applies to arbitrary local model paths and covers weights and referenced shards, tokenizer inputs, SentenceTransformers module definitions and numbered module configuration (including pooling), and custom model code. Documentation and training-only files are excluded.
 
@@ -221,7 +232,7 @@ For hydrated full-corpus runs (`--all-corpus`), CiteMesh performs an incremental
 
 All reconciliation steps are ID-aware and append only uncached paper IDs. Before an incremental growth refresh writes data, CiteMesh marks hydration incomplete; a source or write failure propagates while preserving completed rows for the next resume instead of serving the partial refresh or clearing it. If a prior full-corpus hydration was interrupted but the cached SQLite/HDF5 row counts still match each other and the hydration metadata still matches the requested source/split, CiteMesh first resumes from `cached_rows` instead of clearing the namespace and starting from zero again. If the tail leaves a known row-count shortfall or the upstream row count is unavailable, resume scans the full split for missing IDs before marking hydration complete or memoizing a duplicate-ID deficit; exhausting a tail slice does not prove full source coverage. If upstream split row counts shrink below cached payload size, CiteMesh marks the namespace hydration state incomplete and forces full source revalidation instead of serving stale over-cap rows from the prior cache snapshot. If full reconciliation confirms no uncached IDs while row-count delta remains, CiteMesh treats that as duplicate-ID upstream growth (not a cache failure), records the reconciled row-count state, and skips repeated full-split scans until row counts change again.
 
-When switching a namespace from a capped corpus (for example `--corpus-size 50000`) to `--all-corpus`, cache-clear logs report both the requested target and the replaced cached payload. Seeing `requested_corpus=all` alongside `cached_corpus=50000` means CiteMesh is replacing the old capped namespace before hydrating the full split; it does not mean the new run is silently limited to `50000`.
+When switching a namespace from a capped corpus (for example `--corpus-size 50000`) to `--all-corpus`, cache-clear logs report both the requested target and the replaced cached payload. Seeing `requested_corpus=all` alongside `cached_corpus=newest:50000` means CiteMesh is replacing the old capped namespace before hydrating the full split; it does not mean the new run is silently limited to `50000`.
 
 When at least 0.5% of a write's embedding coordinates fall outside the calibration
 ranges, CiteMesh warns once per cache instance/run and continues accumulating
@@ -235,6 +246,10 @@ namespace and starts a separate cache rather than resuming existing rows.
 
 Current limitation: hydration compatibility is keyed to dataset source/split/corpus metadata, not an immutable upstream dataset revision fingerprint. If a dataset alias mutates upstream without changing source name, treat cache reuse as a performance optimization rather than a strict reproducibility guarantee.
 
+### Durability and recovery internals
+
+You do not need this section to use CiteMesh; it documents crash-safety invariants.
+
 During cache-native search, scored embedding rows must map to metadata rows. Missing metadata row mappings now fail closed with an integrity error instead of returning partial top-k results.
 
 Existing-row replacements use a durable SQLite undo journal under the namespace lock. Before overwriting a vector, CiteMesh commits its previous stored vector and binary-index row to the journal. Every write that maps rows, appends included, flushes and synchronizes its HDF5 data before atomically committing the new paper metadata and removing any journal entries, so a durable row mapping never outlives the vector it points at. If that commit fails or the process stops, the next access restores the journaled rows and removes uncommitted trailing appends before reading vectors or checking their mappings. Failed restoration stops access and retains the journal for another attempt.
@@ -245,7 +260,7 @@ with a replacement vector after a failed commit; row counts cannot identify
 those entries. The existing schema mismatch reset therefore rebuilds each old
 namespace instead of reusing potentially inconsistent vectors.
 
-An interrupted append preserves the contiguous row prefix shared by SQLite and HDF5. Extra HDF5 rows are truncated; extra SQLite mappings whose vectors were lost are removed and hydration is marked incomplete. A calibration-only file before the first embedding write is preserved for resume when its runtime and calibration contract still matches; changed formatter, dtype, or calibration sample settings invalidate those old ranges. A file holding no datasets and no schema attributes, which is what an interrupted first encode leaves behind, is an empty namespace rather than a proven mismatch: reopening keeps hydration and corpus-metadata markers and writes into it. Stored runtime consistency keys are seeded once and then compared on every reopen, and are restamped only after that check passes or the namespace is rebuilt. Ambiguous row mappings and file-open, lock, or IO failures propagate without clearing the namespace. Proven incompatible layouts or invalid calibration metadata still reset that namespace, with the specific mismatch included in the warning; a missing HDF5 file clears its stale SQLite mappings.
+An interrupted append preserves the contiguous row prefix shared by SQLite and HDF5. Extra HDF5 rows are truncated; extra SQLite mappings whose vectors were lost are removed and hydration is marked incomplete. A calibration-only file before the first embedding write is preserved for resume when its runtime and calibration contract still matches; changed formatter, dtype, or calibration sample settings invalidate those old ranges. A file holding no datasets and no schema attributes, which is what an interrupted first encode leaves behind, is an empty namespace rather than a proven mismatch: reopening discards any row mappings whose vectors were never persisted, marks hydration incomplete, keeps the dataset-source/split/corpus-cap and corpus-metadata markers, and writes into it without an incompatible-schema wipe warning. Stored runtime consistency keys are seeded once and then compared on every reopen, and are restamped only after that check passes, the namespace is rebuilt, or the namespace holds no vectors yet. Ambiguous row mappings and file-open, lock, or IO failures propagate without clearing the namespace. Proven incompatible layouts or invalid calibration metadata still reset that namespace, with the specific mismatch included in the warning; a missing HDF5 file clears its stale SQLite mappings.
 
 ## Semantic Scholar Reference Cache
 
@@ -253,7 +268,7 @@ When reference expansion is enabled, reference-ID lookups are cached under `refe
 
 - Default policy is no TTL: version-matched cache entries are reused until manually cleared or refreshed.
 - `--refresh-reference-cache` bypasses persisted reference-cache reads and fetches fresh reference IDs from the API (write-through cache update).
-- Successful empty reference responses are cached as explicit empty lists to avoid repeated API calls for papers with no references.
+- Successful empty reference responses are cached as explicit empty lists to avoid repeated API calls for papers with no references. A `paper not found` response is likewise cached as an empty reference list (unlike the paper-metadata cache, which does not cache misses).
 - Successful reference pages containing only unresolved `paperId: null` records warn and cache an empty list.
 - Empty cached reference hits are reused silently; debug logging emits cache-hit lines only for non-empty reference lists so long runs do not spam one zero-count line per paper.
 - Non-empty cached payloads that contain no valid reference IDs are treated as invalid and rebuilt from API data instead of being reused as implicit empties.
@@ -263,7 +278,7 @@ When reference expansion is enabled, reference-ID lookups are cached under `refe
 
 ## HuggingFace Default Cache
 
-HuggingFace libraries keep their own cache (commonly `~/.cache/huggingface`). CiteMesh does not override that location.
+HuggingFace libraries keep their own cache (commonly `~/.cache/huggingface`, relocatable via `HF_HOME`). CiteMesh does not override that location; model checkpoints and corpus datasets live there, not under the CiteMesh cache root.
 
 ## Cleaning and Inspecting Cache
 
@@ -279,7 +294,7 @@ Clear cached data under the CiteMesh cache root:
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
-Omit `--yes` for interactive confirmation. `cache clear` deletes cache payloads (embeddings, papers, references) but always preserves `config.toml`.
+Omit `--yes` for interactive confirmation. `cache clear` deletes every cache-root entry (embeddings, papers, references, and anything else present) except `config.toml`, which is always preserved.
 
 For command syntax and defaults, see [CLI Usage](cli.md); this section focuses on cache maintenance workflows.
 
