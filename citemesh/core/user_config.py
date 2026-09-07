@@ -14,9 +14,10 @@ loading configuration never imports strategy or visualization modules.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 try:
     import tomllib
@@ -24,12 +25,14 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
     import tomli as tomllib  # type: ignore[no-redef]
 
 import tomli_w
+from filelock import FileLock, Timeout
 
 from citemesh.data.cache import atomic_write_text, get_cache_dir
 
 logger = logging.getLogger(__name__)
 
 USER_CONFIG_FILENAME = "config.toml"
+_CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULTS_TABLE = "defaults"
 API_TABLE = "api"
 
@@ -407,6 +410,35 @@ def _write_document(config_path: Path, document: Dict[str, Any]) -> None:
         ) from exc
 
 
+@contextmanager
+def _config_write_lock(config_path: Path) -> Iterator[None]:
+    """Serialize config read-modify-write cycles across processes.
+
+    Each write is individually atomic, but without a lock a concurrent
+    ``config set`` silently loses the other process's update.
+
+    :param Path config_path: Target config file path.
+    :return Iterator[None]: Context holding the inter-process lock.
+    :raises ConfigFileError: If lock acquisition times out.
+    """
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(
+        f"{config_path}.lock",
+        timeout=_CONFIG_LOCK_TIMEOUT_SECONDS,
+    )
+    try:
+        lock.acquire()
+    except Timeout as exc:
+        raise ConfigFileError(
+            f"Timed out waiting for config file lock on {config_path}; "
+            "another citemesh process is writing the config."
+        ) from exc
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 def set_config_value(
     dotted_key: str, raw_value: Any, *, path: Optional[Path] = None
 ) -> Any:
@@ -426,14 +458,15 @@ def set_config_value(
     except ConfigValueError as exc:
         raise ConfigValueError(f"Invalid value for '{dotted_key}': {exc}") from exc
     config_path = path if path is not None else user_config_path()
-    document = _read_raw_document(config_path)
-    section = document.setdefault(table, {})
-    if not isinstance(section, dict):
-        raise ConfigFileError(
-            f"Cannot rewrite config file {config_path}: [{table}] is not a table."
-        )
-    section[key] = value
-    _write_document(config_path, document)
+    with _config_write_lock(config_path):
+        document = _read_raw_document(config_path)
+        section = document.setdefault(table, {})
+        if not isinstance(section, dict):
+            raise ConfigFileError(
+                f"Cannot rewrite config file {config_path}: [{table}] is not a table."
+            )
+        section[key] = value
+        _write_document(config_path, document)
     return value
 
 
@@ -446,14 +479,15 @@ def unset_config_value(dotted_key: str, *, path: Optional[Path] = None) -> bool:
     """
     table, key, _spec = parse_config_key(dotted_key)
     config_path = path if path is not None else user_config_path()
-    document = _read_raw_document(config_path)
-    section = document.get(table)
-    if not isinstance(section, dict) or key not in section:
-        return False
-    del section[key]
-    if not section:
-        del document[table]
-    _write_document(config_path, document)
+    with _config_write_lock(config_path):
+        document = _read_raw_document(config_path)
+        section = document.get(table)
+        if not isinstance(section, dict) or key not in section:
+            return False
+        del section[key]
+        if not section:
+            del document[table]
+        _write_document(config_path, document)
     return True
 
 

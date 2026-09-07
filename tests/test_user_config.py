@@ -6,6 +6,7 @@ import argparse
 import io
 import logging
 import os
+import threading
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from citemesh import cli as cli_module
+from citemesh.core import user_config as user_config_module
 from citemesh.core.config import EmbeddingStorageConfig
 from citemesh.core.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
@@ -136,6 +138,82 @@ def test_config_file_is_written_owner_only(tmp_path: Path) -> None:
     config_path.chmod(0o644)
     set_config_value("defaults.max_papers", "30", path=config_path)
     assert config_path.stat().st_mode & 0o7777 == 0o600
+
+
+def test_config_set_serializes_concurrent_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """config set must hold one lock across read, merge, and atomic write.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture patching the module's writer.
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate that neither concurrent update is lost.
+    """
+    config_path = tmp_path / "config.toml"
+
+    first_write_started = threading.Event()
+    allow_first_write = threading.Event()
+    second_write_started = threading.Event()
+    write_counter = 0
+    write_counter_lock = threading.Lock()
+    original_atomic_write = user_config_module.atomic_write_text
+
+    def delayed_atomic_write(path: Path, payload: str, **kwargs: object) -> None:
+        """Stall the first write so the second set call races the config lock.
+
+        :param Path path: Config file path under write.
+        :param str payload: Serialized TOML payload.
+        :param object kwargs: Pass-through keyword arguments for the writer.
+        :return None: Delegates to the real atomic writer after coordination.
+        """
+        nonlocal write_counter
+        with write_counter_lock:
+            write_counter += 1
+            call_number = write_counter
+        if call_number == 1:
+            first_write_started.set()
+            assert allow_first_write.wait(timeout=5), "first write never released"
+        else:
+            second_write_started.set()
+        original_atomic_write(path, payload, **kwargs)
+
+    monkeypatch.setattr(user_config_module, "atomic_write_text", delayed_atomic_write)
+
+    errors: list[BaseException] = []
+
+    def worker(dotted_key: str, raw_value: str) -> None:
+        """Persist one config value from a worker thread.
+
+        :param str dotted_key: Dotted config key to set.
+        :param str raw_value: Raw CLI-style value string.
+        :return None: Records any raised exception for the main thread.
+        """
+        try:
+            set_config_value(dotted_key, raw_value, path=config_path)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=worker, args=("defaults.max_papers", "25"))
+    second_thread = threading.Thread(target=worker, args=("defaults.streaming", "true"))
+
+    first_thread.start()
+    assert first_write_started.wait(timeout=5), "first write never started"
+    second_thread.start()
+    assert not second_write_started.wait(timeout=0.25), (
+        "second config set reached write path before first released config lock"
+    )
+
+    allow_first_write.set()
+    first_thread.join(timeout=5)
+    second_thread.join(timeout=5)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not errors
+
+    config = load_user_config(config_path)
+    assert config.defaults["max_papers"] == 25
+    assert config.defaults["streaming"] is True
 
 
 def test_set_rejects_unknown_key(tmp_path: Path) -> None:
