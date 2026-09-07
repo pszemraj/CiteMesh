@@ -114,7 +114,7 @@ and the optional binary prefilter are described in
 
 ## Dependency Floor
 
-- The `embeddings` install extra provides `torch>=2.9.0` on Linux/Windows, `torch>=2.13.0` on macOS, `transformers>=5.2.0`, `sentence-transformers>=6.0.0`, and Datasets. Candidate mode uses the encoder stack without loading Datasets; `arxiv-corpus` mode also uses Datasets for hydration. The macOS torch floor matches the release verified for MPS bf16 execution, while the encoder-stack floors provide the supported automatic-dtype API and EmbeddingGemma's bidirectional attention.
+- The `embeddings` install extra provides `torch>=2.9.0` on Linux/Windows, `torch>=2.13.0` on macOS, `transformers>=5.2.0`, `sentence-transformers>=5.7.0`, and Datasets. Candidate mode uses the encoder stack without loading Datasets; `arxiv-corpus` mode also uses Datasets for hydration. The macOS torch floor matches the release verified for MPS bf16 execution, while the encoder-stack floors provide the supported automatic-dtype API and EmbeddingGemma's bidirectional attention. The automatic-dtype contract is carried by `transformers>=5.2.0`, which the model loader passes through as `model_kwargs={"dtype": "auto"}`; Sentence Transformers only forwards it, so the floor there is the oldest release verified against this stack rather than a required API.
 
 ## Implementation References
 
