@@ -3234,7 +3234,7 @@ def _confirm_destructive_cache_action(
             "Refusing --force-rebuild-cache in non-interactive mode without "
             "--overwrite-cache. Re-run with --overwrite-cache to proceed."
         )
-        prompt = "Proceed with embedding cache overwrite? [y/N]: "
+        prompt = "Proceed with embedding cache overwrite?"
         large_cache_detail = "Clearing may require long rehydration."
         eof_action = "build"
     elif operation == "clear":
@@ -3244,7 +3244,7 @@ def _confirm_destructive_cache_action(
             "Refusing to clear cache in non-interactive mode without --yes. "
             "Re-run with: citemesh cache clear --yes"
         )
-        prompt = f"Delete CiteMesh cache directory '{root}'? [y/N]: "
+        prompt = f"Delete CiteMesh cache directory '{root}'?"
         large_cache_detail = "Deletion is immediate and irreversible."
         eof_action = "cache clear"
     else:
@@ -3302,8 +3302,11 @@ def _confirm_destructive_cache_action(
         "Use %s to bypass this prompt in scripted/non-interactive workflows.",
         confirmation_flag,
     )
+    # Text, not markup: the clear prompt interpolates a path that could
+    # otherwise be parsed as console tags.
+    styled_prompt = Text.assemble((prompt, "bold"), (" [y/N]: ", "dim"))
     try:
-        response = input(prompt).strip().lower()
+        response = log_console.input(styled_prompt).strip().lower()
     except EOFError:
         logger.error("No confirmation input received; %s aborted.", eof_action)
         return False

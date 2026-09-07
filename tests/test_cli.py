@@ -325,7 +325,9 @@ def test_force_rebuild_cache_confirmation_contracts(
     )
 
     monkeypatch.setattr(cli_module, "stdin_isatty", lambda: True)
-    monkeypatch.setattr("builtins.input", lambda _: "n")
+    monkeypatch.setattr(
+        cli_module.Console, "input", lambda self, prompt="", **kwargs: "n"
+    )
     cancelled = run_cli_command(
         [
             "build",
