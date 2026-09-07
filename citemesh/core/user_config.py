@@ -398,7 +398,9 @@ def _write_document(config_path: Path, document: Dict[str, Any]) -> None:
             f"Cannot serialize config document for {config_path}: {exc}"
         ) from exc
     try:
-        atomic_write_text(config_path, payload, newline=None)
+        # config.toml can hold api.s2_api_key, so it stays owner-only even
+        # when a pre-existing file carries broader permission bits.
+        atomic_write_text(config_path, payload, newline=None, mode=0o600)
     except OSError as exc:
         raise ConfigFileError(
             f"Failed to write config file {config_path}: {exc}"

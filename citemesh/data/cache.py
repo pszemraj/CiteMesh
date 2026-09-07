@@ -87,12 +87,15 @@ def _atomic_write_text_payload(
     writer: Callable[[TextIO], object],
     *,
     newline: str | None,
+    mode: int | None = None,
 ) -> None:
     """Atomically replace a UTF-8 text file using a writer callback.
 
     :param Path path: Target text file path.
     :param Callable[[TextIO], object] writer: Callback that writes the payload.
     :param str | None newline: Text-mode newline translation policy.
+    :param int | None mode: Explicit permission bits, or ``None`` to keep the
+        target's existing mode (umask default for new files).
     :return None: Writes and durably replaces the target file.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,6 +107,17 @@ def _atomic_write_text_payload(
     )
     tmp_path = Path(tmp_name)
     try:
+        # mkstemp creates the temp file 0600 and os.replace carries that mode
+        # onto the target; without an explicit chmod every rewrite would
+        # silently restrict shared artifacts to owner-only.
+        if mode is None:
+            try:
+                mode = path.stat().st_mode & 0o7777
+            except FileNotFoundError:
+                current_umask = os.umask(0)
+                os.umask(current_umask)
+                mode = 0o666 & ~current_umask
+        os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as tmp_file:
             writer(tmp_file)
             tmp_file.flush()
@@ -133,18 +147,22 @@ def atomic_write_text(
     content: str,
     *,
     newline: str | None = "",
+    mode: int | None = None,
 ) -> None:
     """Persist complete UTF-8 text with a crash-safe atomic rename.
 
     :param Path path: Target text file path.
     :param str content: Complete text payload.
     :param str | None newline: Text-mode newline translation policy.
+    :param int | None mode: Explicit permission bits, or ``None`` to keep the
+        target's existing mode (umask default for new files).
     :return None: Writes the target file in place.
     """
     _atomic_write_text_payload(
         path,
         lambda handle: handle.write(content),
         newline=newline,
+        mode=mode,
     )
 
 

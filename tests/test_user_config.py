@@ -123,6 +123,21 @@ def test_set_get_unset_round_trip(tmp_path: Path) -> None:
     assert reloaded.defaults["semantic_source"] == "arxiv-corpus"
 
 
+def test_config_file_is_written_owner_only(tmp_path: Path) -> None:
+    """config.toml must stay owner-only because it can hold api.s2_api_key.
+
+    :param Path tmp_path: Pytest temporary directory.
+    :return None: Assertions validate permission bits for new and existing files.
+    """
+    config_path = tmp_path / "config.toml"
+    set_config_value("defaults.max_papers", "25", path=config_path)
+    assert config_path.stat().st_mode & 0o7777 == 0o600
+
+    config_path.chmod(0o644)
+    set_config_value("defaults.max_papers", "30", path=config_path)
+    assert config_path.stat().st_mode & 0o7777 == 0o600
+
+
 def test_set_rejects_unknown_key(tmp_path: Path) -> None:
     """Config mutation should reject unknown and incomplete keys.
 

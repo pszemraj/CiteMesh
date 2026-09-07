@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -120,3 +121,29 @@ def test_atomic_write_text_uses_binary_temp_descriptor(
 
     assert observed_text_modes == [False]
     assert destination.read_bytes() == b"first\nsecond\n"
+
+
+def test_atomic_write_text_preserves_target_permissions(tmp_path: Path) -> None:
+    """Rewriting an existing file must not narrow its permission bits.
+
+    :param Path tmp_path: Temporary directory for the atomic-write target.
+    :return None: Validates preserved, defaulted, and explicit modes.
+    """
+    shared = tmp_path / "graph.html"
+    shared.write_text("original")
+    shared.chmod(0o644)
+
+    cache_module.atomic_write_text(shared, "rewritten")
+    assert shared.stat().st_mode & 0o7777 == 0o644
+
+    current_umask = os.umask(0)
+    os.umask(current_umask)
+    fresh = tmp_path / "fresh.json"
+    cache_module.atomic_write_text(fresh, "{}")
+    assert fresh.stat().st_mode & 0o7777 == 0o666 & ~current_umask
+
+    secret = tmp_path / "config.toml"
+    secret.write_text("old")
+    secret.chmod(0o644)
+    cache_module.atomic_write_text(secret, "new", mode=0o600)
+    assert secret.stat().st_mode & 0o7777 == 0o600
