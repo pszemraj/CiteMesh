@@ -1,10 +1,8 @@
 # CiteMesh
 
-Build exploration-friendly paper graphs from a known paper with recommendation,
-citation, embedding, or hybrid strategies, or start the embedding strategy from a
-free-text query. CiteMesh ships as a single CLI with consistent visuals and export
-formats so you can switch approaches without changing tools -- an open-source,
-embeddings-powered alternative to hosted literature-mapping services.
+Build exploration-friendly paper graphs from a known paper with recommendation, citation, embedding, or hybrid strategies, or start the embedding strategy from a free-text query. CiteMesh ships as a single CLI with consistent visuals and export formats so you can switch approaches without changing tools -- an open-source alternative to hosted literature-mapping services.
+
+**By default, CiteMesh uses Semantic Scholar recommendations.** Local embeddings are opt-in: choose `--strategy embedding` or `--strategy hybrid`. Both use Semantic Scholar candidates by default; to download and search a local arXiv corpus, also set `--semantic-source arxiv-corpus`. You can save these choices as personal defaults with [user configuration](docs/guides/configuration.md).
 
 ![CiteMesh dashboard showing a hybrid graph for Attention is All you Need](assets/ui.png)
 
@@ -18,7 +16,7 @@ Start from one paper you already know, then quickly discover:
 - newer papers that are genuinely related to that paper's core topic
 - older, high-quality foundational papers that matter for understanding the same area
 
-The CLI defaults to the `recommendation` strategy for the fastest topical pass. Use `--strategy hybrid` when you want the tuned citation-plus-semantic workflow for this discovery pattern.
+Use `--strategy hybrid` to combine citation links and local semantic ranking for this discovery pattern.
 
 ## Why CiteMesh (vs. hosted literature-mapping tools)
 
@@ -30,11 +28,6 @@ The CLI defaults to the `recommendation` strategy for the fastest topical pass. 
 | Semantic similarity | Your embeddings, computed locally (CUDA / Apple Silicon MPS / CPU) | Opaque server-side |
 | Outputs | PNG, interactive HTML/Plotly, reusable dashboard collections, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
 | Automation | Scriptable CLI with deterministic exports and JSON sidecars | Manual browsing |
-
-By default the embedding and hybrid strategies are **corpus-free**. For known-paper
-seeds they embed Semantic Scholar neighbors instead of downloading a local corpus.
-An opt-in arXiv mode (`--semantic-source arxiv-corpus`) is available for
-corpus-scale retrieval.
 
 ## Project Status
 
@@ -87,10 +80,17 @@ CiteMesh works without credentials using Semantic Scholar's shared anonymous poo
 ### Run One Graph
 
 ```bash
+# Default: Semantic Scholar recommendations
+citemesh build "arxiv:1706.03762" --export all --theme dark
+
+# Opt in to local embeddings over Semantic Scholar candidates, plus citation links
 citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
+
+# Opt in to embedding search over a downloaded arXiv corpus
+citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-corpus
 ```
 
-The first embedding or hybrid run downloads the `unsloth/embeddinggemma-300m` checkpoint (~300M parameters) and encodes up to 400 candidate abstracts, so expect it to take a few minutes; later runs reuse the persistent embedding cache and skip nearly all of that work.
+The default recommendation strategy does not download an embedding model or corpus. The first embedding or hybrid run downloads the `unsloth/embeddinggemma-300m` checkpoint (~300M parameters). With the default Semantic Scholar candidate source, it encodes up to 400 candidate abstracts; arXiv corpus mode instead downloads the dataset and embeds the 50,000 newest submissions by default. Later runs reuse the persistent embedding cache. See [CLI Usage](docs/guides/cli.md) for corpus size and loading options.
 
 Omit `--output` and generated files land in `out/` under the current working directory (a source checkout already gitignores that path). Repeated dashboard builds share an offline collection there:
 
