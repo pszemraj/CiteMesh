@@ -1198,6 +1198,10 @@ class SemanticScholarClient:
         :return Dict[str, Paper]: Mapping of normalized requested IDs to fetched papers.
         :raises ValueError: If an ID is missing/not a string or over 500 uncached
             IDs would require one batch request.
+        :raises SemanticScholarRequestError: If Semantic Scholar rejects the
+            batch request itself (non-429 HTTP 4xx), regardless of
+            ``raise_on_unavailable`` — a rejected request is a caller error,
+            not an availability failure.
         """
         normalized_ids: list[str] = []
         for raw_paper_id in paper_ids:
@@ -1778,11 +1782,15 @@ def get_client() -> SemanticScholarClient:
     :return SemanticScholarClient: Process-wide singleton client.
     """
     global _client_instance
-    if _client_instance is None or _client_instance._closed:
+    client = _client_instance
+    if client is None or client._closed:
         with _client_lock:
             if _client_instance is None or _client_instance._closed:
                 _client_instance = SemanticScholarClient()
-    return _client_instance
+            # Return the instance observed under the lock: re-reading the
+            # global outside it could observe a concurrent reset_client().
+            client = _client_instance
+    return client
 
 
 def reset_client() -> None:
