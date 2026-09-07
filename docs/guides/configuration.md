@@ -31,7 +31,7 @@ Config values behave like personal built-in defaults, not like explicit flags:
 - Explicit corpus-only CLI flags (for example `--corpus-size`) still imply `--semantic-source arxiv-corpus`, overriding a configured `defaults.semantic_source = "candidates"` for that run.
 - Explicit candidate-only CLI flags work symmetrically: `--candidate-pool-size` implies `--semantic-source candidates`, overriding a configured `defaults.semantic_source = "arxiv-corpus"`. Corpus-only settings that came only from config (for example streaming plus a sliced dataset split) stay inert in that candidate run.
 
-When config defaults are applied to a build, CiteMesh logs one INFO line listing the applied keys and the config file path.
+When config defaults are applied to a build, CiteMesh logs one DEBUG line listing the applied keys and the config file path.
 
 ## Commands
 
@@ -48,13 +48,13 @@ Value forms for `config set`:
 - Booleans: `true` / `false` (also `1/0`, `yes/no`, `on/off`)
 - Export lists: comma-separated, e.g. `citemesh config set defaults.export json,dashboard`
 - Similarity thresholds: decimal numbers between `0.0` and `1.0`
-- Everything else: plain strings/integers
+- Everything else: plain strings/integers (integer counts must be at least `1`, except `max_semantic`, `max_citations`, and `max_references`, which also accept `0`)
 
-Invalid keys and values are rejected at `set` time with the list of valid options. Invalid entries, malformed TOML, and non-UTF-8 files are ignored with a warning during ordinary CLI loads, so a bad config never blocks unrelated commands. Mutating `config set`/`unset` operations fail instead of overwriting an unreadable file. Unknown keys already in the file are preserved when CiteMesh rewrites it (comments are not - the TOML round-trip is value-level).
+Invalid keys and values are rejected at `set` time with the list of valid options. Invalid entries, malformed TOML, and non-UTF-8 files are ignored with a warning during ordinary CLI loads, so a bad config never blocks unrelated commands. Mutating `config set`/`unset` operations fail instead of overwriting an unreadable file, and they serialize on a file lock - a mutation that cannot acquire the lock within 10 seconds fails with an error naming the config path. Unknown keys already in the file are preserved when CiteMesh rewrites it (comments are not - the TOML round-trip is value-level).
 
 ## Supported keys
 
-`[defaults]` - whitelisted build-flag defaults (plus `search_mode`, which applies to `citemesh search` instead of `build`):
+`[defaults]` - whitelisted build-flag defaults. `search_mode` applies to `citemesh search` instead of `build`, and local-mode search also reads the rest of this table to select which embedding-cache namespace it queries (`model`, `model_profile`, `device`, `semantic_source`, `truncate_dim`, and related keys):
 
 | Key | Meaning |
 | --- | --- |
@@ -111,6 +111,7 @@ s2_api_key = "your-key-here"
 ## Location and lifecycle
 
 - The file lives at the cache root, so `CITEMESH_CACHE_DIR` moves it too.
+- CiteMesh rewrites the file with mode `0600` (owner read/write only) because it can hold `api.s2_api_key`; broader pre-existing permission bits are narrowed on every write.
 - `citemesh cache clear` deletes cached payloads but **never** `config.toml`.
 - To reset configuration, delete the path printed by `citemesh config path`, or
   use `citemesh config unset` for individual keys.

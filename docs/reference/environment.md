@@ -46,3 +46,6 @@ macOS cache-location hint.
 | `DARKMODE` | When set to `1`, selects dark mode for `--theme auto` if `COLORFGBG` did not resolve a theme. |
 | `CUDA_VISIBLE_DEVICES` | Honored by torch for CUDA device visibility/selection. |
 | `PYTORCH_ENABLE_MPS_FALLBACK` | Honored by torch: falls back to CPU for individual ops missing MPS kernels. |
+| `NO_COLOR` | Honored by Rich: disables ANSI color in console and help output; non-color emphasis such as bold may remain. |
+| `HF_TOKEN` | Honored by huggingface_hub for authenticated model/dataset downloads. Required for the license-gated `google/embeddinggemma-300m` fallback checkpoint. |
+| `HF_HOME` | Honored by huggingface_hub: relocates the Hugging Face cache holding downloaded model checkpoints and corpus datasets (separate from the CiteMesh cache root). |

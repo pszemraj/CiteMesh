@@ -17,6 +17,7 @@ Related docs:
 Fallback behavior:
 
 - The fallback chain is used only for default-revision loads (no explicit `--model-revision`).
+- The `google/embeddinggemma-300m` fallback is a license-gated repository: it requires an accepted license on Hugging Face plus an `HF_TOKEN`, so without those the fallback fails rather than transparently retrying.
 - If `--model-revision` is set, fallback retries are disabled to preserve deterministic revision pinning.
 - If all candidates fail, CiteMesh raises a runtime error with per-candidate failure summaries.
 - When fallback succeeds, cache fingerprint checks follow the active loaded checkpoint identity (not just the originally requested model token).
@@ -66,7 +67,7 @@ CiteMesh resolves an explicit compute device before loading any embedding model:
 - `--device auto` (default) prefers `cuda`, then `mps` (Apple Silicon Metal), then `cpu`.
 - An explicit `--device cuda` or `--device mps` on a host where that backend is unavailable fails fast with a CLI usage error; MPS diagnostics distinguish a torch build without MPS from a built backend that is unavailable on the machine. CiteMesh never silently downgrades an explicit accelerator request to CPU.
 - The resolved device is passed directly to `SentenceTransformer(device=...)` and drives every precision, attention, TF32, and compile decision below.
-- The effective device and compute dtype are recorded in the run's export metadata (`effective_device`, `effective_compute_dtype`) and config sidecar.
+- The effective device and compute dtype are recorded in the run's export metadata (`effective_device`, `effective_compute_dtype`) and in the config sidecar's embedded `metadata` block; the sidecar's own `build.embedding.device` records the requested token, not the resolved device.
 
 ## Precision and Compile Policy
 
@@ -81,7 +82,7 @@ Per-device precision matrix (EmbeddingGemma is the default profile):
 Notes:
 
 - Embedding models load with Transformers automatic dtype resolution (`dtype="auto"`). This preserves the checkpoint/configured weight dtype instead of forcing fp32 or a reduced dtype.
-- After loading, CiteMesh inspects live parameter and buffer dtypes before binding a cache namespace. Float16 tensors are rejected everywhere; bfloat16 tensors are rejected when the active device/profile did not select the verified bfloat16 path. This keeps automatic loading without allowing the runtime log or cache provenance to claim float32 for bfloat16 execution.
+- After loading, CiteMesh inspects live parameter and buffer dtypes before binding a cache namespace. Float16 tensors are rejected everywhere; bfloat16 tensors are rejected when the active device/profile did not select the verified bfloat16 path; any dtype other than float32/bfloat16 is rejected outright. This keeps automatic loading without allowing the runtime log or cache provenance to claim float32 for bfloat16 execution.
 - Reduced-precision compute is bfloat16-only and is entered through `torch.autocast` around encode calls. If the device capability, torch API, version guard, or autocast-context probe rejects bfloat16, CiteMesh uses float32.
 - CUDA capability checks request native support (`is_bf16_supported(including_emulation=False)`), so tensor-level emulation on older GPUs does not enable bfloat16 autocast.
 - bf16-on-MPS requires torch >= 2.13 (the floor verified on Apple Silicon). Older torch releases fall back to float32.
@@ -114,7 +115,7 @@ and the optional binary prefilter are described in
 
 ## Dependency Floor
 
-- The `embeddings` install extra provides `torch>=2.9.0` on Linux/Windows, `torch>=2.13.0` on macOS, `transformers>=5.2.0`, `sentence-transformers>=5.7.0`, and Datasets. Candidate mode uses the encoder stack without loading Datasets; `arxiv-corpus` mode also uses Datasets for hydration. The macOS torch floor matches the release verified for MPS bf16 execution, while the encoder-stack floors provide the supported automatic-dtype API and EmbeddingGemma's bidirectional attention. The automatic-dtype contract is carried by `transformers>=5.2.0`, which the model loader passes through as `model_kwargs={"dtype": "auto"}`; Sentence Transformers only forwards it, so the floor there is the oldest release verified against this stack rather than a required API.
+- The `embeddings` install extra provides `torch>=2.9.0` on non-macOS platforms, `torch>=2.13.0` on macOS, `transformers>=5.2.0`, `sentence-transformers>=5.7.0`, `datasets>=2.14.0`, and `huggingface_hub>=0.24.0`. Candidate mode uses the encoder stack without loading Datasets; `arxiv-corpus` mode also uses Datasets for hydration. The macOS torch floor matches the release verified for MPS bf16 execution, while the encoder-stack floors provide the supported automatic-dtype API and EmbeddingGemma's bidirectional attention. The automatic-dtype contract is carried by `transformers>=5.2.0`, which the model loader passes through as `model_kwargs={"dtype": "auto"}`; Sentence Transformers only forwards it, so the floor there is the oldest release verified against this stack rather than a required API.
 
 ## Implementation References
 
