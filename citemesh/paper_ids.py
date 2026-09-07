@@ -98,6 +98,12 @@ def paper_identifier_aliases(
             aliases.add(arxiv_alias)
             aliases.add(arxiv_alias.split(":", 1)[1])
 
+    # The doi field is a bare DOI that normalize_paper_id passes through
+    # verbatim; DOI names are case-insensitive, so the lowercase form must
+    # alias too or differently-cased sources split one paper's identity.
+    if isinstance(doi, str) and doi.strip():
+        aliases.add(doi.strip().lower())
+
     return sorted(aliases)
 
 
@@ -183,9 +189,11 @@ def _normalize_hosted_identifier(candidate: str) -> Optional[str]:
             return f"arxiv:{arxiv_id}"
 
     if host_matches_domain(host, "doi.org"):
+        # DOI names are case-insensitive; lowercase so one paper cannot split
+        # into distinct cache keys or graph identities by casing.
         doi_id = path.strip("/")
         if doi_id:
-            return doi_id
+            return doi_id.lower()
 
     return None
 
@@ -210,7 +218,9 @@ def normalize_paper_id(paper_id: str) -> str:
         suffix = unquote(normalized.split(":", 1)[1]).strip()
         if not suffix:
             raise ValueError(f"Invalid paper ID: {paper_id}")
-        return suffix
+        # DOI names are case-insensitive; lowercase so one paper cannot split
+        # into distinct cache keys or graph identities by casing.
+        return suffix.lower()
 
     if lowered.startswith("arxiv:"):
         arxiv_identifier = recognize_arxiv_identifier(normalized)

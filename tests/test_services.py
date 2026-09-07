@@ -589,6 +589,16 @@ def test_normalization_and_get_paper_id_contracts() -> None:
                 "10.1000/example",
             },
         ),
+        (
+            "S2-opaque-id",
+            "",
+            "10.1109/CVPR.2016.90",
+            {
+                "S2-opaque-id",
+                "10.1109/CVPR.2016.90",
+                "10.1109/cvpr.2016.90",
+            },
+        ),
     ],
 )
 def test_paper_identifier_aliases_expand_cross_source_identifiers(
@@ -2471,7 +2481,7 @@ def test_real_requests_json_decode_failure_is_retryable() -> None:
     ("paper_id", "expected_path"),
     [
         ("10.18653/v1/N18-3011", "10.18653/v1/N18-3011"),
-        ("DOI:10.18653/v1/N18-3011", "10.18653/v1/N18-3011"),
+        ("DOI:10.18653/v1/N18-3011", "10.18653/v1/n18-3011"),
         ("arxiv:math/0301234v1", "arxiv%3Amath/0301234"),
         ("10.1234/a b?c#d", "10.1234/a%20b%3Fc%23d"),
     ],

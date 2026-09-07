@@ -83,8 +83,8 @@ Supported keys, value forms, and precedence are documented in
 ## Accepted Identifiers
 
 - DOI (`10.1038/nature14539`)
-- DOI with prefix (`doi:10.1038/nature14539`)
-- DOI URL (`https://doi.org/10.1038/nature14539`)
+- DOI with prefix (`doi:10.1038/nature14539`; canonicalizes to lowercase — DOI names are case-insensitive)
+- DOI URL (`https://doi.org/10.1038/nature14539`; canonicalizes to lowercase)
 - arXiv ID (`arxiv:1706.03762`; version suffixes like `v5` are normalized away)
 - bare arXiv-like IDs (for example `1706.03762`) may work when Semantic Scholar resolves them
 - arXiv URL (`https://arxiv.org/abs/1706.03762`, `https://arxiv.org/abs/arXiv:1706.03762`, `https://arxiv.org/pdf/1706.03762.pdf`; `vN` suffixes are normalized away)
