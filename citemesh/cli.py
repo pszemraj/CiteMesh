@@ -48,6 +48,7 @@ from citemesh.core.user_config import (
     ConfigKeyError,
     ConfigValueError,
     UserConfig,
+    config_lock,
     format_config_value,
     load_user_config,
     parse_config_key,
@@ -3413,7 +3414,7 @@ def _confirmed_cache_clear(
 
 
 def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> int:
-    """Clear the entire CiteMesh cache root.
+    """Clear cached data while preserving configuration and its coordination lock.
 
     :param bool assume_yes: Whether to bypass interactive confirmation.
     :param Optional[str] clear_reason: Optional operator rationale for cache clear.
@@ -3437,21 +3438,20 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
         logger.info("Cache clear aborted.")
         return 1
 
-    # An explicit cache-root override designates this entire directory as cache.
-    # Preserve config.toml; --yes already acknowledges deletion at the logged root.
     config_path = cache_root / USER_CONFIG_FILENAME
-    preserved_config = config_path.exists() or config_path.is_symlink()
     try:
-        for child in sorted(cache_root.iterdir()):
-            if child == config_path:
-                continue
-            if child.is_dir() and not child.is_symlink():
-                shutil.rmtree(child)
-            else:
-                child.unlink()
-        if not preserved_config:
-            cache_root.rmdir()
-    except OSError as exc:
+        # Hold the config lock so an in-flight atomic write cannot lose its
+        # temporary file; preserve the lock's path for waiting writers.
+        with config_lock(config_path) as lock_path:
+            preserved_config = config_path.exists() or config_path.is_symlink()
+            for child in sorted(cache_root.iterdir()):
+                if child in {config_path, lock_path}:
+                    continue
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+    except (OSError, ConfigFileError) as exc:
         logger.error("Failed to clear cache directory %s: %s", cache_root, exc)
         return 1
 

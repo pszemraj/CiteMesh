@@ -31,6 +31,7 @@ Variable details are documented in [Environment Variables](../reference/environm
 ```text
 citemesh cache root
 ├── config.toml                    # Persistent user configuration (see Configuration guide)
+├── config.toml.lock               # Coordination for configuration writes and cache clearing
 ├── embeddings/
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, text hashes, row_idx, authors/categories JSON, hydration state)
 │   ├── embeddings_<model-hash>.h5 # HDF5 matrix datasets (int8/float32 + optional binary index + calibration ranges)
@@ -294,7 +295,7 @@ Clear cached data under the CiteMesh cache root:
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
-Omit `--yes` for interactive confirmation. `cache clear` deletes every cache-root entry (embeddings, papers, references, and anything else present) except `config.toml`, which is always preserved.
+Omit `--yes` for interactive confirmation. `cache clear` deletes every cache-root entry (embeddings, papers, references, and anything else present) except `config.toml` and its coordination lock, `config.toml.lock`. Clearing acquires the same lock as configuration writes, waiting up to 10 seconds before failing if another process holds it. The cache root remains available for locking even when no configuration file exists.
 
 For command syntax and defaults, see [CLI Usage](cli.md); this section focuses on cache maintenance workflows.
 

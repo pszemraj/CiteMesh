@@ -318,7 +318,8 @@ def test_cache_commands_contracts(
     assert clear_result.returncode == 0, (
         f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"
     )
-    assert not cache_root.exists()
+    assert cache_root.is_dir()
+    assert {child.name for child in cache_root.iterdir()} <= {"config.toml.lock"}
 
 
 def test_cache_clear_declined_at_prompt_keeps_cache(

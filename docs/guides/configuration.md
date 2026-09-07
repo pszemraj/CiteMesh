@@ -112,6 +112,6 @@ s2_api_key = "your-key-here"
 
 - The file lives at the cache root, so `CITEMESH_CACHE_DIR` moves it too.
 - CiteMesh rewrites the file with mode `0600` (owner read/write only) because it can hold `api.s2_api_key`; broader pre-existing permission bits are narrowed on every write.
-- `citemesh cache clear` deletes cached payloads but **never** `config.toml`.
+- `citemesh cache clear` deletes cached payloads but **never** `config.toml`. It acquires the configuration lock and preserves its path so clearing cannot interrupt a pending configuration write or let concurrent writers bypass the lock.
 - To reset configuration, delete the path printed by `citemesh config path`, or
   use `citemesh config unset` for individual keys.

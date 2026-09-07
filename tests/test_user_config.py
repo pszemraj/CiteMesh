@@ -7,6 +7,7 @@ import io
 import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -37,6 +38,7 @@ from citemesh.core.user_config import (
     unset_config_value,
     user_config_path,
 )
+from citemesh.data import cache as cache_module
 from citemesh.strategies.hybrid import HYBRID_DEFAULT_MAX_REFERENCES
 
 
@@ -1094,10 +1096,70 @@ def test_cache_clear_preserves_config_file(config_kind: str) -> None:
         assert load_user_config().defaults == {"theme": "dark"}
 
 
-def test_cache_clear_without_config_removes_root() -> None:
-    """Cache clearing may remove the root when no config file exists.
+def test_cache_clear_waits_for_pending_config_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache clearing must wait until an atomic configuration write completes.
 
-    :return None: Assertions validate complete cache-root removal.
+    :param pytest.MonkeyPatch monkeypatch: Fixture pausing a pending config rename.
+    :return None: Validates serialization, config preservation, and cache deletion.
+    """
+    config_path = user_config_path()
+    cache_payload = config_path.parent / "papers" / "paper.json"
+    cache_payload.parent.mkdir(parents=True, exist_ok=True)
+    cache_payload.write_text("{}", encoding="utf-8")
+    write_pending = threading.Event()
+    allow_write = threading.Event()
+    clear_started = threading.Event()
+    clear_finished = threading.Event()
+    original_replace = cache_module.os.replace
+
+    def delayed_replace(source: str | Path, destination: str | Path) -> None:
+        """Pause the config writer after creating its temporary file.
+
+        :param str | Path source: Temporary file ready for replacement.
+        :param str | Path destination: Target file being written.
+        :return None: Replaces the file once the test releases the writer.
+        """
+        if Path(destination) == config_path:
+            write_pending.set()
+            assert allow_write.wait(timeout=5), "config write was never released"
+        original_replace(source, destination)
+
+    def clear_cache() -> int:
+        """Clear cached data while recording when the operation completes.
+
+        :return int: Cache-clear exit code.
+        """
+        clear_started.set()
+        try:
+            return cli_module._clear_cache_directory(assume_yes=True, clear_reason=None)
+        finally:
+            clear_finished.set()
+
+    monkeypatch.setattr(cache_module.os, "replace", delayed_replace)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        writer = executor.submit(set_config_value, "defaults.max_papers", "25")
+        try:
+            assert write_pending.wait(timeout=5), "config write never started"
+            clearing = executor.submit(clear_cache)
+            assert clear_started.wait(timeout=5), "cache clear never started"
+            assert not clear_finished.wait(timeout=0.25), (
+                "cache clear completed while a config write was pending"
+            )
+        finally:
+            allow_write.set()
+        assert writer.result(timeout=5) == 25
+        assert clearing.result(timeout=5) == 0
+
+    assert load_user_config().defaults == {"max_papers": 25}
+    assert not cache_payload.exists()
+
+
+def test_cache_clear_without_config_keeps_coordination_root() -> None:
+    """Cache clearing must leave the root available for configuration locking.
+
+    :return None: Assertions validate removal of every cached payload.
     """
     cache_root = user_config_path().parent
     (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
@@ -1105,4 +1167,5 @@ def test_cache_clear_without_config_removes_root() -> None:
 
     result = _run_cli(["cache", "clear", "--yes"])
     assert result.returncode == 0
-    assert not cache_root.exists()
+    assert cache_root.is_dir()
+    assert {child.name for child in cache_root.iterdir()} <= {"config.toml.lock"}

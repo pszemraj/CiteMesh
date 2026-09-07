@@ -411,19 +411,20 @@ def _write_document(config_path: Path, document: Dict[str, Any]) -> None:
 
 
 @contextmanager
-def _config_write_lock(config_path: Path) -> Iterator[None]:
-    """Serialize config read-modify-write cycles across processes.
+def config_lock(config_path: Path) -> Iterator[Path]:
+    """Serialize configuration updates and cache clearing across processes.
 
     Each write is individually atomic, but without a lock a concurrent
     ``config set`` silently loses the other process's update.
 
     :param Path config_path: Target config file path.
-    :return Iterator[None]: Context holding the inter-process lock.
+    :return Iterator[Path]: Held lock's path, which cache clearing must preserve.
     :raises ConfigFileError: If lock acquisition times out.
     """
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = Path(f"{config_path}.lock")
     lock = FileLock(
-        f"{config_path}.lock",
+        lock_path,
         timeout=_CONFIG_LOCK_TIMEOUT_SECONDS,
     )
     try:
@@ -431,10 +432,10 @@ def _config_write_lock(config_path: Path) -> Iterator[None]:
     except Timeout as exc:
         raise ConfigFileError(
             f"Timed out waiting for config file lock on {config_path}; "
-            "another citemesh process is writing the config."
+            "another citemesh process is using the config."
         ) from exc
     try:
-        yield
+        yield lock_path
     finally:
         lock.release()
 
@@ -458,7 +459,7 @@ def set_config_value(
     except ConfigValueError as exc:
         raise ConfigValueError(f"Invalid value for '{dotted_key}': {exc}") from exc
     config_path = path if path is not None else user_config_path()
-    with _config_write_lock(config_path):
+    with config_lock(config_path):
         document = _read_raw_document(config_path)
         section = document.setdefault(table, {})
         if not isinstance(section, dict):
@@ -479,7 +480,7 @@ def unset_config_value(dotted_key: str, *, path: Optional[Path] = None) -> bool:
     """
     table, key, _spec = parse_config_key(dotted_key)
     config_path = path if path is not None else user_config_path()
-    with _config_write_lock(config_path):
+    with config_lock(config_path):
         document = _read_raw_document(config_path)
         section = document.get(table)
         if not isinstance(section, dict) or key not in section:
