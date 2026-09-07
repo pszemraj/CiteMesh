@@ -4,6 +4,9 @@ Thanks for your interest! CiteMesh is a pre-1.0 project moving quickly; small, f
 
 ## Getting set up
 
+Install PyTorch for your hardware using the [official installation selector](https://pytorch.org/get-started/locally/)
+before installing CiteMesh, so pip does not choose an unintended build.
+
 ```bash
 git clone https://github.com/pszemraj/CiteMesh.git && cd CiteMesh
 pip install -e ".[all]"

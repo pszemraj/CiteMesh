@@ -48,7 +48,9 @@ Public beta, pre-1.0. CiteMesh optimizes for discovery quality, correctness, and
 
 ### Install
 
-Install from GitHub:
+Before installing the recommended or embeddings extras, install PyTorch for your
+hardware using the [official installation selector](https://pytorch.org/get-started/locally/).
+Otherwise, pip may install a build you did not intend to use. Then install from GitHub:
 
 ```bash
 pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.git"
@@ -69,7 +71,7 @@ pip install "citemesh[viz] @ git+https://github.com/pszemraj/CiteMesh.git"
 
 For an editable development install, follow [Contributing](CONTRIBUTING.md).
 
-On macOS the `embeddings` extra requires torch >= 2.13 (installed automatically) and runs on the MPS backend with bfloat16 autocast when supported, falling back to float32; see [Embedding Runtime](docs/reference/embedding-runtime.md).
+On macOS the `embeddings` extra requires torch >= 2.13 and runs on the MPS backend with bfloat16 autocast when supported, falling back to float32; see [Embedding Runtime](docs/reference/embedding-runtime.md).
 
 ### Run One Graph
 
