@@ -105,7 +105,7 @@ Supported keys, value forms, and precedence are documented in
 | `--include-timestamp` | Include generation time in output metadata | disabled |
 | `--export`, `-e` | `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, or `all`; repeat flag for multiple (e.g. `-e json -e dashboard`) | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` checks explicit environment hints before macOS appearance | `dark` |
-| `--output`, `-o` | Output path, or collection root for normal dashboard exports; an explicit `*.dashboard.html` path requests standalone mode | auto-generated `out/` collection root for dashboard, otherwise a per-paper folder |
+| `--output`, `-o` | Output path, or collection root for normal dashboard exports; an existing directory receives `<strategy>.<ext>` inside it, and an explicit `*.dashboard.html` path requests standalone mode | auto-generated `out/` collection root for dashboard, otherwise a per-paper folder |
 | `--log-level` | Console logging level (`debug`, `info`, `warning`, `error`) | `info` |
 | `--log-width` | Rich console wrap width in columns (`0` uses terminal width on TTYs and a stable redirected fallback) | `0` |
 | `--log-file` | Optional plain-text log file path (overwrites existing file) | disabled |
