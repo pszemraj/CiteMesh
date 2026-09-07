@@ -65,8 +65,10 @@ Two semantic sources, selected with `--semantic-source`:
   metadata already includes citation counts, so this mode does not refetch them.
 - `arxiv-corpus` (opt-in): hydrates and searches a local arXiv abstract corpus from
   HuggingFace. This can surface papers with no citation path to the seed but needs
-  the `datasets` dependency and substantially more cold-cache work. Selection,
-  resumption, and storage behavior are described in [Caching & Data](caching.md).
+  the `datasets` dependency and substantially more cold-cache work.
+  The corpus is `librarian-bots/arxiv-metadata-snapshot` (with `CShorten/ML-ArXiv-Papers` and `gfissore/arxiv-abstracts-2021` as load-failure fallbacks) and is not user-selectable; `--dataset-split` names splits of whichever of those loads.
+  The default `--corpus-size 50000` scans the full selected split to rank submissions newest-first before embedding the top 50k, so a cold run reads the whole snapshot before capping.
+  Selection, resumption, and storage behavior are described in [Caching & Data](caching.md).
   Citation-count enrichment is optional: a rejected Semantic Scholar batch warns
   and retains the selected papers with their existing counts. Invalid individual
   batch rows are skipped so valid rows can still enrich their selected papers.
@@ -108,9 +110,10 @@ calibration drift as a corpus grows.
 - Strengths: combines citation-derived evidence with semantic reranking of the
   whole candidate pool.
 - Limitations: inherits dependency and cache requirements from the embedding path.
-- Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.
+- Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a +0.10 boost for overlap papers discovered by both branches and a smaller +0.02 boost for citation-derived candidates over semantic-only ones.
 - `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
 - Graph edges require symmetric semantic cosine of at least **0.74** or shared references before temporal and citation-count weights contribute. Publication proximity has no separate co-citation bonus.
+- A pair that clears that gate must also reach a composite weighted score above **0.4** for seed-incident edges or **0.5** for all other pairs (hard floor 0.2), so a shared-reference pair with weak topical and temporal evidence can still be rejected.
 - With `--max-semantic 0`, hybrid uses the citation strategy's TF-IDF/bibliographic scorer and edge threshold, retaining the hybrid per-paper degree cap.
 - Semantic enrichment failures stop the build; hybrid does not silently downgrade
   to citation-only output.

@@ -272,7 +272,7 @@ Naming format is `h<max_refs>_<max_cites>_<max_semantic>`.
 
 #### Overall (all 5 seeds)
 
-| Config | Quality Score | Mean Runtime (s) | Mean Nodes | Mean Edges | LCR | Median Weight | P25 Weight |
+| Config | Quality Score | Mean Runtime (s) | Mean Nodes | Mean Edges | LCR (largest component ratio) | Median Weight | P25 Weight |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | `h25_25_25` | 0.904825 | 168.047 | 39.4 | 96.0 | 0.930 | 0.894618 | 0.855580 |
 | `h20_20_30` | 0.897266 | 165.207 | 40.0 | 98.2 | 0.905 | 0.896479 | 0.860641 |

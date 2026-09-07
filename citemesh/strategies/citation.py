@@ -2,7 +2,7 @@
 Citation-based graph building strategy.
 
 This strategy builds similarity graphs using citation relationships,
-bibliographic coupling (shared references), and co-citation analysis.
+bibliographic coupling (shared references), and topical similarity.
 """
 
 from __future__ import annotations

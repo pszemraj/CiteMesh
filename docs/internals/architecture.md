@@ -19,6 +19,8 @@ CLI (citemesh/cli.py)
             ↓
 GraphBuilderStrategy (base class)
     ├── collect_papers(seed_id, **kwargs) -> Dict[str, Paper]
+    │       └── strategies/candidates.py: candidate-source fetch, availability
+    │           policy, identity reconciliation, and pool budgets
     ├── compute_similarity(paper_a, paper_b) -> float
     └── build_graph(..) -> (networkx.Graph, seed_id)
             ↓
@@ -54,6 +56,17 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 - Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
 - Selection guidance, tradeoffs, and user-facing strategy behavior are covered in [Guides: Strategies](../guides/strategies.md).
 
+### `citemesh/strategies/candidates.py`
+
+- Shared candidate-acquisition layer used by every strategy: `fetch_candidate_source` tracks per-source outcomes (`complete`/`empty`/`unavailable`), and `require_available_candidate_source` implements the partial-outage-versus-fail policy recorded in export metadata.
+- `IdentityRegistry` and `reconcile_paper_identity` de-duplicate papers across requested IDs and Semantic Scholar/arXiv/DOI aliases; `merge_seed_relation` folds seed relations when identities merge.
+- `fetch_candidate_pool` implements the reference/citation/recommendation budget split and the free-text `query:` seed proxy.
+
+### `citemesh/similarity.py` and `citemesh/dashboard_contracts.py`
+
+- `similarity.py` provides `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity.
+- `dashboard_contracts.py` holds the `kind`/`schema_version` identities shared by the export producers and the dashboard viewer.
+
 ### `citemesh/core/models.py`
 
 - `Paper` and `Author` dataclasses encapsulate validated metadata.
@@ -83,6 +96,7 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 - `GraphExporter` writes interactive and structured output formats from one graph object.
 - Reuses computed layout and style values for cross-format consistency.
 - Normalizes node attributes for serializer compatibility (for example GraphML-safe fields).
+- `visualization/years.py` centralizes publication-year coercion (including the optional-bounds split behind `meta.year_range: null`); `visualization/ordering.py` provides the deterministic node/edge ordering every export relies on.
 - Artifact-level format details and sidecar schema are documented in [Output Artifacts](../reference/output-artifacts.md).
 
 ### Dashboard Collections
