@@ -658,6 +658,7 @@ def reconcile_paper_identity(
         merge_paper_metadata(seed, incoming)
         repoint_aliases(aliases, seed_id, set(collapsed_ids) | {seed_id})
         register_aliases(aliases, seed_id, seed)
+        register_aliases(aliases, seed_id, incoming)
         return IdentityReconciliation(seed_id, collapsed_ids, True)
 
     matched_candidates = [
@@ -675,6 +676,7 @@ def reconcile_paper_identity(
     merge_paper_metadata(papers[canonical_id], incoming)
     repoint_aliases(aliases, canonical_id, set(matched_candidates))
     register_aliases(aliases, canonical_id, papers[canonical_id])
+    register_aliases(aliases, canonical_id, incoming)
     return IdentityReconciliation(canonical_id, collapsed_ids)
 
 

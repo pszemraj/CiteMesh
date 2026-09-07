@@ -1775,32 +1775,57 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
     ("identifier_field", "identifier_value"),
     [("doi", "10.1000/shared"), ("arxiv_id", "2508.12345")],
 )
+@pytest.mark.parametrize("is_seed", [True, False])
 def test_identity_external_id_agreement_overrides_s2_record_disagreement(
     identifier_field: str,
     identifier_value: str,
+    is_seed: bool,
 ) -> None:
-    """Shared DOI/arXiv evidence should collapse duplicate S2 seed records."""
-    seed = Paper(
+    """External-ID matches must retain alternate S2 IDs for later sparse records.
+
+    :param str identifier_field: External identifier shared by the records.
+    :param str identifier_value: Shared DOI or arXiv identifier.
+    :param bool is_seed: Whether the surviving record is the seed or a candidate.
+    :return None: Validates metadata merging and continued identity reconciliation.
+    """
+    canonical = Paper(
         paper_id="1" * 40,
-        title="Canonical Seed",
+        title="Canonical Paper",
         year=2025,
         abstract="",
-        is_seed=True,
+        is_seed=is_seed,
     )
-    setattr(seed, identifier_field, identifier_value)
+    setattr(canonical, identifier_field, identifier_value)
     duplicate = Paper(
         paper_id="2" * 40,
-        title="Duplicate Seed Record",
+        title="Duplicate Record",
         year=2025,
         abstract="hydrated abstract",
     )
     setattr(duplicate, identifier_field, identifier_value)
-    pool = CandidatePool(seed=seed)
+    pool = CandidatePool(seed=canonical if is_seed else _seed_paper())
+    if not is_seed:
+        pool.add(canonical, source="reference", relation="referenced_by_seed")
 
     pool.add(duplicate, source="recommendation", relation="semantic_only")
+    pool.add(
+        Paper(
+            paper_id=duplicate.paper_id,
+            title="Unknown",
+            year=None,
+            references=["related-paper"],
+        ),
+        source="citation",
+        relation="cites_seed",
+    )
 
-    assert pool.papers == {}
-    assert seed.abstract == "hydrated abstract"
+    assert pool.papers == ({} if is_seed else {canonical.paper_id: canonical})
+    assert canonical.abstract == "hydrated abstract"
+    assert canonical.references == ["related-paper"]
+    assert pool._aliases[f"id:{duplicate.paper_id}"] == canonical.paper_id
+    assert pool._aliases.evidence(canonical.paper_id).strong_ids["s2"] == frozenset(
+        {canonical.paper_id, duplicate.paper_id}
+    )
 
 
 def test_candidate_pool_collapses_identifier_bridge_classes() -> None:
