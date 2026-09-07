@@ -2,9 +2,41 @@
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+import logging
+from typing import Any, Callable, Sequence
 
 import numpy as np
+
+
+def warn_on_truncated_inputs(model: Any, texts: Sequence[str]) -> None:
+    """Report texts that exceed the encoder window, including its default prompt.
+
+    :param Any model: SentenceTransformer encoder or its precision proxy.
+    :param Sequence[str] texts: Formatted texts about to be encoded.
+    :return None: Logs a warning when tokenization will discard input tokens.
+    """
+    max_length = getattr(model, "max_seq_length", None)
+    if not texts or max_length is None:
+        return
+    prompt_name = getattr(model, "default_prompt_name", None)
+    prompt = model.prompts.get(prompt_name, "") if prompt_name else ""
+    lengths = model.tokenizer(
+        [prompt + text for text in texts],
+        truncation=False,
+        padding=False,
+        return_length=True,
+        verbose=False,
+    )["length"]
+    truncated_count = sum(length > max_length for length in lengths)
+    if truncated_count:
+        logging.getLogger(__name__).warning(
+            "Embedding encoder will truncate %d of %d inputs to its %d-token "
+            "window (including prompts and special tokens); embeddings will "
+            "represent only part of those inputs.",
+            truncated_count,
+            len(texts),
+            max_length,
+        )
 
 
 def estimate_text_length_bucket(text: str) -> int:

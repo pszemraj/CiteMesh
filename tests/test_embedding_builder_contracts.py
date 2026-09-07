@@ -24,6 +24,7 @@ from citemesh.data.embedding_cache import (
     EMBEDDING_DATASET_CHUNK_ROWS,
     CacheNamespacePayloadStats,
     CacheSearchResult,
+    EmbeddingCache,
 )
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
@@ -1115,6 +1116,88 @@ def test_encode_texts_uses_length_bucketed_batches(
     )
     assert embeddings.shape == (len(texts), 2)
     assert embeddings[:, 0].tolist() == [float(len(text)) for text in texts]
+
+
+@pytest.mark.parametrize("path", ["query", "cache", "hydration"])
+@pytest.mark.parametrize("default_prompt", [None, "task"])
+def test_overlong_inputs_warn_across_encoding_paths(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    default_prompt: str | None,
+) -> None:
+    """Warn for actual truncation across direct encoding and cache writes.
+
+    :param pytest.MonkeyPatch monkeypatch: Model replacement fixture.
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.LogCaptureFixture caplog: Captured diagnostic messages.
+    :param str path: Encoding entry point to exercise.
+    :param str | None default_prompt: Optional model-provided prompt.
+    :return None: Asserts token boundaries, unchanged inputs, and cache-hit silence.
+    """
+    texts = ["short", "one two three", "one two three four"]
+    tokenized: list[list[str]] = []
+    encoded: list[str] = []
+
+    class WindowedModel:
+        max_seq_length = 5
+        default_prompt_name = default_prompt
+        prompts = {"task": "prefix "}
+
+        def tokenizer(self, inputs: list[str], **kwargs: Any) -> dict:
+            """Count words plus two special tokens.
+
+            :param list[str] inputs: Prompt-prefixed texts.
+            :param Any kwargs: Tokenization controls.
+            :return dict: Untruncated token lengths.
+            """
+            assert kwargs == dict(
+                truncation=False, padding=False, return_length=True, verbose=False
+            )
+            tokenized.append(inputs)
+            return {"length": [len(text.split()) + 2 for text in inputs]}
+
+        def encode(self, inputs: list[str], **kwargs: Any) -> np.ndarray:
+            """Record original input text and return FP32 vectors.
+
+            :param list[str] inputs: Texts sent to the encoder.
+            :param Any kwargs: Encode controls.
+            :return np.ndarray: Fixed normalized vectors.
+            """
+            encoded.extend(inputs)
+            return np.tile(np.array([1.0, 0.0], dtype=np.float32), (len(inputs), 1))
+
+    model = WindowedModel()
+    caplog.set_level(logging.WARNING)
+    if path == "query":
+        builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+        monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+        builder._encode_texts(texts)
+    else:
+        cache = EmbeddingCache(
+            cache_dir=tmp_path, model_name="window-test", storage_precision="float32"
+        )
+        papers = {str(i): {"title": text} for i, text in enumerate(texts)}
+        encode = cache.get_embeddings if path == "cache" else cache.upsert_embeddings
+        encode(
+            papers, model, show_progress=False, text_builder=lambda row: row["title"]
+        )
+
+    expected_count = 2 if default_prompt else 1
+    assert f"truncate {expected_count} of 3 inputs" in caplog.text
+    assert "5-token window" in caplog.text
+    prefix = "prefix " if default_prompt else ""
+    assert tokenized == [[prefix + text for text in texts]]
+    assert encoded == texts
+    if path != "query":
+        caplog.clear()
+        encode(
+            papers, model, show_progress=False, text_builder=lambda row: row["title"]
+        )
+        assert not caplog.records
+        assert len(tokenized) == 1
+        assert encoded == texts
 
 
 @pytest.mark.parametrize(

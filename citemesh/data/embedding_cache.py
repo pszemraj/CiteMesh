@@ -32,6 +32,7 @@ from citemesh._runtime import stderr_isatty
 from citemesh.text_batching import (
     encode_texts_in_length_buckets,
     l2_normalize_embeddings,
+    warn_on_truncated_inputs,
 )
 
 from .cache import format_bytes, get_cache_dir
@@ -616,6 +617,7 @@ class EmbeddingCache:
                 calibration_ranges = self._require_calibration_ranges(h5_file=h5)
 
         texts = [record.text for record in papers_to_embed]
+        warn_on_truncated_inputs(model, texts)
         embeddings_array = encode_texts_in_length_buckets(
             texts,
             batch_size=min(int(batch_size), len(texts)),

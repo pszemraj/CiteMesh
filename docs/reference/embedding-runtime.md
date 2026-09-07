@@ -51,6 +51,12 @@ For EmbeddingGemma, the symmetric formatter is exactly `task: sentence similarit
 
 Retrieval documents and graph-similarity vectors have independent cache namespaces, formatter fingerprints, and storage contracts. The graph namespace is always float32 with no binary prefilter. This prevents a dimension match from making asymmetric retrieval vectors eligible for symmetric graph scoring.
 
+Before encoding, CiteMesh warns when text exceeds the loaded model's token window,
+including prompts and special tokens. The encoder still truncates those inputs;
+their embeddings represent only part of the text. This applies to queries, paper
+documents, corpus hydration, calibration, and graph-similarity encoding. Cached
+vectors reused without encoding do not repeat the warning.
+
 The regression suite locks in prompt routing, cache separation, and fail-closed vector completeness. A small frozen real-EmbeddingGemma MPS smoke additionally checks retrieval Recall/nDCG and a related-versus-unrelated STS margin. Real-CUDA smokes load the designated model through the installed encoder stack, verify its live dtype/attention/autocast contract, and round-trip a tiny network-free corpus through INT8 hydration and retrieval. These real-model checks remain opt-in local validation (`pytest -m slow`, or `pytest -m "slow and cuda"` for CUDA only) on the relevant hardware.
 
 ## Device Selection

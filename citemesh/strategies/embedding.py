@@ -82,6 +82,7 @@ from citemesh.strategies.candidates import (
 from citemesh.text_batching import (
     encode_texts_in_length_buckets,
     l2_normalize_embeddings,
+    warn_on_truncated_inputs,
 )
 
 if TYPE_CHECKING:
@@ -2352,6 +2353,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if effective_batch_size < 1:
             raise ValueError("batch_size must be at least 1 when provided")
 
+        warn_on_truncated_inputs(encode_model, texts)
         return encode_texts_in_length_buckets(
             texts,
             batch_size=min(effective_batch_size, len(texts)),
