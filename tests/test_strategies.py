@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from types import MethodType
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 from unittest.mock import MagicMock, call, patch
 
 import networkx as nx
@@ -2358,9 +2359,62 @@ def test_embedding_local_search_validates_cache_fingerprint(
     builder.embedding_cache.search = MagicMock(
         side_effect=lambda **_kwargs: cache_events.append("search") or []
     )
+    builder.embedding_cache.hydration_operation_lock = MagicMock()
 
     assert builder.search_local("cached topic", top_k=2) == []
     assert cache_events == ["fingerprint", "search"]
+    builder.embedding_cache.hydration_operation_lock.assert_not_called()
+
+
+def test_embedding_corpus_local_search_holds_hydration_operation_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corpus local search must hold the operation lock while reading vectors.
+
+    :param pytest.MonkeyPatch monkeypatch: Runtime patch helper.
+    :return None: Verifies the cache search runs inside the hydration lock.
+    """
+    from tests._helpers import SeededRandomEncodeModel
+
+    builder = EmbeddingGraphBuilder(
+        max_papers=4,
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    builder.model = SeededRandomEncodeModel(embedding_dim=4)
+    cache = builder.embedding_cache
+    lock_held = False
+
+    @contextmanager
+    def hydration_operation_lock() -> Iterator[None]:
+        """Track the operation-lock lifetime around the cache read.
+
+        :return Iterator[None]: Context manager body executed under the fake lock.
+        """
+        nonlocal lock_held
+        lock_held = True
+        try:
+            yield
+        finally:
+            lock_held = False
+
+    def search(**_kwargs: object) -> list[object]:
+        """Require the cache read to occur while hydration is excluded.
+
+        :param object _kwargs: Cache search arguments ignored by the assertion.
+        :return list[object]: Empty local-search result list.
+        """
+        assert lock_held is True
+        return []
+
+    cache.hydration_operation_lock = MagicMock(side_effect=hydration_operation_lock)
+    cache.search = MagicMock(side_effect=search)
+
+    assert builder.search_local("cached topic", top_k=2) == []
+    cache.hydration_operation_lock.assert_called_once_with()
+    assert lock_held is False
 
 
 def test_hybrid_candidate_mode_uses_recommendations_not_corpus(

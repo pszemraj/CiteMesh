@@ -36,7 +36,7 @@ from citemesh.text_batching import (
     warn_on_truncated_inputs,
 )
 
-from .cache import format_bytes, get_cache_dir
+from .cache import format_bytes, get_cache_dir, path_exists
 from .model_profiles import DEFAULT_EMBEDDING_MODEL_NAME, compose_title_abstract_text
 
 logger = logging.getLogger(__name__)
@@ -126,22 +126,6 @@ def _resolve_cache_lock_timeout_seconds() -> float:
         )
         return EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
     return parsed
-
-
-def _cache_path_exists(path: Path) -> bool:
-    """Distinguish an absent cache file from a failed filesystem inspection.
-
-    ``Path.exists()`` suppresses all OS errors on Python 3.14 and later.
-
-    :param Path path: Namespace payload path to inspect.
-    :return bool: Whether the path exists.
-    :raises OSError: If inspection fails for a reason other than absence.
-    """
-    try:
-        path.stat()
-    except FileNotFoundError:
-        return False
-    return True
 
 
 def _metadata_table_create_sql() -> str:
@@ -421,6 +405,8 @@ class EmbeddingCache:
         self.db_path = self.cache_dir / f"metadata_{model_hash}.db"
         self.h5_path = self.cache_dir / f"embeddings_{model_hash}.h5"
         self.lock_path = self.cache_dir / f"cache_{model_hash}.lock"
+        self.hydration_lock_path = self.cache_dir / f"hydration_{model_hash}.lock"
+        self._hydration_operation_file_lock = FileLock(str(self.hydration_lock_path))
 
         self.model_name = model_name
         self.storage_precision = storage_precision
@@ -892,7 +878,7 @@ class EmbeddingCache:
         """
         with self._cache_lock(), self._connect_db() as conn:
             self._recover_pending_replacements_with_connection_locked(conn)
-            if not _cache_path_exists(self.h5_path):
+            if not path_exists(self.h5_path):
                 return 0
             with h5py.File(self.h5_path, "r") as h5:
                 dataset = self._get_embeddings_dataset(h5)
@@ -931,7 +917,7 @@ class EmbeddingCache:
             self._connect_db() as conn,
         ):
             self._recover_pending_replacements_with_connection_locked(conn)
-            if not _cache_path_exists(self.h5_path):
+            if not path_exists(self.h5_path):
                 return []
             with h5py.File(self.h5_path, "r") as h5:
                 embeddings_dataset = self._get_embeddings_dataset(h5)
@@ -1059,7 +1045,7 @@ class EmbeddingCache:
         :raises RuntimeError: If storage inspection or pending recovery fails.
         """
         try:
-            if not _cache_path_exists(self.db_path):
+            if not path_exists(self.db_path):
                 return False
             with self._cache_lock(), self._connect_db() as conn:
                 self._recover_pending_replacements_with_connection_locked(conn)
@@ -1069,7 +1055,7 @@ class EmbeddingCache:
                 if paper_rows > 0:
                     return True
 
-                if not _cache_path_exists(self.h5_path):
+                if not path_exists(self.h5_path):
                     return False
                 with h5py.File(self.h5_path, "r") as h5:
                     dataset = self._get_embeddings_dataset(h5)
@@ -1088,7 +1074,7 @@ class EmbeddingCache:
 
         :return Set[str]: Cached paper IDs loaded from SQLite metadata rows.
         """
-        if not _cache_path_exists(self.db_path):
+        if not path_exists(self.db_path):
             return set()
 
         paper_ids: Set[str] = set()
@@ -1118,7 +1104,7 @@ class EmbeddingCache:
             return False
         with self._cache_lock(), self._connect_db() as conn:
             self._recover_pending_replacements_with_connection_locked(conn)
-            if not _cache_path_exists(self.h5_path):
+            if not path_exists(self.h5_path):
                 return False
             with h5py.File(self.h5_path, "r") as h5:
                 return CALIBRATION_RANGES_DATASET_NAME in h5
@@ -1224,11 +1210,11 @@ class EmbeddingCache:
         expected_source = None if dataset_source is None else str(dataset_source)
 
         try:
-            if not _cache_path_exists(self.db_path):
+            if not path_exists(self.db_path):
                 return False
             with self._cache_lock(), self._connect_db() as conn:
                 self._recover_pending_replacements_with_connection_locked(conn)
-                if not _cache_path_exists(self.h5_path):
+                if not path_exists(self.h5_path):
                     return False
                 with h5py.File(self.h5_path, "r") as h5:
                     metadata = self._load_cache_metadata(conn)
@@ -1511,6 +1497,29 @@ class EmbeddingCache:
     # Internal helpers
 
     @contextmanager
+    def hydration_operation_lock(self) -> Iterator[None]:
+        """Serialize a complete corpus hydration and its consuming search.
+
+        The same lock object is intentionally retained on the cache instance so
+        nested acquisition from the builder remains reentrant. Short SQLite/HDF5
+        mutations continue to use :meth:`_cache_lock` independently.
+
+        :return Iterator[None]: Context manager yielding once the operation lock is acquired.
+        """
+        timeout_seconds = _resolve_cache_lock_timeout_seconds()
+        try:
+            with self._hydration_operation_file_lock.acquire(timeout=timeout_seconds):
+                yield
+        except Timeout as exc:
+            raise TimeoutError(
+                "Timed out waiting for embedding cache hydration operation lock "
+                f"at {self.hydration_lock_path} after {timeout_seconds:.3f}s. "
+                "Another process may be hydrating or searching this namespace. "
+                f"Increase {EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR} or set "
+                "CITEMESH_CACHE_DIR to an isolated per-run cache root."
+            ) from exc
+
+    @contextmanager
     def _cache_lock(self) -> Iterator[None]:
         """Serialize cache mutations across processes for this model namespace.
 
@@ -1608,7 +1617,7 @@ class EmbeddingCache:
         pending = conn.execute("SELECT 1 FROM replacement_journal LIMIT 1").fetchone()
         if pending is None:
             return
-        if not _cache_path_exists(self.h5_path):
+        if not path_exists(self.h5_path):
             raise RuntimeError(
                 "Embedding cache recovery error: replacement journal exists but the "
                 "embedding matrix is missing. Existing cache files were preserved."
@@ -2251,7 +2260,7 @@ class EmbeddingCache:
 
         :return None: Preserves valid payloads and propagates IO/open failures.
         """
-        if not _cache_path_exists(self.h5_path):
+        if not path_exists(self.h5_path):
             with self._connect_db() as conn:
                 pending_replacement = conn.execute(
                     "SELECT 1 FROM replacement_journal LIMIT 1"

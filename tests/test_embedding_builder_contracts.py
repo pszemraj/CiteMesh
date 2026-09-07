@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import multiprocessing as mp
 import sys
 import types
 from contextlib import contextmanager, nullcontext
@@ -248,6 +249,123 @@ def _pin_model_fingerprint(
     monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
     builder._resolved_model_fingerprint = fingerprint
     builder._bind_embedding_cache_to_active_model()
+
+
+def _put_concurrent_hydration_record(cache: EmbeddingCache, paper_id: str) -> None:
+    """Persist one deterministic row for the concurrent hydration regression.
+
+    :param EmbeddingCache cache: Shared real SQLite/HDF5 cache.
+    :param str paper_id: Paper identifier and title to persist.
+    :return None: Writes one float32 cache row.
+    """
+    cache.upsert_embeddings(
+        {paper_id: {"title": paper_id, "abstract": "payload"}},
+        ConstantEncodeModel(),
+        batch_size=1,
+        show_progress=False,
+    )
+
+
+def _concurrent_hydration_worker(
+    cache_dir: str,
+    worker_name: str,
+    second_worker_ready: Any,
+    first_batch_written: Any,
+    second_worker_done: Any,
+    result_queue: Any,
+) -> None:
+    """Run one coordinated corpus hydration against a shared namespace.
+
+    :param str cache_dir: Isolated cache directory shared by both workers.
+    :param str worker_name: ``"first"`` or ``"second"`` orchestration role.
+    :param Any second_worker_ready: Event proving both workers reached fingerprinting.
+    :param Any first_batch_written: Event released after the first worker writes once.
+    :param Any second_worker_done: Event released after the second worker's search.
+    :param Any result_queue: Multiprocessing queue receiving worker results.
+    :return None: Reports selected paper IDs through ``result_queue``.
+    """
+    try:
+        is_first = worker_name == "first"
+        source = "source-a" if is_first else "source-b"
+        split = "train" if is_first else "test"
+        corpus_size = 2 if is_first else 1
+        cache = EmbeddingCache(
+            cache_dir=Path(cache_dir),
+            model_name="concurrent-hydration-namespace",
+            storage_precision="float32",
+            binary_prefilter=False,
+        )
+        builder = object.__new__(EmbeddingGraphBuilder)
+        builder._embedding_cache = cache
+        builder._resolved_model_fingerprint = "concurrent-test-artifact"
+        builder.dataset_split = split
+        builder.corpus_size = corpus_size
+        builder.storage_precision = "float32"
+        builder.encode_batch_size = 1
+        builder.max_papers = 2
+        builder.binary_prefilter = False
+        builder.binary_rescore_multiplier = 1
+        builder._last_search_used_binary_prefilter = None
+
+        fingerprint_calls = 0
+
+        def ensure_fingerprint() -> None:
+            """Coordinate workers immediately before operation-lock acquisition."""
+            nonlocal fingerprint_calls
+            fingerprint_calls += 1
+            if fingerprint_calls > 1:
+                return
+            if is_first:
+                if not second_worker_ready.wait(10):
+                    raise RuntimeError("Second hydration worker was not ready.")
+            else:
+                second_worker_ready.set()
+                if not first_batch_written.wait(10):
+                    raise RuntimeError("First hydration worker wrote no batch.")
+
+        def load_dataset(**_kwargs: Any) -> tuple[str, tuple[Any, ...]]:
+            """Return the worker's distinct source without network access."""
+            return source, ()
+
+        def no_op(*_args: Any, **_kwargs: Any) -> None:
+            """Replace unrelated metadata and calibration work in this regression."""
+
+        def hydrate_dataset(**_kwargs: Any) -> int:
+            """Write rows with a deterministic cross-worker fault window."""
+            if is_first:
+                _put_concurrent_hydration_record(cache, "a-first")
+                first_batch_written.set()
+                second_worker_done.wait(0.75)
+                _put_concurrent_hydration_record(cache, "a-second")
+                return 2
+            _put_concurrent_hydration_record(cache, "b-only")
+            return 1
+
+        original_search = builder._search_cache_candidates
+
+        def search(seed_embedding: np.ndarray) -> list[tuple[str, dict, np.ndarray]]:
+            """Expose a post-hydration clear unless the operation lock spans search."""
+            if is_first:
+                second_worker_done.wait(0.75)
+            return original_search(seed_embedding)
+
+        builder._ensure_cache_model_fingerprint = ensure_fingerprint
+        builder._load_dataset_for_hydration = load_dataset
+        builder._ensure_int8_calibration_ranges = no_op
+        builder._refresh_cached_corpus_metadata = no_op
+        builder._hydrate_dataset_records = hydrate_dataset
+        builder._search_cache_candidates = search
+
+        selected = builder._select_candidates(
+            np.asarray([1.0, 0.0], dtype=np.float32),
+            use_streaming=False,
+        )
+        if not is_first:
+            second_worker_done.set()
+        result_queue.put((worker_name, [paper_id for paper_id, _, _ in selected]))
+    except BaseException as exc:
+        second_worker_done.set()
+        result_queue.put((worker_name, "error", repr(exc)))
 
 
 def _write_local_sentence_transformer_profile(
@@ -2455,6 +2573,7 @@ def test_force_rebuild_clears_retrieval_and_graph_task_caches() -> None:
         max_papers=2,
         force_rebuild_cache=True,
         force_rebuild_reason="task contract changed",
+        semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
     builder._resolved_model_fingerprint = "artifact-a"
@@ -2474,6 +2593,7 @@ def test_force_rebuild_clears_retrieval_and_graph_task_caches() -> None:
     )
     retrieval_cache.clear.assert_called_once_with(reason=expected_reason)
     graph_cache.clear.assert_called_once_with(reason=expected_reason)
+    retrieval_cache.hydration_operation_lock.assert_called_once_with()
     assert builder._pending_force_rebuild_reason is None
 
 
@@ -4493,6 +4613,64 @@ def test_hydration_reset_restores_model_fingerprint(
 
     builder._ensure_cache_hydrated(use_streaming=False)
     assert builder.embedding_cache.get_model_fingerprint() == "fp-before-clear"
+
+
+def test_concurrent_hydration_serializes_spec_through_consuming_search(
+    tmp_path: Path,
+) -> None:
+    """Different corpus specs must not mix rows or replace an in-flight search.
+
+    :param Path tmp_path: Isolated real SQLite/HDF5 cache directory.
+    :return None: Verifies process-level hydration and search serialization.
+    """
+    cache_dir = tmp_path / "concurrent-hydration"
+    context = mp.get_context("spawn")
+    second_worker_ready = context.Event()
+    first_batch_written = context.Event()
+    second_worker_done = context.Event()
+    result_queue = context.Queue()
+    worker_args = (
+        str(cache_dir),
+        second_worker_ready,
+        first_batch_written,
+        second_worker_done,
+        result_queue,
+    )
+    processes = [
+        context.Process(
+            target=_concurrent_hydration_worker,
+            args=(worker_args[0], "first", *worker_args[1:]),
+        ),
+        context.Process(
+            target=_concurrent_hydration_worker,
+            args=(worker_args[0], "second", *worker_args[1:]),
+        ),
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=30)
+        if process.is_alive():
+            process.terminate()
+            process.join()
+
+    assert [process.exitcode for process in processes] == [0, 0]
+    reported = dict(result_queue.get(timeout=5) for _ in processes)
+    assert reported == {
+        "first": ["a-first", "a-second"],
+        "second": ["b-only"],
+    }
+
+    cache = EmbeddingCache(
+        cache_dir=cache_dir,
+        model_name="concurrent-hydration-namespace",
+        storage_precision="float32",
+        binary_prefilter=False,
+    )
+    assert cache.get_cached_paper_ids() == {"b-only"}
+    assert cache.embedding_count() == 1
+    assert cache.is_hydrated("test", 1, dataset_source="source-b") is True
 
 
 def test_int8_hydration_calibration_uses_representative_prepass(

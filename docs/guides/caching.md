@@ -34,7 +34,8 @@ citemesh cache root
 ├── embeddings/
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, text hashes, row_idx, authors/categories JSON, hydration state)
 │   ├── embeddings_<model-hash>.h5 # HDF5 matrix datasets (int8/float32 + optional binary index + calibration ranges)
-│   └── cache_<model-hash>.lock    # Inter-process lock for cache mutation
+│   ├── cache_<model-hash>.lock    # Inter-process lock for cache mutation
+│   └── hydration_<model-hash>.lock # Corpus hydration and consuming-search lock
 ├── papers/
 │   └── <sha1>.json                # Semantic Scholar paper metadata by requested ID and known aliases
 └── references/
@@ -164,6 +165,15 @@ compact files automatically; this allocation behavior does not indicate lost
 vectors or duplicate cache rows.
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races. The expensive encode step runs outside that lock; the lock only wraps short lookup and commit phases, and the commit phase re-checks cache misses before assigning final rows. Lock acquisition timeout defaults to `900` seconds and can be overridden with `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
+
+Corpus hydration also holds `hydration_<model-hash>.lock` across the complete
+check, resume or rebuild, and the cache search that consumes the hydrated rows.
+Concurrent builds targeting different source, split, or corpus-size settings
+therefore finish one at a time instead of mixing rows under one hydration marker.
+Explicit corpus-cache rebuilds wait for the same operation lock. The operation
+lock also makes local corpus searches wait for an ongoing hydration to finish. It
+uses the same timeout setting while the short mutation lock continues to protect
+each SQLite/HDF5 commit.
 
 Opening a cache performs exhaustive row-coverage validation and interrupted-append
 recovery. Normal lookups, writes, and searches check runtime settings and indexed

@@ -1327,9 +1327,17 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     graph_namespace
                 )
         if self._pending_force_rebuild_reason is not None:
-            self._embedding_cache.clear(reason=self._pending_force_rebuild_reason)
-            self.graph_embedding_cache.clear(reason=self._pending_force_rebuild_reason)
-            self._pending_force_rebuild_reason = None
+            operation_lock = (
+                self._embedding_cache.hydration_operation_lock()
+                if self.semantic_source == "arxiv-corpus"
+                else nullcontext()
+            )
+            with operation_lock:
+                self._embedding_cache.clear(reason=self._pending_force_rebuild_reason)
+                self.graph_embedding_cache.clear(
+                    reason=self._pending_force_rebuild_reason
+                )
+                self._pending_force_rebuild_reason = None
 
     def _clear_embedding_cache(self, reason: str) -> None:
         """Clear embedding namespace payload with explicit reason logging.
@@ -1970,24 +1978,31 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError(
                 f"Unsupported embedding cache representation: {representation}"
             )
-        has_cached_payload = cache.has_cached_payload()
-        cached_fingerprint = cache.get_model_fingerprint()
-        if has_cached_payload and cached_fingerprint != model_fingerprint:
-            logger.warning(
-                "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
-                "Clearing namespace cache.",
-                cached_fingerprint or "missing",
-                model_fingerprint,
-            )
-            cache.clear(
-                reason=(
-                    "model fingerprint mismatch "
-                    f"(cached={cached_fingerprint or 'missing'}, "
-                    f"active={model_fingerprint})"
+        operation_lock = (
+            cache.hydration_operation_lock()
+            if representation == _RETRIEVAL_DOCUMENT_REPRESENTATION
+            and self.semantic_source == "arxiv-corpus"
+            else nullcontext()
+        )
+        with operation_lock:
+            has_cached_payload = cache.has_cached_payload()
+            cached_fingerprint = cache.get_model_fingerprint()
+            if has_cached_payload and cached_fingerprint != model_fingerprint:
+                logger.warning(
+                    "Embedding cache model fingerprint mismatch (cached=%s, active=%s). "
+                    "Clearing namespace cache.",
+                    cached_fingerprint or "missing",
+                    model_fingerprint,
                 )
-            )
-        if not has_cached_payload or cached_fingerprint != model_fingerprint:
-            cache.set_model_fingerprint(model_fingerprint)
+                cache.clear(
+                    reason=(
+                        "model fingerprint mismatch "
+                        f"(cached={cached_fingerprint or 'missing'}, "
+                        f"active={model_fingerprint})"
+                    )
+                )
+            if not has_cached_payload or cached_fingerprint != model_fingerprint:
+                cache.set_model_fingerprint(model_fingerprint)
 
     def _log_dimension_policy(self) -> None:
         """Log dimensionality and warn once about uncalibrated semantic gates.
@@ -3124,15 +3139,21 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise ValueError("query must not be empty")
         if int(top_k) < 1:
             raise ValueError("top_k must be at least 1")
-        self.prepare_embedding_cache()
+        cache = self.prepare_embedding_cache()
         query_text = self.model_profile.format_query(normalized_query, {})
         query_embedding = self._encode_texts([query_text])[0]
-        return self.embedding_cache.search(
-            query_embedding=np.asarray(query_embedding, dtype=np.float32),
-            top_k=int(top_k),
-            binary_prefilter=self.binary_prefilter,
-            binary_rescore_multiplier=self.binary_rescore_multiplier,
+        operation_lock = (
+            cache.hydration_operation_lock()
+            if self.semantic_source == "arxiv-corpus"
+            else nullcontext()
         )
+        with operation_lock:
+            return cache.search(
+                query_embedding=np.asarray(query_embedding, dtype=np.float32),
+                top_k=int(top_k),
+                binary_prefilter=self.binary_prefilter,
+                binary_rescore_multiplier=self.binary_rescore_multiplier,
+            )
 
     def prepare_embedding_cache(self) -> EmbeddingCache:
         """Resolve the runtime-active model and its exact persistent namespace.
@@ -3168,8 +3189,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether hydration should stream the dataset.
         :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples sorted by similarity.
         """
-        self._ensure_cache_hydrated(use_streaming=use_streaming)
-        return self._search_cache_candidates(seed_embedding)
+        self._ensure_cache_model_fingerprint()
+        with self.embedding_cache.hydration_operation_lock():
+            self._ensure_cache_hydrated(use_streaming=use_streaming)
+            return self._search_cache_candidates(seed_embedding)
 
     def _search_cache_candidates(
         self, seed_embedding: np.ndarray
@@ -3244,6 +3267,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return None: Mutates cache state in-place when hydration is required.
         """
         self._ensure_cache_model_fingerprint()
+        with self.embedding_cache.hydration_operation_lock():
+            self._ensure_cache_hydrated_locked(use_streaming=use_streaming)
+
+    def _ensure_cache_hydrated_locked(self, use_streaming: bool) -> None:
+        """Hydrate the active corpus while its operation lock is held.
+
+        :param bool use_streaming: Whether to use streaming dataset hydration.
+        :return None: Mutates cache state in-place when hydration is required.
+        """
         cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
         if self.embedding_cache.is_hydrated(
             self.dataset_split,
