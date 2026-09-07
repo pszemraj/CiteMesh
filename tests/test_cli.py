@@ -270,10 +270,13 @@ def _restore_cli_logging_state(
     cli_module._LOGGING_CONFIGURED = saved_configured
 
 
-def test_cache_commands_contracts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Cache clear/scan should honor configured cache root and print usage summary."""
+def _populate_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Create a populated cache root and point ``CITEMESH_CACHE_DIR`` at it.
+
+    :param Path tmp_path: Per-test temporary directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to set the cache root env var.
+    :return Path: Cache root containing sample embedding/reference payloads.
+    """
     cache_root = tmp_path / "citemesh-cache-root"
     (cache_root / "embeddings").mkdir(parents=True, exist_ok=True)
     (cache_root / "misc").mkdir(parents=True, exist_ok=True)
@@ -281,6 +284,14 @@ def test_cache_commands_contracts(
     (cache_root / "embeddings" / "vectors.bin").write_bytes(b"a" * 2048)
     (cache_root / "references" / "payload.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
+    return cache_root
+
+
+def test_cache_commands_contracts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cache clear/scan should honor configured cache root and print usage summary."""
+    cache_root = _populate_cache_root(tmp_path, monkeypatch)
 
     scan_result = run_cli_command(["cache", "scan"])
     assert scan_result.returncode == 0, (
@@ -308,6 +319,69 @@ def test_cache_commands_contracts(
         f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"
     )
     assert not cache_root.exists()
+
+
+def test_cache_clear_declined_at_prompt_keeps_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answering the cache clear prompt with ``n`` should abort and keep every file."""
+    cache_root = _populate_cache_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: True)
+    prompt_mock = MagicMock(return_value="n")
+    monkeypatch.setattr(cli_module.Console, "input", prompt_mock)
+
+    declined = run_cli_command(["cache", "clear"])
+
+    assert declined.returncode == 1
+    assert prompt_mock.call_count == 1
+    assert (cache_root / "embeddings" / "vectors.bin").read_bytes() == b"a" * 2048
+    assert (cache_root / "references" / "payload.json").exists()
+    assert (cache_root / "misc").is_dir()
+
+
+def test_cache_clear_prompt_eof_keeps_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``EOFError`` while reading the confirmation should be treated as a decline."""
+    cache_root = _populate_cache_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: True)
+    monkeypatch.setattr(cli_module.Console, "input", MagicMock(side_effect=EOFError))
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+
+    aborted = run_cli_command(["cache", "clear"])
+
+    assert aborted.returncode == 1
+    assert any(
+        "No confirmation input received" in str(call)
+        for call in error_mock.call_args_list
+    )
+    assert (cache_root / "embeddings" / "vectors.bin").read_bytes() == b"a" * 2048
+    assert (cache_root / "references" / "payload.json").exists()
+
+
+def test_cache_clear_without_tty_refuses_before_prompting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-interactive stdin without ``--yes`` should refuse and point at ``--yes``."""
+    cache_root = _populate_cache_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: False)
+    prompt_mock = MagicMock(return_value="y")
+    monkeypatch.setattr(cli_module.Console, "input", prompt_mock)
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+
+    refused = run_cli_command(["cache", "clear"])
+
+    assert refused.returncode == 1
+    assert prompt_mock.call_count == 0
+    assert any(
+        "Refusing to clear cache in non-interactive mode without --yes" in str(call)
+        and "citemesh cache clear --yes" in str(call)
+        for call in error_mock.call_args_list
+    )
+    assert (cache_root / "embeddings" / "vectors.bin").read_bytes() == b"a" * 2048
+    assert (cache_root / "references" / "payload.json").exists()
 
 
 def test_force_rebuild_cache_confirmation_contracts(
