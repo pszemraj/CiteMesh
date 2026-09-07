@@ -73,39 +73,9 @@ For an editable development install, follow [Contributing](CONTRIBUTING.md).
 
 On macOS the `embeddings` extra requires torch >= 2.13 and runs on the MPS backend with bfloat16 autocast when supported, falling back to float32; see [Embedding Runtime](docs/reference/embedding-runtime.md).
 
-### Run One Graph
-
-```bash
-citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
-```
-
-Omit `--output` to keep generated files under the repository's ignored `out/`
-directory. Repeated dashboard builds share an offline collection there:
-
-```bash
-citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard
-citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard
-```
-
-Each build saves its graph and settings as `out/<paper-slug>-<hash>/<strategy>.json`
-and `<strategy>.config.json`. The shared `out/dashboard.html` viewer and
-`out/dashboard.citemesh.json` package collect those results for browsing and sharing.
-Different seeds add results; rebuilding the same seed with the same strategy
-replaces its result. Use the dashboard's graph selector to switch papers.
-
-See [Output Artifacts](docs/reference/output-artifacts.md) for collection updates,
-standalone dashboard files, and the portable package format.
-
-For command syntax and operational details, use:
-
-- [CLI Usage](docs/guides/cli.md)
-- [Strategy Guide](docs/guides/strategies.md)
-- [Caching & Data](docs/guides/caching.md)
-- [User Configuration](docs/guides/configuration.md)
-
 ### Semantic Scholar API key (recommended)
 
-CiteMesh works without credentials using Semantic Scholar's shared anonymous pool, but that pool is small and 429 rate-limit errors are common. A free API key gives you a dedicated 1 request/second budget:
+CiteMesh works without credentials using Semantic Scholar's shared anonymous pool, but that pool is small and 429 rate-limit errors are common — an unkeyed first run can spend most of its time waiting out retries. A free API key gives you a dedicated 1 request/second budget:
 
 1. Request a key at <https://www.semanticscholar.org/product/api>
 2. Provide it via the environment (`export S2_API_KEY=...`) or persist it:
@@ -113,6 +83,30 @@ CiteMesh works without credentials using Semantic Scholar's shared anonymous poo
    ```bash
    citemesh config set api.s2_api_key YOUR_KEY
    ```
+
+### Run One Graph
+
+```bash
+citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
+```
+
+The first embedding or hybrid run downloads the `unsloth/embeddinggemma-300m` checkpoint (~300M parameters) and encodes up to 400 candidate abstracts, so expect it to take a few minutes; later runs reuse the persistent embedding cache and skip nearly all of that work.
+
+Omit `--output` and generated files land in `out/` under the current working directory (a source checkout already gitignores that path). Repeated dashboard builds share an offline collection there:
+
+```bash
+citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard
+citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard
+```
+
+Each build saves its graph under `out/<paper-slug>-<hash>/`, and the shared `out/dashboard.html` viewer collects the results for browsing — different seeds add results, rebuilding the same seed and strategy replaces its result. See [Output Artifacts](docs/reference/output-artifacts.md) for collection semantics, standalone dashboard files, and the portable package format.
+
+For command syntax and operational details, use:
+
+- [CLI Usage](docs/guides/cli.md)
+- [Strategy Guide](docs/guides/strategies.md)
+- [Caching & Data](docs/guides/caching.md)
+- [User Configuration](docs/guides/configuration.md)
 
 ## Highlights
 

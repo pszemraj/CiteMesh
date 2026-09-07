@@ -1,5 +1,7 @@
 # Documentation
 
+New here? Read the [CLI guide](guides/cli.md), then the [Strategy guide](guides/strategies.md); the rest is reference. For development conventions see [Contributing](../CONTRIBUTING.md).
+
 ## Overview
 
 - Project overview, installation, and current project status: [README](../README.md)
@@ -12,7 +14,7 @@
 ## Reference
 
 - Runtime environment variables: [reference/environment.md](reference/environment.md)
-- Output formats and sidecar schema: [reference/output-artifacts.md](reference/output-artifacts.md)
+- Output formats, the interactive dashboard UI, and sidecar schema: [reference/output-artifacts.md](reference/output-artifacts.md)
 - Embedding model defaults, fallback chain, and precision/compile behavior: [reference/embedding-runtime.md](reference/embedding-runtime.md)
 - Default-parameter tuning results and methodology: [reference/defaults-tuning-study.md](reference/defaults-tuning-study.md)
 
