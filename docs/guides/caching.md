@@ -195,6 +195,8 @@ for every returned vector, and accessed rows must have a unique paper mapping.
 Interior mapping corruption outside the accessed rows
 is detected by the full validation on the next cache opening.
 
+Non-streaming dataset downloads and preparation use half the logical CPU count, rounded down with a minimum of one process (`max(1, (os.cpu_count() or 1) // 2)`). Streaming loads do not use this multiprocessing setting.
+
 Hydration write policy:
 
 - Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--encode-batch-size`.

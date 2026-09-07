@@ -2746,10 +2746,19 @@ def test_paper_embedding_task_dispatcher_uses_id_fallback() -> None:
     assert builder._format_graph_similarity_metadata(cached_metadata) == graph
 
 
+@pytest.mark.parametrize(("cpu_count", "workers"), [(8, 4), (3, 1), (1, 1), (None, 1)])
 def test_metadata_and_streaming_loader_contracts(
     monkeypatch: pytest.MonkeyPatch,
+    cpu_count: int | None,
+    workers: int,
 ) -> None:
-    """Metadata parsing and configured-source loading should stay deterministic."""
+    """Metadata parsing and configured-source loading should stay deterministic.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces dataset loading and CPU count.
+    :param int | None cpu_count: Reported logical CPU count.
+    :param int workers: Expected worker count for non-streaming loads.
+    :return None: Verifies source selection, slicing, and multiprocessing settings.
+    """
 
     snapshot = _extract_dataset_paper_metadata(
         {
@@ -2777,19 +2786,24 @@ def test_metadata_and_streaming_loader_contracts(
     assert snapshot["year"] == 2023
     assert versioned["paper_id"] == "arxiv:1706.03762"
 
-    load_calls: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(embedding_module.os, "cpu_count", lambda: cpu_count)
+    load_calls: list[tuple[str, str, bool, int | None]] = []
 
     def fake_load_dataset(
-        dataset_name: str, split: str, streaming: bool = False
+        dataset_name: str,
+        split: str,
+        streaming: bool = False,
+        num_proc: int | None = None,
     ) -> list[dict[str, Any]]:
         """Record the selected source and return one arXiv metadata row.
 
         :param str dataset_name: Requested dataset repository.
         :param str split: Requested split or slice.
         :param bool streaming: Whether loading uses streaming.
+        :param int | None num_proc: Worker count for non-streaming preparation.
         :return list[dict[str, Any]]: Single-paper fixture.
         """
-        load_calls.append((dataset_name, split, streaming))
+        load_calls.append((dataset_name, split, streaming, num_proc))
         return [
             {
                 "id": "2609.03430",
@@ -2814,7 +2828,7 @@ def test_metadata_and_streaming_loader_contracts(
     selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=True)
 
     assert selected_name == DEFAULT_DATASET_SOURCE
-    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True)]
+    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True, None)]
     assert len(list(dataset)) == 1
     assert load_calls[0][1] == "train"
 
@@ -2828,7 +2842,7 @@ def test_metadata_and_streaming_loader_contracts(
     )
     selected_name, dataset = builder._load_dataset_for_hydration(use_streaming=False)
     assert selected_name == "example/arxiv"
-    assert load_calls == [("example/arxiv", "train", False)]
+    assert load_calls == [("example/arxiv", "train", False, workers)]
     # Capped hydration loads the full split; newest-N selection happens by
     # arXiv ID chronology after load, not via positional split slicing.
     assert load_calls[0][1] == "train"
@@ -2841,7 +2855,7 @@ def test_metadata_and_streaming_loader_contracts(
         row_offset=5,
     )
     assert selected_name == "example/arxiv"
-    assert load_calls == [("example/arxiv", "train[5:8]", False)]
+    assert load_calls == [("example/arxiv", "train[5:8]", False, workers)]
     assert load_calls[0][1] == "train[5:8]"
     assert len(list(dataset)) == 1
 
@@ -2855,7 +2869,7 @@ def test_metadata_and_streaming_loader_contracts(
         row_offset=1,
     )
     assert selected_name == DEFAULT_DATASET_SOURCE
-    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True)]
+    assert load_calls == [(DEFAULT_DATASET_SOURCE, "train", True, None)]
     assert load_calls[0][1] == "train"
     assert len(list(dataset)) == 0
 
@@ -3085,7 +3099,12 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
         assert not cache.has_current_corpus_metadata()
         interrupt = False
     builder._ensure_cache_hydrated(use_streaming=False)
-    load_dataset.assert_called_with(source, split="train", streaming=False)
+    load_dataset.assert_called_with(
+        source,
+        split="train",
+        streaming=False,
+        num_proc=max(1, (embedding_module.os.cpu_count() or 1) // 2),
+    )
     assert cache.has_current_corpus_metadata()
     assert cache.get_cached_paper_ids() == {"arxiv:1210.8272"}
     assert cache.h5_path.read_bytes() == original_h5
@@ -3125,7 +3144,9 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
     ]
 
     fake_datasets = types.ModuleType("datasets")
-    fake_datasets.load_dataset = lambda name, split, streaming=False: iter(records)
+    fake_datasets.load_dataset = lambda name, split, streaming=False, num_proc=None: (
+        iter(records)
+    )
     monkeypatch.setattr(
         embedding_module, "_import_datasets_module", lambda: fake_datasets
     )
@@ -3145,8 +3166,8 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
         {"id": f"paper-{idx}", "title": f"Paper {idx}", "abstract": "A."}
         for idx in range(5)
     ]
-    fake_datasets.load_dataset = lambda name, split, streaming=False: iter(
-        no_id_records
+    fake_datasets.load_dataset = lambda name, split, streaming=False, num_proc=None: (
+        iter(no_id_records)
     )
     _, dataset = builder._load_dataset_for_hydration(use_streaming=True)
     assert [record["title"] for record in dataset] == ["Paper 0", "Paper 1", "Paper 2"]
@@ -3691,7 +3712,12 @@ def test_configured_dataset_source_replaces_previous_corpus(
     assert not builder._cache_hydrated_for_active_spec()
     builder._ensure_cache_hydrated(use_streaming=False)
 
-    load.assert_called_once_with(source, split="train", streaming=False)
+    load.assert_called_once_with(
+        source,
+        split="train",
+        streaming=False,
+        num_proc=max(1, (embedding_module.os.cpu_count() or 1) // 2),
+    )
     assert cache.get_cached_paper_ids() == {"arxiv:2609.03430"}
     assert cache.is_hydrated("train", corpus_size, dataset_source=source)
     assert builder._cache_hydrated_for_active_spec()
@@ -3739,7 +3765,12 @@ def test_dataset_load_failure_preserves_cache_without_fallback(
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert str(exc_info.value.__cause__) == "dataset unavailable"
     assert source in str(exc_info.value)
-    load.assert_called_once_with(source, split="train", streaming=False)
+    load.assert_called_once_with(
+        source,
+        split="train",
+        streaming=False,
+        num_proc=max(1, (embedding_module.os.cpu_count() or 1) // 2),
+    )
     assert cache.get_cached_paper_ids() == {"arxiv:1706.03762"}
     assert cache.get_hydrated_dataset_source() == "example/previous-arxiv"
 

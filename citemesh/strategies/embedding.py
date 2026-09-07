@@ -3484,7 +3484,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         # A capped cache retains its original paper selection. Inspect the full
         # selected split so older cached papers can still receive metadata fixes.
         dataset = _import_datasets_module().load_dataset(
-            source, split=self.dataset_split, streaming=use_streaming
+            source,
+            split=self.dataset_split,
+            streaming=use_streaming,
+            num_proc=None if use_streaming else max(1, (os.cpu_count() or 1) // 2),
         )
         batch: List[Dict] = []
         for index, record in enumerate(dataset):
@@ -4357,6 +4360,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.dataset_source,
             split=split_for_load,
             streaming=use_streaming,
+            num_proc=None if use_streaming else max(1, (os.cpu_count() or 1) // 2),
         )
         if use_streaming and (parsed_row_limit is not None or parsed_row_offset > 0):
             stop_idx = (
