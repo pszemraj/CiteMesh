@@ -1235,6 +1235,14 @@ def test_cli_rejects_strategy_incompatible_options() -> None:
     """Build should reject unsupported options for each strategy and argv shape."""
     cases = [
         (
+            ["build", "seed", "--strategy", "citation", "--batch-size", "128"],
+            "--batch-size",
+        ),
+        (
+            ["build", "seed", "--strategy", "citation", "-bs", "128"],
+            "--batch-size",
+        ),
+        (
             [
                 "build",
                 "arxiv:1706.03762",
@@ -3495,7 +3503,8 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "--binary-prefilter",
                 "--binary-rescore-multiplier",
                 "--calibration-sample-size",
-                "--encode-batch-size",
+                "--batch-size",
+                "-bs",
                 "--no-torch-compile",
                 "--spring-iterations",
                 "citation/recommendation",

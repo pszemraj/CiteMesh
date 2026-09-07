@@ -68,7 +68,7 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `device` | Default `--device` (`auto`, `cuda`, `mps`, `cpu`) |
 | `semantic_source` | Default `--semantic-source` (`candidates`, `arxiv-corpus`) |
 | `candidate_pool_size` | Default `--candidate-pool-size` |
-| `encode_batch_size` | Default `--encode-batch-size` |
+| `encode_batch_size` | Default `--batch-size` / `-bs` |
 | `storage_precision` | Default `--storage-precision` (`int8`, `float32`) |
 | `max_papers` | Default `--max-papers` |
 | `max_semantic` | Default `--max-semantic` |

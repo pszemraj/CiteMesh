@@ -659,6 +659,7 @@ _CANDIDATE_ONLY_OPTION_DESTS: Set[str] = {"candidate_pool_size"}
 _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
     dest: f"--{dest.replace('_', '-')}" for dest in _BUILD_STRATEGY_OPTION_SUPPORT
 }
+_BUILD_OPTION_PRIMARY_FLAG["encode_batch_size"] = "--batch-size"
 
 
 def _build_option_label(args: argparse.Namespace, dest: str) -> str:
@@ -2026,7 +2027,9 @@ def _create_parser() -> Tuple[
     )
 
     embedding_group.add_argument(
-        "--encode-batch-size",
+        "--batch-size",
+        "-bs",
+        dest="encode_batch_size",
         type=_positive_int,
         metavar="N",
         default=ENCODE_BATCH_SIZE,

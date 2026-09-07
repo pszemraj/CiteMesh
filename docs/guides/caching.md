@@ -199,7 +199,7 @@ Non-streaming dataset downloads and preparation use half the logical CPU count, 
 
 Hydration write policy:
 
-- Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--encode-batch-size`.
+- Encoding uses conservative model micro-batches by default (`32`) for runtime stability, configurable via `--batch-size` / `-bs`.
 - Cache persistence flushes metadata/embedding appends in larger bursts (`2048` records, matching the HDF5 dataset chunk size) to reduce SQLite/HDF5 lock and resize overhead during long corpus hydration.
 
 By default, corpus hydration covers the full selected split. For capped hydration, `--corpus-size` limits how many of the newest submissions are embedded and cached, not how many selected-split rows are inspected to determine that ordering. In streaming mode CiteMesh warns that newest-first selection must drain the whole stream before hydration starts; `--no-streaming` or an explicit `--dataset-split` slice avoids that pass. If too few records have parseable submission IDs, CiteMesh fills the remaining budget from records with unparseable IDs in source order and emits a warning. A non-streaming `--dataset-split` slice bounds the rows exposed to CiteMesh, although a cold Hugging Face dataset builder may still prepare its complete underlying Arrow split before applying the slice.

@@ -249,7 +249,7 @@ it did not compare embedding dimensions.
 - `--dataset-split train`
 - `--corpus-size 100000`
 - `--max-papers 40`
-- `--encode-batch-size 96`
+- `--batch-size 96`
 - `--no-torch-compile`
 - `--theme dark`
 - isolated temp cache root (`CITEMESH_CACHE_DIR=/tmp/citemesh-agent-cache...`)

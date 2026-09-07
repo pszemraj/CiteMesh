@@ -104,7 +104,7 @@ requested formats go alongside the per-paper JSON.
 Numeric validation:
 
 - `build <paper-id>` and `search <query>` require non-empty strings.
-- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, `--encode-batch-size`, `--candidate-pool-size`, and `search --limit` must be at least `1`.
+- `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, `--batch-size` / `-bs`, `--candidate-pool-size`, and `search --limit` must be at least `1`.
 - `--max-citations` and `--max-references` must be at least `0`.
 - `--calibration-sample-size` is valid only with `--storage-precision int8`.
 - `--cache-compression-level` must be at least `0` and is valid only with `--cache-compression gzip`.
@@ -160,7 +160,7 @@ Build command options are strategy-scoped. If you pass a flag that is not suppor
   The int8 default is `8`; float32 and candidate modes normalize it to an unused
   effective value of `1`. Explicit use requires `--storage-precision int8`.
 - `--calibration-sample-size`: calibration sample size used to compute int8 ranges (default `2000`; explicit use requires `--storage-precision int8`)
-- `--encode-batch-size`: embedding-model encode batch size used during hydration/search (default `32`)
+- `--batch-size`, `-bs`: embedding-model encode batch size used during hydration/search (default `32`)
 - `--cache-compression`: HDF5 compression filter for cache datasets (`gzip`, `lzf`; default `gzip`)
 - `--cache-compression-level`: HDF5 compression level for cache datasets (gzip
   default `1`). Selecting `lzf` without an explicit level normalizes the level to
