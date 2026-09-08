@@ -725,11 +725,12 @@ def test_refresh_reference_cache_force_lookup_contracts() -> None:
 
 
 def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A working local corpus must remain usable when both S2 relations fail.
 
     :param pytest.MonkeyPatch monkeypatch: Offline collection and ranking stubs.
+    :param pytest.LogCaptureFixture caplog: Captured availability warning.
     :return None: Assertions validate retained source status and semantic candidates.
     """
     from citemesh.services import SemanticScholarUnavailableError
@@ -760,7 +761,8 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
         builder, "_rank_candidates", lambda _seed, papers, _sources: list(papers)
     )
 
-    papers = builder.collect_papers("seed")
+    with caplog.at_level(logging.WARNING):
+        papers = builder.collect_papers("seed")
 
     assert set(papers) == {"seed", "semantic"}
     assert builder.candidate_source_status == {
@@ -771,6 +773,10 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
     client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
     client.get_recommended_papers.assert_not_called()
+    assert (
+        "Continuing hybrid corpus acquisition for seed with partial Semantic Scholar "
+        "evidence (references: offline; citations: offline)." in caplog.text
+    )
 
 
 def test_citation_related_paper_reference_failure_remains_uncached() -> None:
@@ -1417,7 +1423,14 @@ def test_max_papers_is_total_node_cap_including_seed(
 
     class FakeCitationBuilder:
         def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:
+            """Initialize the fake citation builder.
+
+            :param int max_papers: Maximum papers returned by the fake collector.
+            :param object _args: Positional constructor arguments not used by the fake.
+            :param object _kwargs: Keyword constructor arguments not used by the fake.
+            """
             self.max_papers = max_papers
+            self.candidate_source_results: tuple[object, ...] = ()
 
         def collect_papers(self, seed_id: str, **_: object) -> dict[str, Paper]:
             del seed_id

@@ -31,6 +31,7 @@ from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
     CandidateAcquisitionError,
+    CandidateSourceState,
     IdentityRegistry,
     fetch_candidate_source,
     merge_seed_relation,
@@ -657,6 +658,21 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         try:
             if self.semantic_source == "arxiv-corpus":
+                citation_source_results = self.citation_builder.candidate_source_results
+                if citation_source_results and all(
+                    result.state is CandidateSourceState.UNAVAILABLE
+                    for result in citation_source_results
+                ):
+                    details = "; ".join(
+                        f"{result.source}: {result.error or 'unavailable'}"
+                        for result in citation_source_results
+                    )
+                    logger.warning(
+                        "Continuing hybrid corpus acquisition for %s with partial "
+                        "Semantic Scholar evidence (%s).",
+                        seed_paper.paper_id,
+                        details,
+                    )
                 semantic_papers = self.embedding_builder.collect_papers(
                     seed_id,
                     seed_paper=seed_paper,
