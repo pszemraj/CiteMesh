@@ -3742,13 +3742,13 @@ def test_cli_help_survives_unusable_terminal_width(
     :param pytest.MonkeyPatch monkeypatch: Terminal-size override fixture.
     :return None: Checks nonempty root help at the minimum formatter width.
     """
-    monkeypatch.setattr(
-        cli_module.shutil,
-        "get_terminal_size",
-        lambda: SimpleNamespace(columns=1),
-    )
-
-    help_text = cli_module._create_parser()[0].format_help()
+    with monkeypatch.context() as terminal_patch:
+        terminal_patch.setattr(
+            cli_module.shutil,
+            "get_terminal_size",
+            lambda: SimpleNamespace(columns=1),
+        )
+        help_text = cli_module._create_parser()[0].format_help()
 
     assert "usage: citemesh COMMAND [options]" in help_text
     assert "CiteMesh" in help_text
