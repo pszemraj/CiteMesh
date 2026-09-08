@@ -7,7 +7,6 @@ providing a single interface to all graph building strategies.
 """
 
 import argparse
-import hashlib
 import json
 import logging
 import math
@@ -2522,16 +2521,15 @@ class DashboardPackageError(ValueError):
 
 
 def _dashboard_package_lock_path(package_path: Path) -> Path:
-    """Return a cache-scoped lock path for a dashboard package.
+    """Return a shared lock beside the resolved dashboard package.
 
-    Coordination locks live outside the collection's portable output files.
+    Writers must coordinate even when their cache roots differ.
 
     :param Path package_path: Dashboard package path being coordinated.
-    :return Path: Stable cache-local lock path derived from the resolved target.
+    :return Path: Hidden lock path in the package directory.
     """
-    resolved_token = str(package_path.expanduser().resolve())
-    digest = hashlib.sha256(resolved_token.encode("utf-8")).hexdigest()
-    return get_cache_dir("locks", "dashboard-packages") / f"{digest}.lock"
+    resolved_path = package_path.expanduser().resolve()
+    return resolved_path.with_name(f".{resolved_path.name}.lock")
 
 
 def _read_json_object(path: Path, *, label: str) -> Dict[str, Any]:

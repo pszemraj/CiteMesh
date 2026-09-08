@@ -1862,6 +1862,7 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         assert {path.name for path in output.iterdir()} == {
             "dashboard.html",
             DASHBOARD_PACKAGE_FILENAME,
+            f".{DASHBOARD_PACKAGE_FILENAME}.lock",
             run_dir.name,
         }
         package = load_dashboard_package(output / DASHBOARD_PACKAGE_FILENAME)
@@ -1976,6 +1977,7 @@ def test_dashboard_default_collection_retains_seed_directory(
     assert {path.name for path in output_root.iterdir()} == {
         "dashboard.html",
         DASHBOARD_PACKAGE_FILENAME,
+        f".{DASHBOARD_PACKAGE_FILENAME}.lock",
         run_dir.name,
     }
     assert {path.name for path in run_dir.iterdir()} == {
@@ -2291,10 +2293,18 @@ def test_dashboard_package_deduplicates_existing_slots_deterministically(
     assert updated["results"][1]["title"] == "First Copy"
 
 
+@pytest.mark.parametrize("separate_cache_roots", [False, True])
 def test_dashboard_package_serializes_concurrent_updates(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, separate_cache_roots: bool
 ) -> None:
-    """Package updates should hold one lock across read, merge, and atomic write."""
+    """Serialize package updates independently of each writer's cache root.
+
+    :param pytest.MonkeyPatch monkeypatch: Controls cache roots and write timing.
+    :param Path tmp_path: Isolated collection and cache directories.
+    :param bool separate_cache_roots: Whether writers use different cache roots.
+    :return None: Checks exclusion and retention of both graph results.
+    """
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-a"))
     package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
     first_graph = build_seed_graph("seed-a")
     second_graph = build_seed_graph("seed-b")
@@ -2311,6 +2321,13 @@ def test_dashboard_package_serializes_concurrent_updates(
     def delayed_atomic_write(
         path: Path, payload: dict[str, object], **kwargs: object
     ) -> None:
+        """Hold the first writer inside its locked package update.
+
+        :param Path path: JSON destination.
+        :param dict[str, object] payload: Package contents to persist.
+        :param object kwargs: Original JSON writer options.
+        :return None: Writes after the test releases the first writer.
+        """
         nonlocal write_counter
         with write_counter_lock:
             write_counter += 1
@@ -2327,6 +2344,12 @@ def test_dashboard_package_serializes_concurrent_updates(
     errors: list[BaseException] = []
 
     def worker(graph: nx.Graph, seed_id: str) -> None:
+        """Update one graph while recording thread failures for the test.
+
+        :param nx.Graph graph: Graph to add to the collection.
+        :param str seed_id: Seed identifying the graph result.
+        :return None: Stores the result or records its exception.
+        """
         try:
             update_dashboard_package(
                 package_path,
@@ -2344,10 +2367,11 @@ def test_dashboard_package_serializes_concurrent_updates(
 
     first_thread.start()
     assert first_write_started.wait(timeout=5), "first write never started"
+    # The first writer already holds its lock, so each writer observes one root.
+    if separate_cache_roots:
+        monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-b"))
     second_thread.start()
-    assert not second_write_started.wait(timeout=0.25), (
-        "second update reached write path before first released package lock"
-    )
+    second_wrote_early = second_write_started.wait(timeout=0.25)
 
     allow_first_write.set()
     first_thread.join(timeout=5)
@@ -2356,6 +2380,9 @@ def test_dashboard_package_serializes_concurrent_updates(
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
     assert not errors
+    assert not second_wrote_early, (
+        "second update reached write path before first released package lock"
+    )
 
     package = load_dashboard_package(package_path)
     assert {entry["result_id"] for entry in package["results"]} == {

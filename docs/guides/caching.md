@@ -45,6 +45,8 @@ citemesh cache root
 
 `config.toml` is configuration, not cache: it is documented in [User Configuration](configuration.md) and survives `citemesh cache clear`. Atomic text writes preserve an existing file's permission bits (new files follow the process umask); `config.toml` is the exception and is always written `0600` because it can hold `api.s2_api_key`.
 
+Dashboard collection locks live beside their output packages, outside the cache root, so changing `CITEMESH_CACHE_DIR` or clearing cached data does not break coordination between collection writers. See [Output Artifacts](../reference/output-artifacts.md).
+
 Model hashes are the first 12 characters of `sha256(<namespace>)`. Every embedding namespace binds the runtime-active model (including a fallback checkpoint), requested revision, immutable resolved artifact fingerprint, representation role, normalization contract, resolved truncate dimension, storage precision, effective binary-prefilter mode, resolved source torch dtype, and task-formatter fingerprint; `int8` namespaces also include calibration sample size. Candidate mode (`--semantic-source candidates`, the default) adds `mode=candidates` to the retrieval-document namespace so incrementally embedded S2 candidates never mix with corpus hydrations. The graph-similarity namespace is source-mode independent because it contains only selected papers encoded under the same symmetric task contract. Namespaces intentionally carry no device token: CPU, CUDA, and MPS share a namespace whenever compute dtype and the other contracts match, whether bf16 or float32.
 
 EmbeddingGemma now defaults to 512 dimensions. Because the resolved dimension is

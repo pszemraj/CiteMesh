@@ -12,10 +12,12 @@ Related docs:
 
 ## Artifact Set
 
-A normal dashboard run writes two shared files at the collection root:
+A normal dashboard run writes two shared artifacts at the collection root:
 
 - `dashboard.html` - reusable tri-pane viewer with an embedded snapshot, so it opens directly from the local filesystem
 - `dashboard.citemesh.json` - authoritative, portable collection package containing one or more graph results and their portable build settings
+
+A persistent hidden `.dashboard.citemesh.json.lock` beside the package serializes collection updates and viewer refreshes, including builds using different `CITEMESH_CACHE_DIR` roots. The lock stays with the output directory; sharing a completed collection requires only the viewer and package.
 
 Every collection build also saves its own graph and build settings under the
 seed's `<slug>-<hash>/` directory, even with only `--export dashboard`:
@@ -67,6 +69,7 @@ build therefore produces:
 out/
   dashboard.html
   dashboard.citemesh.json
+  .dashboard.citemesh.json.lock
   <slug>-<hash>/
     hybrid.json
     hybrid.config.json
