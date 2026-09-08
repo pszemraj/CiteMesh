@@ -3566,7 +3566,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._ensure_int8_calibration_ranges(
             use_streaming=use_streaming,
             dataset_source=dataset_source,
-            selected_dataset=dataset if isinstance(dataset, list) else None,
+            selected_dataset=(
+                dataset if not use_streaming or isinstance(dataset, list) else None
+            ),
         )
 
         hydrated_records = self._hydrate_dataset_records(
@@ -4045,9 +4047,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param bool use_streaming: Whether the hydration source streams records.
         :param str dataset_source: Resolved dataset source token for hydration.
         :param Optional[Sequence[Dict[str, Any]]] selected_dataset: Already
-            materialized hydration rows to sample instead of reloading the
-            source — a capped streaming selection has fully drained the remote
-            stream once and must not pay a second pass for calibration.
+            loaded, repeatable hydration rows to sample instead of reloading the
+            source. This includes non-streaming datasets and capped streaming
+            selections that have fully drained the remote stream once.
         :return None: Persists calibration ranges in cache when required.
         :raises RuntimeError: If calibration source resolution or sampling fails.
         """

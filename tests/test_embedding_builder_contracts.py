@@ -4884,7 +4884,12 @@ def test_int8_hydration_calibration_uses_representative_prepass(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """Int8 hydration should calibrate from a separate representative sample pass."""
+    """Int8 hydration should reuse repeatable rows for representative sampling.
+
+    :param pytest.MonkeyPatch monkeypatch: Dataset, model, and cache stubs.
+    :param Any tmp_path: Temporary cache directory.
+    :return None: Checks calibration sampling without a second dataset load.
+    """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
 
     builder = EmbeddingGraphBuilder(
@@ -4903,7 +4908,8 @@ def test_int8_hydration_calibration_uses_representative_prepass(
         {"id": f"p{idx}", "title": f"Title {idx}", "abstract": f"Abstract {idx}"}
         for idx in range(5)
     ]
-    load_mock = MagicMock(return_value=(source, list(records)))
+    dataset = embedding_module._import_datasets_module().Dataset.from_list(records)
+    load_mock = MagicMock(return_value=(source, dataset))
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
     captured_texts: list[list[str]] = []
