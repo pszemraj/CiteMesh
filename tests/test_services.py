@@ -2219,6 +2219,33 @@ def test_mid_pagination_404_is_an_outage_not_an_empty_reference_list() -> None:
         assert not s2._reference_cache_path("p1").exists()
 
 
+def test_first_page_404_is_not_persisted_as_empty_reference_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing paper must not become a permanent cached empty reference list.
+
+    :param Path tmp_path: Isolated reference-cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate the cache path.
+    :return None: Assertions validate a later successful lookup remains possible.
+    """
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = lambda: None
+    client.client.get_paper_references = MagicMock(
+        side_effect=semantic_module.ObjectNotFoundException("missing paper")
+    )
+
+    assert client.get_reference_ids("p1") == []
+    cache_path = s2._reference_cache_path("p1")
+    assert not cache_path.exists()
+
+    client.client.get_paper_references = MagicMock(
+        return_value=[_make_reference_record("recovered-reference")]
+    )
+    assert client.get_reference_ids("p1") == ["recovered-reference"]
+    assert json.loads(cache_path.read_text())["references"] == ["recovered-reference"]
+
+
 @pytest.mark.parametrize(
     "method",
     ["get_papers", "get_paper_references", "get_paper_citations", "get_reference_ids"],

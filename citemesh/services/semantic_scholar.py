@@ -1590,6 +1590,23 @@ class SemanticScholarClient:
                 rate_limited=self._is_rate_limit_error(exc),
             ) from exc
 
+        paper_not_found = False
+
+        def _handle_not_found(_exc: Exception) -> List[Any]:
+            """Return missing-paper references without treating them as successful empties.
+
+            :param Exception _exc: SDK exception indicating the relation endpoint's
+                first page was not found.
+            :return List[Any]: Empty relation list for the absent paper.
+            """
+            nonlocal paper_not_found
+            paper_not_found = True
+            logger.warning(
+                "Paper not found for reference IDs: %s",
+                normalized_paper_id,
+            )
+            return []
+
         references = self._call_with_retries(
             _operation,
             on_retry=lambda attempt, wait_time, exc: logger.debug(
@@ -1604,13 +1621,7 @@ class SemanticScholarClient:
                 (ValueError, _raise_contract_failure),
                 (
                     ObjectNotFoundException,
-                    lambda _exc: (
-                        logger.warning(
-                            "Paper not found for reference IDs: %s",
-                            normalized_paper_id,
-                        )
-                        or []
-                    ),
+                    _handle_not_found,
                 ),
                 (
                     BadQueryParametersException,
@@ -1626,6 +1637,8 @@ class SemanticScholarClient:
                 ),
             ),
         )
+        if paper_not_found:
+            return []
         if not references:
             return _persist_empty()
 
