@@ -2628,6 +2628,37 @@ def test_dashboard_package_rejects_graph_summary_drift(tmp_path: Path) -> None:
         load_dashboard_package(package_path)
 
 
+def test_dashboard_package_rejects_non_finite_payload_values(tmp_path: Path) -> None:
+    """Persisted non-finite graph values must fail package preflight.
+
+    :param Path tmp_path: Isolated dashboard package directory.
+    :return None: Checks strict numeric validation during package loading.
+    """
+    package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
+    graph = build_seed_graph("seed")
+    graph.add_node(
+        "other",
+        title="Other",
+        year=2021,
+        authors=[],
+        citation_count=0,
+    )
+    graph.add_edge("seed", "other", weight=0.5)
+    package = update_dashboard_package(
+        package_path,
+        graph=graph,
+        seed_id="seed",
+        strategy="recommendation",
+        payload=_dashboard_graph_payload(graph, "seed", "recommendation"),
+        build={"strategy": "recommendation"},
+    )
+    package["results"][0]["payload"]["edges"][0]["weight"] = float("nan")
+    package_path.write_text(json.dumps(package), encoding="utf-8")
+
+    with pytest.raises(DashboardPackageError, match="non-finite numeric values"):
+        load_dashboard_package(package_path)
+
+
 @pytest.mark.parametrize(
     ("mutate_payload", "error_match"),
     [

@@ -2856,6 +2856,12 @@ def _validate_dashboard_package(raw_package: object) -> Dict[str, Any]:
     """
     if not isinstance(raw_package, dict):
         raise DashboardPackageError("Dashboard package must be a JSON object.")
+    try:
+        json.dumps(raw_package, allow_nan=False)
+    except ValueError as exc:
+        raise DashboardPackageError(
+            "Dashboard package contains non-finite numeric values."
+        ) from exc
     if raw_package.get("kind") != DASHBOARD_COLLECTION_KIND:
         raise DashboardPackageError(
             f"Unsupported dashboard package kind {raw_package.get('kind')!r}."
