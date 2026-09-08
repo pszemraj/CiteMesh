@@ -67,7 +67,7 @@ CiteMesh resolves an explicit compute device before loading any embedding model:
 - `--device auto` (default) prefers `cuda`, then `mps` (Apple Silicon Metal), then `cpu`.
 - An explicit `--device cuda` or `--device mps` on a host where that backend is unavailable fails fast with a CLI usage error; MPS diagnostics distinguish a torch build without MPS from a built backend that is unavailable on the machine. CiteMesh never silently downgrades an explicit accelerator request to CPU.
 - The resolved device is passed directly to `SentenceTransformer(device=...)` and drives every precision, attention, TF32, and compile decision below.
-- The effective device and compute dtype are recorded in the run's export metadata (`effective_device`, `effective_compute_dtype`) and in the config sidecar's embedded `metadata` block; the sidecar's own `build.embedding.device` records the requested token, not the resolved device.
+- The effective device and compute dtype are recorded in the config sidecar's `metadata.embedding` block (`effective_device`, `effective_compute_dtype`). The graph JSON export does not include these runtime fields. The sidecar's `build.embedding.device` records the requested token.
 
 ## Precision and Compile Policy
 

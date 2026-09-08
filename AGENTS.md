@@ -19,7 +19,7 @@ Practical conventions for working on CiteMesh (humans and coding agents).
 
 ## Environment
 
-- Python >= 3.10. The maintainer's dev environment is the conda env `inf` (Python 3.12, torch 2.13+); install with `pip install -e ".[all]"`.
+- Python >= 3.10. The maintainer's dev environment is the conda env `inf` (Python 3.11.16, torch 2.13+); install with `pip install -e ".[all]"`.
 - Run project commands through the env, e.g. `conda run -n inf python -m pytest`.
 - Torch floors are platform-split: `>=2.9` Linux/Windows, `>=2.13` macOS (required for reliable MPS bf16).
 
