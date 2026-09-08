@@ -4839,8 +4839,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
 
         logger.info(
-            f"Filtered graph: {filtered_graph.number_of_nodes()} nodes, "
-            f"{filtered_graph.number_of_edges()} edges (top-{self.top_k})"
+            "Graph complete: %s nodes, %s edges",
+            filtered_graph.number_of_nodes(),
+            filtered_graph.number_of_edges(),
         )
 
         return filtered_graph, actual_seed_id

@@ -876,6 +876,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         max_edges = HYBRID_CONFIG.max_edges_per_node
         if not max_edges or max_edges <= 0:
+            logger.info(
+                "Graph complete: %s nodes, %s edges",
+                graph.number_of_nodes(),
+                graph.number_of_edges(),
+            )
             return graph, actual_seed_id
 
         filtered_graph = build_capped_undirected_graph(
@@ -885,6 +890,11 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         logger.info(
             "Hybrid edge cap applied: %s -> %s edges",
             graph.number_of_edges(),
+            filtered_graph.number_of_edges(),
+        )
+        logger.info(
+            "Graph complete: %s nodes, %s edges",
+            filtered_graph.number_of_nodes(),
             filtered_graph.number_of_edges(),
         )
         return filtered_graph, actual_seed_id
