@@ -1328,7 +1328,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self.retrieval_embeddings: Dict[str, np.ndarray] = {}
         self.embeddings: Dict[str, np.ndarray] = {}
         self.candidate_source_status: Dict[str, str] = {}
-        self.client = client or get_client()
+        self._client = client
         self._active_model_name: Optional[str] = None
         self._embedding_cache: Optional[EmbeddingCache] = None
         self._graph_embedding_cache: Optional[EmbeddingCache] = None
@@ -1374,6 +1374,25 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._tf32_mode = "off"
         self._resolved_model_fingerprint: Optional[str] = None
         self._last_search_used_binary_prefilter: Optional[bool] = None
+
+    @property
+    def client(self) -> "SemanticScholarClient":
+        """Return the injected S2 client or create one when an API call needs it.
+
+        :return SemanticScholarClient: Shared client for Semantic Scholar operations.
+        """
+        if self._client is None:
+            self._client = get_client()
+        return self._client
+
+    @client.setter
+    def client(self, client: "SemanticScholarClient") -> None:
+        """Replace the Semantic Scholar client for tests and specialized callers.
+
+        :param SemanticScholarClient client: Client instance to use for S2 operations.
+        :return None: Replaces the current client reference.
+        """
+        self._client = client
 
     @property
     def embedding_cache(self) -> EmbeddingCache:

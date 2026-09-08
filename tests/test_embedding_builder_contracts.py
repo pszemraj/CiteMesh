@@ -3840,6 +3840,63 @@ def test_local_search_respects_configured_dataset_source(
         cache.search.assert_called_once()
 
 
+def test_local_search_does_not_create_semantic_scholar_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local corpus search should not initialize the Semantic Scholar client.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :return None: Asserts local search completes without an S2 client.
+    """
+    client_factory = MagicMock()
+    monkeypatch.setattr(embedding_module, "get_client", client_factory)
+    builder = EmbeddingGraphBuilder(semantic_source="arxiv-corpus", client=None)
+    cache = MagicMock()
+    cache.hydration_operation_lock.return_value = nullcontext()
+    cache.get_hydrated_dataset_source.return_value = builder.dataset_source
+    cache.search.return_value = []
+    builder.embedding_cache = cache
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_encode_texts",
+        lambda _texts: np.asarray([[1.0, 0.0]], dtype=np.float32),
+    )
+
+    assert builder.search_local("query", top_k=1) == []
+    client_factory.assert_not_called()
+
+
+def test_embedding_client_is_lazy_and_preserves_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedding builders should create S2 clients only when their API is used.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :return None: Asserts lazy default construction and injected-client reuse.
+    """
+    default_client = MagicMock()
+    client_factory = MagicMock(return_value=default_client)
+    monkeypatch.setattr(embedding_module, "get_client", client_factory)
+    lazy_builder = EmbeddingGraphBuilder(client=None)
+
+    client_factory.assert_not_called()
+    assert lazy_builder.client is default_client
+    assert lazy_builder.client is default_client
+    client_factory.assert_called_once_with()
+
+    replacement_client = MagicMock()
+    lazy_builder.client = replacement_client
+    assert lazy_builder.client is replacement_client
+    client_factory.assert_called_once_with()
+
+    injected_client = MagicMock()
+    injected_builder = EmbeddingGraphBuilder(client=injected_client)
+    assert injected_builder.client is injected_client
+    client_factory.assert_called_once_with()
+
+
 @pytest.mark.parametrize(
     "corpus_size,complete", [(1, True), (None, True), (None, False)]
 )
