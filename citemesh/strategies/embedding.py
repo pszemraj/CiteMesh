@@ -3793,6 +3793,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 )
                 return False
             updated_rows = self._cached_payload_row_count()
+            if self.corpus_size is not None and updated_rows > self.corpus_size:
+                logger.warning(
+                    "Resumed capped corpus has %d cached rows, exceeding "
+                    "--corpus-size %d after the source selection changed. "
+                    "Retained existing vectors; rebuild the corpus to apply "
+                    "the cap exactly.",
+                    updated_rows,
+                    self.corpus_size,
+                )
             self.embedding_cache.mark_hydrated(
                 dataset_source=source,
                 dataset_split=self.dataset_split,

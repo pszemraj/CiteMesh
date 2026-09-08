@@ -4335,20 +4335,24 @@ def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
 
 
 @pytest.mark.parametrize(
-    ("corpus_size", "dataset_split"),
-    [(2, "train"), (None, "train[:2]")],
-    ids=["capped", "sliced"],
+    ("corpus_size", "dataset_split", "snapshot_advanced"),
+    [(2, "train", False), (None, "train[:2]", False), (2, "train", True)],
+    ids=["capped", "sliced", "capped-new-snapshot"],
 )
 def test_incomplete_selected_corpus_cache_resumes_without_clear(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     corpus_size: int | None,
     dataset_split: str,
+    snapshot_advanced: bool,
 ) -> None:
     """Interrupted capped and sliced hydrations should retain cached vectors.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param pytest.LogCaptureFixture caplog: Captured cap-overflow warning.
     :param int | None corpus_size: Capped corpus size, or ``None`` for a slice.
     :param str dataset_split: Fixed split or split-slice selection.
+    :param bool snapshot_advanced: Whether a new paper displaces a cached selection.
     :return None: Asserts only uncached selected rows are encoded on resume.
     """
     source = "fixture/source"
@@ -4370,6 +4374,8 @@ def test_incomplete_selected_corpus_cache_resumes_without_clear(
     builder._hydrate_dataset_records(
         records[:1], progress_total=1, progress_label="Initial fixture"
     )
+    if snapshot_advanced:
+        records.append({"id": "2601.00003", "title": "Third", "abstract": "A"})
     cache = builder.embedding_cache
     cache.mark_hydrated(
         dataset_source=source,
@@ -4383,17 +4389,23 @@ def test_incomplete_selected_corpus_cache_resumes_without_clear(
     clear_cache_mock = MagicMock()
     monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
     monkeypatch.setattr(
-        builder,
-        "_load_dataset_for_hydration",
-        lambda **_kwargs: (source, records),
+        embedding_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *args, **kwargs: iter(records)
+        ),
     )
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
-    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
+    assert cache.get_cached_paper_ids() == {
+        f"arxiv:{record['id']}" for record in records
+    }
     assert cache.is_hydrated(dataset_split, corpus_size, dataset_source=source)
     assert model.encode.call_count == 1
     clear_cache_mock.assert_not_called()
+    warning = "Resumed capped corpus has 3 cached rows, exceeding --corpus-size 2"
+    assert (warning in caplog.text) is snapshot_advanced
 
 
 @pytest.mark.parametrize("inserted_id", ["2601.00004", "2601.00001"])
