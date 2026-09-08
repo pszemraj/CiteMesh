@@ -2323,10 +2323,19 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
 
 
+@pytest.mark.parametrize(
+    "directory_name", ["session", "session.json", "session.dashboard.html"]
+)
 def test_dashboard_collection_resolver_always_includes_graph_json(
     tmp_path: Path,
+    directory_name: str,
 ) -> None:
-    """A collection should plan a per-seed JSON even without an explicit JSON flag."""
+    """A collection directory should receive the viewer and per-seed JSON.
+
+    :param Path tmp_path: Temporary parent for the collection directory.
+    :param str directory_name: Directory name, including export-like suffixes.
+    :return None: Assertions verify directory routing and implicit graph JSON.
+    """
     graph = nx.Graph()
     graph.add_node("seed", title="Seed Title")
     assert _is_standalone_dashboard_output(
@@ -2339,7 +2348,10 @@ def test_dashboard_collection_resolver_always_includes_graph_json(
         Path("reports/session"), ["dashboard"], True
     )
 
-    root = tmp_path / "reports" / "session"
+    root = tmp_path / "reports" / directory_name
+    root.mkdir(parents=True)
+    assert not _is_standalone_dashboard_output(root, ["dashboard"], True)
+    assert not _is_standalone_dashboard_output(root, ["dashboard", "json"], True)
     output_paths, package_path = resolve_dashboard_collection_outputs(
         base_output_path=root,
         selected_formats=["dashboard"],
@@ -3587,25 +3599,33 @@ def test_output_path_and_slug_contracts() -> None:
         assert paths == expected
 
 
-def test_single_format_output_writes_into_an_existing_directory(
+@pytest.mark.parametrize(
+    "directory_name", ["results", "results.json", "results.dashboard.html"]
+)
+@pytest.mark.parametrize("formats", [["json"], ["png"], ["json", "png"]])
+def test_output_writes_into_an_existing_directory(
     tmp_path: Path,
+    directory_name: str,
+    formats: list[str],
 ) -> None:
     """An existing --output directory must receive the artifact, not name it.
 
     :param Path tmp_path: Temporary directory serving as the output target.
-    :return None: Assertions pin file-or-directory semantics for one format.
+    :param str directory_name: Directory name, including export-like suffixes.
+    :param list[str] formats: Single or multiple requested export formats.
+    :return None: Assertions pin file-or-directory semantics.
     """
-    results_dir = tmp_path / "results"
+    results_dir = tmp_path / directory_name
     results_dir.mkdir()
 
     paths = resolve_output_paths(
         base_output_path=results_dir,
-        selected_formats=["json"],
+        selected_formats=formats,
         explicit_output=True,
         strategy="citation",
     )
 
-    assert paths == {"json": results_dir / "citation.json"}
+    assert paths == {fmt: results_dir / f"citation.{fmt}" for fmt in formats}
     config_cases = [
         (
             {"png": Path("out/seed/hybrid.png")},

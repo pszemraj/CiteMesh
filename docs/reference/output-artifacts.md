@@ -83,13 +83,14 @@ Path components:
 
 Canonical path-normalization rules:
 
+- An existing explicit `--output` directory takes precedence over suffix rules, even when its name ends in `.json` or `.dashboard.html`. Non-dashboard exports go inside that directory; dashboard exports use it as the collection root.
 - `--output` omitted:
   - non-dashboard artifacts are written under `out/<slug>-<hash>/` as `<strategy>.<ext>`
   - a normal dashboard export writes `out/dashboard.html`, `out/dashboard.citemesh.json`, and `out/<slug>-<hash>/<strategy>.json` plus its config sidecar
 - single-export run (`--export <one-format>`) with explicit `--output`:
   - `--export dashboard -o out/my-collection` puts the shared viewer/package in `out/my-collection/` and the graph JSON/sidecar in `out/my-collection/<slug>-<hash>/`
   - `--export dashboard -o out/report.dashboard.html` requests standalone mode and writes exactly that one self-contained file; it does not create or update a collection package
-  - for non-dashboard formats, a matching target suffix is used as-is, a different known export suffix is replaced, an existing directory receives `<strategy>.<ext>` inside it, and a missing suffix is appended
+  - for non-dashboard formats, an existing directory receives `<strategy>.<ext>` inside it; otherwise a matching target suffix is used as-is, a different known export suffix is replaced, and a missing suffix is appended
 - multi-export run (`--export all` or multiple formats) with explicit `--output`:
   - if `dashboard` is among the selected formats and `--output` ends with `.dashboard.html`, the dashboard stays a standalone file at that exact path, collection mode is disabled, and sibling exports use the stripped base with their own suffixes (for example `out/report.json`, `out/report.csv`, `out/report.config.json`)
   - if `--output` ends with a known export suffix (for example `out.png`), that suffix is stripped and the remainder is treated as directory base

@@ -2346,6 +2346,13 @@ def resolve_output_paths(
     :param str strategy: Active strategy name used for multi-format directory outputs.
     :return Dict[str, Path]: Mapping of export format -> resolved output path.
     """
+    if explicit_output and base_output_path.is_dir():
+        basename = strategy or "graph"
+        return {
+            fmt: base_output_path / f"{basename}{EXPORT_EXTENSIONS[fmt]}"
+            for fmt in selected_formats
+        }
+
     base_str = str(base_output_path)
     stripped_base = _strip_known_export_suffix(base_str)
     has_known_suffix = stripped_base != base_str
@@ -2380,14 +2387,6 @@ def resolve_output_paths(
             output_paths[fmt] = Path(stripped_base + desired_ext)
             return output_paths
 
-        if base_output_path.is_dir():
-            # --output promises file-or-directory semantics; an existing
-            # directory receives the artifact inside it, matching the
-            # multi-format branch, instead of becoming a sibling filename stem.
-            basename = strategy or "graph"
-            output_paths[fmt] = base_output_path / f"{basename}{desired_ext}"
-            return output_paths
-
         output_paths[fmt] = Path(base_str + desired_ext)
         return output_paths
 
@@ -2414,6 +2413,7 @@ def _is_standalone_dashboard_output(
         explicit_output
         and "dashboard" in selected_formats
         and str(base_output_path).lower().endswith(EXPORT_EXTENSIONS["dashboard"])
+        and not base_output_path.is_dir()
     )
 
 
@@ -2430,6 +2430,8 @@ def _resolve_dashboard_collection_root(
     """
     if not explicit_output:
         return Path("out")
+    if base_output_path.is_dir():
+        return base_output_path
     base_str = str(base_output_path)
     stripped_base = _strip_known_export_suffix(base_str)
     if stripped_base != base_str:
