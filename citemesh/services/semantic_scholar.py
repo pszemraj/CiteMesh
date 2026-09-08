@@ -154,14 +154,22 @@ def _jittered_backoff(
 class _RetryableRequestError(RuntimeError):
     """Internal marker for transient request failures worth retrying."""
 
-    def __init__(self, message: str, retry_after: Optional[float] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        retry_after: Optional[float] = None,
+        *,
+        rate_limited: bool = False,
+    ) -> None:
         """Create a retryable request error.
 
         :param str message: Failure description.
         :param Optional[float] retry_after: Parsed Retry-After header seconds.
+        :param bool rate_limited: Whether the failure was an HTTP 429.
         """
         super().__init__(message)
         self.retry_after = retry_after
+        self.rate_limited = rate_limited
 
 
 def _warn_on_long_wait(retry_state: RetryCallState) -> None:
@@ -578,7 +586,7 @@ class SemanticScholarClient:
         """
         error = _unwrap_sdk_retry_error(error)
         if isinstance(error, _RetryableRequestError):
-            return True
+            return error.rate_limited
         response = getattr(error, "response", None)
         if response is not None:
             return getattr(response, "status_code", None) == 429
@@ -1023,6 +1031,7 @@ class SemanticScholarClient:
             raise _RetryableRequestError(
                 f"HTTP 429 from {url}",
                 retry_after=self._safe_retry_after(response),
+                rate_limited=True,
             )
         if 400 <= response.status_code < 500:
             if response.status_code in {401, 403}:
@@ -1075,7 +1084,7 @@ class SemanticScholarClient:
             wait_seconds = (
                 retry_state.next_action.sleep if retry_state.next_action else 0.0
             )
-            if isinstance(exc, _RetryableRequestError):
+            if exc is not None and self._is_rate_limit_error(exc):
                 logger.debug(
                     "Rate limited by Semantic Scholar. Waiting %.1fs before retry.",
                     wait_seconds,
@@ -1103,11 +1112,9 @@ class SemanticScholarClient:
         try:
             return retryer(_attempt)
         except (_RetryableRequestError, requests.RequestException, ValueError) as exc:
-            rate_limited = isinstance(
-                exc, _RetryableRequestError
-            ) or self._is_rate_limit_error(exc)
+            rate_limited = self._is_rate_limit_error(exc)
             if raise_on_unavailable:
-                detail = "" if isinstance(exc, _RetryableRequestError) else f": {exc}"
+                detail = "" if rate_limited else f": {exc}"
                 raise self._unavailable_error(
                     context, detail, rate_limited=rate_limited
                 ) from exc

@@ -2016,6 +2016,12 @@ def test_rate_limit_detection_uses_status_or_sdk_exception_contract() -> None:
     assert SemanticScholarClient._is_rate_limit_error(
         ConnectionRefusedError("HTTP status 429 Too Many Requests.")
     )
+    assert SemanticScholarClient._is_rate_limit_error(
+        semantic_module._RetryableRequestError("HTTP 429", rate_limited=True)
+    )
+    assert not SemanticScholarClient._is_rate_limit_error(
+        semantic_module._RetryableRequestError("pagination HTTP 404")
+    )
     assert not SemanticScholarClient._is_rate_limit_error(
         requests.HTTPError("https://example/paper/42901", response=_MockResponse(503))
     )
@@ -2201,8 +2207,12 @@ def test_mid_pagination_404_is_an_outage_not_an_empty_reference_list() -> None:
         client._rate_limit = MagicMock()
         client._session.get = MagicMock(side_effect=_respond)
         with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
-            with pytest.raises(semantic_module.SemanticScholarUnavailableError):
+            with pytest.raises(
+                semantic_module.SemanticScholarUnavailableError,
+                match="unreachable",
+            ) as outage:
                 client.get_reference_ids("p1")
+        assert "rate-limited (HTTP 429)" not in str(outage.value)
         assert sleep_mock.call_count == API_CONFIG.max_retries - 1
         # Each attempt refetches page one and then hits the pagination 404.
         assert client._session.get.call_count == API_CONFIG.max_retries * 2
