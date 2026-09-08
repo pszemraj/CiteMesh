@@ -630,6 +630,26 @@ def test_exports_reject_nonfinite_weights_without_replacing_outputs(
     assert path.read_text() == "previous valid output"
 
 
+def test_json_export_rejects_nonfinite_payload_without_replacing_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """JSON export must reject a non-finite payload before replacing the file.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Supplies a non-finite export payload.
+    :return None: Checks strict JSON encoding preserves the previous artifact.
+    """
+    exporter = GraphExporter(nx.Graph(), "seed")
+    monkeypatch.setattr(exporter, "graph_payload", lambda: {"value": float("nan")})
+    path = tmp_path / "existing.json"
+    path.write_text("previous valid output", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Out of range float values"):
+        exporter.to_json(path)
+
+    assert path.read_text(encoding="utf-8") == "previous valid output"
+
+
 @pytest.mark.parametrize("node_id", ["", " ", " seed", "seed\t"])
 def test_export_rejects_whitespace_ids_before_writing(
     tmp_path: Path, node_id: str
@@ -797,6 +817,41 @@ def test_atomic_dashboard_write_preserves_previous_viewer(
         cache_module.atomic_write_text(destination, "new viewer")
 
     assert destination.read_text(encoding="utf-8") == "previous viewer"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("method", ["to_bibtex", "to_graphml"])
+def test_bibtex_and_graphml_exports_are_atomic(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, method: str
+) -> None:
+    """A failed final replace must preserve existing text-based exports.
+
+    :param pytest.MonkeyPatch monkeypatch: Simulates a failed file replacement.
+    :param Path tmp_path: Isolated output directory.
+    :param str method: Export method to exercise.
+    :return None: Checks that no partial replacement survives the failure.
+    """
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(graph, seed_id, metadata={"strategy": "citation"})
+    destination = tmp_path / f"graph.{method}"
+    destination.write_text("previous export", encoding="utf-8")
+
+    def fail_replace(source: object, target: object) -> None:
+        """Simulate an operating-system replace failure.
+
+        :param object source: Ignored temporary path.
+        :param object target: Ignored destination path.
+        :return None: Always raises.
+        """
+        del source, target
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(cache_module.os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        getattr(exporter, method)(destination)
+
+    assert destination.read_text(encoding="utf-8") == "previous export"
     assert list(tmp_path.iterdir()) == [destination]
 
 
@@ -1841,6 +1896,7 @@ def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
         " renderTimeline();"
         " return {"
         " yearRange: yearRange,"
+        " exportedYearRange: buildPortableJsonPayload().meta.year_range,"
         " minLabel: controls.timelineYearMin.textContent,"
         " maxLabel: controls.timelineYearMax.textContent,"
         " };"
@@ -1848,6 +1904,7 @@ def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
     )
 
     assert probed["yearRange"] == {}
+    assert probed["exportedYearRange"] is None
     assert probed["minLabel"] == "-"
     assert probed["maxLabel"] == "-"
 

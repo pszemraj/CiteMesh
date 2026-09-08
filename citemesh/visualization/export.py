@@ -440,7 +440,7 @@ class GraphExporter:
         """
         atomic_write_text(
             path,
-            json.dumps(self.graph_payload(), sort_keys=True, indent=2),
+            json.dumps(self.graph_payload(), sort_keys=True, indent=2, allow_nan=False),
         )
 
     def to_csv(self, path: Path) -> None:
@@ -512,7 +512,7 @@ class GraphExporter:
             for node in enriched
             if node.get("bibtex", "").strip()
         ]
-        Path(path).write_text("\n\n".join(entries) + "\n", encoding="utf-8")
+        atomic_write_text(path, "\n\n".join(entries) + "\n")
 
     def to_graphml(self, path: Path) -> None:
         """Export to GraphML for external tools such as Gephi or Cytoscape."""
@@ -560,7 +560,9 @@ class GraphExporter:
                 ),
             )
 
-        nx.write_graphml(export_graph, path)
+        buffer = io.BytesIO()
+        nx.write_graphml(export_graph, buffer)
+        atomic_write_text(path, buffer.getvalue().decode("utf-8"))
 
     def to_interactive_html(
         self,
@@ -3468,7 +3470,7 @@ class GraphExporter:
         seed_id: nextMeta.seed_id || "",
         meta: {
           strategy: nextMeta.strategy || "",
-          year_range: nextMeta.year_range || {},
+          year_range: nextMeta.year_range ?? null,
           candidate_source_status: nextMeta.candidate_source_status || {},
         },
         summary,
