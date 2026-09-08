@@ -3522,12 +3522,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             "all" if self.corpus_size is None else self.corpus_size,
             use_streaming,
         )
-        if self.corpus_size is not None and ":" not in str(self.dataset_split):
+        if self.corpus_size is not None:
             logger.info(
                 "Capped corpus hydration selects the %d most recently "
                 "submitted papers (by arXiv ID chronology). Use --all-corpus "
-                "for full coverage or an explicit --dataset-split slice for "
-                "a custom positional window.",
+                "for full coverage.",
                 int(self.corpus_size),
             )
         retained_fingerprint = (
@@ -4539,7 +4538,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             self.corpus_size is not None
             and parsed_row_limit is None
             and parsed_row_offset == 0
-            and ":" not in str(self.dataset_split)
         ):
             # Snapshot row order does not track submission time.
             dataset = self._select_newest_corpus_rows(dataset, self.dataset_source)

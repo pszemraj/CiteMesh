@@ -3129,10 +3129,22 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     load_dataset.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("use_streaming", "dataset_split"),
+    [(True, "train"), (False, "train[:5%]")],
+)
 def test_capped_hydration_selects_newest_rows_by_arxiv_id(
     monkeypatch: pytest.MonkeyPatch,
+    use_streaming: bool,
+    dataset_split: str,
 ) -> None:
-    """Capped hydration must rank by ID chronology, not dataset row order."""
+    """Capped hydration must rank each selected split by ID chronology.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces dataset loading.
+    :param bool use_streaming: Whether the selected split is streamed.
+    :param str dataset_split: Selected HuggingFace split expression.
+    :return None: Assertions verify newest-first selection within the split.
+    """
     # Mirror the real snapshot shape: newest update_date first (including a
     # recently revised OLD paper at row 0), pre-2007 ID block at the tail.
     records = [
@@ -3153,9 +3165,13 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
     )
 
     builder = EmbeddingGraphBuilder(
-        max_papers=1, use_streaming=True, corpus_size=3, client=MagicMock()
+        max_papers=1,
+        use_streaming=use_streaming,
+        dataset_split=dataset_split,
+        corpus_size=3,
+        client=MagicMock(),
     )
-    _, dataset = builder._load_dataset_for_hydration(use_streaming=True)
+    _, dataset = builder._load_dataset_for_hydration(use_streaming=use_streaming)
     assert [record["title"] for record in dataset] == [
         "Late 2024 submission",
         "Recent submission",
@@ -3170,7 +3186,7 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
     fake_datasets.load_dataset = lambda name, split, streaming=False, num_proc=None: (
         iter(no_id_records)
     )
-    _, dataset = builder._load_dataset_for_hydration(use_streaming=True)
+    _, dataset = builder._load_dataset_for_hydration(use_streaming=use_streaming)
     assert [record["title"] for record in dataset] == ["Paper 0", "Paper 1", "Paper 2"]
 
 
