@@ -3658,7 +3658,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         use_streaming: bool,
         cached_dataset_source: Optional[str],
     ) -> bool:
-        """Resume an incomplete full-corpus hydration when cached rows are reusable.
+        """Resume an incomplete corpus hydration when cached rows are reusable.
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Dataset source recorded on the
@@ -3666,11 +3666,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :return bool: ``True`` when the incomplete cache was resumed or safely
             retained without requiring a full namespace clear.
         """
-        if self.corpus_size is not None:
-            return False
-        if ":" in str(self.dataset_split):
-            return False
-
         source = str(cached_dataset_source or "").strip()
         if source != self.dataset_source:
             return False
@@ -3680,7 +3675,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             return False
         if stats.hydration_split != self.dataset_split:
             return False
-        if stats.hydration_corpus_size != "all":
+        expected_corpus_size = (
+            "all" if self.corpus_size is None else f"newest:{int(self.corpus_size)}"
+        )
+        if stats.hydration_corpus_size != expected_corpus_size:
             return False
         if stats.hydration_dataset_source != source:
             return False
@@ -3707,6 +3705,53 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 self.dataset_split,
             )
             return False
+
+        if self.corpus_size is not None or ":" in str(self.dataset_split):
+            cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
+            logger.info(
+                "Resuming incomplete selected-corpus cache for %s/%s from "
+                "cached_rows=%d.",
+                source,
+                self.dataset_split,
+                stats.sqlite_rows,
+            )
+            self._ensure_int8_calibration_ranges(
+                use_streaming=use_streaming,
+                dataset_source=source,
+            )
+            resume_result = self._hydrate_exact_hydration_source_slice(
+                use_streaming=use_streaming,
+                source=source,
+                progress_total=self.corpus_size,
+                progress_label="Resuming dataset",
+                operation="Incomplete hydration resume",
+                existing_paper_ids=cached_paper_ids,
+            )
+            if not resume_result.source_exhausted:
+                logger.warning(
+                    "Incomplete selected-corpus resume for %s/%s did not exhaust "
+                    "its source; performing full rebuild.",
+                    source,
+                    self.dataset_split,
+                )
+                return False
+            updated_rows = self._cached_payload_row_count()
+            self.embedding_cache.mark_hydrated(
+                dataset_source=source,
+                dataset_split=self.dataset_split,
+                corpus_size=self.corpus_size,
+                complete=True,
+            )
+            logger.info(
+                "Resumed incomplete selected-corpus cache for %s/%s "
+                "(source_rows=%d, added=%d, cache_rows=%d).",
+                source,
+                self.dataset_split,
+                resume_result.source_rows_consumed,
+                resume_result.hydrated_records,
+                updated_rows,
+            )
+            return True
 
         cached_rows = int(stats.sqlite_rows)
         upstream_rows = self._resolve_dataset_split_row_count(source)

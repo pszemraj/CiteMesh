@@ -4119,6 +4119,68 @@ def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
     )
 
 
+@pytest.mark.parametrize(
+    ("corpus_size", "dataset_split"),
+    [(2, "train"), (None, "train[:2]")],
+    ids=["capped", "sliced"],
+)
+def test_incomplete_selected_corpus_cache_resumes_without_clear(
+    monkeypatch: pytest.MonkeyPatch,
+    corpus_size: int | None,
+    dataset_split: str,
+) -> None:
+    """Interrupted capped and sliced hydrations should retain cached vectors.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param int | None corpus_size: Capped corpus size, or ``None`` for a slice.
+    :param str dataset_split: Fixed split or split-slice selection.
+    :return None: Asserts only uncached selected rows are encoded on resume.
+    """
+    source = "fixture/source"
+    builder = EmbeddingGraphBuilder(
+        storage_precision="float32",
+        corpus_size=corpus_size,
+        dataset_split=dataset_split,
+        dataset_source=source,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    model = ConstantEncodeModel()
+    model.encode = MagicMock(wraps=model.encode)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    records = [
+        {"id": "2601.00001", "title": "First", "abstract": "A"},
+        {"id": "2601.00002", "title": "Second", "abstract": "A"},
+    ]
+    builder._hydrate_dataset_records(
+        records[:1], progress_total=1, progress_label="Initial fixture"
+    )
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source=source,
+        dataset_split=dataset_split,
+        corpus_size=corpus_size,
+        complete=False,
+    )
+    cache.set_model_fingerprint("test-fingerprint")
+    cache.mark_corpus_metadata_current()
+    model.encode.reset_mock()
+    clear_cache_mock = MagicMock()
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    monkeypatch.setattr(
+        builder,
+        "_load_dataset_for_hydration",
+        lambda **_kwargs: (source, records),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
+    assert cache.is_hydrated(dataset_split, corpus_size, dataset_source=source)
+    assert model.encode.call_count == 1
+    clear_cache_mock.assert_not_called()
+
+
 @pytest.mark.parametrize("inserted_id", ["2601.00004", "2601.00001"])
 @pytest.mark.parametrize("fail_reconciliation", [False, True])
 @pytest.mark.parametrize("upstream_rows", [4, None])
