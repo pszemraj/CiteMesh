@@ -137,3 +137,46 @@ def encode_texts_in_length_buckets(
         [ordered_embeddings[idx] for idx in range(len(texts))],
         dtype=np.float32,
     )
+
+
+def encode_texts(
+    model: Any,
+    texts: Sequence[str],
+    *,
+    batch_size: int,
+    show_progress_bar: bool = False,
+) -> np.ndarray:
+    """Encode text through the model's preferred batching path.
+
+    :param Any model: Encoder or precision proxy exposing ``encode``.
+    :param Sequence[str] texts: Text payloads to encode.
+    :param int batch_size: Maximum rows per encode batch.
+    :param bool show_progress_bar: Whether the encoder may show progress.
+    :return np.ndarray: Float32 embeddings in original input order.
+    """
+    if (
+        getattr(model, "prefetch_batches", False) is True
+        and len(texts) > batch_size
+        and not show_progress_bar
+    ):
+        return np.asarray(
+            model.encode_prefetched(texts, batch_size=batch_size),
+            dtype=np.float32,
+        )
+
+    warn_on_truncated_inputs(model, texts)
+    return encode_texts_in_length_buckets(
+        texts,
+        batch_size=batch_size,
+        show_progress_bar=show_progress_bar,
+        encode_batch=lambda batch_texts, batch_progress: np.asarray(
+            model.encode(
+                batch_texts,
+                batch_size=min(int(batch_size), len(batch_texts)),
+                convert_to_tensor=False,
+                normalize_embeddings=True,
+                show_progress_bar=batch_progress,
+            ),
+            dtype=np.float32,
+        ),
+    )

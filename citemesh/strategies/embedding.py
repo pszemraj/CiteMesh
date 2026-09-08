@@ -15,6 +15,7 @@ import os
 import random
 import re
 import warnings
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from enum import Enum
@@ -80,9 +81,8 @@ from citemesh.strategies.candidates import (
     resolve_aliases,
 )
 from citemesh.text_batching import (
-    encode_texts_in_length_buckets,
+    encode_texts,
     l2_normalize_embeddings,
-    warn_on_truncated_inputs,
 )
 
 if TYPE_CHECKING:
@@ -697,6 +697,8 @@ class _PrecisionEncodeProxy:
         model: Any,
         context_factory: Callable[[], Any],
         restore_eager: Callable[[Exception], bool],
+        *,
+        prefetch_batches: bool = False,
     ):
         """Create a model proxy for encode-time precision controls.
 
@@ -704,10 +706,32 @@ class _PrecisionEncodeProxy:
         :param Callable[[], Any] context_factory: Callable returning a context manager.
         :param Callable[[Exception], bool] restore_eager: Restore eager execution
             after a compiled-call failure; return whether the call can be retried.
+        :param bool prefetch_batches: Whether to overlap CPU preprocessing with
+            model execution for CiteMesh text batches.
         """
         self._model = model
         self._context_factory = context_factory
         self._restore_eager = restore_eager
+        self.prefetch_batches = bool(prefetch_batches)
+
+    def _call_with_precision(self, operation: Callable[[], Any]) -> Any:
+        """Run an operation with precision controls and eager compile recovery.
+
+        :param Callable[[], Any] operation: Encode or forward operation to run.
+        :return Any: Operation result.
+        """
+        try:
+            with self._context_factory():
+                return operation()
+        except Exception as exc:
+            compiled_failure = exc
+            if not self._restore_eager(compiled_failure):
+                raise
+            try:
+                with self._context_factory():
+                    return operation()
+            except Exception as eager_error:
+                raise eager_error from compiled_failure
 
     def encode(self, *args: Any, **kwargs: Any) -> Any:
         """Run ``encode`` within the configured context manager.
@@ -719,22 +743,140 @@ class _PrecisionEncodeProxy:
         normalize_embeddings = kwargs.get("normalize_embeddings", False)
         if normalize_embeddings:
             kwargs["normalize_embeddings"] = False
-        try:
-            with self._context_factory():
-                embeddings = self._model.encode(*args, **kwargs)
-        except Exception as exc:
-            compiled_failure = exc
-            if not self._restore_eager(compiled_failure):
-                raise
-            try:
-                with self._context_factory():
-                    embeddings = self._model.encode(*args, **kwargs)
-            except Exception as eager_error:
-                raise eager_error from compiled_failure
+        embeddings = self._call_with_precision(
+            lambda: self._model.encode(*args, **kwargs)
+        )
         # Normalize once in FP32; CPU autocast would round ST's division to BF16.
         if normalize_embeddings:
             return l2_normalize_embeddings(embeddings)
         return embeddings
+
+    def _prepare_prefetched_batch(
+        self,
+        texts: list[str],
+        prompt: Optional[str],
+    ) -> Tuple[Dict[str, Any], int]:
+        """Preprocess one batch and count inputs that will be truncated.
+
+        :param list[str] texts: Text payloads in encode order.
+        :param Optional[str] prompt: Model-resolved prompt prepended by preprocessing.
+        :return Tuple[Dict[str, Any], int]: Prepared CPU features and truncation count.
+        """
+        features = self._model.preprocess(texts, prompt=prompt)
+        max_length = getattr(self._model, "max_seq_length", None)
+        if max_length is None:
+            return features, 0
+
+        post_truncation_lengths: list[int]
+        if "cu_seq_lens_q" in features:
+            boundaries = features["cu_seq_lens_q"].tolist()
+            post_truncation_lengths = [
+                int(end) - int(start) for start, end in zip(boundaries, boundaries[1:])
+            ]
+        elif "attention_mask" in features:
+            post_truncation_lengths = [
+                int(length) for length in features["attention_mask"].sum(dim=1).tolist()
+            ]
+        else:
+            post_truncation_lengths = [int(max_length)] * len(texts)
+
+        candidates = [
+            text
+            for text, length in zip(texts, post_truncation_lengths)
+            if length >= int(max_length)
+        ]
+        if not candidates:
+            return features, 0
+
+        prompt_prefix = prompt or ""
+        candidate_lengths = self._model.tokenizer(
+            [prompt_prefix + text for text in candidates],
+            truncation=False,
+            padding=False,
+            return_length=True,
+            verbose=False,
+        )["length"]
+        return features, sum(
+            int(length) > int(max_length) for length in candidate_lengths
+        )
+
+    def encode_prefetched(
+        self,
+        texts: Sequence[str],
+        *,
+        batch_size: int,
+    ) -> np.ndarray:
+        """Encode normalized FP32 text vectors while prefetching CPU features.
+
+        :param Sequence[str] texts: Text payloads to encode.
+        :param int batch_size: Maximum rows per prepared batch.
+        :return np.ndarray: Normalized FP32 embeddings in original input order.
+        """
+        if not texts:
+            return np.empty((0, 0), dtype=np.float32)
+
+        from sentence_transformers.util import batch_to_device
+
+        from citemesh.text_batching import length_bucketed_index_batches
+
+        model = self._model
+        model.eval()
+        prompt = model._resolve_prompt(None, None)
+        batches = length_bucketed_index_batches(texts, batch_size)
+        ordered_embeddings: Dict[int, np.ndarray] = {}
+        truncated_count = 0
+        torch = _import_torch()
+
+        def run_batches() -> None:
+            """Run prepared batches on the model in the calling thread.
+
+            :return None: Populates ordered embeddings and truncation count.
+            """
+            nonlocal truncated_count
+            ordered_embeddings.clear()
+            truncated_count = 0
+            with torch.inference_mode(), ThreadPoolExecutor(max_workers=1) as executor:
+                pending = executor.submit(
+                    self._prepare_prefetched_batch,
+                    [texts[idx] for idx in batches[0]],
+                    prompt,
+                )
+                for batch_number, batch_indices in enumerate(batches):
+                    features, batch_truncated_count = pending.result()
+                    truncated_count += batch_truncated_count
+                    if batch_number + 1 < len(batches):
+                        next_indices = batches[batch_number + 1]
+                        pending = executor.submit(
+                            self._prepare_prefetched_batch,
+                            [texts[idx] for idx in next_indices],
+                            prompt,
+                        )
+
+                    features = batch_to_device(features, model.device)
+                    embeddings = model(features)["sentence_embedding"]
+                    truncate_dim = getattr(model, "truncate_dim", None)
+                    if truncate_dim is not None:
+                        embeddings = embeddings[..., : int(truncate_dim)]
+                    batch_embeddings = embeddings.float().cpu().numpy()
+                    for position, original_idx in enumerate(batch_indices):
+                        ordered_embeddings[original_idx] = batch_embeddings[position]
+
+        self._call_with_precision(run_batches)
+        if truncated_count:
+            logger.warning(
+                "Embedding encoder will truncate %d of %d inputs to its %d-token "
+                "window (including prompts and special tokens); embeddings will "
+                "represent only part of those inputs.",
+                truncated_count,
+                len(texts),
+                model.max_seq_length,
+            )
+
+        embeddings = np.asarray(
+            [ordered_embeddings[idx] for idx in range(len(texts))],
+            dtype=np.float32,
+        )
+        return l2_normalize_embeddings(embeddings)
 
     def __getattr__(self, name: str) -> Any:
         """Delegate unknown attributes to the wrapped model.
@@ -2365,6 +2507,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             not self._inner_model_compiled
             and not self._autocast_enabled
             and self._tf32_mode not in {"tf32", "tf32-matmul-high"}
+            and self.device != "cuda"
         ):
             return self.model
 
@@ -2373,6 +2516,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 self.model,
                 self._precision_context,
                 self._restore_eager_model_after_compile_failure,
+                prefetch_batches=self.device == "cuda",
             )
 
         return self._encode_model
@@ -2395,21 +2539,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if effective_batch_size < 1:
             raise ValueError("batch_size must be at least 1 when provided")
 
-        warn_on_truncated_inputs(encode_model, texts)
-        return encode_texts_in_length_buckets(
+        return encode_texts(
+            encode_model,
             texts,
             batch_size=min(effective_batch_size, len(texts)),
             show_progress_bar=show_progress_bar,
-            encode_batch=lambda batch_texts, batch_progress: np.asarray(
-                encode_model.encode(
-                    batch_texts,
-                    batch_size=min(effective_batch_size, len(batch_texts)),
-                    convert_to_tensor=False,
-                    normalize_embeddings=True,
-                    show_progress_bar=batch_progress,
-                ),
-                dtype=np.float32,
-            ),
         )
 
     def _model_load_candidates(self) -> Tuple[str, ...]:
@@ -3986,36 +4120,51 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             description=progress_label,
             unit="papers",
         ) as progress:
-            batch: List[Dict] = []
-            for local_idx, raw_record in enumerate(dataset):
-                if self.corpus_size is not None and local_idx >= self.corpus_size:
-                    break
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                batch: List[Dict] = []
+                pending_write: Optional[Future[int]] = None
+                pending_batch_size = 0
+                for local_idx, raw_record in enumerate(dataset):
+                    if self.corpus_size is not None and local_idx >= self.corpus_size:
+                        break
 
-                metadata = _extract_dataset_paper_metadata(
-                    raw_record,
-                    fallback_index_offset + local_idx,
-                )
-                if existing_paper_ids is not None:
-                    paper_id = str(metadata.get("paper_id", "")).strip()
-                    if not paper_id or paper_id in existing_paper_ids:
-                        progress.update(1)
-                        continue
-                    existing_paper_ids.add(paper_id)
+                    metadata = _extract_dataset_paper_metadata(
+                        raw_record,
+                        fallback_index_offset + local_idx,
+                    )
+                    if existing_paper_ids is not None:
+                        paper_id = str(metadata.get("paper_id", "")).strip()
+                        if not paper_id or paper_id in existing_paper_ids:
+                            progress.update(1)
+                            continue
+                        existing_paper_ids.add(paper_id)
 
-                selected_records += 1
-                batch.append(metadata)
-                if len(batch) >= HYDRATION_FLUSH_SIZE:
-                    hydrated_records += self._cache_metadata_batch(batch)
-                    progress.update(len(batch))
-                    batch = []
-                if max_new_records is not None and selected_records >= int(
-                    max_new_records
-                ):
-                    break
+                    selected_records += 1
+                    batch.append(metadata)
+                    if len(batch) >= HYDRATION_FLUSH_SIZE:
+                        if pending_write is not None:
+                            hydrated_records += pending_write.result()
+                            progress.update(pending_batch_size)
+                        pending_batch_size = len(batch)
+                        pending_write = executor.submit(
+                            self._cache_metadata_batch, batch
+                        )
+                        batch = []
+                    if max_new_records is not None and selected_records >= int(
+                        max_new_records
+                    ):
+                        break
 
-            if batch:
-                hydrated_records += self._cache_metadata_batch(batch)
-                progress.update(len(batch))
+                if batch:
+                    if pending_write is not None:
+                        hydrated_records += pending_write.result()
+                        progress.update(pending_batch_size)
+                    pending_batch_size = len(batch)
+                    pending_write = executor.submit(self._cache_metadata_batch, batch)
+
+                if pending_write is not None:
+                    hydrated_records += pending_write.result()
+                    progress.update(pending_batch_size)
 
             if progress_total is None:
                 progress.set_postfix_str(f"processed {progress.n}")

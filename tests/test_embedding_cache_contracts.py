@@ -7,8 +7,11 @@ import logging
 import multiprocessing as mp
 import os
 import sqlite3
+import sys
 import tempfile
-from contextlib import contextmanager
+import threading
+import types
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from queue import Empty
 from typing import Any, Iterator
@@ -47,6 +50,200 @@ from citemesh.data.embedding_cache import (
 )
 from citemesh.data.model_profiles import get_embedding_model_profile
 from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
+
+
+class _FakeInferenceTensor:
+    """Small NumPy-backed tensor surface for prefetch proxy unit tests."""
+
+    def __init__(self, values: object) -> None:
+        """Store array-like values.
+
+        :param object values: Values represented by the fake tensor.
+        """
+        self.values = np.asarray(values)
+
+    def __getitem__(self, key: object) -> "_FakeInferenceTensor":
+        """Return a sliced fake tensor.
+
+        :param object key: NumPy-compatible index or slice.
+        :return _FakeInferenceTensor: Sliced values.
+        """
+        return _FakeInferenceTensor(self.values[key])
+
+    def float(self) -> "_FakeInferenceTensor":
+        """Return FP32 values.
+
+        :return _FakeInferenceTensor: FP32 tensor view.
+        """
+        return _FakeInferenceTensor(self.values.astype(np.float32))
+
+    def cpu(self) -> "_FakeInferenceTensor":
+        """Return the already-hosted tensor.
+
+        :return _FakeInferenceTensor: This tensor.
+        """
+        return self
+
+    def numpy(self) -> np.ndarray:
+        """Return the backing NumPy array.
+
+        :return np.ndarray: Array values.
+        """
+        return self.values
+
+    def tolist(self) -> list:
+        """Return values as Python lists.
+
+        :return list: Nested or flat list values.
+        """
+        return self.values.tolist()
+
+
+class _PrefetchModelStub:
+    """SentenceTransformer-like text model for CPU-only proxy tests."""
+
+    device = "cuda"
+    truncate_dim = None
+
+    def __init__(
+        self,
+        vectors: dict[str, list[float]],
+        token_lengths: dict[str, int],
+        *,
+        max_seq_length: int = 100,
+        prompt: str = "prompt: ",
+        fail_forward_call: int | None = None,
+        overlap_event: threading.Event | None = None,
+    ) -> None:
+        """Configure deterministic preprocessing and forward behavior.
+
+        :param dict[str, list[float]] vectors: Embeddings keyed by raw input text.
+        :param dict[str, int] token_lengths: Untruncated lengths keyed by raw text.
+        :param int max_seq_length: Encoder token window.
+        :param str prompt: Default prompt resolved by the model.
+        :param Optional[int] fail_forward_call: Optional forward call number to fail.
+        :param Optional[threading.Event] overlap_event: Event set by second preprocessing call.
+        """
+        self.vectors = vectors
+        self.token_lengths = token_lengths
+        self.max_seq_length = max_seq_length
+        self.prompt = prompt
+        self.fail_forward_call = fail_forward_call
+        self.overlap_event = overlap_event
+        self.preprocess_calls: list[tuple[list[str], int]] = []
+        self.forward_threads: list[int] = []
+        self.tokenizer_calls: list[list[str]] = []
+        self.forward_calls = 0
+        self.eval_calls = 0
+
+    def eval(self) -> None:
+        """Record model evaluation setup.
+
+        :return None: Records the call.
+        """
+        self.eval_calls += 1
+
+    def _resolve_prompt(self, prompt: None, prompt_name: None) -> str:
+        """Return the configured default prompt.
+
+        :param None prompt: Unused explicit prompt.
+        :param None prompt_name: Unused prompt name.
+        :return str: Configured prompt.
+        """
+        del prompt, prompt_name
+        return self.prompt
+
+    def preprocess(self, texts: list[str], *, prompt: str) -> dict[str, object]:
+        """Build flattened-input boundaries for one batch.
+
+        :param list[str] texts: Batch texts.
+        :param str prompt: Resolved model prompt.
+        :return dict[str, object]: Fake model features.
+        """
+        assert prompt == self.prompt
+        self.preprocess_calls.append((list(texts), threading.get_ident()))
+        if len(self.preprocess_calls) > 1 and self.overlap_event is not None:
+            self.overlap_event.set()
+        lengths = [min(self.token_lengths[text], self.max_seq_length) for text in texts]
+        boundaries = [0]
+        for length in lengths:
+            boundaries.append(boundaries[-1] + length)
+        return {
+            "cu_seq_lens_q": _FakeInferenceTensor(boundaries),
+            "texts": list(texts),
+        }
+
+    def tokenizer(self, inputs: list[str], **kwargs: object) -> dict[str, list[int]]:
+        """Return exact untruncated lengths for candidate texts.
+
+        :param list[str] inputs: Prompt-prefixed candidate texts.
+        :param object kwargs: Tokenization controls.
+        :return dict[str, list[int]]: Candidate token lengths.
+        """
+        assert kwargs == {
+            "truncation": False,
+            "padding": False,
+            "return_length": True,
+            "verbose": False,
+        }
+        self.tokenizer_calls.append(list(inputs))
+        return {
+            "length": [
+                self.token_lengths[text.removeprefix(self.prompt)] for text in inputs
+            ]
+        }
+
+    def __call__(self, features: dict[str, object]) -> dict[str, object]:
+        """Return batch embeddings or inject a configured compile failure.
+
+        :param dict[str, object] features: Prepared batch features.
+        :return dict[str, object]: Fake sentence embeddings.
+        """
+        self.forward_calls += 1
+        self.forward_threads.append(threading.get_ident())
+        if self.forward_calls == 1 and self.overlap_event is not None:
+            assert self.overlap_event.wait(timeout=2)
+        if self.forward_calls == self.fail_forward_call:
+            raise RuntimeError("compiled forward failed")
+        texts = features["texts"]
+        return {
+            "sentence_embedding": _FakeInferenceTensor(
+                [self.vectors[text] for text in texts]
+            )
+        }
+
+
+def _make_prefetch_proxy(
+    monkeypatch: pytest.MonkeyPatch,
+    model: _PrefetchModelStub,
+    restore_eager: object,
+) -> object:
+    """Create the precision proxy with fake optional-dependency surfaces.
+
+    :param pytest.MonkeyPatch monkeypatch: Module patch fixture.
+    :param _PrefetchModelStub model: Fake base model.
+    :param object restore_eager: Compile recovery callback.
+    :return object: Configured precision proxy.
+    """
+    fake_sentence_transformers = types.ModuleType("sentence_transformers")
+    fake_sentence_transformers.__path__ = []
+    fake_util = types.ModuleType("sentence_transformers.util")
+    fake_util.batch_to_device = lambda features, _device: features
+    monkeypatch.setitem(
+        sys.modules, "sentence_transformers", fake_sentence_transformers
+    )
+    monkeypatch.setitem(sys.modules, "sentence_transformers.util", fake_util)
+
+    from citemesh.strategies import embedding as embedding_module
+
+    fake_torch = types.SimpleNamespace(inference_mode=nullcontext)
+    monkeypatch.setattr(embedding_module, "_import_torch", lambda: fake_torch)
+    return embedding_module._PrecisionEncodeProxy(
+        model,
+        nullcontext,
+        restore_eager,
+        prefetch_batches=True,
+    )
 
 
 def _set_test_int8_calibration(cache: EmbeddingCache, embedding_dim: int = 2) -> None:
@@ -894,6 +1091,188 @@ def test_embedding_cache_uses_length_bucketed_encode_batches() -> None:
     call_lengths = [[len(text) for text in batch] for batch in model.calls]
     assert call_lengths == sorted(call_lengths, key=lambda item: (max(item), item))
     assert list(embeddings) == ["p1", "p2", "p3", "p4"]
+
+
+def test_embedding_cache_dispatches_explicit_prefetch_encoder() -> None:
+    """Cache encoding should hand the full miss set to an enabled prefetch proxy.
+
+    :return None: Verifies explicit fast-path dispatch and complete miss-set input.
+    """
+
+    class _PrefetchEncodeModel:
+        """Capture the optimized cache encoding dispatch."""
+
+        prefetch_batches = True
+
+        def __init__(self) -> None:
+            """Initialize captured prefetch calls.
+
+            :return None: Creates an empty call log.
+            """
+            self.calls: list[tuple[list[str], int]] = []
+
+        def encode_prefetched(self, texts: list[str], *, batch_size: int) -> np.ndarray:
+            """Record one prefetch dispatch and return deterministic vectors.
+
+            :param list[str] texts: Full cache-miss text set.
+            :param int batch_size: Requested model batch size.
+            :return np.ndarray: Stable FP32 embeddings.
+            """
+            self.calls.append((list(texts), batch_size))
+            return np.asarray(
+                [[float(len(text)), 1.0] for text in texts], dtype=np.float32
+            )
+
+        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            """Fail if the generic encode path is selected.
+
+            :param list[str] texts: Unexpected generic encode payload.
+            :param object kwargs: Unexpected generic encode options.
+            :return np.ndarray: Never returns.
+            """
+            del texts, kwargs
+            raise AssertionError("generic encode path should not run")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(
+            cache_dir=tmpdir,
+            model_name="prefetched-cache",
+            storage_precision="float32",
+        )
+        model = _PrefetchEncodeModel()
+        papers = {
+            "p1": {"title": "Long", "abstract": "x " * 40},
+            "p2": {"title": "Tiny", "abstract": "short"},
+            "p3": {"title": "Medium", "abstract": "x " * 20},
+        }
+
+        embeddings = cache.get_embeddings(
+            papers, model, batch_size=2, show_progress=False
+        )
+
+    assert model.calls == [
+        (
+            [
+                "Long. " + ("x " * 40).strip(),
+                "Tiny. short",
+                "Medium. " + ("x " * 20).strip(),
+            ],
+            2,
+        )
+    ]
+    assert list(embeddings) == ["p1", "p2", "p3"]
+
+
+def test_prefetch_proxy_overlaps_preprocessing_and_restores_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The next CPU batch should prepare during forward without changing row order.
+
+    :param pytest.MonkeyPatch monkeypatch: Module patch fixture.
+    :return None: Verifies overlap, ordering, and normalized FP32 results.
+    """
+    overlap_event = threading.Event()
+    texts = ["xxxxxxxx", "a", "mmmm"]
+    vectors = {
+        "xxxxxxxx": [3.0, 4.0],
+        "a": [1.0, 0.0],
+        "mmmm": [0.0, 2.0],
+    }
+    model = _PrefetchModelStub(
+        vectors,
+        {text: len(text) for text in texts},
+        overlap_event=overlap_event,
+    )
+    proxy = _make_prefetch_proxy(monkeypatch, model, lambda _error: False)
+
+    embeddings = proxy.encode_prefetched(texts, batch_size=2)
+
+    np.testing.assert_allclose(
+        embeddings,
+        np.asarray([[0.6, 0.8], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32),
+    )
+    assert overlap_event.is_set()
+    assert len(model.preprocess_calls) == 2
+    assert all(
+        worker_thread != model.forward_threads[0]
+        for _, worker_thread in model.preprocess_calls
+    )
+    assert model.eval_calls == 1
+
+
+def test_prefetch_proxy_retokenizes_only_saturated_truncation_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Exact-window inputs should be checked but only oversized inputs should warn.
+
+    :param pytest.MonkeyPatch monkeypatch: Module patch fixture.
+    :param pytest.LogCaptureFixture caplog: Captured warning records.
+    :return None: Verifies candidate filtering and exact warning counts.
+    """
+    texts = ["short", "exact window", "oversized input payload"]
+    model = _PrefetchModelStub(
+        {text: [1.0, 0.0] for text in texts},
+        {
+            "short": 2,
+            "exact window": 4,
+            "oversized input payload": 7,
+        },
+        max_seq_length=4,
+    )
+    proxy = _make_prefetch_proxy(monkeypatch, model, lambda _error: False)
+
+    with caplog.at_level(logging.WARNING):
+        proxy.encode_prefetched(texts, batch_size=2)
+
+    checked_inputs = [text for call in model.tokenizer_calls for text in call]
+    assert checked_inputs == [
+        "prompt: exact window",
+        "prompt: oversized input payload",
+    ]
+    assert "truncate 1 of 3 inputs" in caplog.text
+
+
+def test_prefetch_proxy_compile_retry_clears_partial_warning_count(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An eager retry should replace partial outputs and truncation accounting.
+
+    :param pytest.MonkeyPatch monkeypatch: Module patch fixture.
+    :param pytest.LogCaptureFixture caplog: Captured warning records.
+    :return None: Verifies complete retry output and reset truncation counts.
+    """
+    texts = ["oversized input", "short"]
+    model = _PrefetchModelStub(
+        {text: [1.0, 0.0] for text in texts},
+        {"oversized input": 8, "short": 2},
+        max_seq_length=4,
+        fail_forward_call=2,
+    )
+    restored_errors: list[str] = []
+
+    def restore_eager(error: Exception) -> bool:
+        """Record the compile failure and allow one eager retry.
+
+        :param Exception error: Failed compiled call.
+        :return bool: Always permits retry.
+        """
+        restored_errors.append(str(error))
+        return True
+
+    proxy = _make_prefetch_proxy(monkeypatch, model, restore_eager)
+
+    with caplog.at_level(logging.WARNING):
+        embeddings = proxy.encode_prefetched(texts, batch_size=1)
+
+    np.testing.assert_array_equal(
+        embeddings, np.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=np.float32)
+    )
+    assert restored_errors == ["compiled forward failed"]
+    assert model.forward_calls == 4
+    assert "truncate 1 of 2 inputs" in caplog.text
+    assert "truncate 2 of 2 inputs" not in caplog.text
 
 
 def test_int8_quantization_uses_uniform_buckets_and_clips_tails() -> None:

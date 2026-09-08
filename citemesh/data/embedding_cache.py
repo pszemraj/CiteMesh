@@ -31,9 +31,8 @@ from filelock import FileLock, Timeout
 from citemesh._runtime import stderr_isatty
 from citemesh.progress import progress_iterator
 from citemesh.text_batching import (
-    encode_texts_in_length_buckets,
+    encode_texts,
     l2_normalize_embeddings,
-    warn_on_truncated_inputs,
 )
 
 from .cache import format_bytes, get_cache_dir, path_exists
@@ -621,21 +620,11 @@ class EmbeddingCache:
                 calibration_ranges = self._require_calibration_ranges(h5_file=h5)
 
         texts = [record.text for record in papers_to_embed]
-        warn_on_truncated_inputs(model, texts)
-        embeddings_array = encode_texts_in_length_buckets(
+        embeddings_array = encode_texts(
+            model,
             texts,
             batch_size=min(int(batch_size), len(texts)),
             show_progress_bar=show_progress,
-            encode_batch=lambda batch_texts, batch_progress: np.asarray(
-                model.encode(
-                    batch_texts,
-                    batch_size=min(int(batch_size), len(batch_texts)),
-                    convert_to_tensor=False,
-                    normalize_embeddings=True,
-                    show_progress_bar=batch_progress,
-                ),
-                dtype=np.float32,
-            ),
         )
         if embeddings_array.ndim == 1:
             embeddings_array = embeddings_array.reshape(1, -1)

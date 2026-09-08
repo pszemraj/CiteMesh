@@ -6,6 +6,7 @@ import json
 import logging
 import multiprocessing as mp
 import sys
+import threading
 import types
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -5047,6 +5048,122 @@ def test_hydration_flush_size_controls_cache_write_bursting(
 
     builder._ensure_cache_hydrated(use_streaming=False)
     assert flushed_batch_sizes == [3, 3, 1]
+
+
+def test_hydration_prepares_next_batch_while_cache_write_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hydration should prepare the next batch during the current cache write.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs a small flush threshold and
+        coordinated cache writer.
+    :return None: Checks overlap, write ordering, and the final partial batch.
+    """
+    monkeypatch.setattr(embedding_module, "HYDRATION_FLUSH_SIZE", 2)
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        use_streaming=False,
+        corpus_size=5,
+        client=MagicMock(),
+    )
+    first_write_started = threading.Event()
+    next_batch_preparation_started = threading.Event()
+    written_batches: list[list[str]] = []
+
+    def _dataset() -> Iterator[dict[str, str]]:
+        """Coordinate the next batch's preparation with the first cache write.
+
+        :return Iterator[dict[str, str]]: Five deterministic metadata records.
+        """
+        for index in range(5):
+            if index == 2:
+                assert first_write_started.wait(timeout=2)
+                next_batch_preparation_started.set()
+            yield {"id": f"p{index}", "title": f"Paper {index}"}
+
+    def _cache_batch(batch: list[dict[str, Any]]) -> int:
+        """Block the first write until main-thread preparation overlaps it.
+
+        :param list[dict[str, Any]] batch: Hydration batch to record.
+        :return int: Number of records accepted by the cache.
+        """
+        if not written_batches:
+            first_write_started.set()
+            assert next_batch_preparation_started.wait(timeout=2)
+        written_batches.append([str(record["paper_id"]) for record in batch])
+        return len(batch)
+
+    monkeypatch.setattr(builder, "_cache_metadata_batch", _cache_batch)
+
+    hydrated = builder._hydrate_dataset_records(
+        _dataset(),
+        progress_total=5,
+        progress_label="Testing hydration",
+    )
+
+    assert hydrated == 5
+    assert written_batches == [["p0", "p1"], ["p2", "p3"], ["p4"]]
+
+
+def test_hydration_cache_write_failure_preserves_completed_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed cache write should propagate without submitting later records.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs a deterministic failing writer.
+    :return None: Checks only the successful prefix is completed before failure.
+    """
+    monkeypatch.setattr(embedding_module, "HYDRATION_FLUSH_SIZE", 2)
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        storage_precision="float32",
+        use_streaming=False,
+        corpus_size=5,
+        client=MagicMock(),
+    )
+    attempted_batches: list[list[str]] = []
+    completed_records: list[str] = []
+    progress = MagicMock()
+
+    @contextmanager
+    def _progress_task(**kwargs: Any) -> Iterator[MagicMock]:
+        """Yield a recorder for completed hydration progress.
+
+        :param Any kwargs: Progress task arguments under test.
+        :return Iterator[MagicMock]: Context manager yielding the recorder.
+        """
+        del kwargs
+        yield progress
+
+    def _cache_batch(batch: list[dict[str, Any]]) -> int:
+        """Persist the first batch and fail the next one.
+
+        :param list[dict[str, Any]] batch: Hydration batch to process.
+        :return int: Number of records accepted by the cache.
+        :raises RuntimeError: On the second cache write.
+        """
+        paper_ids = [str(record["paper_id"]) for record in batch]
+        attempted_batches.append(paper_ids)
+        if len(attempted_batches) == 2:
+            raise RuntimeError("cache write failed")
+        completed_records.extend(paper_ids)
+        return len(batch)
+
+    monkeypatch.setattr(builder, "_cache_metadata_batch", _cache_batch)
+    monkeypatch.setattr(embedding_module, "progress_task", _progress_task)
+    dataset = [{"id": f"p{index}", "title": f"Paper {index}"} for index in range(5)]
+
+    with pytest.raises(RuntimeError, match="cache write failed"):
+        builder._hydrate_dataset_records(
+            dataset,
+            progress_total=5,
+            progress_label="Testing hydration",
+        )
+
+    assert attempted_batches == [["p0", "p1"], ["p2", "p3"]]
+    assert completed_records == ["p0", "p1"]
+    assert progress.update.call_args_list == [call(2)]
 
 
 def test_cache_metadata_batch_caps_model_encode_batch_size(

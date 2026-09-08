@@ -190,7 +190,7 @@ def test_real_cuda_int8_corpus_cache_round_trip(
     with h5py.File(cache.h5_path, "r") as h5_file:
         assert h5_file[EMBEDDINGS_DATASET_NAME].dtype == np.dtype(np.int8)
 
-    assert len(loader_calls) == 2
+    assert loader_calls == [(None, None)]
     blocked_loader = MagicMock(
         side_effect=AssertionError("warm cache unexpectedly reloaded its corpus")
     )
@@ -208,3 +208,40 @@ def test_real_cuda_int8_corpus_cache_round_trip(
     assert all(result.embedding.dtype == np.float32 for result in results)
     assert all(np.isfinite(result.embedding).all() for result in results)
     assert client.method_calls == []
+
+
+def test_real_cuda_prefetched_embeddings_match_native() -> None:
+    """Compare prefetched batches with native encoding on the designated model.
+
+    :return None: Prompts, truncation, order, and FP32 normalization agree.
+    """
+    torch = _require_cuda()
+    builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
+    builder._load_model()
+    builder.model.default_prompt_name = "document"
+    texts = [
+        "title: Retrieval | text: Dense embeddings find relevant research papers.",
+        "title: Diffusion | text: A generative model denoises images step by step.",
+        "title: Multilingual | text: Recherche scientifique, 日本語, Ελληνικά.",
+        "title: Long input | text: " + "A transformer represents context. " * 700,
+        "title: Graphs | text: Message passing learns representations of nodes.",
+        "",
+        "title: Retrieval | text: Dense embeddings find relevant research papers.",
+    ]
+    encoder = builder._get_model_for_encoding()
+    native = encoder.encode(
+        texts,
+        batch_size=3,
+        convert_to_tensor=False,
+        normalize_embeddings=True,
+        show_progress_bar=False,
+    )
+    prefetched = builder._encode_texts(texts, batch_size=3)
+    torch.cuda.synchronize()
+
+    assert prefetched.shape == native.shape == (len(texts), builder.truncate_dim)
+    assert prefetched.dtype == np.float32
+    assert np.isfinite(prefetched).all()
+    np.testing.assert_allclose(np.linalg.norm(prefetched, axis=1), 1.0, atol=1e-5)
+    assert np.min(np.sum(native * prefetched, axis=1)) > 0.999
+    np.testing.assert_allclose(prefetched[0], prefetched[-1], atol=1e-5)
