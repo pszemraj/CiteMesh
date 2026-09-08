@@ -262,9 +262,9 @@ Top-level fields:
 
 `build` includes strategy-specific sections:
 
-- `citation` for reference/citation collection knobs that affected the run. Recommendation sidecars include only shared reference-hydration settings, while citation and hybrid sidecars also include citation-expansion budgets.
+- `citation` for reference/citation collection knobs that affected the run. Citation and recommendation sidecars record `similarity_threshold` and shared reference-hydration settings; citation and hybrid sidecars also include citation-expansion budgets.
 - `hybrid` for resolved `max_semantic`.
-- `embedding` for embedding/hybrid semantic settings, including the requested `device` and `model_profile` tokens.
+- `embedding` for embedding/hybrid semantic settings, including the requested `device` and `model_profile` tokens. Embedding-strategy sidecars also record `top_k`, the per-node edge cap.
 
 Inactive source and storage options are omitted: candidate runs do not record
 corpus-hydration flags, corpus runs do not record candidate-pool budgets, and

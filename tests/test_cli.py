@@ -3241,6 +3241,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
     assert citation_config == {
         "fetch_references": False,
         "refresh_reference_cache": True,
+        "similarity_threshold": cli_args.similarity_threshold,
     }
     assert "max_citations" not in citation_config
     assert "max_references" not in citation_config
@@ -3363,7 +3364,11 @@ def test_hybrid_disabled_semantic_branch_skips_embedding_side_effect_logs(
 def test_strategy_dispatches_to_matching_builder_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Dispatch should pass parsed CLI settings into strategy builders."""
+    """Dispatch and sidecars should retain the same graph-shaping settings.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces builders with recording stubs.
+    :return None: Checks builder arguments and strategy-specific sidecar values.
+    """
     cases = [
         (
             "citation",
@@ -3505,6 +3510,24 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         assert seed_id == "seed"
         assert graph.number_of_nodes() == 1
         assert captured == expected_kwargs
+        build_config = cli_module._build_graph_config_payload(
+            namespace,
+            seed_id,
+            {},
+            ["json"],
+            {"json": Path(f"out/{strategy}.json")},
+        )["build"]
+        if "similarity_threshold" in captured:
+            assert (
+                build_config["citation"]["similarity_threshold"]
+                == captured["similarity_threshold"]
+            )
+        else:
+            assert "similarity_threshold" not in build_config.get("citation", {})
+        if "top_k" in captured:
+            assert build_config["embedding"]["top_k"] == captured["top_k"]
+        else:
+            assert "top_k" not in build_config.get("embedding", {})
         client_factory = MagicMock()
         monkeypatch.setattr(cli_module, "SemanticScholarClient", client_factory)
         namespace.refresh_paper_cache = True

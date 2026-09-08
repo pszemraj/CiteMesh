@@ -3166,14 +3166,18 @@ def _build_citation_config_payload(
         return {
             "fetch_references": fetch_references,
             "refresh_reference_cache": refresh_reference_cache,
+            "similarity_threshold": cli_args.similarity_threshold,
         }
     if strategy in {"citation", "hybrid"}:
-        return {
+        config = {
             "max_citations": int(cli_args.max_citations),
             "max_references": int(cli_args.max_references),
             "fetch_references": fetch_references,
             "refresh_reference_cache": refresh_reference_cache,
         }
+        if strategy == "citation":
+            config["similarity_threshold"] = cli_args.similarity_threshold
+        return config
     return None
 
 
@@ -3231,6 +3235,8 @@ def _build_graph_config_payload(
                 getattr(cli_args, "cache_overwrite_reason", None)
             ),
         }
+        if strategy == "embedding":
+            embedding_config["top_k"] = int(cli_args.top_k)
         if cli_args.semantic_source != "arxiv-corpus":
             for dest in _CORPUS_ONLY_OPTION_DESTS:
                 embedding_config.pop(dest, None)
