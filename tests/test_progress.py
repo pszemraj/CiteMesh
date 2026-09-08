@@ -18,7 +18,7 @@ def progress_console(monkeypatch: pytest.MonkeyPatch) -> Console:
     """Route progress rendering through a recording in-memory console.
 
     :param pytest.MonkeyPatch monkeypatch: Fixture used to restore the global.
-    :return Console: Console whose ``export_text`` holds the rendered frames.
+    :return Console: Console recording rendered output, including live redraws.
     """
     console = Console(
         file=io.StringIO(),
@@ -93,18 +93,22 @@ def test_progress_iterator_with_zero_total_renders_a_bounded_bar(
 def test_dataset_progress_keeps_total_and_eta_visible_at_80_columns(
     monkeypatch: pytest.MonkeyPatch,
     progress_console: Console,
+    recorded_displays: list[Progress],
 ) -> None:
     """Dataset counts and a measured ETA should fit a standard terminal width.
 
     :param pytest.MonkeyPatch monkeypatch: Supplies a deterministic progress clock.
     :param Console progress_console: Recording console with an 80-column width.
+    :param list[Progress] recorded_displays: Captures the final progress display.
     :return None: Checks the rendered count and ETA share an untruncated line.
     """
     clock = [0.0]
     monkeypatch.setattr(
         progress_module,
         "Progress",
-        partial(Progress, get_time=lambda: clock[0], auto_refresh=False),
+        partial(
+            progress_module.Progress, get_time=lambda: clock[0], auto_refresh=False
+        ),
     )
     with progress_module.progress_task(
         total=3156800,
@@ -117,6 +121,9 @@ def test_dataset_progress_keeps_total_and_eta_visible_at_80_columns(
         clock[0] = 2.0
         task.update(1000)
 
+    # Live redraws are terminal replacements, not separate exported text lines.
+    progress_console.export_text(clear=True)
+    progress_console.print(recorded_displays[0].get_renderable())
     lines = progress_console.export_text().splitlines()
     assert any(
         "Calibrating dataset" in line
