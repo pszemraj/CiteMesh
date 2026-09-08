@@ -13,6 +13,7 @@ import math
 import os
 import shutil
 import sys
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1622,6 +1623,7 @@ def _create_parser() -> Tuple[
                     'citemesh build "arxiv:1706.03762" --strategy hybrid',
                 ),
                 ("Find a seed paper", 'citemesh search "attention mechanisms"'),
+                ("Open saved results", "citemesh view"),
                 ("Inspect local storage", "citemesh cache scan"),
             ),
             Text(
@@ -2107,6 +2109,30 @@ def _create_parser() -> Tuple[
         ),
     )
 
+    view_parser = subparsers.add_parser(
+        "view",
+        help="Open saved results in a browser",
+        description="Open an existing HTML export or a collection directory's dashboard.html in a browser.",
+        epilog=_help_examples(
+            ("Open the default saved dashboard", "citemesh view"),
+            ("Open another collection", "citemesh view out/my-collection"),
+            ("Choose Chrome on Linux", "citemesh view --browser google-chrome"),
+        ),
+    )
+    view_parser.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path("out") / DASHBOARD_COLLECTION_FILENAME,
+        help="HTML file or collection directory (default: out/dashboard.html)",
+    )
+    view_parser.add_argument(
+        "--browser",
+        type=_non_empty_str,
+        default=None,
+        help="Browser name, such as google-chrome (default: system browser)",
+    )
+
     # Search subcommand
     search_parser = subparsers.add_parser(
         "search",
@@ -2289,6 +2315,7 @@ def _create_parser() -> Tuple[
     for command_parser, synopsis in (
         (parser, "COMMAND [options]"),
         (build_parser, "PAPER [options]"),
+        (view_parser, "[PATH] [options]"),
         (search_parser, "QUERY [options]"),
         (cache_parser, "COMMAND [options]"),
         (cache_clear_parser, "[options]"),
@@ -2329,6 +2356,7 @@ def _create_parser() -> Tuple[
                     "model_revision": "REV",
                     "dataset_source": "DATASET",
                     "dataset_split": "SPLIT",
+                    "browser": "NAME",
                 }.get(action.dest, "TEXT")
 
     _instrument_parser_actions(parser)
@@ -3624,6 +3652,47 @@ def _masked_secret(value: str) -> str:
     return f"****{value[-4:]}"
 
 
+def _run_view_command(path: Path, browser: Optional[str]) -> int:
+    """Open a saved HTML export using the selected browser.
+
+    :param Path path: HTML file or directory containing the saved dashboard.
+    :param Optional[str] browser: Browser name, or ``None`` for the system default.
+    :return int: Zero if a browser opened, otherwise one with an error message.
+    """
+    target = path.expanduser()
+    try:
+        if target.is_dir():
+            target = target / DASHBOARD_COLLECTION_FILENAME
+        target = target.resolve(strict=True)
+        if not target.is_file() or target.suffix.lower() not in {".html", ".htm"}:
+            logger.error(
+                "Expected a saved HTML file or collection directory: %s. "
+                "Open a dashboard and use Add Results to import graph JSON.",
+                target,
+            )
+            return 1
+    except OSError as exc:
+        logger.error("Cannot read saved results at %s: %s", target, exc)
+        return 1
+
+    try:
+        open_tab = (
+            webbrowser.get(browser).open_new_tab if browser else webbrowser.open_new_tab
+        )
+        opened = open_tab(target.as_uri())
+    except (webbrowser.Error, OSError) as exc:
+        logger.error("Could not launch browser: %s. Open %s manually.", exc, target)
+        return 1
+    if not opened:
+        logger.error(
+            "Could not open a browser. Open %s manually or choose one with --browser NAME.",
+            target,
+        )
+        return 1
+    logger.info("Opened %s", target)
+    return 0
+
+
 def _run_config_command(
     args: argparse.Namespace, config_parser: argparse.ArgumentParser
 ) -> int:
@@ -4057,6 +4126,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "config":
         return _run_config_command(args, config_parser)
+
+    if args.command == "view":
+        return _run_view_command(args.path, args.browser)
 
     user_config = load_user_config()
     args._s2_api_key = _resolve_user_config_api_key(user_config)

@@ -11,6 +11,7 @@ import runpy
 import shlex
 import tempfile
 import threading
+import webbrowser
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -286,6 +287,119 @@ def _populate_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     (cache_root / "references" / "payload.json").write_text("{}", encoding="utf-8")
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(cache_root))
     return cache_root
+
+
+@pytest.mark.parametrize(
+    ("arguments", "html_path", "browser_name"),
+    [
+        ([], "out/dashboard.html", None),
+        (["collection dir"], "collection dir/dashboard.html", None),
+        (
+            ["report #1.html", "--browser", "google-chrome"],
+            "report #1.html",
+            "google-chrome",
+        ),
+    ],
+)
+def test_view_opens_saved_html(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    html_path: str,
+    browser_name: str | None,
+) -> None:
+    """View resolves saved results and sends a file URI to the chosen browser.
+
+    :param Path tmp_path: Directory containing saved results.
+    :param pytest.MonkeyPatch monkeypatch: Isolated browser and working directory.
+    :param list[str] arguments: Optional view arguments.
+    :param str html_path: Saved HTML path relative to the working directory.
+    :param str | None browser_name: Explicit browser override, if any.
+    :return None: Checks browser dispatch without loading build configuration.
+    """
+    monkeypatch.chdir(tmp_path)
+    saved_html = tmp_path / html_path
+    saved_html.parent.mkdir(parents=True, exist_ok=True)
+    saved_html.write_text("<html>Saved result</html>", encoding="utf-8")
+    open_default = MagicMock(return_value=True)
+    controller = MagicMock()
+    controller.open_new_tab.return_value = True
+    get_browser = MagicMock(return_value=controller)
+    monkeypatch.setattr(webbrowser, "open_new_tab", open_default)
+    monkeypatch.setattr(webbrowser, "get", get_browser)
+    load_config = MagicMock(side_effect=AssertionError("view loaded build config"))
+    monkeypatch.setattr(cli_module, "load_user_config", load_config)
+
+    result = run_cli_command(["view", *arguments])
+
+    assert result.returncode == 0, result.stderr
+    if browser_name:
+        get_browser.assert_called_once_with(browser_name)
+        controller.open_new_tab.assert_called_once_with(saved_html.as_uri())
+        open_default.assert_not_called()
+    else:
+        open_default.assert_called_once_with(saved_html.as_uri())
+        get_browser.assert_not_called()
+    load_config.assert_not_called()
+
+
+@pytest.mark.parametrize("target", ["missing.html", "empty-collection", "graph.json"])
+def test_view_rejects_missing_or_non_html_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """View should report unusable inputs without launching a browser.
+
+    :param Path tmp_path: Directory containing invalid result selections.
+    :param pytest.MonkeyPatch monkeypatch: Isolated browser and working directory.
+    :param str target: Missing file, incomplete collection, or graph data file.
+    :return None: Checks a useful error and nonzero exit status.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "empty-collection").mkdir()
+    (tmp_path / "graph.json").write_text("{}", encoding="utf-8")
+    open_default = MagicMock()
+    monkeypatch.setattr(webbrowser, "open_new_tab", open_default)
+
+    result = run_cli_command(["view", target])
+
+    assert result.returncode == 1
+    assert target in result.stderr
+    if target == "graph.json":
+        assert "HTML" in result.stderr
+        assert "Add Results" in result.stderr
+    else:
+        assert "Cannot read saved results" in result.stderr
+    open_default.assert_not_called()
+
+
+@pytest.mark.parametrize("browser_name", [None, "unavailable-browser"])
+def test_view_reports_browser_launch_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, browser_name: str | None
+) -> None:
+    """View should report browser failures with the file available to open manually.
+
+    :param Path tmp_path: Directory containing saved HTML.
+    :param pytest.MonkeyPatch monkeypatch: Isolated browser launch behavior.
+    :param str | None browser_name: Unavailable named browser or default launch failure.
+    :return None: Checks the failure exit status and actionable browser error.
+    """
+    saved_html = tmp_path / "dashboard.html"
+    saved_html.write_text("<html/>", encoding="utf-8")
+    monkeypatch.setattr(webbrowser, "open_new_tab", lambda _url: False)
+    monkeypatch.setattr(
+        webbrowser,
+        "get",
+        MagicMock(side_effect=webbrowser.Error("browser unavailable")),
+    )
+    arguments = ["view", str(saved_html)]
+    if browser_name:
+        arguments.extend(["--browser", browser_name])
+
+    result = run_cli_command(arguments)
+
+    assert result.returncode == 1
+    assert "browser" in result.stderr.lower()
+    assert str(saved_html) in result.stderr
 
 
 def test_cache_commands_contracts(
@@ -3752,6 +3866,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "build",
                 "cache",
                 "search",
+                "view",
                 "S2_API_KEY",
                 "CITEMESH_CACHE_DIR",
                 "--version",
@@ -3779,6 +3894,10 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 DASHBOARD_PACKAGE_FILENAME,
                 ".dashboard.html",
             ],
+        ),
+        (
+            ["view", "--help"],
+            ["view [PATH]", "out/dashboard.html", "--browser NAME", "system browser"],
         ),
         (["search", "--help"], ["search", "--limit"]),
         (["cache", "--help"], ["clear", "scan", "Examples"]),

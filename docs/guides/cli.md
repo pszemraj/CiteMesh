@@ -62,6 +62,23 @@ Persistent defaults for most build flags can be stored with `citemesh config`.
 Supported keys, value forms, and precedence are documented in
 [User Configuration](configuration.md).
 
+## View a Saved Dashboard
+
+`citemesh view [PATH]` opens a saved local dashboard without rebuilding data or starting a server. `PATH` defaults to `out/dashboard.html` relative to the current working directory. An existing directory resolves to its `dashboard.html`; an explicit existing `.html` or `.htm` file is also accepted.
+
+The system default browser opens the file by default. Use `--browser NAME` to select a browser, such as `--browser google-chrome` on Linux. A missing dashboard, non-HTML input, or browser launch failure exits `1` with an actionable error.
+
+```bash
+# Open the default out/dashboard.html collection
+citemesh view
+
+# Open a named dashboard collection
+citemesh view out/my-collection
+
+# Open an explicit standalone file in a selected browser
+citemesh view out/report.dashboard.html --browser google-chrome
+```
+
 ## Accepted Identifiers
 
 - DOI (`10.1038/nature14539`)

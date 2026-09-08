@@ -79,6 +79,8 @@ The collection package remains a portable copy of all results. The per-seed JSON
 files let you inspect, copy, or import a single graph without extracting it from
 that package.
 
+Open the saved collection directly with `citemesh view`; use `citemesh view out/my-collection` for a named existing collection or `citemesh view out/report.dashboard.html` for a standalone file. The command opens the local HTML file without rebuilding or starting a server.
+
 Path components:
 
 - `<slug>` is a filesystem-safe version of the seed title
