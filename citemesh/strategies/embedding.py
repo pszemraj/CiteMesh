@@ -41,6 +41,7 @@ from typing import (
 import networkx as nx
 import numpy as np
 
+from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
@@ -178,6 +179,29 @@ def _suppress_expected_fa2_load_dtype_warning(*, enabled: bool) -> Iterator[None
         yield
     finally:
         transformers_logger.removeFilter(keep_relevant_warning)
+
+
+@contextmanager
+def _suppress_transformers_progress_for_non_tty() -> Iterator[None]:
+    """Temporarily hide Transformers progress bars when stderr is redirected.
+
+    :return Iterator[None]: Scoped model-loading output configuration.
+    """
+    if stderr_isatty():
+        yield
+        return
+
+    from transformers.utils import logging as transformers_logging
+
+    if not transformers_logging.is_progress_bar_enabled():
+        yield
+        return
+
+    transformers_logging.disable_progress_bar()
+    try:
+        yield
+    finally:
+        transformers_logging.enable_progress_bar()
 
 
 class EmbeddingTask(str, Enum):
@@ -2618,17 +2642,18 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     if self.model_revision is not None:
                         st_kwargs["revision"] = self.model_revision
                     try:
-                        with _suppress_expected_fa2_load_dtype_warning(
-                            enabled=(
-                                self._attention_implementation_hint
-                                == "flash_attention_2"
-                                and self._autocast_enabled
-                                and self._autocast_device_type == "cuda"
-                            )
-                        ):
-                            loaded_model = sentence_transformer_cls(
-                                candidate_model, **st_kwargs
-                            )
+                        with _suppress_transformers_progress_for_non_tty():
+                            with _suppress_expected_fa2_load_dtype_warning(
+                                enabled=(
+                                    self._attention_implementation_hint
+                                    == "flash_attention_2"
+                                    and self._autocast_enabled
+                                    and self._autocast_device_type == "cuda"
+                                )
+                            ):
+                                loaded_model = sentence_transformer_cls(
+                                    candidate_model, **st_kwargs
+                                )
                     except (ImportError, ValueError) as exc:
                         fa2_error_markers = (
                             "flashattention2",
@@ -2651,9 +2676,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                         )
                         self._attention_implementation_hint = "sdpa"
                         model_kwargs["attn_implementation"] = "sdpa"
-                        loaded_model = sentence_transformer_cls(
-                            candidate_model, **st_kwargs
-                        )
+                        with _suppress_transformers_progress_for_non_tty():
+                            loaded_model = sentence_transformer_cls(
+                                candidate_model, **st_kwargs
+                            )
                     self._validate_loaded_model_precision(loaded_model, candidate_model)
                     self._validate_loaded_model_contract(loaded_model, candidate_model)
                     self.model = loaded_model

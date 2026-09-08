@@ -199,6 +199,47 @@ def _install_fake_sentence_transformers(
     init_log: dict[str, Any] = {}
     encode_log: list[dict[str, Any]] = []
     blocked_models = set(fail_model_names or ())
+    fake_transformers_logging = types.ModuleType("transformers.utils.logging")
+    fake_transformers_logging.progress_enabled = True
+    fake_transformers_logging.progress_calls = []
+
+    def is_progress_bar_enabled() -> bool:
+        """Return the fake global Transformers progress state.
+
+        :return bool: Whether fake model loading may emit progress frames.
+        """
+        return bool(fake_transformers_logging.progress_enabled)
+
+    def disable_progress_bar() -> None:
+        """Disable fake Transformers progress and record the call.
+
+        :return None: Updates fake global progress state.
+        """
+        fake_transformers_logging.progress_calls.append("disable")
+        fake_transformers_logging.progress_enabled = False
+
+    def enable_progress_bar() -> None:
+        """Enable fake Transformers progress and record the call.
+
+        :return None: Updates fake global progress state.
+        """
+        fake_transformers_logging.progress_calls.append("enable")
+        fake_transformers_logging.progress_enabled = True
+
+    fake_transformers_logging.is_progress_bar_enabled = is_progress_bar_enabled
+    fake_transformers_logging.disable_progress_bar = disable_progress_bar
+    fake_transformers_logging.enable_progress_bar = enable_progress_bar
+    fake_transformers_utils = types.ModuleType("transformers.utils")
+    fake_transformers_utils.logging = fake_transformers_logging
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.__version__ = "5.2.0"
+    fake_transformers.utils = fake_transformers_utils
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setitem(sys.modules, "transformers.utils", fake_transformers_utils)
+    monkeypatch.setitem(
+        sys.modules, "transformers.utils.logging", fake_transformers_logging
+    )
+    init_log["transformers_logging"] = fake_transformers_logging
 
     class _FakeInnerBlock:
         def __init__(self) -> None:
@@ -1467,6 +1508,62 @@ def test_fa2_load_unrelated_failure_does_not_retry_with_sdpa(
         for _model_name, kwargs in attempts
     )
     assert builder._attention_implementation_hint == "flash_attention_2"
+
+
+@pytest.mark.parametrize(
+    ("interactive", "initially_enabled", "expected_calls", "emits_frame"),
+    [
+        (False, True, ["disable", "enable"], False),
+        (False, False, [], False),
+        (True, True, [], True),
+    ],
+    ids=["non-tty-enabled", "non-tty-already-disabled", "tty-enabled"],
+)
+def test_non_tty_model_load_suppresses_transformers_progress_temporarily(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    interactive: bool,
+    initially_enabled: bool,
+    expected_calls: list[str],
+    emits_frame: bool,
+) -> None:
+    """Non-interactive model loads should not leave Transformers bars enabled.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param pytest.CaptureFixture[str] capsys: Captured stderr fixture.
+    :param bool interactive: Whether the test stderr is interactive.
+    :param bool initially_enabled: Initial global Transformers progress state.
+    :param list[str] expected_calls: Expected progress-toggle calls during loading.
+    :param bool emits_frame: Whether the fake loader should emit a progress frame.
+    :return None: Asserts non-TTY suppression, emitted output, and restoration.
+    """
+    init_log, _ = _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
+    transformers_logging = init_log["transformers_logging"]
+    transformers_logging.progress_enabled = initially_enabled
+    original_cls = embedding_module._import_sentence_transformer_class()
+
+    def load(model_name: str, **kwargs: Any) -> Any:
+        """Emit a fake progress frame only while the global bar is enabled.
+
+        :param str model_name: Requested checkpoint.
+        :param Any kwargs: SentenceTransformer constructor arguments.
+        :return Any: Fake loaded model.
+        """
+        if transformers_logging.is_progress_bar_enabled():
+            print("transformers progress frame", file=sys.stderr, end="\r")
+        return original_cls(model_name, **kwargs)
+
+    monkeypatch.setattr(embedding_module, "stderr_isatty", lambda: interactive)
+    monkeypatch.setattr(
+        embedding_module, "_import_sentence_transformer_class", lambda: load
+    )
+    EmbeddingGraphBuilder(client=MagicMock())._load_model()
+
+    captured = capsys.readouterr()
+    assert ("transformers progress frame" in captured.err) is emits_frame
+    assert transformers_logging.progress_calls == expected_calls
+    assert transformers_logging.progress_enabled is initially_enabled
 
 
 def test_verified_fa2_autocast_filters_only_redundant_load_warning(
