@@ -1674,6 +1674,85 @@ def test_fa2_load_warning_filter_is_removed_after_failure() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("autocast_enabled", "raise_error", "expected_messages"),
+    [
+        (
+            True,
+            False,
+            [
+                "independent Transformers forward warning",
+                "Casting fp32 inputs back to torch.bfloat16 for flash-attn compatibility.",
+            ],
+        ),
+        (
+            False,
+            False,
+            [
+                "Casting fp32 inputs back to torch.bfloat16 for flash-attn compatibility.",
+                "independent Transformers forward warning",
+                "Casting fp32 inputs back to torch.bfloat16 for flash-attn compatibility.",
+            ],
+        ),
+        (
+            True,
+            True,
+            [
+                "independent Transformers forward warning",
+                "Casting fp32 inputs back to torch.bfloat16 for flash-attn compatibility.",
+            ],
+        ),
+    ],
+    ids=["enabled", "gate-disabled", "cleanup-after-error"],
+)
+def test_fa2_precision_context_filters_forward_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    autocast_enabled: bool,
+    raise_error: bool,
+    expected_messages: list[str],
+) -> None:
+    """Verified CUDA bf16 FA2 should scope its expected forward warning filter.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param bool autocast_enabled: Whether verified bf16 autocast is active.
+    :param bool raise_error: Whether the precision context raises while active.
+    :param list[str] expected_messages: Ordered captured warning messages.
+    :return None: Checks filtering, gating, and cleanup.
+    """
+    _install_fake_torch(monkeypatch, cuda_available=True, bf16_supported=True)
+    builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
+    builder._autocast_enabled = autocast_enabled
+    builder._autocast_device_type = "cuda" if autocast_enabled else None
+    builder._attention_implementation_hint = "flash_attention_2"
+    monkeypatch.setattr(builder, "_autocast_context", nullcontext)
+    monkeypatch.setattr(builder, "_tf32_context", nullcontext)
+    flash_logger = logging.getLogger("transformers.modeling_flash_attention_utils")
+    handler = MagicMock(spec=logging.Handler)
+    handler.level = logging.NOTSET
+    forward_warning = (
+        "Casting fp32 inputs back to torch.bfloat16 for flash-attn compatibility."
+    )
+    flash_logger.addHandler(handler)
+    try:
+        error_context = (
+            pytest.raises(RuntimeError, match="encoding failure")
+            if raise_error
+            else nullcontext()
+        )
+        with error_context:
+            with builder._precision_context():
+                flash_logger.warning(forward_warning)
+                flash_logger.warning("independent Transformers forward warning")
+                if raise_error:
+                    raise RuntimeError("encoding failure")
+        flash_logger.warning(forward_warning)
+    finally:
+        flash_logger.removeHandler(handler)
+
+    messages = [call.args[0].getMessage() for call in handler.handle.call_args_list]
+    assert messages == expected_messages
+
+
 def test_compile_replaces_and_restores_sentence_transformers_active_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

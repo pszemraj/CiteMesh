@@ -93,6 +93,9 @@ logger = logging.getLogger(__name__)
 _FA2_LOAD_DTYPE_WARNING_PREFIX = (
     "Flash Attention 2 only supports torch.float16 and torch.bfloat16 dtypes"
 )
+_FA2_FORWARD_DTYPE_WARNING = (
+    "Casting fp32 inputs back to torch.bfloat16 for flash-attn compatibility."
+)
 _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
 # bf16-on-MPS is only enabled on torch releases verified on Apple Silicon; this is
 # a policy floor, not a hard technical cliff — lower it once older wheels are vetted.
@@ -2504,6 +2507,26 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         with ExitStack() as stack:
             stack.enter_context(self._tf32_context())
             stack.enter_context(self._autocast_context())
+            if (
+                self.device == "cuda"
+                and self._autocast_enabled
+                and self._autocast_device_type == "cuda"
+                and self._attention_implementation_hint == "flash_attention_2"
+            ):
+
+                def keep_relevant_warning(record: logging.LogRecord) -> bool:
+                    """Reject the expected FP32-to-bf16 attention warning.
+
+                    :param logging.LogRecord record: Candidate Transformers log record.
+                    :return bool: Whether the log record should be emitted.
+                    """
+                    return record.getMessage() != _FA2_FORWARD_DTYPE_WARNING
+
+                flash_logger = logging.getLogger(
+                    "transformers.modeling_flash_attention_utils"
+                )
+                flash_logger.addFilter(keep_relevant_warning)
+                stack.callback(flash_logger.removeFilter, keep_relevant_warning)
             if self.device == "cpu" and self._inner_model_compiled:
                 # Dynamo must see freezing while capturing weights; backend-only
                 # compile options arrive too late. Keep eager fallback weights.
