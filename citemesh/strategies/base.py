@@ -345,7 +345,7 @@ class GraphBuilderStrategy(ABC):
                     edges_created += 1
 
         logger.info(
-            "Graph complete: %s nodes, %s edges",
+            "Graph constructed: %s nodes, %s edges",
             graph.number_of_nodes(),
             edges_created,
         )

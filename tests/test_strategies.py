@@ -1635,6 +1635,35 @@ def test_degree_capping_preserves_per_node_limit(
 
 
 @pytest.mark.parametrize(
+    "builder_factory",
+    [
+        lambda: CitationGraphBuilder(max_papers=5, client=MagicMock()),
+        lambda: RecommendationGraphBuilder(max_papers=5, client=MagicMock()),
+    ],
+)
+def test_capped_strategies_log_final_edge_count(
+    builder_factory: Callable[[], object],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Capped strategies must reserve the completion count for the final graph.
+
+    :param Callable[[], object] builder_factory: Capped strategy constructor.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used for deterministic graph inputs.
+    :param pytest.LogCaptureFixture caplog: Captured graph-construction logs.
+    :return None: Assertions validate pre-cap and final edge counts are distinct.
+    """
+    builder, _ = _make_constant_similarity_builder(builder_factory, monkeypatch)
+
+    with caplog.at_level(logging.INFO):
+        graph, _ = builder.build_graph("seed")
+
+    assert "Graph constructed: 5 nodes, 10 edges" in caplog.text
+    assert f"Graph complete: 5 nodes, {graph.number_of_edges()} edges" in caplog.text
+    assert "Graph complete: 5 nodes, 10 edges" not in caplog.text
+
+
+@pytest.mark.parametrize(
     ("edges", "max_edges_per_node", "expected"),
     [
         (
