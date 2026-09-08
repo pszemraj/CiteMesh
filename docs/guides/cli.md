@@ -17,6 +17,8 @@ Installation and optional extras are covered in [README](../../README.md).
 
 Every command supports `-h` / `--help`, including nested commands (`citemesh build --help`, `citemesh cache clear --help`). Help is Rich-styled with grouped options and examples, adapts to terminal width up to 110 columns, and describes built-in defaults - use `citemesh config list` to see saved overrides. Redirected help is plain text; set `NO_COLOR=1` to disable colors in an interactive terminal (emphasis such as bold may remain). `--log-width` controls result tables and logs; help always uses the terminal width.
 
+`citemesh --version` prints the installed package version and exits.
+
 Queries, paper titles, and config values are displayed literally, including square brackets. `config get` and `config path` return raw, unwrapped values on stdout for shell substitution; operational logs go to stderr.
 
 ## Basic Invocation
@@ -53,6 +55,8 @@ citemesh config path
 ```
 
 For cache path/layout/hydration details, see [Caching & Data](caching.md). In non-interactive shells, `citemesh cache clear` requires `--yes`. `citemesh cache clear` never deletes `config.toml`. In non-interactive embedding/hybrid runs, `--force-rebuild-cache` requires `--overwrite-cache`.
+
+Cache scans count symbolic links and their own sizes without traversing their targets, matching cache clear's removal of the links themselves. Cache clear aborts if it cannot inspect the preserved configuration file.
 
 Persistent defaults for most build flags can be stored with `citemesh config`.
 Supported keys, value forms, and precedence are documented in

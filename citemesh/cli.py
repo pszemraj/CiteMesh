@@ -38,6 +38,7 @@ from rich.table import Table
 from rich.text import Text
 from rich_argparse import RichHelpFormatter
 
+from citemesh import __version__
 from citemesh._runtime import stderr_isatty, stdin_isatty, stdout_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG
 from citemesh.core.user_config import (
@@ -1634,6 +1635,10 @@ def _create_parser() -> Tuple[
             ),
             Text("\nPersonal defaults: citemesh config --help", style="dim"),
         ),
+    )
+
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
 
     subparsers = parser.add_subparsers(
@@ -3491,7 +3496,7 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
         # Hold the config lock so an in-flight atomic write cannot lose its
         # temporary file; preserve the lock's path for waiting writers.
         with config_lock(config_path) as lock_path:
-            preserved_config = config_path.exists() or config_path.is_symlink()
+            preserved_config = path_exists(config_path) or config_path.is_symlink()
             for child in sorted(cache_root.iterdir()):
                 if child in {config_path, lock_path}:
                     continue
@@ -3524,20 +3529,20 @@ def _scan_path_stats(path: Path) -> tuple[int, int]:
     :param Path path: Directory or file path to scan.
     :return tuple[int, int]: ``(file_count, size_bytes)`` totals.
     """
-    if path.is_file():
+    if path.is_symlink() or path.is_file():
         try:
-            return 1, path.stat().st_size
+            return 1, path.lstat().st_size
         except OSError:
             return 1, 0
 
     file_count = 0
     size_bytes = 0
     for candidate in path.rglob("*"):
-        if not candidate.is_file():
+        if not candidate.is_symlink() and not candidate.is_file():
             continue
         file_count += 1
         try:
-            size_bytes += candidate.stat().st_size
+            size_bytes += candidate.lstat().st_size
         except OSError:
             continue
     return file_count, size_bytes

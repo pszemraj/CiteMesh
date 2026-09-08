@@ -291,8 +291,30 @@ def _populate_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 def test_cache_commands_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Cache clear/scan should honor configured cache root and print usage summary."""
+    """Cache clear/scan should count links without traversing their targets.
+
+    :param Path tmp_path: Temporary cache and external directory locations.
+    :param pytest.MonkeyPatch monkeypatch: Overrides the cache-root environment.
+    :return None: Checks scan totals, cache removal, and intact symlink targets.
+    """
     cache_root = _populate_cache_root(tmp_path, monkeypatch)
+    external = tmp_path / "external"
+    external.mkdir()
+    external_file = external / "payload.bin"
+    external_file.write_bytes(b"outside cache" * 1000)
+    links = [
+        (cache_root / "linked-directory", external),
+        (cache_root / "linked-file", external_file),
+        (cache_root / "broken-link", external / "missing"),
+        (cache_root / "embeddings" / "nested-link", external),
+    ]
+    for link, target in links:
+        link.symlink_to(target, target_is_directory=target == external)
+        assert cli_module._scan_path_stats(link) == (1, link.lstat().st_size)
+    assert cli_module._scan_path_stats(cache_root) == (
+        2 + len(links),
+        2050 + sum(link.lstat().st_size for link, _target in links),
+    )
 
     scan_result = run_cli_command(["cache", "scan"])
     assert scan_result.returncode == 0, (
@@ -321,6 +343,48 @@ def test_cache_commands_contracts(
     )
     assert cache_root.is_dir()
     assert {child.name for child in cache_root.iterdir()} <= {"config.toml.lock"}
+    assert external_file.read_bytes() == b"outside cache" * 1000
+
+
+def test_cache_clear_reports_config_inspection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed config stat must abort clearing even when exists hides errors.
+
+    :param Path tmp_path: Temporary cache location.
+    :param pytest.MonkeyPatch monkeypatch: Emulates suppressed exists errors.
+    :return None: Checks that the error is reported before deleting cache data.
+    """
+    cache_root = _populate_cache_root(tmp_path, monkeypatch)
+    config_path = cache_root / "config.toml"
+    config_path.write_text('[defaults]\ntheme = "dark"\n', encoding="utf-8")
+    original_stat = Path.stat
+    original_exists = Path.exists
+
+    def denied_stat(path: Path, *args: Any, **kwargs: Any) -> Any:
+        """Deny config inspection while allowing all other file operations.
+
+        :param Path path: Path being inspected.
+        :param Any args: Forwarded positional stat arguments.
+        :param Any kwargs: Forwarded keyword stat arguments.
+        :return Any: Original stat result for other paths.
+        """
+        if path == config_path and kwargs.get("follow_symlinks", True):
+            raise PermissionError("config stat denied")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied_stat)
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda path: False if path == config_path else original_exists(path),
+    )
+    monkeypatch.setattr(
+        cli_module, "_confirmed_cache_clear", lambda *_args, **_kwargs: True
+    )
+
+    assert cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
+    assert (cache_root / "embeddings" / "vectors.bin").is_file()
 
 
 def test_cache_clear_declined_at_prompt_keeps_cache(
@@ -3680,6 +3744,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setenv("COLUMNS", str(width))
     monkeypatch.delenv("FORCE_COLOR", raising=False)
     cases = [
+        (["--version"], [f"citemesh {cli_module.__version__}"]),
         (
             ["--help"],
             [
@@ -3689,6 +3754,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "search",
                 "S2_API_KEY",
                 "CITEMESH_CACHE_DIR",
+                "--version",
             ],
         ),
         (
