@@ -737,10 +737,6 @@ class EmbeddingCache:
                 binary_embedding = (
                     None if binary_embeddings is None else binary_embeddings[idx]
                 )
-                if return_embeddings:
-                    new_embeddings[record.paper_id] = np.asarray(
-                        returned_embeddings[idx], dtype=np.float32
-                    )
                 existing_row = latest_rows.get(record.paper_id)
                 latest_row_idx = (
                     existing_row["row_idx"] if existing_row is not None else None
@@ -752,6 +748,14 @@ class EmbeddingCache:
                     and latest_row_idx is not None
                     and 0 <= latest_row_idx < existing_row_count
                 ):
+                    if return_embeddings:
+                        new_embeddings.update(
+                            self._load_cached_embeddings(
+                                h5,
+                                embeddings_dataset,
+                                [(record.paper_id, latest_row_idx)],
+                            )
+                        )
                     rows_to_upsert.append(
                         self._metadata_tuple(
                             paper_id=record.paper_id,
@@ -763,6 +767,10 @@ class EmbeddingCache:
                     )
                     continue
 
+                if return_embeddings:
+                    new_embeddings[record.paper_id] = np.asarray(
+                        returned_embeddings[idx], dtype=np.float32
+                    )
                 if (
                     latest_row_idx is not None
                     and 0 <= latest_row_idx < existing_row_count

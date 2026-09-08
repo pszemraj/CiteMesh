@@ -1004,23 +1004,37 @@ def test_embedding_cache_int8_requires_explicit_calibration_ranges() -> None:
 def test_embedding_cache_rechecks_misses_after_encode_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Encode phase should run outside the lock and reuse rows inserted mid-flight."""
+    """Encode races must return the persisted winner on this and later cache hits.
+
+    :param pytest.MonkeyPatch monkeypatch: Runtime patch helper.
+    :return None: Assertions validate the race winner and warm cache behavior.
+    """
     monkeypatch.setenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR, "0.05")
 
     class _RaceEncodeModel:
         """Encode model that inserts the same row through a nested cache write."""
 
         def __init__(self, cache: EmbeddingCache) -> None:
+            """Initialize the race model with the shared embedding cache.
+
+            :param EmbeddingCache cache: Cache used by the concurrent winner.
+            """
             self.cache = cache
             self.encode_calls = 0
 
         def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            """Persist a winner vector while producing a distinct loser vector.
+
+            :param list[str] texts: Input texts requested for embedding.
+            :param object kwargs: Encoder options not used by this fixture.
+            :return np.ndarray: Fresh vector that loses the concurrent cache race.
+            """
             del texts, kwargs
             self.encode_calls += 1
             self.cache.get_embeddings(
                 {"p1": {"title": "Alpha", "abstract": "First"}},
                 LookupEncodeModel(
-                    {"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}
+                    {"Alpha. First": np.asarray([0.0, 1.0], dtype=np.float32)}
                 ),
                 show_progress=False,
             )
@@ -1046,12 +1060,20 @@ def test_embedding_cache_rechecks_misses_after_encode_race(
             ).fetchone()[0]
         with h5py.File(cache.h5_path, "r") as h5:
             embedding_rows = int(h5["embeddings"].shape[0])
+        warm_embeddings = cache.get_embeddings(
+            {"p1": {"title": "Alpha", "abstract": "First"}},
+            model,
+            show_progress=False,
+        )
 
     assert model.encode_calls == 1
     assert paper_rows == 1
     assert embedding_rows == 1
     assert row_idx == 0
-    np.testing.assert_allclose(embeddings["p1"], np.asarray([1.0, 0.0], np.float32))
+    np.testing.assert_allclose(embeddings["p1"], np.asarray([0.0, 1.0], np.float32))
+    np.testing.assert_allclose(
+        warm_embeddings["p1"], np.asarray([0.0, 1.0], np.float32)
+    )
 
 
 def test_embedding_cache_uses_length_bucketed_encode_batches() -> None:
