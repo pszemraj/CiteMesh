@@ -162,7 +162,7 @@ class _HelpFormatter(RichHelpFormatter):
         super().__init__(
             prog,
             max_help_position=32,
-            width=min(110, shutil.get_terminal_size().columns - 2),
+            width=max(40, min(110, shutil.get_terminal_size().columns - 2)),
         )
 
 

@@ -3684,6 +3684,27 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
             assert token.lower() in lowered
 
 
+def test_cli_help_survives_unusable_terminal_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Help must remain readable when the terminal reports one column.
+
+    :param pytest.MonkeyPatch monkeypatch: Terminal-size override fixture.
+    :return None: Checks nonempty root help at the minimum formatter width.
+    """
+    monkeypatch.setattr(
+        cli_module.shutil,
+        "get_terminal_size",
+        lambda: SimpleNamespace(columns=1),
+    )
+
+    help_text = cli_module._create_parser()[0].format_help()
+
+    assert "usage: citemesh COMMAND [options]" in help_text
+    assert "CiteMesh" in help_text
+    assert "Options:" in help_text
+
+
 def test_output_path_and_slug_contracts() -> None:
     """Output path resolver and auto-output slug generation should stay stable."""
     path_cases = [
