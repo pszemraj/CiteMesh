@@ -1364,12 +1364,24 @@ def test_attention_selection_uses_fa2_only_on_bf16_cuda(
     assert init_log["kwargs"]["model_kwargs"].get("attn_implementation") == expected
 
 
+@pytest.mark.parametrize(
+    ("error_type", "message"),
+    [
+        (ImportError, "flash_attn CUDA extension cannot be loaded"),
+        (ValueError, "Flash Attention 2 is not available on this CUDA device"),
+    ],
+    ids=["missing-import", "unsupported-device"],
+)
 def test_fa2_load_failure_retries_same_checkpoint_with_sdpa(
     monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+    message: str,
 ) -> None:
     """An unusable FA2 installation must retain the chosen checkpoint via SDPA.
 
     :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param type[Exception] error_type: FA2-specific constructor error type.
+    :param str message: FA2-specific constructor error message.
     :return None: Checks the fallback backend and automatic checkpoint dtype.
     """
     _install_fake_sentence_transformers(monkeypatch)
@@ -1386,7 +1398,7 @@ def test_fa2_load_failure_retries_same_checkpoint_with_sdpa(
         """
         attempts.append((model_name, dict(kwargs["model_kwargs"])))
         if kwargs["model_kwargs"]["attn_implementation"] == "flash_attention_2":
-            raise ImportError("flash_attn CUDA extension cannot be loaded")
+            raise error_type(message)
         return original_cls(model_name, **kwargs)
 
     monkeypatch.setattr(embedding_module, "_module_available", lambda _name: True)
@@ -1406,6 +1418,55 @@ def test_fa2_load_failure_retries_same_checkpoint_with_sdpa(
         ),
     ]
     assert builder._attention_implementation_hint == "sdpa"
+
+
+@pytest.mark.parametrize("error_type", [OSError, ImportError])
+def test_fa2_load_unrelated_failure_does_not_retry_with_sdpa(
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[Exception],
+) -> None:
+    """A non-FA2 model-load failure should preserve the requested backend.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
+    :param type[Exception] error_type: Unrelated constructor failure type.
+    :return None: Asserts transient load failures are not mislabeled as FA2 errors.
+    """
+    _install_fake_sentence_transformers(monkeypatch)
+    _install_fake_torch(monkeypatch, cuda_available=True, bf16_supported=True)
+    attempts = []
+
+    def load(model_name: str, **kwargs: Any) -> Any:
+        """Record the initial backend before simulating a transient load failure.
+
+        :param str model_name: Requested checkpoint.
+        :param Any kwargs: SentenceTransformer constructor arguments.
+        :return Any: Never returns because the first load is interrupted.
+        :raises Exception: Simulated unrelated model-loading failure.
+        """
+        attempts.append((model_name, dict(kwargs["model_kwargs"])))
+        raise error_type("temporary checkpoint read failure")
+
+    monkeypatch.setattr(embedding_module, "_module_available", lambda _name: True)
+    monkeypatch.setattr(
+        embedding_module, "_import_sentence_transformer_class", lambda: load
+    )
+    builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
+
+    with pytest.raises(
+        RuntimeError, match="temporary checkpoint read failure"
+    ) as caught:
+        builder._load_model()
+
+    assert isinstance(caught.value.__cause__, error_type)
+    assert [model_name for model_name, _kwargs in attempts] == [
+        DEFAULT_EMBEDDING_MODEL_NAME,
+        *DEFAULT_EMBEDDING_MODEL_FALLBACKS[DEFAULT_EMBEDDING_MODEL_NAME],
+    ]
+    assert all(
+        kwargs["attn_implementation"] == "flash_attention_2"
+        for _model_name, kwargs in attempts
+    )
+    assert builder._attention_implementation_hint == "flash_attention_2"
 
 
 def test_verified_fa2_autocast_filters_only_redundant_load_warning(

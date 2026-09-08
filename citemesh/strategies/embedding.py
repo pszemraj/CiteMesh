@@ -2629,8 +2629,20 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                             loaded_model = sentence_transformer_cls(
                                 candidate_model, **st_kwargs
                             )
-                    except Exception as exc:
-                        if self._attention_implementation_hint != "flash_attention_2":
+                    except (ImportError, ValueError) as exc:
+                        fa2_error_markers = (
+                            "flashattention2",
+                            "flash attention 2",
+                            "flash_attn",
+                            "flash_attention_2",
+                        )
+                        if (
+                            self._attention_implementation_hint != "flash_attention_2"
+                            or not any(
+                                marker in str(exc).casefold()
+                                for marker in fa2_error_markers
+                            )
+                        ):
                             raise
                         logger.warning(
                             "FlashAttention 2 could not load for %s (%s); retrying with SDPA.",
