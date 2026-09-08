@@ -708,12 +708,15 @@ def test_search_mode_local_prints_cached_results(
     assert builder_kwargs["storage_precision"] == "float32"
 
 
+@pytest.mark.parametrize("binary_prefilter", [False, True])
 def test_search_local_uses_configured_corpus_dataset_source(
     monkeypatch: pytest.MonkeyPatch,
+    binary_prefilter: bool,
 ) -> None:
-    """Local corpus search should target the configured metadata source.
+    """Local corpus search should target the configured int8 cache namespace.
 
     :param pytest.MonkeyPatch monkeypatch: Fixture replacing local runtime dependencies.
+    :param bool binary_prefilter: Persisted binary-prefilter setting.
     :return None: Assertions validate the build-defaults namespace passed to search.
     """
     fake_builder = _fake_local_search_builder(
@@ -722,17 +725,13 @@ def test_search_local_uses_configured_corpus_dataset_source(
     builder_factory = MagicMock(return_value=fake_builder)
     monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
     dataset_source = "research/arxiv-snapshot"
-    monkeypatch.setattr(
-        cli_module,
-        "load_user_config",
-        lambda: UserConfig(
-            path=Path("cfg-home") / "config.toml",
-            defaults={
-                "semantic_source": "arxiv-corpus",
-                "dataset_source": dataset_source,
-            },
-        ),
-    )
+    for key, value in {
+        "semantic_source": "arxiv-corpus",
+        "dataset_source": dataset_source,
+        "calibration_sample_size": "200",
+        "binary_prefilter": str(binary_prefilter).lower(),
+    }.items():
+        cli_module.set_config_value(f"defaults.{key}", value)
 
     result = run_cli_command(["search", "cached topic", "--mode", "local"])
 
@@ -740,6 +739,9 @@ def test_search_local_uses_configured_corpus_dataset_source(
     builder_kwargs = builder_factory.call_args.kwargs
     assert builder_kwargs["semantic_source"] == "arxiv-corpus"
     assert builder_kwargs["dataset_source"] == dataset_source
+    assert builder_kwargs["storage_precision"] == "int8"
+    assert builder_kwargs["calibration_sample_size"] == 200
+    assert builder_kwargs["binary_prefilter"] is binary_prefilter
 
 
 def test_configured_local_corpus_hybrid_build_uses_full_split(

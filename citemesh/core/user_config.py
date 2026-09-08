@@ -216,6 +216,8 @@ CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigCaster] = {
     "candidate_pool_size": _int_caster(1),
     "encode_batch_size": _int_caster(1),
     "storage_precision": _choice_caster(STORAGE_PRECISION_CHOICES),
+    "binary_prefilter": _cast_bool,
+    "calibration_sample_size": _int_caster(1),
     "max_papers": _int_caster(1),
     "max_semantic": _int_caster(0),
     "max_citations": _int_caster(0),

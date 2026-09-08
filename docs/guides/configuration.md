@@ -70,6 +70,8 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | `candidate_pool_size` | Default `--candidate-pool-size` |
 | `encode_batch_size` | Default `--batch-size` / `-bs` |
 | `storage_precision` | Default `--storage-precision` (`int8`, `float32`) |
+| `binary_prefilter` | Default `--binary-prefilter` / `--no-binary-prefilter` toggle for int8 corpus caches |
+| `calibration_sample_size` | Default `--calibration-sample-size` for int8 corpus caches; must match the build to reuse its namespace in local search |
 | `max_papers` | Default `--max-papers` |
 | `max_semantic` | Default `--max-semantic` |
 | `max_citations` | Default `--max-citations` |
