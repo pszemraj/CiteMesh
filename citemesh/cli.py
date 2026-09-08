@@ -3023,12 +3023,14 @@ def update_dashboard_package(
     strategy: str,
     payload: Dict[str, Any],
     build: Dict[str, Any],
+    result_files: Optional[Dict[Path, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Atomically create or update a portable dashboard collection package.
 
     One slot is retained per ``(strategy, seed_id)`` pair. The package lock covers
     existing-package validation, optional legacy migration, merge, and atomic
-    replacement so concurrent builds cannot lose each other's results.
+    replacement, including per-result JSON/config writes, so concurrent builds
+    cannot lose results or leave audit files describing a different run.
 
     :param Path package_path: Portable collection package path.
     :param nx.Graph graph: Built graph used for seed metadata.
@@ -3036,6 +3038,8 @@ def update_dashboard_package(
     :param str strategy: Active strategy name.
     :param Dict[str, Any] payload: Canonical graph payload from the exporter.
     :param Dict[str, Any] build: Portable resolved build settings.
+    :param Optional[Dict[Path, Dict[str, Any]]] result_files: Staged graph and config
+        JSON payloads to write under the package lock.
     :return Dict[str, Any]: Canonical package written to disk.
     :raises DashboardPackageError: If an existing package is invalid or unsupported.
     """
@@ -3078,6 +3082,8 @@ def update_dashboard_package(
                     "results": [entry, *filtered],
                 }
             )
+            for result_path, result_payload in (result_files or {}).items():
+                atomic_write_json(result_path, result_payload, indent=2)
             atomic_write_json(package_path, package, indent=2)
             return package
     except Timeout as exc:
@@ -4203,9 +4209,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             for fmt, method_name in _EXPORTER_METHOD.items():
                 if fmt not in output_paths:
                     continue
-                if fmt == "dashboard" and dashboard_package_path is not None:
-                    # Shared dashboards are rendered after the package update so the
-                    # shell can embed the current collection for offline reuse.
+                if dashboard_package_path is not None and fmt in ("dashboard", "json"):
+                    # Collection JSON is saved under the package lock; the viewer
+                    # is rendered afterward from the latest collection snapshot.
                     continue
                 method = getattr(exporter, method_name)
                 if fmt in _THEME_AWARE_FORMATS:
@@ -4227,21 +4233,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "dashboard"
             ]
             graph_config_path: Optional[Path] = None
+            result_files: Dict[Path, Dict[str, Any]] = {}
             if not standalone_dashboard_only:
                 graph_config_path = resolve_graph_config_path(
                     output_paths=output_paths,
                     strategy=args.strategy,
                 )
-                atomic_write_json(graph_config_path, graph_config_payload, indent=2)
+                if dashboard_package_path is None:
+                    atomic_write_json(graph_config_path, graph_config_payload, indent=2)
+                else:
+                    result_files[graph_config_path] = graph_config_payload
 
             if dashboard_package_path is not None:
+                graph_payload = exporter.graph_payload()
+                result_files[output_paths["json"]] = graph_payload
                 update_dashboard_package(
                     dashboard_package_path,
                     graph=graph,
                     seed_id=seed_id,
                     strategy=args.strategy,
-                    payload=exporter.graph_payload(),
+                    payload=graph_payload,
                     build=dict(graph_config_payload.get("build", {})),
+                    result_files=result_files,
                 )
                 try:
                     render_dashboard_collection_snapshot(

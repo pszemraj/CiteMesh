@@ -2147,6 +2147,111 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
     assert second_result.returncode == 0
 
 
+def test_dashboard_build_serializes_result_files_with_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Overlapping builds of one result must keep its audit files consistent.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces building and delays one upsert.
+    :param Path tmp_path: Temporary collection root.
+    :return None: Assertions verify graph JSON and config match the winning entry.
+    """
+    first_graph = build_seed_graph("seed")
+    second_graph = first_graph.copy()
+    second_graph.add_node("extra", title="Second Run Paper")
+    second_graph.add_edge("seed", "extra", weight=0.4)
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **kwargs: (
+            first_graph if args.max_papers == 1 else second_graph,
+            "seed",
+        ),
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "GraphExporter",
+        _make_exporter_stub({}, methods=("to_dashboard_html",)),
+    )
+
+    first_update_started = threading.Event()
+    allow_first_update = threading.Event()
+    original_update = cli_module.update_dashboard_package
+
+    def delayed_update(package_path: Path, **kwargs: Any) -> dict[str, Any]:
+        """Let the second build finish before the first acquires the package lock.
+
+        :param Path package_path: Shared dashboard package path.
+        :param Any kwargs: Result and staged artifacts passed by the CLI.
+        :return dict[str, Any]: Updated collection package.
+        """
+        if kwargs["graph"] is first_graph:
+            first_update_started.set()
+            assert allow_first_update.wait(timeout=10), "first update never released"
+        return original_update(package_path, **kwargs)
+
+    monkeypatch.setattr(cli_module, "update_dashboard_package", delayed_update)
+    returncodes: list[int] = []
+    errors: list[BaseException] = []
+
+    def worker(max_papers: int) -> None:
+        """Build the same result with distinguishable graph and build settings.
+
+        :param int max_papers: Selects the first or second fixture graph.
+        :return None: Records the CLI result or an unexpected worker error.
+        """
+        try:
+            returncodes.append(
+                cli_module.main(
+                    [
+                        "build",
+                        "arxiv:1706.03762",
+                        "--strategy",
+                        "recommendation",
+                        "--export",
+                        "dashboard",
+                        "--max-papers",
+                        str(max_papers),
+                        "--output",
+                        str(tmp_path),
+                    ]
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first_thread = threading.Thread(target=worker, args=(1,))
+    first_thread.start()
+    try:
+        assert first_update_started.wait(timeout=10), "first update never started"
+        worker(2)
+        assert not errors
+        assert returncodes == [0]
+    finally:
+        allow_first_update.set()
+        first_thread.join(timeout=10)
+
+    assert not first_thread.is_alive()
+    assert not errors
+    assert returncodes == [0, 0]
+    package = load_dashboard_package(tmp_path / DASHBOARD_PACKAGE_FILENAME)
+    assert len(package["results"]) == 1
+    entry = package["results"][0]
+    assert entry["summary"] == {"nodes": 1, "edges": 0}
+    assert entry["build"]["max_papers"] == 1
+    run_dir = generate_output_path(
+        first_graph, "seed", output_dir=tmp_path, strategy="recommendation"
+    ).parent
+    assert (
+        json.loads((run_dir / "recommendation.json").read_text(encoding="utf-8"))
+        == entry["payload"]
+    )
+    config = json.loads(
+        (run_dir / "recommendation.config.json").read_text(encoding="utf-8")
+    )
+    assert config["build"] == entry["build"]
+
+
 def test_dashboard_package_deduplicates_existing_slots_deterministically(
     tmp_path: Path,
 ) -> None:
