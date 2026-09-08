@@ -1852,6 +1852,85 @@ def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
     assert probed["maxLabel"] == "-"
 
 
+def test_dashboard_highlights_fallback_to_path_order_and_use_theme_styles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing Plotly point metadata must retain per-node dashboard styling.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks graph point classes and halo color in the generated runtime.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph = nx.Graph()
+    graph.graph["strategy"] = "citation"
+    graph.add_node("seed", title="Seed", year=2020, is_seed=True)
+    graph.add_node("related", title="Related", year=2021)
+    graph.add_node("other", title="Other", year=2022)
+    graph.add_edge("seed", "related", weight=0.7)
+    exporter = GraphExporter(
+        graph,
+        "seed",
+        layout={"other": (0.0, 0.0), "related": (1.0, 0.0), "seed": (2.0, 0.0)},
+    )
+    out_path = tmp_path / "highlights.dashboard.html"
+    exporter.to_dashboard_html(out_path, theme="light")
+    rendered = out_path.read_text(encoding="utf-8")
+
+    for opacity in ("0.74", "0.18", "0.12"):
+        assert f"opacity: {opacity} !important;" in rendered
+    assert (
+        rendered.count(
+            "background: color-mix(in srgb, var(--panel-bg) 82%, transparent);"
+        )
+        == 2
+    )
+    assert (
+        "filter: drop-shadow(0 0 10px color-mix(in srgb, var(--seed-ring) 85%, transparent)) brightness(1.14);"
+        in rendered
+    )
+    assert "rgba(8, 12, 18, 0.72)" not in rendered
+    assert "rgba(220, 80, 150, 0.85)" not in rendered
+
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        "(() => {"
+        " const pointPaths = nodeOrder.map(() => {"
+        "   const classes = new Set();"
+        "   return {"
+        "     getAttribute() { return null; },"
+        "     classList: { toggle(name, enabled) { enabled ? classes.add(name) : classes.delete(name); } },"
+        "     classes,"
+        "   };"
+        " });"
+        " const traceGroups = Array.from({ length: nodeTraceIndex + 1 }, () => null);"
+        " traceGroups[nodeTraceIndex] = { querySelectorAll() { return pointPaths; } };"
+        " graphDiv.data = Array.from({ length: nodeTraceIndex + 1 }, () => ({}));"
+        " graphDiv.querySelectorAll = () => traceGroups;"
+        " window.Plotly = Plotly;"
+        " globalThis.getComputedStyle = () => ({ getPropertyValue() { return '#123456'; } });"
+        " const restyles = [];"
+        " Plotly.restyle = (...args) => restyles.push(args);"
+        " state.selectedId = 'seed';"
+        " state.hoverId = null;"
+        " state.visibleIds = new Set(['seed', 'related']);"
+        " syncGraphHighlights();"
+        " const haloCall = restyles.find((call) => call[2][0] === haloTraceIndex);"
+        " return {"
+        "   paths: pointPaths.map((path, idx) => ({ id: nodeOrder[idx], classes: Array.from(path.classes).sort() })),"
+        "   haloColor: haloCall[1]['marker.color'][0][0],"
+        " };"
+        "})()",
+    )
+
+    classes_by_id = {entry["id"]: entry["classes"] for entry in probed["paths"]}
+    assert classes_by_id["other"] == ["is-dimmed", "is-filter-hidden"]
+    assert classes_by_id["related"] == ["is-neighbor"]
+    assert classes_by_id["seed"] == ["is-glowing"]
+    assert probed["haloColor"] == "rgba(18,52,86,0.340)"
+
+
 def test_dashboard_labels_balance_priority_and_spacing() -> None:
     """Dashboard labels should favor prominent nodes without crowding the seed."""
     graph = nx.Graph()

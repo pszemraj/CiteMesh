@@ -2012,16 +2012,16 @@ class GraphExporter:
       transition: filter 0.2s ease, opacity 0.2s ease;
     }
     .js-plotly-plot .scatterlayer path.point.is-glowing {
-      filter: drop-shadow(0 0 10px rgba(220, 80, 150, 0.85)) brightness(1.14);
+      filter: drop-shadow(0 0 10px color-mix(in srgb, var(--seed-ring) 85%, transparent)) brightness(1.14);
     }
     .js-plotly-plot .scatterlayer path.point.is-neighbor {
-      opacity: 0.74;
+      opacity: 0.74 !important;
     }
     .js-plotly-plot .scatterlayer path.point.is-dimmed {
-      opacity: 0.18;
+      opacity: 0.18 !important;
     }
     .js-plotly-plot .scatterlayer path.point.is-filter-hidden {
-      opacity: 0.12;
+      opacity: 0.12 !important;
     }
     #graph-footer {
       position: absolute;
@@ -2034,7 +2034,7 @@ class GraphExporter:
       pointer-events: none;
     }
     #graph-legend {
-      background: rgba(8, 12, 18, 0.72);
+      background: color-mix(in srgb, var(--panel-bg) 82%, transparent);
       border: 1px solid color-mix(in srgb, var(--panel-border) 70%, transparent);
       border-radius: 10px;
       padding: 8px 10px;
@@ -2077,7 +2077,7 @@ class GraphExporter:
       gap: 8px;
       font-size: 11px;
       color: color-mix(in srgb, var(--text-muted) 92%, #d8e3f2);
-      background: rgba(8, 12, 18, 0.72);
+      background: color-mix(in srgb, var(--panel-bg) 82%, transparent);
       border: 1px solid color-mix(in srgb, var(--panel-border) 70%, transparent);
       border-radius: 10px;
       padding: 7px 9px;
@@ -4185,7 +4185,7 @@ class GraphExporter:
 
       graphNodePaths.forEach((path, idx) => {
         const rawPointIndex = path.getAttribute("data-point-number");
-        const pointIndex = Number(rawPointIndex);
+        const pointIndex = Number.parseInt(rawPointIndex ?? "", 10);
         const stableIdx = Number.isInteger(pointIndex) && pointIndex >= 0 ? pointIndex : idx;
         const nodeId = nodeOrder[stableIdx];
         const isVisible = !!nodeId && state.visibleIds.has(nodeId);
@@ -4240,7 +4240,7 @@ class GraphExporter:
           haloX = [defaultNodeX[idx]];
           haloY = [defaultNodeY[idx]];
           haloSize = [defaultNodeSizes[idx] * (state.selectedId ? 2.2 : 1.88)];
-          haloColor = [state.selectedId ? "rgba(238,137,208,0.34)" : "rgba(233,172,245,0.26)"];
+          haloColor = [colorWithAlpha(currentSeedRingColor(), state.selectedId ? 0.34 : 0.26)];
         }
         const haloKey = `${focusId || ""}|${state.selectedId ? "selected" : "hover"}`;
         if (overlayState.haloKey !== haloKey) {
