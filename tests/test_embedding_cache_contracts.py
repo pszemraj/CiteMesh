@@ -501,6 +501,118 @@ def test_embedding_cache_replacement_journal_recovers_failed_sqlite_commit(
         )
 
 
+@pytest.mark.parametrize(
+    ("storage_precision", "recovery_operation"),
+    [("float32", "get"), ("int8", "search")],
+)
+def test_embedding_cache_recovers_failed_append_on_same_instance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    storage_precision: str,
+    recovery_operation: str,
+) -> None:
+    """A live cache must discard an append whose SQLite commit failed.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Replaces only the final SQLite commit.
+    :param str storage_precision: Persisted vector format under test.
+    :param str recovery_operation: First public operation after the failed append.
+    :return None: Checks shared-prefix recovery and resumed writes on one instance.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=f"append-sqlite-{storage_precision}",
+        storage_precision=storage_precision,
+    )
+    _set_test_int8_calibration(cache)
+    seed = {"p1": {"title": "Seed", "abstract": "x"}}
+    appended = {"p2": {"title": "Append", "abstract": "y"}}
+    model = LookupEncodeModel(
+        {
+            "Seed. x": np.asarray([1.0, 0.0], dtype=np.float32),
+            "Append. y": np.asarray([0.0, 1.0], dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(seed, model, show_progress=False)
+    cache.mark_hydrated(
+        dataset_source="test-corpus",
+        dataset_split="train",
+        corpus_size=1,
+        complete=True,
+    )
+    with h5py.File(cache.h5_path, "r") as h5:
+        seed_embedding = h5[EMBEDDINGS_DATASET_NAME][:].copy()
+        seed_binary = (
+            h5[BINARY_INDEX_DATASET_NAME][:].copy()
+            if BINARY_INDEX_DATASET_NAME in h5
+            else None
+        )
+
+    connection_count = 0
+
+    @contextmanager
+    def fail_final_commit() -> Iterator[sqlite3.Connection]:
+        """Fail the metadata transaction after the appended vector is durable.
+
+        :return Iterator[sqlite3.Connection]: SQLite connection used by one cache phase.
+        """
+        nonlocal connection_count
+        conn = sqlite3.connect(cache.db_path)
+        connection_count += 1
+        try:
+            yield conn
+            if connection_count == 2:
+                raise sqlite3.OperationalError("forced final commit failure")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cache, "_connect_db", fail_final_commit)
+        with pytest.raises(sqlite3.OperationalError, match="forced final commit"):
+            cache.upsert_embeddings(appended, model, show_progress=False)
+
+    with cache._connect_db() as conn:
+        assert conn.execute("SELECT paper_id FROM papers").fetchall() == [("p1",)]
+        assert (
+            conn.execute("SELECT COUNT(*) FROM replacement_journal").fetchone()[0] == 0
+        )
+    with h5py.File(cache.h5_path, "r") as h5:
+        assert h5[EMBEDDINGS_DATASET_NAME].shape[0] == 2
+        if seed_binary is not None:
+            assert h5[BINARY_INDEX_DATASET_NAME].shape[0] == 2
+
+    if recovery_operation == "get":
+        assert set(cache.get_embeddings(seed, model, show_progress=False)) == {"p1"}
+    else:
+        results = cache.search(
+            np.asarray([1.0, 0.0], dtype=np.float32),
+            top_k=1,
+            binary_prefilter=True,
+            binary_rescore_multiplier=2,
+        )
+        assert [result.paper_id for result in results] == ["p1"]
+
+    assert cache.embedding_count() == 1
+    assert cache.get_cached_paper_ids() == {"p1"}
+    assert cache.is_hydrated(
+        dataset_source="test-corpus",
+        dataset_split="train",
+        corpus_size=1,
+    )
+    with h5py.File(cache.h5_path, "r") as h5:
+        np.testing.assert_array_equal(h5[EMBEDDINGS_DATASET_NAME][:], seed_embedding)
+        if seed_binary is not None:
+            np.testing.assert_array_equal(h5[BINARY_INDEX_DATASET_NAME][:], seed_binary)
+
+    cache.upsert_embeddings(appended, model, show_progress=False)
+    assert cache.embedding_count() == 2
+    assert cache.get_cached_paper_ids() == {"p1", "p2"}
+
+
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 def test_embedding_cache_replacement_journal_recovers_vector_write_failure(
     tmp_path: Path,
@@ -2133,13 +2245,21 @@ def test_embedding_cache_search_raises_on_missing_metadata_rows() -> None:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="missing-search-metadata")
         _set_test_int8_calibration(cache)
         cache.get_embeddings(
-            {"p1": {"title": "Alpha", "abstract": "First"}},
-            LookupEncodeModel({"Alpha. First": np.array([1.0, 0.0], dtype=np.float32)}),
+            {
+                "p1": {"title": "Alpha", "abstract": "First"},
+                "p2": {"title": "Beta", "abstract": "Second"},
+            },
+            LookupEncodeModel(
+                {
+                    "Alpha. First": np.array([1.0, 0.0], dtype=np.float32),
+                    "Beta. Second": np.array([0.0, 1.0], dtype=np.float32),
+                }
+            ),
             show_progress=False,
         )
 
         with cache._connect_db() as conn:
-            conn.execute("DELETE FROM papers")
+            conn.execute("DELETE FROM papers WHERE paper_id = 'p1'")
             conn.commit()
 
         with pytest.raises(
@@ -2261,6 +2381,60 @@ def test_embedding_cache_search_fails_closed_on_metadata_provenance_mismatch(
                 binary_prefilter=True,
                 binary_rescore_multiplier=2,
             )
+
+
+@pytest.mark.parametrize("operation", ["count", "search"])
+def test_embedding_cache_recovery_checks_provenance_before_truncation(
+    tmp_path: Path, operation: str
+) -> None:
+    """Runtime recovery must not trim rows from a mismatched cache contract.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param str operation: Public read path that first observes the orphan row.
+    :return None: Checks provenance failure preserves SQLite and HDF5 payloads.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name=f"recovery-{operation}")
+    _set_test_int8_calibration(cache)
+    cache.get_embeddings(
+        {"p1": {"title": "Alpha", "abstract": "First"}},
+        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    with h5py.File(cache.h5_path, "a") as h5:
+        embeddings = h5[EMBEDDINGS_DATASET_NAME]
+        binary = h5[BINARY_INDEX_DATASET_NAME]
+        embeddings.resize((2, 2))
+        embeddings[1] = np.asarray([0, 0], dtype=np.int8)
+        binary.resize((2, 1))
+        binary[1] = np.asarray([0], dtype=np.uint8)
+        original_embeddings = embeddings[:].copy()
+        original_binary = binary[:].copy()
+    with cache._connect_db() as conn:
+        conn.execute(
+            "UPDATE cache_metadata SET value = ? WHERE key = ?",
+            ("corrupt-dtype", SOURCE_TORCH_DTYPE_KEY),
+        )
+
+    with pytest.raises(RuntimeError, match="source_torch_dtype"):
+        if operation == "count":
+            cache.embedding_count()
+        else:
+            cache.search(
+                query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+                top_k=1,
+                binary_prefilter=True,
+                binary_rescore_multiplier=2,
+            )
+
+    with cache._connect_db() as conn:
+        assert conn.execute("SELECT paper_id, row_idx FROM papers").fetchall() == [
+            ("p1", 0)
+        ]
+    with h5py.File(cache.h5_path, "r") as h5:
+        np.testing.assert_array_equal(
+            h5[EMBEDDINGS_DATASET_NAME][:], original_embeddings
+        )
+        np.testing.assert_array_equal(h5[BINARY_INDEX_DATASET_NAME][:], original_binary)
 
 
 def test_embedding_cache_search_handles_unsorted_prefilter_candidates() -> None:
@@ -2654,9 +2828,14 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
     def _remove_h5_payload(cache: EmbeddingCache) -> None:
         cache.h5_path.unlink(missing_ok=True)
 
-    def _delete_metadata_rows(cache: EmbeddingCache) -> None:
+    def _invalidate_metadata_mapping(cache: EmbeddingCache) -> None:
+        """Move the only metadata row outside the embedding matrix.
+
+        :param EmbeddingCache cache: Cache whose SQLite mapping is corrupted.
+        :return None: Persists a non-prefix row mapping.
+        """
         with cache._connect_db() as conn:
-            conn.execute("DELETE FROM papers")
+            conn.execute("UPDATE papers SET row_idx = 1")
             conn.commit()
 
     def _clear_dataset_source(cache: EmbeddingCache) -> None:
@@ -2676,10 +2855,10 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
             "include_source_arg_after_invalidation": True,
         },
         {
-            "label": "orphaned embedding metadata rows",
+            "label": "invalid embedding metadata mapping",
             "model_name": "hydration-metadata-rows",
             "corpus_size": 256,
-            "invalidate": _delete_metadata_rows,
+            "invalidate": _invalidate_metadata_mapping,
             "include_source_arg_after_invalidation": True,
         },
         {
@@ -2720,7 +2899,7 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
             }
             if case["include_source_arg_after_invalidation"]:
                 hydrated_kwargs["dataset_source"] = source
-            if case["label"] == "orphaned embedding metadata rows":
+            if case["label"] == "invalid embedding metadata mapping":
                 with pytest.raises(RuntimeError, match="cache files were preserved"):
                     cache.is_hydrated(**hydrated_kwargs)
             else:

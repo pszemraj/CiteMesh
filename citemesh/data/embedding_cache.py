@@ -1708,7 +1708,7 @@ class EmbeddingCache:
     def _recover_pending_replacements_with_connection_locked(
         self, conn: sqlite3.Connection
     ) -> None:
-        """Open HDF5 for durable replacement recovery when its journal is non-empty.
+        """Open HDF5 for durable replacement and trailing-row recovery.
 
         Callers must already hold this namespace's cache lock and own ``conn``.
 
@@ -1717,13 +1717,22 @@ class EmbeddingCache:
         :raises RuntimeError: If pending replacement rows cannot be restored safely.
         """
         pending = conn.execute("SELECT 1 FROM replacement_journal LIMIT 1").fetchone()
-        if pending is None:
-            return
         if not path_exists(self.h5_path):
-            raise RuntimeError(
-                "Embedding cache recovery error: replacement journal exists but the "
-                "embedding matrix is missing. Existing cache files were preserved."
-            )
+            if pending is not None:
+                raise RuntimeError(
+                    "Embedding cache recovery error: replacement journal exists but the "
+                    "embedding matrix is missing. Existing cache files were preserved."
+                )
+            return
+        if pending is None:
+            with h5py.File(self.h5_path, "r") as h5_file:
+                embeddings_dataset = self._get_embeddings_dataset(h5_file)
+                if embeddings_dataset is None:
+                    return
+                embedding_rows = int(embeddings_dataset.shape[0])
+            paper_rows = int(conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0])
+            if embedding_rows == paper_rows:
+                return
         with h5py.File(self.h5_path, "a") as h5_file:
             self._recover_pending_replacements_locked(conn=conn, h5_file=h5_file)
 
@@ -1731,11 +1740,15 @@ class EmbeddingCache:
         self,
         conn: sqlite3.Connection,
         h5_file: h5py.File,
+        *,
+        validate_runtime_contract: bool = True,
     ) -> None:
-        """Restore journaled rows before exposing this namespace payload.
+        """Restore journaled rows and discard uncommitted trailing rows.
 
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
         :param h5py.File h5_file: Writable HDF5 handle for the active namespace.
+        :param bool validate_runtime_contract: Whether to validate payload identity
+            before runtime recovery mutates HDF5.
         :return None: Reinstates durable prior rows and clears their journal entries.
         :raises RuntimeError: If a journaled row cannot be restored safely.
         """
@@ -1746,24 +1759,37 @@ class EmbeddingCache:
             ORDER BY row_idx
             """
         ).fetchall()
-        if not journal_rows:
-            return
 
         try:
             embeddings_dataset = self._get_embeddings_dataset(h5_file)
         except _EmbeddingCacheLayoutError as exc:
+            if not journal_rows:
+                raise
             raise RuntimeError(
                 "Embedding cache recovery error: replacement journal cannot be "
                 "applied to the embedding matrix. Existing cache files were "
                 "preserved."
             ) from exc
         if embeddings_dataset is None:
-            raise RuntimeError(
-                "Embedding cache recovery error: replacement journal exists without "
-                "an embedding matrix. Existing cache files were preserved."
-            )
+            if journal_rows:
+                raise RuntimeError(
+                    "Embedding cache recovery error: replacement journal exists without "
+                    "an embedding matrix. Existing cache files were preserved."
+                )
+            return
 
         embedding_rows = int(embeddings_dataset.shape[0])
+        paper_rows = int(conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0])
+        if not journal_rows and embedding_rows == paper_rows:
+            return
+        if validate_runtime_contract:
+            self._assert_runtime_cache_consistency(
+                conn=conn,
+                h5_file=h5_file,
+                embeddings_dataset=embeddings_dataset,
+                fail_mode="runtime",
+                check_row_mapping=False,
+            )
         embedding_width = int(embeddings_dataset.shape[1])
         binary_dataset = h5_file.get(BINARY_INDEX_DATASET_NAME)
         for (
@@ -1823,13 +1849,15 @@ class EmbeddingCache:
                 )
             binary_dataset[resolved_row_idx] = old_binary
 
-        self._recover_trailing_rows(
+        recovered_embedding_rows = self._recover_trailing_rows(
             conn=conn,
             h5_file=h5_file,
             embeddings_dataset=embeddings_dataset,
         )
-        self._flush_h5_file(h5_file)
-        conn.execute("DELETE FROM replacement_journal")
+        if journal_rows or recovered_embedding_rows != embedding_rows:
+            self._flush_h5_file(h5_file)
+        if journal_rows:
+            conn.execute("DELETE FROM replacement_journal")
 
     @staticmethod
     def _flush_h5_file(h5_file: h5py.File) -> None:
@@ -2090,6 +2118,7 @@ class EmbeddingCache:
         embeddings_dataset: Optional[h5py.Dataset],
         *,
         fail_mode: str,
+        check_row_mapping: bool = True,
     ) -> None:
         """Assert that metadata/attrs/datasets agree on active runtime semantics.
 
@@ -2097,6 +2126,7 @@ class EmbeddingCache:
         :param h5py.File h5_file: Open HDF5 cache handle.
         :param Optional[h5py.Dataset] embeddings_dataset: Matrix dataset, or None before the first write.
         :param str fail_mode: ``"runtime"`` to fail-closed, ``"repair"`` to rebuild incompatible layouts.
+        :param bool check_row_mapping: Whether to validate SQLite/HDF5 row coverage.
         :return None: Raises when metadata and payload state diverge.
         :raises RuntimeError: If row mappings are inconsistent or runtime checks fail.
         :raises ValueError: If a layout mismatch is found in repair mode.
@@ -2170,6 +2200,9 @@ class EmbeddingCache:
                     f"({actual_compression_level!r} != "
                     f"{self._effective_compression_level!r})"
                 )
+
+        if not check_row_mapping:
+            return
 
         row_count = int(embeddings_dataset.shape[0])
         if fail_mode == "runtime":
@@ -2393,7 +2426,11 @@ class EmbeddingCache:
                 self._connect_db() as conn,
                 h5py.File(self.h5_path, "a") as h5,
             ):
-                self._recover_pending_replacements_locked(conn=conn, h5_file=h5)
+                self._recover_pending_replacements_locked(
+                    conn=conn,
+                    h5_file=h5,
+                    validate_runtime_contract=False,
+                )
                 dataset = self._get_embeddings_dataset(h5)
                 if dataset is None:
                     if len(h5) == 0 and len(h5.attrs) == 0:
