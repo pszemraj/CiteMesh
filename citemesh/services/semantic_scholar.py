@@ -1033,7 +1033,7 @@ class SemanticScholarClient:
                 retry_after=self._safe_retry_after(response),
                 rate_limited=True,
             )
-        if 400 <= response.status_code < 500:
+        if 400 <= response.status_code < 500 and response.status_code != 408:
             if response.status_code in {401, 403}:
                 remediation = "Check S2_API_KEY credentials and access permissions."
             else:
@@ -1063,7 +1063,7 @@ class SemanticScholarClient:
             HTTP 404 still returns ``None`` (genuinely absent resource).
         :param str context: Request description used in availability errors.
         :return Optional[Dict[str, Any]]: Parsed JSON payload or ``None`` on failure.
-        :raises SemanticScholarRequestError: If a non-429 HTTP 4xx response
+        :raises SemanticScholarRequestError: If a non-408/429 HTTP 4xx response
             rejects the request.
         """
 

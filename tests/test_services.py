@@ -1846,7 +1846,7 @@ def test_search_empty_results_stay_empty_in_strict_mode() -> None:
     assert client.search_papers("attention", raise_on_unavailable=True) == []
 
 
-@pytest.mark.parametrize("status", [502, 503])
+@pytest.mark.parametrize("status", [408, 502, 503])
 def test_single_paper_uses_http_status_and_recovers(status: int) -> None:
     """Statuses discarded by the SDK must remain retryable on paper lookups.
 
@@ -2127,13 +2127,15 @@ def test_sdk_json_decode_failures_keep_operational_retries(
     ["get_papers", "get_paper_references", "get_paper_citations", "get_reference_ids"],
 )
 @pytest.mark.parametrize("recovers", [False, True])
+@pytest.mark.parametrize("status", [408, 503])
 def test_real_sdk_transport_preserves_outages_and_stops_failed_pagination(
-    method: str, recovers: bool
+    method: str, recovers: bool, status: int
 ) -> None:
     """An SDK relation or batch outage must never become empty data or endless paging.
 
     :param str method: Public SDK-backed API operation.
-    :param bool recovers: Whether a successful response follows the first HTTP 503.
+    :param bool recovers: Whether a successful response follows the first retryable error.
+    :param int status: Retryable HTTP status returned by the transport.
     :return None: Checks the real SDK conversion and a single bounded retry budget.
     """
     relation_key = "citingPaper" if method == "get_paper_citations" else "citedPaper"
@@ -2147,7 +2149,7 @@ def test_real_sdk_transport_preserves_outages_and_stops_failed_pagination(
     )
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
-        response = _MockResponse(503, headers={"Retry-After": "120"})
+        response = _MockResponse(status, headers={"Retry-After": "120"})
         fetch = MagicMock(
             side_effect=[response, _MockResponse(200, payload)] if recovers else None,
             return_value=response,
