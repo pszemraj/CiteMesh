@@ -14,7 +14,8 @@ import threading
 import time
 import weakref
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
+from enum import Enum
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
@@ -81,6 +82,26 @@ _anonymous_pool_announced = False
 
 class SemanticScholarUnavailableError(RuntimeError):
     """Raised when the Semantic Scholar API stays unreachable after retries."""
+
+
+class _FailureDomain(str, Enum):
+    """Semantic Scholar capabilities with independent collection retry budgets."""
+
+    REFERENCES = "references"
+    CITATIONS = "citations"
+    RECOMMENDATIONS = "recommendations"
+    SEARCH = "search"
+    PAPER_METADATA = "paper_metadata"
+
+
+@dataclass
+class _CandidateOperationState:
+    """Failures shared by nested calls in one thread-local collection."""
+
+    depth: int = 0
+    failures: dict[_FailureDomain, SemanticScholarUnavailableError] = field(
+        default_factory=dict
+    )
 
 
 class _CandidateOperationSkippedError(SemanticScholarUnavailableError):
@@ -513,64 +534,70 @@ class SemanticScholarClient:
 
     @contextlib.contextmanager
     def candidate_operation_scope(self) -> Iterator[None]:
-        """Share one Semantic Scholar outage result across a discovery operation.
+        """Share capability-specific outages across one discovery operation.
 
         Nested strategy calls share the outer scope. A later independent collection
         receives a new scope and may retry normally.
 
         :return Iterator[None]: Candidate-discovery scope.
         """
-        depth = getattr(self._candidate_operation, "depth", 0)
-        if depth == 0:
-            self._candidate_operation.failure = None
-        self._candidate_operation.depth = depth + 1
+        state = getattr(self._candidate_operation, "state", None)
+        owns_state = state is None
+        if owns_state:
+            state = _CandidateOperationState()
+            self._candidate_operation.state = state
+        state.depth += 1
         try:
             yield
         finally:
-            remaining_depth = self._candidate_operation.depth - 1
-            if remaining_depth:
-                self._candidate_operation.depth = remaining_depth
-            else:
-                del self._candidate_operation.depth
-                del self._candidate_operation.failure
+            state.depth -= 1
+            if owns_state and state.depth == 0:
+                del self._candidate_operation.state
 
-    def _candidate_operation_failure(self) -> Optional[SemanticScholarUnavailableError]:
-        """Return an exhausted failure from the active discovery scope.
+    def _candidate_operation_failure(
+        self, failure_domain: _FailureDomain
+    ) -> Optional[SemanticScholarUnavailableError]:
+        """Return an exhausted capability failure from the active scope.
 
+        :param _FailureDomain failure_domain: Capability whose state is requested.
         :return Optional[SemanticScholarUnavailableError]: The recorded failure, or
-            ``None`` outside a scope or before the first exhausted request.
+            ``None`` outside a scope or before that capability exhausts a request.
         """
-        if not getattr(self._candidate_operation, "depth", 0):
+        state = getattr(self._candidate_operation, "state", None)
+        if state is None:
             return None
-        return getattr(self._candidate_operation, "failure", None)
+        return state.failures.get(failure_domain)
 
     def _record_candidate_operation_failure(
-        self, error: SemanticScholarUnavailableError
+        self,
+        failure_domain: _FailureDomain,
+        error: SemanticScholarUnavailableError,
     ) -> None:
-        """Remember the first exhausted request within a discovery scope.
+        """Remember the first exhausted request for one scoped capability.
 
+        :param _FailureDomain failure_domain: Capability whose retry budget exhausted.
         :param SemanticScholarUnavailableError error: Exhausted service failure.
         :return None: Updates the active scope when one exists.
         """
-        if (
-            getattr(self._candidate_operation, "depth", 0)
-            and getattr(self._candidate_operation, "failure", None) is None
-        ):
-            self._candidate_operation.failure = error
+        state = getattr(self._candidate_operation, "state", None)
+        if state is not None:
+            state.failures.setdefault(failure_domain, error)
 
     @staticmethod
     def _skipped_candidate_operation_error(
+        failure_domain: _FailureDomain,
         failure: SemanticScholarUnavailableError,
     ) -> _CandidateOperationSkippedError:
-        """Describe a request skipped after an earlier collection outage.
+        """Describe a request skipped after the same capability failed.
 
+        :param _FailureDomain failure_domain: Capability skipped by the breaker.
         :param SemanticScholarUnavailableError failure: Original exhausted failure.
         :return _CandidateOperationSkippedError: Skipped-request failure retaining the
             original error text.
         """
         return _CandidateOperationSkippedError(
-            "Skipped Semantic Scholar request after an earlier collection outage: "
-            f"{failure}"
+            f"Skipped Semantic Scholar {failure_domain.value} request after an "
+            f"earlier {failure_domain.value} outage: {failure}"
         )
 
     def __enter__(self) -> "SemanticScholarClient":
@@ -716,6 +743,7 @@ class SemanticScholarClient:
         self,
         operation: Callable[[], Any],
         *,
+        failure_domain: _FailureDomain,
         failure_context: str,
         on_retry: Callable[[int, float, Exception], None],
         on_final_failure: Callable[[Exception], Any],
@@ -726,6 +754,7 @@ class SemanticScholarClient:
         """Run an API operation with shared retry/backoff behavior.
 
         :param Callable[[], Any] operation: Zero-argument API operation to execute.
+        :param _FailureDomain failure_domain: Capability sharing this retry budget.
         :param str failure_context: Description used if operational retries exhaust.
         :param Callable[[int, float, Exception], None] on_retry: Callback invoked before
             each retry with 1-based attempt count, sleep delay, and triggering exception.
@@ -735,10 +764,10 @@ class SemanticScholarClient:
             Exception-specific handlers that short-circuit normal retry handling.
         :return Any: Result produced by ``operation`` or one of the failure handlers.
         """
-        scope_failure = self._candidate_operation_failure()
+        scope_failure = self._candidate_operation_failure(failure_domain)
         if scope_failure is not None:
             return on_final_failure(
-                self._skipped_candidate_operation_error(scope_failure)
+                self._skipped_candidate_operation_error(failure_domain, scope_failure)
             )
 
         def _before_sleep(state: RetryCallState) -> None:
@@ -793,7 +822,7 @@ class SemanticScholarClient:
                 f": {exc}",
                 rate_limited=self._is_rate_limit_error(exc),
             )
-            self._record_candidate_operation_failure(unavailable)
+            self._record_candidate_operation_failure(failure_domain, unavailable)
             return on_final_failure(exc)
 
         raise AssertionError("retry loop exhausted without returning")
@@ -1135,17 +1164,22 @@ class SemanticScholarClient:
         url: str,
         params: Dict[str, Any],
         *,
+        failure_domain: _FailureDomain,
         raise_on_unavailable: bool = False,
+        record_domain_failure: bool = True,
         context: str = "requesting data",
     ) -> Optional[Dict[str, Any]]:
         """Request JSON payload from direct Semantic Scholar REST endpoints.
 
         :param str url: Endpoint URL.
         :param Dict[str, Any] params: Query parameters.
+        :param _FailureDomain failure_domain: Capability sharing this retry budget.
         :param bool raise_on_unavailable: When ``True``, exhausted retries raise
             :class:`SemanticScholarUnavailableError` instead of returning
             ``None``, so callers can distinguish "no data" from "API down".
             HTTP 404 still returns ``None`` (genuinely absent resource).
+        :param bool record_domain_failure: Whether an exhausted optional request
+            should suppress later calls to the same capability in this collection.
         :param str context: Request description used in availability errors.
         :return Optional[Dict[str, Any]]: Parsed JSON payload or ``None`` on failure.
         :raises SemanticScholarRequestError: If a non-408/429 HTTP 4xx response
@@ -1159,15 +1193,16 @@ class SemanticScholarClient:
             """
             return self._request_json_once(url, params, context=context)
 
-        scope_failure = self._candidate_operation_failure()
+        scope_failure = self._candidate_operation_failure(failure_domain)
         if scope_failure is not None:
             if raise_on_unavailable:
                 raise self._skipped_candidate_operation_error(
-                    scope_failure
+                    failure_domain, scope_failure
                 ) from scope_failure
             logger.error(
-                "Skipped %s after an earlier Semantic Scholar outage: %s",
+                "Skipped %s after an earlier Semantic Scholar %s outage: %s",
                 url,
+                failure_domain.value,
                 scope_failure,
             )
             return None
@@ -1215,7 +1250,8 @@ class SemanticScholarClient:
             unavailable = self._unavailable_error(
                 context, detail, rate_limited=rate_limited
             )
-            self._record_candidate_operation_failure(unavailable)
+            if record_domain_failure:
+                self._record_candidate_operation_failure(failure_domain, unavailable)
             if raise_on_unavailable:
                 raise unavailable from exc
             logger.error(
@@ -1271,6 +1307,7 @@ class SemanticScholarClient:
         api_paper = self._request_json(
             f"{PAPER_BASE_URL}/{quote(paper_id, safe='/')}",
             {"fields": ",".join(_default_paper_fields())},
+            failure_domain=_FailureDomain.PAPER_METADATA,
             raise_on_unavailable=raise_on_unavailable,
             context=f"fetching {paper_id}",
         )
@@ -1379,7 +1416,7 @@ class SemanticScholarClient:
                 if raise_on_unavailable:
                     raise exc
                 logger.warning(
-                    "Skipped batch fetch for %s papers after an earlier collection "
+                    "Skipped batch fetch for %s papers after an earlier paper-metadata "
                     "outage: %s",
                     len(normalized_ids),
                     exc,
@@ -1401,6 +1438,7 @@ class SemanticScholarClient:
 
         matched = self._call_with_retries(
             _operation,
+            failure_domain=_FailureDomain.PAPER_METADATA,
             failure_context="batch fetching papers",
             on_retry=lambda attempt, wait_time, exc: logger.debug(
                 "Failed to batch fetch papers (attempt %s). Retrying in %.1fs: %s",
@@ -1442,6 +1480,7 @@ class SemanticScholarClient:
             limit=parsed_limit,
             fetch_method=self.client.get_paper_citations,
             relation_label="citations",
+            failure_domain=_FailureDomain.CITATIONS,
             raise_on_unavailable=raise_on_unavailable,
         )
 
@@ -1471,6 +1510,7 @@ class SemanticScholarClient:
             limit=parsed_limit,
             fetch_method=self.client.get_paper_references,
             relation_label="references",
+            failure_domain=_FailureDomain.REFERENCES,
             raise_on_unavailable=raise_on_unavailable,
         )
 
@@ -1480,6 +1520,7 @@ class SemanticScholarClient:
         limit: int,
         fetch_method: Callable[..., Any],
         relation_label: str,
+        failure_domain: _FailureDomain,
         raise_on_unavailable: bool,
     ) -> List[Paper]:
         """Fetch and convert citation-like relation payloads with shared retry logic.
@@ -1488,6 +1529,7 @@ class SemanticScholarClient:
         :param int limit: Maximum number of relation records to fetch.
         :param Callable[..., Any] fetch_method: Semantic Scholar relation fetch method.
         :param str relation_label: Human-readable label used in logs.
+        :param _FailureDomain failure_domain: Capability sharing this retry budget.
         :param bool raise_on_unavailable: Whether exhausted operational retries raise.
         :return List[Paper]: Converted relation papers.
         """
@@ -1539,9 +1581,10 @@ class SemanticScholarClient:
                 if raise_on_unavailable:
                     raise exc
                 logger.warning(
-                    "Skipped %s for %s after an earlier collection outage: %s",
+                    "Skipped %s for %s after an earlier %s outage: %s",
                     relation_label,
                     normalized_paper_id,
+                    relation_label,
                     exc,
                 )
                 return []
@@ -1562,6 +1605,7 @@ class SemanticScholarClient:
 
         return self._call_with_retries(
             _operation,
+            failure_domain=failure_domain,
             failure_context=f"fetching {relation_label} for {normalized_paper_id}",
             on_retry=lambda attempt, wait_time, exc: logger.debug(
                 "Failed to fetch %s for %s (attempt %s). Retrying in %.1fs",
@@ -1752,6 +1796,7 @@ class SemanticScholarClient:
 
         references = self._call_with_retries(
             _operation,
+            failure_domain=_FailureDomain.REFERENCES,
             failure_context=f"fetching reference IDs for {normalized_paper_id}",
             on_retry=lambda attempt, wait_time, exc: logger.debug(
                 "Failed to fetch reference IDs for %s (attempt %s). Retrying in %.1fs",
@@ -1843,6 +1888,7 @@ class SemanticScholarClient:
         payload = self._request_json(
             f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
             base_params,
+            failure_domain=_FailureDomain.RECOMMENDATIONS,
             raise_on_unavailable=raise_on_unavailable,
             context=f"fetching recommendations for {normalized_paper_id}",
         )
@@ -1857,7 +1903,9 @@ class SemanticScholarClient:
                 fallback_payload = self._request_json(
                     f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
                     {**base_params, "from": "all-cs"},
+                    failure_domain=_FailureDomain.RECOMMENDATIONS,
                     raise_on_unavailable=raise_on_unavailable,
+                    record_domain_failure=False,
                     context=(
                         f"fetching all-cs recommendations for {normalized_paper_id}"
                     ),
@@ -1926,6 +1974,7 @@ class SemanticScholarClient:
                 "fields": ",".join(fields),
                 "limit": parsed_limit,
             },
+            failure_domain=_FailureDomain.SEARCH,
             raise_on_unavailable=raise_on_unavailable,
             context=f"searching for {normalized_query!r}",
         )

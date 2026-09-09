@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from pathlib import Path
-from types import MethodType
+from types import MethodType, SimpleNamespace
 from typing import Callable, Iterator, Optional
 from unittest.mock import MagicMock, call, patch
 
@@ -81,6 +81,42 @@ def _seed_paper(paper_id: str = "seed") -> Paper:
         abstract="seed abstract",
         is_seed=True,
     )
+
+
+def _api_relation_record(paper_id: str) -> SimpleNamespace:
+    """Build one SDK-shaped relation record.
+
+    :param str paper_id: Semantic Scholar paper identifier.
+    :return SimpleNamespace: Relation wrapper containing paper metadata.
+    """
+    return SimpleNamespace(
+        paper={
+            "paperId": paper_id,
+            "title": f"Paper {paper_id}",
+            "year": 2024,
+            "abstract": f"Abstract {paper_id}",
+            "citationCount": 10,
+            "fieldsOfStudy": [],
+            "authors": [],
+        }
+    )
+
+
+def _recommendation_payload(paper_id: str) -> dict[str, object]:
+    """Build one recommendation response record.
+
+    :param str paper_id: Semantic Scholar paper identifier.
+    :return dict[str, object]: REST-shaped paper metadata.
+    """
+    return {
+        "paperId": paper_id,
+        "title": f"Paper {paper_id}",
+        "year": 2024,
+        "abstract": f"Abstract {paper_id}",
+        "citationCount": 10,
+        "fieldsOfStudy": [],
+        "authors": [],
+    }
 
 
 def _identity_bridge_records() -> tuple[Paper, Paper, Paper]:
@@ -324,19 +360,19 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
         (RecommendationGraphBuilder, "reference_ids"),
     ],
 )
-def test_candidate_scope_stops_after_seed_reference_outage(
+def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
     builder_type: type[GraphBuilderStrategy],
     failure_path: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Either reference access path must exhaust the shared collection budget.
+    """A reference outage must not suppress healthy discovery capabilities.
 
     :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
     :param str failure_path: Reference-ID or full-paper request that exhausts retries.
     :param Path tmp_path: Isolated reference-cache directory.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
-    :return None: Checks one retry budget and a fresh scope on builder reuse.
+    :return None: Checks domain isolation, cache reuse, and fresh top-level scopes.
     """
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     seed = _paper("scope-seed")
@@ -358,10 +394,12 @@ def test_candidate_scope_stops_after_seed_reference_outage(
 
         client.client.get_paper_references = MagicMock(side_effect=fetch_references)
         client.client.get_paper_citations = MagicMock(
-            side_effect=AssertionError("candidate citations must be skipped")
+            return_value=[_api_relation_record("healthy-citation")]
         )
-        client._session.get = MagicMock(
-            side_effect=AssertionError("candidate recommendations must be skipped")
+        client._request_json_once = MagicMock(
+            return_value={
+                "recommendedPapers": [_recommendation_payload("healthy-recommendation")]
+            }
         )
         if builder_type is CitationGraphBuilder:
             builder = CitationGraphBuilder(
@@ -379,16 +417,24 @@ def test_candidate_scope_stops_after_seed_reference_outage(
         with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
             for expected_calls in (API_CONFIG.max_retries, API_CONFIG.max_retries * 2):
                 with client.candidate_operation_scope():
+                    papers = builder.collect_papers("scope-seed")
+                    if builder_type is CitationGraphBuilder:
+                        assert set(papers) == {"scope-seed", "healthy-citation"}
+                        assert builder.candidate_source_status == {
+                            "references": "unavailable",
+                            "citations": "complete",
+                        }
+                    else:
+                        assert set(papers) == {
+                            "scope-seed",
+                            "healthy-recommendation",
+                        }
+                        assert builder.candidate_source_status == {
+                            "recommendations": "complete"
+                        }
                     with pytest.raises(
-                        CandidateAcquisitionError,
-                        match="Skipped Semantic Scholar request after an earlier collection outage",
-                    ):
-                        builder.collect_papers("scope-seed")
-                    assert set(builder.candidate_source_status.values()) == {
-                        "unavailable"
-                    }
-                    with pytest.raises(
-                        s2.SemanticScholarUnavailableError, match="Skipped"
+                        s2.SemanticScholarUnavailableError,
+                        match="Skipped Semantic Scholar references request",
                     ):
                         client.get_reference_ids("later-citing-paper")
                     assert client.get_reference_ids("warm") == ["cached-reference"]
@@ -400,18 +446,22 @@ def test_candidate_scope_stops_after_seed_reference_outage(
 
         assert sleep_mock.call_count == 2 * (API_CONFIG.max_retries - 1)
 
-    client.client.get_paper_citations.assert_not_called()
-    client._session.get.assert_not_called()
+    if builder_type is CitationGraphBuilder:
+        assert client.client.get_paper_citations.call_count == 2
+        client._request_json_once.assert_not_called()
+    else:
+        client.client.get_paper_citations.assert_not_called()
+        assert client._request_json_once.call_count == 2
 
 
 def test_hybrid_candidate_scope_is_shared_with_citation_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Hybrid nesting must not restart retries after its citation child fails.
+    """Hybrid nesting shares reference failures without poisoning recommendations.
 
     :param Path tmp_path: Isolated reference-cache directory.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
-    :return None: Verifies the semantic recommendation request is short-circuited.
+    :return None: Verifies reference retry sharing and healthy parent enrichment.
     """
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     seed = _paper("hybrid-scope-seed")
@@ -422,10 +472,12 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
             side_effect=requests.ConnectionError("offline")
         )
         client.client.get_paper_citations = MagicMock(
-            side_effect=AssertionError("candidate citations must be skipped")
+            return_value=[_api_relation_record("healthy-citation")]
         )
-        client._session.get = MagicMock(
-            side_effect=AssertionError("semantic recommendations must be skipped")
+        client._request_json_once = MagicMock(
+            return_value={
+                "recommendedPapers": [_recommendation_payload("healthy-recommendation")]
+            }
         )
         builder = HybridGraphBuilder(
             max_papers=3,
@@ -435,25 +487,41 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
             semantic_source="candidates",
             client=client,
         )
+        assert builder.embedding_builder is not None
+        monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
+        monkeypatch.setattr(
+            builder,
+            "_rank_candidates",
+            lambda _seed, candidates, _sources: list(candidates),
+        )
 
         with patch("citemesh.services.semantic_scholar.time.sleep"):
-            with pytest.raises(CandidateAcquisitionError):
-                builder.collect_papers("hybrid-scope-seed")
+            papers = builder.collect_papers("hybrid-scope-seed")
 
         assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
+        assert set(papers) == {
+            "hybrid-scope-seed",
+            "healthy-citation",
+            "healthy-recommendation",
+        }
+        assert builder.candidate_source_status == {
+            "references": "unavailable",
+            "citations": "complete",
+            "recommendations": "complete",
+        }
 
-    client.client.get_paper_citations.assert_not_called()
-    client._session.get.assert_not_called()
+    client.client.get_paper_citations.assert_called_once()
+    client._request_json_once.assert_called_once()
 
 
-def test_embedding_candidate_scope_stops_later_sources(
+def test_embedding_candidate_scope_keeps_healthy_later_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Embedding candidate collection must share its pool's outage budget.
+    """Embedding candidates retain citations and recommendations after a ref outage.
 
     :param Path tmp_path: Isolated reference-cache directory.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
-    :return None: Verifies citation and recommendation endpoints are skipped.
+    :return None: Verifies healthy source candidates and accurate status survive.
     """
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     seed = _paper("embedding-scope-seed")
@@ -464,13 +532,15 @@ def test_embedding_candidate_scope_stops_later_sources(
             side_effect=requests.ConnectionError("offline")
         )
         client.client.get_paper_citations = MagicMock(
-            side_effect=AssertionError("candidate citations must be skipped")
+            return_value=[_api_relation_record("healthy-citation")]
         )
-        client._session.get = MagicMock(
-            side_effect=AssertionError("candidate recommendations must be skipped")
+        client._request_json_once = MagicMock(
+            return_value={
+                "recommendedPapers": [_recommendation_payload("healthy-recommendation")]
+            }
         )
         builder = EmbeddingGraphBuilder(
-            max_papers=2,
+            max_papers=3,
             semantic_source="candidates",
             client=client,
         )
@@ -480,15 +550,32 @@ def test_embedding_candidate_scope_stops_later_sources(
             "_encode_texts",
             lambda *_args, **_kwargs: np.asarray([[1.0, 0.0]], dtype=np.float32),
         )
+        monkeypatch.setattr(
+            builder,
+            "embed_papers",
+            lambda papers: {
+                paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
+                for paper_id in papers
+            },
+        )
 
         with patch("citemesh.services.semantic_scholar.time.sleep"):
-            with pytest.raises(CandidateAcquisitionError):
-                builder.collect_papers("embedding-scope-seed")
+            papers = builder.collect_papers("embedding-scope-seed")
 
         assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
+        assert set(papers) == {
+            "embedding-scope-seed",
+            "healthy-citation",
+            "healthy-recommendation",
+        }
+        assert builder.candidate_source_status == {
+            "references": "unavailable",
+            "citations": "complete",
+            "recommendations": "complete",
+        }
 
-    client.client.get_paper_citations.assert_not_called()
-    client._session.get.assert_not_called()
+    client.client.get_paper_citations.assert_called_once()
+    client._request_json_once.assert_called_once()
 
 
 @pytest.mark.parametrize(
@@ -504,13 +591,13 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Standalone pools should keep completed or empty evidence after an outage.
+    """Standalone pools retain evidence and continue after one source outage.
 
     :param list[Paper] reference_papers: Earlier reference-source result.
     :param str expected_status: Expected tri-state status for the references source.
     :param Path tmp_path: Isolated reference-cache directory.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
-    :return None: Verifies later sources are skipped without discarding prior evidence.
+    :return None: Verifies a citation outage does not suppress recommendations.
     """
     monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
     with SemanticScholarClient(timeout=1) as client:
@@ -519,8 +606,10 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
         client.client.get_paper_citations = MagicMock(
             side_effect=requests.ConnectionError("offline")
         )
-        client._session.get = MagicMock(
-            side_effect=AssertionError("recommendations must be skipped")
+        client._request_json_once = MagicMock(
+            return_value={
+                "recommendedPapers": [_recommendation_payload("healthy-recommendation")]
+            }
         )
 
         with patch("citemesh.services.semantic_scholar.time.sleep"):
@@ -535,12 +624,15 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
         assert pool.source_status == {
             "references": expected_status,
             "citations": "unavailable",
-            "recommendations": "unavailable",
+            "recommendations": "complete",
         }
-        assert set(pool.papers) == {paper.paper_id for paper in reference_papers}
+        assert set(pool.papers) == {
+            *(paper.paper_id for paper in reference_papers),
+            "healthy-recommendation",
+        }
         assert client.client.get_paper_citations.call_count == API_CONFIG.max_retries
 
-    client._session.get.assert_not_called()
+    client._request_json_once.assert_called_once()
 
 
 def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_refs() -> (

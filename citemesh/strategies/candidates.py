@@ -82,7 +82,7 @@ class CandidateSourceResult:
 def scope_candidate_collection(
     collector: Callable[..., Any],
 ) -> Callable[..., Any]:
-    """Scope a strategy collection to one Semantic Scholar outage budget.
+    """Scope a strategy collection to capability-specific outage budgets.
 
     :param Callable[..., Any] collector: Strategy collection method to wrap.
     :return Callable[..., Any]: Collector that shares a client scope with nested
