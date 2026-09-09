@@ -344,15 +344,24 @@ def test_embedding_cache_lifecycle_contract() -> None:
         _set_test_int8_calibration(cache)
         papers_v1 = {
             "p1": {"title": "Paper One", "abstract": "Abstract one"},
-            "p2": {"title": "Paper Two", "abstract": "Abstract two"},
+            "p2": {
+                "title": "Paper Two",
+                "abstract": "Abstract two",
+                "authors": ["Alice", "Bob", "Carol"],
+            },
         }
         papers_v2 = {
             "p1": {"title": "Updated", "abstract": "Abstract one"},
-            "p2": {"title": "Paper Two", "abstract": "Abstract two"},
+            "p2": papers_v1["p2"],
         }
         papers_v3 = {
             "p1": {"title": "Updated", "abstract": "Abstract one"},
-            "p2": {"title": "Paper Two", "abstract": "Abstract two", "year": 2024},
+            "p2": {
+                "title": "Paper Two",
+                "abstract": "Abstract two",
+                "year": 2024,
+                "authors": ["Alice", "Bob", "Carol", "Dana"],
+            },
         }
         first = cache.get_embeddings(papers_v1, model, show_progress=False)
         second = cache.get_embeddings(papers_v1, model, show_progress=False)
@@ -367,8 +376,8 @@ def test_embedding_cache_lifecycle_contract() -> None:
                 "SELECT row_idx FROM papers WHERE paper_id = 'p1'"
             ).fetchone()[0]
             p2_metadata_after_refresh = conn.execute(
-                "SELECT year FROM papers WHERE paper_id = 'p2'"
-            ).fetchone()[0]
+                "SELECT year, authors_json FROM papers WHERE paper_id = 'p2'"
+            ).fetchone()
 
         with h5py.File(cache.h5_path, "r") as h5:
             assert set(h5.keys()) == {
@@ -387,7 +396,7 @@ def test_embedding_cache_lifecycle_contract() -> None:
     assert first["p1"].shape == second["p1"].shape
     assert rows == [("p1", 0), ("p2", 1)]
     assert row_idx_after_update == 0
-    assert p2_metadata_after_refresh == 2024
+    assert p2_metadata_after_refresh == (2024, '["Alice", "Bob", "Carol", "Dana"]')
 
 
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])

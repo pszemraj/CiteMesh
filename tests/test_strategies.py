@@ -1230,6 +1230,76 @@ def test_embedding_and_hybrid_similarity_normalize_scaled_embeddings(
     )
 
 
+def test_embedding_similarity_rewards_shared_fourth_author() -> None:
+    """A shared author beyond third position should receive the collaboration bonus.
+
+    :return None: Checks that the fourth author contributes to graph similarity.
+    """
+    paper_a = Paper(
+        paper_id="a",
+        title="First",
+        year=2010,
+        authors=[
+            Author(name="Alice"),
+            Author(name="Bob"),
+            Author(name="Carol"),
+            Author(name="Dana"),
+        ],
+    )
+    paper_b = Paper(
+        paper_id="b",
+        title="Second",
+        year=2020,
+        authors=[
+            Author(name="Eve"),
+            Author(name="Frank"),
+            Author(name="Grace"),
+            Author(name="Dana"),
+        ],
+    )
+    builder = EmbeddingGraphBuilder(max_papers=2, client=MagicMock())
+    builder.embeddings = {
+        "a": np.asarray([1.0, 0.0], dtype=np.float32),
+        "b": np.asarray([0.8, 0.6], dtype=np.float32),
+    }
+
+    expected = (
+        EMBEDDING_CONFIG.semantic_weight * 0.8
+        + EMBEDDING_CONFIG.temporal_weight
+        * builder.temporal_similarity(paper_a, paper_b)
+    ) * EMBEDDING_CONFIG.shared_author_bonus
+
+    assert paper_a.shares_authors_with(paper_b)
+    assert builder.compute_similarity(paper_a, paper_b) == pytest.approx(expected)
+
+
+def test_graph_nodes_mirror_all_paper_authors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Graph node metadata should retain the complete canonical author list.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces collection and graph scoring.
+    :return None: Checks node-level author metadata remains complete.
+    """
+    author_names = ["Alice", "Bob", "Carol", "Dana"]
+    papers = {
+        "seed": Paper(
+            paper_id="seed",
+            title="Seed",
+            year=2024,
+            authors=[Author(name=name) for name in author_names],
+            is_seed=True,
+        )
+    }
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    monkeypatch.setattr(builder, "collect_papers", lambda _seed_id, **_kwargs: papers)
+    monkeypatch.setattr(builder, "prepare_graph_scoring", lambda _papers: None)
+
+    graph, _ = builder.build_graph("seed")
+
+    assert graph.nodes["seed"]["authors"] == author_names
+
+
 def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() -> None:
     """Hybrid seed ranking and pairwise topology must consume different spaces."""
     builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())

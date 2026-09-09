@@ -3277,7 +3277,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             if paper_id in papers:
                 continue
 
-            authors = [Author(name=name) for name in metadata.get("authors", [])[:3]]
+            authors = [Author(name=name) for name in metadata.get("authors", [])]
 
             paper = Paper(
                 paper_id=paper_id,

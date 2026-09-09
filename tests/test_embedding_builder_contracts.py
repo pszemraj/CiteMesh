@@ -17,7 +17,7 @@ import h5py
 import numpy as np
 import pytest
 
-from citemesh.core import Paper
+from citemesh.core import Author, Paper
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
     DEFAULT_EMBEDDING_MODEL_NAME,
@@ -3715,6 +3715,59 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
 
     assert list(papers) == [seed.paper_id, "arxiv:2608.15412"]
     assert "arxiv:2608.15411" not in builder.retrieval_embeddings
+
+
+def test_corpus_collection_preserves_all_candidate_authors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corpus candidates should retain every source author in source order.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces model and corpus acquisition.
+    :return None: Checks the corpus metadata conversion preserves all authors.
+    """
+    seed = Paper(
+        paper_id="seed",
+        title="Seed",
+        year=2024,
+        abstract="Seed abstract",
+        is_seed=True,
+    )
+    author_names = ["Alice", "Bob", "Carol", "Dana"]
+    builder = EmbeddingGraphBuilder(
+        max_papers=2, semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    builder.client.get_paper.return_value = seed
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_encode_texts",
+        lambda _texts, show_progress_bar=False: np.asarray(
+            [[1.0, 0.0]], dtype=np.float32
+        ),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_select_candidates",
+        lambda _seed_embedding, *, use_streaming: [
+            (
+                "arxiv:2501.00001",
+                {
+                    "title": "Corpus candidate",
+                    "year": 2025,
+                    "abstract": "Corpus abstract",
+                    "authors": author_names,
+                },
+                np.asarray([1.0, 0.0], dtype=np.float32),
+            )
+        ],
+    )
+    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+
+    papers = builder.collect_papers("seed")
+
+    assert papers["arxiv:2501.00001"].authors == [
+        Author(name=name) for name in author_names
+    ]
 
 
 def test_collect_papers_formats_all_seeds_in_retrieval_query_space(

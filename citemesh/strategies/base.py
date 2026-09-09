@@ -316,7 +316,7 @@ class GraphBuilderStrategy(ABC):
                 # Mirror commonly-read scalar fields for render/export paths.
                 title=paper.title,
                 year=paper.year,
-                authors=[a.name for a in paper.authors[:3]],
+                authors=[a.name for a in paper.authors],
                 citation_count=paper.citation_count,
                 venue=paper.venue,
                 arxiv_id=paper.arxiv_id,
