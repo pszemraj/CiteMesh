@@ -80,6 +80,7 @@ from citemesh.strategies.candidates import (
     paper_embedding_metadata,
     register_aliases,
     resolve_aliases,
+    scope_candidate_collection,
 )
 from citemesh.text_batching import (
     encode_texts,
@@ -3173,6 +3174,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
         return True
 
+    @scope_candidate_collection
     def collect_papers(
         self,
         seed_id: str,

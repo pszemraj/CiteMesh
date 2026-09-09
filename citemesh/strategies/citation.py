@@ -29,6 +29,7 @@ from citemesh.strategies.candidates import (
     reconcile_paper_identity,
     register_aliases,
     require_available_candidate_source,
+    scope_candidate_collection,
 )
 
 if TYPE_CHECKING:
@@ -256,6 +257,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.reference_cache[paper_id] = ref_ids
         return ref_ids
 
+    @scope_candidate_collection
     def collect_papers(
         self,
         seed_id: str,

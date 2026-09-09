@@ -38,6 +38,7 @@ from citemesh.strategies.candidates import (
     reconcile_paper_identity,
     register_aliases,
     require_available_candidate_source,
+    scope_candidate_collection,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import (
@@ -570,6 +571,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
         return [paper_id for _, paper_id, _ in scored]
 
+    @scope_candidate_collection
     def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """
         Collect papers from both citation and semantic sources.

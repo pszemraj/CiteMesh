@@ -6,6 +6,7 @@ import builtins
 import importlib
 import json
 import logging
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -70,6 +71,133 @@ def test_service_and_strategy_package_exports() -> None:
     assert services_module.SemanticScholarClient is SemanticScholarClient
     assert TopLevelEmbeddingGraphBuilder is EmbeddingGraphBuilder
     assert EmbeddingGraphBuilder.__module__ == "citemesh.strategies.embedding"
+
+
+def test_candidate_operation_scope_is_thread_local() -> None:
+    """A shared client must keep concurrent discovery failures isolated.
+
+    :return None: Verifies each thread retains only its own scoped outage.
+    """
+    failures: dict[str, SemanticScholarUnavailableError] = {}
+    barrier = threading.Barrier(2)
+    with SemanticScholarClient(timeout=1) as client:
+
+        def record_failure(label: str) -> None:
+            """Record and read one thread-local candidate-operation failure.
+
+            :param str label: Identifier for this worker's synthetic failure.
+            :return None: Stores the failure observed within this worker's scope.
+            """
+            failure = SemanticScholarUnavailableError(label)
+            with client.candidate_operation_scope():
+                client._record_candidate_operation_failure(failure)
+                barrier.wait()
+                observed = client._candidate_operation_failure()
+                assert observed is failure
+                failures[label] = observed
+
+        threads = [
+            threading.Thread(target=record_failure, args=(label,))
+            for label in ("first outage", "second outage")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert client._candidate_operation_failure() is None
+
+    assert {label: str(failure) for label, failure in failures.items()} == {
+        "first outage": "first outage",
+        "second outage": "second outage",
+    }
+
+
+def test_candidate_operation_scope_preserves_tolerant_calls(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A tripped scope must retain tolerant batch and relation contracts.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cached metadata.
+    :param pytest.LogCaptureFixture caplog: Captured skipped-request diagnostics.
+    :return None: Verifies cached batch results and empty relations remain usable.
+    """
+    cached = Paper(paper_id="cached", title="Cached", year=2024)
+    monkeypatch.setattr(
+        s2,
+        "_load_cached_paper",
+        lambda paper_id: cached if paper_id == "cached" else None,
+    )
+    with SemanticScholarClient(timeout=1) as client:
+        client.client.get_paper_citations = MagicMock(
+            side_effect=AssertionError("tolerant relation call must not reach S2")
+        )
+        client._session.post = MagicMock(
+            side_effect=AssertionError("tolerant batch call must not reach S2")
+        )
+        with client.candidate_operation_scope(), caplog.at_level(logging.WARNING):
+            client._record_candidate_operation_failure(
+                SemanticScholarUnavailableError("original outage")
+            )
+            assert client.get_papers(["cached", "uncached"]) == {"cached": cached}
+            assert client.get_paper_citations("uncached") == []
+
+    client.client.get_paper_citations.assert_not_called()
+    client._session.post.assert_not_called()
+    assert "Skipped batch fetch" in caplog.text
+    assert "Skipped citations" in caplog.text
+
+
+@pytest.mark.parametrize("first_endpoint", ["sdk", "http"])
+def test_candidate_operation_scope_records_tolerant_exhaustion(
+    first_endpoint: str,
+) -> None:
+    """A tolerant exhausted request must stop the next source's retry budget.
+
+    :param str first_endpoint: SDK or direct-HTTP endpoint that exhausts first.
+    :return None: Verifies one retry budget across tolerant and strict callers.
+    """
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        if first_endpoint == "sdk":
+            client.client.get_paper_citations = MagicMock(
+                side_effect=requests.ConnectionError("offline")
+            )
+            client._session.get = MagicMock(
+                side_effect=AssertionError("strict direct request must be skipped")
+            )
+            first_fetch = client.client.get_paper_citations
+            skipped_fetch = client._session.get
+        else:
+            client._session.get = MagicMock(
+                side_effect=requests.ConnectionError("offline")
+            )
+            client.client.get_paper_citations = MagicMock(
+                side_effect=AssertionError("strict SDK request must be skipped")
+            )
+            first_fetch = client._session.get
+            skipped_fetch = client.client.get_paper_citations
+
+        with (
+            client.candidate_operation_scope(),
+            patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock,
+        ):
+            if first_endpoint == "sdk":
+                assert client.get_paper_citations("first") == []
+            else:
+                assert client.get_recommended_papers("first") == []
+            with pytest.raises(
+                SemanticScholarUnavailableError,
+                match="Skipped Semantic Scholar request after an earlier collection outage",
+            ):
+                if first_endpoint == "sdk":
+                    client.get_recommended_papers("second", raise_on_unavailable=True)
+                else:
+                    client.get_paper_citations("second", raise_on_unavailable=True)
+
+    assert first_fetch.call_count == API_CONFIG.max_retries
+    assert skipped_fetch.call_count == 0
+    assert sleep_mock.call_count == API_CONFIG.max_retries - 1
 
 
 @pytest.mark.parametrize(

@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
 from urllib.parse import quote
 
 import requests
@@ -80,6 +80,10 @@ _anonymous_pool_announced = False
 
 class SemanticScholarUnavailableError(RuntimeError):
     """Raised when the Semantic Scholar API stays unreachable after retries."""
+
+
+class _CandidateOperationSkippedError(SemanticScholarUnavailableError):
+    """Raised when a scoped operation skips a request after an earlier outage."""
 
 
 class SemanticScholarRequestError(RuntimeError):
@@ -473,6 +477,7 @@ class SemanticScholarClient:
         self.refresh_paper_cache = refresh_paper_cache
         self.timeout = timeout
         self.last_request_time = 0.0
+        self._candidate_operation = threading.local()
         self._session = requests.Session()
         # SDK 0.8-0.12 has no public transport hook and discards unrecognized HTTP
         # statuses. Replace only this client's requester; retain SDK pagination.
@@ -500,6 +505,68 @@ class SemanticScholarClient:
                     "Free keys: %s",
                     S2_API_KEY_SIGNUP_URL,
                 )
+
+    @contextlib.contextmanager
+    def candidate_operation_scope(self) -> Iterator[None]:
+        """Share one Semantic Scholar outage result across a discovery operation.
+
+        Nested strategy calls share the outer scope. A later independent collection
+        receives a new scope and may retry normally.
+
+        :return Iterator[None]: Candidate-discovery scope.
+        """
+        depth = getattr(self._candidate_operation, "depth", 0)
+        if depth == 0:
+            self._candidate_operation.failure = None
+        self._candidate_operation.depth = depth + 1
+        try:
+            yield
+        finally:
+            remaining_depth = self._candidate_operation.depth - 1
+            if remaining_depth:
+                self._candidate_operation.depth = remaining_depth
+            else:
+                del self._candidate_operation.depth
+                del self._candidate_operation.failure
+
+    def _candidate_operation_failure(self) -> Optional[SemanticScholarUnavailableError]:
+        """Return an exhausted failure from the active discovery scope.
+
+        :return Optional[SemanticScholarUnavailableError]: The recorded failure, or
+            ``None`` outside a scope or before the first exhausted request.
+        """
+        if not getattr(self._candidate_operation, "depth", 0):
+            return None
+        return getattr(self._candidate_operation, "failure", None)
+
+    def _record_candidate_operation_failure(
+        self, error: SemanticScholarUnavailableError
+    ) -> None:
+        """Remember the first exhausted request within a discovery scope.
+
+        :param SemanticScholarUnavailableError error: Exhausted service failure.
+        :return None: Updates the active scope when one exists.
+        """
+        if (
+            getattr(self._candidate_operation, "depth", 0)
+            and getattr(self._candidate_operation, "failure", None) is None
+        ):
+            self._candidate_operation.failure = error
+
+    @staticmethod
+    def _skipped_candidate_operation_error(
+        failure: SemanticScholarUnavailableError,
+    ) -> _CandidateOperationSkippedError:
+        """Describe a request skipped after an earlier collection outage.
+
+        :param SemanticScholarUnavailableError failure: Original exhausted failure.
+        :return _CandidateOperationSkippedError: Skipped-request failure retaining the
+            original error text.
+        """
+        return _CandidateOperationSkippedError(
+            "Skipped Semantic Scholar request after an earlier collection outage: "
+            f"{failure}"
+        )
 
     def __enter__(self) -> "SemanticScholarClient":
         """Return this client for context-manager use."""
@@ -644,6 +711,7 @@ class SemanticScholarClient:
         self,
         operation: Callable[[], Any],
         *,
+        failure_context: str,
         on_retry: Callable[[int, float, Exception], None],
         on_final_failure: Callable[[Exception], Any],
         handled_exceptions: tuple[
@@ -653,6 +721,7 @@ class SemanticScholarClient:
         """Run an API operation with shared retry/backoff behavior.
 
         :param Callable[[], Any] operation: Zero-argument API operation to execute.
+        :param str failure_context: Description used if operational retries exhaust.
         :param Callable[[int, float, Exception], None] on_retry: Callback invoked before
             each retry with 1-based attempt count, sleep delay, and triggering exception.
         :param Callable[[Exception], Any] on_final_failure: Callback used to produce the
@@ -661,6 +730,11 @@ class SemanticScholarClient:
             Exception-specific handlers that short-circuit normal retry handling.
         :return Any: Result produced by ``operation`` or one of the failure handlers.
         """
+        scope_failure = self._candidate_operation_failure()
+        if scope_failure is not None:
+            return on_final_failure(
+                self._skipped_candidate_operation_error(scope_failure)
+            )
 
         def _before_sleep(state: RetryCallState) -> None:
             """Report the scheduled retry using the endpoint's existing logger.
@@ -709,6 +783,12 @@ class SemanticScholarClient:
                     exc, (TypeError, ValueError, SemanticScholarRequestError)
                 ):
                     raise
+            unavailable = self._unavailable_error(
+                failure_context,
+                f": {exc}",
+                rate_limited=self._is_rate_limit_error(exc),
+            )
+            self._record_candidate_operation_failure(unavailable)
             return on_final_failure(exc)
 
         raise AssertionError("retry loop exhausted without returning")
@@ -1074,6 +1154,19 @@ class SemanticScholarClient:
             """
             return self._request_json_once(url, params, context=context)
 
+        scope_failure = self._candidate_operation_failure()
+        if scope_failure is not None:
+            if raise_on_unavailable:
+                raise self._skipped_candidate_operation_error(
+                    scope_failure
+                ) from scope_failure
+            logger.error(
+                "Skipped %s after an earlier Semantic Scholar outage: %s",
+                url,
+                scope_failure,
+            )
+            return None
+
         def _log_before_sleep(retry_state: RetryCallState) -> None:
             """Log the upcoming retry with its computed wait.
 
@@ -1113,11 +1206,13 @@ class SemanticScholarClient:
             return retryer(_attempt)
         except (_RetryableRequestError, requests.RequestException, ValueError) as exc:
             rate_limited = self._is_rate_limit_error(exc)
+            detail = "" if rate_limited else f": {exc}"
+            unavailable = self._unavailable_error(
+                context, detail, rate_limited=rate_limited
+            )
+            self._record_candidate_operation_failure(unavailable)
             if raise_on_unavailable:
-                detail = "" if rate_limited else f": {exc}"
-                raise self._unavailable_error(
-                    context, detail, rate_limited=rate_limited
-                ) from exc
+                raise unavailable from exc
             logger.error(
                 "Failed to call %s after %s attempts: %s",
                 url,
@@ -1275,6 +1370,16 @@ class SemanticScholarClient:
             :raises SemanticScholarUnavailableError: In strict mode.
             :return None: Signals an unavailable batch in tolerant mode.
             """
+            if isinstance(exc, _CandidateOperationSkippedError):
+                if raise_on_unavailable:
+                    raise exc
+                logger.warning(
+                    "Skipped batch fetch for %s papers after an earlier collection "
+                    "outage: %s",
+                    len(normalized_ids),
+                    exc,
+                )
+                return None
             if raise_on_unavailable:
                 raise self._unavailable_error(
                     "batch fetching papers",
@@ -1291,6 +1396,7 @@ class SemanticScholarClient:
 
         matched = self._call_with_retries(
             _operation,
+            failure_context="batch fetching papers",
             on_retry=lambda attempt, wait_time, exc: logger.debug(
                 "Failed to batch fetch papers (attempt %s). Retrying in %.1fs: %s",
                 attempt,
@@ -1424,6 +1530,16 @@ class SemanticScholarClient:
             :return List[Paper]: Empty list in tolerant mode.
             :raises SemanticScholarUnavailableError: In strict mode.
             """
+            if isinstance(exc, _CandidateOperationSkippedError):
+                if raise_on_unavailable:
+                    raise exc
+                logger.warning(
+                    "Skipped %s for %s after an earlier collection outage: %s",
+                    relation_label,
+                    normalized_paper_id,
+                    exc,
+                )
+                return []
             if raise_on_unavailable:
                 raise self._unavailable_error(
                     f"fetching {relation_label} for {normalized_paper_id}",
@@ -1441,6 +1557,7 @@ class SemanticScholarClient:
 
         return self._call_with_retries(
             _operation,
+            failure_context=f"fetching {relation_label} for {normalized_paper_id}",
             on_retry=lambda attempt, wait_time, exc: logger.debug(
                 "Failed to fetch %s for %s (attempt %s). Retrying in %.1fs",
                 relation_label,
@@ -1603,6 +1720,8 @@ class SemanticScholarClient:
             :raises SemanticScholarUnavailableError: Always with failure context.
             :return List[Any]: This function does not return successfully.
             """
+            if isinstance(exc, _CandidateOperationSkippedError):
+                raise exc
             raise self._unavailable_error(
                 f"fetching reference IDs for {normalized_paper_id}",
                 f": {exc}",
@@ -1628,6 +1747,7 @@ class SemanticScholarClient:
 
         references = self._call_with_retries(
             _operation,
+            failure_context=f"fetching reference IDs for {normalized_paper_id}",
             on_retry=lambda attempt, wait_time, exc: logger.debug(
                 "Failed to fetch reference IDs for %s (attempt %s). Retrying in %.1fs",
                 normalized_paper_id,

@@ -21,6 +21,7 @@ from citemesh.strategies.candidates import (
     reconcile_paper_identity,
     register_aliases,
     require_available_candidate_source,
+    scope_candidate_collection,
 )
 
 if TYPE_CHECKING:
@@ -93,6 +94,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
                 exc,
             )
 
+    @scope_candidate_collection
     def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """Collect recommendations for a seed paper.
 

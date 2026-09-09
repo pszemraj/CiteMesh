@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from pathlib import Path
 from types import MethodType
 from typing import Callable, Iterator, Optional
 from unittest.mock import MagicMock, call, patch
@@ -313,6 +314,199 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
     assert set(papers) == {"seed", "cold", "warm"}
     assert papers["warm"].references == expected_references
     assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
+
+
+@pytest.mark.parametrize(
+    "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
+)
+def test_candidate_scope_stops_after_seed_reference_outage(
+    builder_type: type[GraphBuilderStrategy],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One seed-reference exhaustion must cover each indexed collection.
+
+    :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
+    :param Path tmp_path: Isolated reference-cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
+    :return None: Checks one retry budget and a fresh scope on builder reuse.
+    """
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    seed = _paper("scope-seed")
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client.get_paper = MagicMock(return_value=seed)
+        client.client.get_paper_references = MagicMock(
+            side_effect=requests.ConnectionError("offline")
+        )
+        client.client.get_paper_citations = MagicMock(
+            side_effect=AssertionError("candidate citations must be skipped")
+        )
+        client._session.get = MagicMock(
+            side_effect=AssertionError("candidate recommendations must be skipped")
+        )
+        if builder_type is CitationGraphBuilder:
+            builder = CitationGraphBuilder(
+                max_papers=3,
+                max_references=1,
+                max_citations=1,
+                client=client,
+            )
+        else:
+            builder = RecommendationGraphBuilder(max_papers=3, client=client)
+
+        with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+            for expected_calls in (API_CONFIG.max_retries, API_CONFIG.max_retries * 2):
+                with pytest.raises(
+                    CandidateAcquisitionError,
+                    match="Skipped Semantic Scholar request after an earlier collection outage",
+                ):
+                    builder.collect_papers("scope-seed")
+                assert client.client.get_paper_references.call_count == expected_calls
+
+        assert sleep_mock.call_count == 2 * (API_CONFIG.max_retries - 1)
+
+    client.client.get_paper_citations.assert_not_called()
+    client._session.get.assert_not_called()
+
+
+def test_hybrid_candidate_scope_is_shared_with_citation_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hybrid nesting must not restart retries after its citation child fails.
+
+    :param Path tmp_path: Isolated reference-cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
+    :return None: Verifies the semantic recommendation request is short-circuited.
+    """
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    seed = _paper("hybrid-scope-seed")
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client.get_paper = MagicMock(return_value=seed)
+        client.client.get_paper_references = MagicMock(
+            side_effect=requests.ConnectionError("offline")
+        )
+        client.client.get_paper_citations = MagicMock(
+            side_effect=AssertionError("candidate citations must be skipped")
+        )
+        client._session.get = MagicMock(
+            side_effect=AssertionError("semantic recommendations must be skipped")
+        )
+        builder = HybridGraphBuilder(
+            max_papers=3,
+            max_references=1,
+            max_citations=1,
+            max_semantic=1,
+            semantic_source="candidates",
+            client=client,
+        )
+
+        with patch("citemesh.services.semantic_scholar.time.sleep"):
+            with pytest.raises(CandidateAcquisitionError):
+                builder.collect_papers("hybrid-scope-seed")
+
+        assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
+
+    client.client.get_paper_citations.assert_not_called()
+    client._session.get.assert_not_called()
+
+
+def test_embedding_candidate_scope_stops_later_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Embedding candidate collection must share its pool's outage budget.
+
+    :param Path tmp_path: Isolated reference-cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
+    :return None: Verifies citation and recommendation endpoints are skipped.
+    """
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    seed = _paper("embedding-scope-seed")
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client.get_paper = MagicMock(return_value=seed)
+        client.client.get_paper_references = MagicMock(
+            side_effect=requests.ConnectionError("offline")
+        )
+        client.client.get_paper_citations = MagicMock(
+            side_effect=AssertionError("candidate citations must be skipped")
+        )
+        client._session.get = MagicMock(
+            side_effect=AssertionError("candidate recommendations must be skipped")
+        )
+        builder = EmbeddingGraphBuilder(
+            max_papers=2,
+            semantic_source="candidates",
+            client=client,
+        )
+        monkeypatch.setattr(builder, "_load_model", lambda: None)
+        monkeypatch.setattr(
+            builder,
+            "_encode_texts",
+            lambda *_args, **_kwargs: np.asarray([[1.0, 0.0]], dtype=np.float32),
+        )
+
+        with patch("citemesh.services.semantic_scholar.time.sleep"):
+            with pytest.raises(CandidateAcquisitionError):
+                builder.collect_papers("embedding-scope-seed")
+
+        assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
+
+    client.client.get_paper_citations.assert_not_called()
+    client._session.get.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("reference_papers", "expected_status"),
+    [
+        ([_paper("early-reference")], "complete"),
+        ([], "empty"),
+    ],
+)
+def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
+    reference_papers: list[Paper],
+    expected_status: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Standalone pools should keep completed or empty evidence after an outage.
+
+    :param list[Paper] reference_papers: Earlier reference-source result.
+    :param str expected_status: Expected tri-state status for the references source.
+    :param Path tmp_path: Isolated reference-cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
+    :return None: Verifies later sources are skipped without discarding prior evidence.
+    """
+    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client.get_paper_references = MagicMock(return_value=reference_papers)
+        client.client.get_paper_citations = MagicMock(
+            side_effect=requests.ConnectionError("offline")
+        )
+        client._session.get = MagicMock(
+            side_effect=AssertionError("recommendations must be skipped")
+        )
+
+        with patch("citemesh.services.semantic_scholar.time.sleep"):
+            pool = fetch_candidate_pool(
+                client,
+                _seed_paper("partial-scope-seed"),
+                max_references=1,
+                max_citations=1,
+                max_recommendations=1,
+            )
+
+        assert pool.source_status == {
+            "references": expected_status,
+            "citations": "unavailable",
+            "recommendations": "unavailable",
+        }
+        assert set(pool.papers) == {paper.paper_id for paper in reference_papers}
+        assert client.client.get_paper_citations.call_count == API_CONFIG.max_retries
+
+    client._session.get.assert_not_called()
 
 
 def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_refs() -> (

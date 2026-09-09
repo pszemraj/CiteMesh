@@ -14,8 +14,10 @@ import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import wraps
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
     Dict,
     Iterator,
@@ -75,6 +77,31 @@ class CandidateSourceResult:
     state: CandidateSourceState
     papers: tuple[Paper, ...] = ()
     error: str = ""
+
+
+def scope_candidate_collection(
+    collector: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Scope a strategy collection to one Semantic Scholar outage budget.
+
+    :param Callable[..., Any] collector: Strategy collection method to wrap.
+    :return Callable[..., Any]: Collector that shares a client scope with nested
+        strategy and candidate-pool calls.
+    """
+
+    @wraps(collector)
+    def wrapped(builder: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run the collector within its client's discovery-operation scope.
+
+        :param Any builder: Strategy instance with a Semantic Scholar client.
+        :param Any args: Positional arguments for ``collector``.
+        :param Any kwargs: Keyword arguments for ``collector``.
+        :return Any: Result returned by ``collector``.
+        """
+        with builder.client.candidate_operation_scope():
+            return collector(builder, *args, **kwargs)
+
+    return wrapped
 
 
 @dataclass(frozen=True)
@@ -405,9 +432,13 @@ def require_available_candidate_source(
     ]
     if len(unavailable) == len(results):
         sources = ", ".join(result.source for result in unavailable)
+        details = "; ".join(
+            f"{result.source}: {result.error or 'unavailable'}"
+            for result in unavailable
+        )
         raise CandidateAcquisitionError(
             f"All requested Semantic Scholar sources were unavailable for {context}: "
-            f"{sources}."
+            f"{sources}. Details: {details}"
         )
     if unavailable:
         details = "; ".join(
@@ -769,6 +800,33 @@ def fetch_candidate_pool(
 
     Free-text query seeds (``query:`` IDs) have no S2 neighbors; they are proxied
     through paper search on the query text before recommendation expansion.
+
+    :param SemanticScholarClient client: Semantic Scholar client.
+    :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
+    :param int max_references: Maximum seed references to fetch (0 disables).
+    :param int max_citations: Maximum citing papers to fetch (0 disables).
+    :param int max_recommendations: Maximum recommendations to fetch (0 disables).
+    :return CandidatePool: Deduplicated candidate pool with provenance tags.
+    """
+    with client.candidate_operation_scope():
+        return _fetch_candidate_pool(
+            client,
+            seed_paper,
+            max_references=max_references,
+            max_citations=max_citations,
+            max_recommendations=max_recommendations,
+        )
+
+
+def _fetch_candidate_pool(
+    client: "SemanticScholarClient",
+    seed_paper: Paper,
+    *,
+    max_references: int = 0,
+    max_citations: int = 0,
+    max_recommendations: int = 0,
+) -> CandidatePool:
+    """Fetch candidates while an outer operation scope is active.
 
     :param SemanticScholarClient client: Semantic Scholar client.
     :param Paper seed_paper: Seed paper (S2-backed or free-text query seed).
