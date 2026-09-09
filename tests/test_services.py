@@ -1002,6 +1002,8 @@ def test_reference_cache_hit_corrupt_and_failure_paths(
     client.client.get_paper_references = MagicMock(
         side_effect=AssertionError("API should not be called on cache hit")
     )
+    assert client.get_cached_reference_ids("arxiv:1234.5678") == ["r1", "r2"]
+    assert client.get_cached_reference_ids("missing-cache-entry") is None
     assert client.get_reference_ids("arxiv:1234.5678") == ["r1", "r2"]
 
     legacy_mixed_paper_id = s2.normalize_paper_id("seed-mixed")

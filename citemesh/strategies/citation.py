@@ -108,6 +108,11 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             paper.references = list(cached_refs)
             return
         if self._reference_source_unavailable:
+            if not self.refresh_reference_cache:
+                cached_refs = self.client.get_cached_reference_ids(paper_id)
+                if cached_refs is not None:
+                    self.reference_cache[paper_id] = cached_refs
+                    paper.references = list(cached_refs)
             return
 
         from citemesh.services import SemanticScholarUnavailableError

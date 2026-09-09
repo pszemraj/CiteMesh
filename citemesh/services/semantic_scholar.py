@@ -1471,6 +1471,56 @@ class SemanticScholarClient:
             ),
         )
 
+    def get_cached_reference_ids(self, paper_id: str) -> Optional[List[str]]:
+        """Read a validated persisted reference entry without making an API request.
+
+        :param str paper_id: Paper identifier whose cached references are requested.
+        :return Optional[List[str]]: Cached reference IDs, including an authoritative
+            empty list, or ``None`` when no valid cache entry exists.
+        """
+        normalized_paper_id = normalize_paper_id(paper_id)
+        cache_path = _reference_cache_path(normalized_paper_id)
+        if not cache_path.exists():
+            return None
+
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("reference cache payload must be a JSON object")
+            if data.get("version") != REFERENCE_CACHE_VERSION:
+                return None
+            if data.get("paper_id") != normalized_paper_id:
+                raise ValueError("reference cache paper ID does not match its key")
+            if "references" not in data:
+                raise ValueError("reference cache payload is missing references")
+            cached_references = data["references"]
+            refs = _coerce_cached_reference_ids(cached_references)
+            if refs is None:
+                logger.warning(
+                    "Invalid reference cache payload for %s; rebuilding entry.",
+                    normalized_paper_id,
+                )
+                with contextlib.suppress(OSError):
+                    cache_path.unlink(missing_ok=True)
+                return None
+            if cached_references != refs:
+                self._persist_reference_cache_entry(
+                    cache_path,
+                    normalized_paper_id,
+                    refs,
+                )
+            if refs:
+                logger.debug(
+                    "Loaded %d cached references for %s",
+                    len(refs),
+                    normalized_paper_id,
+                )
+            return refs
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
+            with contextlib.suppress(OSError):
+                cache_path.unlink(missing_ok=True)
+            return None
+
     def get_reference_ids(
         self, paper_id: str, *, force_refresh: bool = False
     ) -> List[str]:
@@ -1491,46 +1541,10 @@ class SemanticScholarClient:
                 "Bypassing reference cache for %s due to force_refresh.",
                 normalized_paper_id,
             )
-        if not force_refresh and cache_path.exists():
-            try:
-                data = json.loads(cache_path.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    raise ValueError("reference cache payload must be a JSON object")
-                if data.get("version") == REFERENCE_CACHE_VERSION:
-                    if data.get("paper_id") != normalized_paper_id:
-                        raise ValueError(
-                            "reference cache paper ID does not match its key"
-                        )
-                    if "references" not in data:
-                        raise ValueError(
-                            "reference cache payload is missing references"
-                        )
-                    cached_references = data["references"]
-                    refs = _coerce_cached_reference_ids(cached_references)
-                    if refs is None:
-                        logger.warning(
-                            "Invalid reference cache payload for %s; rebuilding entry.",
-                            normalized_paper_id,
-                        )
-                        with contextlib.suppress(OSError):
-                            cache_path.unlink(missing_ok=True)
-                    else:
-                        if cached_references != refs:
-                            self._persist_reference_cache_entry(
-                                cache_path,
-                                normalized_paper_id,
-                                refs,
-                            )
-                        if refs:
-                            logger.debug(
-                                "Loaded %d cached references for %s",
-                                len(refs),
-                                normalized_paper_id,
-                            )
-                        return refs
-            except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError):
-                with contextlib.suppress(OSError):
-                    cache_path.unlink(missing_ok=True)
+        if not force_refresh:
+            cached_references = self.get_cached_reference_ids(normalized_paper_id)
+            if cached_references is not None:
+                return cached_references
 
         def _persist_empty() -> List[str]:
             """Persist and return an empty cached reference-ID list.

@@ -11,9 +11,12 @@ from unittest.mock import MagicMock, call, patch
 import networkx as nx
 import numpy as np
 import pytest
+import requests
 
-from citemesh.core import EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
+from citemesh.core import API_CONFIG, EMBEDDING_CONFIG, HYBRID_CONFIG, Author, Paper
 from citemesh.data.model_profiles import compose_title_abstract_text
+from citemesh.services import semantic_scholar as s2
+from citemesh.services.semantic_scholar import SemanticScholarClient
 from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies import hybrid as hybrid_strategy
 from citemesh.strategies.base import (
@@ -229,6 +232,7 @@ def test_reference_outage_warns_and_stops_hydration_until_next_collection(
     client.get_paper_references.return_value = related
     client.get_paper_citations.return_value = []
     client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
+    client.get_cached_reference_ids.return_value = None
     builder = builder_type(client=client)
 
     with caplog.at_level(logging.WARNING):
@@ -251,6 +255,64 @@ def test_reference_outage_warns_and_stops_hydration_until_next_collection(
     client.get_reference_ids.side_effect = ValueError("malformed references")
     with pytest.raises(ValueError, match="malformed references"):
         builder.collect_papers("seed")
+
+
+@pytest.mark.parametrize(
+    "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
+)
+@pytest.mark.parametrize(
+    ("refresh_reference_cache", "expected_references"),
+    [(False, ["shared"]), (True, [])],
+)
+def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
+    builder_type: type[GraphBuilderStrategy],
+    refresh_reference_cache: bool,
+    expected_references: list[str],
+) -> None:
+    """A reference outage must retain later disk hits without retrying misses.
+
+    :param type[GraphBuilderStrategy] builder_type: Indexed graph strategy constructor.
+    :param bool refresh_reference_cache: Whether persisted reference reads are bypassed.
+    :param list[str] expected_references: Expected warm-paper reference IDs.
+    :return None: Verifies cache-only recovery after one exhausted request.
+    """
+    seed = _paper("seed", refs=["seed-reference"])
+    cold = _paper("cold")
+    warm = _paper("warm")
+
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client.get_paper = MagicMock(return_value=seed)
+        client.client.get_paper_references = MagicMock(
+            side_effect=requests.ConnectionError("offline")
+        )
+        client._persist_reference_cache_entry(
+            s2._reference_cache_path("warm"), "warm", ["shared"]
+        )
+        if builder_type is CitationGraphBuilder:
+            client.get_paper_references = MagicMock(return_value=[cold, warm])
+            client.get_paper_citations = MagicMock(return_value=[])
+            builder = CitationGraphBuilder(
+                max_papers=3,
+                max_references=2,
+                max_citations=0,
+                refresh_reference_cache=refresh_reference_cache,
+                client=client,
+            )
+        else:
+            client.get_recommended_papers = MagicMock(return_value=[cold, warm])
+            builder = RecommendationGraphBuilder(
+                max_papers=3,
+                refresh_reference_cache=refresh_reference_cache,
+                client=client,
+            )
+
+        with patch("citemesh.services.semantic_scholar.time.sleep"):
+            papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", "cold", "warm"}
+    assert papers["warm"].references == expected_references
+    assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
 
 
 def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_refs() -> (

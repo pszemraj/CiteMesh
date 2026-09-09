@@ -280,6 +280,7 @@ When reference expansion is enabled, reference-ID lookups are cached under `refe
 - Default policy is no TTL: version-matched cache entries are reused until manually cleared or refreshed.
 - `--refresh-reference-cache` bypasses persisted reference-cache reads and fetches fresh reference IDs from the API (write-through cache update).
 - Successful empty reference responses are cached as explicit empty lists to avoid repeated API calls for papers with no references. A first-page `paper not found` response returns an empty list without caching it, so a later lookup can recover when the paper becomes available. A 404 after an earlier pagination page succeeded is retried as a service inconsistency and never cached as an empty list.
+- After a reference request exhausts its retries during a graph collection, later valid persisted reference entries are still reused; cache misses do not make additional network attempts. `--refresh-reference-cache` continues to bypass those persisted entries.
 - Successful reference pages containing only unresolved `paperId: null` records warn and cache an empty list.
 - Empty cached reference hits are reused silently; debug logging emits cache-hit lines only for non-empty reference lists so long runs do not spam one zero-count line per paper.
 - Non-empty cached payloads that contain no valid reference IDs are treated as invalid and rebuilt from API data instead of being reused as implicit empties.

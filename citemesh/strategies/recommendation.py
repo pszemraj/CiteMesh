@@ -67,11 +67,14 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :param Paper paper: Paper record to enrich.
         :return None: Mutates ``paper.references`` in place when successful.
         """
-        if (
-            not self.fetch_references
-            or paper.references
-            or self._reference_source_unavailable
-        ):
+        if not self.fetch_references or paper.references:
+            return
+
+        if self._reference_source_unavailable:
+            if not self.refresh_reference_cache:
+                cached_references = self.client.get_cached_reference_ids(paper.paper_id)
+                if cached_references is not None:
+                    paper.references = list(cached_references)
             return
 
         from citemesh.services import SemanticScholarUnavailableError
