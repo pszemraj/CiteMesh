@@ -63,11 +63,7 @@ does not clear the independent paper-metadata or reference caches.
 
 ## Paper Metadata Cache
 
-Successful `get_paper` and `get_papers` lookups persist metadata under `papers/`,
-independently of the embedding model and encoding batch size. Lookups check this
-cache before contacting Semantic Scholar, including seed resolution at the start
-of a rerun. Batch requests send only missing IDs. Entries are shared across the
-requested identifier and known Semantic Scholar, arXiv, and DOI aliases.
+Successful `get_paper`, `get_papers`, citation/reference, recommendation, and default-field search lookups persist metadata under `papers/`, independently of the embedding model and encoding batch size. Lookups check this cache before contacting Semantic Scholar, including seed resolution at the start of a rerun. Batch requests send only missing IDs. Entries are shared across the requested identifier and known Semantic Scholar, arXiv, and DOI aliases.
 
 A null entry in a successful batch response means that requested paper is absent;
 CiteMesh skips an individual follow-up lookup and does not cache the miss.
@@ -77,15 +73,7 @@ malformed API responses are not cached. Reference IDs remain in their separate
 cache and are loaded or fetched when requested; cached metadata alone does not
 mean references have been fetched. Graph-specific seed flags are not persisted.
 
-Runs made before this cache was introduced require one successful paper lookup
-to populate it. Citation/reference paper lists, recommendation results, and
-keyword search results still require live requests; cached seed metadata does
-not make an entire graph build offline. Use `build --refresh-paper-cache` to
-bypass persisted paper-metadata reads for that run. Successful fresh
-responses replace cached metadata, including citation counts; failures preserve
-the previous cache entries. Refreshing metadata leaves embedding caches intact
-and does not by itself re-encode unchanged paper text. Reference IDs keep their
-separate `--refresh-reference-cache` control.
+Runs made before this cache was introduced require one successful paper lookup to populate it. Citation/reference paper lists, recommendation results, and keyword search results still require live requests; their complete returned paper records can satisfy later individual or batch metadata lookups, but cached seed metadata does not make an entire graph build offline. Custom partial field lists never replace shared paper metadata. Use `build --refresh-paper-cache` to bypass persisted paper-metadata reads for that run. Successful fresh responses replace cached metadata, including citation counts; failures preserve the previous cache entries. Refreshing metadata leaves embedding caches intact and does not by itself re-encode unchanged paper text. Reference IDs keep their separate `--refresh-reference-cache` control.
 
 ## Embedding Cache Behavior
 

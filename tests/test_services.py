@@ -945,6 +945,89 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         assert url.endswith(expected_suffix)
 
 
+@pytest.mark.parametrize(
+    "method",
+    [
+        "get_paper_citations",
+        "get_paper_references",
+        "get_recommended_papers",
+        "search_papers",
+    ],
+)
+def test_full_relation_recommendation_and_search_records_populate_paper_cache(
+    method: str,
+) -> None:
+    """Complete records from discovery endpoints should satisfy later paper lookups.
+
+    :param str method: Discovery endpoint expected to return complete paper metadata.
+    :return None: Checks one live discovery request and a later metadata-cache hit.
+    """
+    paper_id = f"{method}-paper"
+    payload = _paper_payload(paper_id=paper_id, title="Discovered paper")
+    with SemanticScholarClient(timeout=1) as client:
+        if method in {"get_paper_citations", "get_paper_references"}:
+            fetch = MagicMock(
+                return_value=[SimpleNamespace(paper=SimpleNamespace(**payload))]
+            )
+            setattr(client.client, method, fetch)
+            results = getattr(client, method)("seed", limit=1)
+            fetch.assert_called_once_with(
+                "seed",
+                fields=s2._default_paper_fields(),
+                limit=1,
+            )
+        elif method == "get_recommended_papers":
+            client._request_json = MagicMock(
+                return_value={"recommendedPapers": [payload]}
+            )
+            results = client.get_recommended_papers("seed", limit=1)
+        else:
+            client._request_json = MagicMock(return_value={"data": [payload]})
+            results = client.search_papers("discovered", limit=1)
+
+        assert [paper.paper_id for paper in results] == [paper_id]
+        client._request_json = MagicMock(
+            side_effect=AssertionError("unexpected metadata request after cache hit")
+        )
+        assert client.get_paper(paper_id).title == "Discovered paper"
+
+
+@pytest.mark.parametrize("method", ["get_recommended_papers", "search_papers"])
+def test_partial_discovery_fields_do_not_replace_cached_paper_metadata(
+    method: str,
+) -> None:
+    """Partial discovery responses must leave richer shared metadata untouched.
+
+    :param str method: Endpoint invoked with a partial custom field list.
+    :return None: Checks that custom partial responses do not overwrite cache entries.
+    """
+    paper_id = f"{method}-paper"
+    existing = Paper(
+        paper_id=paper_id,
+        title="Rich cached title",
+        abstract="Rich cached abstract",
+        year=2024,
+        citation_count=7,
+    )
+    partial_payload = {"paperId": paper_id, "title": "Partial title"}
+    with SemanticScholarClient(timeout=1) as client:
+        s2._persist_paper(existing, paper_id)
+        if method == "get_recommended_papers":
+            client._request_json = MagicMock(
+                return_value={"recommendedPapers": [partial_payload]}
+            )
+            results = client.get_recommended_papers("seed", fields=["paperId", "title"])
+        else:
+            client._request_json = MagicMock(return_value={"data": [partial_payload]})
+            results = client.search_papers("partial", fields=["paperId", "title"])
+
+    assert [paper.title for paper in results] == ["Partial title"]
+    cached = s2._load_cached_paper(paper_id)
+    assert cached is not None
+    assert cached.title == "Rich cached title"
+    assert cached.abstract == "Rich cached abstract"
+
+
 def test_external_id_fallback_from_paper_id_contracts() -> None:
     """Paper-ID fallback should populate arXiv/DOI fields when external IDs are absent."""
     client = SemanticScholarClient(timeout=1)

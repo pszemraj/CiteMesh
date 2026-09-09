@@ -1389,7 +1389,11 @@ class SemanticScholarClient:
             """
             attempt_papers: List[Paper] = []
             try:
-                relation_records = fetch_method(normalized_paper_id, limit=limit)
+                relation_records = fetch_method(
+                    normalized_paper_id,
+                    fields=_default_paper_fields(),
+                    limit=limit,
+                )
             except TypeError as exc:
                 if not _is_sdk_null_relation_page(exc):
                     raise
@@ -1406,6 +1410,7 @@ class SemanticScholarClient:
                 paper = self._convert_api_paper(getattr(record, "paper", None))
                 if paper:
                     attempt_papers.append(paper)
+                    _persist_paper(paper, paper.paper_id)
 
                 if len(attempt_papers) >= limit:
                     break
@@ -1697,6 +1702,7 @@ class SemanticScholarClient:
         """
         if fields is None:
             fields = _default_paper_fields()
+        cache_full_metadata = set(_default_paper_fields()).issubset(fields)
         # Semantic Scholar's recommendations endpoint does not currently support
         # requesting ``references`` in field lists (returns HTTP 400 with
         # unsupported nested-reference field tokens). Keep the request field set
@@ -1755,6 +1761,8 @@ class SemanticScholarClient:
             paper = self._convert_recommendation(rec)
             if paper:
                 papers.append(paper)
+                if cache_full_metadata:
+                    _persist_paper(paper, paper.paper_id)
         return papers
 
     def search_papers(
@@ -1784,6 +1792,7 @@ class SemanticScholarClient:
 
         if fields is None:
             fields = _default_paper_fields()
+        cache_full_metadata = set(_default_paper_fields()).issubset(fields)
 
         payload = self._request_json(
             SEARCH_BASE_URL,
@@ -1803,6 +1812,8 @@ class SemanticScholarClient:
             paper = self._convert_recommendation(rec)
             if paper:
                 papers.append(paper)
+                if cache_full_metadata:
+                    _persist_paper(paper, paper.paper_id)
         return papers
 
 
