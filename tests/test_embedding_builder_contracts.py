@@ -2800,21 +2800,48 @@ def test_embedding_fingerprint_resolution_contracts(
 def test_local_model_fingerprint_covers_inference_artifact_manifest(
     tmp_path: Path,
 ) -> None:
-    """Weights, tokenizer, and pooling changes must alter local model identity."""
+    """Selected inference artifacts, including custom code, define identity."""
     model_path = tmp_path / "local-model"
     pooling_path = model_path / "1_Pooling"
     pooling_path.mkdir(parents=True)
     (model_path / "config.json").write_text('{"model_type":"test"}')
     (model_path / "modules.json").write_text(
-        '[{"idx":0,"name":"pool","path":"1_Pooling","type":"Pooling"}]'
+        json.dumps(
+            [
+                {
+                    "idx": 0,
+                    "name": "transformer",
+                    "path": "",
+                    "type": "modeling_test.TestModel",
+                },
+                {
+                    "idx": 1,
+                    "name": "pool",
+                    "path": "1_Pooling",
+                    "type": "sentence_transformers.models.Pooling",
+                },
+            ]
+        )
     )
+    (model_path / "modeling_test.py").write_text(
+        "from .helper import VALUE\nclass TestModel: pass\n"
+    )
+    (model_path / "helper.py").write_text("VALUE = 'a'\n")
     (model_path / "model.safetensors").write_bytes(b"weights-a")
     (model_path / "tokenizer.json").write_text('{"version":"a"}')
+    (model_path / "tokenizer_config.json").write_text(
+        '{"fast_tokenizer_files":["tokenizer.4.0.0.json"]}'
+    )
+    versioned_tokenizer_path = model_path / "tokenizer.4.0.0.json"
+    versioned_tokenizer_path.write_text('{"version":"a"}')
     (pooling_path / "config.json").write_text('{"pooling_mode_mean_tokens":true}')
     (model_path / "README.md").write_text("documentation a")
 
     def _identity() -> tuple[str, Path]:
-        """Resolve a fresh fingerprint and physical cache for the local fixture."""
+        """Resolve a fresh fingerprint and physical cache for the local fixture.
+
+        :return tuple[str, Path]: Fingerprint and selected cache path.
+        """
         builder = EmbeddingGraphBuilder(
             max_papers=1,
             model_name=str(model_path),
@@ -2826,6 +2853,8 @@ def test_local_model_fingerprint_covers_inference_artifact_manifest(
 
     initial, initial_cache_path = _identity()
     (model_path / "README.md").write_text("documentation b")
+    (model_path / "metrics.json").write_text('{"loss":0.1}')
+    (model_path / "pytorch_model.bin.index.json").write_text("not valid json")
     assert _identity() == (initial, initial_cache_path)
 
     (pooling_path / "config.json").write_text('{"pooling_mode_mean_tokens":false}')
@@ -2838,14 +2867,26 @@ def test_local_model_fingerprint_covers_inference_artifact_manifest(
     assert tokenizer_changed != pooling_changed
     assert tokenizer_cache_path != pooling_cache_path
 
+    versioned_tokenizer_path.write_text('{"version":"b"}')
+    metadata_tokenizer_changed, metadata_tokenizer_cache_path = _identity()
+    assert metadata_tokenizer_changed != tokenizer_changed
+    assert metadata_tokenizer_cache_path != tokenizer_cache_path
+
     (model_path / "model.safetensors").write_bytes(b"weights-b")
     weights_changed, weights_cache_path = _identity()
-    assert weights_changed != tokenizer_changed
-    assert weights_cache_path != tokenizer_cache_path
+    assert weights_changed != metadata_tokenizer_changed
+    assert weights_cache_path != metadata_tokenizer_cache_path
+
+    (model_path / "helper.py").write_text("VALUE = 'b'\n")
+    code_changed, code_cache_path = _identity()
+    assert code_changed != weights_changed
+    assert code_cache_path != weights_cache_path
 
     (model_path / "model.safetensors").write_bytes(b"weights-a")
     (model_path / "tokenizer.json").write_text('{"version":"a"}')
+    versioned_tokenizer_path.write_text('{"version":"a"}')
     (pooling_path / "config.json").write_text('{"pooling_mode_mean_tokens":true}')
+    (model_path / "helper.py").write_text("VALUE = 'a'\n")
     assert _identity() == (initial, initial_cache_path)
 
 

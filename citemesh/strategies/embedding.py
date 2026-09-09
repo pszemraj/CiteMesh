@@ -105,36 +105,41 @@ _COMPILE_ELIGIBLE_DEVICES = frozenset({"cuda", "mps", "cpu"})
 # Legacy release-branch workaround window where Inductor conflicted with the
 # fp32_precision TF32 API; later torch releases use the modern API directly.
 _TF32_COMPILE_BRIDGE_TORCH_VERSIONS = frozenset({(2, 9), (2, 10)})
-_INFERENCE_ARTIFACT_SUFFIXES = frozenset(
+_INFERENCE_ARTIFACT_FILENAMES = frozenset(
     {
-        ".bin",
-        ".json",
-        ".merges",
-        ".model",
-        ".onnx",
-        ".pt",
-        ".pth",
-        ".py",
-        ".safetensors",
-        ".tflite",
-        ".tiktoken",
-        ".txt",
-        ".vocab",
+        "added_tokens.json",
+        "cnn_config.json",
+        "config.json",
+        "config_sentence_transformers.json",
+        "lstm_config.json",
+        "merges.txt",
+        "phrasetokenizer_config.json",
+        "router_config.json",
+        "sentence_albert_config.json",
+        "sentence_bert_config.json",
+        "sentence_camembert_config.json",
+        "sentence_distilbert_config.json",
+        "sentence_roberta_config.json",
+        "sentence_xlm-roberta_config.json",
+        "sentence_xlnet_config.json",
+        "sentencepiece.bpe.model",
+        "sentencepiece.model",
+        "special_tokens_map.json",
+        "spiece.model",
+        "tokenizer.json",
+        "tokenizer.model",
+        "tokenizer_config.json",
+        "vocab.json",
+        "vocab.txt",
+        "whitespacetokenizer_config.json",
+        "wordembedding_config.json",
     }
 )
-_IGNORED_ARTIFACT_DIRECTORIES = frozenset({".git", "logs", "runs", "wandb"})
-_IGNORED_ARTIFACT_FILES = frozenset(
-    {
-        ".ds_store",
-        ".gitattributes",
-        ".gitignore",
-        "optimizer.pt",
-        "rng_state.pth",
-        "scaler.pt",
-        "scheduler.pt",
-        "trainer_state.json",
-        "training_args.bin",
-    }
+_TORCH_WEIGHT_LAYOUTS = (
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
 )
 _RETRIEVAL_DOCUMENT_REPRESENTATION = "retrieval-document-v1"
 _GRAPH_SIMILARITY_REPRESENTATION = "graph-similarity-v1"
@@ -2020,6 +2025,55 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             )
         return Path(candidate_absolute)
 
+    @staticmethod
+    def _referenced_python_artifact_paths(
+        root: Path,
+        raw_reference: object,
+    ) -> Set[Path]:
+        """Resolve locally referenced custom Python model code.
+
+        SentenceTransformers loads repository-local module classes through the
+        Transformers dynamic-module loader, which recursively copies relative
+        imports. This follows that same bounded dependency graph.
+
+        :param Path root: Complete local model root.
+        :param object raw_reference: Dotted module class reference.
+        :return Set[Path]: Existing referenced Python artifacts below ``root``.
+        """
+        if not isinstance(raw_reference, str) or "--" in raw_reference:
+            return set()
+
+        module_name, separator, _ = raw_reference.strip().rpartition(".")
+        module_parts = module_name.split(".")
+        if not separator or any(
+            not part or re.fullmatch(r"[A-Za-z_]\w*", part) is None
+            for part in module_parts
+        ):
+            return set()
+
+        module_path = root.joinpath(*module_parts).with_suffix(".py")
+        if not module_path.is_file():
+            return set()
+
+        paths = {module_path}
+        pending = [module_path]
+        dependency_root = module_path.parent
+        while pending:
+            current_path = pending.pop()
+            source = current_path.read_text(encoding="utf-8")
+            relative_imports = re.findall(
+                r"^\s*import\s+\.(\S+)\s*$", source, flags=re.MULTILINE
+            )
+            relative_imports.extend(
+                re.findall(r"^\s*from\s+\.(\S+)\s+import", source, flags=re.MULTILINE)
+            )
+            for relative_import in relative_imports:
+                dependency_path = dependency_root / f"{relative_import}.py"
+                if dependency_path.is_file() and dependency_path not in paths:
+                    paths.add(dependency_path)
+                    pending.append(dependency_path)
+        return paths
+
     @classmethod
     def _inference_artifact_paths(cls, artifact_root: Path) -> List[Path]:
         """Enumerate and validate inference-relevant checkpoint artifacts.
@@ -2035,28 +2089,11 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             raise RuntimeError(f"Local embedding model path is not readable: {root}")
 
         artifacts: Set[Path] = set()
-        for directory, child_directories, file_names in os.walk(root):
-            child_directories[:] = [
-                name
-                for name in child_directories
-                if name.lower() not in _IGNORED_ARTIFACT_DIRECTORIES
-                and not name.lower().startswith("checkpoint-")
-            ]
-            directory_path = Path(directory)
-            for file_name in file_names:
-                lowered = file_name.lower()
-                if (
-                    lowered in _IGNORED_ARTIFACT_FILES
-                    or lowered.startswith("readme")
-                    or lowered.startswith("license")
-                ):
-                    continue
-                path = directory_path / file_name
-                if path.suffix.lower() in _INFERENCE_ARTIFACT_SUFFIXES:
-                    artifacts.add(path)
-
+        artifact_roots = {root}
+        python_references: List[object] = []
         modules_path = root / "modules.json"
         if modules_path.is_file():
+            artifacts.add(modules_path)
             try:
                 modules_payload = json.loads(modules_path.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -2070,6 +2107,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     raise RuntimeError(
                         "SentenceTransformers modules.json entries must be objects."
                     )
+                python_references.append(module.get("type"))
                 module_path = str(module.get("path", "") or "").strip()
                 if not module_path:
                     continue
@@ -2080,16 +2118,66 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                     raise RuntimeError(
                         f"SentenceTransformers module path is missing: {module_path}"
                     )
+                if resolved_module.is_dir():
+                    artifact_roots.add(resolved_module)
+                    artifacts.update(
+                        path for path in resolved_module.rglob("*.py") if path.is_file()
+                    )
+                elif resolved_module.is_file():
+                    artifacts.add(resolved_module)
 
-        index_paths = [
-            path for path in artifacts if path.name.lower().endswith(".index.json")
-        ]
-        for index_path in index_paths:
+        for current_root in artifact_roots:
+            artifacts.update(
+                path
+                for file_name in _INFERENCE_ARTIFACT_FILENAMES
+                if (path := current_root / file_name).is_file()
+            )
+            tokenizer_config_path = current_root / "tokenizer_config.json"
+            if tokenizer_config_path.is_file():
+                try:
+                    tokenizer_config = json.loads(
+                        tokenizer_config_path.read_text(encoding="utf-8")
+                    )
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                    tokenizer_config = {}
+                if isinstance(tokenizer_config, dict):
+                    for key, raw_reference in tokenizer_config.items():
+                        if key.endswith("_file") and isinstance(raw_reference, str):
+                            references = [raw_reference]
+                        elif key.endswith("_files") and isinstance(raw_reference, list):
+                            references = raw_reference
+                        else:
+                            continue
+                        for reference in references:
+                            if not isinstance(reference, str):
+                                continue
+                            try:
+                                referenced_path = cls._safe_artifact_reference(
+                                    root, tokenizer_config_path, reference
+                                )
+                            except RuntimeError:
+                                continue
+                            if referenced_path.is_file():
+                                artifacts.add(referenced_path)
+
+            selected_weight = next(
+                (
+                    current_root / file_name
+                    for file_name in _TORCH_WEIGHT_LAYOUTS
+                    if (current_root / file_name).is_file()
+                ),
+                None,
+            )
+            if selected_weight is None:
+                continue
+            artifacts.add(selected_weight)
+            if not selected_weight.name.endswith(".index.json"):
+                continue
             try:
-                index_payload = json.loads(index_path.read_text(encoding="utf-8"))
+                index_payload = json.loads(selected_weight.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise RuntimeError(
-                    f"Malformed weight index {index_path}: {exc}"
+                    f"Malformed weight index {selected_weight}: {exc}"
                 ) from exc
             weight_map = (
                 index_payload.get("weight_map")
@@ -2097,14 +2185,19 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
                 else None
             )
             if not isinstance(weight_map, dict) or not weight_map:
-                raise RuntimeError(f"Weight index has no weight_map: {index_path}")
+                raise RuntimeError(f"Weight index has no weight_map: {selected_weight}")
             for shard_name in sorted({str(value) for value in weight_map.values()}):
-                shard_path = cls._safe_artifact_reference(root, index_path, shard_name)
+                shard_path = cls._safe_artifact_reference(
+                    root, selected_weight, shard_name
+                )
                 if not shard_path.is_file():
                     raise RuntimeError(
                         f"Weight index references a missing shard: {shard_name}"
                     )
                 artifacts.add(shard_path)
+
+        for reference in python_references:
+            artifacts.update(cls._referenced_python_artifact_paths(root, reference))
 
         if not artifacts:
             raise RuntimeError(
