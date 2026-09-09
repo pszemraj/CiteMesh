@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,9 @@ def _forbid_external_model_resolution(
     if request.node.get_closest_marker("slow") is not None:
         return
 
+    # Import before patching the provider so teardown restores the original alias.
+    import transformers.utils.hub as transformers_hub
+
     def blocked(*_args: Any, **_kwargs: Any) -> Any:
         """Reject external model resolution from a nominal unit test."""
         raise AssertionError(
@@ -36,6 +38,4 @@ def _forbid_external_model_resolution(
     monkeypatch.setattr(huggingface_hub, "snapshot_download", blocked)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", blocked)
 
-    transformers_hub = sys.modules.get("transformers.utils.hub")
-    if transformers_hub is not None:
-        monkeypatch.setattr(transformers_hub, "hf_hub_download", blocked)
+    monkeypatch.setattr(transformers_hub, "hf_hub_download", blocked)
