@@ -2497,32 +2497,62 @@ def test_newest_first_selection_drains_streams_with_a_cost_warning(
         for record in caplog.records
     )
 
-    f32_default = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="float32",
-        client=MagicMock(),
-    )
-    int8_prefilter_on = EmbeddingGraphBuilder(
+
+@pytest.mark.parametrize("initial_prefilter", [False, True])
+def test_prefilter_toggle_reuses_hydrated_builder_vectors(
+    monkeypatch: pytest.MonkeyPatch, initial_prefilter: bool
+) -> None:
+    """Changing retrieval acceleration must reuse vectors and hydration state.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolates the model runtime.
+    :param bool initial_prefilter: Setting used to populate the original cache.
+    :return None: Checks warm reads and searches through both live builders.
+    """
+    _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
+    first = EmbeddingGraphBuilder(
         max_papers=1,
         storage_precision="int8",
-        binary_prefilter=True,
+        binary_prefilter=initial_prefilter,
         semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
-    int8_prefilter_off = EmbeddingGraphBuilder(
-        max_papers=1,
-        storage_precision="int8",
-        binary_prefilter=False,
-        semantic_source="arxiv-corpus",
-        client=MagicMock(),
+    original = first.embedding_cache
+    original.set_calibration_ranges(
+        np.asarray([[-1.0, -1.0], [1.0, 1.0]], dtype=np.float32), embedding_dim=2
+    )
+    papers = {"p1": {"title": "Cached paper", "abstract": "Cached abstract"}}
+    model = ConstantEncodeModel()
+    cold = original.get_embeddings(papers, model, show_progress=False)
+    original.mark_hydrated(
+        dataset_source="corpus", dataset_split="train", corpus_size=1, complete=True
     )
 
-    assert f32_default.binary_prefilter is False
-    assert f32_default.binary_rescore_multiplier == 1
-    assert (
-        int8_prefilter_on.embedding_cache.model_name
-        != int8_prefilter_off.embedding_cache.model_name
+    second = EmbeddingGraphBuilder(
+        max_papers=1,
+        storage_precision="int8",
+        binary_prefilter=not initial_prefilter,
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
     )
+    toggled = second.embedding_cache
+    assert toggled.h5_path == original.h5_path
+    assert toggled.db_path == original.db_path
+    with patch.object(
+        model, "encode", side_effect=AssertionError("Unexpected re-encode")
+    ):
+        for cache in (toggled, original):
+            warm = cache.get_embeddings(papers, model, show_progress=False)
+            np.testing.assert_array_equal(warm["p1"], cold["p1"])
+            assert cache.is_hydrated(
+                dataset_source="corpus", dataset_split="train", corpus_size=1
+            )
+            results = cache.search(
+                cold["p1"],
+                top_k=1,
+                binary_prefilter=cache.binary_prefilter,
+                binary_rescore_multiplier=1,
+            )
+            assert [result.paper_id for result in results] == ["p1"]
 
 
 @pytest.mark.parametrize("semantic_source", ["candidates", "arxiv-corpus"])

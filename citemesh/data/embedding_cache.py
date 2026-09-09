@@ -2015,13 +2015,15 @@ class EmbeddingCache:
             key: self._metadata_value_from_h5_attr(value)
             for key, value in self._runtime_contract_values().items()
         }
+        # Other live cache objects may enable or remove this derived index.
+        # Its presence/encoding is checked separately from primary vector rows.
+        expected.pop(BINARY_PREFILTER_ENABLED_KEY)
         if self.storage_precision != "int8":
             expected.pop(CALIBRATION_SAMPLE_SIZE_KEY)
         if embeddings_dataset is None:
             for key in (
                 COMPRESSION_FILTER_KEY,
                 COMPRESSION_LEVEL_KEY,
-                BINARY_PREFILTER_ENABLED_KEY,
             ):
                 expected.pop(key)
         metadata = self._load_cache_metadata(conn)

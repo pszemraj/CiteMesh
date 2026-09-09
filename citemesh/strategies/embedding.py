@@ -1485,7 +1485,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
             representation=_GRAPH_SIMILARITY_REPRESENTATION,
             artifact_identity=self._resolved_model_fingerprint,
             storage_precision="float32",
-            binary_prefilter=False,
             formatter_identity=self._similarity_formatter_fingerprint,
         )
 
@@ -1622,7 +1621,6 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         representation: str = _RETRIEVAL_DOCUMENT_REPRESENTATION,
         artifact_identity: Optional[str] = None,
         storage_precision: Optional[str] = None,
-        binary_prefilter: Optional[bool] = None,
         formatter_identity: Optional[str] = None,
     ) -> str:
         """Build a cache key for the active model and representation contract.
@@ -1630,16 +1628,10 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         :param str representation: Semantic role and schema version of stored vectors.
         :param Optional[str] artifact_identity: Immutable resolved checkpoint identity.
         :param Optional[str] storage_precision: Representation-specific storage mode.
-        :param Optional[bool] binary_prefilter: Representation-specific prefilter mode.
         :param Optional[str] formatter_identity: Representation formatter fingerprint.
         :return str: Namespace key used for embedding cache partitioning.
         """
         resolved_storage = storage_precision or self.storage_precision
-        resolved_prefilter = (
-            self.binary_prefilter
-            if binary_prefilter is None
-            else bool(binary_prefilter)
-        )
         resolved_formatter = formatter_identity or self._document_formatter_fingerprint
         parts = [
             f"model={self._cache_model_identity()}",
@@ -1652,7 +1644,9 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         if self.truncate_dim is not None:
             parts.append(f"truncate_dim={self.truncate_dim}")
         parts.append(f"storage_precision={resolved_storage}")
-        parts.append(f"binary_prefilter={int(resolved_prefilter)}")
+        # Keep the historical default token so existing default caches remain
+        # reachable; the auxiliary index setting does not identify vector rows.
+        parts.append(f"binary_prefilter={int(resolved_storage == 'int8')}")
         if resolved_storage == "int8":
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
         parts.append(f"source_dtype={self._source_dtype_hint}")

@@ -809,6 +809,17 @@ def test_embedding_cache_rebuilds_binary_index_after_disabled_replacement(
     with h5py.File(disabled.h5_path, "r") as h5:
         assert BINARY_INDEX_DATASET_NAME not in h5
 
+    # The original object still has prefiltering enabled, but the shared index
+    # was removed by the other writer; its search must score primary rows.
+    live_results = cache.search(
+        -np.ones(8, dtype=np.float32),
+        top_k=1,
+        binary_prefilter=True,
+        binary_rescore_multiplier=1,
+    )
+    assert [result.paper_id for result in live_results] == ["p1"]
+    assert cache.last_search_used_binary_prefilter is False
+
     reenabled = EmbeddingCache(cache_dir=tmp_path, model_name=model_name)
     results = reenabled.search(
         -np.ones(8, dtype=np.float32),
@@ -818,6 +829,16 @@ def test_embedding_cache_rebuilds_binary_index_after_disabled_replacement(
     )
     assert [result.paper_id for result in results] == ["p1"]
     assert reenabled.last_search_used_binary_prefilter is True
+
+    disabled.get_embeddings(replacement, model, show_progress=False)
+    direct_results = disabled.search(
+        -np.ones(8, dtype=np.float32),
+        top_k=1,
+        binary_prefilter=True,
+        binary_rescore_multiplier=1,
+    )
+    assert [result.paper_id for result in direct_results] == ["p1"]
+    assert disabled.last_search_used_binary_prefilter is False
 
 
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])

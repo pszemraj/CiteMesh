@@ -274,7 +274,7 @@ The default mode is `auto`: local search when your cache has embeddings, S2 keyw
 
 Local search targets the same retrieval-document cache namespace a flagless build writes to (honoring `config.toml` defaults), so it finds your vectors automatically in the common case. It does not search the separate graph-similarity cache. In `arxiv-corpus` mode, its configured `dataset_source` must match the source recorded when the corpus cache was hydrated; build the requested source first if it differs. Namespaces are keyed by the runtime-active model artifact, requested revision, model profile, representation contract, formatter, dimensions, and compute dtype. Pass `--model` for a non-default model and `--model-profile` when the build used an explicit profile override; float32 and bfloat16 runs use distinct namespaces, while CPU, CUDA, and MPS share a namespace when their effective compute dtype and other contracts match.
 
-For int8 corpus caches built with a non-default `--calibration-sample-size` or `--no-binary-prefilter`, set the matching `defaults.calibration_sample_size` and `defaults.binary_prefilter` values with `citemesh config set` before local search. These settings select the same namespace for subsequent flagless builds and searches.
+For int8 corpus caches built with a non-default `--calibration-sample-size`, set the matching `defaults.calibration_sample_size` value with `citemesh config set` before local search. Calibration size selects the namespace; `defaults.binary_prefilter` only changes retrieval acceleration and reuses the same primary vectors and hydration state.
 
 ## Troubleshooting
 
