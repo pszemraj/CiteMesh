@@ -70,7 +70,13 @@ from citemesh.data import (
     get_cache_dir,
     validate_compression_filter,
 )
-from citemesh.data.cache import atomic_write_json, legacy_macos_cache_root, path_exists
+from citemesh.data.cache import (
+    CACHE_COORDINATION_DIRNAME,
+    atomic_write_json,
+    cache_operation_lock,
+    legacy_macos_cache_root,
+    path_exists,
+)
 from citemesh.paper_ids import normalize_paper_id
 from citemesh.progress import set_progress_console
 from citemesh.services import (
@@ -3521,17 +3527,29 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
 
     config_path = cache_root / USER_CONFIG_FILENAME
     try:
-        # Hold the config lock so an in-flight atomic write cannot lose its
-        # temporary file; preserve the lock's path for waiting writers.
-        with config_lock(config_path) as lock_path:
-            preserved_config = path_exists(config_path) or config_path.is_symlink()
-            for child in sorted(cache_root.iterdir()):
-                if child in {config_path, lock_path}:
-                    continue
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
+        # The exclusive root lock prevents a live embedding operation from
+        # losing its namespace lock inode while this removes cache payloads.
+        with cache_operation_lock(cache_root, exclusive=True, blocking=False):
+            # Hold the config lock so an in-flight atomic write cannot lose its
+            # temporary file; preserve the lock's path for waiting writers.
+            with config_lock(config_path) as lock_path:
+                preserved_config = path_exists(config_path) or config_path.is_symlink()
+                for child in sorted(cache_root.iterdir()):
+                    if child in {
+                        config_path,
+                        lock_path,
+                        cache_root / CACHE_COORDINATION_DIRNAME,
+                    }:
+                        continue
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+    except Timeout:
+        logger.error(
+            "Cache directory is busy with an active cache operation: %s", cache_root
+        )
+        return 1
     except (OSError, ConfigFileError) as exc:
         logger.error("Failed to clear cache directory %s: %s", cache_root, exc)
         return 1

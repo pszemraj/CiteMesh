@@ -13,6 +13,7 @@ import tempfile
 import threading
 import webbrowser
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import networkx as nx
+import numpy as np
 import pytest
 
 from citemesh import cli as cli_module
@@ -40,6 +42,8 @@ from citemesh.cli import (
 from citemesh.core import Author, Paper
 from citemesh.core.user_config import UserConfig
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
+from citemesh.data.embedding_cache import EmbeddingCache
 from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, ENCODE_BATCH_SIZE
 from citemesh.strategies.hybrid import (
@@ -456,8 +460,64 @@ def test_cache_commands_contracts(
         f"STDOUT: {clear_result.stdout}\nSTDERR: {clear_result.stderr}"
     )
     assert cache_root.is_dir()
-    assert {child.name for child in cache_root.iterdir()} <= {"config.toml.lock"}
+    assert {child.name for child in cache_root.iterdir()} <= {
+        "config.toml.lock",
+        CACHE_COORDINATION_DIRNAME,
+    }
     assert external_file.read_bytes() == b"outside cache" * 1000
+
+
+def test_cache_clear_refuses_active_embedding_encode() -> None:
+    """Cache clear must not delete a namespace between encode and commit.
+
+    :return None: Validates that an active shared cache operation rejects clear.
+    """
+    encode_started = threading.Event()
+    release_encode = threading.Event()
+
+    class _BlockingEncodeModel:
+        """Hold an embedding operation between its cache lookup and commit."""
+
+        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            """Wait until the test permits the cache commit.
+
+            :param list[str] texts: Text payload to embed.
+            :param object kwargs: Unused encoder keyword arguments.
+            :return np.ndarray: One deterministic FP32 vector per requested text.
+            """
+            del kwargs
+            encode_started.set()
+            assert release_encode.wait(timeout=5), "encode was never released"
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    cache = EmbeddingCache(model_name="clear-race", storage_precision="float32")
+    model = _BlockingEncodeModel()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        write = executor.submit(
+            cache.get_embeddings,
+            {"paper": {"title": "Title", "abstract": "Abstract"}},
+            model,
+            show_progress=False,
+        )
+        assert encode_started.wait(timeout=5), "embedding encode never started"
+        assert (
+            cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
+        )
+        assert cache.h5_path.is_file()
+        release_encode.set()
+        write.result(timeout=5)
+
+    assert cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    assert cache.cache_dir.parent.joinpath(CACHE_COORDINATION_DIRNAME).is_dir()
+    assert not cache.cache_dir.exists()
+
+    repopulated = cache.get_embeddings(
+        {"paper-after-clear": {"title": "Title", "abstract": "Abstract"}},
+        model,
+        show_progress=False,
+    )
+    assert set(repopulated) == {"paper-after-clear"}
+    assert cache.h5_path.is_file()
 
 
 def test_cache_clear_reports_config_inspection_failure(

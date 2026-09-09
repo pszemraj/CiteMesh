@@ -35,7 +35,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "filelock>=3.16.0",
+    "filelock>=3.32.4",
     "h5py>=3.10.0",
     "matplotlib>=3.5.0",
     "networkx>=2.6",

@@ -8,9 +8,15 @@ import json
 import os
 import platform
 import tempfile
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, Callable, Iterator, TextIO
+
+from filelock import ReadWriteLock
+
+CACHE_COORDINATION_DIRNAME = ".locks"
+CACHE_OPERATION_LOCK_FILENAME = "cache-operations.db"
 
 
 def path_exists(path: Path) -> bool:
@@ -85,6 +91,39 @@ def get_cache_dir(*parts: str, create: bool = True) -> Path:
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+@contextmanager
+def cache_operation_lock(
+    cache_root: Path,
+    *,
+    exclusive: bool = False,
+    timeout: float = -1,
+    blocking: bool = True,
+) -> Iterator[None]:
+    """Coordinate a cache operation with cache-root clearing.
+
+    :param Path cache_root: CiteMesh cache root whose artifacts are coordinated.
+    :param bool exclusive: Whether to acquire the exclusive clear lock.
+    :param float timeout: Maximum acquisition wait in seconds; ``-1`` waits indefinitely.
+    :param bool blocking: Whether acquisition may wait for conflicting operations.
+    :return Iterator[None]: Context manager holding a shared operation or exclusive clear lock.
+    """
+    cache_root.mkdir(parents=True, exist_ok=True)
+    lock_dir = cache_root / CACHE_COORDINATION_DIRNAME
+    lock_dir.mkdir(exist_ok=True)
+    lock = ReadWriteLock(
+        lock_dir / CACHE_OPERATION_LOCK_FILENAME,
+        timeout=timeout,
+        blocking=blocking,
+        is_singleton=False,
+    )
+    lock_context = lock.write_lock() if exclusive else lock.read_lock()
+    try:
+        with lock_context:
+            yield
+    finally:
+        lock.close()
 
 
 def _atomic_write_text_payload(

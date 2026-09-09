@@ -35,7 +35,13 @@ from citemesh.text_batching import (
     l2_normalize_embeddings,
 )
 
-from .cache import format_bytes, get_cache_dir, path_exists
+from .cache import (
+    CACHE_COORDINATION_DIRNAME,
+    cache_operation_lock,
+    format_bytes,
+    get_cache_dir,
+    path_exists,
+)
 from .model_profiles import DEFAULT_EMBEDDING_MODEL_NAME, compose_title_abstract_text
 
 logger = logging.getLogger(__name__)
@@ -394,11 +400,14 @@ class EmbeddingCache:
         if calibration_sample_size < 1:
             raise ValueError("calibration_sample_size must be at least 1")
 
+        configured_cache_root = get_cache_dir(create=False)
         if cache_dir is None:
-            cache_dir = get_cache_dir("embeddings")
+            cache_dir = configured_cache_root / "embeddings"
 
         self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self._managed_cache_root = self._resolve_managed_cache_root(
+            self.cache_dir, configured_cache_root
+        )
 
         model_hash = hashlib.sha256(model_name.encode("utf-8")).hexdigest()[:12]
         self.db_path = self.cache_dir / f"metadata_{model_hash}.db"
@@ -433,9 +442,11 @@ class EmbeddingCache:
         self.last_search_rescored_embeddings: Optional[int] = None
         self._int8_saturation_warning_emitted = False
 
-        with self._cache_lock():
-            self._init_db()
-            self._ensure_h5_layout()
+        with self._cache_operation_lock():
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            with self._cache_lock():
+                self._init_db()
+                self._ensure_h5_layout()
 
     # ------------------------------------------------------------------
     # Public API
@@ -504,7 +515,37 @@ class EmbeddingCache:
         text_builder: Optional[Callable[[Dict[str, object]], str]],
         return_embeddings: bool,
     ) -> Optional[Dict[str, np.ndarray]]:
-        """Hydrate cache entries and optionally materialize float32 embeddings.
+        """Coordinate one complete embedding cache operation with root clearing.
+
+        :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
+        :param Any model: SentenceTransformer-compatible model exposing ``encode``.
+        :param int batch_size: Batch size for model encoding.
+        :param bool show_progress: Whether to display progress bars.
+        :param Optional[Callable[[Dict[str, object]], str]] text_builder: Optional metadata->text formatter.
+        :param bool return_embeddings: Whether to return float32 embedding payloads.
+        :return Optional[Dict[str, np.ndarray]]: Embedding map when requested, else ``None``.
+        """
+        with self._cache_operation_lock():
+            return self._process_embeddings_locked(
+                papers,
+                model,
+                batch_size=batch_size,
+                show_progress=show_progress,
+                text_builder=text_builder,
+                return_embeddings=return_embeddings,
+            )
+
+    def _process_embeddings_locked(
+        self,
+        papers: Dict[str, Dict],
+        model: Any,
+        *,
+        batch_size: int,
+        show_progress: bool,
+        text_builder: Optional[Callable[[Dict[str, object]], str]],
+        return_embeddings: bool,
+    ) -> Optional[Dict[str, np.ndarray]]:
+        """Hydrate cache entries while the root operation lock is held.
 
         :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
         :param Any model: SentenceTransformer-compatible model exposing ``encode``.
@@ -1520,8 +1561,11 @@ class EmbeddingCache:
         """
         timeout_seconds = _resolve_cache_lock_timeout_seconds()
         try:
-            with self._hydration_operation_file_lock.acquire(timeout=timeout_seconds):
-                yield
+            with self._cache_operation_lock():
+                with self._hydration_operation_file_lock.acquire(
+                    timeout=timeout_seconds
+                ):
+                    yield
         except Timeout as exc:
             raise TimeoutError(
                 "Timed out waiting for embedding cache hydration operation lock "
@@ -1538,15 +1582,61 @@ class EmbeddingCache:
         :return Iterator[None]: Context manager yielding once lock is acquired.
         """
         timeout_seconds = _resolve_cache_lock_timeout_seconds()
-        lock = FileLock(str(self.lock_path), timeout=timeout_seconds)
+        with self._cache_operation_lock():
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            lock = FileLock(str(self.lock_path), timeout=timeout_seconds)
+            try:
+                with lock:
+                    if not path_exists(self.db_path):
+                        self._init_db()
+                    yield
+            except Timeout as exc:
+                raise TimeoutError(
+                    "Timed out waiting for embedding cache lock "
+                    f"at {self.lock_path} after {timeout_seconds:.3f}s. "
+                    "Another process may be holding it. "
+                    f"Increase {EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR} or set "
+                    "CITEMESH_CACHE_DIR to an isolated per-run cache root."
+                ) from exc
+
+    @staticmethod
+    def _resolve_managed_cache_root(
+        cache_dir: Path, configured_cache_root: Path
+    ) -> Optional[Path]:
+        """Return the configured root when ``cache_dir`` is cleared by the CLI.
+
+        :param Path cache_dir: Embedding namespace directory.
+        :param Path configured_cache_root: Active CiteMesh cache root.
+        :return Optional[Path]: Root coordinated with ``cache clear``, if applicable.
+        """
+        resolved_root = configured_cache_root.expanduser().resolve()
         try:
-            with lock:
+            cache_dir.expanduser().resolve().relative_to(resolved_root)
+        except ValueError:
+            return None
+        return resolved_root
+
+    @contextmanager
+    def _cache_operation_lock(self) -> Iterator[None]:
+        """Hold a shared root lock when this namespace belongs to CiteMesh's root.
+
+        :return Iterator[None]: Context manager protecting a live cache operation.
+        """
+        if self._managed_cache_root is None:
+            yield
+            return
+        timeout_seconds = _resolve_cache_lock_timeout_seconds()
+        try:
+            with cache_operation_lock(
+                self._managed_cache_root, timeout=timeout_seconds
+            ):
                 yield
         except Timeout as exc:
             raise TimeoutError(
-                "Timed out waiting for embedding cache lock "
-                f"at {self.lock_path} after {timeout_seconds:.3f}s. "
-                "Another process may be holding it. "
+                "Timed out waiting for cache-root operation lock "
+                f"at {self._managed_cache_root / CACHE_COORDINATION_DIRNAME} "
+                f"after {timeout_seconds:.3f}s. Another process may be clearing "
+                "or using this cache root. "
                 f"Increase {EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR} or set "
                 "CITEMESH_CACHE_DIR to an isolated per-run cache root."
             ) from exc

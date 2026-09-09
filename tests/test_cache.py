@@ -8,8 +8,26 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from filelock import Timeout
 
 import citemesh.data.cache as cache_module
+
+
+def test_cache_operation_lock_blocks_nonblocking_clear(tmp_path: Path) -> None:
+    """An exclusive clear lock must reject while a shared operation is live.
+
+    :param Path tmp_path: Temporary cache root.
+    :return None: Validates shared/exclusive root coordination.
+    """
+    with cache_module.cache_operation_lock(tmp_path):
+        with pytest.raises(Timeout):
+            with cache_module.cache_operation_lock(
+                tmp_path, exclusive=True, blocking=False
+            ):
+                pass
+
+    with cache_module.cache_operation_lock(tmp_path, exclusive=True, blocking=False):
+        pass
 
 
 def test_default_cache_root_honors_override_before_platform(

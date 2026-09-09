@@ -1303,4 +1303,7 @@ def test_cache_clear_without_config_keeps_coordination_root() -> None:
     result = _run_cli(["cache", "clear", "--yes"])
     assert result.returncode == 0
     assert cache_root.is_dir()
-    assert {child.name for child in cache_root.iterdir()} <= {"config.toml.lock"}
+    assert {child.name for child in cache_root.iterdir()} <= {
+        "config.toml.lock",
+        cache_module.CACHE_COORDINATION_DIRNAME,
+    }

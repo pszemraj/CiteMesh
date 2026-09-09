@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import types
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from queue import Empty
@@ -21,6 +22,7 @@ import numpy as np
 import pytest
 
 import citemesh.data.embedding_cache as embedding_cache_module
+from citemesh.data.cache import cache_operation_lock
 from citemesh.data.embedding_cache import (
     BINARY_INDEX_DATASET_NAME,
     BINARY_INDEX_ENCODING,
@@ -1003,6 +1005,23 @@ def test_embedding_cache_lock_timeout_env_override_contract(
 
     monkeypatch.setenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR, "not-a-number")
     assert _resolve_cache_lock_timeout_seconds() == EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS
+
+
+def test_embedding_cache_root_lock_uses_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root coordination must honor the established embedding lock timeout.
+
+    :param pytest.MonkeyPatch monkeypatch: Provides a short deterministic timeout.
+    :return None: Verifies root-lock timeout propagation and error context.
+    """
+    cache = EmbeddingCache(model_name="root-timeout", storage_precision="float32")
+    monkeypatch.setenv(EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR, "0.01")
+
+    with cache_operation_lock(cache.cache_dir.parent, exclusive=True):
+        with pytest.raises(TimeoutError, match="cache-root operation lock"):
+            with cache._cache_lock():
+                pass
 
 
 def test_embedding_cache_int8_requires_explicit_calibration_ranges() -> None:
@@ -3113,6 +3132,91 @@ def test_embedding_cache_serializes_multiprocess_writes(tmp_path: Path) -> None:
 
     errors = [result for result in results if result[0] == "err"]
     assert not errors, f"Concurrent cache writes failed: {errors}"
+
+
+def test_hydration_operation_lock_allows_background_cache_write() -> None:
+    """A hydration read lock should coexist with a background cache write.
+
+    :return None: Verifies nested root read locks use independent lock connections.
+    """
+    cache = EmbeddingCache(
+        model_name="hydration-read-nesting", storage_precision="float32"
+    )
+    papers = {"paper": {"title": "Title", "abstract": "Abstract"}}
+
+    with cache.hydration_operation_lock():
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                cache.get_embeddings,
+                papers,
+                LookupEncodeModel(
+                    {"Title. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}
+                ),
+                show_progress=False,
+            )
+            embeddings = future.result(timeout=5)
+
+    assert set(embeddings) == {"paper"}
+
+
+def test_embedding_cache_root_read_locks_allow_separate_namespaces() -> None:
+    """Two namespace encodes should share the cache-root operation lock.
+
+    :return None: Verifies root coordination does not serialize unrelated encodes.
+    """
+    first_started = threading.Event()
+    second_started = threading.Event()
+    release_encode = threading.Event()
+
+    class _BlockingEncodeModel:
+        """Block an encode after its root read lock is acquired."""
+
+        def __init__(self, started: threading.Event) -> None:
+            """Store the event that signals entry to encode.
+
+            :param threading.Event started: Event set when encode begins.
+            """
+            self.started = started
+
+        def encode(self, texts: list[str], **kwargs: object) -> np.ndarray:
+            """Block each encode until both namespaces are active.
+
+            :param list[str] texts: Text payload to embed.
+            :param object kwargs: Unused encoder keyword arguments.
+            :return np.ndarray: One deterministic FP32 vector per requested text.
+            """
+            del kwargs
+            self.started.set()
+            assert release_encode.wait(timeout=5), "encode was never released"
+            return np.ones((len(texts), 2), dtype=np.float32)
+
+    first_cache = EmbeddingCache(
+        model_name="parallel-root-read-one", storage_precision="float32"
+    )
+    second_cache = EmbeddingCache(
+        model_name="parallel-root-read-two", storage_precision="float32"
+    )
+    papers = {"paper": {"title": "Title", "abstract": "Abstract"}}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            first_cache.get_embeddings,
+            papers,
+            _BlockingEncodeModel(first_started),
+            show_progress=False,
+        )
+        second = executor.submit(
+            second_cache.get_embeddings,
+            papers,
+            _BlockingEncodeModel(second_started),
+            show_progress=False,
+        )
+        try:
+            assert first_started.wait(timeout=5), "first encode never started"
+            assert second_started.wait(timeout=5), "second encode never started"
+        finally:
+            release_encode.set()
+        assert set(first.result(timeout=5)) == {"paper"}
+        assert set(second.result(timeout=5)) == {"paper"}
 
 
 def test_embedding_cache_serializes_multiprocess_initialization_recovery(

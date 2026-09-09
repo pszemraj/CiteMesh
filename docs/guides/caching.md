@@ -31,7 +31,9 @@ Variable details are documented in [Environment Variables](../reference/environm
 ```text
 citemesh cache root
 ├── config.toml                    # Persistent user configuration (see Configuration guide)
-├── config.toml.lock               # Coordination for configuration writes and cache clearing
+├── config.toml.lock               # Coordination for configuration writes
+├── .locks/
+│   └── cache-operations.db        # SQLite coordination for live cache operations and clear
 ├── embeddings/
 │   ├── metadata_<model-hash>.db   # SQLite metadata (paper ids, text hashes, row_idx, authors/categories JSON, hydration state)
 │   ├── embeddings_<model-hash>.h5 # HDF5 matrix datasets (int8/float32 + optional binary index + calibration ranges)
@@ -43,7 +45,7 @@ citemesh cache root
     └── <sha1>.json                # Semantic Scholar reference ID cache entries
 ```
 
-`config.toml` is configuration, not cache: it is documented in [User Configuration](configuration.md) and survives `citemesh cache clear`. Atomic text writes preserve an existing file's permission bits (new files follow the process umask); `config.toml` is the exception and is always written `0600` because it can hold `api.s2_api_key`.
+`config.toml` is configuration, not cache: it is documented in [User Configuration](configuration.md) and survives `citemesh cache clear`, along with its lock and `.locks/` coordination directory. Atomic text writes preserve an existing file's permission bits (new files follow the process umask); `config.toml` is the exception and is always written `0600` because it can hold `api.s2_api_key`.
 
 Dashboard collection locks live beside their output packages, outside the cache root, so changing `CITEMESH_CACHE_DIR` or clearing cached data does not break coordination between collection writers. See [Output Artifacts](../reference/output-artifacts.md).
 
@@ -183,6 +185,8 @@ vectors or duplicate cache rows.
 
 Cache writes are serialized via per-model lock files (`cache_<model-hash>.lock`) to avoid multi-process HDF5 write races. The expensive encode step runs outside that lock; the lock only wraps short lookup and commit phases, and the commit phase re-checks cache misses before assigning final rows. Lock acquisition timeout defaults to `900` seconds and can be overridden with `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` (details: [Environment Variables](../reference/environment.md)).
 
+Every live embedding cache operation also holds a shared cache-root lock from lookup through encode and commit. Different namespaces can continue concurrently. `cache clear` requests the exclusive side without waiting; if a cache operation is active, it reports that the cache is busy and leaves all payloads untouched. The SQLite coordination database and any SQLite sidecars remain in `.locks/` across clears so a clear never replaces an active lock inode.
+
 Corpus hydration also holds `hydration_<model-hash>.lock` across the complete
 check, resume or rebuild, and the cache search that consumes the hydrated rows.
 Concurrent builds targeting different source, split, or corpus-size settings
@@ -306,7 +310,7 @@ Clear cached data under the CiteMesh cache root:
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
-Omit `--yes` for interactive confirmation. `cache clear` deletes every cache-root entry (embeddings, papers, references, and anything else present) except `config.toml` and its coordination lock, `config.toml.lock`. Clearing acquires the same lock as configuration writes, waiting up to 10 seconds before failing if another process holds it. The cache root remains available for locking even when no configuration file exists.
+Omit `--yes` for interactive confirmation. `cache clear` deletes every cache-root entry (embeddings, papers, references, and anything else present) except `config.toml`, `config.toml.lock`, and `.locks/`. It first acquires the exclusive cache-root lock without waiting; an active cache operation makes the command fail without deletion. Clearing then acquires the configuration lock, waiting up to 10 seconds before failing if another process holds it. The cache root remains available for coordination even when no configuration file exists.
 
 For command syntax and defaults, see [CLI Usage](cli.md); this section focuses on cache maintenance workflows.
 
