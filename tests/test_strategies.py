@@ -317,16 +317,23 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
 
 
 @pytest.mark.parametrize(
-    "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
+    ("builder_type", "failure_path"),
+    [
+        (CitationGraphBuilder, "reference_ids"),
+        (CitationGraphBuilder, "reference_papers"),
+        (RecommendationGraphBuilder, "reference_ids"),
+    ],
 )
 def test_candidate_scope_stops_after_seed_reference_outage(
     builder_type: type[GraphBuilderStrategy],
+    failure_path: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One seed-reference exhaustion must cover each indexed collection.
+    """Either reference access path must exhaust the shared collection budget.
 
     :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
+    :param str failure_path: Reference-ID or full-paper request that exhausts retries.
     :param Path tmp_path: Isolated reference-cache directory.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
     :return None: Checks one retry budget and a fresh scope on builder reuse.
@@ -336,9 +343,20 @@ def test_candidate_scope_stops_after_seed_reference_outage(
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=seed)
-        client.client.get_paper_references = MagicMock(
-            side_effect=requests.ConnectionError("offline")
-        )
+
+        def fetch_references(paper_id: str, **kwargs: object) -> list[dict]:
+            """Allow seed IDs only when full reference metadata is the failure path.
+
+            :param str paper_id: Requested Semantic Scholar paper ID.
+            :param object kwargs: SDK request options, including selected fields.
+            :return list[dict]: One successful seed reference-ID record.
+            """
+            if failure_path == "reference_papers" and kwargs["fields"] == ["paperId"]:
+                assert paper_id == "scope-seed"
+                return [{"paperId": "seed-reference"}]
+            raise requests.ConnectionError("offline")
+
+        client.client.get_paper_references = MagicMock(side_effect=fetch_references)
         client.client.get_paper_citations = MagicMock(
             side_effect=AssertionError("candidate citations must be skipped")
         )
@@ -355,14 +373,30 @@ def test_candidate_scope_stops_after_seed_reference_outage(
         else:
             builder = RecommendationGraphBuilder(max_papers=3, client=client)
 
+        client._persist_reference_cache_entry(
+            s2._reference_cache_path("warm"), "warm", ["cached-reference"]
+        )
         with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
             for expected_calls in (API_CONFIG.max_retries, API_CONFIG.max_retries * 2):
-                with pytest.raises(
-                    CandidateAcquisitionError,
-                    match="Skipped Semantic Scholar request after an earlier collection outage",
-                ):
-                    builder.collect_papers("scope-seed")
-                assert client.client.get_paper_references.call_count == expected_calls
+                with client.candidate_operation_scope():
+                    with pytest.raises(
+                        CandidateAcquisitionError,
+                        match="Skipped Semantic Scholar request after an earlier collection outage",
+                    ):
+                        builder.collect_papers("scope-seed")
+                    assert set(builder.candidate_source_status.values()) == {
+                        "unavailable"
+                    }
+                    with pytest.raises(
+                        s2.SemanticScholarUnavailableError, match="Skipped"
+                    ):
+                        client.get_reference_ids("later-citing-paper")
+                    assert client.get_reference_ids("warm") == ["cached-reference"]
+                    successful_calls = int(failure_path == "reference_papers")
+                    assert (
+                        client.client.get_paper_references.call_count
+                        == expected_calls + successful_calls
+                    )
 
         assert sleep_mock.call_count == 2 * (API_CONFIG.max_retries - 1)
 
