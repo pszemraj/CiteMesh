@@ -4056,6 +4056,7 @@ def _run_search_command(
             )
         return _run_s2_search(args)
 
+    builder: EmbeddingGraphBuilder | None = None
     try:
         builder, defaults = _prepare_local_search_builder(
             args, build_parser, user_config
@@ -4068,15 +4069,22 @@ def _run_search_command(
         else:
             cached_count = 0
     except Exception as exc:
+        namespace_selectors = ""
+        if builder is not None:
+            namespace_selectors = (
+                f" (device={builder.device} compute_dtype={builder.compute_dtype})"
+            )
         if mode == "auto":
             logger.info(
-                "Local semantic search unavailable (%s); searching the "
+                "Local semantic search unavailable%s (%s); searching the "
                 "Semantic Scholar API instead.",
+                namespace_selectors,
                 exc,
             )
             return _run_s2_search(args)
         logger.error(
-            "Local search unavailable: %s",
+            "Local search unavailable%s: %s",
+            namespace_selectors,
             exc,
             exc_info=logging.getLogger().level == logging.DEBUG,
         )
@@ -4092,9 +4100,14 @@ def _run_search_command(
             )
             return _render_local_search(args, builder, defaults)
         logger.info(
-            "Local embedding cache is empty; searching the Semantic Scholar "
-            "API instead. Local semantic search activates once your builds "
-            "have embedded papers."
+            "Local embedding cache is empty for device=%s compute_dtype=%s; "
+            "searching the Semantic Scholar API instead. Run `citemesh build` "
+            "with the same configuration to populate this namespace. A different "
+            "--device can resolve to a different compute dtype and cache namespace; "
+            "select the device matching an existing build, or use --mode s2 for "
+            "keyword search.",
+            builder.device,
+            builder.compute_dtype,
         )
         return _run_s2_search(args)
 
@@ -4110,13 +4123,16 @@ def _run_search_command(
             requested_via = f"defaults.search_mode in {user_config.path}"
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
-            "has no vectors for model=%s semantic-source=%s. "
-            "Local search covers papers your builds have already embedded - "
-            "run `citemesh build` with the embedding or hybrid strategy to "
-            "populate it, or use --mode s2 for keyword search.",
+            "has no vectors for model=%s semantic-source=%s device=%s "
+            "compute_dtype=%s. Run `citemesh build` with the same configuration to "
+            "populate this namespace. A different --device can resolve to a "
+            "different compute dtype and cache namespace; select the device matching "
+            "an existing build, or use --mode s2 for keyword search.",
             requested_via,
             defaults.model,
             defaults.semantic_source,
+            builder.device,
+            builder.compute_dtype,
         )
         return 1
     return _render_local_search(args, builder, defaults)

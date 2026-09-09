@@ -862,6 +862,8 @@ def _fake_local_search_builder(
 ) -> MagicMock:
     """Build a fake EmbeddingGraphBuilder for local-search CLI tests."""
     fake_builder = MagicMock()
+    fake_builder.device = "cpu"
+    fake_builder.compute_dtype = "float32"
     fake_builder.search_local.return_value = list(results or [])
     fake_builder.has_persistent_embedding_artifacts.return_value = cached_count > 0
     fake_builder.embedding_cache = SimpleNamespace(
@@ -1267,6 +1269,7 @@ def test_search_auto_resolves_artifact_namespace_when_cache_files_exist(
 
 def test_search_auto_falls_back_to_s2_when_cache_empty(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Default (auto) mode falls back to S2 keyword search with a notice."""
     fake_builder = _fake_local_search_builder(cached_count=0)
@@ -1285,13 +1288,15 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         )
     ]
     monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
-    info_mock = MagicMock()
-    monkeypatch.setattr(cli_module.logger, "info", info_mock)
-
-    result = run_cli_command(["search", "attention", "--limit", "1"])
+    with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
+        result = run_cli_command(["search", "attention", "--limit", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     assert "Search results for 'attention'" in result.stdout
-    assert "searching the Semantic Scholar API instead" in str(info_mock.call_args_list)
+    notices = [record.getMessage() for record in caplog.records]
+    assert any(
+        "searching the Semantic Scholar API instead" in notice for notice in notices
+    )
+    assert any("device=cpu compute_dtype=float32" in notice for notice in notices)
     fake_builder.search_local.assert_not_called()
     fake_builder.prepare_embedding_cache.assert_not_called()
 
@@ -1313,8 +1318,45 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     assert "Local search was requested via" in message
     assert "--mode local" in message
     assert "has no vectors" in message
+    assert "device=%s compute_dtype=%s" in message
+    assert error_mock.call_args.args[-2:] == ("cpu", "float32")
     fake_builder.prepare_embedding_cache.assert_not_called()
     fake_builder.search_local.assert_not_called()
+
+
+def test_search_auto_reports_selectors_when_cache_prepare_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Auto fallback should identify a constructed namespace after a load failure.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces local and S2 search dependencies.
+    :param pytest.LogCaptureFixture caplog: Captures fallback diagnostics.
+    :return None: Assertions verify the effective namespace selectors are logged.
+    """
+    fake_builder = _fake_local_search_builder(cached_count=1)
+    fake_builder.device = "cuda"
+    fake_builder.compute_dtype = "bfloat16"
+    fake_builder.prepare_embedding_cache.side_effect = RuntimeError("model unavailable")
+    monkeypatch.setattr(
+        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(cli_module, "_run_s2_search", s2_search)
+
+    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    args = parser.parse_args(["search", "attention"])
+    with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
+        result = cli_module._run_search_command(
+            args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
+        )
+
+    assert result == 0
+    assert any(
+        "device=cuda compute_dtype=bfloat16" in record.getMessage()
+        for record in caplog.records
+    )
+    s2_search.assert_called_once_with(args)
 
 
 def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(

@@ -1403,6 +1403,15 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         self._client = client
 
     @property
+    def compute_dtype(self) -> str:
+        """Return the effective compute dtype for the active cache namespace.
+
+        :return str: ``"bfloat16"`` when verified autocast is selected, otherwise
+            ``"float32"``.
+        """
+        return self._source_dtype_hint
+
+    @property
     def embedding_cache(self) -> EmbeddingCache:
         """Return the current cache, creating the requested namespace lazily.
 

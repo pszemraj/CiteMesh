@@ -103,10 +103,7 @@ The roles have different representation and formatter identities, so dimensions
 alone cannot make their vectors interchangeable. Local semantic search reads only
 retrieval-document caches.
 
-Local-search discovery checks for existing vector files without creating a
-provisional namespace. If files exist, it resolves the active model before
-opening its cache; an empty cache root stays empty when search falls back to
-Semantic Scholar.
+Local-search discovery checks for existing vector files without creating a provisional namespace. If files exist, it resolves the active model before opening its cache; an empty cache root stays empty when search falls back to Semantic Scholar. Empty-cache diagnostics include the resolved device and effective compute dtype, so they identify the compute namespace that needs a matching build.
 
 With built-in CLI settings:
 

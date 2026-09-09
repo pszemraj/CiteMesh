@@ -959,6 +959,7 @@ def test_embedding_bf16_autocast_rejection_falls_back_to_float32(
     builder._load_model()
 
     assert builder._source_dtype_hint == "float32"
+    assert builder.compute_dtype == "float32"
     assert builder._autocast_enabled is False
     assert (
         init_log["kwargs"]["model_kwargs"].get(
@@ -6453,6 +6454,9 @@ def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
     assert cuda_builder._source_dtype_hint == "bfloat16"
     assert mps_builder._source_dtype_hint == "bfloat16"
     assert cpu_builder._source_dtype_hint == ("bfloat16" if cpu_bf16 else "float32")
+    assert cuda_builder.compute_dtype == "bfloat16"
+    assert mps_builder.compute_dtype == "bfloat16"
+    assert cpu_builder.compute_dtype == ("bfloat16" if cpu_bf16 else "float32")
     assert (
         cuda_builder._embedding_cache_namespace()
         == mps_builder._embedding_cache_namespace()
