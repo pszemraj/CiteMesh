@@ -3251,6 +3251,70 @@ def test_embedding_cache_binary_rebuild_preserves_signs_and_prefilter_results(
     assert [result.paper_id for result in rebuilt.search(**search_args)] == ["p2"]
 
 
+def test_embedding_cache_live_search_falls_back_after_interrupted_binary_rebuild(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An existing cache must not search an unfinished binary index.
+
+    :param Path tmp_path: Isolated cache directory.
+    :param pytest.MonkeyPatch monkeypatch: Injects the interrupted index rebuild.
+    :return None: Checks that live search falls back to the persisted vectors.
+    """
+    cache = EmbeddingCache(cache_dir=tmp_path, model_name="interrupted-binary-rebuild")
+    _set_test_int8_calibration(cache)
+    cache.get_embeddings(
+        {
+            "p0": {"title": "Opposite"},
+            "p1": {"title": "Match"},
+        },
+        LookupEncodeModel(
+            {
+                "Opposite": np.asarray([-1.0, 0.0], dtype=np.float32),
+                "Match": np.asarray([1.0, 0.0], dtype=np.float32),
+            }
+        ),
+        show_progress=False,
+    )
+    EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name=cache.model_name,
+        binary_prefilter=False,
+    )
+
+    def interrupt_rebuild(
+        self: EmbeddingCache,
+        h5_file: h5py.File,
+        embeddings_dataset: h5py.Dataset,
+        binary_dataset: h5py.Dataset,
+    ) -> None:
+        """Interrupt rebuilding after allocating the full index shape.
+
+        :param EmbeddingCache self: Cache being reopened.
+        :param h5py.File h5_file: Open cache file.
+        :param h5py.Dataset embeddings_dataset: Persisted primary vectors.
+        :param h5py.Dataset binary_dataset: Unfinished auxiliary index.
+        :return None: Raises after allocating unpopulated index rows.
+        """
+        binary_dataset.resize((embeddings_dataset.shape[0], binary_dataset.shape[1]))
+        raise RuntimeError("interrupted binary rebuild")
+
+    monkeypatch.setattr(EmbeddingCache, "_rebuild_binary_dataset", interrupt_rebuild)
+    with pytest.raises(RuntimeError, match="interrupted binary rebuild"):
+        EmbeddingCache(cache_dir=tmp_path, model_name=cache.model_name)
+    with h5py.File(cache.h5_path, "r") as h5:
+        assert h5[BINARY_INDEX_DATASET_NAME].attrs[BINARY_INDEX_ENCODING_KEY] == ""
+
+    results = cache.search(
+        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=True,
+        binary_rescore_multiplier=1,
+    )
+
+    assert [result.paper_id for result in results] == ["p1"]
+    assert cache.last_search_used_binary_prefilter is False
+
+
 def test_embedding_cache_enabling_binary_prefilter_preserves_populated_namespace(
     tmp_path: Path,
 ) -> None:

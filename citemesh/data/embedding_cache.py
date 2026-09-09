@@ -2954,13 +2954,15 @@ class EmbeddingCache:
         embedding_dim: int,
         embedding_rows: int,
     ) -> bool:
-        """Return whether binary dataset shape aligns with embedding matrix.
+        """Return whether the binary index has a complete encoding and valid shape.
 
         :param h5py.Dataset binary_dataset: Binary index dataset.
         :param int embedding_dim: Embedding vector dimension.
         :param int embedding_rows: Number of embedding rows in matrix dataset.
-        :return bool: ``True`` when binary index shape is compatible.
+        :return bool: ``True`` when binary index encoding and shape are compatible.
         """
+        if binary_dataset.attrs.get(BINARY_INDEX_ENCODING_KEY) != BINARY_INDEX_ENCODING:
+            return False
         if binary_dataset.ndim != 2:
             return False
         if np.dtype(binary_dataset.dtype) != np.dtype(np.uint8):
