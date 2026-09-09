@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Hashable
+from unittest.mock import MagicMock
 
 import networkx as nx
 import numpy as np
@@ -32,6 +33,7 @@ from citemesh.dashboard_contracts import (
 )
 from citemesh.data import cache as cache_module
 from citemesh.data.model_profiles import get_embedding_model_profile
+from citemesh.services.semantic_scholar import SemanticScholarClient
 from citemesh.visualization import export as export_module
 from citemesh.visualization import render as render_module
 from citemesh.visualization import themes as themes_module
@@ -2830,8 +2832,42 @@ def test_model_profiles_match_expected_formatters() -> None:
 
 
 def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
-    """JSON export should include enriched fields; CSV and BibTeX should work."""
+    """Exports must preserve full author lists through API ingestion and disk reload.
+
+    :param Path tmp_path: Temporary directory for exported graphs and bibliography.
+    :return None: Checks enriched fields and complete authors in every export format.
+    """
     graph, seed_id = _build_graph()
+    author_names = ["Alice Alpha", "Bob Beta", "Carol Gamma", "Dana Delta"]
+    with SemanticScholarClient(timeout=1) as cold:
+        cold._rate_limit = MagicMock()
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "paperId": seed_id,
+            "title": "Seed Paper",
+            "year": 2020,
+            "abstract": "Seed abstract",
+            "authors": [
+                {"name": name, "authorId": str(index)}
+                for index, name in enumerate(author_names)
+            ],
+        }
+        cold._session.get = MagicMock(return_value=response)
+        fetched = cold.get_paper(seed_id, raise_on_unavailable=True)
+        assert fetched is not None
+        assert [author.name for author in fetched.authors] == author_names
+        cold._session.get.assert_called_once()
+
+    with SemanticScholarClient(timeout=1) as warm:
+        warm._session.get = MagicMock(
+            side_effect=AssertionError("persisted paper must reload without the API")
+        )
+        restored = warm.get_paper(seed_id, raise_on_unavailable=True)
+        assert restored is not None and restored is not fetched
+        assert restored.authors == fetched.authors
+        warm._session.get.assert_not_called()
+
+    graph.nodes[seed_id]["paper"] = restored
     exporter = GraphExporter(graph, seed_id, metadata={"strategy": "hybrid"})
 
     json_path = tmp_path / "enriched.json"
@@ -2857,6 +2893,9 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
     assert "bibtex" in seed_node
     assert seed_node["provenance"] == "seed"
     assert seed_node["seed_relation"] == "seed"
+    assert seed_node["authors"] == author_names
+    author_field = "author = {" + " and ".join(author_names) + "}"
+    assert author_field in seed_node["bibtex"]
 
     related_node = next(n for n in nodes if not n["is_seed"])
     assert related_node["provenance"] in {"citation", "semantic", "both"}
@@ -2871,11 +2910,16 @@ def test_exporter_enriched_json_csv_bibtex(tmp_path: Path) -> None:
     assert "provenance" in header
     assert "seed_relevance" in header
     assert "arxiv_url" in header
+    seed_row = next(
+        row for row in csv.DictReader(io.StringIO(csv_text)) if row["id"] == seed_id
+    )
+    assert seed_row["authors"] == "; ".join(author_names)
 
     # --- BibTeX ---
     bib_text = bib_path.read_text()
     assert "@article{" in bib_text
     assert "Seed Paper" in bib_text or "Related Paper" in bib_text
+    assert author_field in bib_text
 
 
 def test_csv_export_neutralizes_formula_cells_and_uses_lowercase_booleans(

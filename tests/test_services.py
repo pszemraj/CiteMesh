@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 import threading
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
@@ -17,7 +18,7 @@ import requests
 from semanticscholar.Reference import Reference
 
 import citemesh.services as services_module
-from citemesh.core import API_CONFIG, Paper
+from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.paper_ids import paper_identifier_aliases
 from citemesh.services import semantic_scholar as s2
 from citemesh.services import semantic_scholar as semantic_module
@@ -773,7 +774,12 @@ def test_paper_metadata_survives_client_restart_and_alias_lookup() -> None:
     """
     payload = _paper_payload(paper_id="s2-seed")
     payload.update(
-        authors=[{"name": "Ada Example", "authorId": "author-1"}],
+        authors=[
+            {"name": "Ada Example", "authorId": "author-1"},
+            {"name": "Blaise Example", "authorId": "author-2"},
+            {"name": "Chien Example", "authorId": "author-3"},
+            {"name": "Daria Example", "authorId": "author-4"},
+        ],
         externalIds={"ArXiv": "2404.08801", "DOI": "10.1234/example"},
         venue="Example Conference",
         fieldsOfStudy=["Computer Science"],
@@ -795,9 +801,70 @@ def test_paper_metadata_survives_client_restart_and_alias_lookup() -> None:
             restored = warm.get_paper(alias, raise_on_unavailable=True)
             assert restored is not None
             assert vars(restored) == expected
-            assert restored.authors[0].name == "Ada Example"
+            assert [(author.name, author.author_id) for author in restored.authors] == [
+                ("Ada Example", "author-1"),
+                ("Blaise Example", "author-2"),
+                ("Chien Example", "author-3"),
+                ("Daria Example", "author-4"),
+            ]
+            cached = json.loads(
+                s2._paper_cache_path(s2.normalize_paper_id(alias)).read_text()
+            )
+            assert cached["version"] == s2.PAPER_CACHE_VERSION
+            assert cached["paper"]["authors"] == [
+                {"name": "Ada Example", "author_id": "author-1"},
+                {"name": "Blaise Example", "author_id": "author-2"},
+                {"name": "Chien Example", "author_id": "author-3"},
+                {"name": "Daria Example", "author_id": "author-4"},
+            ]
         warm._request_json.assert_not_called()
         warm._rate_limit.assert_not_called()
+
+
+def test_legacy_paper_metadata_cache_entry_is_refreshed_with_all_authors() -> None:
+    """A legacy cached paper must refetch and replace its truncated author list.
+
+    :return None: Checks versioned cache refresh preserves complete author metadata.
+    """
+    legacy = Paper(
+        paper_id="s2-legacy",
+        title="Legacy title",
+        year=2024,
+        authors=[
+            Author(name="Ada Example", author_id="author-1"),
+            Author(name="Blaise Example", author_id="author-2"),
+            Author(name="Chien Example", author_id="author-3"),
+        ],
+    )
+    s2._paper_cache_path("s2-legacy").write_text(json.dumps(asdict(legacy)))
+    assert s2._load_cached_paper("s2-legacy") is None
+
+    payload = _paper_payload(paper_id="s2-legacy")
+    payload.update(
+        authors=[
+            {"name": "Ada Example", "authorId": "author-1"},
+            {"name": "Blaise Example", "authorId": "author-2"},
+            {"name": "Chien Example", "authorId": "author-3"},
+            {"name": "Daria Example", "authorId": "author-4"},
+        ],
+        externalIds={"ArXiv": "2404.08801", "DOI": "10.1234/example"},
+    )
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client._request_json = MagicMock(return_value=payload)
+        paper = client.get_paper("s2-legacy", raise_on_unavailable=True)
+        assert paper is not None
+        client._request_json.assert_called_once()
+
+    for alias in ("s2-legacy", "arxiv:2404.08801", "doi:10.1234/example"):
+        refreshed = s2._load_cached_paper(s2.normalize_paper_id(alias))
+        assert refreshed is not None
+        assert [(author.name, author.author_id) for author in refreshed.authors] == [
+            ("Ada Example", "author-1"),
+            ("Blaise Example", "author-2"),
+            ("Chien Example", "author-3"),
+            ("Daria Example", "author-4"),
+        ]
 
 
 @pytest.mark.parametrize("reference_ids", [[], ["ref-1", "ref-2"]])
@@ -968,7 +1035,14 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         "citationCount": 0,
         "publicationVenue": {"name": "ICLR"},
         "externalIds": {"ArXiv": "2411.03884v2", "DOI": "10.1145/3133956.3134029"},
-        "authors": [{"name": ""}, {}],
+        "authors": [
+            {"name": " "},
+            {"name": " Ada Example ", "authorId": "author-1"},
+            {},
+            {"name": "Blaise Example", "authorId": "author-2"},
+            {"name": "Chien Example", "authorId": "author-3"},
+            {"name": "Daria Example", "authorId": "author-4"},
+        ],
         "fieldsOfStudy": ["cs.AI", "cs.LG"],
     }
     paper = client._convert_recommendation(payload)
@@ -981,7 +1055,12 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     assert paper.venue == "ICLR"
     assert paper.arxiv_id == "2411.03884v2"
     assert paper.doi == "10.1145/3133956.3134029"
-    assert paper.authors == []
+    assert [(author.name, author.author_id) for author in paper.authors] == [
+        ("Ada Example", "author-1"),
+        ("Blaise Example", "author-2"),
+        ("Chien Example", "author-3"),
+        ("Daria Example", "author-4"),
+    ]
     assert paper.categories == ["cs.AI", "cs.LG"]
 
     client = SemanticScholarClient(timeout=1)

@@ -72,6 +72,7 @@ Metadata has no TTL and is reused until manually refreshed or cleared. Failed, m
 malformed API responses are not cached. Reference IDs remain in their separate
 cache and are loaded or fetched when requested; cached metadata alone does not
 mean references have been fetched. Graph-specific seed flags are not persisted.
+Paper-metadata cache entries use schema version 2; earlier unversioned entries are treated as cache misses and replaced by the next successful metadata lookup. This does not clear reference or embedding caches, and the author-metadata refresh does not re-encode unchanged title and abstract text.
 
 Runs made before this cache was introduced require one successful paper lookup to populate it. Citation/reference paper lists, recommendation results, and keyword search results still require live requests; their complete returned paper records can satisfy later individual or batch metadata lookups, but cached seed metadata does not make an entire graph build offline. Custom partial field lists never replace shared paper metadata. Use `build --refresh-paper-cache` to bypass persisted paper-metadata reads for that run. Successful fresh responses replace cached metadata, including citation counts; failures preserve the previous cache entries. Refreshing metadata leaves embedding caches intact and does not by itself re-encode unchanged paper text. Reference IDs keep their separate `--refresh-reference-cache` control.
 

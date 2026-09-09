@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 # When unset, reference cache paths are resolved from ``get_cache_dir`` per call.
 REFERENCE_CACHE_DIR: Optional[Path] = None
 REFERENCE_CACHE_VERSION = 1
+PAPER_CACHE_VERSION = 2
 RECOMMENDATION_BASE_URL = (
     "https://api.semanticscholar.org/recommendations/v1/papers/forpaper"
 )
@@ -285,16 +286,19 @@ def _paper_cache_path(paper_id: str) -> Path:
 
 
 def _load_cached_paper(paper_id: str) -> Optional[Paper]:
-    """Read paper metadata, treating unreadable entries as cache misses.
+    """Read current paper metadata, treating stale entries as cache misses.
 
     :param str paper_id: Normalized requested paper identifier.
     :return Optional[Paper]: Fresh paper instance, or ``None`` on a cache miss.
     """
     try:
-        data = json.loads(_paper_cache_path(paper_id).read_text(encoding="utf-8"))
+        cached = json.loads(_paper_cache_path(paper_id).read_text(encoding="utf-8"))
+        if cached.get("version") != PAPER_CACHE_VERSION:
+            return None
+        data = cached["paper"]
         data["authors"] = [Author(**author) for author in data["authors"]]
         return Paper(**data)
-    except (OSError, UnicodeError, ValueError, TypeError, KeyError):
+    except (AttributeError, OSError, UnicodeError, ValueError, TypeError, KeyError):
         return None
 
 
@@ -308,9 +312,10 @@ def _persist_paper(paper: Paper, requested_id: str) -> None:
     data = asdict(paper)
     data["references"] = []
     data["is_seed"] = False
+    cached = {"version": PAPER_CACHE_VERSION, "paper": data}
     for alias in _paper_lookup_keys(paper) | {requested_id}:
         try:
-            atomic_write_json(_paper_cache_path(alias), data)
+            atomic_write_json(_paper_cache_path(alias), cached)
         except OSError as exc:
             logger.debug("Failed to persist paper cache for %s: %s", alias, exc)
 
@@ -890,22 +895,22 @@ class SemanticScholarClient:
 
     @classmethod
     def _extract_authors(cls, raw_authors: object) -> list[Author]:
-        """Extract up to three authors from raw API payload shapes.
+        """Extract all authors from raw API payload shapes.
 
         :param object raw_authors: Raw authors payload from Semantic Scholar.
-        :return list[Author]: Up to three normalized author records.
+        :return list[Author]: All normalized author records in source order.
         """
         if not isinstance(raw_authors, list):
             return []
 
         authors: list[Author] = []
-        for raw_author in raw_authors[:3]:
+        for raw_author in raw_authors:
             name = cls._payload_get(raw_author, "name")
-            if not isinstance(name, str) or not name:
+            if not isinstance(name, str) or not name.strip():
                 continue
             authors.append(
                 Author(
-                    name=name,
+                    name=name.strip(),
                     author_id=cls._payload_get(raw_author, "authorId"),
                 )
             )
