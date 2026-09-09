@@ -3067,13 +3067,14 @@ def update_dashboard_package(
     payload: Dict[str, Any],
     build: Dict[str, Any],
     result_files: Optional[Dict[Path, Dict[str, Any]]] = None,
+    result_writer: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """Atomically create or update a portable dashboard collection package.
 
     One slot is retained per ``(strategy, seed_id)`` pair. The package lock covers
     existing-package validation, optional legacy migration, merge, and atomic
-    replacement, including per-result JSON/config writes, so concurrent builds
-    cannot lose results or leave audit files describing a different run.
+    replacement, including every per-result export, so concurrent builds cannot
+    lose results or leave artifacts describing different runs.
 
     :param Path package_path: Portable collection package path.
     :param nx.Graph graph: Built graph used for seed metadata.
@@ -3083,6 +3084,8 @@ def update_dashboard_package(
     :param Dict[str, Any] build: Portable resolved build settings.
     :param Optional[Dict[Path, Dict[str, Any]]] result_files: Staged graph and config
         JSON payloads to write under the package lock.
+    :param Optional[Callable[[], None]] result_writer: Additional per-result exports
+        to write under the package lock.
     :return Dict[str, Any]: Canonical package written to disk.
     :raises DashboardPackageError: If an existing package is invalid or unsupported.
     """
@@ -3125,6 +3128,8 @@ def update_dashboard_package(
                     "results": [entry, *filtered],
                 }
             )
+            if result_writer is not None:
+                result_writer()
             for result_path, result_payload in (result_files or {}).items():
                 atomic_write_json(result_path, result_payload, indent=2)
             atomic_write_json(package_path, package, indent=2)
@@ -4315,30 +4320,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                 layout=shared_layout,
             )
 
-            if "png" in output_paths:
-                visualize_graph(
-                    graph,
-                    seed_id,
-                    output_paths["png"],
-                    iterations=args.spring_iterations,
-                    dpi=args.dpi,
-                    metadata=plot_metadata,
-                    theme_name=args.theme,
-                    layout=shared_layout,
-                )
+            def write_export_artifacts() -> None:
+                """Write this build's non-staged graph export artifacts.
 
-            for fmt, method_name in _EXPORTER_METHOD.items():
-                if fmt not in output_paths:
-                    continue
-                if dashboard_package_path is not None and fmt in ("dashboard", "json"):
-                    # Collection JSON is saved under the package lock; the viewer
-                    # is rendered afterward from the latest collection snapshot.
-                    continue
-                method = getattr(exporter, method_name)
-                if fmt in _THEME_AWARE_FORMATS:
-                    method(output_paths[fmt], theme=args.theme)
-                else:
-                    method(output_paths[fmt])
+                :return None: Writes the selected artifacts to their resolved paths.
+                """
+                if "png" in output_paths:
+                    visualize_graph(
+                        graph,
+                        seed_id,
+                        output_paths["png"],
+                        iterations=args.spring_iterations,
+                        dpi=args.dpi,
+                        metadata=plot_metadata,
+                        theme_name=args.theme,
+                        layout=shared_layout,
+                    )
+
+                for fmt, method_name in _EXPORTER_METHOD.items():
+                    if fmt not in output_paths:
+                        continue
+                    if dashboard_package_path is not None and fmt in (
+                        "dashboard",
+                        "json",
+                    ):
+                        # Collection JSON is staged separately; the viewer is
+                        # rendered afterward from the latest collection snapshot.
+                        continue
+                    method = getattr(exporter, method_name)
+                    if fmt in _THEME_AWARE_FORMATS:
+                        method(output_paths[fmt], theme=args.theme)
+                    else:
+                        method(output_paths[fmt])
+
+            if dashboard_package_path is None:
+                write_export_artifacts()
 
             config_output_paths = dict(output_paths)
             if dashboard_package_path is not None:
@@ -4376,6 +4392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     payload=graph_payload,
                     build=dict(graph_config_payload.get("build", {})),
                     result_files=result_files,
+                    result_writer=write_export_artifacts,
                 )
                 try:
                     render_dashboard_collection_snapshot(

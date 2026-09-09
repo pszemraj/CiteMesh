@@ -2431,14 +2431,14 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
     assert second_result.returncode == 0
 
 
-def test_dashboard_build_serializes_result_files_with_package(
+def test_dashboard_build_serializes_all_result_artifacts_with_package(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Overlapping builds of one result must keep its audit files consistent.
+    """Overlapping builds of one result must keep every artifact consistent.
 
     :param pytest.MonkeyPatch monkeypatch: Replaces building and delays one upsert.
     :param Path tmp_path: Temporary collection root.
-    :return None: Assertions verify graph JSON and config match the winning entry.
+    :return None: Assertions verify every artifact matches the winning entry.
     """
     first_graph = build_seed_graph("seed")
     second_graph = first_graph.copy()
@@ -2452,11 +2452,33 @@ def test_dashboard_build_serializes_result_files_with_package(
             "seed",
         ),
     )
-    monkeypatch.setattr(
-        cli_module,
-        "GraphExporter",
-        _make_exporter_stub({}, methods=("to_dashboard_html",)),
-    )
+    exporter_factory = _make_exporter_stub({}, methods=("to_dashboard_html", "to_csv"))
+
+    def graph_sensitive_exporter(
+        *factory_args: object, **kwargs: object
+    ) -> SimpleNamespace:
+        """Mark CSV output with the source graph's node count.
+
+        :param object factory_args: Exporter constructor positional arguments.
+        :param object kwargs: Exporter constructor keyword arguments.
+        :return SimpleNamespace: Stub exporter with graph-sensitive CSV output.
+        """
+        graph = factory_args[0]
+        assert isinstance(graph, nx.Graph)
+        exporter = exporter_factory(*factory_args, **kwargs)
+
+        def write_csv(path: Path) -> None:
+            """Write the source graph's node count to the CSV fixture.
+
+            :param Path path: CSV output path.
+            :return None: Writes the fixture marker.
+            """
+            path.write_text(str(graph.number_of_nodes()), encoding="utf-8")
+
+        exporter.to_csv = write_csv
+        return exporter
+
+    monkeypatch.setattr(cli_module, "GraphExporter", graph_sensitive_exporter)
 
     first_update_started = threading.Event()
     allow_first_update = threading.Event()
@@ -2494,6 +2516,8 @@ def test_dashboard_build_serializes_result_files_with_package(
                         "recommendation",
                         "--export",
                         "dashboard",
+                        "--export",
+                        "csv",
                         "--max-papers",
                         str(max_papers),
                         "--output",
@@ -2534,6 +2558,7 @@ def test_dashboard_build_serializes_result_files_with_package(
         (run_dir / "recommendation.config.json").read_text(encoding="utf-8")
     )
     assert config["build"] == entry["build"]
+    assert (run_dir / "recommendation.csv").read_text(encoding="utf-8") == "1"
 
 
 def test_dashboard_package_deduplicates_existing_slots_deterministically(
