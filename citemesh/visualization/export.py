@@ -4684,8 +4684,13 @@ class GraphExporter:
       const graphResizeObserver = new ResizeObserver(() => Plotly.Plots.resize(graphDiv));
       graphResizeObserver.observe(graphDiv);
       renderTimeline();
-      const initialResultId = currentResultIdForPayload(payload);
-      if (collectionResultId && collectionResultId !== initialResultId) {
+      // Result IDs survive rebuilds, so the saved payload can be newer than the
+      // initial graph even when both identify the same seed and strategy.
+      if (
+        collectionResultId
+        && !bootstrapStatusMessage
+        && embeddedCollectionBundle.results.length > 0
+      ) {
         loadCollectionResult(collectionResultId).catch((err) => {
           setDashboardStatus("Failed to load the selected graph: " + err.message, "warning");
         });

@@ -23,7 +23,11 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from citemesh.cli import _validate_dashboard_graph_payload
+from citemesh.cli import (
+    _validate_dashboard_graph_payload,
+    render_dashboard_collection_snapshot,
+    update_dashboard_package,
+)
 from citemesh.core import Author, Paper
 from citemesh.dashboard_contracts import (
     DASHBOARD_COLLECTION_KIND,
@@ -1417,10 +1421,6 @@ def test_exporter_dashboard_runtime_script_contracts(
         "targetCollection.results = incomingUnique.concat(retained);" in runtime_script
     )
     assert "function portableCollectionPackage" in runtime_script
-    assert (
-        "const initialResultId = currentResultIdForPayload(payload);" in runtime_script
-    )
-    assert "collectionResultId !== initialResultId" in runtime_script
     assert "loadCollectionResult(collectionResultId)" in runtime_script
     assert "updated_at: entry.updated_at || new Date().toISOString()" in runtime_script
     assert "build: isObjectRecord(entry.build) ? entry.build : {}" in runtime_script
@@ -1791,6 +1791,63 @@ def test_dashboard_invalid_embedded_collection_keeps_current_graph_in_node(
 
     assert result.returncode == 0, result.stderr
     assert "Unsupported collection kind" in result.stdout
+
+
+def test_dashboard_snapshot_loads_latest_same_result_in_node(tmp_path: Path) -> None:
+    """Load the latest saved graph when an earlier build renders the same result ID.
+
+    :param Path tmp_path: Isolated dashboard collection directory.
+    :return None: Checks the displayed payload and figure against the latest package.
+    """
+    pytest.importorskip("plotly")
+    first_graph, seed_id = _build_graph()
+    first_metadata = {"strategy": "citation"}
+    first_exporter = GraphExporter(first_graph, seed_id, metadata=first_metadata)
+    package_path = tmp_path / "dashboard.citemesh.json"
+    update_dashboard_package(
+        package_path,
+        graph=first_graph,
+        seed_id=seed_id,
+        strategy="citation",
+        payload=first_exporter.graph_payload(),
+        build={},
+    )
+
+    latest_graph, _ = _build_graph()
+    latest_graph.add_node("new-paper", title="New paper", year=2024)
+    latest_exporter = GraphExporter(latest_graph, seed_id)
+    update_dashboard_package(
+        package_path,
+        graph=latest_graph,
+        seed_id=seed_id,
+        strategy="citation",
+        payload=latest_exporter.graph_payload(),
+        build={},
+    )
+
+    dashboard_path = tmp_path / "dashboard.html"
+    render_dashboard_collection_snapshot(
+        package_path,
+        dashboard_path=dashboard_path,
+        exporter=first_exporter,
+        metadata=first_metadata,
+        theme="dark",
+    )
+    displayed = _probe_dashboard_runtime_in_node(
+        dashboard_path,
+        "({"
+        " active: payload.nodes.map(node => node.id),"
+        " stored: collectionBundle.results[0].payload.nodes.map(node => node.id),"
+        " positions: figureSpec.data[nodeTraceIndex].x.length,"
+        " resultId: collectionResultId"
+        "})",
+    )
+    assert displayed == {
+        "active": ["new-paper", "related", "seed"],
+        "stored": ["new-paper", "related", "seed"],
+        "positions": 3,
+        "resultId": "citation:seed",
+    }
 
 
 def test_saved_reading_list_survives_a_rebuild_that_dropped_a_node(
