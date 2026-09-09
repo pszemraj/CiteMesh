@@ -181,18 +181,30 @@ def test_atomic_writes_without_fchmod(
     assert json.loads(json_path.read_text(encoding="utf-8")) == {"paper_id": "seed"}
 
 
-def test_atomic_write_text_preserves_target_permissions(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "target_mode",
+    [0o644, 0o444, 0o222, 0o000],
+    ids=["read-write", "read-only", "write-only", "no-access"],
+)
+def test_atomic_write_text_preserves_target_permissions(
+    tmp_path: Path, target_mode: int
+) -> None:
     """Rewriting an existing file must not narrow its permission bits.
 
     :param Path tmp_path: Temporary directory for the atomic-write target.
+    :param int target_mode: Existing permissions, including missing read/write access.
     :return None: Validates preserved, defaulted, and explicit modes.
     """
     shared = tmp_path / "graph.html"
-    shared.write_text("original")
-    shared.chmod(0o644)
+    shared.write_text("original", encoding="utf-8")
+    shared.chmod(target_mode)
 
-    cache_module.atomic_write_text(shared, "rewritten")
-    assert shared.stat().st_mode & 0o7777 == 0o644
+    try:
+        cache_module.atomic_write_text(shared, "rewritten")
+        assert shared.stat().st_mode & 0o7777 == target_mode
+    finally:
+        shared.chmod(0o600)
+    assert shared.read_text(encoding="utf-8") == "rewritten"
 
     current_umask = os.umask(0)
     os.umask(current_umask)

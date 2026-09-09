@@ -128,9 +128,8 @@ def _atomic_write_text_payload(
             tmp_file.flush()
             os.fsync(tmp_file.fileno())
 
+        # The payload is already synced; its preserved mode may forbid reopening.
         os.replace(tmp_name, path)
-        with path.open("r+b") as final_file:
-            os.fsync(final_file.fileno())
         directory_fd: int | None = None
         try:
             directory_fd = os.open(str(path.parent), os.O_RDONLY)
