@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -197,6 +198,90 @@ def test_atomic_writes_without_fchmod(
 
     assert text_path.read_text(encoding="utf-8") == 'theme = "dark"\n'
     assert json.loads(json_path.read_text(encoding="utf-8")) == {"paper_id": "seed"}
+
+
+@pytest.mark.parametrize("write_json", [False, True], ids=["text", "json"])
+@pytest.mark.parametrize(
+    "failure_stage", ["stat", "chmod", "fdopen", "fsync", "replace"]
+)
+def test_atomic_write_failure_closes_descriptor_and_preserves_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    write_json: bool,
+    failure_stage: str,
+) -> None:
+    """Failed atomic writes must release their descriptor without replacing data.
+
+    :param Path tmp_path: Temporary directory for the write target.
+    :param pytest.MonkeyPatch monkeypatch: Fixture injecting filesystem failures.
+    :param bool write_json: Whether to use the JSON entry point.
+    :param str failure_stage: Operation that raises before replacement completes.
+    :return None: Checks descriptor ownership, temporary cleanup, and old contents.
+    """
+    target = tmp_path / "payload.json"
+    target.write_text("original", encoding="utf-8")
+    original_mkstemp = cache_module.tempfile.mkstemp
+    original_stat = Path.stat
+    descriptors: list[int] = []
+
+    def recording_mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
+        """Record ownership of the real temporary descriptor.
+
+        :param Any args: Arguments forwarded to the original factory.
+        :param Any kwargs: Keyword arguments forwarded to the original factory.
+        :return tuple[int, str]: Open descriptor and temporary path.
+        """
+        fd, name = original_mkstemp(*args, **kwargs)
+        descriptors.append(fd)
+        return fd, name
+
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        """Reject the selected filesystem operation.
+
+        :param Any _args: Ignored positional arguments.
+        :param Any _kwargs: Ignored keyword arguments.
+        :return Any: Never returns.
+        """
+        raise PermissionError(f"injected {failure_stage} failure")
+
+    def stat(path: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        """Fail only the destination lookup, allowing temporary-file setup.
+
+        :param Path path: Inspected path.
+        :param Any args: Additional stat arguments.
+        :param Any kwargs: Additional stat keyword arguments.
+        :return os.stat_result: Original metadata for unrelated paths.
+        """
+        if path == target:
+            fail()
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(cache_module.tempfile, "mkstemp", recording_mkstemp)
+    if failure_stage == "stat":
+        monkeypatch.setattr(Path, "stat", stat)
+    elif failure_stage == "chmod":
+        monkeypatch.setattr(Path, "chmod", fail)
+    else:
+        monkeypatch.setattr(cache_module.os, failure_stage, fail)
+
+    try:
+        with pytest.raises(PermissionError, match=f"injected {failure_stage} failure"):
+            if write_json:
+                cache_module.atomic_write_json(target, {"updated": True})
+            else:
+                cache_module.atomic_write_text(target, "updated")
+        assert len(descriptors) == 1
+        with pytest.raises(OSError) as error:
+            os.fstat(descriptors[0])
+        assert error.value.errno == errno.EBADF
+        assert target.read_text(encoding="utf-8") == "original"
+        assert list(tmp_path.iterdir()) == [target]
+    finally:
+        for fd in descriptors:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 @pytest.mark.parametrize(

@@ -151,21 +151,27 @@ def _atomic_write_text_payload(
     )
     tmp_path = Path(tmp_name)
     try:
-        # mkstemp creates the temp file 0600 and os.replace carries that mode
-        # onto the target; without an explicit chmod every rewrite would
-        # silently restrict shared artifacts to owner-only.
-        if mode is None:
-            try:
-                mode = path.stat().st_mode & 0o7777
-            except FileNotFoundError:
-                current_umask = os.umask(0)
-                os.umask(current_umask)
-                mode = 0o666 & ~current_umask
-        tmp_path.chmod(mode)
-        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as tmp_file:
-            writer(tmp_file)
-            tmp_file.flush()
-            os.fsync(tmp_file.fileno())
+        try:
+            # Keep descriptor ownership even when constructing the wrapper fails.
+            with os.fdopen(
+                fd, "w", encoding="utf-8", newline=newline, closefd=False
+            ) as tmp_file:
+                # mkstemp creates the temp file 0600 and os.replace carries that mode
+                # onto the target; without an explicit chmod every rewrite would
+                # silently restrict shared artifacts to owner-only.
+                if mode is None:
+                    try:
+                        mode = path.stat().st_mode & 0o7777
+                    except FileNotFoundError:
+                        current_umask = os.umask(0)
+                        os.umask(current_umask)
+                        mode = 0o666 & ~current_umask
+                tmp_path.chmod(mode)
+                writer(tmp_file)
+                tmp_file.flush()
+                os.fsync(tmp_file.fileno())
+        finally:
+            os.close(fd)
 
         # The payload is already synced; its preserved mode may forbid reopening.
         os.replace(tmp_name, path)
