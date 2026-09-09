@@ -209,10 +209,9 @@ GraphML carries a reduced node schema compared to JSON/CSV: `provenance`, `prove
 
 The dashboard viewer (`dashboard.html` in collection mode, or `<name>.dashboard.html` for explicit standalone output) is a tri-pane research interface with embedded Plotly graph, paper list, and detail panel. Collection-mode HTML embeds a snapshot of `dashboard.citemesh.json`; this intentional duplication lets the viewer work when opened as `file://...`, where browsers do not reliably permit JavaScript to fetch adjacent local files. The JSON package remains the authoritative reusable data file.
 
-![CiteMesh dashboard with the Prior works filter active](../../assets/ui-prior-works.png)
+![CiteMesh Megalodon dashboard with Prior works active and FlashAttention-2 selected](../../assets/ui-prior-works.png)
 
-_The same local run with **Prior works** active: the graph and paper list narrow
-to 19 foundational papers while the selected seed's full details remain visible._
+_The Megalodon hybrid graph with **Prior works** active and “FlashAttention-2” selected: the graph and paper list narrow to 37 earlier papers while the detail pane explains the selected paper's relationship and path to the seed._
 
 **Toolbar controls:**
 

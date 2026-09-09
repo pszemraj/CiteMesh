@@ -4,10 +4,9 @@ Build exploration-friendly paper graphs from a known paper with recommendation, 
 
 **By default, CiteMesh uses Semantic Scholar recommendations.** Local embeddings are opt-in: choose `--strategy embedding` or `--strategy hybrid`. Both use Semantic Scholar candidates by default; to download and search a local arXiv corpus, also set `--semantic-source arxiv-corpus`. You can save these choices as personal defaults with [user configuration](docs/guides/configuration.md).
 
-![CiteMesh dashboard showing a hybrid graph for Attention is All you Need](assets/ui.png)
+![CiteMesh dashboard showing a Megalodon hybrid graph with LM-Infinite selected](assets/ui.png)
 
-_Current dashboard rendered from a repository-local hybrid run for “Attention is
-All you Need” (45 papers, 107 links)._
+_A repository-local hybrid graph seeded by “Megalodon,” with “LM-Infinite” selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
 
 ## Core Use Case
 
