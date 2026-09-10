@@ -98,7 +98,7 @@ citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard
 citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard
 ```
 
-Each build saves its graph under the seed-stable `out/<seed-id-slug>-<hash>/`, and the shared `out/dashboard.html` viewer collects the results for browsing — different seeds add results, rebuilding the same seed and strategy replaces its result. See [Output Artifacts](docs/reference/output-artifacts.md) for collection semantics, standalone dashboard files, and the portable package format.
+Each build saves its graph under `out/<title-slug>-<hash>/`, reusing the existing seed directory if the title changes. The shared `out/dashboard.html` viewer collects the results for browsing — different seeds add results, rebuilding the same seed and strategy replaces its result. See [Output Artifacts](docs/reference/output-artifacts.md) for collection semantics, standalone dashboard files, and the portable package format.
 
 Open the saved default viewer with `citemesh view`, a named collection with `citemesh view out/my-collection`, or an explicit HTML file with `citemesh view out/report.dashboard.html --browser google-chrome`.
 

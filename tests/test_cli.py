@@ -3044,7 +3044,7 @@ def test_dashboard_collection_resolver_always_includes_graph_json(
         seed_id="seed",
     )
     assert output_paths["json"].parent.parent == root
-    assert output_paths["json"].parent.name.startswith("seed-")
+    assert output_paths["json"].parent.name.startswith("seed-title-")
     assert output_paths["json"].name == "recommendation.json"
     assert output_paths["json"] == implicit_json
     assert package_path == root / DASHBOARD_PACKAGE_FILENAME
@@ -4404,24 +4404,28 @@ def test_output_writes_into_an_existing_directory(
     graph = nx.Graph()
     graph.add_node("seed-a", title="A Survey of Transformers")
     graph.add_node("seed-b", title="A Survey of Transformers")
-    path_a = generate_output_path(graph, seed_id="seed-a", output_dir=Path("out"))
-    path_b = generate_output_path(graph, seed_id="seed-b", output_dir=Path("out"))
+    output_dir = tmp_path / "out"
+    path_a = generate_output_path(graph, seed_id="seed-a", output_dir=output_dir)
+    path_b = generate_output_path(graph, seed_id="seed-b", output_dir=output_dir)
     graph.nodes["seed-a"]["title"] = "A Corrected Transformer Survey Title"
     corrected_path_a = generate_output_path(
-        graph, seed_id="seed-a", output_dir=Path("out")
+        graph, seed_id="seed-a", output_dir=output_dir
     )
     assert path_a != path_b
     assert path_a.parent.name != path_b.parent.name
     assert corrected_path_a == path_a
+    assert path_a.parent.name.startswith("a-survey-of-transformers-")
+    assert path_b.parent.name.startswith("a-survey-of-transformers-")
     assert re.search(r"-[0-9a-f]{8}$", path_a.parent.name)
     assert re.search(r"-[0-9a-f]{8}$", path_b.parent.name)
 
     graph = nx.Graph()
-    long_seed_id = "seed-identifier-that-should-definitely-exceed-forty-characters"
-    graph.add_node(long_seed_id, title="Short title")
-    output_path = generate_output_path(
-        graph, seed_id=long_seed_id, output_dir=Path("out")
+    graph.add_node(
+        "seed",
+        title="This title should definitely exceed forty characters for the slug",
     )
+    output_path = generate_output_path(graph, seed_id="seed", output_dir=output_dir)
+    assert output_path.parent.name.startswith("this-title-should-")
     assert re.search(r"-[0-9a-f]{8}$", output_path.parent.name)
     assert len(output_path.parent.name) <= 40
 

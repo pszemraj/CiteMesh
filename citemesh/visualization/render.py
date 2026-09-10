@@ -120,10 +120,10 @@ def _seed_suffix(seed_id: str, length: int = 8) -> str:
 def _output_dir_name(label: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS) -> str:
     """Build output directory name with stable seed suffix under truncation.
 
-    :param str label: Stable identifier used for the human-readable slug prefix.
+    :param str label: Paper title or fallback seed ID used for the slug prefix.
     :param str seed_id: Canonical seed identifier used for stable hash suffix.
     :param int max_chars: Maximum total directory-name length.
-    :return str: Filesystem-safe directory name containing identifier and hash suffix.
+    :return str: Filesystem-safe directory name containing a slug and hash suffix.
     """
     suffix = f"-{_seed_suffix(seed_id)}"
     label_budget = max_chars - len(suffix)
@@ -1080,16 +1080,23 @@ def generate_output_path(
     graph: nx.Graph, seed_id: str, output_dir: Path = Path("out"), strategy: str = ""
 ) -> Path:
     """
-    Generate an auto-named output path from the stable seed identifier.
+    Generate a title-based output path, reusing an existing seed directory.
 
-    :param nx.Graph graph: NetworkX graph retained for API compatibility.
+    :param nx.Graph graph: NetworkX graph containing the seed paper title.
     :param str seed_id: ID of seed paper
     :param Path output_dir: Output directory
     :param str strategy: Optional strategy suffix used in filename.
     :return Path: Path object for output file
     """
-    del graph
-    paper_dir = output_dir / _output_dir_name(label=seed_id, seed_id=seed_id)
+    existing_dirs = sorted(
+        path for path in output_dir.glob(f"*-{_seed_suffix(seed_id)}") if path.is_dir()
+    )
+    if existing_dirs:
+        paper_dir = existing_dirs[0]
+    else:
+        seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
+        title = seed_attrs.get("title") or seed_id
+        paper_dir = output_dir / _output_dir_name(label=title, seed_id=seed_id)
     paper_dir.mkdir(parents=True, exist_ok=True)
 
     basename = _filename_safe(strategy, max_chars=32) if strategy else "graph"

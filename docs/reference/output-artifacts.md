@@ -19,7 +19,7 @@ A normal dashboard run writes two shared artifacts at the collection root:
 
 A persistent hidden `.dashboard.citemesh.json.lock` beside the package serializes collection updates and viewer refreshes, including builds using different `CITEMESH_CACHE_DIR` roots. The lock stays with the output directory; sharing a completed collection requires only the viewer and package.
 
-Every collection build also saves its own graph and build settings under the seed's `<seed-id-slug>-<hash>/` directory, even with only `--export dashboard`:
+Every collection build also saves its own graph and build settings under the seed's `<title-slug>-<hash>/` directory, even with only `--export dashboard`:
 
 - `<strategy>.json` - complete standalone graph payload, including titles, IDs,
   papers, edges, and dashboard layout; readable independently and loadable through
@@ -48,7 +48,7 @@ format is supplied):
 - `<strategy>.graphml` (exchange format for Gephi/Cytoscape)
 - `<strategy>.config.json` (run config + metadata sidecar; always written except for a standalone-only `--export dashboard -o *.dashboard.html` run)
 
-When dashboard is combined with other formats, those additional artifacts live alongside the graph JSON and its sidecar under `<seed-id-slug>-<hash>/`. Explicitly adding `--export json` does not duplicate the JSON file. `--export all` adds the remaining formats in the same directory.
+When dashboard is combined with other formats, those additional artifacts live alongside the graph JSON and its sidecar under `<title-slug>-<hash>/`. Explicitly adding `--export json` does not duplicate the JSON file. `--export all` adds the remaining formats in the same directory.
 
 Each individual artifact is written to a temporary file beside its destination and published by atomic replacement. If a writer or HTML post-processing step reports a failure, an existing destination is retained instead of being replaced by partial output.
 
@@ -56,14 +56,14 @@ Each individual artifact is written to a temporary file beside its destination a
 
 Omit `--output` to use `out/` under the current working directory. In a source checkout this directory has a tracked `.gitkeep` and generated contents are ignored by Git. An explicit `--output` overrides that location; a root-level name such as `research` creates a separate directory outside the ignored output tree.
 
-Dashboard exports use two shared collection files directly under `out/` and keep the graph JSON and build sidecar under `out/<seed-id-slug>-<hash>/`. A first dashboard build therefore produces:
+Dashboard exports use two shared collection files directly under `out/` and keep the graph JSON and build sidecar under `out/<title-slug>-<hash>/`. A first dashboard build therefore produces:
 
 ```text
 out/
   dashboard.html
   dashboard.citemesh.json
   .dashboard.citemesh.json.lock
-  <seed-id-slug>-<hash>/
+  <title-slug>-<hash>/
     hybrid.json
     hybrid.config.json
 ```
@@ -76,32 +76,34 @@ Open the saved collection directly with `citemesh view`; use `citemesh view out/
 
 Path components:
 
-- `<seed-id-slug>` is a filesystem-safe version of the canonical seed ID; it does not change when paper metadata such as the title is corrected
+- `<title-slug>` is a filesystem-safe version of the paper title, falling back to the canonical seed ID when the title is missing
 - `<hash>` is the first 8 chars of `sha256(seed_id)`
+
+Later builds reuse an existing directory with the same seed-hash suffix, including directories previously named from the seed ID. Correcting a paper title therefore retains the original directory name and lets a dashboard refresh replace its exports and remove obsolete formats in place.
 
 Canonical path-normalization rules:
 
 - An existing explicit `--output` directory takes precedence over suffix rules, even when its name ends in `.json` or `.dashboard.html`. Non-dashboard exports go inside that directory; dashboard exports use it as the collection root.
 - `--output` omitted:
-  - non-dashboard artifacts are written under `out/<seed-id-slug>-<hash>/` as `<strategy>.<ext>`
-  - a normal dashboard export writes `out/dashboard.html`, `out/dashboard.citemesh.json`, and `out/<seed-id-slug>-<hash>/<strategy>.json` plus its config sidecar
+  - non-dashboard artifacts are written under `out/<title-slug>-<hash>/` as `<strategy>.<ext>`
+  - a normal dashboard export writes `out/dashboard.html`, `out/dashboard.citemesh.json`, and `out/<title-slug>-<hash>/<strategy>.json` plus its config sidecar
 - single-export run (`--export <one-format>`) with explicit `--output`:
-  - `--export dashboard -o out/my-collection` puts the shared viewer/package in `out/my-collection/` and the graph JSON/sidecar in `out/my-collection/<seed-id-slug>-<hash>/`
+  - `--export dashboard -o out/my-collection` puts the shared viewer/package in `out/my-collection/` and the graph JSON/sidecar in `out/my-collection/<title-slug>-<hash>/`
   - `--export dashboard -o out/report.dashboard.html` requests standalone mode and writes exactly that one self-contained file; it does not create or update a collection package
   - for non-dashboard formats, an existing directory receives `<strategy>.<ext>` inside it; otherwise a matching target suffix is used as-is, a different known export suffix is replaced, and a missing suffix is appended
 - multi-export run (`--export all` or multiple formats) with explicit `--output`:
   - if `dashboard` is among the selected formats and `--output` ends with `.dashboard.html`, the dashboard stays a standalone file at that exact path, collection mode is disabled, and sibling exports use the stripped base with their own suffixes (for example `out/report.json`, `out/report.csv`, `out/report.config.json`)
   - if `--output` ends with a known export suffix (for example `out.png`), that suffix is stripped and the remainder is treated as directory base
   - if `--output` has no known suffix, it is treated directly as directory base
-  - with dashboard collection mode, the viewer/package stay at the directory root; graph JSON, its sidecar, and every additional format are written under `<directory-base>/<seed-id-slug>-<hash>/`
+  - with dashboard collection mode, the viewer/package stay at the directory root; graph JSON, its sidecar, and every additional format are written under `<directory-base>/<title-slug>-<hash>/`
   - without dashboard collection mode, each format follows the normal single/multi-export resolver
 
 Examples:
 
-- `citemesh build "<paper-id>" --strategy hybrid --export dashboard` writes the shared viewer/package in `out/` plus `out/<seed-id-slug>-<hash>/hybrid.json` and `hybrid.config.json`
+- `citemesh build "<paper-id>" --strategy hybrid --export dashboard` writes the shared viewer/package in `out/` plus `out/<title-slug>-<hash>/hybrid.json` and `hybrid.config.json`
 - adding `-o out/my-collection` uses that directory as the root for the same structure
 - running again for another paper adds its directory and a second result to the same package, then refreshes the shared viewer
-- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png` writes `out/dashboard.html`, `out/dashboard.citemesh.json`, `out/<seed-id-slug>-<hash>/hybrid.png`, `out/<seed-id-slug>-<hash>/hybrid.html`, `out/<seed-id-slug>-<hash>/hybrid.plotly.html`, `out/<seed-id-slug>-<hash>/hybrid.json`, `out/<seed-id-slug>-<hash>/hybrid.csv`, `out/<seed-id-slug>-<hash>/hybrid.bib`, `out/<seed-id-slug>-<hash>/hybrid.graphml`, and `out/<seed-id-slug>-<hash>/hybrid.config.json`
+- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png` writes `out/dashboard.html`, `out/dashboard.citemesh.json`, `out/<title-slug>-<hash>/hybrid.png`, `out/<title-slug>-<hash>/hybrid.html`, `out/<title-slug>-<hash>/hybrid.plotly.html`, `out/<title-slug>-<hash>/hybrid.json`, `out/<title-slug>-<hash>/hybrid.csv`, `out/<title-slug>-<hash>/hybrid.bib`, `out/<title-slug>-<hash>/hybrid.graphml`, and `out/<title-slug>-<hash>/hybrid.config.json`
 - `citemesh build "<paper-id>" --strategy citation --export json -o out/report.graphml` writes `out/report.json`
 - `citemesh build "<paper-id>" --strategy recommendation --export dashboard -o out/report.dashboard.html` writes the standalone dashboard file `out/report.dashboard.html`
 - `citemesh build "<paper-id>" --strategy recommendation --export dashboard --export json -o out/report.dashboard.html` writes `out/report.dashboard.html`, `out/report.json`, and `out/report.config.json`

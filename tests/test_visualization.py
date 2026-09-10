@@ -576,6 +576,32 @@ def test_plotly_html_survives_empty_and_seedless_graphs(
         assert png_path.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
+@pytest.mark.parametrize("existing_label", ["Original Paper Title", "seed"])
+def test_output_path_reuses_existing_seed_directory(
+    tmp_path: Path, existing_label: str
+) -> None:
+    """Reuse prior title-based and ID-based directories when metadata changes.
+
+    :param Path tmp_path: Isolated output directory.
+    :param str existing_label: Label used by a previous build of the same seed.
+    :return None: Checks that the next build preserves the existing artifact path.
+    """
+    paper_dir = tmp_path / render_module._output_dir_name(existing_label, "seed")
+    paper_dir.mkdir()
+    artifact = paper_dir / "hybrid.png"
+    artifact.write_bytes(b"previous export")
+    graph = nx.Graph()
+    graph.add_node("seed", title="Corrected Paper Title")
+
+    output_path = render_module.generate_output_path(
+        graph, "seed", tmp_path, strategy="hybrid"
+    )
+
+    assert output_path == artifact
+    assert output_path.read_bytes() == b"previous export"
+    assert list(tmp_path.iterdir()) == [paper_dir]
+
+
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
     """GraphML should round-trip nullable metadata and XML-invalid text."""
     graph, seed_id = _build_graph()

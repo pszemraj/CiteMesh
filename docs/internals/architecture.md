@@ -28,7 +28,7 @@ Visualization + Export
     ├── visualization.visualize_graph -> PNG
     ├── export.GraphExporter -> HTML / Plotly / Dashboard / JSON / CSV / BibTeX / GraphML
     ├── dashboard collection writer -> dashboard.citemesh.json + dashboard.html
-    └── per-seed exports -> <seed-id-slug>-<hash>/*.json + *.config.json (also for dashboards)
+    └── per-seed exports -> <title-slug>-<hash>/*.json + *.config.json (also for dashboards)
 ```
 
 Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `venue`, `arxiv_id`, `doi`, `is_seed`) so visualization and export layers remain strategy-agnostic.

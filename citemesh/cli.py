@@ -1723,7 +1723,7 @@ def _create_parser() -> Tuple[
         help=(
             "File or directory (default: out/ with automatic names). Dashboard collections share "
             "dashboard.html + dashboard.citemesh.json and save each seed's JSON "
-            "under <seed-id-slug>-<hash>/; use *.dashboard.html for a standalone file."
+            "under <title-slug>-<hash>/; use *.dashboard.html for a standalone file."
         ),
     )
 
