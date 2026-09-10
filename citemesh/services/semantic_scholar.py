@@ -1199,7 +1199,7 @@ class SemanticScholarClient:
                 raise self._skipped_candidate_operation_error(
                     failure_domain, scope_failure
                 ) from scope_failure
-            logger.error(
+            logger.warning(
                 "Skipped %s after an earlier Semantic Scholar %s outage: %s",
                 url,
                 failure_domain.value,
