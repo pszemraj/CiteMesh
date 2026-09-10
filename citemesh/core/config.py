@@ -98,7 +98,7 @@ class VisualizationConfig:
     figure_size: Tuple[int, int] = (14, 8)
     dpi: int = 150
 
-    # Node size parameters (in square pixels)
+    # Node area caps and minimum (in square points for static scatter plots)
     seed_size: int = 2500
     max_non_seed_size: int = 2200
     min_size: int = 100

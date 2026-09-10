@@ -609,7 +609,7 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
     Compute node sizes with extreme variation matching CiteMesh style.
 
     :param nx.Graph graph: NetworkX graph with paper nodes
-    :return List[float]: List of sizes (in square pixels) for each node
+    :return List[float]: List of marker areas (in square points) for each node.
     """
     nodes = ordered_nodes(graph)
     sizes = []
@@ -652,6 +652,12 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
         # Add citation bonus (log scale)
         citation_bonus = np.log10(citation_count + 1) * 100
         size += citation_bonus
+        size = min(
+            size,
+            VIZ_CONFIG.seed_size
+            if node in seed_nodes
+            else VIZ_CONFIG.max_non_seed_size,
+        )
 
         sizes.append(size)
 
@@ -866,9 +872,9 @@ def draw_labels(
         return textwrap.fill(title, width=width, break_long_words=False)
 
     ordered = ordered_nodes(graph)
-    size_map: Dict[Hashable, float] = {}
-    if sizes is not None and len(sizes) == len(ordered):
-        size_map = {node: float(sizes[idx]) for idx, node in enumerate(ordered)}
+    if sizes is None or len(sizes) != len(ordered):
+        sizes = compute_node_sizes(graph)
+    size_map = {node: float(sizes[idx]) for idx, node in enumerate(ordered)}
 
     candidate_nodes = sorted(
         ordered,
@@ -886,6 +892,8 @@ def draw_labels(
     renderer = _figure_renderer(ax.figure)
     for node in candidate_nodes:
         p = pos[node]
+        # Scatter areas are points squared; the two-point outline adds one point.
+        node_radius = math.sqrt(size_map[node]) / 2.0 + 1.0
 
         # Seed paper gets larger, bold label
         is_seed = node == seed_id
@@ -893,7 +901,7 @@ def draw_labels(
             title = graph.nodes[node].get("title", "Seed paper")
             label = _wrap_title(title)
             fontsize = 9
-            xytext = (0, 8)
+            xytext = (0, node_radius + 8)
             vertical_alignment = "bottom"
             label_bbox = dict(
                 boxstyle="round,pad=0.2",
@@ -913,7 +921,7 @@ def draw_labels(
             year_label = "n.d." if year is None else str(year)
             label = f"{last_name}, {year_label}"
             fontsize = VIZ_CONFIG.font_size
-            xytext = (0, -3)
+            xytext = (0, -node_radius - 3)
             vertical_alignment = "top"
             label_bbox = dict(
                 boxstyle="round,pad=0.1",

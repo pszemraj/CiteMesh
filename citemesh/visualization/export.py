@@ -58,6 +58,7 @@ DASHBOARD_FOOTER_MARGIN = 78
 DASHBOARD_LABEL_CAP = 8
 DASHBOARD_LABEL_MIN_DISTANCE = 0.18
 DASHBOARD_MAX_NODE_DIAMETER = 58.0
+DASHBOARD_SELECTION_HALO_SCALE = 2.2
 # Identifier fields BibTeX consumers resolve verbatim, so LaTeX escaping them
 # would break every machine reader.
 _BIBTEX_VERBATIM_FIELDS = frozenset({"doi", "url"})
@@ -907,7 +908,7 @@ class GraphExporter:
             x=node_x,
             y=node_y,
             name="nodes",
-            mode="markers+text",
+            mode="markers" if for_dashboard else "markers+text",
             hoverinfo="text",
             text=node_labels,
             textposition=text_position,
@@ -995,6 +996,35 @@ class GraphExporter:
             "paper_bgcolor": theme_obj.background,
             "font": dict(color=theme_obj.text_color),
         }
+        if for_dashboard:
+            # Pixel shifts clear the largest selection halo at every zoom level.
+            layout_kwargs["annotations"] = [
+                dict(
+                    x=node_x[idx],
+                    y=node_y[idx],
+                    xref="x",
+                    yref="y",
+                    text=label,
+                    font=text_font,
+                    showarrow=False,
+                    xanchor="center",
+                    yanchor="bottom",
+                    borderpad=0,
+                    yshift=max(
+                        4.0,
+                        math.sqrt(
+                            node_sizes[idx]
+                            * DASHBOARD_SELECTION_HALO_SCALE
+                            / (2.0 * marker_sizeref)
+                        ),
+                        max(4.0, math.sqrt(node_sizes[idx] / (2.0 * marker_sizeref)))
+                        + marker_line_width[idx] / 2.0,
+                    )
+                    + 3.0,
+                )
+                for idx, label in enumerate(node_labels)
+                if label
+            ]
         if for_dashboard and node_x and node_y:
             x_min = min(node_x)
             x_max = max(node_x)
@@ -1673,6 +1703,7 @@ class GraphExporter:
             "__DASHBOARD_LABEL_CAP__": str(DASHBOARD_LABEL_CAP),
             "__DASHBOARD_LABEL_MIN_DISTANCE__": str(DASHBOARD_LABEL_MIN_DISTANCE),
             "__DASHBOARD_MAX_NODE_DIAMETER__": str(DASHBOARD_MAX_NODE_DIAMETER),
+            "__DASHBOARD_SELECTION_HALO_SCALE__": str(DASHBOARD_SELECTION_HALO_SCALE),
             "__GRAPH_PAYLOAD_KIND_JSON__": json.dumps(GRAPH_PAYLOAD_KIND),
             "__GRAPH_PAYLOAD_SCHEMA_VERSION__": str(GRAPH_PAYLOAD_SCHEMA_VERSION),
             "__COLLECTION_KIND_JSON__": json.dumps(DASHBOARD_COLLECTION_KIND),
@@ -2916,6 +2947,7 @@ class GraphExporter:
       });
 
       const nodeTrace = templateNodeTrace;
+      nodeTrace.mode = "markers";
       nodeTrace.x = xPairs;
       nodeTrace.y = yPairs;
       nodeTrace.text = nodeTexts;
@@ -2963,6 +2995,23 @@ class GraphExporter:
         range: [yMin - yPad, yMax + yPad],
       });
       layout.shapes = edgeShapes;
+      layout.annotations = nodeTexts.flatMap((text, idx) => text ? [{
+        x: xPairs[idx],
+        y: yPairs[idx],
+        xref: "x",
+        yref: "y",
+        text,
+        font: nodeTrace.textfont,
+        showarrow: false,
+        xanchor: "center",
+        yanchor: "bottom",
+        borderpad: 0,
+        yshift: Math.max(
+          4.0,
+          Math.sqrt(alignedNodeSizes[idx] * __DASHBOARD_SELECTION_HALO_SCALE__ / (2.0 * nextMarkerSizeRef)),
+          Math.max(4.0, Math.sqrt(alignedNodeSizes[idx] / (2.0 * nextMarkerSizeRef))) + lineWidths[idx] / 2.0
+        ) + 3.0,
+      }] : []);
       layout.uirevision = `citemesh-dashboard-static-layout-v1:${String(meta.strategy || "")}:${String(meta.seed_id || "")}`;
 
       template.data = nextTraceSpecs;
@@ -4243,7 +4292,7 @@ class GraphExporter:
           const idx = nodeIndexById.get(focusId);
           haloX = [defaultNodeX[idx]];
           haloY = [defaultNodeY[idx]];
-          haloSize = [defaultNodeSizes[idx] * (state.selectedId ? 2.2 : 1.88)];
+          haloSize = [defaultNodeSizes[idx] * (state.selectedId ? __DASHBOARD_SELECTION_HALO_SCALE__ : 1.88)];
           haloColor = [colorWithAlpha(currentSeedRingColor(), state.selectedId ? 0.34 : 0.26)];
         }
         const haloKey = `${focusId || ""}|${state.selectedId ? "selected" : "hover"}`;

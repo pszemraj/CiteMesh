@@ -2504,6 +2504,124 @@ def test_visualize_graph_metadata_overlay_is_compact(
     assert "Embedding" not in text
 
 
+@pytest.mark.parametrize("area", [None, 100.0, 460.0, 3028.0])
+@pytest.mark.parametrize("dpi", [72, 150])
+def test_static_labels_clear_marker_bounds(area: float | None, dpi: int) -> None:
+    """Labels and their backgrounds must clear actual rendered marker outlines.
+
+    :param float | None area: Explicit marker area, or computed default sizes.
+    :param int dpi: Canvas resolution used for text and marker measurement.
+    :return None: Checks both seed and non-seed label bounding boxes.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.transforms import Affine2D
+
+    graph, seed_id = _build_graph()
+    positions = {"related": (0.75, 0.25), "seed": (0.25, 0.75)}
+    sizes = compute_node_sizes(graph) if area is None else [area, area]
+    figure, axis = plt.subplots(dpi=dpi)
+    try:
+        axis.set_xlim(0, 1)
+        axis.set_ylim(0, 1)
+        render_module.draw_nodes(
+            axis, graph, positions, sizes, [(0.5, 0.5, 0.5)] * 2, get_theme("light")
+        )
+        render_module.draw_labels(
+            axis,
+            graph,
+            positions,
+            seed_id,
+            get_theme("light"),
+            sizes=None if area is None else sizes,
+        )
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        assert len(axis.texts) == 2
+        markers = dict(zip(positions.values(), axis.collections))
+        for label in axis.texts:
+            marker = markers[tuple(label.xy)]
+            center = marker.get_offset_transform().transform(marker.get_offsets()[0])
+            marker_bounds = (
+                marker.get_paths()[0]
+                .get_extents(Affine2D(marker.get_transforms()[0]))
+                .transformed(Affine2D().translate(*center))
+                .padded(marker.get_linewidths()[0] * dpi / 144)
+            )
+            label_bounds = label.get_bbox_patch().get_window_extent(renderer)
+            assert not label_bounds.overlaps(marker_bounds)
+    finally:
+        plt.close(figure)
+
+
+@pytest.mark.parametrize("seed_citations", [100_000, 300_000])
+def test_node_size_caps_include_citation_bonus(seed_citations: int) -> None:
+    """Highly cited nodes must stay within the configured area caps.
+
+    :param int seed_citations: Citation count placing the seed above or below its peer.
+    :return None: Checks the final sizes after tier assignment and citation bonuses.
+    """
+    graph, _ = _build_graph()
+    graph.nodes["seed"]["citation_count"] = seed_citations
+    graph.nodes["related"]["citation_count"] = 200_000
+    related_size, seed_size = compute_node_sizes(graph)
+    assert seed_size <= render_module.VIZ_CONFIG.seed_size
+    assert related_size <= render_module.VIZ_CONFIG.max_non_seed_size
+
+
+def test_dashboard_labels_clear_selection_halos_after_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Initial and imported graphs must anchor labels outside selection halos.
+
+    :param Path tmp_path: Isolated dashboard output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks marker identity, label text and radius-based pixel clearance.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    graph.nodes["seed"]["citation_count"] = 200_000
+    exporter = GraphExporter(
+        graph, seed_id, layout={"related": (0.0, 0.0), "seed": (1.0, 1.0)}
+    )
+    path = tmp_path / "labels.dashboard.html"
+    exporter.to_dashboard_html(path)
+    initial = _extract_dashboard_script_json(
+        path.read_text(encoding="utf-8"), "citemesh-dashboard-figure"
+    )
+    imported = _probe_dashboard_runtime_in_node(
+        path,
+        "(() => {"
+        " const next = JSON.parse(JSON.stringify(payload));"
+        " next.meta.plotly_node_sizes = [6, 5000];"
+        " next.nodes.forEach(node => { node.authors = ['A <b>Imported</b>']; });"
+        " return buildFigureSpecFromPayload(next);"
+        "})()",
+    )
+    for figure in [initial, imported]:
+        trace = next(trace for trace in figure["data"] if trace.get("name") == "nodes")
+        assert trace["mode"] == "markers"
+        annotations = figure["layout"]["annotations"]
+        assert len(annotations) == 2
+        assert [label["text"] for label in annotations] == trace["text"]
+        for index, label in enumerate(annotations):
+            marker = trace["marker"]
+            radius = max(
+                marker["sizemin"],
+                (marker["size"][index] / (2 * marker["sizeref"])) ** 0.5,
+            )
+            halo_radius = max(
+                4, (2.2 * marker["size"][index] / (2 * marker["sizeref"])) ** 0.5
+            )
+            assert label["x"] == trace["x"][index]
+            assert label["y"] == trace["y"][index]
+            assert label["xref"] == "x" and label["yref"] == "y"
+            assert label["yanchor"] == "bottom"
+            assert label["showarrow"] is False
+            assert label["yshift"] >= halo_radius + 3
+            assert label["yshift"] >= radius + marker["line"]["width"][index] / 2 + 3
+    assert "&lt;b&gt;Imported&lt;/b&gt;" in imported["layout"]["annotations"][0]["text"]
+
+
 def test_static_labels_are_capped_by_citation_priority() -> None:
     """Dense static plots should label only the highest-priority non-seed papers."""
     import matplotlib.pyplot as plt

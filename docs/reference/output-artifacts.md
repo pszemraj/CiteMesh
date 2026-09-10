@@ -271,6 +271,8 @@ IDs with surrounding whitespace, matching the dashboard's import contract.
 Plotly marker labels display upstream markup as literal text. Static PNG exports
 use an `Unknown` title when the requested seed is absent, including empty graphs.
 
+Static labels sit outside each marker's outline. Dashboard labels also clear the selection halo, keeping the same pixel clearance during zoom, resizing, and result imports. Citation-based node areas are capped at 2,500 square points for seeds and 2,200 for other papers before interactive-display scaling.
+
 `metadata` includes:
 
 - common run metadata (`paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`)
