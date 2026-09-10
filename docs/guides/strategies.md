@@ -15,47 +15,124 @@ Related docs:
 | Strategy | Primary signal | Data source | Best for |
 | --- | --- | --- | --- |
 | `recommendation` | Semantic Scholar recommendations | Semantic Scholar API | Fast topical exploration |
-| `citation` | References + citations + bibliographic coupling | Semantic Scholar API | Relationship-grounded neighborhoods |
-| `embedding` | Dense vector similarity | HuggingFace corpus + embedding model | Conceptual similarity beyond citations |
-| `hybrid` | Citation graph + semantic enrichment | Semantic Scholar API + HuggingFace corpus | Balanced recall with grounded edges |
+| `citation` | References + citations + bibliographic coupling | Semantic Scholar API | Citation-derived neighborhoods |
+| `embedding` | Dense vector similarity | S2 candidate pool + embedding model (default) or HuggingFace corpus | Conceptual similarity beyond citations |
+| `hybrid` | Citation-derived candidates + semantic enrichment | Semantic Scholar API + embedding model | Balanced grounded and semantic recall |
 
 ## Recommendation Strategy
 
 - Data source: Semantic Scholar recommendation endpoints.
 - Strengths: fast, low setup, good for topical exploration.
 - Limitations: depends on Semantic Scholar availability and coverage.
-- Typical use: quick graphing from a known paper ID or query.
+- Typical use: quick graphing from a known paper ID.
+- Edges require positive topical similarity or shared-reference evidence and meet
+  the configured similarity threshold. At most three edges touch each paper;
+  the seed's strongest eligible edges are reserved first, then remaining edges
+  are selected by strength within each paper's cap. The seed retains up to three
+  existing neighbors; capping never invents unsupported edges.
 
 ## Citation Strategy
 
 - Data source: Semantic Scholar references and citations.
-- Strengths: edges follow explicit citation relationships.
+- Strengths: candidates come from explicit reference and citation relationships;
+  graph edges combine topical, temporal, citation-impact, and bibliographic
+  evidence.
 - Limitations: coverage varies by paper and field; requires reference lists for full bibliographic coupling.
-- Typical use: grounded citation neighborhoods and reference-aware similarity.
+- Typical use: citation-derived neighborhoods and reference-aware similarity.
+- As with recommendation graphs, dates and citation popularity alone cannot
+  create an edge, and each paper has at most three edges. The default 40-paper
+  graph therefore has at most 60 edges. The seed's strongest eligible edges are
+  reserved before selecting the remaining edges.
+
+Both strategies warn when reference hydration exhausts its retries, then skip
+further reference hydration for that collection. Existing reference lists remain
+available for scoring; a subsequent collection tries the source again.
 
 ## Embedding Strategy
 
-- Data source: HuggingFace ArXiv-like corpus + sentence-transformer model.
+Two semantic sources, selected with `--semantic-source`:
+
+- `candidates` (default): for a known-paper seed, fetches Semantic Scholar
+  references, citations, and recommendations within `--candidate-pool-size`, then
+  embeds title/abstract text locally and ranks it against the seed. A free-text
+  embedding seed instead starts with up to 20 S2 keyword results and expands
+  recommendations from the top anchor. Candidate vectors persist incrementally;
+  no local corpus is downloaded.
+  Known-paper budgets are split approximately 1:2:1 across references, citations,
+  and recommendations, with references and recommendations each capped at 100.
+  Pools of at least three include all three sources; a one-paper budget requests
+  recommendations, and a two-paper budget also requests one reference. Candidate
+  metadata already includes citation counts, so this mode does not refetch them.
+- `arxiv-corpus` (opt-in): hydrates and searches a local arXiv abstract corpus from
+  HuggingFace. This can surface papers with no citation path to the seed but needs
+  the `datasets` dependency and substantially more cold-cache work.
+  The default corpus is `librarian-bots/arxiv-metadata-snapshot`. Set `--dataset-source OWNER/DATASET` to select another HuggingFace repository with the [supported arXiv metadata fields](cli.md); `--dataset-split` selects a split within that repository. CiteMesh loads only the selected source and reports loading failures without switching datasets. Custom column mappings are not supported.
+  By default, CiteMesh hydrates the full selected split. Set `--corpus-size N` to opt into a newest-first cap; this still scans the selected split before embedding the N retained papers. `--all-corpus` overrides a configured cap for one run.
+  Selection, resumption, and storage behavior are described in [Caching & Data](caching.md).
+  Citation-count enrichment is optional: a rejected Semantic Scholar batch warns
+  and retains the selected papers with their existing counts. Invalid individual
+  batch rows are skipped so valid rows can still enrich their selected papers.
+
 - Strengths: captures semantic similarity even when citations are missing.
-- Limitations: first run hydrates a cache for the selected corpus spec; requires optional embedding dependencies.
+- Graph edges require symmetric semantic cosine of at least **0.74** before publication year, category overlap, and shared authors modify their weights. This boundary is calibrated for the default EmbeddingGemma model, STS formatting, and 512 dimensions; it is not a probability or a model-independent relevance scale.
+- Edge selection reserves the seed's strongest eligible neighbors before the
+  remaining edges, while preserving the per-paper `top_k` cap.
 - Typical use: semantic exploration and discovery beyond citation graphs.
 
-Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md).
-Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](../reference/embedding-runtime.md).
+Embedding cache behavior, hydration, and precision controls are defined in [Caching & Data](caching.md). Embedding model defaults/fallbacks and compile policy are defined in [Embedding Runtime](../reference/embedding-runtime.md).
+
+Override the semantic boundary for either embedding or hybrid graphs with
+`--min-semantic-similarity VALUE`, or persist it with
+`citemesh config set defaults.min_semantic_similarity VALUE`. CiteMesh warns when
+the active profile is not EmbeddingGemma or the dimension is not 512 because the
+default boundary is uncalibrated for those representations. Evaluate labeled
+related and unrelated pairs before choosing an override; smaller dimensions do
+not necessarily preserve the same cosine boundary.
+
+The semantic boundary is selected on 14 full real abstracts and checked on 10
+independent real abstracts. At 0.74, the combined fixtures retain 17 of 21 related
+pairs and admit 1 of 105 unrelated pairs; 0.72 retains 18 and admits 5. This favors
+precision and still misses some useful architectural relationships, including
+Transformer/BERT. See the [semantic threshold study](../reference/defaults-tuning-study.md#semantic-edge-threshold-september-2026)
+for label exclusions, selection method, and validation tradeoffs. These are
+bounded regression fixtures, not general scientific relevance accuracy estimates.
+With the default model already cached, run the real-abstract and original
+synthetic controls offline with `python -m pytest -m slow tests/test_semantic_quality.py`.
+The same evaluation checks recall@2 against two labeled relevant papers per query
+and compares FP32, INT8, and binary-prefilter retrieval. The 24-document fixture
+uses the default 8× prefilter rescore budget (16 candidates), so this check
+exercises actual candidate exclusion. It does not measure full-corpus recall or
+calibration drift as a corpus grows.
 
 ## Hybrid Strategy
 
-- Data source: citation collection plus semantic enrichment.
-- Strengths: combines grounded citation edges with semantic reranking of the whole candidate pool.
+- Data source: citation collection plus semantic enrichment. In the default `candidates` mode the semantic branch pulls S2 recommendations and embeds the merged candidate pool locally; `arxiv-corpus` mode searches the hydrated corpus instead.
+- Strengths: combines citation-derived evidence with semantic reranking of the
+  whole candidate pool.
 - Limitations: inherits dependency and cache requirements from the embedding path.
-- Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a boost for overlap papers discovered by both branches.
+- Default behavior builds citation and semantic candidate pools, then reranks by seed relevance with a +0.10 boost for overlap papers discovered by both branches and a smaller +0.02 boost for citation-derived candidates over semantic-only ones.
 - `max_semantic` limits semantic-only additions, not overlap papers that also appear in citation candidates.
-- Hybrid defaults are tuned for the seed-paper discovery workflow (recent follow-up + foundational prior work), with current depth targets documented in the defaults study.
-- Typical use: balanced graphs when you want citation structure plus semantic recall.
+- Graph edges require symmetric semantic cosine of at least **0.74** or shared references before temporal and citation-count weights contribute. Publication proximity has no separate co-citation bonus.
+- A pair that clears that gate must also reach a composite weighted score above **0.4** for seed-incident edges or **0.5** for all other pairs (hard floor 0.2), so a shared-reference pair with weak topical and temporal evidence can still be rejected.
+- With `--max-semantic 0`, hybrid uses the citation strategy's TF-IDF/bibliographic scorer and edge threshold, retaining the hybrid per-paper degree cap.
+- Semantic enrichment failures stop the build; hybrid does not silently downgrade
+  to citation-only output.
+- If citation/reference endpoints are unavailable after the seed resolves,
+  semantic enrichment can still proceed from recommendations or the local arXiv
+  corpus. Source availability is recorded in the graph metadata.
+- Hybrid defaults are tuned for the seed-paper discovery workflow (recent
+  follow-up + foundational prior work); the evaluation rationale is documented in
+  the defaults study.
+- Typical use: balanced graphs when you want citation evidence plus semantic recall.
+- Edge selection reserves the seed's strongest eligible neighbors before the
+  remaining edges, while preserving the configured per-paper degree cap.
 
 ## Choosing a Strategy
 
+All strategies warn when no selected paper pair meets the edge criteria and the
+resulting graph contains no edges.
+
 - Start with `recommendation` for fast topical graphs.
-- Use `citation` when explicit reference structure is most important.
+- Use `citation` when a citation-derived neighborhood is most important.
 - Use `embedding` to surface conceptually similar papers without citation dependency.
 - Use `hybrid` when you want citation grounding plus semantic expansion.

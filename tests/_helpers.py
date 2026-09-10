@@ -109,6 +109,12 @@ def get_paper_id_normalization_cases() -> List[tuple[str, str]]:
         ("https://arxiv.org/abs/arXiv:1706.03762v5", "arxiv:1706.03762"),
         ("https://arxiv.org/pdf/1706.03762v5.pdf", "arxiv:1706.03762"),
         ("https://doi.org/10.1145/3133956.3134029", "10.1145/3133956.3134029"),
+        ("doi:10.1109/CVPR.2016.90", "10.1109/cvpr.2016.90"),
+        (
+            "https://doi.org/10.1007/978-3-642-11745-9_11",
+            "10.1007/978-3-642-11745-9_11",
+        ),
+        ("DOI:10.18653/V1/N18-3011", "10.18653/v1/n18-3011"),
     ]
 
 
@@ -121,8 +127,10 @@ def disable_embedding_dep_checks(monkeypatch: pytest.MonkeyPatch) -> None:
     from citemesh.strategies import embedding as embedding_strategy
     from citemesh.strategies import hybrid as hybrid_strategy
 
-    monkeypatch.setattr(embedding_strategy, "_check_embedding_deps", lambda: None)
-    monkeypatch.setattr(hybrid_strategy, "_check_embedding_deps", lambda: None)
+    monkeypatch.setattr(
+        embedding_strategy, "_check_embedding_deps", lambda *a, **k: None
+    )
+    monkeypatch.setattr(hybrid_strategy, "_check_embedding_deps", lambda *a, **k: None)
 
 
 def raise_import_error(*_args: object, **_kwargs: object) -> Any:

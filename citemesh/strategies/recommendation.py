@@ -3,12 +3,26 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+import networkx as nx
 
 from citemesh.core import Paper
 from citemesh.services import get_client
 from citemesh.similarity import AbstractSimilarityIndex
-from citemesh.strategies.base import GraphBuilderStrategy
+from citemesh.strategies.base import (
+    GraphBuilderStrategy,
+    build_capped_undirected_graph,
+)
+from citemesh.strategies.candidates import (
+    IdentityRegistry,
+    fetch_candidate_source,
+    merge_paper_metadata,
+    reconcile_paper_identity,
+    register_aliases,
+    require_available_candidate_source,
+    scope_candidate_collection,
+)
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -45,6 +59,8 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.similarity_threshold = similarity_threshold
         self.client = client or get_client()
         self._abstract_index = AbstractSimilarityIndex()
+        self.candidate_source_status: Dict[str, str] = {}
+        self._reference_source_unavailable = False
 
     def _hydrate_references(self, paper: Paper) -> None:
         """Populate reference IDs for a paper when strategy settings require it.
@@ -55,18 +71,30 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         if not self.fetch_references or paper.references:
             return
 
+        if self._reference_source_unavailable:
+            if not self.refresh_reference_cache:
+                cached_references = self.client.get_cached_reference_ids(paper.paper_id)
+                if cached_references is not None:
+                    paper.references = list(cached_references)
+            return
+
+        from citemesh.services import SemanticScholarUnavailableError
+
         try:
             paper.references = self.client.get_reference_ids(
                 paper.paper_id,
                 force_refresh=self.refresh_reference_cache,
             )
-        except Exception as exc:
-            logger.debug(
-                "Could not fetch reference IDs for recommendation %s: %s",
+        except SemanticScholarUnavailableError as exc:
+            self._reference_source_unavailable = True
+            logger.warning(
+                "Reference IDs unavailable for recommendation %s; continuing "
+                "without further reference hydration for this collection: %s",
                 paper.paper_id,
                 exc,
             )
 
+    @scope_candidate_collection
     def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
         """Collect recommendations for a seed paper.
 
@@ -75,57 +103,95 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         :return Dict[str, Paper]: Papers included in graph.
         """
         papers: Dict[str, Paper] = {}
+        self.candidate_source_status = {}
+        self._reference_source_unavailable = False
 
         logger.info("Fetching seed paper: %s", seed_id)
-        seed = self.client.get_paper(seed_id, fetch_references=self.fetch_references)
+        seed = self.client.get_paper(
+            seed_id,
+            raise_on_unavailable=True,
+        )
         if not seed:
-            raise ValueError(f"Seed paper not found: {seed_id}")
+            raise ValueError(
+                f"Seed paper not found: {seed_id} (Semantic Scholar does not "
+                "know this identifier; check the DOI/arXiv/S2 ID)."
+            )
 
         seed.is_seed = True
         papers[seed.paper_id] = seed
+        identity_aliases = IdentityRegistry()
+        register_aliases(identity_aliases, seed.paper_id, seed)
+        self._hydrate_references(seed)
 
         logger.info("Fetching recommendations for %s", seed.paper_id)
-        recommendations = self.client.get_recommended_papers(
-            seed.paper_id,
-            limit=self.max_papers * 2,
-            include_references=self.fetch_references,
+        recommendation_result = fetch_candidate_source(
+            "recommendations",
+            lambda: self.client.get_recommended_papers(
+                seed.paper_id,
+                limit=self.max_papers * 2,
+                raise_on_unavailable=True,
+            ),
+        )
+        self.candidate_source_status = {
+            recommendation_result.source: recommendation_result.state.value
+        }
+        require_available_candidate_source(
+            [recommendation_result],
+            context=f"recommendation acquisition for {seed.paper_id}",
         )
 
-        for paper in recommendations:
+        for paper in recommendation_result.papers:
             # Recommendation payloads can include the seed paper itself.
             # Preserve the original seed object so GraphBuilderStrategy can always
             # identify a node with ``is_seed=True``.
-            if paper.paper_id == seed.paper_id:
+            reconciliation = reconcile_paper_identity(
+                identity_aliases, seed, papers, paper
+            )
+            if reconciliation.seed_matched:
+                continue
+
+            canonical_id = reconciliation.canonical_id
+            if canonical_id is not None:
+                existing = papers[canonical_id]
+                if not existing.references:
+                    self._hydrate_references(paper)
+                    merge_paper_metadata(existing, paper)
                 continue
 
             if not paper.abstract or not paper.title:
                 continue
 
-            existing = papers.get(paper.paper_id)
-            if existing is not None:
-                if existing.is_seed:
-                    continue
-                # Keep richer metadata when duplicates are returned.
-                if (not existing.abstract and paper.abstract) or (
-                    existing.title == "Unknown" and paper.title != "Unknown"
-                ):
-                    self._hydrate_references(paper)
-                    papers[paper.paper_id] = paper
-                elif not existing.references:
-                    self._hydrate_references(existing)
-                continue
-
             if len(papers) >= self.max_papers:
-                break
+                continue
 
             self._hydrate_references(paper)
             papers[paper.paper_id] = paper
+            register_aliases(identity_aliases, paper.paper_id, paper)
 
         self._abstract_index.build(papers)
         self._set_collection_summary(
             f"Collected {len(papers)} papers from recommendations"
         )
         return papers
+
+    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
+        """Build a recommendation graph with candidate-source status metadata.
+
+        :param str seed_id: Seed paper identifier.
+        :param Any kwargs: Strategy-specific options forwarded to parent build.
+        :return Tuple[nx.Graph, str]: Built graph and canonical seed identifier.
+        """
+        graph, actual_seed_id = super().build_graph(seed_id, **kwargs)
+        graph.graph["candidate_source_status"] = dict(
+            sorted(self.candidate_source_status.items())
+        )
+        filtered_graph = build_capped_undirected_graph(graph, 3, seed_id=actual_seed_id)
+        logger.info(
+            "Graph complete: %s nodes, %s edges",
+            filtered_graph.number_of_nodes(),
+            filtered_graph.number_of_edges(),
+        )
+        return filtered_graph, actual_seed_id
 
     def compute_similarity(self, paper1: Paper, paper2: Paper) -> float:
         """

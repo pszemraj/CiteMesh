@@ -10,31 +10,93 @@ import argparse
 import json
 import logging
 import math
+import os
 import shutil
+import sys
+import tempfile
+import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Protocol, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NoReturn,
+    Optional,
+    Protocol,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import networkx as nx
 from filelock import FileLock, Timeout
-from rich.console import Console
+from rich import box
+from rich.console import Console, Group
 from rich.logging import RichHandler
 from rich.table import Table
+from rich.text import Text
+from rich_argparse import RichHelpFormatter
 
+from citemesh import __version__
 from citemesh._runtime import stderr_isatty, stdin_isatty, stdout_isatty
-from citemesh.core import EMBEDDING_STORAGE_CONFIG
+from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG
+from citemesh.core.user_config import (
+    SEARCH_MODE_CHOICES,
+    USER_CONFIG_FILENAME,
+    ConfigFileError,
+    ConfigKeyError,
+    ConfigValueError,
+    UserConfig,
+    config_lock,
+    format_config_value,
+    load_user_config,
+    parse_config_key,
+    set_config_value,
+    unset_config_value,
+    user_config_path,
+)
+from citemesh.dashboard_contracts import (
+    DASHBOARD_COLLECTION_KIND,
+    DASHBOARD_COLLECTION_SCHEMA_VERSION,
+    GRAPH_PAYLOAD_KIND,
+    GRAPH_PAYLOAD_SCHEMA_VERSION,
+)
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
+    EMBEDDING_MODEL_PROFILE_CHOICES,
     format_bytes,
     get_cache_dir,
     validate_compression_filter,
 )
-from citemesh.data.cache import atomic_write_json
+from citemesh.data.cache import (
+    CACHE_COORDINATION_DIRNAME,
+    atomic_write_json,
+    cache_operation_lock,
+    legacy_macos_cache_root,
+    path_exists,
+)
 from citemesh.paper_ids import normalize_paper_id
-from citemesh.services import get_client
+from citemesh.progress import set_progress_console
+from citemesh.services import (
+    SemanticScholarClient,
+    SemanticScholarUnavailableError,
+    get_client,
+)
+from citemesh.strategies.candidates import (
+    DEFAULT_CANDIDATE_POOL_SIZE,
+    SEMANTIC_SOURCE_CHOICES,
+)
 from citemesh.strategies.citation import CitationGraphBuilder
-from citemesh.strategies.embedding import ENCODE_BATCH_SIZE, EmbeddingGraphBuilder
+from citemesh.strategies.embedding import (
+    DEFAULT_DATASET_SOURCE,
+    EMBEDDING_DEVICE_CHOICES,
+    ENCODE_BATCH_SIZE,
+    EmbeddingGraphBuilder,
+    resolve_embedding_device,
+)
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
@@ -54,7 +116,7 @@ DEFAULT_LOG_WIDTH = 0
 REDIRECTED_LOG_WIDTH = 140
 LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
 LOG_LEVEL_CHOICES = ("debug", "info", "warning", "error")
-DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS = 60.0
+DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS = 60.0
 
 
 def _resolve_console_width(log_width: int, *, interactive: bool) -> Optional[int]:
@@ -85,6 +147,98 @@ _TRACKED_OPTION_DESTS_ATTR = "_citemesh_provided_option_dests"
 _TRACKED_ACTION_CACHE: Dict[type[argparse.Action], type[argparse.Action]] = {}
 
 
+class _HelpFormatter(RichHelpFormatter):
+    """Style argparse help without interpreting dataset slices as markup."""
+
+    styles = {
+        **RichHelpFormatter.styles,
+        "argparse.groups": "bold",
+        "argparse.args": "cyan",
+        "argparse.metavar": "dim cyan",
+        "argparse.prog": "bold cyan",
+    }
+    group_name_formatter = str
+    help_markup = False
+    text_markup = False
+
+    def __init__(self, prog: str) -> None:
+        """Keep option columns readable on both narrow and wide terminals.
+
+        :param str prog: Command name supplied by argparse.
+        :return None: Initialize the help renderer.
+        """
+        super().__init__(
+            prog,
+            max_help_position=32,
+            width=max(40, min(110, shutil.get_terminal_size().columns - 2)),
+        )
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """Argparse parser that styles usage errors like the rest of the CLI.
+
+    ``RichHelpFormatter`` only styles help and usage rendering; argparse still
+    reports ``error()`` through a plain ``sys.stderr`` write. Subparsers default
+    to their parent's class, so building the root parser from this class styles
+    every command's usage errors without a per-parser opt-in.
+    """
+
+    def error(self, message: str) -> NoReturn:
+        """Report a usage error through the Rich console, then exit.
+
+        :param str message: Failure description supplied by argparse.
+        :return NoReturn: Always exits with argparse's usage status code.
+        """
+        self.print_usage(sys.stderr)
+        log_console.print(
+            Text.assemble(
+                (f"{self.prog}: ", "bold"),
+                ("error: ", "bold red"),
+                (message, "red"),
+            ),
+            soft_wrap=True,
+        )
+        self.exit(2)
+
+
+def _help_examples(*examples: tuple[str, str]) -> Table:
+    """Render labeled command examples that wrap with the help's terminal width.
+
+    :param tuple[str, str] examples: Description and command pairs.
+    :return Table: Borderless, single-column example block.
+    """
+    table = Table(
+        box=None,
+        show_header=False,
+        padding=(0, 2),
+        leading=1,
+        title="Examples:",
+        title_style="bold",
+        title_justify="left",
+    )
+    for label, command in examples:
+        table.add_row(Text.assemble((label + "\n", "dim"), (command + "\n", "cyan")))
+    return table
+
+
+def _output_table(title: str) -> Table:
+    """Create the shared compact table style for human-readable CLI results.
+
+    :param str title: Literal table title.
+    :return Table: Table with light rules and a left-aligned title.
+    """
+    return Table(
+        title=Text(title),
+        title_style="bold",
+        title_justify="left",
+        box=box.SIMPLE_HEAD,
+        border_style="dim",
+        header_style="bold",
+        padding=(0, 1),
+        collapse_padding=True,
+    )
+
+
 def _tracking_action_class(
     action_cls: type[argparse.Action],
 ) -> type[argparse.Action]:
@@ -109,6 +263,15 @@ def _tracking_action_class(
             values: object,
             option_string: str | None = None,
         ) -> None:
+            """Record options and retain parent options across subparser namespaces.
+
+            :param argparse.ArgumentParser parser: Parser invoking this action.
+            :param argparse.Namespace namespace: Destination namespace.
+            :param object values: Parsed action values.
+            :param str | None option_string: Explicit option spelling, if any.
+            :return None: Apply the action and merge presence tracking.
+            """
+            parent_provided = set(getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, set()))
             if self.option_strings:
                 provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, None)
                 if not isinstance(provided, set):
@@ -116,6 +279,14 @@ def _tracking_action_class(
                     setattr(namespace, _TRACKED_OPTION_DESTS_ATTR, provided)
                 provided.add(self.dest)
             super().__call__(parser, namespace, values, option_string)
+            if isinstance(self, argparse._SubParsersAction):
+                # argparse copies a fresh child namespace over its parent.
+                child_provided = getattr(namespace, _TRACKED_OPTION_DESTS_ATTR, set())
+                setattr(
+                    namespace,
+                    _TRACKED_OPTION_DESTS_ATTR,
+                    parent_provided | child_provided,
+                )
 
     _TrackedAction.__name__ = f"CiteMeshTracked{action_cls.__name__}"
     _TRACKED_ACTION_CACHE[action_cls] = _TrackedAction
@@ -133,9 +304,9 @@ def _instrument_parser_actions(parser: argparse.ArgumentParser) -> None:
     :return None: Mutates parser action classes in place.
     """
     for action in parser._actions:
-        if action.option_strings and not getattr(
-            action.__class__, "_citemesh_tracks_presence", False
-        ):
+        if (
+            action.option_strings or isinstance(action, argparse._SubParsersAction)
+        ) and not getattr(action.__class__, "_citemesh_tracks_presence", False):
             tracked_cls = _tracking_action_class(action.__class__)
             try:
                 action.__class__ = tracked_cls
@@ -183,9 +354,6 @@ def _configure_logging(
     if level_name not in LOG_LEVEL_CHOICES:
         level_name = "info"
     resolved_level = getattr(logging, level_name.upper(), logging.INFO)
-    console_level = (
-        max(resolved_level, logging.INFO) if log_file is not None else resolved_level
-    )
     log_console = Console(
         stderr=True,
         width=_resolve_console_width(log_width, interactive=stderr_isatty()),
@@ -193,14 +361,16 @@ def _configure_logging(
     output_console = Console(
         width=_resolve_console_width(log_width, interactive=stdout_isatty())
     )
+    # Progress bars share the logging console so records render above a live bar.
+    set_progress_console(log_console)
     console_handler = RichHandler(
         console=log_console,
         show_time=False,
         show_path=False,
         rich_tracebacks=False,
-        markup=True,
+        markup=False,
     )
-    console_handler.setLevel(console_level)
+    console_handler.setLevel(resolved_level)
     handlers: list[logging.Handler] = [console_handler]
     if log_file is not None:
         resolved_log_file = Path(log_file).expanduser()
@@ -224,6 +394,7 @@ def _configure_logging(
         format="%(message)s",
         datefmt="[%X]",
         handlers=handlers,
+        force=True,
     )
     # Keep third-party HTTP logs concise without import-time side effects.
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -329,23 +500,27 @@ def _add_logging_arguments(
         default_log_width = argparse.SUPPRESS
         default_log_file = argparse.SUPPRESS
 
-    target.add_argument(
+    group = target.add_argument_group("Logging")
+    group.add_argument(
         "--log-level",
+        metavar="LEVEL",
         choices=list(LOG_LEVEL_CHOICES),
         default=default_log_level,
-        help="Console log level (default: info)",
+        help="Console verbosity: debug, info, warning, error (default: info)",
     )
-    target.add_argument(
+    group.add_argument(
         "--log-width",
+        metavar="COLS",
         type=_non_negative_int,
         default=default_log_width,
-        help="Rich console wrap width in columns (0 = auto width; default: 0)",
+        help="Output/log width in columns; 0 uses terminal width (default: 0)",
     )
-    target.add_argument(
+    group.add_argument(
         "--log-file",
+        metavar="PATH",
         type=_non_empty_str,
         default=default_log_file,
-        help="Optional plain-text log file path (overwrites existing file).",
+        help="Write plain-text logs to PATH (overwrites an existing file)",
     )
 
 
@@ -385,7 +560,8 @@ _EXPORTER_METHOD: Dict[str, str] = {
 }
 _THEME_AWARE_FORMATS: frozenset = frozenset({"html", "plotly", "dashboard"})
 DASHBOARD_COLLECTION_FILENAME = "dashboard.html"
-DASHBOARD_MANIFEST_FILENAME = "dashboard.manifest.json"
+DASHBOARD_PACKAGE_FILENAME = "dashboard.citemesh.json"
+LEGACY_DASHBOARD_MANIFEST_FILENAME = "dashboard.manifest.json"
 # Verify dispatch coverage at import time — a new EXPORT_FORMATS entry without
 # a dispatch mapping will fail fast here rather than silently skip at runtime.
 assert set(_EXPORTER_METHOD) | {"png"} == set(EXPORT_FORMATS), (
@@ -406,6 +582,31 @@ class _StrategyBuilderProtocol(Protocol):
         ...
 
 
+class _ParserErrorSink(Protocol):
+    """Protocol for argparse-compatible validation error sinks."""
+
+    def error(self, message: str) -> NoReturn:
+        """Stop validation with a user-facing error.
+
+        :param str message: Validation failure message.
+        :raises SystemExit: Argparse implementations terminate CLI parsing.
+        """
+        ...
+
+
+class _ValueErrorParserErrorSink:
+    """Translate parser-style validation failures into catchable exceptions."""
+
+    @staticmethod
+    def error(message: str) -> NoReturn:
+        """Raise a parser-style validation message as ``ValueError``.
+
+        :param str message: Validation failure message.
+        :raises ValueError: Always raised with ``message``.
+        """
+        raise ValueError(message)
+
+
 StrategyFactory = Callable[[argparse.Namespace], _StrategyBuilderProtocol]
 
 # Strategy-scoped build options and CLI-token aliases for strict post-parse validation.
@@ -416,12 +617,15 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "no_references": {"citation", "recommendation", "hybrid"},
     "refresh_reference_cache": {"citation", "recommendation", "hybrid"},
     "model": {"embedding", "hybrid"},
+    "model_profile": {"embedding", "hybrid"},
     "model_revision": {"embedding", "hybrid"},
+    "dataset_source": {"embedding", "hybrid"},
     "dataset_split": {"embedding", "hybrid"},
     "corpus_size": {"embedding", "hybrid"},
     "all_corpus": {"embedding", "hybrid"},
     "top_k": {"embedding"},
     "truncate_dim": {"embedding", "hybrid"},
+    "min_semantic_similarity": {"embedding", "hybrid"},
     "streaming": {"embedding", "hybrid"},
     "force_rebuild_cache": {"embedding", "hybrid"},
     "overwrite_cache": {"embedding", "hybrid"},
@@ -434,38 +638,53 @@ _BUILD_STRATEGY_OPTION_SUPPORT: Dict[str, Set[str]] = {
     "cache_compression_level": {"embedding", "hybrid"},
     "encode_batch_size": {"embedding", "hybrid"},
     "torch_compile": {"embedding", "hybrid"},
+    "device": {"embedding", "hybrid"},
+    "semantic_source": {"embedding", "hybrid"},
+    "candidate_pool_size": {"embedding", "hybrid"},
     "max_semantic": {"hybrid"},
 }
-_BUILD_OPTION_FLAGS: Dict[str, List[str]] = {
-    "max_citations": ["--max-citations", "-c"],
-    "max_references": ["--max-references", "-r"],
-    "similarity_threshold": ["--similarity-threshold", "-t"],
-    "no_references": ["--no-references"],
-    "refresh_reference_cache": ["--refresh-reference-cache"],
-    "model": ["--model", "-m"],
-    "model_revision": ["--model-revision"],
-    "dataset_split": ["--dataset-split"],
-    "corpus_size": ["--corpus-size"],
-    "all_corpus": ["--all-corpus"],
-    "top_k": ["--top-k", "-k"],
-    "truncate_dim": ["--truncate-dim"],
-    "streaming": ["--streaming"],
-    "force_rebuild_cache": ["--force-rebuild-cache"],
-    "overwrite_cache": ["--overwrite-cache"],
-    "cache_overwrite_reason": ["--cache-overwrite-reason"],
-    "storage_precision": ["--storage-precision"],
-    "binary_prefilter": ["--binary-prefilter", "--no-binary-prefilter"],
-    "binary_rescore_multiplier": ["--binary-rescore-multiplier"],
-    "calibration_sample_size": ["--calibration-sample-size"],
-    "cache_compression": ["--cache-compression"],
-    "cache_compression_level": ["--cache-compression-level"],
-    "encode_batch_size": ["--encode-batch-size"],
-    "torch_compile": ["--torch-compile", "--no-torch-compile"],
-    "max_semantic": ["--max-semantic"],
+# Flags that only affect arxiv-corpus hydration; providing them implies (or
+# requires) --semantic-source arxiv-corpus.
+_CORPUS_ONLY_OPTION_DESTS: Set[str] = {
+    "dataset_source",
+    "dataset_split",
+    "corpus_size",
+    "all_corpus",
+    "streaming",
 }
+# Built-in parser defaults restored when corpus-only config values are ignored
+# in candidates mode; kept in sync with the build parser by a contract test.
+_CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS: Dict[str, object] = {
+    "dataset_source": DEFAULT_DATASET_SOURCE,
+    "dataset_split": "train",
+    "corpus_size": None,
+    "all_corpus": False,
+    "streaming": False,
+}
+# Explicit candidate-only options imply candidate sourcing just as explicit
+# corpus-only options imply corpus sourcing.
+_CANDIDATE_ONLY_OPTION_DESTS: Set[str] = {"candidate_pool_size"}
 _BUILD_OPTION_PRIMARY_FLAG: Dict[str, str] = {
-    dest: flags[0] for dest, flags in _BUILD_OPTION_FLAGS.items()
+    dest: f"--{dest.replace('_', '-')}" for dest in _BUILD_STRATEGY_OPTION_SUPPORT
 }
+_BUILD_OPTION_PRIMARY_FLAG["encode_batch_size"] = "--batch-size"
+
+
+def _build_option_label(args: argparse.Namespace, dest: str) -> str:
+    """Name a build option with its effective boolean polarity.
+
+    :param argparse.Namespace args: Parsed option values.
+    :param str dest: Parser destination to describe.
+    :return str: Positive or negated long option spelling.
+    """
+    label = _BUILD_OPTION_PRIMARY_FLAG[dest]
+    if dest in {"streaming", "binary_prefilter", "torch_compile"} and not getattr(
+        args, dest
+    ):
+        return "--no-" + label[2:]
+    return label
+
+
 _CACHE_COMPRESSION_CHOICES = ("gzip", "lzf")
 _HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
     "max_papers": HYBRID_DEFAULT_MAX_PAPERS,
@@ -475,14 +694,18 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: Dict[str, int] = {
 _PROGRAMMATIC_BUILD_VALUE_DESTS: Set[str] = set(_BUILD_STRATEGY_OPTION_SUPPORT) | {
     "paper_id",
     "max_papers",
+    "refresh_paper_cache",
 }
 _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "model",
+    "model_profile",
     "model_revision",
+    "dataset_source",
     "dataset_split",
     "corpus_size",
     "all_corpus",
     "truncate_dim",
+    "min_semantic_similarity",
     "streaming",
     "force_rebuild_cache",
     "overwrite_cache",
@@ -495,6 +718,9 @@ _HYBRID_EMBEDDING_OPTION_DESTS: Set[str] = {
     "cache_compression_level",
     "encode_batch_size",
     "torch_compile",
+    "device",
+    "semantic_source",
+    "candidate_pool_size",
 }
 
 
@@ -512,11 +738,15 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
     :return Dict[str, object]: Shared kwargs consumed by embedding/hybrid builders.
     """
     return {
+        **_configured_client_kwargs(cli_args),
         "model_name": cli_args.model,
+        "model_profile": cli_args.model_profile,
         "model_revision": cli_args.model_revision,
+        "dataset_source": cli_args.dataset_source,
         "dataset_split": cli_args.dataset_split,
         "corpus_size": None if cli_args.all_corpus else cli_args.corpus_size,
         "truncate_dim": cli_args.truncate_dim,
+        "min_semantic_similarity": cli_args.min_semantic_similarity,
         "use_streaming": cli_args.streaming,
         "force_rebuild_cache": cli_args.force_rebuild_cache,
         "force_rebuild_reason": getattr(cli_args, "cache_overwrite_reason", None),
@@ -528,6 +758,9 @@ def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> Dict[str, 
         "cache_compression_level": cli_args.cache_compression_level,
         "encode_batch_size": cli_args.encode_batch_size,
         "enable_torch_compile": cli_args.torch_compile,
+        "device": cli_args.device,
+        "semantic_source": cli_args.semantic_source,
+        "candidate_pool_size": cli_args.candidate_pool_size,
     }
 
 
@@ -563,8 +796,40 @@ def _embedding_export_metadata(
     elif not int8_mode:
         binary_prefilter_used_for_query = False
 
-    return {
+    effective_device: Optional[str] = None
+    effective_compute_dtype: Optional[str] = None
+    effective_model_profile = str(cli_args.model_profile)
+    retrieval_representation = "retrieval-query/retrieval-document"
+    graph_representation = "graph-similarity"
+    if isinstance(runtime_metadata, dict):
+        raw_device = runtime_metadata.get("device")
+        raw_compute_dtype = runtime_metadata.get("compute_dtype")
+        if isinstance(raw_device, str) and raw_device:
+            effective_device = raw_device
+        if isinstance(raw_compute_dtype, str) and raw_compute_dtype:
+            effective_compute_dtype = raw_compute_dtype
+        raw_model_profile = runtime_metadata.get("model_profile")
+        if isinstance(raw_model_profile, str) and raw_model_profile:
+            effective_model_profile = raw_model_profile
+        raw_retrieval_representation = runtime_metadata.get("retrieval_representation")
+        raw_graph_representation = runtime_metadata.get("graph_representation")
+        if (
+            isinstance(raw_retrieval_representation, str)
+            and raw_retrieval_representation
+        ):
+            retrieval_representation = raw_retrieval_representation
+        if isinstance(raw_graph_representation, str) and raw_graph_representation:
+            graph_representation = raw_graph_representation
+
+    payload: Dict[str, object] = {
         "effective_vector_dtype": "float32",
+        "effective_device": effective_device,
+        "effective_compute_dtype": effective_compute_dtype,
+        "model_profile": effective_model_profile,
+        "retrieval_representation": retrieval_representation,
+        "graph_representation": graph_representation,
+        "semantic_source": str(cli_args.semantic_source),
+        "candidate_pool_size": int(cli_args.candidate_pool_size),
         "storage_precision": str(cli_args.storage_precision),
         "binary_prefilter_enabled": binary_prefilter_enabled,
         "binary_prefilter_used_for_query": binary_prefilter_used_for_query,
@@ -575,6 +840,11 @@ def _embedding_export_metadata(
             getattr(cli_args, "cache_overwrite_reason", None)
         ),
     }
+    if payload["semantic_source"] == "arxiv-corpus":
+        # Corpus builds never consult the candidate pool; recording its default
+        # here contradicted the config sidecar, which omits it.
+        payload.pop("candidate_pool_size")
+    return payload
 
 
 def _plot_overlay_metadata(export_metadata: Dict[str, Any]) -> Dict[str, Any]:
@@ -618,6 +888,115 @@ def _apply_hybrid_default_overrides(
         if dest in provided:
             continue
         setattr(args, dest, int(value))
+
+
+def _apply_user_config_defaults(
+    args: argparse.Namespace, provided: Set[str], user_config: UserConfig
+) -> Set[str]:
+    """Overlay config.toml defaults onto build args the user did not set.
+
+    Precedence: explicit CLI flag > config.toml > built-in default. Values are
+    already whitelist-validated at config load time.
+
+    :param argparse.Namespace args: Parsed build arguments.
+    :param Set[str] provided: Explicit option destinations found in argv.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return Set[str]: Destinations that were filled from config.toml.
+    """
+    applied: Set[str] = set()
+    for dest in sorted(user_config.defaults):
+        if dest in provided or not hasattr(args, dest):
+            continue
+        value = user_config.defaults[dest]
+        setattr(args, dest, list(value) if isinstance(value, list) else value)
+        applied.add(dest)
+    if applied:
+        summary = ", ".join(
+            f"{dest}={format_config_value(user_config.defaults[dest])}"
+            for dest in sorted(applied)
+        )
+        logger.debug("Loaded config defaults from %s: %s", user_config.path, summary)
+    return applied
+
+
+def _config_error_context(
+    *,
+    related_dests: Set[str],
+    config_defaults: Set[str],
+    config_path: Path | None,
+) -> str:
+    """Describe config values that contributed to a contract failure.
+
+    :param Set[str] related_dests: Option destinations relevant to the failure.
+    :param Set[str] config_defaults: Destinations filled from config.toml.
+    :param Path | None config_path: Active config.toml path when available.
+    :return str: Diagnostic suffix, or an empty string for CLI-only failures.
+    """
+    configured = sorted(related_dests & set(config_defaults))
+    if not configured:
+        return ""
+    key_text = ", ".join(f"defaults.{dest}" for dest in configured)
+    source = str(config_path) if config_path is not None else "config.toml"
+    return (
+        f" Config source: {key_text} in {source}; update or unset the configured value."
+    )
+
+
+def _build_contract_error(
+    error_sink: _ParserErrorSink,
+    message: str,
+    *,
+    related_dests: Set[str] = frozenset(),
+    config_defaults: Set[str] = frozenset(),
+    config_path: Path | None = None,
+) -> NoReturn:
+    """Route a build-contract failure through the active error sink.
+
+    :param _ParserErrorSink error_sink: Argparse or exception-raising error sink.
+    :param str message: Base validation failure message.
+    :param Set[str] related_dests: Option destinations relevant to the failure.
+    :param Set[str] config_defaults: Destinations filled from config.toml.
+    :param Path | None config_path: Active config.toml path when available.
+    :raises SystemExit: When ``error_sink`` is an argparse parser.
+    :raises ValueError: When ``error_sink`` raises catchable validation errors.
+    """
+    context = _config_error_context(
+        related_dests=related_dests,
+        config_defaults=config_defaults,
+        config_path=config_path,
+    )
+    error_sink.error(f"{message}{context}")
+
+
+def _resolve_user_config_api_key(user_config: UserConfig) -> str | None:
+    """Resolve the S2 API key without exposing config secrets to subprocesses.
+
+    Environment presence wins even for an empty value, so ``S2_API_KEY=""``
+    still explicitly disables the configured key.
+
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return str | None: Environment key, configured key, or no configured value.
+    """
+    if "S2_API_KEY" in os.environ:
+        return os.environ["S2_API_KEY"]
+    if user_config.s2_api_key:
+        logger.debug("Using api.s2_api_key from %s.", user_config.path)
+    return user_config.s2_api_key or None
+
+
+def _configured_client_kwargs(args: argparse.Namespace) -> Dict[str, object]:
+    """Inject a client only when this command has API-specific settings.
+
+    :param argparse.Namespace args: Parsed arguments and resolved API key.
+    :return Dict[str, object]: Optional client constructor argument for builders.
+    """
+    api_key = getattr(args, "_s2_api_key", None)
+    refresh = bool(getattr(args, "refresh_paper_cache", False))
+    if api_key is None and not refresh:
+        return {}
+    return {
+        "client": SemanticScholarClient(api_key=api_key, refresh_paper_cache=refresh)
+    }
 
 
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:
@@ -686,37 +1065,147 @@ def _strategy_score_contract(strategy: str) -> Dict[str, object]:
 
 
 def _validate_build_cli_contract(
-    args: argparse.Namespace, build_parser: argparse.ArgumentParser, provided: Set[str]
+    args: argparse.Namespace,
+    build_parser: _ParserErrorSink,
+    provided: Set[str],
+    config_defaults: Set[str] = frozenset(),
+    config_path: Path | None = None,
 ) -> None:
     """Validate strategy-scoped and dependent build options before execution.
 
     :param argparse.Namespace args: Parsed build arguments.
-    :param argparse.ArgumentParser build_parser: Build subcommand parser.
+    :param _ParserErrorSink build_parser: Parser-like validation error sink.
     :param Set[str] provided: Explicit option destinations found in argv.
+    :param Set[str] config_defaults: Destinations filled from config.toml; they
+        outrank built-in defaults (hybrid implicit budgets) but never count as
+        explicit flags for strategy gating or corpus-mode implication.
+    :param Path | None config_path: Active config.toml path for diagnostics.
     :return None: Mutates normalized args for effective no-op elimination.
     """
     strategy = str(args.strategy)
-    _apply_hybrid_default_overrides(args, provided)
+    _apply_hybrid_default_overrides(args, provided | set(config_defaults))
+    contract_provided = set(provided)
     unsupported: List[str] = []
-    for dest in sorted(provided):
+    for dest in sorted(contract_provided):
         allowed = _BUILD_STRATEGY_OPTION_SUPPORT.get(dest)
         if allowed is None:
             continue
         if strategy not in allowed:
-            unsupported.append(_BUILD_OPTION_PRIMARY_FLAG[dest])
+            unsupported.append(_build_option_label(args, dest))
     if unsupported:
         unsupported_text = ", ".join(unsupported)
-        build_parser.error(
+        _build_contract_error(
+            build_parser,
             f"Unsupported option(s) for --strategy {strategy}: {unsupported_text}. "
-            "Use --help to view strategy-scoped option applicability."
+            "Use --help to view strategy-scoped option applicability.",
+            related_dests={"strategy"},
+            config_defaults=config_defaults,
+            config_path=config_path,
         )
+    if not bool(getattr(args, "streaming", False)):
+        contract_provided.discard("streaming")
 
     if strategy in {"embedding", "hybrid"}:
-        if args.streaming and ":" in str(args.dataset_split):
-            build_parser.error(
+        provided_corpus_flags = sorted(
+            _build_option_label(args, dest)
+            for dest in contract_provided
+            if dest in _CORPUS_ONLY_OPTION_DESTS
+        )
+        provided_candidate_flags = sorted(
+            _build_option_label(args, dest)
+            for dest in contract_provided
+            if dest in _CANDIDATE_ONLY_OPTION_DESTS
+        )
+        if "semantic_source" not in contract_provided:
+            if provided_corpus_flags and provided_candidate_flags:
+                build_parser.error(
+                    "Corpus-only and candidate-only options cannot be combined: "
+                    f"{', '.join(provided_corpus_flags + provided_candidate_flags)}."
+                )
+            if provided_corpus_flags:
+                args.semantic_source = "arxiv-corpus"
+                logger.debug(
+                    "Corpus option(s) %s imply --semantic-source arxiv-corpus.",
+                    ", ".join(provided_corpus_flags),
+                )
+            elif provided_candidate_flags:
+                args.semantic_source = "candidates"
+                logger.debug(
+                    "Candidate option(s) %s imply --semantic-source candidates.",
+                    ", ".join(provided_candidate_flags),
+                )
+        if args.semantic_source != "arxiv-corpus":
+            ignored_config_corpus_dests = sorted(
+                set(config_defaults) & _CORPUS_ONLY_OPTION_DESTS
+            )
+            if ignored_config_corpus_dests:
+                ignored_text = ", ".join(
+                    f"defaults.{dest}" for dest in ignored_config_corpus_dests
+                )
+                source = str(config_path) if config_path is not None else "config.toml"
+                logger.info(
+                    "Ignoring corpus-only config default(s) %s from %s because "
+                    "the effective semantic source is candidates; set "
+                    "defaults.semantic_source='arxiv-corpus' to apply them.",
+                    ignored_text,
+                    source,
+                )
+                # "Ignored" must mean ignored: reset the values so the builder
+                # never receives corpus settings a candidates run announced it
+                # would not apply.
+                for dest in ignored_config_corpus_dests:
+                    setattr(args, dest, _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS[dest])
+            if provided_corpus_flags:
+                option_text = ", ".join(provided_corpus_flags)
+                _build_contract_error(
+                    build_parser,
+                    f"Corpus-only option(s) require --semantic-source arxiv-corpus: "
+                    f"{option_text}.",
+                    related_dests={"semantic_source"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
+                )
+            if (
+                "storage_precision" in contract_provided
+                and args.storage_precision == "int8"
+            ):
+                _build_contract_error(
+                    build_parser,
+                    "--storage-precision int8 requires --semantic-source "
+                    "arxiv-corpus (int8 calibration ranges are computed during "
+                    "corpus hydration).",
+                    related_dests={"semantic_source"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
+                )
+            if args.storage_precision == "int8":
+                # Normalize the implicit int8 default to candidate-mode storage.
+                args.storage_precision = "float32"
+                logger.debug(
+                    "Candidate mode stores embeddings as float32 "
+                    "(int8 calibration requires corpus hydration)."
+                )
+        elif provided_candidate_flags:
+            _build_contract_error(
+                build_parser,
+                "--candidate-pool-size requires --semantic-source candidates.",
+                related_dests={"semantic_source"},
+                config_defaults=config_defaults,
+                config_path=config_path,
+            )
+        if (
+            args.semantic_source == "arxiv-corpus"
+            and args.streaming
+            and ":" in str(args.dataset_split)
+        ):
+            _build_contract_error(
+                build_parser,
                 "Streaming mode does not support sliced --dataset-split values "
                 "(for example train[:5%]). Use unsliced split (e.g. train) or "
-                "disable --streaming."
+                "disable --streaming.",
+                related_dests={"dataset_split", "streaming"},
+                config_defaults=config_defaults,
+                config_path=config_path,
             )
         if bool(args.overwrite_cache) and not bool(args.force_rebuild_cache):
             build_parser.error("--overwrite-cache requires --force-rebuild-cache.")
@@ -726,10 +1215,21 @@ def _validate_build_cli_contract(
             build_parser.error(
                 "--cache-overwrite-reason requires --force-rebuild-cache."
             )
-        if args.all_corpus and "corpus_size" in provided:
+        if args.all_corpus and "corpus_size" in contract_provided:
             build_parser.error(
                 "--all-corpus cannot be combined with explicit --corpus-size."
             )
+        if _embedding_branch_enabled(args) and str(args.device) != "auto":
+            try:
+                resolve_embedding_device(args.device)
+            except ValueError as exc:
+                _build_contract_error(
+                    build_parser,
+                    str(exc),
+                    related_dests={"device"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
+                )
         try:
             args.cache_compression = validate_compression_filter(
                 str(args.cache_compression)
@@ -743,7 +1243,7 @@ def _validate_build_cli_contract(
         if resolved_compression_level < 0:
             build_parser.error("--cache-compression-level must be at least 0.")
         if args.cache_compression == "lzf":
-            if "cache_compression_level" in provided:
+            if "cache_compression_level" in contract_provided:
                 build_parser.error(
                     "--cache-compression-level is unsupported with "
                     "--cache-compression lzf."
@@ -751,84 +1251,140 @@ def _validate_build_cli_contract(
             resolved_compression_level = 0
         args.cache_compression_level = int(resolved_compression_level)
         if str(args.storage_precision) != "int8":
-            if "binary_prefilter" in provided and bool(args.binary_prefilter):
-                build_parser.error(
-                    "--binary-prefilter requires --storage-precision int8."
+            if "binary_prefilter" in contract_provided and bool(args.binary_prefilter):
+                _build_contract_error(
+                    build_parser,
+                    "--binary-prefilter requires --storage-precision int8.",
+                    related_dests={"storage_precision"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
                 )
-            if "binary_rescore_multiplier" in provided:
-                build_parser.error(
-                    "--binary-rescore-multiplier requires --storage-precision int8."
+            if "binary_rescore_multiplier" in contract_provided:
+                _build_contract_error(
+                    build_parser,
+                    "--binary-rescore-multiplier requires --storage-precision int8.",
+                    related_dests={"storage_precision"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
                 )
-            if "calibration_sample_size" in provided:
-                build_parser.error(
-                    "--calibration-sample-size requires --storage-precision int8."
+            if "calibration_sample_size" in contract_provided:
+                _build_contract_error(
+                    build_parser,
+                    "--calibration-sample-size requires --storage-precision int8.",
+                    related_dests={"storage_precision"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
                 )
             # Normalize implicit non-int8 defaults to effective values to avoid
             # strategy-level runtime warnings about ignored options.
             args.binary_prefilter = False
             args.binary_rescore_multiplier = 1
+            args.calibration_sample_size = (
+                EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+            )
 
     if strategy == "hybrid":
         if args.max_semantic is not None and int(args.max_semantic) >= int(
             args.max_papers
         ):
-            build_parser.error(
-                "--max-semantic must be between 0 and --max-papers - 1 for hybrid."
+            _build_contract_error(
+                build_parser,
+                "--max-semantic must be between 0 and --max-papers - 1 for hybrid.",
+                related_dests={"max_papers", "max_semantic"},
+                config_defaults=config_defaults,
+                config_path=config_path,
             )
         resolved_max_semantic = _resolved_hybrid_max_semantic(args)
 
         if resolved_max_semantic == 0:
             ignored_embedding_options = sorted(
-                _BUILD_OPTION_PRIMARY_FLAG[dest]
-                for dest in provided
+                _build_option_label(args, dest)
+                for dest in contract_provided
                 if dest in _HYBRID_EMBEDDING_OPTION_DESTS
             )
             if ignored_embedding_options:
                 option_text = ", ".join(ignored_embedding_options)
                 if args.max_semantic is None:
-                    build_parser.error(
+                    message = (
                         "Hybrid semantic branch is disabled (effective --max-semantic "
                         "is 0 from --max-papers defaulting); remove embedding-only "
                         f"option(s): {option_text}."
                     )
+                elif "max_semantic" in config_defaults:
+                    message = (
+                        "Hybrid semantic branch is disabled by defaults.max_semantic=0; "
+                        f"remove embedding-only option(s): {option_text}."
+                    )
                 else:
-                    build_parser.error(
+                    message = (
                         "Hybrid semantic branch is disabled with --max-semantic 0; "
                         f"remove embedding-only option(s): {option_text}."
                     )
+                _build_contract_error(
+                    build_parser,
+                    message,
+                    related_dests={"max_semantic", "max_papers"},
+                    config_defaults=config_defaults,
+                    config_path=config_path,
+                )
 
 
 def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
     """Log build side-effect contract summary for transparency before execution.
 
     :param argparse.Namespace args: Parsed build arguments.
-    :return None: Emits info-level contract summary logs.
+    :return None: Emits contract details at their appropriate logging levels.
     """
     if not _embedding_branch_enabled(args):
         return
 
+    corpus_mode = str(args.semantic_source) == "arxiv-corpus"
     _, cache_files, _ = _embedding_cache_directory_stats()
     if cache_files == 0:
-        logger.warning(
-            "No embedding cache found; model and corpus downloads may be "
-            "required (network access needed, may take several minutes on "
-            "first use)."
-        )
+        if corpus_mode:
+            logger.info(
+                "No embedding cache found; model and corpus downloads may be "
+                "required (network access needed, may take several minutes on "
+                "first use)."
+            )
+        else:
+            logger.info(
+                "No embedding cache found; the embedding model will be "
+                "downloaded on first use (network access needed)."
+            )
 
-    corpus_label = "all" if args.all_corpus else str(args.corpus_size)
     cache_root = get_cache_dir("embeddings")
     revision_label = args.model_revision or "default"
     logger.debug("Embedding cache namespace root: %s.", cache_root)
-    logger.info(
-        "Embedding config: model=%s@%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
-        args.model,
-        revision_label,
-        args.dataset_split,
-        corpus_label,
-        bool(args.streaming),
-        args.storage_precision,
-        int(args.encode_batch_size),
-    )
+    if corpus_mode:
+        corpus_label = (
+            "all"
+            if args.all_corpus or args.corpus_size is None
+            else str(args.corpus_size)
+        )
+        logger.debug(
+            "Embedding config: model=%s@%s device=%s source=arxiv-corpus dataset=%s split=%s corpus=%s streaming=%s storage=%s encode_batch=%s.",
+            args.model,
+            revision_label,
+            args.device,
+            args.dataset_source,
+            args.dataset_split,
+            corpus_label,
+            bool(args.streaming),
+            args.storage_precision,
+            int(args.encode_batch_size),
+        )
+    else:
+        logger.debug(
+            "Embedding config: model=%s@%s device=%s source=%s pool=%s storage=%s encode_batch=%s.",
+            args.model,
+            revision_label,
+            args.device,
+            args.semantic_source,
+            int(args.candidate_pool_size),
+            args.storage_precision,
+            int(args.encode_batch_size),
+        )
     if args.force_rebuild_cache:
         overwrite_reason = _normalized_cache_reason(
             getattr(args, "cache_overwrite_reason", None)
@@ -851,13 +1407,13 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
 def _normalize_programmatic_build_value(
     action: argparse.Action,
     value: object,
-    parser_error_sink: argparse.ArgumentParser,
+    parser_error_sink: _ParserErrorSink,
 ) -> object:
     """Normalize a programmatic build value using the parser action contract.
 
     :param argparse.Action action: Parser action defining the value contract.
     :param object value: Programmatic value to validate.
-    :param argparse.ArgumentParser parser_error_sink: Parser-like error sink.
+    :param _ParserErrorSink parser_error_sink: Parser-like error sink.
     :return object: Normalized value compatible with CLI parsing rules.
     """
     if value is None:
@@ -887,13 +1443,13 @@ def _normalize_programmatic_build_value(
 def _validate_programmatic_build_values(
     args: argparse.Namespace,
     build_parser: argparse.ArgumentParser,
-    parser_error_sink: argparse.ArgumentParser,
+    parser_error_sink: _ParserErrorSink,
 ) -> None:
     """Validate programmatic build namespaces against CLI scalar contracts.
 
     :param argparse.Namespace args: Candidate build namespace.
     :param argparse.ArgumentParser build_parser: Build parser used for action metadata.
-    :param argparse.ArgumentParser parser_error_sink: Parser-like error sink.
+    :param _ParserErrorSink parser_error_sink: Parser-like error sink.
     :return None: Mutates ``args`` with normalized CLI-equivalent values.
     """
     for action in build_parser._actions:
@@ -924,6 +1480,7 @@ def _synchronize_namespace_values(
 _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
     "citation": _StrategyDispatchSpec(
         factory=lambda cli_args: CitationGraphBuilder(
+            **_configured_client_kwargs(cli_args),
             max_papers=cli_args.max_papers,
             max_citations=cli_args.max_citations,
             max_references=cli_args.max_references,
@@ -934,6 +1491,7 @@ _STRATEGY_DISPATCH: Dict[str, _StrategyDispatchSpec] = {
     ),
     "recommendation": _StrategyDispatchSpec(
         factory=lambda cli_args: RecommendationGraphBuilder(
+            **_configured_client_kwargs(cli_args),
             max_papers=cli_args.max_papers,
             fetch_references=not cli_args.no_references,
             refresh_reference_cache=cli_args.refresh_reference_cache,
@@ -987,7 +1545,7 @@ def _build_strategy_graph(
     setattr(args_for_validation, "strategy", strategy)
 
     if validate_contract:
-        parser_snapshot, build_parser_snapshot, _ = _create_parser()
+        parser_snapshot, build_parser_snapshot, _, _ = _create_parser()
         del parser_snapshot
         defaults_namespace = build_parser_snapshot.parse_args(["seed"])
         merged_values = vars(defaults_namespace)
@@ -1003,26 +1561,14 @@ def _build_strategy_graph(
             )
         )
 
-        class _ProgrammaticBuildParser:
-            """Tiny parser shim translating parser.error into ValueError."""
-
-            @staticmethod
-            def error(message: str) -> None:
-                """Raise parser-style validation messages as ``ValueError``.
-
-                :param str message: Validation error message.
-                :raises ValueError: Always raised with ``message``.
-                """
-                raise ValueError(message)
-
         _validate_programmatic_build_values(
             args_for_validation,
             build_parser_snapshot,
-            _ProgrammaticBuildParser(),  # type: ignore[arg-type]
+            _ValueErrorParserErrorSink(),
         )
         _validate_build_cli_contract(
             args_for_validation,
-            _ProgrammaticBuildParser(),  # type: ignore[arg-type]
+            _ValueErrorParserErrorSink(),
             inferred_provided,
         )
         _synchronize_namespace_values(args, args_for_validation)
@@ -1066,161 +1612,194 @@ def _infer_provided_build_option_dests(
 
 
 def _create_parser() -> Tuple[
-    argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
 ]:
     """Create and return the root parser and key subcommand parsers.
 
-    :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
-        Root parser, build subcommand parser, cache subcommand parser.
+    :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
+        Root parser, build subcommand parser, cache subcommand parser,
+        config subcommand parser.
     """
-    root_logging_parent = argparse.ArgumentParser(add_help=False)
-    _add_logging_arguments(root_logging_parent)
-    command_logging_parent = argparse.ArgumentParser(add_help=False)
-    _add_logging_arguments(command_logging_parent, suppress_defaults=True)
+    parser = _ArgumentParser(
+        prog="citemesh",
+        description="CiteMesh — discover related research and build paper graphs.",
+        epilog=Group(
+            _help_examples(
+                (
+                    "Build a graph from a known paper",
+                    'citemesh build "arxiv:1706.03762" --strategy hybrid',
+                ),
+                ("Find a seed paper", 'citemesh search "attention mechanisms"'),
+                ("Open saved results", "citemesh view"),
+                ("Inspect local storage", "citemesh cache scan"),
+            ),
+            Text(
+                "\nUse citemesh COMMAND --help for command-specific options.",
+                style="dim",
+            ),
+            Text("\nEnvironment", style="bold"),
+            Text(
+                "  S2_API_KEY          Semantic Scholar API key (higher rate limits)\n"
+                "  CITEMESH_CACHE_DIR  Override the cache directory"
+            ),
+            Text("\nPersonal defaults: citemesh config --help", style="dim"),
+        ),
+    )
 
-    parser = argparse.ArgumentParser(
-        description="CiteMesh: Create citation graph visualizations",
-        parents=[root_logging_parent],
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Citation-based graph (fast, uses S2 API)
-  citemesh build "arxiv:1706.03762" --strategy citation
-
-  # Recommendation graph (semantic-aware by default)
-  citemesh build "arxiv:1706.03762"
-
-  # Embedding-based graph (semantic similarity)
-  citemesh build "arxiv:1706.03762" --strategy embedding
-
-  # Hybrid approach (combines both)
-  citemesh build "arxiv:1706.03762" --strategy hybrid
-
-  # Custom output path
-  citemesh build "10.1038/nature14539" -o my_graph.png
-
-  # Quick test with fewer papers
-  citemesh build "arxiv:1810.04805" -p 20 --strategy citation
-
-Environment variables:
-  S2_API_KEY                                      Semantic Scholar API key (higher rate limits)
-  CITEMESH_CACHE_DIR                              Override cache directory location
-  CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS   Embedding cache lock timeout (default: 900s)
-        """,
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
 
     subparsers = parser.add_subparsers(
         dest="command",
-        help="Commands",
+        title="Commands",
+        metavar="COMMAND",
     )
 
     # Build command
     build_parser = subparsers.add_parser(
         "build",
-        help="Build and visualize paper graph",
-        parents=[command_logging_parent],
+        help="Build a graph from a paper or topic",
+        description="Discover related papers using recommendations, citations, embeddings, or a hybrid of citations and embeddings.",
+        epilog=_help_examples(
+            (
+                "Create or extend the dashboard collection in out/",
+                'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard',
+            ),
+            (
+                "Search 10,000 recent papers by topic",
+                'citemesh build "long-context models" -s embedding --corpus-size 10000',
+            ),
+        ),
     )
 
     # Required arguments
     build_parser.add_argument(
         "paper_id",
         type=_non_empty_str,
-        help="Paper identifier (DOI, arXiv ID, or S2 ID)",
+        metavar="PAPER",
+        help="DOI, arXiv ID/URL, S2 ID, or free text with --strategy embedding",
     )
 
+    graph_group = build_parser.add_argument_group("Graph")
+    graph_group.add_argument(
+        "--refresh-paper-cache",
+        action="store_true",
+        help="Fetch fresh S2 paper metadata and citation counts, retaining embedding caches.",
+    )
+    export_group = build_parser.add_argument_group("Output")
+    citation_group = build_parser.add_argument_group("Citations and references")
+    semantic_group = build_parser.add_argument_group(
+        "Semantic discovery", "For embedding and hybrid strategies."
+    )
+    embedding_group = build_parser.add_argument_group("Embedding runtime")
+    corpus_group = build_parser.add_argument_group(
+        "arXiv corpus",
+        "These options select arxiv-corpus sourcing when --semantic-source is omitted.",
+    )
+    storage_group = build_parser.add_argument_group("Embedding cache")
+    hybrid_group = build_parser.add_argument_group("Hybrid expansion")
+
     # Strategy selection
-    build_parser.add_argument(
+    graph_group.add_argument(
         "--strategy",
         "-s",
+        metavar="NAME",
         type=str,
         choices=["recommendation", "citation", "embedding", "hybrid"],
         default="recommendation",
-        help="Graph building strategy (default: recommendation)",
+        help="recommendation, citation, embedding, hybrid (default: recommendation)",
     )
 
     # Common arguments
-    build_parser.add_argument(
+    export_group.add_argument(
         "--output",
         "-o",
         type=str,
         default=None,
         help=(
-            "Output file path for single export, or output/collection root for "
-            "multi-export runs. With dashboard export, an explicit "
-            "*.dashboard.html path keeps standalone mode; otherwise CiteMesh "
-            "writes dashboard.html + dashboard.manifest.json under the output root."
+            "File or directory (default: out/ with automatic names). Dashboard collections share "
+            "dashboard.html + dashboard.citemesh.json and save each seed's JSON "
+            "under <title-slug>-<hash>/; use *.dashboard.html for a standalone file."
         ),
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--export",
         "-e",
+        metavar="FORMAT",
         choices=[*EXPORT_FORMATS, "all"],
         action="append",
         default=None,
         help=(
-            "Export format; repeat for multiple (default: png). Dashboard export "
-            "normally uses collection mode (shared dashboard.html + manifest + "
-            "per-run JSON/config artifacts). Use -o <name>.dashboard.html for a "
-            "standalone one-file dashboard."
+            "png, html, plotly, dashboard, json, csv, bibtex, graphml, all; "
+            "repeat for multiple (default: png)."
         ),
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--theme",
+        metavar="THEME",
         choices=["light", "dark", "solarized", "auto"],
-        default="light",
-        help="Visualization theme to use",
+        default="dark",
+        help="light, dark, solarized, auto (default: %(default)s)",
     )
 
-    build_parser.add_argument(
+    graph_group.add_argument(
         "--max-papers",
         "-p",
         type=_positive_int,
+        metavar="N",
         default=40,
         help=(
-            "Maximum papers in final graph (seed included; default: 40; "
-            f"hybrid implicit default: {HYBRID_DEFAULT_MAX_PAPERS})"
+            "Maximum papers including the seed (default: 40; "
+            f"hybrid: {HYBRID_DEFAULT_MAX_PAPERS})"
         ),
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--spring-iterations",
         "-i",
         type=_positive_int,
+        metavar="N",
         default=100,
         help="Spring fallback layout iterations (default: 100)",
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--dpi",
         "-d",
         type=_positive_int,
+        metavar="N",
         default=150,
         help="Output image resolution (default: 150)",
     )
 
-    build_parser.add_argument(
+    export_group.add_argument(
         "--seed",
         type=int,
+        metavar="N",
         default=None,
         help=(
             "Seed for deterministic layout generation in layout-based exports "
             "(default: deterministic built-in seed)"
         ),
     )
-    build_parser.add_argument(
+    export_group.add_argument(
         "--include-timestamp",
         action="store_true",
         help="Include generation timestamp in output metadata annotations",
     )
 
     # Citation strategy arguments
-    citation_group = build_parser.add_argument_group("citation strategy options")
     citation_group.add_argument(
         "--max-citations",
         "-c",
         type=_non_negative_int,
+        metavar="N",
         default=25,
         help=(
             "Maximum citing papers to fetch (default: 25; "
@@ -1232,6 +1811,7 @@ Environment variables:
         "--max-references",
         "-r",
         type=_non_negative_int,
+        metavar="N",
         default=25,
         help=(
             "Maximum referenced papers to fetch (default: 25; "
@@ -1243,6 +1823,7 @@ Environment variables:
         "--similarity-threshold",
         "-t",
         type=_threshold_float,
+        metavar="SCORE",
         default=0.2,
         help="Minimum edge similarity for citation/recommendation strategies (default: 0.2)",
     )
@@ -1262,13 +1843,22 @@ Environment variables:
     )
 
     # Embedding strategy arguments
-    embedding_group = build_parser.add_argument_group("embedding strategy options")
     embedding_group.add_argument(
         "--model",
         "-m",
         type=_non_empty_str,
         default=DEFAULT_EMBEDDING_MODEL_NAME,
-        help="Sentence transformer model name",
+        help="Model name or local checkpoint path (default: %(default)s)",
+    )
+    embedding_group.add_argument(
+        "--model-profile",
+        metavar="PROFILE",
+        choices=list(EMBEDDING_MODEL_PROFILE_CHOICES),
+        default="auto",
+        help=(
+            "auto, default, embeddinggemma (default: auto). "
+            "Use an explicit profile for stripped local exports."
+        ),
     )
     embedding_group.add_argument(
         "--model-revision",
@@ -1280,59 +1870,95 @@ Environment variables:
         ),
     )
 
-    embedding_group.add_argument(
-        "--dataset-split",
+    corpus_group.add_argument(
+        "--dataset-source",
         type=_non_empty_str,
-        default="train",
-        help="ArXiv dataset split (default: train = full snapshot split; combine with --corpus-size to cap runtime)",
-    )
-
-    embedding_group.add_argument(
-        "--corpus-size",
-        type=_positive_int,
-        default=50000,
+        default=DEFAULT_DATASET_SOURCE,
         help=(
-            "Maximum papers to load from corpus "
-            "(default: 50000; use --all-corpus to remove cap)"
+            "HuggingFace arXiv metadata dataset source "
+            f"(default: {DEFAULT_DATASET_SOURCE})"
         ),
     )
 
-    embedding_group.add_argument(
-        "--all-corpus",
-        action="store_true",
-        help="Disable corpus cap and process the full selected split",
+    corpus_group.add_argument(
+        "--dataset-split",
+        type=_non_empty_str,
+        default="train",
+        help=(
+            "ArXiv dataset split (default: train; non-streaming slices such as "
+            "train[:1000] bound rows exposed to CiteMesh)"
+        ),
     )
 
-    embedding_group.add_argument(
+    corpus_group.add_argument(
+        "--corpus-size",
+        type=_positive_int,
+        metavar="N",
+        default=None,
+        help=(
+            "Opt in to caching only the N newest submissions after scanning the split "
+            "(default: full selected split)"
+        ),
+    )
+
+    corpus_group.add_argument(
+        "--all-corpus",
+        action="store_true",
+        help="Use the full selected split (the default), overriding a configured corpus cap",
+    )
+
+    semantic_group.add_argument(
         "--top-k",
         "-k",
         type=_positive_int,
+        metavar="N",
         default=4,
-        help="Top-k neighbors per node (default: 4)",
+        help="Neighbors per node for the embedding strategy only (default: 4)",
     )
 
     embedding_group.add_argument(
         "--truncate-dim",
         type=_positive_int,
+        metavar="N",
         default=None,
         help=(
             "Optional embedding output dimension truncation "
-            "(for EmbeddingGemma: 768, 512, 256, 128; default uses profile recommendation)"
+            "(for EmbeddingGemma: 768, 512, 256, 128; default: 512; "
+            "other models use their profile recommendation)"
         ),
     )
 
-    embedding_group.add_argument(
+    semantic_group.add_argument(
+        "--min-semantic-similarity",
+        type=_threshold_float,
+        default=EMBEDDING_CONFIG.min_semantic_similarity,
+        help=(
+            "Minimum semantic cosine for embedding/hybrid graph edges "
+            "(default: %(default)s; calibrated for EmbeddingGemma at 512 dimensions)"
+        ),
+    )
+
+    streaming_group = corpus_group.add_mutually_exclusive_group()
+    streaming_group.add_argument(
         "--streaming",
+        dest="streaming",
         action="store_true",
         help="Stream HuggingFace dataset instead of loading it into memory (requires non-sliced --dataset-split)",
     )
+    streaming_group.add_argument(
+        "--no-streaming",
+        dest="streaming",
+        action="store_false",
+        help="Load cached HuggingFace dataset shards instead of streaming them.",
+    )
+    build_parser.set_defaults(streaming=False)
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--force-rebuild-cache",
         action="store_true",
         help="Forcefully clear and rebuild embedding cache for this model before running.",
     )
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--overwrite-cache",
         action="store_true",
         help=(
@@ -1340,7 +1966,7 @@ Environment variables:
             "skip interactive confirmation."
         ),
     )
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--cache-overwrite-reason",
         type=str,
         default=None,
@@ -1350,19 +1976,20 @@ Environment variables:
         ),
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--storage-precision",
-        choices=["int8", "float16", "float32"],
+        metavar="PRECISION",
+        choices=["int8", "float32"],
         default=EMBEDDING_STORAGE_CONFIG.storage_precision,
-        help=("Persistent embedding cache precision (default: %(default)s)"),
+        help="Persistent vectors (default: int8 for corpus, float32 for candidates)",
     )
 
-    binary_prefilter_group = embedding_group.add_mutually_exclusive_group()
+    binary_prefilter_group = storage_group.add_mutually_exclusive_group()
     binary_prefilter_group.add_argument(
         "--binary-prefilter",
         dest="binary_prefilter",
         action="store_true",
-        help="Enable binary Hamming prefilter + rescoring (recommended for large corpora).",
+        help="Binary Hamming prefilter + rescoring (default: on for int8 corpus)",
     )
     binary_prefilter_group.add_argument(
         "--no-binary-prefilter",
@@ -1374,18 +2001,20 @@ Environment variables:
         binary_prefilter=EMBEDDING_STORAGE_CONFIG.binary_prefilter
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--binary-rescore-multiplier",
         type=_positive_int,
+        metavar="N",
         default=EMBEDDING_STORAGE_CONFIG.binary_rescore_multiplier,
         help=(
             "Oversampling factor for binary prefilter rescoring (default: %(default)s)"
         ),
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--calibration-sample-size",
         type=_positive_int,
+        metavar="N",
         default=EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         help=(
             "Calibration sample size for int8 quantization ranges "
@@ -1393,20 +2022,19 @@ Environment variables:
         ),
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--cache-compression",
+        metavar="FILTER",
         type=str,
         choices=list(_CACHE_COMPRESSION_CHOICES),
         default=EMBEDDING_STORAGE_CONFIG.compression,
-        help=(
-            "HDF5 compression filter for embedding cache datasets "
-            "(default: %(default)s)"
-        ),
+        help=("HDF5 compression: gzip, lzf (default: %(default)s)"),
     )
 
-    embedding_group.add_argument(
+    storage_group.add_argument(
         "--cache-compression-level",
         type=_non_negative_int,
+        metavar="N",
         default=EMBEDDING_STORAGE_CONFIG.compression_level,
         help=(
             "HDF5 compression level for embedding cache datasets (default: %(default)s; "
@@ -1415,8 +2043,11 @@ Environment variables:
     )
 
     embedding_group.add_argument(
-        "--encode-batch-size",
+        "--batch-size",
+        "-bs",
+        dest="encode_batch_size",
         type=_positive_int,
+        metavar="N",
         default=ENCODE_BATCH_SIZE,
         help=(
             "Batch size for embedding model encode passes during hydration/search "
@@ -1442,47 +2073,170 @@ Environment variables:
     )
     build_parser.set_defaults(torch_compile=False)
 
+    semantic_group.add_argument(
+        "--semantic-source",
+        metavar="SOURCE",
+        dest="semantic_source",
+        choices=list(SEMANTIC_SOURCE_CHOICES),
+        default="candidates",
+        help=(
+            "candidates embeds S2 seed neighbors; arxiv-corpus builds a local "
+            "corpus (default: %(default)s). Corpus flags imply arxiv-corpus."
+        ),
+    )
+    semantic_group.add_argument(
+        "--candidate-pool-size",
+        dest="candidate_pool_size",
+        type=_positive_int,
+        metavar="N",
+        default=DEFAULT_CANDIDATE_POOL_SIZE,
+        help=(
+            "Maximum S2 candidate pool size fetched in candidates mode "
+            "(default: %(default)s)."
+        ),
+    )
+    embedding_group.add_argument(
+        "--device",
+        metavar="DEVICE",
+        dest="device",
+        choices=list(EMBEDDING_DEVICE_CHOICES),
+        default="auto",
+        help=(
+            "auto, cuda, mps, cpu (default: auto). Auto prefers CUDA, "
+            "then MPS (Apple Silicon), then CPU."
+        ),
+    )
+
     # Hybrid strategy arguments
-    hybrid_group = build_parser.add_argument_group("hybrid strategy options")
     hybrid_group.add_argument(
         "--max-semantic",
         type=_non_negative_int,
+        metavar="N",
         default=None,
         help=(
-            "Maximum non-seed semantic papers to add (must be <= max-papers - 1). "
-            "When omitted, hybrid uses implicit citation-depth reservation before "
-            "semantic expansion (default cap: "
-            f"min({DEFAULT_MAX_SEMANTIC}, max-papers - 1))."
+            "Semantic additions, at most max-papers - 1; 0 disables embeddings. "
+            f"Default: reserve citation depth, then add up to {DEFAULT_MAX_SEMANTIC}."
         ),
+    )
+
+    view_parser = subparsers.add_parser(
+        "view",
+        help="Open saved results in a browser",
+        description="Open an existing HTML export or a collection directory's dashboard.html in a browser.",
+        epilog=_help_examples(
+            ("Open the default saved dashboard", "citemesh view"),
+            ("Open another collection", "citemesh view out/my-collection"),
+            ("Choose Chrome on Linux", "citemesh view --browser google-chrome"),
+        ),
+    )
+    view_parser.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path("out") / DASHBOARD_COLLECTION_FILENAME,
+        help="HTML file or collection directory (default: out/dashboard.html)",
+    )
+    view_parser.add_argument(
+        "--browser",
+        type=_non_empty_str,
+        default=None,
+        help="Browser name, such as google-chrome (default: system browser)",
     )
 
     # Search subcommand
     search_parser = subparsers.add_parser(
         "search",
-        help="Search papers by title or keyword",
-        parents=[command_logging_parent],
+        help="Search papers (local semantic index or the Semantic Scholar API)",
+        description=(
+            "Find papers to pass to citemesh build. Auto mode searches cached "
+            "embeddings when available, otherwise Semantic Scholar. Local mode "
+            "uses the same model and cache settings as your configured builds."
+        ),
+        epilog=_help_examples(
+            (
+                "Search available sources automatically",
+                'citemesh search "long-context language models" -n 10',
+            ),
+            (
+                "Search cached embeddings",
+                'citemesh search "long-context language models" --mode local',
+            ),
+            (
+                "Search Semantic Scholar by keyword",
+                'citemesh search "Megalodon" --mode s2',
+            ),
+        ),
     )
-    search_parser.add_argument("query", type=_non_empty_str, help="Search query")
+    search_parser.add_argument(
+        "query",
+        type=_non_empty_str,
+        metavar="QUERY",
+        help="Search text (quote phrases with spaces)",
+    )
     search_parser.add_argument(
         "--limit",
         "-n",
         type=_positive_int,
+        metavar="N",
         default=10,
         help="Maximum results (default: 10)",
     )
+    search_parser.add_argument(
+        "--mode",
+        metavar="MODE",
+        choices=list(SEARCH_MODE_CHOICES),
+        default=None,
+        help=(
+            "auto, local, s2 (default: saved search_mode, else auto). "
+            "Auto uses local embeddings when available, otherwise S2."
+        ),
+    )
+    search_parser.add_argument(
+        "--model",
+        "-m",
+        type=_non_empty_str,
+        default=None,
+        help=(
+            "Embedding model for local search (implies --mode local); must "
+            "match the model used at build time (default: config.toml "
+            "default or built-in default)"
+        ),
+    )
+    search_parser.add_argument(
+        "--model-profile",
+        metavar="PROFILE",
+        choices=list(EMBEDDING_MODEL_PROFILE_CHOICES),
+        default=None,
+        help=(
+            "auto, default, embeddinggemma; match the build profile "
+            "(implies --mode local)"
+        ),
+    )
+    search_parser.add_argument(
+        "--device",
+        metavar="DEVICE",
+        choices=list(EMBEDDING_DEVICE_CHOICES),
+        default=None,
+        help="auto, cuda, mps, cpu for query encoding (implies --mode local)",
+    )
     cache_parser = subparsers.add_parser(
         "cache",
-        help="Manage local CiteMesh caches",
-        parents=[command_logging_parent],
+        help="Inspect or clear local caches",
+        description="Inspect local cache usage or delete cached data. Clearing preserves your config.toml settings.",
+        epilog=_help_examples(
+            ("Show storage by cache section", "citemesh cache scan"),
+            ("Clear cached data after confirmation", "citemesh cache clear"),
+        ),
     )
     cache_subparsers = cache_parser.add_subparsers(
         dest="cache_command",
-        help="Cache operations",
+        title="Cache operations",
+        metavar="COMMAND",
     )
     cache_clear_parser = cache_subparsers.add_parser(
         "clear",
-        help="Delete the entire CiteMesh cache directory",
-        parents=[command_logging_parent],
+        help="Delete cached data; preserve config.toml",
+        description="Delete cached papers, references, and embeddings. config.toml is preserved. Prompts for confirmation; scripts require --yes.",
     )
     cache_clear_parser.add_argument(
         "--yes",
@@ -1496,13 +2250,127 @@ Environment variables:
         default=None,
         help="Optional rationale string logged when cache clear is executed.",
     )
-    cache_subparsers.add_parser(
+    cache_scan_parser = cache_subparsers.add_parser(
         "scan",
-        help="Scan cache usage (sections, file counts, and total size)",
-        parents=[command_logging_parent],
+        help="Show sections, file counts, and storage usage",
+        description="Show the cache root, usage by section, and total disk space.",
     )
+
+    # Config subcommand
+    config_parser = subparsers.add_parser(
+        "config",
+        help="View or change personal defaults",
+        description=(
+            "Manage persistent CiteMesh defaults stored in config.toml under "
+            "the cache root. Precedence: explicit CLI flag > environment "
+            "variable > config.toml > built-in default."
+        ),
+        epilog=_help_examples(
+            ("Show saved settings", "citemesh config list"),
+            (
+                "Use the local corpus by default",
+                "citemesh config set defaults.semantic_source arxiv-corpus",
+            ),
+            (
+                "Reset one setting to its default",
+                "citemesh config unset defaults.semantic_source",
+            ),
+        ),
+    )
+    config_subparsers = config_parser.add_subparsers(
+        dest="config_command",
+        title="Config operations",
+        metavar="COMMAND",
+    )
+    config_list_parser = config_subparsers.add_parser(
+        "list",
+        help="Show configured values and the config file path",
+    )
+    config_get_parser = config_subparsers.add_parser(
+        "get",
+        help="Print one configured value",
+    )
+    config_get_parser.add_argument(
+        "key",
+        type=_non_empty_str,
+        help="Dotted config key (for example defaults.semantic_source)",
+    )
+    config_set_parser = config_subparsers.add_parser(
+        "set",
+        help="Set and persist one config value",
+    )
+    config_set_parser.add_argument(
+        "key",
+        type=_non_empty_str,
+        help="Dotted config key (for example defaults.semantic_source)",
+    )
+    config_set_parser.add_argument(
+        "value",
+        type=_non_empty_str,
+        help="Value to persist (booleans: true/false; lists: comma-separated)",
+    )
+    config_unset_parser = config_subparsers.add_parser(
+        "unset",
+        help="Remove one configured value",
+    )
+    config_unset_parser.add_argument(
+        "key",
+        type=_non_empty_str,
+        help="Dotted config key (for example defaults.semantic_source)",
+    )
+    config_path_parser = config_subparsers.add_parser(
+        "path",
+        help="Print the config file path",
+    )
+    for command_parser, synopsis in (
+        (parser, "COMMAND [options]"),
+        (build_parser, "PAPER [options]"),
+        (view_parser, "[PATH] [options]"),
+        (search_parser, "QUERY [options]"),
+        (cache_parser, "COMMAND [options]"),
+        (cache_clear_parser, "[options]"),
+        (cache_scan_parser, "[options]"),
+        (config_parser, "COMMAND [options]"),
+        (config_list_parser, "[options]"),
+        (config_get_parser, "KEY [options]"),
+        (config_set_parser, "KEY VALUE [options]"),
+        (config_unset_parser, "KEY [options]"),
+        (config_path_parser, "[options]"),
+    ):
+        command_parser.formatter_class = _HelpFormatter
+        command_parser.usage = f"%(prog)s {synopsis}"
+        command_parser._positionals.title = "Arguments"
+        command_parser._optionals.title = "Options"
+        _add_logging_arguments(
+            command_parser, suppress_defaults=command_parser is not parser
+        )
+        command_parser._action_groups.sort(
+            key=lambda group: {"Options": 1, "Logging": 2}.get(group.title, 0)
+        )
+        for action in command_parser._actions:
+            if not action.option_strings and not isinstance(
+                action, argparse._SubParsersAction
+            ):
+                action.metavar = (
+                    action.dest.upper() if action.metavar is None else action.metavar
+                )
+            elif (
+                action.option_strings
+                and action.type in (str, _non_empty_str)
+                and action.choices is None
+            ):
+                action.metavar = {
+                    "output": "PATH",
+                    "log_file": "PATH",
+                    "model": "MODEL",
+                    "model_revision": "REV",
+                    "dataset_source": "DATASET",
+                    "dataset_split": "SPLIT",
+                    "browser": "NAME",
+                }.get(action.dest, "TEXT")
+
     _instrument_parser_actions(parser)
-    return parser, build_parser, cache_parser
+    return parser, build_parser, cache_parser, config_parser
 
 
 def resolve_output_paths(
@@ -1520,6 +2388,13 @@ def resolve_output_paths(
     :param str strategy: Active strategy name used for multi-format directory outputs.
     :return Dict[str, Path]: Mapping of export format -> resolved output path.
     """
+    if explicit_output and base_output_path.is_dir():
+        basename = strategy or "graph"
+        return {
+            fmt: base_output_path / f"{basename}{EXPORT_EXTENSIONS[fmt]}"
+            for fmt in selected_formats
+        }
+
     base_str = str(base_output_path)
     stripped_base = _strip_known_export_suffix(base_str)
     has_known_suffix = stripped_base != base_str
@@ -1580,6 +2455,7 @@ def _is_standalone_dashboard_output(
         explicit_output
         and "dashboard" in selected_formats
         and str(base_output_path).lower().endswith(EXPORT_EXTENSIONS["dashboard"])
+        and not base_output_path.is_dir()
     )
 
 
@@ -1594,18 +2470,15 @@ def _resolve_dashboard_collection_root(
     :param bool explicit_output: Whether ``--output`` was provided.
     :return Path: Collection root directory containing shared dashboard shell.
     """
-    if explicit_output:
-        base_str = str(base_output_path)
-        stripped_base = _strip_known_export_suffix(base_str)
-        if stripped_base != base_str:
-            return Path(stripped_base)
+    if not explicit_output:
+        return Path("out")
+    if base_output_path.is_dir():
         return base_output_path
-
-    parent = base_output_path.parent
-    grandparent = parent.parent
-    if str(grandparent) and grandparent != Path("."):
-        return grandparent
-    return parent
+    base_str = str(base_output_path)
+    stripped_base = _strip_known_export_suffix(base_str)
+    if stripped_base != base_str:
+        return Path(stripped_base)
+    return base_output_path
 
 
 def resolve_dashboard_collection_outputs(
@@ -1617,11 +2490,11 @@ def resolve_dashboard_collection_outputs(
     graph: nx.Graph,
     seed_id: str,
 ) -> tuple[Dict[str, Path], Path]:
-    """Resolve shared-dashboard output paths plus per-run result artifact paths.
+    """Resolve shared dashboard files and per-seed result artifacts.
 
-    The dashboard shell lives at the collection root, while each build run writes
-    its JSON/config and any other requested artifacts into a unique seed-specific
-    result directory beneath that root.
+    Dashboard state lives in one collection package at the collection root. A
+    seed-specific result directory always retains the graph JSON and its build
+    sidecar, alongside any additional requested formats.
 
     :param Path base_output_path: User-provided or generated base output path.
     :param List[str] selected_formats: Requested export formats.
@@ -1629,11 +2502,16 @@ def resolve_dashboard_collection_outputs(
     :param str strategy: Active strategy name.
     :param nx.Graph graph: Built graph used for run-specific output naming.
     :param str seed_id: Seed node identifier.
-    :return tuple[Dict[str, Path], Path]: Resolved output paths and manifest path.
+    :return tuple[Dict[str, Path], Path]: Resolved output paths and package path.
     """
     collection_root = _resolve_dashboard_collection_root(
         base_output_path,
         explicit_output=explicit_output,
+    )
+    run_formats = list(
+        dict.fromkeys(
+            ["json", *(fmt for fmt in selected_formats if fmt != "dashboard")]
+        )
     )
     run_base_output_path = generate_output_path(
         graph,
@@ -1641,9 +2519,6 @@ def resolve_dashboard_collection_outputs(
         output_dir=collection_root,
         strategy=strategy,
     )
-    run_formats = [fmt for fmt in selected_formats if fmt != "dashboard"]
-    if "json" not in run_formats:
-        run_formats.append("json")
     output_paths = resolve_output_paths(
         base_output_path=run_base_output_path,
         selected_formats=run_formats,
@@ -1651,7 +2526,7 @@ def resolve_dashboard_collection_outputs(
         strategy=strategy,
     )
     output_paths["dashboard"] = collection_root / DASHBOARD_COLLECTION_FILENAME
-    return output_paths, collection_root / DASHBOARD_MANIFEST_FILENAME
+    return output_paths, collection_root / DASHBOARD_PACKAGE_FILENAME
 
 
 def _strip_known_export_suffix(filename: str) -> str:
@@ -1684,107 +2559,503 @@ def resolve_graph_config_path(output_paths: Dict[str, Path], strategy: str) -> P
     return anchor_path.parent / f"{stem}.config.json"
 
 
-def _relative_output_path(path: Path, root: Path) -> str:
-    """Resolve a stable manifest path relative to a collection root when possible.
+class DashboardPackageError(ValueError):
+    """Raised when an existing dashboard package violates its format contract."""
 
-    :param Path path: Absolute or relative artifact path.
-    :param Path root: Collection root directory.
-    :return str: Relative path when possible, else normalized string form.
+
+def _dashboard_package_lock_path(package_path: Path) -> Path:
+    """Return a shared lock beside the resolved dashboard package.
+
+    Writers must coordinate even when their cache roots differ.
+
+    :param Path package_path: Dashboard package path being coordinated.
+    :return Path: Hidden lock path in the package directory.
+    """
+    resolved_path = package_path.expanduser().resolve()
+    return resolved_path.with_name(f".{resolved_path.name}.lock")
+
+
+def _dashboard_optional_result_paths(output_paths: Dict[str, Path]) -> Set[Path]:
+    """Return every optional export path owned by one collection result.
+
+    :param Dict[str, Path] output_paths: Resolved collection output paths.
+    :return Set[Path]: Known optional paths beside the mandatory graph JSON.
+    """
+    json_path = output_paths["json"]
+    basename = _strip_known_export_suffix(json_path.name)
+    return {
+        json_path.parent / f"{basename}{EXPORT_EXTENSIONS[fmt]}"
+        for fmt in EXPORT_FORMATS
+        if fmt not in {"dashboard", "json"}
+    }
+
+
+def _commit_staged_dashboard_artifacts(
+    package_path: Path,
+    package: Dict[str, Any],
+    *,
+    staged_result_files: Dict[Path, Path],
+    obsolete_result_paths: Set[Path],
+) -> None:
+    """Publish one collection result and restore prior files on failure.
+
+    The package is the final commit marker. Result files are backed up before
+    promotion so an ordinary export or filesystem exception restores the prior
+    completed bundle. Unknown files and other strategy basenames are untouched.
+
+    :param Path package_path: Authoritative collection package destination.
+    :param Dict[str, Any] package: Validated package payload to publish last.
+    :param Dict[Path, Path] staged_result_files: Final paths mapped to complete
+        same-filesystem staging files.
+    :param Set[Path] obsolete_result_paths: Exact known-format files omitted by
+        the new result and removed on successful publication.
+    :return None: Publishes the complete result bundle and package.
+    """
+    obsolete_paths = set(obsolete_result_paths) - set(staged_result_files)
+    target_paths = sorted(
+        set(staged_result_files) | obsolete_paths,
+        key=lambda path: str(path),
+    )
+    promoted_paths: Set[Path] = set()
+    with tempfile.TemporaryDirectory(
+        prefix=".citemesh-dashboard-backup-",
+        dir=package_path.parent,
+        ignore_cleanup_errors=True,
+    ) as backup_name:
+        backup_dir = Path(backup_name)
+        backups: Dict[Path, Path] = {}
+        try:
+            for index, target_path in enumerate(target_paths):
+                if not path_exists(target_path):
+                    continue
+                backup_path = backup_dir / f"{index}-{target_path.name}"
+                try:
+                    os.link(target_path, backup_path)
+                except OSError:
+                    target_path.replace(backup_path)
+                backups[target_path] = backup_path
+
+            for target_path, staged_path in sorted(
+                staged_result_files.items(), key=lambda item: str(item[0])
+            ):
+                backup_path = backups.get(target_path)
+                if backup_path is not None:
+                    staged_path.chmod(backup_path.stat().st_mode & 0o7777)
+                staged_path.replace(target_path)
+                promoted_paths.add(target_path)
+
+            for obsolete_path in sorted(obsolete_paths, key=str):
+                obsolete_path.unlink(missing_ok=True)
+
+            atomic_write_json(package_path, package, indent=2)
+        except BaseException:
+            for target_path in reversed(target_paths):
+                backup_path = backups.get(target_path)
+                if backup_path is not None:
+                    backup_path.replace(target_path)
+                elif target_path in promoted_paths:
+                    target_path.unlink(missing_ok=True)
+            raise
+
+
+def _read_json_object(path: Path, *, label: str) -> Dict[str, Any]:
+    """Read one UTF-8 JSON object with a context-rich package error.
+
+    :param Path path: JSON file to read.
+    :param str label: Human-readable artifact label for errors.
+    :return Dict[str, Any]: Parsed JSON object.
+    :raises DashboardPackageError: If the file is unreadable, malformed, or not an object.
     """
     try:
-        return str(path.relative_to(root))
-    except ValueError:
-        return str(path)
+        raw_text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DashboardPackageError(f"Could not read {label} at {path}: {exc}") from exc
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise DashboardPackageError(f"Malformed {label} at {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise DashboardPackageError(
+            f"{label.capitalize()} at {path} must be a JSON object."
+        )
+    return payload
 
 
-def update_dashboard_manifest(
-    manifest_path: Path,
-    *,
-    collection_root: Path,
-    graph: nx.Graph,
-    seed_id: str,
-    strategy: str,
-    json_path: Path,
-    config_path: Path,
-    metadata: Dict[str, Any],
-) -> Dict[str, Any]:
-    """Create or update shared dashboard manifest for collection-style outputs.
+def _validated_non_negative_count(raw: object, *, field: str) -> int:
+    """Validate a non-negative integer package summary count.
 
-    Dashboard collections intentionally keep one manifest slot per
-    ``(strategy, seed_id)`` pair. Re-running the same seed/strategy refreshes
-    that slot because the per-run JSON/config artifact paths are also stable for
-    a given seed title and identifier.
-
-    :param Path manifest_path: Manifest JSON path to write.
-    :param Path collection_root: Shared dashboard collection root directory.
-    :param nx.Graph graph: Built graph used for seed metadata.
-    :param str seed_id: Seed node identifier.
-    :param str strategy: Active strategy name.
-    :param Path json_path: Per-run JSON payload path.
-    :param Path config_path: Per-run config sidecar path.
-    :param Dict[str, Any] metadata: Export metadata payload for summary fields.
-    :return Dict[str, Any]: Manifest payload written to disk.
+    :param object raw: Candidate count value.
+    :param str field: Field label for validation errors.
+    :return int: Validated count.
+    :raises DashboardPackageError: If ``raw`` is not a non-negative integer.
     """
-    seed_title = str(graph.nodes[seed_id].get("title", seed_id))
-    result_id = f"{strategy}:{seed_id}"
-    entry = {
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise DashboardPackageError(
+            f"Dashboard package {field} must be a non-negative integer."
+        )
+    return raw
+
+
+def _validated_dashboard_token(raw: object, *, field: str) -> str:
+    """Validate a non-empty dashboard identity token without hidden whitespace.
+
+    :param object raw: Candidate seed, strategy, node, or edge token.
+    :param str field: Field label for validation errors.
+    :return str: Canonical token.
+    :raises DashboardPackageError: If the token is empty or padded with whitespace.
+    """
+    token = str(raw or "")
+    if not token or token != token.strip():
+        raise DashboardPackageError(
+            f"Dashboard package {field} must be a non-empty canonical token."
+        )
+    return token
+
+
+def _validate_dashboard_graph_payload(
+    raw_payload: object, *, result_id: str
+) -> Dict[str, Any]:
+    """Validate one canonical graph payload embedded in a dashboard package.
+
+    :param object raw_payload: Candidate graph payload.
+    :param str result_id: Owning result identifier for contextual errors.
+    :return Dict[str, Any]: Shallow normalized graph payload copy.
+    :raises DashboardPackageError: If the graph payload contract is invalid.
+    """
+    if not isinstance(raw_payload, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} payload must be an object."
+        )
+    if raw_payload.get("kind") != GRAPH_PAYLOAD_KIND:
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has unsupported graph kind."
+        )
+    graph_schema = raw_payload.get("schema_version")
+    if type(graph_schema) is not int or graph_schema != GRAPH_PAYLOAD_SCHEMA_VERSION:
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has unsupported graph schema "
+            f"version {graph_schema!r}."
+        )
+    seed_id = _validated_dashboard_token(
+        raw_payload.get("seed_id"), field=f"result {result_id!r} payload seed_id"
+    )
+    meta = raw_payload.get("meta")
+    summary = raw_payload.get("summary")
+    if not isinstance(meta, dict) or not isinstance(summary, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has incomplete graph metadata."
+        )
+    payload_strategy = _validated_dashboard_token(
+        meta.get("strategy"), field=f"result {result_id!r} payload strategy"
+    )
+    nodes = raw_payload.get("nodes")
+    edges = raw_payload.get("edges")
+    if not isinstance(nodes, list) or not isinstance(edges, list):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} nodes and edges must be arrays."
+        )
+    node_count = _validated_non_negative_count(
+        summary.get("nodes"), field=f"result {result_id!r} payload summary.nodes"
+    )
+    edge_count = _validated_non_negative_count(
+        summary.get("edges"), field=f"result {result_id!r} payload summary.edges"
+    )
+    if node_count != len(nodes) or edge_count != len(edges):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} summary does not match its "
+            "node and edge arrays."
+        )
+    node_ids: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise DashboardPackageError(
+                f"Dashboard package result {result_id!r} nodes must be objects."
+            )
+        node_id = _validated_dashboard_token(
+            node.get("id"), field=f"result {result_id!r} node ID"
+        )
+        node_ids.append(node_id)
+    node_id_set = set(node_ids)
+    if len(node_id_set) != len(node_ids) or seed_id not in node_id_set:
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} requires unique node IDs "
+            "including its seed."
+        )
+    for edge in edges:
+        if not isinstance(edge, dict):
+            raise DashboardPackageError(
+                f"Dashboard package result {result_id!r} edges must be objects."
+            )
+        source_id = _validated_dashboard_token(
+            edge.get("source"), field=f"result {result_id!r} edge source"
+        )
+        target_id = _validated_dashboard_token(
+            edge.get("target"), field=f"result {result_id!r} edge target"
+        )
+        if source_id not in node_id_set or target_id not in node_id_set:
+            raise DashboardPackageError(
+                f"Dashboard package result {result_id!r} has an edge with an "
+                "unknown endpoint."
+            )
+
+    dashboard = raw_payload.get("dashboard")
+    dashboard_meta = dashboard.get("meta") if isinstance(dashboard, dict) else None
+    if not isinstance(dashboard_meta, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} is missing dashboard geometry."
+        )
+    dashboard_seed_id = _validated_dashboard_token(
+        dashboard_meta.get("seed_id"),
+        field=f"result {result_id!r} dashboard seed_id",
+    )
+    dashboard_strategy = _validated_dashboard_token(
+        dashboard_meta.get("strategy"),
+        field=f"result {result_id!r} dashboard strategy",
+    )
+    dashboard_summary = dashboard_meta.get("summary")
+    dashboard_node_count = (
+        _validated_non_negative_count(
+            dashboard_summary.get("nodes"),
+            field=f"result {result_id!r} dashboard summary.nodes",
+        )
+        if isinstance(dashboard_summary, dict)
+        else None
+    )
+    dashboard_edge_count = (
+        _validated_non_negative_count(
+            dashboard_summary.get("edges"),
+            field=f"result {result_id!r} dashboard summary.edges",
+        )
+        if isinstance(dashboard_summary, dict)
+        else None
+    )
+    if (
+        dashboard_seed_id != seed_id
+        or dashboard_strategy != payload_strategy
+        or dashboard_node_count != node_count
+        or dashboard_edge_count != edge_count
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has inconsistent dashboard metadata."
+        )
+    raw_order = dashboard_meta.get("plotly_node_order")
+    raw_positions = dashboard_meta.get("plotly_positions")
+    raw_sizes = dashboard_meta.get("plotly_node_sizes")
+    if not all(
+        isinstance(value, list) for value in (raw_order, raw_positions, raw_sizes)
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has incomplete dashboard geometry."
+        )
+    geometry_order = [
+        _validated_dashboard_token(
+            node_id, field=f"result {result_id!r} geometry node ID"
+        )
+        for node_id in raw_order
+    ]
+    if (
+        len(geometry_order) != len(node_ids)
+        or len(set(geometry_order)) != len(geometry_order)
+        or set(geometry_order) != node_id_set
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} geometry must cover each node exactly once."
+        )
+    if len(raw_positions) != len(node_ids) or len(raw_sizes) != len(node_ids):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} geometry arrays must align with its nodes."
+        )
+    for position in raw_positions:
+        if (
+            not isinstance(position, list)
+            or len(position) != 2
+            or any(
+                isinstance(coordinate, bool)
+                or not isinstance(coordinate, (int, float))
+                or not math.isfinite(float(coordinate))
+                for coordinate in position
+            )
+        ):
+            raise DashboardPackageError(
+                f"Dashboard package result {result_id!r} has an invalid layout position."
+            )
+    if any(
+        isinstance(size, bool)
+        or not isinstance(size, (int, float))
+        or not math.isfinite(float(size))
+        or float(size) <= 0.0
+        for size in raw_sizes
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} has invalid node sizes."
+        )
+    return dict(raw_payload)
+
+
+def _validate_dashboard_result_entry(raw_entry: object) -> Dict[str, Any]:
+    """Validate and normalize one dashboard collection result entry.
+
+    :param object raw_entry: Candidate result entry.
+    :return Dict[str, Any]: Normalized result entry.
+    :raises DashboardPackageError: If required descriptor or payload fields are invalid.
+    """
+    if not isinstance(raw_entry, dict):
+        raise DashboardPackageError("Dashboard package result entries must be objects.")
+    result_id = str(raw_entry.get("result_id") or "").strip()
+    seed_id = str(raw_entry.get("seed_id") or "").strip()
+    strategy = str(raw_entry.get("strategy") or "").strip()
+    title = str(raw_entry.get("title") or "").strip()
+    updated_at = str(raw_entry.get("updated_at") or "").strip()
+    if not all((result_id, seed_id, strategy, title, updated_at)):
+        raise DashboardPackageError(
+            "Dashboard package result entries require result_id, seed_id, title, "
+            "strategy, and updated_at."
+        )
+    expected_result_id = f"{strategy}:{seed_id}"
+    if result_id != expected_result_id:
+        raise DashboardPackageError(
+            f"Dashboard package result_id {result_id!r} does not match "
+            f"{expected_result_id!r}."
+        )
+
+    summary = raw_entry.get("summary")
+    if not isinstance(summary, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} summary must be an object."
+        )
+    normalized_summary = {
+        "nodes": _validated_non_negative_count(
+            summary.get("nodes"), field=f"result {result_id!r} summary.nodes"
+        ),
+        "edges": _validated_non_negative_count(
+            summary.get("edges"), field=f"result {result_id!r} summary.edges"
+        ),
+    }
+    payload = _validate_dashboard_graph_payload(
+        raw_entry.get("payload"), result_id=result_id
+    )
+    payload_meta = payload["meta"]
+    payload_summary = payload["summary"]
+    if (
+        str(payload.get("seed_id") or "").strip() != seed_id
+        or str(payload_meta.get("strategy") or "").strip() != strategy
+    ):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} descriptor does not match its payload."
+        )
+    if normalized_summary != {
+        "nodes": payload_summary.get("nodes"),
+        "edges": payload_summary.get("edges"),
+    }:
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} summary does not match its payload."
+        )
+    build = raw_entry.get("build", {})
+    if not isinstance(build, dict):
+        raise DashboardPackageError(
+            f"Dashboard package result {result_id!r} build settings must be an object."
+        )
+    return {
         "result_id": result_id,
         "seed_id": seed_id,
-        "title": seed_title,
+        "title": title,
         "strategy": strategy,
-        "summary": {
-            "nodes": int(metadata.get("nodes", 0) or 0),
-            "edges": int(metadata.get("edges", 0) or 0),
-        },
-        "json_path": _relative_output_path(json_path, collection_root),
-        "config_path": _relative_output_path(config_path, collection_root),
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "summary": normalized_summary,
+        "updated_at": updated_at,
+        "payload": payload,
+        "build": dict(build),
     }
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = manifest_path.with_name(f".{manifest_path.name}.lock")
-    lock = FileLock(str(lock_path), timeout=DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS)
-    try:
-        with lock:
-            results: list[Dict[str, Any]] = []
-            if manifest_path.exists():
-                try:
-                    existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    existing = {}
-                if isinstance(existing, dict) and isinstance(
-                    existing.get("results"), list
-                ):
-                    results = [
-                        item for item in existing["results"] if isinstance(item, dict)
-                    ]
-
-            filtered = [item for item in results if item.get("result_id") != result_id]
-            manifest_payload = {
-                "schema_version": 1,
-                "results": [entry, *filtered],
-            }
-            atomic_write_json(manifest_path, manifest_payload, indent=2)
-            return manifest_payload
-    except Timeout as exc:
-        raise RuntimeError(
-            "Timed out waiting for dashboard manifest lock "
-            f"at {lock_path} after {DASHBOARD_MANIFEST_LOCK_TIMEOUT_SECONDS:.1f}s."
-        ) from exc
 
 
-def _resolve_collection_payload_path(
-    collection_root: Path, json_rel_path: str
-) -> Optional[Path]:
-    """Resolve a manifest JSON payload path confined to the collection root.
+def _validate_dashboard_package(raw_package: object) -> Dict[str, Any]:
+    """Validate a dashboard collection package and deterministically deduplicate it.
 
-    :param Path collection_root: Shared dashboard collection directory.
-    :param str json_rel_path: Manifest-provided JSON payload path.
-    :return Optional[Path]: Resolved payload path, or ``None`` when invalid.
+    When duplicate result identifiers are present, the first entry wins. Package
+    upserts always place the newest entry first, so this also repairs duplicate
+    state deterministically without inventing another recency policy.
+
+    :param object raw_package: Candidate package object.
+    :return Dict[str, Any]: Canonical package object.
+    :raises DashboardPackageError: If the top-level or entry contract is invalid.
     """
-    candidate = Path(json_rel_path)
-    if candidate.is_absolute():
-        return None
+    if not isinstance(raw_package, dict):
+        raise DashboardPackageError("Dashboard package must be a JSON object.")
+    try:
+        json.dumps(raw_package, allow_nan=False)
+    except ValueError as exc:
+        raise DashboardPackageError(
+            "Dashboard package contains non-finite numeric values."
+        ) from exc
+    if raw_package.get("kind") != DASHBOARD_COLLECTION_KIND:
+        raise DashboardPackageError(
+            f"Unsupported dashboard package kind {raw_package.get('kind')!r}."
+        )
+    schema_version = raw_package.get("schema_version")
+    if (
+        type(schema_version) is not int
+        or schema_version != DASHBOARD_COLLECTION_SCHEMA_VERSION
+    ):
+        raise DashboardPackageError(
+            f"Unsupported dashboard package schema version {schema_version!r}."
+        )
+    raw_results = raw_package.get("results")
+    if not isinstance(raw_results, list):
+        raise DashboardPackageError("Dashboard package results must be an array.")
 
+    results: list[Dict[str, Any]] = []
+    seen_result_ids: set[str] = set()
+    for raw_entry in raw_results:
+        entry = _validate_dashboard_result_entry(raw_entry)
+        result_id = entry["result_id"]
+        if result_id in seen_result_ids:
+            continue
+        seen_result_ids.add(result_id)
+        results.append(entry)
+
+    raw_current_result_id = raw_package.get("current_result_id")
+    current_result_id = (
+        str(raw_current_result_id).strip()
+        if raw_current_result_id is not None
+        else None
+    )
+    if current_result_id == "":
+        current_result_id = None
+    if current_result_id is not None and current_result_id not in seen_result_ids:
+        raise DashboardPackageError(
+            "Dashboard package current_result_id does not reference a package result."
+        )
+    return {
+        "kind": DASHBOARD_COLLECTION_KIND,
+        "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
+        "current_result_id": current_result_id,
+        "results": results,
+    }
+
+
+def load_dashboard_package(package_path: Path) -> Dict[str, Any]:
+    """Load and strictly validate an existing dashboard collection package.
+
+    :param Path package_path: Package file to load.
+    :return Dict[str, Any]: Canonical validated package.
+    :raises DashboardPackageError: If the package cannot be decoded or validated.
+    """
+    return _validate_dashboard_package(
+        _read_json_object(package_path, label="dashboard package")
+    )
+
+
+def _resolve_collection_artifact_path(
+    collection_root: Path, relative_path: object
+) -> Optional[Path]:
+    """Resolve a legacy manifest artifact path confined to its collection root.
+
+    :param Path collection_root: Legacy collection directory.
+    :param object relative_path: Manifest-provided relative artifact path.
+    :return Optional[Path]: Confined resolved path, or ``None`` when unsafe.
+    """
+    candidate = Path(str(relative_path or "").strip())
+    if not str(candidate) or candidate.is_absolute():
+        return None
     resolved_root = collection_root.resolve()
     resolved_candidate = (resolved_root / candidate).resolve()
     try:
@@ -1794,49 +3065,208 @@ def _resolve_collection_payload_path(
     return resolved_candidate
 
 
-def build_dashboard_collection_bundle(
-    manifest_path: Path,
-    *,
-    current_result_id: str,
-) -> Dict[str, Any]:
-    """Load manifest entries plus embedded JSON payloads for shared dashboard UX.
+def _load_legacy_dashboard_results(collection_root: Path) -> list[Dict[str, Any]]:
+    """Load valid entries from a legacy manifest without modifying legacy files.
 
-    :param Path manifest_path: Manifest JSON path for the collection.
-    :param str current_result_id: Result identifier for the graph just built.
-    :return Dict[str, Any]: Embedded dashboard collection bundle.
+    Invalid legacy entries are reported and skipped. Their source files remain
+    untouched, allowing manual recovery while safe entries migrate forward.
+
+    :param Path collection_root: Collection directory containing a legacy manifest.
+    :return list[Dict[str, Any]]: Valid normalized package entries in manifest order.
     """
-    collection_root = manifest_path.parent
+    manifest_path = collection_root / LEGACY_DASHBOARD_MANIFEST_FILENAME
+    if not path_exists(manifest_path):
+        return []
     try:
-        manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        manifest_payload = {}
+        manifest = _read_json_object(manifest_path, label="legacy dashboard manifest")
+    except DashboardPackageError as exc:
+        logger.warning("Skipping invalid legacy dashboard manifest: %s", exc)
+        return []
+    if manifest.get("schema_version") != 1 or not isinstance(
+        manifest.get("results"), list
+    ):
+        logger.warning(
+            "Skipping unsupported legacy dashboard manifest at %s.", manifest_path
+        )
+        return []
 
-    raw_results = (
-        manifest_payload.get("results") if isinstance(manifest_payload, dict) else []
-    )
-    results = [entry for entry in raw_results if isinstance(entry, dict)]
-    payloads: Dict[str, Any] = {}
-    for entry in results:
-        result_id = str(entry.get("result_id") or "").strip()
-        json_rel_path = str(entry.get("json_path") or "").strip()
-        if not result_id or not json_rel_path:
+    results: list[Dict[str, Any]] = []
+    seen_result_ids: set[str] = set()
+    for index, raw_entry in enumerate(manifest["results"]):
+        if not isinstance(raw_entry, dict):
+            logger.warning(
+                "Skipping invalid legacy dashboard result at index %d.", index
+            )
             continue
-        payload_path = _resolve_collection_payload_path(collection_root, json_rel_path)
-        if payload_path is None:
+        json_path = _resolve_collection_artifact_path(
+            collection_root, raw_entry.get("json_path")
+        )
+        config_path = _resolve_collection_artifact_path(
+            collection_root, raw_entry.get("config_path")
+        )
+        if json_path is None or config_path is None:
+            logger.warning(
+                "Skipping legacy dashboard result %r with an unsafe artifact path.",
+                raw_entry.get("result_id"),
+            )
             continue
         try:
-            payload = json.loads(payload_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            graph_payload = _read_json_object(json_path, label="legacy graph payload")
+            config_payload = _read_json_object(config_path, label="legacy graph config")
+            graph_payload = dict(graph_payload)
+            graph_payload.setdefault("kind", GRAPH_PAYLOAD_KIND)
+            graph_payload.setdefault("schema_version", GRAPH_PAYLOAD_SCHEMA_VERSION)
+            build = config_payload.get("build", {})
+            summary = graph_payload.get("summary", raw_entry.get("summary"))
+            candidate = _validate_dashboard_result_entry(
+                {
+                    "result_id": raw_entry.get("result_id"),
+                    "seed_id": raw_entry.get("seed_id"),
+                    "title": raw_entry.get("title"),
+                    "strategy": raw_entry.get("strategy"),
+                    "summary": summary,
+                    "updated_at": raw_entry.get("updated_at"),
+                    "payload": graph_payload,
+                    "build": build,
+                }
+            )
+        except DashboardPackageError as exc:
+            logger.warning(
+                "Skipping invalid legacy dashboard result %r: %s",
+                raw_entry.get("result_id"),
+                exc,
+            )
             continue
-        if not isinstance(payload, dict):
+        result_id = candidate["result_id"]
+        if result_id in seen_result_ids:
             continue
-        payloads[result_id] = payload
+        seen_result_ids.add(result_id)
+        results.append(candidate)
+    return results
 
-    return {
-        "current_result_id": current_result_id,
-        "results": results,
-        "payloads": payloads,
+
+def update_dashboard_package(
+    package_path: Path,
+    *,
+    graph: nx.Graph,
+    seed_id: str,
+    strategy: str,
+    payload: Dict[str, Any],
+    build: Dict[str, Any],
+    staged_result_files: Optional[Dict[Path, Path]] = None,
+    obsolete_result_paths: Optional[Set[Path]] = None,
+) -> Dict[str, Any]:
+    """Atomically create or update a portable dashboard collection package.
+
+    One slot is retained per ``(strategy, seed_id)`` pair. The package lock covers
+    existing-package validation, optional legacy migration, merge, and atomic
+    replacement. Complete per-result exports may be staged before locking and
+    published with rollback here, so concurrent or failed builds cannot leave a
+    mixed successful result bundle.
+
+    :param Path package_path: Portable collection package path.
+    :param nx.Graph graph: Built graph used for seed metadata.
+    :param str seed_id: Seed node identifier.
+    :param str strategy: Active strategy name.
+    :param Dict[str, Any] payload: Canonical graph payload from the exporter.
+    :param Dict[str, Any] build: Portable resolved build settings.
+    :param Optional[Dict[Path, Path]] staged_result_files: Final result paths mapped
+        to fully written same-filesystem staging files.
+    :param Optional[Set[Path]] obsolete_result_paths: Exact prior optional exports
+        to remove if this result is published successfully.
+    :return Dict[str, Any]: Canonical package written to disk.
+    :raises DashboardPackageError: If an existing package is invalid or unsupported.
+    """
+    seed_title = str(graph.nodes[seed_id].get("title") or seed_id)
+    result_id = f"{strategy}:{seed_id}"
+    validated_payload = _validate_dashboard_graph_payload(payload, result_id=result_id)
+    payload_summary = validated_payload["summary"]
+    entry = {
+        "result_id": result_id,
+        "seed_id": seed_id,
+        "title": seed_title,
+        "strategy": strategy,
+        "summary": {
+            "nodes": payload_summary["nodes"],
+            "edges": payload_summary["edges"],
+        },
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "payload": validated_payload,
+        "build": dict(build),
     }
+    entry = _validate_dashboard_result_entry(entry)
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = _dashboard_package_lock_path(package_path)
+    lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)
+    try:
+        with lock:
+            if path_exists(package_path):
+                existing_package = load_dashboard_package(package_path)
+                existing_results = existing_package["results"]
+            else:
+                existing_results = _load_legacy_dashboard_results(package_path.parent)
+            filtered = [
+                item for item in existing_results if item.get("result_id") != result_id
+            ]
+            package = _validate_dashboard_package(
+                {
+                    "kind": DASHBOARD_COLLECTION_KIND,
+                    "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
+                    "current_result_id": result_id,
+                    "results": [entry, *filtered],
+                }
+            )
+            if staged_result_files is not None:
+                _commit_staged_dashboard_artifacts(
+                    package_path,
+                    package,
+                    staged_result_files=staged_result_files,
+                    obsolete_result_paths=obsolete_result_paths or set(),
+                )
+            else:
+                atomic_write_json(package_path, package, indent=2)
+            return package
+    except Timeout as exc:
+        raise RuntimeError(
+            "Timed out waiting for dashboard package lock "
+            f"at {lock_path} after {DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS:.1f}s."
+        ) from exc
+
+
+def render_dashboard_collection_snapshot(
+    package_path: Path,
+    *,
+    dashboard_path: Path,
+    exporter: Any,
+    metadata: Dict[str, Any],
+    theme: str,
+) -> Dict[str, Any]:
+    """Render an atomic dashboard snapshot from the latest locked package state.
+
+    The package and its embedded HTML snapshot must be serialized by the same
+    lock. Otherwise two successful builds can write their HTML snapshots out of
+    order even though their package upserts were individually atomic.
+
+    :param Path package_path: Authoritative dashboard collection package.
+    :param Path dashboard_path: HTML viewer path to refresh.
+    :param Any exporter: Graph exporter for the build's current graph.
+    :param Dict[str, Any] metadata: Mutable exporter metadata mapping.
+    :param str theme: Requested dashboard theme.
+    :return Dict[str, Any]: Latest package embedded in the rendered viewer.
+    """
+    lock_path = _dashboard_package_lock_path(package_path)
+    lock = FileLock(str(lock_path), timeout=DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS)
+    try:
+        with lock:
+            package = load_dashboard_package(package_path)
+            metadata["dashboard_collection"] = package
+            exporter.to_dashboard_html(dashboard_path, theme=theme)
+            return package
+    except Timeout as exc:
+        raise RuntimeError(
+            "Timed out waiting to refresh dashboard snapshot "
+            f"at {lock_path} after {DASHBOARD_PACKAGE_LOCK_TIMEOUT_SECONDS:.1f}s."
+        ) from exc
 
 
 def _drop_none_values(value: Any) -> Any:
@@ -1872,14 +3302,18 @@ def _build_citation_config_payload(
         return {
             "fetch_references": fetch_references,
             "refresh_reference_cache": refresh_reference_cache,
+            "similarity_threshold": cli_args.similarity_threshold,
         }
     if strategy in {"citation", "hybrid"}:
-        return {
+        config = {
             "max_citations": int(cli_args.max_citations),
             "max_references": int(cli_args.max_references),
             "fetch_references": fetch_references,
             "refresh_reference_cache": refresh_reference_cache,
         }
+        if strategy == "citation":
+            config["similarity_threshold"] = cli_args.similarity_threshold
+        return config
     return None
 
 
@@ -1907,11 +3341,20 @@ def _build_graph_config_payload(
     if semantic_enabled:
         embedding_config = {
             "model": cli_args.model,
+            "model_profile": cli_args.model_profile,
             "model_revision": cli_args.model_revision,
+            "semantic_source": str(cli_args.semantic_source),
+            "candidate_pool_size": int(cli_args.candidate_pool_size),
+            "dataset_source": cli_args.dataset_source,
             "dataset_split": cli_args.dataset_split,
-            "corpus_size": None if cli_args.all_corpus else int(cli_args.corpus_size),
-            "all_corpus": bool(cli_args.all_corpus),
+            "corpus_size": (
+                None
+                if cli_args.all_corpus or cli_args.corpus_size is None
+                else int(cli_args.corpus_size)
+            ),
+            "all_corpus": bool(cli_args.all_corpus or cli_args.corpus_size is None),
             "truncate_dim": cli_args.truncate_dim,
+            "min_semantic_similarity": cli_args.min_semantic_similarity,
             "streaming": bool(cli_args.streaming),
             "storage_precision": cli_args.storage_precision,
             "binary_prefilter": bool(cli_args.binary_prefilter),
@@ -1921,12 +3364,27 @@ def _build_graph_config_payload(
             "cache_compression_level": int(cli_args.cache_compression_level),
             "encode_batch_size": int(cli_args.encode_batch_size),
             "torch_compile": bool(cli_args.torch_compile),
+            "device": str(cli_args.device),
             "force_rebuild_cache": bool(cli_args.force_rebuild_cache),
             "overwrite_cache": bool(cli_args.overwrite_cache),
             "cache_overwrite_reason": _normalized_cache_reason(
                 getattr(cli_args, "cache_overwrite_reason", None)
             ),
         }
+        if strategy == "embedding":
+            embedding_config["top_k"] = int(cli_args.top_k)
+        if cli_args.semantic_source != "arxiv-corpus":
+            for dest in _CORPUS_ONLY_OPTION_DESTS:
+                embedding_config.pop(dest, None)
+        else:
+            embedding_config.pop("candidate_pool_size")
+        if cli_args.storage_precision != "int8":
+            for dest in (
+                "binary_prefilter",
+                "binary_rescore_multiplier",
+                "calibration_sample_size",
+            ):
+                embedding_config.pop(dest)
 
     payload = {
         "schema_version": 1,
@@ -1936,6 +3394,9 @@ def _build_graph_config_payload(
             "seed_id": seed_id,
             "strategy": strategy,
             "max_papers": int(cli_args.max_papers),
+            "refresh_paper_cache": bool(
+                getattr(cli_args, "refresh_paper_cache", False)
+            ),
             "citation": _build_citation_config_payload(cli_args, strategy=strategy),
             "hybrid": (
                 {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}
@@ -1979,10 +3440,116 @@ def _embedding_cache_directory_stats() -> tuple[Path, int, int]:
     embedding_cache_dir = (
         get_cache_dir("embeddings", create=False).expanduser().resolve()
     )
-    if not embedding_cache_dir.exists():
+    if not path_exists(embedding_cache_dir):
         return embedding_cache_dir, 0, 0
     files, size_bytes = _scan_path_stats(embedding_cache_dir)
     return embedding_cache_dir, files, size_bytes
+
+
+def _confirm_destructive_cache_action(
+    *,
+    root: Path,
+    total_files: int,
+    total_bytes: int,
+    confirmed: bool,
+    operation: str,
+    reason: Optional[str],
+) -> bool:
+    """Apply the shared warning, non-TTY, rationale, and prompt workflow.
+
+    :param Path root: Cache path affected by the operation.
+    :param int total_files: Files present under ``root``.
+    :param int total_bytes: Bytes present under ``root``.
+    :param bool confirmed: Whether the operation was explicitly acknowledged.
+    :param str operation: ``rebuild`` or ``clear`` action selector.
+    :param Optional[str] reason: Optional operator rationale.
+    :return bool: ``True`` when the destructive action may proceed.
+    """
+    if operation == "rebuild":
+        confirmation_flag = "--overwrite-cache"
+        operation_label = "embedding cache rebuild"
+        reason_label = "Cache overwrite"
+        non_interactive_error = (
+            "Refusing --force-rebuild-cache in non-interactive mode without "
+            "--overwrite-cache. Re-run with --overwrite-cache to proceed."
+        )
+        prompt = "Proceed with embedding cache overwrite?"
+        large_cache_detail = "Clearing may require long rehydration."
+        eof_action = "build"
+    elif operation == "clear":
+        confirmation_flag = "--yes"
+        operation_label = reason_label = "Cache clear"
+        non_interactive_error = (
+            "Refusing to clear cache in non-interactive mode without --yes. "
+            "Re-run with: citemesh cache clear --yes"
+        )
+        prompt = f"Delete CiteMesh cache directory '{root}'?"
+        large_cache_detail = "Deletion is immediate and irreversible."
+        eof_action = "cache clear"
+    else:
+        raise ValueError(f"Unsupported destructive cache operation: {operation}")
+
+    total_size_label = format_bytes(total_bytes)
+    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
+    threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
+    normalized_reason = _normalized_cache_reason(reason)
+    # Namespace resolution happens after model load, so the rebuild snapshot
+    # can only show whole-directory totals; say so rather than implying the
+    # entire directory is deleted.
+    scope_note = (
+        "Snapshot covers the whole embedding cache directory; only the "
+        "resolved model namespace payload will be cleared."
+        if operation == "rebuild"
+        else None
+    )
+
+    if confirmed:
+        logger.warning(
+            "%s acknowledged destructive %s (root=%s files=%d size=%s).",
+            confirmation_flag,
+            operation_label,
+            root,
+            total_files,
+            total_size_label,
+        )
+    elif not stdin_isatty():
+        logger.error(non_interactive_error)
+        return False
+    else:
+        logger.warning("%s requires explicit confirmation.", operation_label)
+        logger.warning(
+            "Cache snapshot: root=%s files=%d size=%s.",
+            root,
+            total_files,
+            total_size_label,
+        )
+
+    if scope_note:
+        logger.warning("%s", scope_note)
+    if large_cache:
+        logger.warning(
+            "Large cache warning: %s >= %s. %s",
+            total_size_label,
+            threshold_label,
+            large_cache_detail,
+        )
+    if normalized_reason:
+        logger.warning("%s rationale: %s", reason_label, normalized_reason)
+    if confirmed:
+        return True
+    logger.warning(
+        "Use %s to bypass this prompt in scripted/non-interactive workflows.",
+        confirmation_flag,
+    )
+    # Text, not markup: the clear prompt interpolates a path that could
+    # otherwise be parsed as console tags.
+    styled_prompt = Text.assemble((prompt, "bold"), (" [y/N]: ", "dim"))
+    try:
+        response = log_console.input(styled_prompt).strip().lower()
+    except EOFError:
+        logger.error("No confirmation input received; %s aborted.", eof_action)
+        return False
+    return response in {"y", "yes"}
 
 
 def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
@@ -1999,66 +3566,14 @@ def _confirm_force_rebuild_cache(args: argparse.Namespace) -> bool:
         return True
 
     embedding_cache_dir, total_files, total_bytes = _embedding_cache_directory_stats()
-    total_size_label = format_bytes(total_bytes)
-    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
-    large_threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
-    overwrite_reason = _normalized_cache_reason(
-        getattr(args, "cache_overwrite_reason", None)
+    return _confirm_destructive_cache_action(
+        root=embedding_cache_dir,
+        total_files=total_files,
+        total_bytes=total_bytes,
+        confirmed=bool(args.overwrite_cache),
+        operation="rebuild",
+        reason=getattr(args, "cache_overwrite_reason", None),
     )
-
-    if bool(args.overwrite_cache):
-        logger.warning(
-            "--overwrite-cache acknowledged destructive rebuild "
-            "(embedding cache dir=%s files=%d size=%s).",
-            embedding_cache_dir,
-            total_files,
-            total_size_label,
-        )
-        if large_cache:
-            logger.warning(
-                "Large embedding cache footprint detected (%s >= %s).",
-                total_size_label,
-                large_threshold_label,
-            )
-        if overwrite_reason:
-            logger.warning("Cache overwrite rationale: %s", overwrite_reason)
-        return True
-
-    if not stdin_isatty():
-        logger.error(
-            "Refusing --force-rebuild-cache in non-interactive mode without "
-            "--overwrite-cache. Re-run with --overwrite-cache to proceed."
-        )
-        return False
-
-    logger.warning(
-        "--force-rebuild-cache will clear the active embedding cache namespace before this run."
-    )
-    logger.warning(
-        "Embedding cache directory snapshot: root=%s files=%d size=%s.",
-        embedding_cache_dir,
-        total_files,
-        total_size_label,
-    )
-    if large_cache:
-        logger.warning(
-            "Large cache warning: %s >= %s. Clearing may require long rehydration.",
-            total_size_label,
-            large_threshold_label,
-        )
-    if overwrite_reason:
-        logger.warning("Cache overwrite rationale: %s", overwrite_reason)
-    logger.warning(
-        "Use --overwrite-cache to bypass this prompt in scripted/non-interactive workflows."
-    )
-    try:
-        response = (
-            input("Proceed with embedding cache overwrite? [y/N]: ").strip().lower()
-        )
-    except EOFError:
-        logger.error("No confirmation input received; build aborted.")
-        return False
-    return response in {"y", "yes"}
 
 
 def _confirmed_cache_clear(
@@ -2072,60 +3587,18 @@ def _confirmed_cache_clear(
     :return bool: ``True`` if cache deletion should proceed.
     """
     total_files, total_bytes = _scan_path_stats(cache_root)
-    total_size_label = format_bytes(total_bytes)
-    large_cache = total_bytes >= LARGE_CACHE_CLEAR_WARNING_BYTES
-    large_threshold_label = format_bytes(LARGE_CACHE_CLEAR_WARNING_BYTES)
-    normalized_reason = _normalized_cache_reason(clear_reason)
-
-    if assume_yes:
-        logger.warning(
-            "--yes acknowledged destructive cache clear (root=%s files=%d size=%s).",
-            cache_root,
-            total_files,
-            total_size_label,
-        )
-        if large_cache:
-            logger.warning(
-                "Large cache warning: %s >= %s.",
-                total_size_label,
-                large_threshold_label,
-            )
-        if normalized_reason:
-            logger.warning("Cache clear rationale: %s", normalized_reason)
-        return True
-
-    if not stdin_isatty():
-        logger.error(
-            "Refusing to clear cache in non-interactive mode without --yes. "
-            "Re-run with: citemesh cache clear --yes"
-        )
-        return False
-
-    logger.warning(
-        "Cache directory snapshot: root=%s files=%d size=%s.",
-        cache_root,
-        total_files,
-        total_size_label,
+    return _confirm_destructive_cache_action(
+        root=cache_root,
+        total_files=total_files,
+        total_bytes=total_bytes,
+        confirmed=assume_yes,
+        operation="clear",
+        reason=clear_reason,
     )
-    if large_cache:
-        logger.warning(
-            "Large cache warning: %s >= %s. Deletion is immediate and irreversible.",
-            total_size_label,
-            large_threshold_label,
-        )
-    if normalized_reason:
-        logger.warning("Cache clear rationale: %s", normalized_reason)
-    prompt = f"Delete CiteMesh cache directory '{cache_root}'? [y/N]: "
-    try:
-        response = input(prompt).strip().lower()
-    except EOFError:
-        logger.error("No confirmation input received; cache clear aborted.")
-        return False
-    return response in {"y", "yes"}
 
 
 def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> int:
-    """Clear the entire CiteMesh cache root.
+    """Clear cached data while preserving configuration and its coordination lock.
 
     :param bool assume_yes: Whether to bypass interactive confirmation.
     :param Optional[str] clear_reason: Optional operator rationale for cache clear.
@@ -2141,7 +3614,7 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
         logger.error("Refusing to clear home directory path: %s", cache_root)
         return 1
 
-    if not cache_root.exists():
+    if not path_exists(cache_root):
         logger.info("Cache directory does not exist: %s", cache_root)
         return 0
 
@@ -2149,16 +3622,44 @@ def _clear_cache_directory(*, assume_yes: bool, clear_reason: Optional[str]) -> 
         logger.info("Cache clear aborted.")
         return 1
 
+    config_path = cache_root / USER_CONFIG_FILENAME
     try:
-        shutil.rmtree(cache_root)
-    except OSError as exc:
+        # The exclusive root lock prevents a live embedding operation from
+        # losing its namespace lock inode while this removes cache payloads.
+        with cache_operation_lock(cache_root, exclusive=True, blocking=False):
+            # Hold the config lock so an in-flight atomic write cannot lose its
+            # temporary file; preserve the lock's path for waiting writers.
+            with config_lock(config_path) as lock_path:
+                preserved_config = path_exists(config_path) or config_path.is_symlink()
+                for child in sorted(cache_root.iterdir()):
+                    if child in {
+                        config_path,
+                        lock_path,
+                        cache_root / CACHE_COORDINATION_DIRNAME,
+                    }:
+                        continue
+                    if child.is_dir() and not child.is_symlink():
+                        shutil.rmtree(child)
+                    else:
+                        child.unlink()
+    except Timeout:
+        logger.error(
+            "Cache directory is busy with an active cache operation: %s", cache_root
+        )
+        return 1
+    except (OSError, ConfigFileError) as exc:
         logger.error("Failed to clear cache directory %s: %s", cache_root, exc)
         return 1
 
+    suffix_parts = []
+    if preserved_config:
+        suffix_parts.append(f"preserved {USER_CONFIG_FILENAME}")
     normalized_reason = _normalized_cache_reason(clear_reason)
     if normalized_reason:
+        suffix_parts.append(f"reason={normalized_reason}")
+    if suffix_parts:
         logger.info(
-            "✓ Cleared cache directory: %s (reason=%s)", cache_root, normalized_reason
+            "✓ Cleared cache directory: %s (%s)", cache_root, ", ".join(suffix_parts)
         )
     else:
         logger.info("✓ Cleared cache directory: %s", cache_root)
@@ -2171,20 +3672,20 @@ def _scan_path_stats(path: Path) -> tuple[int, int]:
     :param Path path: Directory or file path to scan.
     :return tuple[int, int]: ``(file_count, size_bytes)`` totals.
     """
-    if path.is_file():
+    if path.is_symlink() or path.is_file():
         try:
-            return 1, path.stat().st_size
+            return 1, path.lstat().st_size
         except OSError:
             return 1, 0
 
     file_count = 0
     size_bytes = 0
     for candidate in path.rglob("*"):
-        if not candidate.is_file():
+        if not candidate.is_symlink() and not candidate.is_file():
             continue
         file_count += 1
         try:
-            size_bytes += candidate.stat().st_size
+            size_bytes += candidate.lstat().st_size
         except OSError:
             continue
     return file_count, size_bytes
@@ -2198,8 +3699,9 @@ def _scan_cache_directory() -> int:
     raw_cache_root = get_cache_dir(create=False)
     cache_root = raw_cache_root.expanduser().resolve()
 
-    if not cache_root.exists():
+    if not path_exists(cache_root):
         logger.info("Cache directory does not exist: %s", cache_root)
+        _log_legacy_macos_cache_hint(cache_root)
         return 0
     if not cache_root.is_dir():
         logger.error("Cache path exists but is not a directory: %s", cache_root)
@@ -2213,25 +3715,524 @@ def _scan_cache_directory() -> int:
     total_files = sum(row[1] for row in section_rows)
     total_bytes = sum(row[2] for row in section_rows)
 
-    output_console.print(f"[bold]Cache root:[/bold] {cache_root}")
-    table = Table(title="CiteMesh Cache Scan")
-    table.add_column("Section")
+    output_console.print(Text.assemble(("Cache root: ", "bold"), str(cache_root)))
+    table = _output_table("CiteMesh Cache Scan")
+    table.add_column("Section", style="cyan")
     table.add_column("Files", justify="right")
     table.add_column("Size", justify="right")
 
     if section_rows:
         for name, files, size_bytes in section_rows:
-            table.add_row(name, str(files), format_bytes(size_bytes))
+            table.add_row(Text(name), f"{files:,}", format_bytes(size_bytes))
     else:
         table.add_row("(empty)", "0", "0 B")
 
-    table.add_row(
-        "[bold]TOTAL[/bold]",
-        f"[bold]{total_files}[/bold]",
-        f"[bold]{format_bytes(total_bytes)}[/bold]",
-    )
+    table.add_section()
+    table.add_row("TOTAL", f"{total_files:,}", format_bytes(total_bytes), style="bold")
     output_console.print(table)
+    _log_legacy_macos_cache_hint(cache_root)
     return 0
+
+
+def _log_legacy_macos_cache_hint(cache_root: Path) -> None:
+    """Point at the pre-unification macOS cache directory when it lingers.
+
+    :param Path cache_root: Active resolved cache root.
+    :return None: Emits an info-level migration hint when applicable.
+    """
+    legacy_root = legacy_macos_cache_root()
+    if legacy_root is None:
+        return
+    try:
+        if legacy_root.resolve() == cache_root:
+            return
+    except OSError:
+        return
+    logger.info(
+        "Legacy macOS cache directory detected at %s. CiteMesh now uses %s; "
+        "move or delete the old directory to reclaim space.",
+        legacy_root,
+        cache_root,
+    )
+
+
+def _masked_secret(value: str) -> str:
+    """Mask a secret for display, keeping a short recognizable suffix.
+
+    :param str value: Secret value to mask.
+    :return str: Masked representation.
+    """
+    if len(value) <= 8:
+        return "****"
+    return f"****{value[-4:]}"
+
+
+def _run_view_command(path: Path, browser: Optional[str]) -> int:
+    """Open a saved HTML export using the selected browser.
+
+    :param Path path: HTML file or directory containing the saved dashboard.
+    :param Optional[str] browser: Browser name, or ``None`` for the system default.
+    :return int: Zero if a browser opened, otherwise one with an error message.
+    """
+    target = path.expanduser()
+    try:
+        if target.is_dir():
+            target = target / DASHBOARD_COLLECTION_FILENAME
+        target = target.resolve(strict=True)
+        if not target.is_file() or target.suffix.lower() not in {".html", ".htm"}:
+            logger.error(
+                "Expected a saved HTML file or collection directory: %s. "
+                "Open a dashboard and use Add Results to import graph JSON.",
+                target,
+            )
+            return 1
+    except OSError as exc:
+        logger.error("Cannot read saved results at %s: %s", target, exc)
+        return 1
+
+    try:
+        open_tab = (
+            webbrowser.get(browser).open_new_tab if browser else webbrowser.open_new_tab
+        )
+        opened = open_tab(target.as_uri())
+    except (webbrowser.Error, OSError) as exc:
+        logger.error("Could not launch browser: %s. Open %s manually.", exc, target)
+        return 1
+    if not opened:
+        logger.error(
+            "Could not open a browser. Open %s manually or choose one with --browser NAME.",
+            target,
+        )
+        return 1
+    logger.info("Opened %s", target)
+    return 0
+
+
+def _run_config_command(
+    args: argparse.Namespace, config_parser: argparse.ArgumentParser
+) -> int:
+    """Execute the ``citemesh config`` subcommand.
+
+    :param argparse.Namespace args: Parsed config arguments.
+    :param argparse.ArgumentParser config_parser: Config subcommand parser.
+    :return int: Process-style exit code.
+    """
+    command = getattr(args, "config_command", None)
+    if not command:
+        config_parser.print_help()
+        return 1
+
+    if command == "path":
+        # Plain print keeps `citemesh config path`/`get` output unwrapped and
+        # markup-free for shell substitution.
+        print(user_config_path())
+        return 0
+
+    if command == "list":
+        user_config = load_user_config()
+        output_console.print(
+            Text.assemble(("Config file: ", "bold"), str(user_config.path))
+        )
+        if not user_config.path.is_file():
+            output_console.print(
+                "[dim]File does not exist yet; using built-in defaults. "
+                "Create it with `citemesh config set <key> <value>`.[/dim]"
+            )
+        rows: List[Tuple[str, str]] = [
+            (f"defaults.{key}", format_config_value(value))
+            for key, value in sorted(user_config.defaults.items())
+        ]
+        if user_config.s2_api_key:
+            rows.append(("api.s2_api_key", _masked_secret(user_config.s2_api_key)))
+        table = _output_table("CiteMesh User Config")
+        table.add_column("Key", style="cyan")
+        table.add_column("Value")
+        if rows:
+            for key, value in rows:
+                table.add_row(Text(key), Text(value))
+        else:
+            table.add_row("(no values set)", "")
+        output_console.print(table)
+        return 0
+
+    if command == "get":
+        try:
+            table_name, key, _spec = parse_config_key(args.key)
+        except ConfigKeyError as exc:
+            config_parser.error(str(exc))
+        user_config = load_user_config()
+        if table_name == "api":
+            # Direct get is intentionally raw for shell substitution; list is masked.
+            value: Any = user_config.s2_api_key
+        else:
+            value = user_config.defaults.get(key)
+        if value is None:
+            logger.error("Config key '%s' is not set.", args.key)
+            return 1
+        print(format_config_value(value))
+        return 0
+
+    if command == "set":
+        try:
+            value = set_config_value(args.key, args.value)
+        except (ConfigKeyError, ConfigValueError) as exc:
+            config_parser.error(str(exc))
+        except ConfigFileError as exc:
+            logger.error("%s", exc)
+            return 1
+        display_value = (
+            _masked_secret(str(value))
+            if str(args.key).strip() == "api.s2_api_key"
+            else format_config_value(value)
+        )
+        logger.info("✓ Set %s = %s in %s", args.key, display_value, user_config_path())
+        return 0
+
+    if command == "unset":
+        try:
+            removed = unset_config_value(args.key)
+        except ConfigKeyError as exc:
+            config_parser.error(str(exc))
+        except ConfigFileError as exc:
+            logger.error("%s", exc)
+            return 1
+        if removed:
+            logger.info("✓ Unset %s in %s", args.key, user_config_path())
+        else:
+            logger.info("Config key '%s' was not set.", args.key)
+        return 0
+
+    config_parser.print_help()
+    return 1
+
+
+def _resolve_search_mode(
+    args: argparse.Namespace, user_config: UserConfig
+) -> Tuple[str, str]:
+    """Resolve the effective search mode and where it came from.
+
+    Precedence: explicit ``--mode`` flag > config.toml
+    ``defaults.search_mode`` > built-in ``auto``.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return Tuple[str, str]: ``(mode, origin)`` with origin one of ``flag``,
+        ``config``, ``default``.
+    """
+    if args.mode:
+        return str(args.mode), "flag"
+    configured = user_config.defaults.get("search_mode")
+    if configured:
+        return str(configured), "config"
+    return "auto", "default"
+
+
+def _prepare_local_search_builder(
+    args: argparse.Namespace,
+    build_parser: argparse.ArgumentParser,
+    user_config: UserConfig,
+) -> Tuple[EmbeddingGraphBuilder, argparse.Namespace]:
+    """Construct the embedding builder local search runs against.
+
+    Mirrors a flagless build's defaults pipeline (config.toml defaults plus
+    candidate-mode storage normalization) so the search targets the same cache
+    namespace a default build writes to; ``--model``, ``--model-profile``, and
+    ``--device`` override.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :param argparse.ArgumentParser build_parser: Build subparser used to
+        derive build-equivalent defaults.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return Tuple[EmbeddingGraphBuilder, argparse.Namespace]: Builder and the
+        effective build-equivalent defaults namespace.
+    """
+    defaults = build_parser.parse_args(["local-search-placeholder-seed"])
+    defaults._s2_api_key = _resolve_user_config_api_key(user_config)
+    _pop_tracked_option_dests(defaults)
+    config_default_dests = _apply_user_config_defaults(
+        defaults, {"strategy"}, user_config
+    )
+    defaults.strategy = "embedding"
+    if args.model:
+        defaults.model = args.model
+        config_default_dests.discard("model")
+    if args.model_profile:
+        defaults.model_profile = args.model_profile
+        config_default_dests.discard("model_profile")
+    if args.device:
+        defaults.device = args.device
+        config_default_dests.discard("device")
+    _validate_build_cli_contract(
+        defaults,
+        _ValueErrorParserErrorSink(),
+        frozenset(),
+        config_defaults=config_default_dests,
+        config_path=user_config.path,
+    )
+    builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
+    return builder, defaults
+
+
+def _render_local_search(
+    args: argparse.Namespace,
+    builder: EmbeddingGraphBuilder,
+    defaults: argparse.Namespace,
+) -> int:
+    """Encode the query, search the local cache, and render ranked results.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :param EmbeddingGraphBuilder builder: Builder targeting the search namespace.
+    :param argparse.Namespace defaults: Effective build-equivalent defaults.
+    :return int: Process-style exit code.
+    """
+    try:
+        results = builder.search_local(args.query, top_k=args.limit)
+    except Exception as exc:
+        logger.error(
+            "Local search failed: %s",
+            exc,
+            exc_info=logging.getLogger().level == logging.DEBUG,
+        )
+        return 1
+
+    cache = builder.embedding_cache
+    if not results:
+        logger.error(
+            "Local search returned no results for model=%s (cache: %s).",
+            defaults.model,
+            cache.h5_path,
+        )
+        return 1
+
+    table = _output_table(f"Local semantic search for '{args.query}'")
+    table.leading = 1
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Paper / authors", ratio=1)
+    table.add_column("Year", justify="right", no_wrap=True)
+    table.add_column("Score", justify="right", width=6)
+
+    for i, result in enumerate(results, 1):
+        metadata = result.metadata or {}
+        authors = [str(name) for name in (metadata.get("authors") or [])]
+        authors_str = ", ".join(authors[:2])
+        if len(authors) > 2:
+            authors_str += " et al."
+        year_value = metadata.get("year")
+        table.add_row(
+            str(i),
+            Text.assemble(
+                (str(metadata.get("title") or ""), "bold"),
+                ("\n" + authors_str, "dim") if authors_str else "",
+            ),
+            str(year_value) if year_value is not None else "",
+            f"{float(result.score):.3f}",
+        )
+
+    output_console.print(table)
+    total = getattr(cache, "last_search_total_embeddings", None)
+    if total is not None:
+        output_console.print(
+            Text(
+                f"Searched {int(total):,} locally cached embeddings "
+                f"(model={defaults.model}, source={defaults.semantic_source}).",
+                style="dim",
+            )
+        )
+    output_console.print("\n[dim]Full paper IDs:[/dim]")
+    for i, result in enumerate(results, 1):
+        output_console.print(
+            Text.assemble((f"{i}. ", "dim"), (str(result.paper_id), "cyan")),
+            soft_wrap=True,
+        )
+    output_console.print('\nUse a paper ID with: citemesh build "<ID>"', style="dim")
+    return 0
+
+
+def _run_s2_search(args: argparse.Namespace) -> int:
+    """Run keyword search on the Semantic Scholar API and render results.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :return int: Process-style exit code.
+    """
+    try:
+        client = _configured_client_kwargs(args).get("client") or get_client()
+        logger.info(f"Searching for: {args.query}")
+        results = client.search_papers(
+            args.query, limit=args.limit, raise_on_unavailable=True
+        )
+
+        if not results:
+            logger.error("No results found.")
+            return 1
+
+        table = _output_table(f"Search results for '{args.query}'")
+        table.leading = 1
+        table.add_column("#", style="dim", width=3)
+        table.add_column("Paper / authors", ratio=1)
+        table.add_column("Year", justify="right", no_wrap=True)
+        table.add_column("Citations", justify="right", no_wrap=True)
+
+        for i, paper in enumerate(results, 1):
+            authors_str = ", ".join(a.name for a in paper.authors[:2])
+            if len(paper.authors) > 2:
+                authors_str += " et al."
+
+            table.add_row(
+                str(i),
+                Text.assemble(
+                    (paper.title, "bold"),
+                    ("\n" + authors_str, "dim") if authors_str else "",
+                ),
+                str(paper.year) if paper.year is not None else "",
+                f"{paper.citation_count:,}",
+            )
+
+        output_console.print(table)
+        output_console.print("\n[dim]Full paper IDs:[/dim]")
+        for i, paper in enumerate(results, 1):
+            output_console.print(
+                Text.assemble((f"{i}. ", "dim"), (paper.paper_id, "cyan")),
+                soft_wrap=True,
+            )
+        output_console.print(
+            '\nUse a paper ID with: citemesh build "<ID>"', style="dim"
+        )
+
+    except SemanticScholarUnavailableError as e:
+        logger.error(str(e))
+        return 1
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        return 1
+    return 0
+
+
+def _run_search_command(
+    args: argparse.Namespace,
+    build_parser: argparse.ArgumentParser,
+    user_config: UserConfig,
+) -> int:
+    """Dispatch `citemesh search` across local and S2 modes.
+
+    Mode ``auto`` prefers the local embedding cache when it has vectors and
+    falls back to the Semantic Scholar API otherwise, logging which one ran.
+    Explicitly requested local mode treats an empty cache as an error.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :param argparse.ArgumentParser build_parser: Build subparser used to
+        derive build-equivalent defaults for local search.
+    :param UserConfig user_config: Loaded user configuration snapshot.
+    :return int: Process-style exit code.
+    """
+    mode, origin = _resolve_search_mode(args, user_config)
+    if args.model or args.model_profile or args.device:
+        if args.mode == "s2":
+            logger.error(
+                "--model, --model-profile, and --device only apply to local "
+                "semantic search; drop them or use --mode local."
+            )
+            return 2
+        if origin != "flag" and mode != "local":
+            # Namespace-selecting flags are explicit local intent; they
+            # outrank a config-level s2/auto default but never an explicit
+            # --mode, so --mode auto keeps its S2 fallback.
+            mode, origin = "local", "namespace-flag"
+    if args.device:
+        try:
+            resolve_embedding_device(args.device)
+        except ValueError as exc:
+            logger.error(str(exc))
+            return 2
+
+    if mode == "s2":
+        if origin == "config":
+            logger.info(
+                "Searching the Semantic Scholar API (defaults.search_mode = "
+                "'s2' in %s).",
+                user_config.path,
+            )
+        return _run_s2_search(args)
+
+    builder: EmbeddingGraphBuilder | None = None
+    try:
+        builder, defaults = _prepare_local_search_builder(
+            args, build_parser, user_config
+        )
+        # Resolve the artifact before opening a namespace: opening the provisional
+        # cache just to count rows leaves unused metadata and lock files behind.
+        if builder.has_persistent_embedding_artifacts():
+            builder.prepare_embedding_cache()
+            cached_count = builder.embedding_cache.embedding_count()
+        else:
+            cached_count = 0
+    except Exception as exc:
+        namespace_selectors = ""
+        if builder is not None:
+            namespace_selectors = (
+                f" (device={builder.device} compute_dtype={builder.compute_dtype})"
+            )
+        if mode == "auto":
+            logger.info(
+                "Local semantic search unavailable%s (%s); searching the "
+                "Semantic Scholar API instead.",
+                namespace_selectors,
+                exc,
+            )
+            return _run_s2_search(args)
+        logger.error(
+            "Local search unavailable%s: %s",
+            namespace_selectors,
+            exc,
+            exc_info=logging.getLogger().level == logging.DEBUG,
+        )
+        return 1
+
+    if mode == "auto":
+        if cached_count > 0:
+            logger.info(
+                "Searching %s locally cached embeddings (model=%s). "
+                "Use --mode s2 for Semantic Scholar keyword search.",
+                f"{cached_count:,}",
+                defaults.model,
+            )
+            return _render_local_search(args, builder, defaults)
+        logger.info(
+            "Local embedding cache is empty for device=%s compute_dtype=%s; "
+            "searching the Semantic Scholar API instead. Run `citemesh build` "
+            "with the same configuration to populate this namespace. A different "
+            "--device can resolve to a different compute dtype and cache namespace; "
+            "select the device matching an existing build, or use --mode s2 for "
+            "keyword search.",
+            builder.device,
+            builder.compute_dtype,
+        )
+        return _run_s2_search(args)
+
+    # Explicit local mode: an empty cache is an error, not a fallback.
+    if cached_count == 0:
+        if origin == "flag":
+            requested_via = "--mode local"
+        elif origin == "namespace-flag":
+            requested_via = (
+                "--model/--model-profile/--device (namespace flags imply local search)"
+            )
+        else:
+            requested_via = f"defaults.search_mode in {user_config.path}"
+        logger.error(
+            "Local search was requested via %s, but the local embedding cache "
+            "has no vectors for model=%s semantic-source=%s device=%s "
+            "compute_dtype=%s. Run `citemesh build` with the same configuration to "
+            "populate this namespace. A different --device can resolve to a "
+            "different compute dtype and cache namespace; select the device matching "
+            "an existing build, or use --mode s2 for keyword search.",
+            requested_via,
+            defaults.model,
+            defaults.semantic_source,
+            builder.device,
+            builder.compute_dtype,
+        )
+        return 1
+    return _render_local_search(args, builder, defaults)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2240,7 +4241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     :param Sequence[str] | None argv: Optional CLI argument list without executable.
     :return int: Process-style exit code.
     """
-    parser, build_parser, cache_parser = _create_parser()
+    parser, build_parser, cache_parser, config_parser = _create_parser()
     argv_list = list(argv) if argv is not None else None
     args = parser.parse_args(argv_list)
     _configure_logging(
@@ -2254,9 +4255,53 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help()
         return 1
 
+    if args.command == "config":
+        return _run_config_command(args, config_parser)
+
+    if args.command == "view":
+        return _run_view_command(args.path, args.browser)
+
+    user_config = load_user_config()
+    args._s2_api_key = _resolve_user_config_api_key(user_config)
+
     if args.command == "build":
-        _validate_build_cli_contract(args, build_parser, provided_build_options)
+        config_default_dests = _apply_user_config_defaults(
+            args, provided_build_options, user_config
+        )
+        _validate_build_cli_contract(
+            args,
+            build_parser,
+            provided_build_options,
+            config_defaults=config_default_dests,
+            config_path=user_config.path,
+        )
         try:
+            raw_exports = args.export or ["png"]
+            if "all" in raw_exports:
+                selected_formats = list(EXPORT_FORMATS)
+            else:
+                selected_formats = list(dict.fromkeys(raw_exports))
+
+            explicit_output = bool(args.output)
+            requested_base_output_path = Path(args.output or "out")
+            standalone_dashboard = _is_standalone_dashboard_output(
+                base_output_path=requested_base_output_path,
+                selected_formats=selected_formats,
+                explicit_output=explicit_output,
+            )
+            dashboard_collection_mode = (
+                "dashboard" in selected_formats and not standalone_dashboard
+            )
+            preflight_package_path: Optional[Path] = None
+            if dashboard_collection_mode:
+                collection_root = _resolve_dashboard_collection_root(
+                    requested_base_output_path,
+                    explicit_output=explicit_output,
+                )
+                preflight_package_path = collection_root / DASHBOARD_PACKAGE_FILENAME
+                if path_exists(preflight_package_path):
+                    load_dashboard_package(preflight_package_path)
+
             if not _confirm_force_rebuild_cache(args):
                 logger.info("Build aborted.")
                 return 1
@@ -2267,55 +4312,50 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args, args.strategy, validate_contract=False
             )
 
-            # Determine output paths
             if args.output:
                 base_output_path = Path(args.output)
+            elif dashboard_collection_mode:
+                # The collection resolver places shared and per-paper artifacts.
+                base_output_path = Path("out")
             else:
                 base_output_path = generate_output_path(
                     graph, seed_id, strategy=args.strategy
                 )
 
-            raw_exports = args.export or ["png"]
-            if "all" in raw_exports:
-                selected_formats = list(EXPORT_FORMATS)
-            else:
-                selected_formats = list(dict.fromkeys(raw_exports))
-            dashboard_manifest_path: Optional[Path] = None
-            if "dashboard" in selected_formats and not _is_standalone_dashboard_output(
-                base_output_path=base_output_path,
-                selected_formats=selected_formats,
-                explicit_output=bool(args.output),
-            ):
-                output_paths, dashboard_manifest_path = (
+            dashboard_package_path: Optional[Path] = None
+            if dashboard_collection_mode:
+                output_paths, dashboard_package_path = (
                     resolve_dashboard_collection_outputs(
                         base_output_path=base_output_path,
                         selected_formats=selected_formats,
-                        explicit_output=bool(args.output),
+                        explicit_output=explicit_output,
                         strategy=args.strategy,
                         graph=graph,
                         seed_id=seed_id,
                     )
                 )
+                if dashboard_package_path != preflight_package_path:
+                    raise RuntimeError(
+                        "Dashboard package planning changed after graph construction."
+                    )
             else:
                 output_paths = resolve_output_paths(
                     base_output_path=base_output_path,
                     selected_formats=selected_formats,
-                    explicit_output=bool(args.output),
+                    explicit_output=explicit_output,
                     strategy=args.strategy,
                 )
-            if dashboard_manifest_path is not None:
-                run_artifact_root = (
-                    output_paths["json"].parent
-                    if "json" in output_paths
-                    else next(iter(output_paths.values())).parent
-                )
+            if dashboard_package_path is not None:
                 logger.info(
-                    "Dashboard collection mode: shell=%s manifest=%s run_artifacts=%s.",
+                    "Dashboard collection mode: viewer=%s package=%s graph=%s.",
                     output_paths["dashboard"],
-                    dashboard_manifest_path,
-                    run_artifact_root,
+                    dashboard_package_path,
+                    output_paths["json"],
                 )
-            for parent in {path.parent for path in output_paths.values()}:
+            planned_paths = list(output_paths.values())
+            if dashboard_package_path is not None:
+                planned_paths.append(dashboard_package_path)
+            for parent in {path.parent for path in planned_paths}:
                 if parent and not parent.exists():
                     parent.mkdir(parents=True, exist_ok=True)
 
@@ -2329,6 +4369,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "theme": args.theme,
                 "score_contract": _strategy_score_contract(args.strategy),
             }
+            raw_source_status = graph.graph.get("candidate_source_status")
+            if isinstance(raw_source_status, dict):
+                metadata["candidate_source_status"] = {
+                    str(source): str(status)
+                    for source, status in sorted(
+                        raw_source_status.items(), key=lambda item: str(item[0])
+                    )
+                }
             include_embedding_metadata = _embedding_branch_enabled(args)
             if include_embedding_metadata:
                 runtime_embedding_metadata: Optional[Dict[str, Any]] = None
@@ -2341,8 +4389,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.include_timestamp:
                 metadata["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M")
             plot_metadata = _plot_overlay_metadata(metadata)
+            # JSON embeds dashboard geometry too, so it shares the run's layout
+            # (honoring --spring-iterations/--seed) instead of a default one.
             layout_required = any(
-                fmt in output_paths for fmt in ("png", "plotly", "dashboard")
+                fmt in output_paths for fmt in ("png", "plotly", "dashboard", "json")
             )
             shared_layout = (
                 compute_layout(
@@ -2362,75 +4412,133 @@ def main(argv: Sequence[str] | None = None) -> int:
                 layout=shared_layout,
             )
 
-            if "png" in output_paths:
-                visualize_graph(
-                    graph,
-                    seed_id,
-                    output_paths["png"],
-                    iterations=args.spring_iterations,
-                    dpi=args.dpi,
-                    metadata=plot_metadata,
-                    theme_name=args.theme,
-                    layout=shared_layout,
-                )
+            def write_export_artifacts(export_paths: Dict[str, Path]) -> None:
+                """Write selected graph exports to their supplied paths.
 
-            for fmt, method_name in _EXPORTER_METHOD.items():
-                if fmt not in output_paths:
-                    continue
-                if fmt == "dashboard" and dashboard_manifest_path is not None:
-                    # Shared dashboards are rendered after the manifest update so the
-                    # shell can embed the current collection bundle for offline reuse.
-                    continue
-                method = getattr(exporter, method_name)
-                if fmt in _THEME_AWARE_FORMATS:
-                    method(output_paths[fmt], theme=args.theme)
-                else:
-                    method(output_paths[fmt])
+                :param Dict[str, Path] export_paths: Destination paths for this write.
+                :return None: Writes the selected artifacts to their resolved paths.
+                """
+                if "png" in export_paths:
+                    visualize_graph(
+                        graph,
+                        seed_id,
+                        export_paths["png"],
+                        iterations=args.spring_iterations,
+                        dpi=args.dpi,
+                        metadata=plot_metadata,
+                        theme_name=args.theme,
+                        layout=shared_layout,
+                    )
 
-            graph_config_path = resolve_graph_config_path(
-                output_paths=output_paths,
-                strategy=args.strategy,
-            )
+                for fmt, method_name in _EXPORTER_METHOD.items():
+                    if fmt not in export_paths:
+                        continue
+                    if dashboard_package_path is not None and fmt in (
+                        "dashboard",
+                        "json",
+                    ):
+                        # Collection JSON is staged separately; the viewer is
+                        # rendered afterward from the latest collection snapshot.
+                        continue
+                    method = getattr(exporter, method_name)
+                    if fmt in _THEME_AWARE_FORMATS:
+                        method(export_paths[fmt], theme=args.theme)
+                    else:
+                        method(export_paths[fmt])
+
+            if dashboard_package_path is None:
+                write_export_artifacts(output_paths)
+
+            config_output_paths = dict(output_paths)
+            if dashboard_package_path is not None:
+                config_output_paths["dashboard_package"] = dashboard_package_path
             graph_config_payload = _build_graph_config_payload(
                 cli_args=args,
                 seed_id=seed_id,
                 metadata=metadata,
                 selected_formats=selected_formats,
-                output_paths=output_paths,
+                output_paths=config_output_paths,
             )
-            graph_config_path.write_text(
-                json.dumps(graph_config_payload, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
-            if (
-                dashboard_manifest_path is not None
-                and "json" in output_paths
-                and output_paths["json"].exists()
-            ):
-                manifest_payload = update_dashboard_manifest(
-                    dashboard_manifest_path,
-                    collection_root=dashboard_manifest_path.parent,
-                    graph=graph,
-                    seed_id=seed_id,
+            standalone_dashboard_only = standalone_dashboard and selected_formats == [
+                "dashboard"
+            ]
+            graph_config_path: Optional[Path] = None
+            if dashboard_package_path is None and not standalone_dashboard_only:
+                graph_config_path = resolve_graph_config_path(
+                    output_paths=output_paths,
                     strategy=args.strategy,
-                    json_path=output_paths["json"],
-                    config_path=graph_config_path,
-                    metadata=metadata,
                 )
-                metadata["dashboard_collection"] = build_dashboard_collection_bundle(
-                    dashboard_manifest_path,
-                    current_result_id=str(
-                        manifest_payload["results"][0].get(
-                            "result_id", f"{args.strategy}:{seed_id}"
-                        )
-                    ),
+                atomic_write_json(graph_config_path, graph_config_payload, indent=2)
+
+            if dashboard_package_path is not None:
+                graph_payload = exporter.graph_payload()
+                result_directory = output_paths["json"].parent
+                graph_config_path = resolve_graph_config_path(
+                    output_paths=output_paths,
+                    strategy=args.strategy,
                 )
-                exporter.to_dashboard_html(output_paths["dashboard"], theme=args.theme)
+                with tempfile.TemporaryDirectory(
+                    prefix=f".{result_directory.name}.stage-",
+                    dir=result_directory.parent,
+                    ignore_cleanup_errors=True,
+                ) as staging_name:
+                    staging_directory = Path(staging_name)
+                    staged_output_paths = {
+                        fmt: staging_directory / path.name
+                        for fmt, path in output_paths.items()
+                        if fmt != "dashboard"
+                    }
+                    write_export_artifacts(staged_output_paths)
+                    atomic_write_json(
+                        staged_output_paths["json"], graph_payload, indent=2
+                    )
+                    staged_config_path = staging_directory / graph_config_path.name
+                    atomic_write_json(
+                        staged_config_path, graph_config_payload, indent=2
+                    )
+                    staged_result_files = {
+                        output_paths[fmt]: staged_path
+                        for fmt, staged_path in staged_output_paths.items()
+                    }
+                    staged_result_files[graph_config_path] = staged_config_path
+                    update_dashboard_package(
+                        dashboard_package_path,
+                        graph=graph,
+                        seed_id=seed_id,
+                        strategy=args.strategy,
+                        payload=graph_payload,
+                        build=dict(graph_config_payload.get("build", {})),
+                        staged_result_files=staged_result_files,
+                        obsolete_result_paths=(
+                            _dashboard_optional_result_paths(output_paths)
+                            - set(staged_result_files)
+                        ),
+                    )
+                try:
+                    render_dashboard_collection_snapshot(
+                        dashboard_package_path,
+                        dashboard_path=output_paths["dashboard"],
+                        exporter=exporter,
+                        metadata=metadata,
+                        theme=args.theme,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Dashboard data was saved safely at %s, but the viewer "
+                        "refresh failed: %s. Recover by opening an existing "
+                        "dashboard.html, choosing Add Results, and selecting this "
+                        "package, or rerun after fixing the renderer.",
+                        dashboard_package_path,
+                        exc,
+                        exc_info=logging.getLogger().level == logging.DEBUG,
+                    )
+                    return 1
 
             artifact_paths = dict(output_paths)
-            artifact_paths["config"] = graph_config_path
-            if dashboard_manifest_path is not None:
-                artifact_paths["dashboard_manifest"] = dashboard_manifest_path
+            if graph_config_path is not None:
+                artifact_paths["config"] = graph_config_path
+            if dashboard_package_path is not None:
+                artifact_paths["dashboard_package"] = dashboard_package_path
             saved_artifact_count = len(artifact_paths)
             output_dirs = sorted({str(path.parent) for path in artifact_paths.values()})
             if saved_artifact_count:
@@ -2454,6 +4562,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 graph.number_of_edges(),
             )
 
+        except DashboardPackageError as e:
+            logger.error(
+                "Failed to prepare dashboard collection: %s",
+                e,
+                exc_info=logging.getLogger().level == logging.DEBUG,
+            )
+            return 1
         except Exception as e:
             logger.error(
                 "Failed to build graph: %s",
@@ -2462,50 +4577,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
     elif args.command == "search":
-        try:
-            client = get_client()
-            logger.info(f"Searching for: {args.query}")
-            results = client.search_papers(args.query, limit=args.limit)
-
-            if not results:
-                logger.error("No results found.")
-                return 1
-
-            table = Table(title=f"Search results for '{args.query}'")
-            table.add_column("#", style="dim", width=3)
-            # Keep full IDs copyable for direct use in `citemesh build`.
-            table.add_column("ID", style="cyan", overflow="fold")
-            table.add_column("Title", overflow="fold")
-            table.add_column("Year", justify="right", width=6)
-            table.add_column("Citations", justify="right", width=10)
-            table.add_column("Authors", max_width=30)
-
-            for i, paper in enumerate(results, 1):
-                authors_str = ", ".join(a.name for a in paper.authors[:2])
-                if len(paper.authors) > 2:
-                    authors_str += " et al."
-
-                table.add_row(
-                    str(i),
-                    paper.paper_id,
-                    paper.title,
-                    str(paper.year) if paper.year is not None else "",
-                    f"{paper.citation_count:,}",
-                    authors_str,
-                )
-
-            output_console.print(table)
-            output_console.print("\n[dim]Full paper IDs:[/dim]")
-            for i, paper in enumerate(results, 1):
-                output_console.print(f"[dim]{i}.[/dim] {paper.paper_id}")
-            output_console.print(
-                "\n[dim]Use the paper ID with:[/dim] "
-                'citemesh build "<ID>" --strategy recommendation'
-            )
-
-        except Exception as e:
-            logger.error(f"Search failed: {e}")
-            return 1
+        return _run_search_command(args, build_parser, user_config)
     elif args.command == "cache":
         if args.cache_command == "scan":
             exit_code = _scan_cache_directory()

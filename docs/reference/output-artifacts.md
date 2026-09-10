@@ -1,6 +1,8 @@
 # Output Artifacts
 
-CiteMesh writes graph outputs by format plus a run-configuration sidecar.
+CiteMesh writes graph outputs by format. Dashboard collections use one reusable
+viewer plus one versioned data package instead of generating a dashboard for every
+seed.
 
 Related docs:
 
@@ -10,64 +12,125 @@ Related docs:
 
 ## Artifact Set
 
-When `--export all` is used, CiteMesh writes:
+A normal dashboard run writes two shared artifacts at the collection root:
+
+- `dashboard.html` - reusable tri-pane viewer with an embedded snapshot, so it opens directly from the local filesystem
+- `dashboard.citemesh.json` - authoritative, portable collection package containing one or more graph results and their portable build settings
+
+A persistent hidden `.dashboard.citemesh.json.lock` beside the package serializes collection updates and viewer refreshes, including builds using different `CITEMESH_CACHE_DIR` roots. The lock stays with the output directory; sharing a completed collection requires only the viewer and package.
+
+Every collection build also saves its own graph and build settings under the seed's `<title-slug>-<hash>/` directory, even with only `--export dashboard`:
+
+- `<strategy>.json` - complete standalone graph payload, including titles, IDs,
+  papers, edges, and dashboard layout; readable independently and loadable through
+  **Add Results**
+- `<strategy>.config.json` - build settings, output paths, and runtime metadata
+
+Reusing the same collection root adds or refreshes a package result and writes the current seed's files without rewriting other seeds' files. Results are keyed by `(strategy, seed_id)`, so rebuilding the same seed with the same strategy updates that slot while a different strategy remains a separate result. A refresh also removes known optional formats for that strategy that were produced by an earlier run but are not selected now. Files for other strategies and unrelated user files in the directory are left untouched.
+
+The filenames identify the collection; seed titles and IDs live inside it.
+The dashboard's **Graph selector** labels results by title and strategy. On each build:
+
+- A different seed adds a result and retains existing results.
+- The same seed with a different strategy adds a separate result.
+- The same seed and strategy replaces that result, even if model or build
+  settings changed. Collections do not retain a history of those reruns.
+
+Other formats are written when selected (`png` remains the default when no export
+format is supplied):
 
 - `<strategy>.png` (static Matplotlib render)
 - `<strategy>.html` (Pyvis interactive network)
 - `<strategy>.plotly.html` (Plotly interactive graph)
-- `dashboard.html` (shared tri-pane research dashboard shell when dashboard export is part of a normal collection flow)
-- `dashboard.manifest.json` (shared collection index for dashboard result payloads)
 - `<strategy>.json` (enriched graph data payload)
 - `<strategy>.csv` (flat paper table for pandas/spreadsheets)
 - `<strategy>.bib` (combined BibTeX entries for all papers)
 - `<strategy>.graphml` (exchange format for Gephi/Cytoscape)
-- `<strategy>.config.json` (run config + metadata sidecar)
+- `<strategy>.config.json` (run config + metadata sidecar; always written except for a standalone-only `--export dashboard -o *.dashboard.html` run)
 
-For single-export runs, only the requested format is written.
-`*.config.json` is still written as the run sidecar.
+When dashboard is combined with other formats, those additional artifacts live alongside the graph JSON and its sidecar under `<title-slug>-<hash>/`. Explicitly adding `--export json` does not duplicate the JSON file. `--export all` adds the remaining formats in the same directory.
+
+Each individual artifact is written to a temporary file beside its destination and published by atomic replacement. If a writer or HTML post-processing step reports a failure, an existing destination is retained instead of being replaced by partial output.
 
 ## Output Location
 
+Omit `--output` to use `out/` under the current working directory. In a source checkout this directory has a tracked `.gitkeep` and generated contents are ignored by Git. An explicit `--output` overrides that location; a root-level name such as `research` creates a separate directory outside the ignored output tree.
+
+Dashboard exports use two shared collection files directly under `out/` and keep the graph JSON and build sidecar under `out/<title-slug>-<hash>/`. A first dashboard build therefore produces:
+
+```text
+out/
+  dashboard.html
+  dashboard.citemesh.json
+  .dashboard.citemesh.json.lock
+  <title-slug>-<hash>/
+    hybrid.json
+    hybrid.config.json
+```
+
+The collection package remains a portable copy of all results. The per-seed JSON
+files let you inspect, copy, or import a single graph without extracting it from
+that package.
+
+Open the saved collection directly with `citemesh view`; use `citemesh view out/my-collection` for a named existing collection or `citemesh view out/report.dashboard.html` for a standalone file. The command opens the local HTML file without rebuilding or starting a server.
+
 Path components:
 
-- `<slug>` is a filesystem-safe version of the seed title
+- `<title-slug>` is a filesystem-safe version of the paper title, falling back to the canonical seed ID when the title is missing
 - `<hash>` is the first 8 chars of `sha256(seed_id)`
+
+Later builds reuse an existing directory with the same seed-hash suffix, including directories previously named from the seed ID. Correcting a paper title therefore retains the original directory name and lets a dashboard refresh replace its exports and remove obsolete formats in place.
 
 Canonical path-normalization rules:
 
+- An existing explicit `--output` directory takes precedence over suffix rules, even when its name ends in `.json` or `.dashboard.html`. Non-dashboard exports go inside that directory; dashboard exports use it as the collection root.
 - `--output` omitted:
-  - non-dashboard artifacts are written under `out/<slug>-<hash>/` as `<strategy>.<ext>`
-  - when `dashboard` export is selected, the shared shell is written to `out/dashboard.html`, the collection index to `out/dashboard.manifest.json`, and the shared shell is refreshed with the current saved-result bundle
+  - non-dashboard artifacts are written under `out/<title-slug>-<hash>/` as `<strategy>.<ext>`
+  - a normal dashboard export writes `out/dashboard.html`, `out/dashboard.citemesh.json`, and `out/<title-slug>-<hash>/<strategy>.json` plus its config sidecar
 - single-export run (`--export <one-format>`) with explicit `--output`:
-  - `--export dashboard -o report.dashboard.html` keeps the legacy standalone one-file behavior and writes exactly `report.dashboard.html`
-  - if `--output` ends with the target format suffix, it is used as-is
-  - if `--output` ends with a different known export suffix, that suffix is replaced
-  - if `--output` has no known export suffix, the target suffix is appended
+  - `--export dashboard -o out/my-collection` puts the shared viewer/package in `out/my-collection/` and the graph JSON/sidecar in `out/my-collection/<title-slug>-<hash>/`
+  - `--export dashboard -o out/report.dashboard.html` requests standalone mode and writes exactly that one self-contained file; it does not create or update a collection package
+  - for non-dashboard formats, an existing directory receives `<strategy>.<ext>` inside it; otherwise a matching target suffix is used as-is, a different known export suffix is replaced, and a missing suffix is appended
 - multi-export run (`--export all` or multiple formats) with explicit `--output`:
-  - if `dashboard` is among the selected formats and `--output` ends with
-    `.dashboard.html`, the dashboard stays a standalone file at that exact path,
-    collection mode is disabled, and sibling exports use the stripped base with
-    their own suffixes (for example `report.json`, `report.csv`, `report.config.json`)
-  - if `--output` ends with a known export suffix (for example `out.png`), that suffix
-    is stripped and the remainder is treated as directory base
+  - if `dashboard` is among the selected formats and `--output` ends with `.dashboard.html`, the dashboard stays a standalone file at that exact path, collection mode is disabled, and sibling exports use the stripped base with their own suffixes (for example `out/report.json`, `out/report.csv`, `out/report.config.json`)
+  - if `--output` ends with a known export suffix (for example `out.png`), that suffix is stripped and the remainder is treated as directory base
   - if `--output` has no known suffix, it is treated directly as directory base
-  - each format is written as `<directory-base>/<strategy>.<ext>`
-  - if `dashboard` is among the selected formats, the shared shell is written as `<directory-base>/dashboard.html`, the collection index as `<directory-base>/dashboard.manifest.json`, the shell embeds the currently available saved-result payloads from that collection, and the run-specific data/config artifacts are written under `<directory-base>/<slug>-<hash>/`
-  - re-running the same `seed_id` with the same `strategy` refreshes that collection slot instead of creating a second entry, because the JSON/config artifact path for that seed is stable
+  - with dashboard collection mode, the viewer/package stay at the directory root; graph JSON, its sidecar, and every additional format are written under `<directory-base>/<title-slug>-<hash>/`
+  - without dashboard collection mode, each format follows the normal single/multi-export resolver
 
 Examples:
 
-- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png`
-  writes `out/dashboard.html`, `out/dashboard.manifest.json`,
-  `out/<slug>-<hash>/hybrid.png`, `out/<slug>-<hash>/hybrid.html`,
-  `out/<slug>-<hash>/hybrid.plotly.html`, `out/<slug>-<hash>/hybrid.json`,
-  `out/<slug>-<hash>/hybrid.graphml`, `out/<slug>-<hash>/hybrid.config.json`
-- `citemesh build "<paper-id>" --strategy citation --export json -o report.graphml`
-  writes `report.json`
-- `citemesh build "<paper-id>" --strategy recommendation --export dashboard -o report.dashboard.html`
-  writes the standalone dashboard file `report.dashboard.html`
-- `citemesh build "<paper-id>" --strategy recommendation --export dashboard --export json -o report.dashboard.html`
-  writes `report.dashboard.html`, `report.json`, and `report.config.json`
+- `citemesh build "<paper-id>" --strategy hybrid --export dashboard` writes the shared viewer/package in `out/` plus `out/<title-slug>-<hash>/hybrid.json` and `hybrid.config.json`
+- adding `-o out/my-collection` uses that directory as the root for the same structure
+- running again for another paper adds its directory and a second result to the same package, then refreshes the shared viewer
+- `citemesh build "<paper-id>" --strategy hybrid --export all -o out.png` writes `out/dashboard.html`, `out/dashboard.citemesh.json`, `out/<title-slug>-<hash>/hybrid.png`, `out/<title-slug>-<hash>/hybrid.html`, `out/<title-slug>-<hash>/hybrid.plotly.html`, `out/<title-slug>-<hash>/hybrid.json`, `out/<title-slug>-<hash>/hybrid.csv`, `out/<title-slug>-<hash>/hybrid.bib`, `out/<title-slug>-<hash>/hybrid.graphml`, and `out/<title-slug>-<hash>/hybrid.config.json`
+- `citemesh build "<paper-id>" --strategy citation --export json -o out/report.graphml` writes `out/report.json`
+- `citemesh build "<paper-id>" --strategy recommendation --export dashboard -o out/report.dashboard.html` writes the standalone dashboard file `out/report.dashboard.html`
+- `citemesh build "<paper-id>" --strategy recommendation --export dashboard --export json -o out/report.dashboard.html` writes `out/report.dashboard.html`, `out/report.json`, and `out/report.config.json`
+
+### Collection Package (`dashboard.citemesh.json`)
+
+The package is ordinary UTF-8 JSON with:
+
+- `kind: "citemesh-dashboard-collection"`
+- `schema_version: 1`
+- `current_result_id`
+- `results`, ordered with the most recently added or refreshed result first
+
+Each result contains its stable result identity, seed/title/strategy summary,
+an `updated_at` timestamp, canonical graph payload, and the portable `build`
+settings needed to understand or reproduce the run. Machine-local output paths are excluded from the embedded build
+settings, so the package can be moved between directories and machines as one file.
+Each embedded graph uses `kind: "citemesh-graph"` and `schema_version: 1`.
+
+Collections created by the former `dashboard.manifest.json` layout are migrated on
+the next collection build. CiteMesh reads valid legacy entries and merges them into
+`dashboard.citemesh.json`; migration does not rewrite or delete the legacy manifest
+or its referenced artifacts.
+
+An existing malformed, unsupported, or inaccessible package stops the build before CiteMesh makes API calls or starts model work, and the file is left untouched. Failed filesystem inspection never counts as a missing package. Package persistence precedes viewer refresh so an unexpected HTML-rendering failure cannot discard a completed graph: the error reports the saved package path, which can be loaded from another current dashboard with **Add Results**, or the command can be rerun after the renderer is repaired.
+
+Per-result files are fully staged before the collection lock is acquired. Under that lock, CiteMesh backs up the exact files owned by the result, publishes the staged files, removes obsolete known formats, and writes the package last. If the operation reports a normal export or filesystem failure, the prior completed result files and package are retained or restored. This does not claim power-loss atomicity across the entire multi-file bundle.
 
 ## JSON vs Sidecar
 
@@ -79,68 +142,106 @@ Examples:
 Sidecar path contract:
 
 - for strategy-named outputs, sidecar is `<strategy>.config.json` in the same directory
-- for explicit single-file outputs, sidecar uses the resolved output stem
-  (for example `report.json` -> `report.config.json`)
+- for explicit single-file outputs, sidecar uses the resolved output stem (for example `out/report.json` -> `out/report.config.json`)
 
 ### Graph JSON (`<strategy>.json`)
 
 Top-level fields:
 
+- `kind` (`"citemesh-graph"`)
+- `schema_version` (`1`)
 - `seed_id`
-- `meta` (`strategy`, `year_range`)
+- `meta` (`strategy`, `year_range`, and `candidate_source_status` when the build queried Semantic Scholar neighborhood sources). `year_range` is `{"min": ..., "max": ...}` over the papers with a known publication year, and `null` when no paper has one.
 - `summary` (`nodes`, `edges`)
-- `nodes` — enriched per-paper objects (see below)
+- `nodes` - enriched per-paper objects (see below)
+- `dashboard` (`meta` and the stored layout geometry are always present)
 - `edges` (`source`, `target`, `weight`, plus readable source/target title/label fields)
 
-`source`/`target` are canonical node IDs for unambiguous graph processing.
-The extra `*_title` and `*_label` fields are provided for readable inspection.
+`source`/`target` are canonical node IDs for unambiguous graph processing. The extra `*_title` and `*_label` fields are provided for readable inspection.
 
 Each node includes:
 
-- core fields: `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`
-- analysis fields: `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), `seed_relevance` (personalized PageRank score)
+- core fields: `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`. `year` is `0` when no valid publication year is known; the same papers are excluded from `meta.year_range`.
+- analysis fields: `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), `seed_relevance` (personalized PageRank over the final graph - a topology metric computed at export time, not the candidate-selection score used during hybrid reranking)
 - external: `links` (arXiv abs/pdf URLs, DOI URL, Semantic Scholar URL)
 - `bibtex` (deterministic BibTeX entry)
 
-The JSON and dashboard formats share the same enriched node schema. When a
-precomputed/shared layout already exists (for example because the same run also
-exports `png`, `plotly`, or `dashboard`), the JSON payload also carries
-dashboard render metadata (`dashboard.meta.plotly_*`) so current-version
-CiteMesh JSON files can be loaded back into the dashboard via the
-**Load Results** button without losing graph geometry. JSON-only exports omit
-those geometry arrays to avoid unnecessary layout work during data-only runs.
+The JSON and dashboard formats share the same enriched node schema. Every JSON export carries the stored dashboard render metadata and layout geometry (`dashboard.meta.plotly_*`), so any `citemesh-graph` file can be loaded back into the dashboard via **Add Results** without losing graph geometry - including files produced by a data-only `--export json` run.
 
 ### CSV (`<strategy>.csv`)
 
-Flat table with one row per paper. Columns: `id`, `title`, `year`, `authors`
-(semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`,
-`categories` (semicolon-separated), `is_seed`, `provenance`, `seed_relation`,
-`seed_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
+Flat table with one row per paper. Columns: `id`, `title`, `year`, `authors` (semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`, `categories` (semicolon-separated), `is_seed`, `provenance`, `seed_relation`, `seed_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
+
+An empty graph still writes the column header. Both CLI and dashboard exports
+quote fields containing commas, quotes, newlines, or carriage returns. Text cells
+beginning with `=`, `+`, `-`, `@`, tab, or carriage return are prefixed with an
+apostrophe (spreadsheet formula-injection guard) in both writers, so consumers
+parsing those columns may see a leading `'`.
 
 ### BibTeX (`<strategy>.bib`)
 
-Combined BibTeX entries for all papers in the graph, one `@article` per paper.
-Ready for direct import into reference managers or LaTeX projects.
+Combined BibTeX entries for all papers in the graph, one `@article` per paper. Ready for direct import into reference managers or LaTeX projects.
+
+Entries carry `title`, `author`, `year`, `doi`, `url`, and `abstract` when
+available. `doi` and `url` are written verbatim (never LaTeX-escaped) so
+reference managers and resolvers receive usable values; `doi` is the raw
+identifier from the node payload while `url` is the percent-encoded
+`https://doi.org/...` link. All other fields are LaTeX-escaped.
+
+Citation keys combine a readable paper-ID slug with a stable ID-derived suffix,
+so IDs differing only in punctuation or letter case retain distinct keys.
+An empty graph produces a bibliography with no entries.
+
+### GraphML (`<strategy>.graphml`)
+
+GraphML carries a reduced node schema compared to JSON/CSV: `provenance`, `provenance_base`, `seed_relation`, `seed_relevance`, `links`, and `bibtex` are omitted. `authors` and `categories` are flattened to comma-separated strings, and `is_seed` is written as `0`/`1`. Graph-level attributes include `citemesh_graphml_determinism`, `citemesh_graphml_writer_version`, and one `citemesh_meta_<key>` entry per run-metadata key.
 
 ### Dashboard HTML
 
-The dashboard shell (`dashboard.html` in collection mode, or
-`<name>.dashboard.html` for explicit standalone output) is a tri-pane research
-interface with embedded Plotly graph, paper list, and detail panel.
+The dashboard viewer (`dashboard.html` in collection mode, or `<name>.dashboard.html` for explicit standalone output) is a tri-pane research interface with embedded Plotly graph, paper list, and detail panel. Collection-mode HTML embeds a snapshot of `dashboard.citemesh.json`; this intentional duplication lets the viewer work when opened as `file://...`, where browsers do not reliably permit JavaScript to fetch adjacent local files. The JSON package remains the authoritative reusable data file.
+
+![CiteMesh Megalodon dashboard with Prior works active and FlashAttention-2 selected](../../assets/ui-prior-works.png)
+
+_The Megalodon hybrid graph with **Prior works** active and “FlashAttention-2” selected: the graph and paper list narrow to 37 earlier papers while the detail pane explains the selected paper's relationship and path to the seed._
+
+**Toolbar controls:**
+
+- **Prior works / Derivative works** - scope the graph and paper list to papers the seed builds on, or papers that build on the seed; these correspond directly to the two halves of the seed-discovery workflow
+- **List view** - scrolls the paper list pane into view
+- **Filters** - toggles the search/sort/filter strip: text search, sort order, year range, provenance chips (citation/semantic/both), and the `Saved` chip
+- **More** - opens the selected paper (or the seed when nothing is selected) on Semantic Scholar in a new tab
+- **Graph selector** - switches between graph slots in the active collection
 
 **Toolbar data actions:**
 
-- **Export JSON** — downloads the embedded enriched payload as a standalone `.json` file
-- **Export CSV** — generates a CSV table client-side from the current dataset
-- **All BibTeX** — downloads all papers' BibTeX entries as a single `.bib` file
-- **Saved Results selector** — switches between JSON payload slots already tracked in the collection shell, with no extra file picking
-- **Load Results** — file picker that accepts current-version CiteMesh JSON files plus current-version dashboard HTML exports. Current-version JSON keeps stored graph geometry when that geometry was exported. Older dashboard HTML exports are not supported; re-export them from the current code if you still need dashboard import. If you need JSON round-tripping through the dashboard, export JSON alongside a layout-based format such as `dashboard` or `plotly`.
+- **Export JSON** - downloads the embedded enriched payload as a standalone `.json` file
+- **Export CSV** - generates a CSV table client-side from the current dataset
+- **All BibTeX** - downloads all papers' BibTeX entries as a single `.bib` file
+- **Saved BibTeX / Copy Saved Links** - appear once you star papers; download the reading list as `.bib`, or copy it as a markdown link list
+- **Add Results** - imports one or multiple `citemesh-graph` JSON files, `citemesh-dashboard-collection` packages, or current dashboard HTML exports into the browser session; matching `(strategy, seed_id)` slots are refreshed instead of duplicated
+- **Export Collection** - downloads the active one-or-many-result browser collection as `dashboard.citemesh.json`
 
-In collection mode, this means you can keep one `dashboard.html` open and move
-between saved result slots from the built-in selector, or load any other
-compatible JSON payload manually, rather than opening a separate dashboard HTML
-file for each paper. Re-running the same seed with the same strategy refreshes
-that slot instead of adding another selector entry.
+In-browser downloads are named from a seed-title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics; **Export Collection** always writes `dashboard.citemesh.json`.
+
+In collection mode, keep one `dashboard.html` open and move between results rather
+than opening a separate dashboard for each paper. Browser imports change the
+in-memory session; use **Export Collection** to persist that merged set.
+
+**Reading list:** every paper row and the detail panel carry a star toggle. Starred
+papers persist in browser `localStorage` per `(strategy, seed_id)` result, the
+`Saved` chip filters the list down to them, and the saved-scoped export buttons
+above turn a triage session into a `.bib` file or a markdown link list without
+opening each paper in a tab. The stored list is a superset of what is displayed:
+entries for papers a later rebuild drops are retained in `localStorage` and
+reappear if the paper returns; only the visible list and the saved-scoped exports
+are pruned to the current graph.
+
+**Visual encodings:** node color is a publication-year gradient (the on-graph legend and year timeline share the exact colorscale), node size tracks citation count, the seed wears a ring halo, and edge opacity/width scale with relative link weight within the graph. Hovering a node shows a theme-styled card (wrapped title, authors, year | citations | venue, and its relation to the seed) and previews the full details panel; clicking locks the selection and draws its strongest links as arcs.
+
+All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta
+so auto-darkening browser extensions leave the tuned palettes alone. Theme choices
+and defaults are described in [CLI Usage](../guides/cli.md); auto-detection inputs
+are described in [Environment Variables](environment.md).
 
 ### Sidecar (`<strategy>.config.json`)
 
@@ -153,20 +254,37 @@ Top-level fields:
 
 `build` includes strategy-specific sections:
 
-- `citation` for reference/citation collection knobs that affected the run.
-  Recommendation sidecars include only shared reference-hydration settings, while
-  citation and hybrid sidecars also include citation-expansion budgets.
+- `citation` for reference/citation collection knobs that affected the run. Citation and recommendation sidecars record `similarity_threshold` and shared reference-hydration settings; citation and hybrid sidecars also include citation-expansion budgets.
 - `hybrid` for resolved `max_semantic`.
-- `embedding` for embedding/hybrid semantic settings.
+- `embedding` for embedding/hybrid semantic settings, including the requested `device` and `model_profile` tokens. Embedding-strategy sidecars also record `top_k`, the per-node edge cap.
+
+Inactive source and storage options are omitted: candidate runs do not record
+corpus-hydration flags, corpus runs do not record candidate-pool budgets, and
+FP32 storage does not record INT8 calibration or prefilter settings.
+`build.refresh_paper_cache` records whether fresh paper metadata was requested.
+
+Exports accept integral numeric years (including values such as `2017.0`);
+fractional or non-finite years are treated as missing. GraphML writes nullable
+text fields as empty values. Null or non-finite edge weights raise a clear error
+before exports replace existing files. GraphExporter rejects empty node IDs and
+IDs with surrounding whitespace, matching the dashboard's import contract.
+Plotly marker labels display upstream markup as literal text. Static PNG exports
+use an `Unknown` title when the requested seed is absent, including empty graphs.
+
+Static labels sit outside each marker's outline. Dashboard labels also clear the selection halo, keeping the same pixel clearance during zoom, resizing, and result imports. Citation-based node areas are capped at 2,500 square points for seeds and 2,200 for other papers before interactive-display scaling.
 
 `metadata` includes:
 
 - common run metadata (`paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`)
-- strategy score semantics (`score_contract`)
-- embedding/hybrid runtime retrieval metadata when available
+- strategy score semantics (`score_contract`): `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, and `score_type` (`<strategy>_similarity_composite`); hybrid additionally records an `adjudication_policy` sentence describing candidate reranking
+- Semantic Scholar neighborhood outcomes (`candidate_source_status`) keyed by
+  attempted source. Values are `complete` (papers returned), `empty` (successful
+  response with no papers), or `unavailable` (operational failure). Partial
+  results remain usable and preserve the unavailable source; if every attempted
+  source is unavailable, the build fails and writes no normal result artifacts.
+- embedding/hybrid runtime metadata when available, including `effective_device`, `effective_compute_dtype`, and the resolved `model_profile`, plus `retrieval_representation` and `graph_representation` identifying the distinct prompt-conditioned vector roles
 
-See embedding metadata term definitions in
-[Embedding Runtime](embedding-runtime.md).
+See embedding metadata term definitions in [Embedding Runtime](embedding-runtime.md).
 
 ## Determinism Notes
 

@@ -32,6 +32,9 @@ class TemporalConfig:
 class EmbeddingSimilarityConfig:
     """Configuration for embedding-based similarity."""
 
+    # Real-abstract development grid winner; see the semantic quality fixtures.
+    min_semantic_similarity: float = 0.74
+
     # Multi-factor similarity weights.
     semantic_weight: float = 0.5
     temporal_weight: float = 0.2
@@ -62,10 +65,9 @@ class EmbeddingStorageConfig:
 
     def validate(self) -> None:
         """Ensure storage settings are valid."""
-        if self.storage_precision not in {"float32", "float16", "int8"}:
+        if self.storage_precision not in {"float32", "int8"}:
             raise ValueError(
-                "Embedding storage_precision must be one of "
-                "{'float32', 'float16', 'int8'}"
+                "Embedding storage_precision must be one of {'float32', 'int8'}"
             )
         if self.binary_rescore_multiplier < 1:
             raise ValueError("binary_rescore_multiplier must be at least 1")
@@ -84,9 +86,6 @@ class HybridSimilarityConfig:
     citation_citation_weights: Tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
     mixed_weights: Tuple[float, float, float, float] = (0.4, 0.3, 0.2, 0.1)
 
-    # Co-citation boost
-    co_citation_boost: float = 0.2
-
     # Edge limiting
     max_edges_per_node: int = 5
 
@@ -96,10 +95,10 @@ class VisualizationConfig:
     """Configuration for graph visualization."""
 
     # Figure settings
-    figure_size: Tuple[int, int] = (12, 10)
+    figure_size: Tuple[int, int] = (14, 8)
     dpi: int = 150
 
-    # Node size parameters (in square pixels)
+    # Node area caps and minimum (in square points for static scatter plots)
     seed_size: int = 2500
     max_non_seed_size: int = 2200
     min_size: int = 100
@@ -135,12 +134,16 @@ class APIConfig:
     # Timeout settings (seconds)
     default_timeout: float = 30.0
 
-    # Retry settings
-    max_retries: int = 3
+    # Long waits are intentional for resumable builds: bound attempts, not total
+    # elapsed time. The service retry policy caps each delay (60s jitter ceiling,
+    # 300s honored Retry-After ceiling) but sets no aggregate deadline.
+    max_retries: int = 30
     retry_delay: float = 2.0  # Initial delay, increases exponentially
 
-    # Rate limiting
-    requests_per_second: float = 0.5  # Conservative rate limit
+    # Rate limiting: anonymous requests share a small public pool; authenticated
+    # keys are granted 1 request/second by Semantic Scholar.
+    requests_per_second: float = 0.5
+    authenticated_requests_per_second: float = 1.0
 
 
 # Global config instances (can be overridden)

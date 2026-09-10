@@ -45,6 +45,11 @@ class AbstractSimilarityIndex:
             ngram_range=(1, 2),
             sublinear_tf=True,
         )
+        analyze = vectorizer.build_analyzer()
+        if not any(analyze(text) for text in texts):
+            self._matrix = None
+            self._id_to_idx = {}
+            return
         matrix = vectorizer.fit_transform(texts)
 
         self._matrix = matrix

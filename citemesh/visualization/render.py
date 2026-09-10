@@ -12,12 +12,14 @@ import textwrap
 from pathlib import Path
 from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
 
+import matplotlib
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 
 from citemesh.core import VIZ_CONFIG
+from citemesh.data.cache import atomic_output_path
 
 from .ordering import (
     canonicalize_graph_for_layout,
@@ -25,11 +27,10 @@ from .ordering import (
     ordered_nodes,
 )
 from .themes import Theme, get_theme
+from .years import coerce_publication_year, publication_year_bounds
 
 logger = logging.getLogger(__name__)
 MAX_TITLE_CHARS = 40
-MISSING_YEAR_FALLBACK_MIN = 2000
-MISSING_YEAR_FALLBACK_MAX = 2001
 KK_LAYOUT_DISTANCE_ATTR = "layout_distance"
 KK_LAYOUT_DISTANCE_EPSILON = 1e-6
 LAYOUT_PADDING_RATIO = 0.1
@@ -43,6 +44,39 @@ COMMUNITY_SEPARATION_BASE = 0.92
 COMMUNITY_SEPARATION_STEP = 0.06
 COMMUNITY_SEPARATION_MAX_EXTRA = 0.32
 COMMUNITY_ANCHOR_MAX_RADIUS = 0.69
+COMMUNITY_SCAFFOLD_WEIGHT = 0.15
+MAX_STATIC_NON_SEED_LABELS = 12
+DISCONNECTED_COMPONENT_GAP = 0.18
+DISCONNECTED_COMPONENT_MIN_SCALE = 0.32
+DISCONNECTED_COMPONENT_MIN_EXTENT = 0.28
+DISCONNECTED_COMPONENT_TARGET_ASPECT = 1.6
+STATIC_VIEWPORT_MARGIN_RATIO = 0.08
+STATIC_VIEWPORT_MIN_MARGIN = 0.1
+
+
+def _figure_renderer(figure: plt.Figure) -> Any:
+    """Return a renderer without depending on Matplotlib private APIs.
+
+    Interactive and vector canvases do not consistently expose
+    ``get_renderer``. In that case a temporary Agg canvas supplies public text
+    measurement while the caller's original canvas is restored for export.
+
+    :param plt.Figure figure: Figure whose artists need measurement.
+    :return Any: Matplotlib renderer compatible with artist extent methods.
+    """
+    original_canvas = figure.canvas
+    get_renderer = getattr(original_canvas, "get_renderer", None)
+    if callable(get_renderer):
+        return get_renderer()
+
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    agg_canvas = FigureCanvasAgg(figure)
+    try:
+        agg_canvas.draw()
+        return agg_canvas.get_renderer()
+    finally:
+        figure.set_canvas(original_canvas)
 
 
 def _citation_count(attrs: Mapping[str, Any]) -> int:
@@ -83,18 +117,18 @@ def _seed_suffix(seed_id: str, length: int = 8) -> str:
     return hashlib.sha256(seed_id.encode("utf-8")).hexdigest()[:length]
 
 
-def _output_dir_name(title: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS) -> str:
+def _output_dir_name(label: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS) -> str:
     """Build output directory name with stable seed suffix under truncation.
 
-    :param str title: Seed paper title used for the human-readable slug prefix.
+    :param str label: Paper title or fallback seed ID used for the slug prefix.
     :param str seed_id: Canonical seed identifier used for stable hash suffix.
     :param int max_chars: Maximum total directory-name length.
-    :return str: Filesystem-safe directory name containing title slug and hash suffix.
+    :return str: Filesystem-safe directory name containing a slug and hash suffix.
     """
     suffix = f"-{_seed_suffix(seed_id)}"
-    title_budget = max_chars - len(suffix)
-    title_budget = max(1, title_budget)
-    return f"{_filename_safe(title, max_chars=title_budget)}{suffix}"
+    label_budget = max_chars - len(suffix)
+    label_budget = max(1, label_budget)
+    return f"{_filename_safe(label, max_chars=label_budget)}{suffix}"
 
 
 def _similarity_to_layout_distance(raw_similarity: object) -> float:
@@ -189,14 +223,22 @@ def _spread_layout_by_communities(
         else:
             community_graph.add_edge(left_idx, right_idx, weight=weight)
 
-    if community_graph.number_of_edges() == 0:
-        ordered_cluster_ids = sorted(community_graph.nodes())
-        for idx, cluster_id in enumerate(ordered_cluster_ids):
-            next_cluster = ordered_cluster_ids[(idx + 1) % len(ordered_cluster_ids)]
-            if cluster_id != next_cluster and not community_graph.has_edge(
-                cluster_id, next_cluster
-            ):
-                community_graph.add_edge(cluster_id, next_cluster, weight=1.0)
+    component_groups = [
+        sorted(component) for component in nx.connected_components(community_graph)
+    ]
+    component_groups.sort(
+        key=lambda members: (0 if 0 in members else 1, tuple(members))
+    )
+    if len(component_groups) > 1:
+        # Spring layout otherwise lets isolated community groups drift to arbitrary
+        # extremes, which can collapse the useful graph area after normalization.
+        hub_cluster = component_groups[0][0]
+        for component in component_groups[1:]:
+            community_graph.add_edge(
+                hub_cluster,
+                component[0],
+                weight=COMMUNITY_SCAFFOLD_WEIGHT,
+            )
 
     anchor_positions = nx.spring_layout(
         community_graph,
@@ -330,6 +372,179 @@ def _normalize_layout_positions(
     }
 
 
+def _orient_layout_horizontally(
+    pos: Dict[Hashable, np.ndarray],
+) -> Dict[Hashable, np.ndarray]:
+    """Rotate a portrait-oriented layout to use the landscape export viewport.
+
+    :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
+    :return Dict[Hashable, np.ndarray]: Copied positions with the longer axis horizontal.
+    """
+    if not pos:
+        return {}
+
+    coords = np.array(list(pos.values()), dtype=float)
+    if coords.ndim != 2 or coords.shape[1] != 2:
+        return {
+            node: np.asarray(position, dtype=float).copy()
+            for node, position in pos.items()
+        }
+
+    span_x, span_y = np.ptp(coords, axis=0)
+    if float(span_y) <= float(span_x):
+        return {
+            node: np.asarray(position, dtype=float).copy()
+            for node, position in pos.items()
+        }
+    return {
+        node: np.array([float(position[1]), -float(position[0])])
+        for node, position in pos.items()
+    }
+
+
+def _layout_viewport_limits(
+    pos: Dict[Hashable, np.ndarray], viewport_aspect: float
+) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    """Fit equal-scale plot limits to the graph and export viewport.
+
+    :param Dict[Hashable, np.ndarray] pos: Normalized node positions.
+    :param float viewport_aspect: Physical width-to-height ratio of the axes.
+    :return Tuple[Tuple[float, float], Tuple[float, float]]: X and Y axis limits.
+    """
+    if not pos:
+        return (-1.05, 1.05), (-1.05, 1.05)
+
+    coords = np.array(list(pos.values()), dtype=float)
+    min_xy = coords.min(axis=0)
+    max_xy = coords.max(axis=0)
+    center_xy = (min_xy + max_xy) * 0.5
+    span_x, span_y = max_xy - min_xy
+    margin_x = max(
+        float(span_x) * STATIC_VIEWPORT_MARGIN_RATIO,
+        STATIC_VIEWPORT_MIN_MARGIN,
+    )
+    margin_y = max(
+        float(span_y) * STATIC_VIEWPORT_MARGIN_RATIO,
+        STATIC_VIEWPORT_MIN_MARGIN,
+    )
+    range_x = max(float(span_x) + 2.0 * margin_x, 2.0 * STATIC_VIEWPORT_MIN_MARGIN)
+    range_y = max(float(span_y) + 2.0 * margin_y, 2.0 * STATIC_VIEWPORT_MIN_MARGIN)
+    safe_aspect = max(float(viewport_aspect), 1e-6)
+
+    if range_x / range_y < safe_aspect:
+        range_x = range_y * safe_aspect
+    else:
+        range_y = range_x / safe_aspect
+
+    center_x, center_y = float(center_xy[0]), float(center_xy[1])
+    return (
+        (center_x - range_x * 0.5, center_x + range_x * 0.5),
+        (center_y - range_y * 0.5, center_y + range_y * 0.5),
+    )
+
+
+def _pack_disconnected_components(
+    pos: Dict[Hashable, np.ndarray], graph: nx.Graph
+) -> Dict[Hashable, np.ndarray]:
+    """Pack disconnected components into deterministic size-aware rows.
+
+    :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
+    :param nx.Graph graph: Graph defining connected-component membership.
+    :return Dict[Hashable, np.ndarray]: Size-aware packed component positions.
+    """
+    if not pos or graph.number_of_nodes() == 0:
+        return {}
+
+    components = [
+        sorted(component, key=str) for component in nx.connected_components(graph)
+    ]
+    if len(components) < 2:
+        return {
+            node: np.asarray(position, dtype=float).copy()
+            for node, position in pos.items()
+        }
+
+    components.sort(key=lambda members: (-len(members), tuple(map(str, members))))
+    largest_size = max(len(component) for component in components)
+    component_layouts: List[
+        Tuple[
+            Dict[Hashable, np.ndarray],
+            Tuple[float, float],
+            Tuple[float, float],
+        ]
+    ] = []
+
+    for component in components:
+        component_pos = {
+            node: np.asarray(pos[node], dtype=float)
+            for node in component
+            if node in pos
+        }
+        normalized = _orient_layout_horizontally(
+            _normalize_layout_positions(component_pos)
+        )
+        scale = max(
+            DISCONNECTED_COMPONENT_MIN_SCALE,
+            math.sqrt(float(len(component)) / float(largest_size)),
+        )
+        scaled = {
+            node: np.asarray(position, dtype=float) * scale
+            for node, position in normalized.items()
+        }
+        coords = np.array(list(scaled.values()), dtype=float)
+        if coords.size:
+            min_x, min_y = coords.min(axis=0)
+            max_x, max_y = coords.max(axis=0)
+        else:
+            min_x = min_y = max_x = max_y = 0.0
+        width = max(float(max_x - min_x), DISCONNECTED_COMPONENT_MIN_EXTENT)
+        height = max(float(max_y - min_y), DISCONNECTED_COMPONENT_MIN_EXTENT)
+        component_layouts.append(
+            (
+                scaled,
+                (float((min_x + max_x) * 0.5), float((min_y + max_y) * 0.5)),
+                (width, height),
+            )
+        )
+
+    padded_area = sum(
+        (width + DISCONNECTED_COMPONENT_GAP) * (height + DISCONNECTED_COMPONENT_GAP)
+        for _, _, (width, height) in component_layouts
+    )
+    target_row_width = max(
+        max(width for _, _, (width, _) in component_layouts),
+        math.sqrt(padded_area * DISCONNECTED_COMPONENT_TARGET_ASPECT),
+    )
+
+    packed: Dict[Hashable, np.ndarray] = {}
+    cursor_x = 0.0
+    cursor_y = 0.0
+    row_height = 0.0
+    for scaled, current_center, (width, height) in component_layouts:
+        if cursor_x > 0.0 and cursor_x + width > target_row_width:
+            cursor_x = 0.0
+            cursor_y += row_height + DISCONNECTED_COMPONENT_GAP
+            row_height = 0.0
+
+        target_center_x = cursor_x + width * 0.5
+        target_center_y = cursor_y + height * 0.5
+        offset_x = target_center_x - current_center[0]
+        offset_y = target_center_y - current_center[1]
+        for node, position in scaled.items():
+            packed[node] = np.array(
+                [float(position[0]) + offset_x, float(position[1]) + offset_y],
+                dtype=float,
+            )
+        cursor_x += width + DISCONNECTED_COMPONENT_GAP
+        row_height = max(row_height, height)
+
+    if not packed:
+        return {}
+    packed_coords = np.array(list(packed.values()), dtype=float)
+    bounds_center = (packed_coords.min(axis=0) + packed_coords.max(axis=0)) * 0.5
+    return {node: position - bounds_center for node, position in packed.items()}
+
+
 def add_metadata_box(
     ax: plt.Axes,
     metadata: Dict[str, Any],
@@ -394,7 +609,7 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
     Compute node sizes with extreme variation matching CiteMesh style.
 
     :param nx.Graph graph: NetworkX graph with paper nodes
-    :return List[float]: List of sizes (in square pixels) for each node
+    :return List[float]: List of marker areas (in square points) for each node.
     """
     nodes = ordered_nodes(graph)
     sizes = []
@@ -437,6 +652,12 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
         # Add citation bonus (log scale)
         citation_bonus = np.log10(citation_count + 1) * 100
         size += citation_bonus
+        size = min(
+            size,
+            VIZ_CONFIG.seed_size
+            if node in seed_nodes
+            else VIZ_CONFIG.max_non_seed_size,
+        )
 
         sizes.append(size)
 
@@ -455,23 +676,17 @@ def compute_node_colors(
     :return Tuple[List[Tuple[float, float, float]], int, int]: Tuple of (color_list, min_year, max_year)
     """
     nodes = ordered_nodes(graph)
-    years = [graph.nodes[n].get("year") for n in nodes if graph.nodes[n].get("year")]
-    if years:
-        min_year = min(years)
-        max_year = max(years)
-    else:
-        min_year = MISSING_YEAR_FALLBACK_MIN
-        max_year = MISSING_YEAR_FALLBACK_MAX
+    years = [coerce_publication_year(graph.nodes[node].get("year")) for node in nodes]
+    min_year, max_year = publication_year_bounds(years)
 
     colors = []
-    for node in nodes:
+    for node, year in zip(nodes, years):
         # Seed paper gets special color
         if node == seed_id:
             colors.append(theme.seed_color)
             continue
 
-        year = graph.nodes[node].get("year")
-        if year is None:
+        if year <= 0:
             norm = 0.5
         elif max_year == min_year:
             norm = 0.5
@@ -549,7 +764,8 @@ def compute_layout(
     for node in sorted(pos, key=str):
         pos[node] += rng.normal(0, VIZ_CONFIG.perturbation_std, 2)
 
-    return pos
+    packed = _pack_disconnected_components(pos, canonical_graph)
+    return _orient_layout_horizontally(packed)
 
 
 def draw_edges(
@@ -656,9 +872,9 @@ def draw_labels(
         return textwrap.fill(title, width=width, break_long_words=False)
 
     ordered = ordered_nodes(graph)
-    size_map: Dict[Hashable, float] = {}
-    if sizes is not None and len(sizes) == len(ordered):
-        size_map = {node: float(sizes[idx]) for idx, node in enumerate(ordered)}
+    if sizes is None or len(sizes) != len(ordered):
+        sizes = compute_node_sizes(graph)
+    size_map = {node: float(sizes[idx]) for idx, node in enumerate(ordered)}
 
     candidate_nodes = sorted(
         ordered,
@@ -670,8 +886,14 @@ def draw_labels(
     )
 
     placed: List[np.ndarray] = []
+    label_bounds: List[Any] = []
+    non_seed_label_count = 0
+    ax.figure.canvas.draw()
+    renderer = _figure_renderer(ax.figure)
     for node in candidate_nodes:
         p = pos[node]
+        # Scatter areas are points squared; the two-point outline adds one point.
+        node_radius = math.sqrt(size_map[node]) / 2.0 + 1.0
 
         # Seed paper gets larger, bold label
         is_seed = node == seed_id
@@ -679,7 +901,7 @@ def draw_labels(
             title = graph.nodes[node].get("title", "Seed paper")
             label = _wrap_title(title)
             fontsize = 9
-            xytext = (0, 8)
+            xytext = (0, node_radius + 8)
             vertical_alignment = "bottom"
             label_bbox = dict(
                 boxstyle="round,pad=0.2",
@@ -699,12 +921,19 @@ def draw_labels(
             year_label = "n.d." if year is None else str(year)
             label = f"{last_name}, {year_label}"
             fontsize = VIZ_CONFIG.font_size
-            xytext = (0, -3)
+            xytext = (0, -node_radius - 3)
             vertical_alignment = "top"
-            label_bbox = None
+            label_bbox = dict(
+                boxstyle="round,pad=0.1",
+                facecolor=theme.background,
+                alpha=0.68,
+                linewidth=0,
+            )
 
         fontweight = "bold" if is_seed else VIZ_CONFIG.font_weight
         if not is_seed:
+            if non_seed_label_count >= MAX_STATIC_NON_SEED_LABELS:
+                continue
             node_size = size_map.get(node, float(VIZ_CONFIG.min_size))
             scaled = min(
                 max(node_size / max(float(VIZ_CONFIG.seed_size), 1.0), 0.0), 1.0
@@ -720,7 +949,7 @@ def draw_labels(
             ):
                 continue
 
-        ax.annotate(
+        annotation = ax.annotate(
             label,
             xy=p,
             xytext=xytext,
@@ -732,7 +961,14 @@ def draw_labels(
             color=theme.text_color,
             bbox=label_bbox,
         )
+        bounds = annotation.get_window_extent(renderer).expanded(1.06, 1.16)
+        if not is_seed and any(bounds.overlaps(previous) for previous in label_bounds):
+            annotation.remove()
+            continue
+        label_bounds.append(bounds)
         placed.append(np.asarray(p, dtype=float))
+        if not is_seed:
+            non_seed_label_count += 1
 
 
 def visualize_graph(
@@ -742,7 +978,7 @@ def visualize_graph(
     iterations: int = 100,
     dpi: int = None,
     metadata: Optional[Dict[str, Any]] = None,
-    theme_name: str = "light",
+    theme_name: str = "dark",
     layout: Optional[Dict[Hashable, np.ndarray]] = None,
     layout_seed: Optional[int] = None,
 ) -> None:
@@ -760,7 +996,14 @@ def visualize_graph(
         reuse.
     :param Optional[int] layout_seed: Optional seed used when computing layout internally.
     :return None: Writes output image to the given path.
+    :raises ValueError: If an edge weight is null or non-finite.
     """
+    for left, right, attrs in ordered_edges_with_data(graph):
+        weight = attrs.get("weight", 0.0)
+        if weight is None or not math.isfinite(float(weight)):
+            raise ValueError(
+                f"Cannot export null or non-finite edge weight for {left!r} -> {right!r}."
+            )
     if dpi is None:
         dpi = VIZ_CONFIG.dpi
 
@@ -778,12 +1021,32 @@ def visualize_graph(
     sizes = compute_node_sizes(graph)
     colors, _, _ = compute_node_colors(graph, seed_id, theme)
 
-    # Create figure
-    fig, ax = plt.subplots(figsize=VIZ_CONFIG.figure_size, facecolor=theme.background)
+    # The MacOSX canvas requires the GUI main thread. Use an Agg canvas only for
+    # this static figure without replacing the application's selected backend.
+    if str(matplotlib.get_backend()).lower() == "macosx":
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+
+        fig = Figure(figsize=VIZ_CONFIG.figure_size, facecolor=theme.background)
+        FigureCanvasAgg(fig)
+        ax = fig.subplots()
+    else:
+        fig, ax = plt.subplots(
+            figsize=VIZ_CONFIG.figure_size, facecolor=theme.background
+        )
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.02)
     ax.set_aspect("equal")
     ax.axis("off")
     fig.patch.set_facecolor(theme.background)
     ax.set_facecolor(theme.background)
+    axes_box = ax.get_position(original=True)
+    figure_width, figure_height = fig.get_size_inches()
+    viewport_aspect = (figure_width * axes_box.width) / (
+        figure_height * axes_box.height
+    )
+    x_limits, y_limits = _layout_viewport_limits(pos, viewport_aspect)
+    ax.set_xlim(*x_limits)
+    ax.set_ylim(*y_limits)
 
     # Draw graph components
     draw_edges(ax, graph, pos, theme)
@@ -791,7 +1054,8 @@ def visualize_graph(
     draw_labels(ax, graph, pos, seed_id, theme, sizes=sizes)
 
     # Add title
-    title = graph.nodes[seed_id].get("title", "Unknown")
+    seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
+    title = seed_attrs.get("title", "Unknown")
     wrapped_title = textwrap.fill(
         " ".join(str(title).split()),
         width=72,
@@ -808,33 +1072,39 @@ def visualize_graph(
     if metadata:
         add_metadata_box(ax, metadata, pos, theme)
 
-    ax.set_xlim(-1.05, 1.05)
-    ax.set_ylim(-1.05, 1.05)
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.02)
-
     # Save figure
-    plt.savefig(
-        output_path,
-        dpi=dpi,
-        facecolor=theme.background,
-    )
-    plt.close()
+    try:
+        with atomic_output_path(output_path) as tmp_path:
+            fig.savefig(
+                tmp_path,
+                dpi=dpi,
+                facecolor=theme.background,
+            )
+    finally:
+        plt.close(fig)
 
 
 def generate_output_path(
     graph: nx.Graph, seed_id: str, output_dir: Path = Path("out"), strategy: str = ""
 ) -> Path:
     """
-    Generate auto-named output path from paper title.
+    Generate a title-based output path, reusing an existing seed directory.
 
-    :param nx.Graph graph: NetworkX graph
+    :param nx.Graph graph: NetworkX graph containing the seed paper title.
     :param str seed_id: ID of seed paper
     :param Path output_dir: Output directory
     :param str strategy: Optional strategy suffix used in filename.
     :return Path: Path object for output file
     """
-    title = graph.nodes[seed_id].get("title", "graph")
-    paper_dir = output_dir / _output_dir_name(title=title, seed_id=seed_id)
+    existing_dirs = sorted(
+        path for path in output_dir.glob(f"*-{_seed_suffix(seed_id)}") if path.is_dir()
+    )
+    if existing_dirs:
+        paper_dir = existing_dirs[0]
+    else:
+        seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
+        title = seed_attrs.get("title") or seed_id
+        paper_dir = output_dir / _output_dir_name(label=title, seed_id=seed_id)
     paper_dir.mkdir(parents=True, exist_ok=True)
 
     basename = _filename_safe(strategy, max_chars=32) if strategy else "graph"

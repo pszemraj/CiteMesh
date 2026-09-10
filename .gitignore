@@ -1,9 +1,11 @@
 # local files
+.DS_Store
 out/*
 cache/*
 citemesh/_version.py
-*.yaml
-!docs/config.yaml.example
+# stray run configs at repo root only
+/*.yaml
+.claude/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

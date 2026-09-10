@@ -7,15 +7,77 @@ enabling the Strategy pattern for different similarity computation approaches.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+)
 
 import networkx as nx
 import numpy as np
 
 from citemesh.core import TEMPORAL_CONFIG, Paper
-from citemesh.strategies.similarity import compute_indexed_similarity_score
 
 logger = logging.getLogger(__name__)
+
+
+def validate_embedding_vectors(
+    required_ids: Iterable[str],
+    embeddings: Mapping[str, np.ndarray],
+    *,
+    context: str,
+    vector_label: str = "vector",
+    error_factory: Callable[[str], Exception] = RuntimeError,
+) -> Dict[str, np.ndarray]:
+    """Validate a complete finite, nonzero, dimensionally consistent vector map.
+
+    :param Iterable[str] required_ids: Paper IDs that require vectors.
+    :param Mapping[str, np.ndarray] embeddings: Materialized vectors by paper ID.
+    :param str context: User-facing task description for errors.
+    :param str vector_label: Noun used for vectors in error messages.
+    :param Callable[[str], Exception] error_factory: Exception constructor.
+    :return Dict[str, np.ndarray]: Validated float32 vector map.
+    :raises Exception: From ``error_factory`` when a required vector is unusable.
+    """
+    ordered_ids = list(required_ids)
+    missing = [paper_id for paper_id in ordered_ids if paper_id not in embeddings]
+    if missing:
+        raise error_factory(
+            f"{context} is missing {len(missing)} {vector_label}(s): "
+            + ", ".join(missing[:5])
+        )
+
+    validated: Dict[str, np.ndarray] = {}
+    expected_dimension: Optional[int] = None
+    for paper_id in ordered_ids:
+        vector = np.asarray(embeddings[paper_id], dtype=np.float32)
+        if vector.ndim != 1 or vector.size == 0:
+            raise error_factory(
+                f"{context} received a malformed {vector_label} for {paper_id}."
+            )
+        if not np.all(np.isfinite(vector)):
+            raise error_factory(
+                f"{context} received a non-finite {vector_label} for {paper_id}."
+            )
+        if float(np.linalg.norm(vector)) <= 1e-12:
+            raise error_factory(
+                f"{context} received a zero {vector_label} for {paper_id}."
+            )
+        if expected_dimension is None:
+            expected_dimension = int(vector.size)
+        elif int(vector.size) != expected_dimension:
+            raise error_factory(
+                f"{context} received inconsistent {vector_label} dimensions for "
+                f"{paper_id}: expected {expected_dimension}, got {int(vector.size)}."
+            )
+        validated[paper_id] = vector
+    return validated
 
 
 def deterministic_sort_key(
@@ -39,12 +101,15 @@ def deterministic_sort_key(
 def select_capped_undirected_edges(
     edges: Iterable[Tuple[Any, Any, Mapping[str, Any]]],
     max_edges_per_node: int,
+    *,
+    seed_id: Optional[Any] = None,
 ) -> List[Tuple[Any, Any, float]]:
     """Select edges for an undirected graph while capping per-node degree.
 
     :param Iterable[Tuple[Any, Any, Mapping[str, Any]]] edges: Edge tuples with optional
         ``weight`` metadata.
     :param int max_edges_per_node: Maximum degree per node.
+    :param Optional[Any] seed_id: Reserve this seed's strongest existing edges first.
     :return List[Tuple[Any, Any, float]]: Selected canonicalized edges with weights.
     """
     canonical_edges: Dict[Tuple[str, str], Tuple[Any, Any, float]] = {}
@@ -63,7 +128,10 @@ def select_capped_undirected_edges(
 
     sorted_edges = sorted(
         canonical_edges.values(),
-        key=lambda item: deterministic_sort_key(item[2], item[0], item[1]),
+        key=lambda item: (
+            seed_id is not None and seed_id not in item[:2],
+            deterministic_sort_key(item[2], item[0], item[1]),
+        ),
     )
 
     if max_edges_per_node <= 0:
@@ -89,11 +157,14 @@ def select_capped_undirected_edges(
     return selected_edges
 
 
-def build_capped_undirected_graph(graph: nx.Graph, max_edges_per_node: int) -> nx.Graph:
+def build_capped_undirected_graph(
+    graph: nx.Graph, max_edges_per_node: int, *, seed_id: Optional[Any] = None
+) -> nx.Graph:
     """Copy a graph while retaining only the strongest capped undirected edges.
 
     :param nx.Graph graph: Source graph whose nodes and metadata should be preserved.
     :param int max_edges_per_node: Maximum degree per node in the rebuilt graph.
+    :param Optional[Any] seed_id: Reserve this seed's strongest existing edges first.
     :return nx.Graph: Rebuilt graph with selected weighted edges.
     """
     filtered_graph = nx.Graph()
@@ -101,7 +172,7 @@ def build_capped_undirected_graph(graph: nx.Graph, max_edges_per_node: int) -> n
     filtered_graph.add_nodes_from(graph.nodes(data=True))
 
     for u, v, weight in select_capped_undirected_edges(
-        graph.edges(data=True), max_edges_per_node
+        graph.edges(data=True), max_edges_per_node, seed_id=seed_id
     ):
         filtered_graph.add_edge(u, v, weight=weight)
 
@@ -171,7 +242,7 @@ class GraphBuilderStrategy(ABC):
         :param Paper paper1: First paper
         :param Paper paper2: Second paper
         :param float similarity: Computed similarity score
-        :return bool: True if edge should be created. Uses ``self.similarity_threshold``
+        :return bool: True for a positive score meeting ``self.similarity_threshold``
             when present, otherwise defaults to ``0.0``.
         """
         del paper1
@@ -181,7 +252,7 @@ class GraphBuilderStrategy(ABC):
             threshold = float(raw_threshold)
         except (TypeError, ValueError):
             threshold = 0.0
-        return similarity >= threshold
+        return similarity > 0.0 and similarity >= threshold
 
     def get_collection_summary(self) -> Optional[str]:
         """
@@ -197,6 +268,14 @@ class GraphBuilderStrategy(ABC):
     def _set_collection_summary(self, summary: str) -> None:
         """Allow subclasses to provide a collection summary."""
         self._collection_summary = summary
+
+    def prepare_graph_scoring(self, papers: Dict[str, Paper]) -> None:
+        """Prepare strategy-specific state required by pairwise graph scoring.
+
+        :param Dict[str, Paper] papers: Final collected papers keyed by ID.
+        :return None: Base strategies require no additional preparation.
+        """
+        del papers
 
     def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
         """
@@ -226,6 +305,7 @@ class GraphBuilderStrategy(ABC):
         else:
             logger.info("Collected %s papers", len(self.papers))
         logger.info("Seed paper: %s", seed_paper.title)
+        self.prepare_graph_scoring(self.papers)
 
         # Step 2: Create graph with nodes
         graph = nx.Graph()
@@ -236,7 +316,7 @@ class GraphBuilderStrategy(ABC):
                 # Mirror commonly-read scalar fields for render/export paths.
                 title=paper.title,
                 year=paper.year,
-                authors=[a.name for a in paper.authors[:3]],
+                authors=[a.name for a in paper.authors],
                 citation_count=paper.citation_count,
                 venue=paper.venue,
                 arxiv_id=paper.arxiv_id,
@@ -265,10 +345,15 @@ class GraphBuilderStrategy(ABC):
                     edges_created += 1
 
         logger.info(
-            "Graph complete: %s nodes, %s edges",
+            "Graph constructed: %s nodes, %s edges",
             graph.number_of_nodes(),
             edges_created,
         )
+        if edges_created == 0:
+            logger.warning(
+                "Graph contains no edges: no selected paper pair met the "
+                "strategy's edge criteria."
+            )
         return graph, actual_seed_id
 
     def _resolved_strategy_name(self) -> str:
@@ -300,18 +385,39 @@ class GraphBuilderStrategy(ABC):
         :param bool cap_at_one: Whether to clamp the combined similarity score to ``1.0``.
         :return float: Composite indexed similarity score.
         """
-        return compute_indexed_similarity_score(
-            paper1,
-            paper2,
-            abstract_index=self._abstract_index,
-            temporal_similarity_fn=self.temporal_similarity,
-            citation_similarity_fn=self.citation_similarity,
-            bibliographic_coupling_fn=self.bibliographic_coupling,
-            fetch_references=bool(getattr(self, "fetch_references", False)),
-            with_references_weights=with_references_weights,
-            without_references_weights=without_references_weights,
-            cap_at_one=cap_at_one,
+        abstract_similarity = self._abstract_index.similarity(
+            paper1.paper_id, paper2.paper_id
         )
+        temporal_similarity = self.temporal_similarity(paper1, paper2)
+        citation_similarity = self.citation_similarity(paper1, paper2)
+        has_bibliographic_coupling = bool(
+            getattr(self, "fetch_references", False)
+            and paper1.references
+            and paper2.references
+        )
+        bibliographic_coupling = (
+            self.bibliographic_coupling(paper1, paper2)
+            if has_bibliographic_coupling
+            else 0.0
+        )
+        # Publication era and citation popularity alone do not establish topic relevance.
+        if abstract_similarity <= 0.0 and bibliographic_coupling <= 0.0:
+            return 0.0
+        weights = (
+            with_references_weights
+            if has_bibliographic_coupling
+            else without_references_weights
+        )
+        abstract_weight, temporal_weight, citation_weight, bibliographic_weight = (
+            weights
+        )
+        score = (
+            abstract_weight * abstract_similarity
+            + temporal_weight * temporal_similarity
+            + citation_weight * citation_similarity
+            + bibliographic_weight * bibliographic_coupling
+        )
+        return min(score, 1.0) if cap_at_one else score
 
     # Utility methods for common similarity computations
 

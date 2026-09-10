@@ -2,9 +2,41 @@
 
 from __future__ import annotations
 
-from typing import Callable, Sequence
+import logging
+from typing import Any, Callable, Sequence
 
 import numpy as np
+
+
+def warn_on_truncated_inputs(model: Any, texts: Sequence[str]) -> None:
+    """Report texts that exceed the encoder window, including its default prompt.
+
+    :param Any model: SentenceTransformer encoder or its precision proxy.
+    :param Sequence[str] texts: Formatted texts about to be encoded.
+    :return None: Logs a warning when tokenization will discard input tokens.
+    """
+    max_length = getattr(model, "max_seq_length", None)
+    if not texts or max_length is None:
+        return
+    prompt_name = getattr(model, "default_prompt_name", None)
+    prompt = model.prompts.get(prompt_name, "") if prompt_name else ""
+    lengths = model.tokenizer(
+        [prompt + text for text in texts],
+        truncation=False,
+        padding=False,
+        return_length=True,
+        verbose=False,
+    )["length"]
+    truncated_count = sum(length > max_length for length in lengths)
+    if truncated_count:
+        logging.getLogger(__name__).warning(
+            "Embedding encoder will truncate %d of %d inputs to its %d-token "
+            "window (including prompts and special tokens); embeddings will "
+            "represent only part of those inputs.",
+            truncated_count,
+            len(texts),
+            max_length,
+        )
 
 
 def estimate_text_length_bucket(text: str) -> int:
@@ -104,4 +136,47 @@ def encode_texts_in_length_buckets(
     return np.asarray(
         [ordered_embeddings[idx] for idx in range(len(texts))],
         dtype=np.float32,
+    )
+
+
+def encode_texts(
+    model: Any,
+    texts: Sequence[str],
+    *,
+    batch_size: int,
+    show_progress_bar: bool = False,
+) -> np.ndarray:
+    """Encode text through the model's preferred batching path.
+
+    :param Any model: Encoder or precision proxy exposing ``encode``.
+    :param Sequence[str] texts: Text payloads to encode.
+    :param int batch_size: Maximum rows per encode batch.
+    :param bool show_progress_bar: Whether the encoder may show progress.
+    :return np.ndarray: Float32 embeddings in original input order.
+    """
+    if (
+        getattr(model, "prefetch_batches", False) is True
+        and len(texts) > batch_size
+        and not show_progress_bar
+    ):
+        return np.asarray(
+            model.encode_prefetched(texts, batch_size=batch_size),
+            dtype=np.float32,
+        )
+
+    warn_on_truncated_inputs(model, texts)
+    return encode_texts_in_length_buckets(
+        texts,
+        batch_size=batch_size,
+        show_progress_bar=show_progress_bar,
+        encode_batch=lambda batch_texts, batch_progress: np.asarray(
+            model.encode(
+                batch_texts,
+                batch_size=min(int(batch_size), len(batch_texts)),
+                convert_to_tensor=False,
+                normalize_embeddings=True,
+                show_progress_bar=batch_progress,
+            ),
+            dtype=np.float32,
+        ),
     )
