@@ -996,12 +996,31 @@ def _newest_records_by_arxiv_id(
     return selected + head_fallback[: limit - len(selected)]
 
 
-def _parse_authors(authors_data: Any) -> List[str]:
+def _parse_authors(authors_data: Any, authors_parsed_data: Any = None) -> List[str]:
     """Normalize author metadata to a list of names.
 
     :param Any authors_data: Raw ``authors`` field from dataset.
+    :param Any authors_parsed_data: Optional structured arXiv author rows.
     :return List[str]: Author names.
     """
+    if isinstance(authors_parsed_data, list):
+        structured_authors = []
+        for raw_author in authors_parsed_data:
+            if not isinstance(raw_author, (list, tuple)):
+                continue
+            parts = (
+                raw_author[1] if len(raw_author) > 1 else "",
+                raw_author[0] if raw_author else "",
+                raw_author[2] if len(raw_author) > 2 else "",
+            )
+            name = " ".join(
+                part.strip() for part in parts if isinstance(part, str) and part.strip()
+            )
+            if name:
+                structured_authors.append(name)
+        if structured_authors:
+            return structured_authors
+
     if isinstance(authors_data, str):
         return [name.strip() for name in authors_data.split(",") if name.strip()]
 
@@ -1106,7 +1125,9 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
         "arxiv_id": arxiv_id,
         "doi": doi,
         "year": _parse_year(paper),
-        "authors": _parse_authors(paper.get("authors", [])),
+        "authors": _parse_authors(
+            paper.get("authors", []), paper.get("authors_parsed")
+        ),
         "categories": _parse_categories(paper.get("categories", [])),
     }
 

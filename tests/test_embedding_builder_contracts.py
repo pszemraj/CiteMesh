@@ -3205,6 +3205,80 @@ def test_metadata_and_streaming_loader_contracts(
     assert candidate_builder.semantic_source == "candidates"
 
 
+def test_corpus_metadata_prefers_structured_authors_without_lab_fragments() -> None:
+    """Structured arXiv authors must prevent false collaboration overlap.
+
+    :return None: Checks family/given/suffix rendering and free-text fallback.
+    """
+    first_metadata = _extract_dataset_paper_metadata(
+        {
+            "id": "2401.00001",
+            "authors": (
+                "Christophe Ambroise (LaMME), Alia Dehman, "
+                "Pierre Neuvial (IMT), Guillem Rigaill (IPS2, LaMME), "
+                "and Nathalie Vialaneix (MIAT INRA)"
+            ),
+            "authors_parsed": [
+                ["Ambroise", "Christophe", ""],
+                ["Dehman", "Alia", ""],
+                ["Neuvial", "Pierre", ""],
+                ["Rigaill", "Guillem", ""],
+                ["Vialaneix", "Nathalie", ""],
+            ],
+        },
+        fallback_index=0,
+    )
+    second_metadata = _extract_dataset_paper_metadata(
+        {
+            "id": "2401.00002",
+            "authors": "Jane Doe (IPS2, LaMME)",
+            "authors_parsed": [["Doe", "Jane", "Jr."]],
+        },
+        fallback_index=1,
+    )
+    fallback_metadata = _extract_dataset_paper_metadata(
+        {
+            "id": "2401.00003",
+            "authors": "Alice Smith, Bob Jones",
+            "authors_parsed": [],
+        },
+        fallback_index=2,
+    )
+
+    assert first_metadata["authors"] == [
+        "Christophe Ambroise",
+        "Alia Dehman",
+        "Pierre Neuvial",
+        "Guillem Rigaill",
+        "Nathalie Vialaneix",
+    ]
+    assert second_metadata["authors"] == ["Jane Doe Jr."]
+    assert fallback_metadata["authors"] == ["Alice Smith", "Bob Jones"]
+    builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
+    embedding_text = builder._format_retrieval_document_metadata(
+        {
+            **first_metadata,
+            "title": "Structured authors",
+            "abstract": "Author names are cache metadata.",
+        }
+    )
+    assert "LaMME" not in embedding_text
+    assert "Guillem Rigaill" not in embedding_text
+    first_paper = Paper(
+        paper_id=first_metadata["paper_id"],
+        title="First",
+        year=2024,
+        authors=[Author(name=name) for name in first_metadata["authors"]],
+    )
+    second_paper = Paper(
+        paper_id=second_metadata["paper_id"],
+        title="Second",
+        year=2024,
+        authors=[Author(name=name) for name in second_metadata["authors"]],
+    )
+    assert not first_paper.shares_authors_with(second_paper)
+
+
 def test_arxiv_id_chronology_key_parses_both_styles() -> None:
     """Submission chronology must parse new-style, old-style, and prefixed IDs."""
     key = embedding_module._arxiv_id_chronology_key
