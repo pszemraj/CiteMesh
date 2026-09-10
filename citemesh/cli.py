@@ -13,6 +13,7 @@ import math
 import os
 import shutil
 import sys
+import tempfile
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime
@@ -1719,7 +1720,7 @@ def _create_parser() -> Tuple[
         help=(
             "File or directory (default: out/ with automatic names). Dashboard collections share "
             "dashboard.html + dashboard.citemesh.json and save each seed's JSON "
-            "under <paper-slug>-<hash>/; use *.dashboard.html for a standalone file."
+            "under <seed-id-slug>-<hash>/; use *.dashboard.html for a standalone file."
         ),
     )
 
@@ -2571,6 +2572,89 @@ def _dashboard_package_lock_path(package_path: Path) -> Path:
     return resolved_path.with_name(f".{resolved_path.name}.lock")
 
 
+def _dashboard_optional_result_paths(output_paths: Dict[str, Path]) -> Set[Path]:
+    """Return every optional export path owned by one collection result.
+
+    :param Dict[str, Path] output_paths: Resolved collection output paths.
+    :return Set[Path]: Known optional paths beside the mandatory graph JSON.
+    """
+    json_path = output_paths["json"]
+    basename = _strip_known_export_suffix(json_path.name)
+    return {
+        json_path.parent / f"{basename}{EXPORT_EXTENSIONS[fmt]}"
+        for fmt in EXPORT_FORMATS
+        if fmt not in {"dashboard", "json"}
+    }
+
+
+def _commit_staged_dashboard_artifacts(
+    package_path: Path,
+    package: Dict[str, Any],
+    *,
+    staged_result_files: Dict[Path, Path],
+    obsolete_result_paths: Set[Path],
+) -> None:
+    """Publish one collection result and restore prior files on failure.
+
+    The package is the final commit marker. Result files are backed up before
+    promotion so an ordinary export or filesystem exception restores the prior
+    completed bundle. Unknown files and other strategy basenames are untouched.
+
+    :param Path package_path: Authoritative collection package destination.
+    :param Dict[str, Any] package: Validated package payload to publish last.
+    :param Dict[Path, Path] staged_result_files: Final paths mapped to complete
+        same-filesystem staging files.
+    :param Set[Path] obsolete_result_paths: Exact known-format files omitted by
+        the new result and removed on successful publication.
+    :return None: Publishes the complete result bundle and package.
+    """
+    obsolete_paths = set(obsolete_result_paths) - set(staged_result_files)
+    target_paths = sorted(
+        set(staged_result_files) | obsolete_paths,
+        key=lambda path: str(path),
+    )
+    promoted_paths: Set[Path] = set()
+    with tempfile.TemporaryDirectory(
+        prefix=".citemesh-dashboard-backup-",
+        dir=package_path.parent,
+        ignore_cleanup_errors=True,
+    ) as backup_name:
+        backup_dir = Path(backup_name)
+        backups: Dict[Path, Path] = {}
+        try:
+            for index, target_path in enumerate(target_paths):
+                if not path_exists(target_path):
+                    continue
+                backup_path = backup_dir / f"{index}-{target_path.name}"
+                try:
+                    os.link(target_path, backup_path)
+                except OSError:
+                    target_path.replace(backup_path)
+                backups[target_path] = backup_path
+
+            for target_path, staged_path in sorted(
+                staged_result_files.items(), key=lambda item: str(item[0])
+            ):
+                backup_path = backups.get(target_path)
+                if backup_path is not None:
+                    staged_path.chmod(backup_path.stat().st_mode & 0o7777)
+                staged_path.replace(target_path)
+                promoted_paths.add(target_path)
+
+            for obsolete_path in sorted(obsolete_paths, key=str):
+                obsolete_path.unlink(missing_ok=True)
+
+            atomic_write_json(package_path, package, indent=2)
+        except BaseException:
+            for target_path in reversed(target_paths):
+                backup_path = backups.get(target_path)
+                if backup_path is not None:
+                    backup_path.replace(target_path)
+                elif target_path in promoted_paths:
+                    target_path.unlink(missing_ok=True)
+            raise
+
+
 def _read_json_object(path: Path, *, label: str) -> Dict[str, Any]:
     """Read one UTF-8 JSON object with a context-rich package error.
 
@@ -3066,15 +3150,16 @@ def update_dashboard_package(
     strategy: str,
     payload: Dict[str, Any],
     build: Dict[str, Any],
-    result_files: Optional[Dict[Path, Dict[str, Any]]] = None,
-    result_writer: Optional[Callable[[], None]] = None,
+    staged_result_files: Optional[Dict[Path, Path]] = None,
+    obsolete_result_paths: Optional[Set[Path]] = None,
 ) -> Dict[str, Any]:
     """Atomically create or update a portable dashboard collection package.
 
     One slot is retained per ``(strategy, seed_id)`` pair. The package lock covers
     existing-package validation, optional legacy migration, merge, and atomic
-    replacement, including every per-result export, so concurrent builds cannot
-    lose results or leave artifacts describing different runs.
+    replacement. Complete per-result exports may be staged before locking and
+    published with rollback here, so concurrent or failed builds cannot leave a
+    mixed successful result bundle.
 
     :param Path package_path: Portable collection package path.
     :param nx.Graph graph: Built graph used for seed metadata.
@@ -3082,10 +3167,10 @@ def update_dashboard_package(
     :param str strategy: Active strategy name.
     :param Dict[str, Any] payload: Canonical graph payload from the exporter.
     :param Dict[str, Any] build: Portable resolved build settings.
-    :param Optional[Dict[Path, Dict[str, Any]]] result_files: Staged graph and config
-        JSON payloads to write under the package lock.
-    :param Optional[Callable[[], None]] result_writer: Additional per-result exports
-        to write under the package lock.
+    :param Optional[Dict[Path, Path]] staged_result_files: Final result paths mapped
+        to fully written same-filesystem staging files.
+    :param Optional[Set[Path]] obsolete_result_paths: Exact prior optional exports
+        to remove if this result is published successfully.
     :return Dict[str, Any]: Canonical package written to disk.
     :raises DashboardPackageError: If an existing package is invalid or unsupported.
     """
@@ -3128,11 +3213,15 @@ def update_dashboard_package(
                     "results": [entry, *filtered],
                 }
             )
-            if result_writer is not None:
-                result_writer()
-            for result_path, result_payload in (result_files or {}).items():
-                atomic_write_json(result_path, result_payload, indent=2)
-            atomic_write_json(package_path, package, indent=2)
+            if staged_result_files is not None:
+                _commit_staged_dashboard_artifacts(
+                    package_path,
+                    package,
+                    staged_result_files=staged_result_files,
+                    obsolete_result_paths=obsolete_result_paths or set(),
+                )
+            else:
+                atomic_write_json(package_path, package, indent=2)
             return package
     except Timeout as exc:
         raise RuntimeError(
@@ -4320,16 +4409,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 layout=shared_layout,
             )
 
-            def write_export_artifacts() -> None:
-                """Write this build's non-staged graph export artifacts.
+            def write_export_artifacts(export_paths: Dict[str, Path]) -> None:
+                """Write selected graph exports to their supplied paths.
 
+                :param Dict[str, Path] export_paths: Destination paths for this write.
                 :return None: Writes the selected artifacts to their resolved paths.
                 """
-                if "png" in output_paths:
+                if "png" in export_paths:
                     visualize_graph(
                         graph,
                         seed_id,
-                        output_paths["png"],
+                        export_paths["png"],
                         iterations=args.spring_iterations,
                         dpi=args.dpi,
                         metadata=plot_metadata,
@@ -4338,7 +4428,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
 
                 for fmt, method_name in _EXPORTER_METHOD.items():
-                    if fmt not in output_paths:
+                    if fmt not in export_paths:
                         continue
                     if dashboard_package_path is not None and fmt in (
                         "dashboard",
@@ -4349,12 +4439,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                         continue
                     method = getattr(exporter, method_name)
                     if fmt in _THEME_AWARE_FORMATS:
-                        method(output_paths[fmt], theme=args.theme)
+                        method(export_paths[fmt], theme=args.theme)
                     else:
-                        method(output_paths[fmt])
+                        method(export_paths[fmt])
 
             if dashboard_package_path is None:
-                write_export_artifacts()
+                write_export_artifacts(output_paths)
 
             config_output_paths = dict(output_paths)
             if dashboard_package_path is not None:
@@ -4370,30 +4460,57 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "dashboard"
             ]
             graph_config_path: Optional[Path] = None
-            result_files: Dict[Path, Dict[str, Any]] = {}
-            if not standalone_dashboard_only:
+            if dashboard_package_path is None and not standalone_dashboard_only:
                 graph_config_path = resolve_graph_config_path(
                     output_paths=output_paths,
                     strategy=args.strategy,
                 )
-                if dashboard_package_path is None:
-                    atomic_write_json(graph_config_path, graph_config_payload, indent=2)
-                else:
-                    result_files[graph_config_path] = graph_config_payload
+                atomic_write_json(graph_config_path, graph_config_payload, indent=2)
 
             if dashboard_package_path is not None:
                 graph_payload = exporter.graph_payload()
-                result_files[output_paths["json"]] = graph_payload
-                update_dashboard_package(
-                    dashboard_package_path,
-                    graph=graph,
-                    seed_id=seed_id,
+                result_directory = output_paths["json"].parent
+                graph_config_path = resolve_graph_config_path(
+                    output_paths=output_paths,
                     strategy=args.strategy,
-                    payload=graph_payload,
-                    build=dict(graph_config_payload.get("build", {})),
-                    result_files=result_files,
-                    result_writer=write_export_artifacts,
                 )
+                with tempfile.TemporaryDirectory(
+                    prefix=f".{result_directory.name}.stage-",
+                    dir=result_directory.parent,
+                    ignore_cleanup_errors=True,
+                ) as staging_name:
+                    staging_directory = Path(staging_name)
+                    staged_output_paths = {
+                        fmt: staging_directory / path.name
+                        for fmt, path in output_paths.items()
+                        if fmt != "dashboard"
+                    }
+                    write_export_artifacts(staged_output_paths)
+                    atomic_write_json(
+                        staged_output_paths["json"], graph_payload, indent=2
+                    )
+                    staged_config_path = staging_directory / graph_config_path.name
+                    atomic_write_json(
+                        staged_config_path, graph_config_payload, indent=2
+                    )
+                    staged_result_files = {
+                        output_paths[fmt]: staged_path
+                        for fmt, staged_path in staged_output_paths.items()
+                    }
+                    staged_result_files[graph_config_path] = staged_config_path
+                    update_dashboard_package(
+                        dashboard_package_path,
+                        graph=graph,
+                        seed_id=seed_id,
+                        strategy=args.strategy,
+                        payload=graph_payload,
+                        build=dict(graph_config_payload.get("build", {})),
+                        staged_result_files=staged_result_files,
+                        obsolete_result_paths=(
+                            _dashboard_optional_result_paths(output_paths)
+                            - set(staged_result_files)
+                        ),
+                    )
                 try:
                     render_dashboard_collection_snapshot(
                         dashboard_package_path,

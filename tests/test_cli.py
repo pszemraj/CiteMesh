@@ -2355,9 +2355,11 @@ def test_dashboard_package_tracks_multiple_runs(
 def test_dashboard_package_refreshes_same_seed_strategy_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-running the same seed/strategy should refresh the existing selector slot."""
+    """Refresh one stable result slot and remove its obsolete export formats."""
     seed_graph = build_seed_graph("seed")
+    seed_graph.nodes["seed"]["title"] = "Original Seed Title"
     updated_graph = build_seed_graph("seed")
+    updated_graph.nodes["seed"]["title"] = "Corrected Seed Title"
     updated_graph.add_node(
         "extra",
         title="Extra Paper",
@@ -2379,7 +2381,14 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
         "GraphExporter",
         _make_exporter_stub(
             captured,
-            methods=("to_dashboard_html",),
+            methods=(
+                "to_dashboard_html",
+                "to_interactive_html",
+                "to_plotly_html",
+                "to_csv",
+                "to_bibtex",
+                "to_graphml",
+            ),
         ),
     )
 
@@ -2393,9 +2402,43 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
                 "recommendation",
                 "--export",
                 "dashboard",
+                "--export",
+                "html",
+                "--export",
+                "plotly",
+                "--export",
+                "csv",
+                "--export",
+                "bibtex",
+                "--export",
+                "graphml",
                 "-o",
                 str(output_dir),
             ],
+        )
+        first_run_dir = generate_output_path(
+            seed_graph, "seed", output_dir=output_dir, strategy="recommendation"
+        ).parent
+        optional_suffixes = (".html", ".plotly.html", ".csv", ".bib", ".graphml")
+        for suffix in optional_suffixes:
+            assert (first_run_dir / f"recommendation{suffix}").exists()
+        sentinel_path = first_run_dir / "notes.txt"
+        sentinel_path.write_text("keep user file", encoding="utf-8")
+        citation_payload = _dashboard_graph_payload(seed_graph, "seed", "citation")
+        citation_paths = {
+            first_run_dir / "citation.json": json.dumps(citation_payload),
+            first_run_dir / "citation.config.json": '{"strategy": "citation"}',
+            first_run_dir / "citation.csv": "keep citation export",
+        }
+        for path, content in citation_paths.items():
+            path.write_text(content, encoding="utf-8")
+        update_dashboard_package(
+            output_dir / DASHBOARD_PACKAGE_FILENAME,
+            graph=seed_graph,
+            seed_id="seed",
+            strategy="citation",
+            payload=citation_payload,
+            build={"strategy": "citation"},
         )
         second_result = run_cli_command(
             [
@@ -2411,21 +2454,29 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
         )
 
         package = load_dashboard_package(output_dir / DASHBOARD_PACKAGE_FILENAME)
-        assert len(package["results"]) == 1
+        assert len(package["results"]) == 2
         entry = package["results"][0]
         assert entry["result_id"] == "recommendation:seed"
+        assert package["results"][1]["result_id"] == "citation:seed"
         assert entry["summary"] == {"nodes": 2, "edges": 1}
         assert entry["payload"]["summary"] == {"nodes": 2, "edges": 1}
         run_dir = generate_output_path(
             updated_graph, "seed", output_dir=output_dir, strategy="recommendation"
         ).parent
+        assert run_dir == first_run_dir
         assert (
             json.loads((run_dir / "recommendation.json").read_text())
             == entry["payload"]
         )
+        for suffix in optional_suffixes:
+            assert not (run_dir / f"recommendation{suffix}").exists()
+        assert sentinel_path.read_text(encoding="utf-8") == "keep user file"
+        assert {
+            path: path.read_text(encoding="utf-8") for path in citation_paths
+        } == citation_paths
         collection_bundle = captured["metadata"]["dashboard_collection"]
         assert collection_bundle["current_result_id"] == "recommendation:seed"
-        assert len(collection_bundle["results"]) == 1
+        assert len(collection_bundle["results"]) == 2
 
     assert first_result.returncode == 0
     assert second_result.returncode == 0
@@ -2559,6 +2610,183 @@ def test_dashboard_build_serializes_all_result_artifacts_with_package(
     )
     assert config["build"] == entry["build"]
     assert (run_dir / "recommendation.csv").read_text(encoding="utf-8") == "1"
+
+
+def test_dashboard_export_failure_preserves_previous_result_bundle(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed staged export must leave the completed result bundle unchanged.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs graph and exporter fixtures.
+    :param Path tmp_path: Isolated dashboard collection root.
+    :return None: Checks prior artifacts and package bytes after a failed refresh.
+    """
+    first_graph = build_seed_graph("seed")
+    second_graph = first_graph.copy()
+    second_graph.add_node("extra", title="Uncommitted Paper")
+    second_graph.add_edge("seed", "extra", weight=0.4)
+    build_results = iter([(first_graph, "seed"), (second_graph, "seed")])
+    monkeypatch.setattr(
+        cli_module,
+        "_build_strategy_graph",
+        lambda args, strategy, **kwargs: next(build_results),
+    )
+    base_factory = _make_exporter_stub(
+        {}, methods=("to_dashboard_html", "to_csv", "to_bibtex")
+    )
+
+    def failing_exporter(*args: object, **kwargs: object) -> SimpleNamespace:
+        """Fail the second graph's BibTeX export after writing partial data.
+
+        :param object args: Exporter constructor positional arguments.
+        :param object kwargs: Exporter constructor keyword arguments.
+        :return SimpleNamespace: Exporter fixture with graph-sensitive failure.
+        """
+        graph = args[0]
+        exporter = base_factory(*args, **kwargs)
+
+        def write_bibtex(path: Path) -> None:
+            """Write staged data and fail only for the replacement graph.
+
+            :param Path path: Staged BibTeX path.
+            :return None: Writes a fixture or raises for the second graph.
+            """
+            path.write_text("partial replacement", encoding="utf-8")
+            if graph is second_graph:
+                raise RuntimeError("bibtex export failed")
+
+        exporter.to_bibtex = write_bibtex
+        return exporter
+
+    monkeypatch.setattr(cli_module, "GraphExporter", failing_exporter)
+    first_result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "dashboard",
+            "--export",
+            "csv",
+            "--output",
+            str(tmp_path),
+        ]
+    )
+    run_dir = generate_output_path(
+        first_graph, "seed", output_dir=tmp_path, strategy="recommendation"
+    ).parent
+    completed_paths = (
+        tmp_path / DASHBOARD_PACKAGE_FILENAME,
+        tmp_path / "dashboard.html",
+        run_dir / "recommendation.json",
+        run_dir / "recommendation.config.json",
+        run_dir / "recommendation.csv",
+    )
+    completed_bytes = {path: path.read_bytes() for path in completed_paths}
+
+    second_result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "dashboard",
+            "--export",
+            "csv",
+            "--export",
+            "bibtex",
+            "--output",
+            str(tmp_path),
+        ]
+    )
+
+    assert first_result.returncode == 0, first_result.stderr
+    assert second_result.returncode == 1
+    assert {path: path.read_bytes() for path in completed_paths} == completed_bytes
+    assert not (run_dir / "recommendation.bib").exists()
+    assert not any(".stage-" in path.name for path in tmp_path.rglob("*"))
+
+
+@pytest.mark.parametrize("failure_stage", ["promotion", "package"])
+def test_dashboard_commit_failure_restores_promoted_and_removed_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_stage: str
+) -> None:
+    """A commit failure must roll back result promotion and pruning.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs the selected filesystem failure.
+    :param Path tmp_path: Isolated transaction directory.
+    :param str failure_stage: Transaction stage that raises after one promotion.
+    :return None: Checks exact restoration of old, absent, and obsolete targets.
+    """
+    package_path = tmp_path / DASHBOARD_PACKAGE_FILENAME
+    existing_path = tmp_path / "recommendation.json"
+    new_path = tmp_path / "recommendation.config.json"
+    obsolete_path = tmp_path / "recommendation.csv"
+    staged_existing = tmp_path / "staged.json"
+    staged_new = tmp_path / "staged.config.json"
+    package_path.write_bytes(b"old package")
+    existing_path.write_bytes(b"old graph")
+    existing_path.chmod(0o000)
+    obsolete_path.write_bytes(b"old csv")
+    staged_existing.write_bytes(b"new graph")
+    staged_new.write_bytes(b"new config")
+
+    def fail_package_write(path: Path, payload: object, **kwargs: object) -> None:
+        """Fail the final package write after result-file promotion.
+
+        :param Path path: Package destination.
+        :param object payload: New package payload.
+        :param object kwargs: JSON serialization options.
+        :return None: Always raises before replacing the package.
+        """
+        del path, payload, kwargs
+        raise OSError("package write failed")
+
+    original_replace = Path.replace
+    promoted_count = 0
+
+    def fail_second_promotion(source: Path, target: Path) -> Path:
+        """Fail after the first staged file has reached its final path.
+
+        :param Path source: Source path for the replacement.
+        :param Path target: Destination path for the replacement.
+        :return Path: Result from replacements outside the injected failure.
+        """
+        nonlocal promoted_count
+        if source in {staged_existing, staged_new}:
+            promoted_count += 1
+            if promoted_count == 2:
+                raise OSError("promotion write failed")
+        return original_replace(source, target)
+
+    if failure_stage == "promotion":
+        monkeypatch.setattr(Path, "replace", fail_second_promotion)
+    else:
+        monkeypatch.setattr(cli_module, "atomic_write_json", fail_package_write)
+
+    with pytest.raises(OSError, match=f"{failure_stage} write failed"):
+        cli_module._commit_staged_dashboard_artifacts(
+            package_path,
+            {"results": []},
+            staged_result_files={
+                existing_path: staged_existing,
+                new_path: staged_new,
+            },
+            obsolete_result_paths={obsolete_path},
+        )
+
+    assert package_path.read_bytes() == b"old package"
+    assert existing_path.stat().st_mode & 0o7777 == 0o000
+    existing_path.chmod(0o600)
+    assert existing_path.read_bytes() == b"old graph"
+    assert not new_path.exists()
+    assert obsolete_path.read_bytes() == b"old csv"
+    assert not any(
+        path.name.startswith(".citemesh-dashboard-backup-")
+        for path in tmp_path.iterdir()
+    )
 
 
 def test_dashboard_package_deduplicates_existing_slots_deterministically(
@@ -2813,7 +3041,7 @@ def test_dashboard_collection_resolver_always_includes_graph_json(
         seed_id="seed",
     )
     assert output_paths["json"].parent.parent == root
-    assert output_paths["json"].parent.name.startswith("seed-title-")
+    assert output_paths["json"].parent.name.startswith("seed-")
     assert output_paths["json"].name == "recommendation.json"
     assert output_paths["json"] == implicit_json
     assert package_path == root / DASHBOARD_PACKAGE_FILENAME
@@ -4175,17 +4403,22 @@ def test_output_writes_into_an_existing_directory(
     graph.add_node("seed-b", title="A Survey of Transformers")
     path_a = generate_output_path(graph, seed_id="seed-a", output_dir=Path("out"))
     path_b = generate_output_path(graph, seed_id="seed-b", output_dir=Path("out"))
+    graph.nodes["seed-a"]["title"] = "A Corrected Transformer Survey Title"
+    corrected_path_a = generate_output_path(
+        graph, seed_id="seed-a", output_dir=Path("out")
+    )
     assert path_a != path_b
     assert path_a.parent.name != path_b.parent.name
+    assert corrected_path_a == path_a
     assert re.search(r"-[0-9a-f]{8}$", path_a.parent.name)
     assert re.search(r"-[0-9a-f]{8}$", path_b.parent.name)
 
     graph = nx.Graph()
-    graph.add_node(
-        "seed",
-        title="This title should definitely exceed forty characters for the slug",
+    long_seed_id = "seed-identifier-that-should-definitely-exceed-forty-characters"
+    graph.add_node(long_seed_id, title="Short title")
+    output_path = generate_output_path(
+        graph, seed_id=long_seed_id, output_dir=Path("out")
     )
-    output_path = generate_output_path(graph, seed_id="seed", output_dir=Path("out"))
     assert re.search(r"-[0-9a-f]{8}$", output_path.parent.name)
     assert len(output_path.parent.name) <= 40
 

@@ -19,6 +19,7 @@ import networkx as nx
 import numpy as np
 
 from citemesh.core import VIZ_CONFIG
+from citemesh.data.cache import atomic_output_path
 
 from .ordering import (
     canonicalize_graph_for_layout,
@@ -116,18 +117,18 @@ def _seed_suffix(seed_id: str, length: int = 8) -> str:
     return hashlib.sha256(seed_id.encode("utf-8")).hexdigest()[:length]
 
 
-def _output_dir_name(title: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS) -> str:
+def _output_dir_name(label: str, seed_id: str, max_chars: int = MAX_TITLE_CHARS) -> str:
     """Build output directory name with stable seed suffix under truncation.
 
-    :param str title: Seed paper title used for the human-readable slug prefix.
+    :param str label: Stable identifier used for the human-readable slug prefix.
     :param str seed_id: Canonical seed identifier used for stable hash suffix.
     :param int max_chars: Maximum total directory-name length.
-    :return str: Filesystem-safe directory name containing title slug and hash suffix.
+    :return str: Filesystem-safe directory name containing identifier and hash suffix.
     """
     suffix = f"-{_seed_suffix(seed_id)}"
-    title_budget = max_chars - len(suffix)
-    title_budget = max(1, title_budget)
-    return f"{_filename_safe(title, max_chars=title_budget)}{suffix}"
+    label_budget = max_chars - len(suffix)
+    label_budget = max(1, label_budget)
+    return f"{_filename_safe(label, max_chars=label_budget)}{suffix}"
 
 
 def _similarity_to_layout_distance(raw_similarity: object) -> float:
@@ -1064,29 +1065,31 @@ def visualize_graph(
         add_metadata_box(ax, metadata, pos, theme)
 
     # Save figure
-    fig.savefig(
-        output_path,
-        dpi=dpi,
-        facecolor=theme.background,
-    )
-    plt.close(fig)
+    try:
+        with atomic_output_path(output_path) as tmp_path:
+            fig.savefig(
+                tmp_path,
+                dpi=dpi,
+                facecolor=theme.background,
+            )
+    finally:
+        plt.close(fig)
 
 
 def generate_output_path(
     graph: nx.Graph, seed_id: str, output_dir: Path = Path("out"), strategy: str = ""
 ) -> Path:
     """
-    Generate auto-named output path from paper title.
+    Generate an auto-named output path from the stable seed identifier.
 
-    :param nx.Graph graph: NetworkX graph
+    :param nx.Graph graph: NetworkX graph retained for API compatibility.
     :param str seed_id: ID of seed paper
     :param Path output_dir: Output directory
     :param str strategy: Optional strategy suffix used in filename.
     :return Path: Path object for output file
     """
-    seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
-    title = seed_attrs.get("title", "graph")
-    paper_dir = output_dir / _output_dir_name(title=title, seed_id=seed_id)
+    del graph
+    paper_dir = output_dir / _output_dir_name(label=seed_id, seed_id=seed_id)
     paper_dir.mkdir(parents=True, exist_ok=True)
 
     basename = _filename_safe(strategy, max_chars=32) if strategy else "graph"

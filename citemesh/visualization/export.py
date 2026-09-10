@@ -29,7 +29,7 @@ from citemesh.dashboard_contracts import (
     GRAPH_PAYLOAD_KIND,
     GRAPH_PAYLOAD_SCHEMA_VERSION,
 )
-from citemesh.data.cache import atomic_write_text
+from citemesh.data.cache import atomic_output_path, atomic_write_text
 
 from .ordering import ordered_edges_with_data, ordered_nodes
 from .render import (
@@ -647,8 +647,9 @@ class GraphExporter:
             weight = float(data.get("weight", 0.1))
             net.add_edge(u, v, value=max(0.1, weight * 5))
 
-        net.save_graph(str(path))
-        _inject_darkreader_lock(path, _theme_color_scheme(theme_obj))
+        with atomic_output_path(path) as tmp_path:
+            net.save_graph(str(tmp_path))
+            _inject_darkreader_lock(tmp_path, _theme_color_scheme(theme_obj))
 
     def to_plotly_html(self, path: Path, theme: Optional[str] = None) -> None:
         """Create Plotly interactive visualization.
@@ -667,14 +668,15 @@ class GraphExporter:
         fig, _ = self._build_plotly_figure(go=go, theme_obj=theme_obj)
 
         div_id = self._plotly_div_id()
-        try:
-            fig.write_html(str(path), div_id=div_id)
-        except TypeError as exc:
-            raise RuntimeError(
-                "Deterministic Plotly export requires write_html(div_id=...). "
-                "Upgrade plotly to a version that supports div_id."
-            ) from exc
-        _inject_darkreader_lock(path, _theme_color_scheme(theme_obj))
+        with atomic_output_path(path) as tmp_path:
+            try:
+                fig.write_html(str(tmp_path), div_id=div_id)
+            except TypeError as exc:
+                raise RuntimeError(
+                    "Deterministic Plotly export requires write_html(div_id=...). "
+                    "Upgrade plotly to a version that supports div_id."
+                ) from exc
+            _inject_darkreader_lock(tmp_path, _theme_color_scheme(theme_obj))
 
     def to_dashboard_html(self, path: Path, theme: Optional[str] = None) -> None:
         """Create a standalone Plotly-backed research dashboard HTML export.

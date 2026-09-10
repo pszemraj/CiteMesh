@@ -111,12 +111,7 @@ citemesh view out/report.dashboard.html --browser google-chrome
 
 Output-path normalization, file naming, and sidecar placement are defined in [Output Artifacts](../reference/output-artifacts.md).
 
-Omit `--output` to write to `out/` under the current working directory (a source checkout already gitignores that path).
-Dashboard builds maintain `out/dashboard.html` and `out/dashboard.citemesh.json`,
-and always save `<strategy>.json` plus `<strategy>.config.json` under
-`out/<slug>-<hash>/`. Different seeds retain separate files and accumulate in the
-collection; rerunning the same seed and strategy replaces that result. Other
-requested formats go alongside the per-paper JSON.
+Omit `--output` to write to `out/` under the current working directory (a source checkout already gitignores that path). Dashboard builds maintain `out/dashboard.html` and `out/dashboard.citemesh.json`, and always save `<strategy>.json` plus `<strategy>.config.json` under `out/<seed-id-slug>-<hash>/`. This directory is derived from the canonical seed ID, so a corrected paper title does not move later builds to a new directory. Different seeds retain separate files and accumulate in the collection; rerunning the same seed and strategy replaces that result and removes that result's previously selected optional formats when they are no longer requested. Other requested formats go alongside the per-paper JSON.
 
 `--log-level`, `--log-width`, and `--log-file` are shared command options and are accepted for `build`, `search`, `cache`, and `config` command trees (including `cache scan` / `cache clear`).
 

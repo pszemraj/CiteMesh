@@ -191,6 +191,53 @@ def _atomic_write_text_payload(
             pass
 
 
+@contextmanager
+def atomic_output_path(path: Path) -> Iterator[Path]:
+    """Publish a library-written file with an atomic replacement.
+
+    The yielded temporary path is closed, resides beside the destination, and
+    retains the destination suffix so libraries can infer their output format.
+
+    :param Path path: Final output path.
+    :return Iterator[Path]: Closed temporary path for the library writer.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = path.stat().st_mode & 0o7777
+    except FileNotFoundError:
+        current_umask = os.umask(0)
+        os.umask(current_umask)
+        mode = 0o666 & ~current_umask
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.stem}.",
+        suffix=path.suffix,
+        dir=path.parent,
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        yield tmp_path
+        with tmp_path.open("rb") as tmp_file:
+            tmp_path.chmod(mode)
+            os.fsync(tmp_file.fileno())
+        os.replace(tmp_path, path)
+        directory_fd: int | None = None
+        try:
+            directory_fd = os.open(str(path.parent), os.O_RDONLY)
+            os.fsync(directory_fd)
+        except OSError:
+            pass
+        finally:
+            if directory_fd is not None:
+                os.close(directory_fd)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def atomic_write_text(
     path: Path,
     content: str,

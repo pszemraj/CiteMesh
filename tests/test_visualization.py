@@ -473,11 +473,14 @@ def test_exporter_interactive_html_contracts(
     monkeypatch.setattr(export_module, "_load_pyvis_network_class", lambda: FakeNetwork)
 
     out_path = tmp_path / "graph.html"
+    out_path.write_text("previous", encoding="utf-8")
+    out_path.chmod(0o640)
     exporter = GraphExporter(graph, seed_id, theme_name="dark")
     exporter.to_interactive_html(out_path, physics=True)
 
     instance = FakeNetwork.instances[-1]
     assert out_path.exists()
+    assert out_path.stat().st_mode & 0o7777 == 0o640
     assert instance.options is not None
     assert len(instance.nodes) == 2
     assert len(instance.edges) == 1
@@ -512,9 +515,12 @@ def test_exporter_plotly_contracts(
         graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
     )
     out_path = tmp_path / "graph.plotly.html"
+    out_path.write_text("previous", encoding="utf-8")
+    out_path.chmod(0o640)
     exporter.to_plotly_html(out_path)
 
     assert out_path.exists()
+    assert out_path.stat().st_mode & 0o7777 == 0o640
     node_trace = captured["data"][1]
     assert list(node_trace["text"]) == ["Jones, 2021", "Smith, 2020"]
     layout = captured["layout"]
@@ -823,6 +829,180 @@ def test_atomic_dashboard_write_preserves_previous_viewer(
         cache_module.atomic_write_text(destination, "new viewer")
 
     assert destination.read_text(encoding="utf-8") == "previous viewer"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("failure_stage", ["writer", "injection"])
+def test_interactive_html_failure_preserves_previous_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_stage: str
+) -> None:
+    """Pyvis and post-processing failures must not publish partial HTML.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs the failing exporter stage.
+    :param Path tmp_path: Isolated output directory.
+    :param str failure_stage: Export stage that raises after writing temporary data.
+    :return None: Checks that the old destination and directory contents survive.
+    """
+    graph, seed_id = _build_graph()
+    destination = tmp_path / "graph.html"
+    destination.write_text("previous export", encoding="utf-8")
+
+    class FakeNetwork:
+        """Write a partial Pyvis fixture and optionally fail."""
+
+        def __init__(self, **kwargs: Any) -> None:
+            del kwargs
+
+        def set_options(self, options: str) -> None:
+            del options
+
+        def add_node(self, node_id: str, **kwargs: Any) -> None:
+            del node_id, kwargs
+
+        def add_edge(self, source: str, target: str, **kwargs: Any) -> None:
+            del source, target, kwargs
+
+        def save_graph(self, path: str) -> None:
+            """Write temporary HTML and optionally simulate a Pyvis failure.
+
+            :param str path: Temporary HTML destination.
+            :return None: Writes partial data before the selected failure.
+            """
+            Path(path).write_text("partial export", encoding="utf-8")
+            if failure_stage == "writer":
+                raise RuntimeError("writer failed")
+
+    def fail_injection(path: Path, scheme: str) -> None:
+        """Simulate post-processing failure after the library write.
+
+        :param Path path: Temporary HTML path.
+        :param str scheme: Requested color scheme.
+        :return None: Always raises for the injection test case.
+        """
+        del path, scheme
+        raise RuntimeError("injection failed")
+
+    monkeypatch.setattr(export_module, "_load_pyvis_network_class", lambda: FakeNetwork)
+    if failure_stage == "injection":
+        monkeypatch.setattr(export_module, "_inject_darkreader_lock", fail_injection)
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        GraphExporter(graph, seed_id).to_interactive_html(destination)
+
+    assert destination.read_text(encoding="utf-8") == "previous export"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("failure_stage", ["writer", "injection"])
+def test_plotly_html_failure_preserves_previous_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_stage: str
+) -> None:
+    """Plotly and post-processing failures must not publish partial HTML.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs the failing exporter stage.
+    :param Path tmp_path: Isolated output directory.
+    :param str failure_stage: Export stage that raises after writing temporary data.
+    :return None: Checks that the old destination and directory contents survive.
+    """
+    graph, seed_id = _build_graph()
+    destination = tmp_path / "graph.plotly.html"
+    destination.write_text("previous export", encoding="utf-8")
+
+    class FakeFigure(_BaseFakeFigure):
+        """Write a partial Plotly fixture and optionally fail."""
+
+        def write_html(self, path: str, **kwargs: Any) -> None:
+            """Write temporary HTML and optionally simulate a Plotly failure.
+
+            :param str path: Temporary HTML destination.
+            :param Any kwargs: Plotly serialization options.
+            :return None: Writes partial data before the selected failure.
+            """
+            del kwargs
+            Path(path).write_text("partial export", encoding="utf-8")
+            if failure_stage == "writer":
+                raise RuntimeError("writer failed")
+
+    def fail_injection(path: Path, scheme: str) -> None:
+        """Simulate post-processing failure after the library write.
+
+        :param Path path: Temporary HTML path.
+        :param str scheme: Requested color scheme.
+        :return None: Always raises for the injection test case.
+        """
+        del path, scheme
+        raise RuntimeError("injection failed")
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    if failure_stage == "injection":
+        monkeypatch.setattr(export_module, "_inject_darkreader_lock", fail_injection)
+
+    with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
+        GraphExporter(
+            graph,
+            seed_id,
+            layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+        ).to_plotly_html(destination)
+
+    assert destination.read_text(encoding="utf-8") == "previous export"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
+@pytest.mark.parametrize("failure_stage", ["writer", "replace"])
+def test_png_failure_preserves_previous_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure_stage: str
+) -> None:
+    """Matplotlib and final-replace failures must not publish a partial PNG.
+
+    :param pytest.MonkeyPatch monkeypatch: Installs the failing output operation.
+    :param Path tmp_path: Isolated output directory.
+    :param str failure_stage: Output operation that raises.
+    :return None: Checks that the old destination and directory contents survive.
+    """
+    graph, seed_id = _build_graph()
+    destination = tmp_path / "graph.png"
+    destination.write_bytes(b"previous png")
+
+    if failure_stage == "writer":
+
+        def fail_savefig(figure: object, path: Path, **kwargs: Any) -> None:
+            """Write partial image data and simulate a Matplotlib failure.
+
+            :param object figure: Matplotlib figure instance.
+            :param Path path: Temporary PNG destination.
+            :param Any kwargs: Matplotlib serialization options.
+            :return None: Writes partial data and raises.
+            """
+            del figure, kwargs
+            path.write_bytes(b"partial png")
+            raise RuntimeError("writer failed")
+
+        monkeypatch.setattr(render_module.plt.Figure, "savefig", fail_savefig)
+    else:
+
+        def fail_replace(source: object, target: object) -> None:
+            """Simulate a failed final atomic replacement.
+
+            :param object source: Temporary PNG path.
+            :param object target: Final PNG path.
+            :return None: Always raises.
+            """
+            del source, target
+            raise OSError("replace failed")
+
+        monkeypatch.setattr(cache_module.os, "replace", fail_replace)
+
+    error = RuntimeError if failure_stage == "writer" else OSError
+    with pytest.raises(error, match=f"{failure_stage} failed"):
+        visualize_graph(
+            graph,
+            seed_id,
+            destination,
+            layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+            dpi=40,
+        )
+
+    assert destination.read_bytes() == b"previous png"
     assert list(tmp_path.iterdir()) == [destination]
 
 
