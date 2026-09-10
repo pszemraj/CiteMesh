@@ -39,6 +39,7 @@ from citemesh.core.user_config import (
     user_config_path,
 )
 from citemesh.data import cache as cache_module
+from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.hybrid import HYBRID_DEFAULT_MAX_REFERENCES
 
 
@@ -810,21 +811,70 @@ def test_configured_corpus_cap_and_full_split_override(
     assert embedding["all_corpus"] is expected_all_corpus
 
 
-def test_config_int8_normalized_in_candidate_mode() -> None:
-    """Candidate mode should normalize persisted int8 storage to float32.
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+@pytest.mark.parametrize(
+    ("semantic_source", "storage_precision", "expected_precision"),
+    [
+        ("candidates", "int8", "float32"),
+        ("arxiv-corpus", "float32", "float32"),
+        ("arxiv-corpus", "int8", "int8"),
+    ],
+)
+def test_config_calibration_defaults_follow_effective_storage(
+    monkeypatch: pytest.MonkeyPatch,
+    strategy: str,
+    semantic_source: str,
+    storage_precision: str,
+    expected_precision: str,
+) -> None:
+    """Configured calibration sizes should only reach builders using int8 storage.
 
-    :return None: Assertions validate candidate storage policy.
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing runtime probes.
+    :param str strategy: Embedding-aware build strategy.
+    :param str semantic_source: Configured candidate or corpus source.
+    :param str storage_precision: Configured storage precision.
+    :param str expected_precision: Effective builder storage precision.
+    :return None: Validates constructor compatibility and int8 calibration retention.
     """
-    args, provided, build_parser = _parsed_build_args(
-        ["paper-id", "--strategy", "embedding"]
+    monkeypatch.setattr(embedding_module, "_check_embedding_deps", MagicMock())
+    monkeypatch.setattr(
+        embedding_module, "resolve_embedding_device", MagicMock(return_value="cpu")
     )
-    config = UserConfig(path=Path("unused"), defaults={"storage_precision": "int8"})
+    monkeypatch.setattr(
+        cli_module.EmbeddingGraphBuilder,
+        "_resolve_source_dtype_hint",
+        MagicMock(return_value="float32"),
+    )
+    monkeypatch.setattr(
+        cli_module.EmbeddingGraphBuilder,
+        "_resolve_attention_implementation_hint",
+        MagicMock(return_value="sdpa"),
+    )
+    args, provided, build_parser = _parsed_build_args(
+        ["paper-id", "--strategy", strategy]
+    )
+    config = UserConfig(
+        path=Path("unused"),
+        defaults={
+            "semantic_source": semantic_source,
+            "storage_precision": storage_precision,
+            "calibration_sample_size": 100,
+        },
+    )
     applied = cli_module._apply_user_config_defaults(args, provided, config)
     cli_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
-    assert args.semantic_source == "candidates"
-    assert args.storage_precision == "float32"
+    builder = cli_module.EmbeddingGraphBuilder(
+        **cli_module._shared_embedding_builder_kwargs(args)
+    )
+    assert builder.semantic_source == semantic_source
+    assert builder.storage_precision == expected_precision
+    assert builder.calibration_sample_size == (
+        100
+        if expected_precision == "int8"
+        else cli_module.EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+    )
 
 
 def test_config_embedding_defaults_do_not_gate_citation_strategy() -> None:

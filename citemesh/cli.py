@@ -1279,6 +1279,9 @@ def _validate_build_cli_contract(
             # strategy-level runtime warnings about ignored options.
             args.binary_prefilter = False
             args.binary_rescore_multiplier = 1
+            args.calibration_sample_size = (
+                EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+            )
 
     if strategy == "hybrid":
         if args.max_semantic is not None and int(args.max_semantic) >= int(

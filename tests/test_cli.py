@@ -1066,7 +1066,7 @@ def test_search_forces_embedding_strategy_over_configured_build_strategy(
     monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
     config = UserConfig(
         path=Path("cfg-home") / "config.toml",
-        defaults={"strategy": "recommendation"},
+        defaults={"strategy": "recommendation", "calibration_sample_size": 100},
     )
     monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
     client_factory = MagicMock()
@@ -1080,6 +1080,9 @@ def test_search_forces_embedding_strategy_over_configured_build_strategy(
     assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
     assert builder_kwargs["storage_precision"] == "float32"
     assert builder_kwargs["binary_prefilter"] is False
+    assert builder_kwargs["calibration_sample_size"] == (
+        cli_module.EMBEDDING_STORAGE_CONFIG.calibration_sample_size
+    )
     client_factory.assert_not_called()
 
 
