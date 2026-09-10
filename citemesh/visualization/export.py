@@ -3636,7 +3636,7 @@ class GraphExporter:
           nodes: importedNodes.length,
           edges: importedEdges.length,
         },
-        year_range: importedDashboardMeta.year_range || importedMeta.year_range || {},
+        year_range: importedDashboardMeta.year_range ?? importedMeta.year_range ?? null,
         candidate_source_status:
           importedDashboardMeta.candidate_source_status
           || importedMeta.candidate_source_status

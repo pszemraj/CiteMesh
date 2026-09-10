@@ -2159,9 +2159,13 @@ def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
         out_path,
         "(() => {"
         " renderTimeline();"
+        " const roundTrip = portableGraphPayload(normalizeImportedDashboardPayload("
+        ' buildPortableJsonPayload(), "round trip", false).payload);'
         " return {"
         " yearRange: yearRange,"
         " exportedYearRange: buildPortableJsonPayload().meta.year_range,"
+        " importedYearRange: roundTrip.meta.year_range,"
+        " importedDashboardYearRange: roundTrip.dashboard.meta.year_range,"
         " minLabel: controls.timelineYearMin.textContent,"
         " maxLabel: controls.timelineYearMax.textContent,"
         " };"
@@ -2170,6 +2174,8 @@ def test_dashboard_year_range_is_null_when_no_paper_has_a_year(
 
     assert probed["yearRange"] == {}
     assert probed["exportedYearRange"] is None
+    assert probed["importedYearRange"] is None
+    assert probed["importedDashboardYearRange"] is None
     assert probed["minLabel"] == "-"
     assert probed["maxLabel"] == "-"
 
