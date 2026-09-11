@@ -248,7 +248,7 @@ def _spread_layout_by_communities(
         scale=1.0,
         center=(0.0, 0.0),
     )
-    normalized_anchors = _normalize_layout_positions(
+    normalized_anchors = normalize_layout_positions(
         {
             cluster_id: np.asarray(anchor, dtype=float)
             for cluster_id, anchor in anchor_positions.items()
@@ -334,7 +334,7 @@ def _choose_metadata_anchor(
     return x, y, ha, va
 
 
-def _normalize_layout_positions(
+def normalize_layout_positions(
     pos: Dict[Hashable, np.ndarray], padding_ratio: float = LAYOUT_PADDING_RATIO
 ) -> Dict[Hashable, np.ndarray]:
     """Normalize layout positions to a centered square viewport.
@@ -481,7 +481,7 @@ def _pack_disconnected_components(
             if node in pos
         }
         normalized = _orient_layout_horizontally(
-            _normalize_layout_positions(component_pos)
+            normalize_layout_positions(component_pos)
         )
         scale = max(
             DISCONNECTED_COMPONENT_MIN_SCALE,
@@ -1015,7 +1015,7 @@ def visualize_graph(
         if layout is not None
         else compute_layout(graph, iterations, layout_seed=layout_seed)
     )
-    pos = _normalize_layout_positions(raw_pos)
+    pos = normalize_layout_positions(raw_pos)
 
     # Compute visual properties
     sizes = compute_node_sizes(graph)

@@ -58,12 +58,6 @@ from citemesh.core.user_config import (
     unset_config_value,
     user_config_path,
 )
-from citemesh.dashboard_contracts import (
-    DASHBOARD_COLLECTION_KIND,
-    DASHBOARD_COLLECTION_SCHEMA_VERSION,
-    GRAPH_PAYLOAD_KIND,
-    GRAPH_PAYLOAD_SCHEMA_VERSION,
-)
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     EMBEDDING_MODEL_PROFILE_CHOICES,
@@ -110,6 +104,12 @@ from citemesh.visualization import (
     compute_layout,
     generate_output_path,
     visualize_graph,
+)
+from citemesh.visualization.dashboard.contracts import (
+    DASHBOARD_COLLECTION_KIND,
+    DASHBOARD_COLLECTION_SCHEMA_VERSION,
+    GRAPH_PAYLOAD_KIND,
+    GRAPH_PAYLOAD_SCHEMA_VERSION,
 )
 
 DEFAULT_LOG_WIDTH = 0

@@ -29,18 +29,18 @@ from citemesh.cli import (
     update_dashboard_package,
 )
 from citemesh.core import Author, Paper
-from citemesh.dashboard_contracts import (
-    DASHBOARD_COLLECTION_KIND,
-    DASHBOARD_COLLECTION_SCHEMA_VERSION,
-    GRAPH_PAYLOAD_KIND,
-    GRAPH_PAYLOAD_SCHEMA_VERSION,
-)
 from citemesh.data import cache as cache_module
 from citemesh.data.model_profiles import get_embedding_model_profile
 from citemesh.services.semantic_scholar import SemanticScholarClient
 from citemesh.visualization import export as export_module
 from citemesh.visualization import render as render_module
 from citemesh.visualization import themes as themes_module
+from citemesh.visualization.dashboard.contracts import (
+    DASHBOARD_COLLECTION_KIND,
+    DASHBOARD_COLLECTION_SCHEMA_VERSION,
+    GRAPH_PAYLOAD_KIND,
+    GRAPH_PAYLOAD_SCHEMA_VERSION,
+)
 from citemesh.visualization.export import (
     DASHBOARD_AXIS_MIN_PADDING,
     DASHBOARD_AXIS_X_PADDING,
@@ -56,11 +56,13 @@ from citemesh.visualization.export import (
     _select_dashboard_label_nodes,
     _stable_curve_direction,
 )
+from citemesh.visualization.export import geometry as geometry_module
+from citemesh.visualization.export import loaders as loaders_module
+from citemesh.visualization.export import nodes as nodes_module
 from citemesh.visualization.render import (
     KK_LAYOUT_DISTANCE_ATTR,
     MAX_STATIC_NON_SEED_LABELS,
     _layout_viewport_limits,
-    _normalize_layout_positions,
     _orient_layout_horizontally,
     _pack_disconnected_components,
     _spread_layout_by_communities,
@@ -68,6 +70,7 @@ from citemesh.visualization.render import (
     compute_node_colors,
     compute_node_sizes,
     draw_labels,
+    normalize_layout_positions,
     visualize_graph,
 )
 from citemesh.visualization.themes import get_theme
@@ -92,9 +95,9 @@ def _install_fake_plotly(
         Layout=lambda **kwargs: {"type": "layout", **kwargs},
         Figure=figure_cls,
     )
-    monkeypatch.setattr(export_module, "_load_plotly_graph_objects", lambda: fake_go)
+    monkeypatch.setattr(loaders_module, "_load_plotly_graph_objects", lambda: fake_go)
     monkeypatch.setattr(
-        export_module,
+        loaders_module,
         "_load_plotly_dashboard_runtime",
         lambda: (fake_go, lambda: plotly_js),
     )
@@ -393,7 +396,7 @@ def test_json_export_embeds_geometry_computing_layout_lazily(
         layout_calls.append(graph_arg)
         return {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
 
-    monkeypatch.setattr(export_module, "compute_layout", _counting_compute_layout)
+    monkeypatch.setattr(nodes_module, "compute_layout", _counting_compute_layout)
 
     json_path = tmp_path / "graph.json"
     exporter.to_json(json_path)
@@ -444,7 +447,7 @@ def test_exporter_interactive_html_contracts(
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setattr(export_module, "_load_pyvis_network_class", raise_import_error)
+    monkeypatch.setattr(loaders_module, "_load_pyvis_network_class", raise_import_error)
     with pytest.raises(RuntimeError, match="pyvis is required"):
         exporter.to_interactive_html(tmp_path / "missing.html")
 
@@ -470,7 +473,9 @@ def test_exporter_interactive_html_contracts(
         def save_graph(self, path: str) -> None:
             Path(path).write_text("<html>fake</html>")
 
-    monkeypatch.setattr(export_module, "_load_pyvis_network_class", lambda: FakeNetwork)
+    monkeypatch.setattr(
+        loaders_module, "_load_pyvis_network_class", lambda: FakeNetwork
+    )
 
     out_path = tmp_path / "graph.html"
     out_path.write_text("previous", encoding="utf-8")
@@ -494,7 +499,9 @@ def test_exporter_plotly_contracts(
     graph, seed_id = _build_graph()
     exporter = GraphExporter(graph, seed_id)
 
-    monkeypatch.setattr(export_module, "_load_plotly_graph_objects", raise_import_error)
+    monkeypatch.setattr(
+        loaders_module, "_load_plotly_graph_objects", raise_import_error
+    )
     with pytest.raises(RuntimeError, match="plotly is required"):
         exporter.to_plotly_html(tmp_path / "missing.plotly.html")
 
@@ -645,7 +652,7 @@ def test_exports_reject_nonfinite_weights_without_replacing_outputs(
     """
     _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
     monkeypatch.setattr(
-        export_module,
+        loaders_module,
         "_load_pyvis_network_class",
         lambda: (
             lambda **kwargs: types.SimpleNamespace(
@@ -729,7 +736,7 @@ def test_plotly_marker_labels_escape_upstream_markup(
         graph, seed_id, layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)}
     )
     figure, _ = exporter._build_plotly_figure(
-        go=export_module._load_plotly_graph_objects(),
+        go=loaders_module._load_plotly_graph_objects(),
         theme_obj=get_theme("dark"),
         for_dashboard=for_dashboard,
     )
@@ -756,7 +763,7 @@ def test_plotly_figure_title_escapes_upstream_markup(
     )
 
     figure, _ = exporter._build_plotly_figure(
-        go=export_module._load_plotly_graph_objects(),
+        go=loaders_module._load_plotly_graph_objects(),
         theme_obj=get_theme("light"),
         for_dashboard=False,
     )
@@ -908,9 +915,11 @@ def test_interactive_html_failure_preserves_previous_output(
         del path, scheme
         raise RuntimeError("injection failed")
 
-    monkeypatch.setattr(export_module, "_load_pyvis_network_class", lambda: FakeNetwork)
+    monkeypatch.setattr(
+        loaders_module, "_load_pyvis_network_class", lambda: FakeNetwork
+    )
     if failure_stage == "injection":
-        monkeypatch.setattr(export_module, "_inject_darkreader_lock", fail_injection)
+        monkeypatch.setattr(geometry_module, "_inject_darkreader_lock", fail_injection)
 
     with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
         GraphExporter(graph, seed_id).to_interactive_html(destination)
@@ -961,7 +970,7 @@ def test_plotly_html_failure_preserves_previous_output(
 
     _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
     if failure_stage == "injection":
-        monkeypatch.setattr(export_module, "_inject_darkreader_lock", fail_injection)
+        monkeypatch.setattr(geometry_module, "_inject_darkreader_lock", fail_injection)
 
     with pytest.raises(RuntimeError, match=f"{failure_stage} failed"):
         GraphExporter(
@@ -2294,7 +2303,7 @@ def test_exporter_dashboard_missing_plotly_dependency(
     exporter = GraphExporter(graph, seed_id)
 
     monkeypatch.setattr(
-        export_module, "_load_plotly_dashboard_runtime", raise_import_error
+        loaders_module, "_load_plotly_dashboard_runtime", raise_import_error
     )
     with pytest.raises(RuntimeError, match="plotly is required for Dashboard export"):
         exporter.to_dashboard_html(tmp_path / "missing.dashboard.html")
@@ -2899,7 +2908,7 @@ def test_layout_positioning_contracts(
         "b": np.array([22.0, 4.0]),
         "c": np.array([16.0, 8.0]),
     }
-    normalized = _normalize_layout_positions(raw, padding_ratio=0.1)
+    normalized = normalize_layout_positions(raw, padding_ratio=0.1)
     coords = np.array(list(normalized.values()), dtype=float)
     bounds_center = (coords.max(axis=0) + coords.min(axis=0)) * 0.5
 
@@ -3417,7 +3426,9 @@ def test_bibtex_keys_distinguish_ids_with_the_same_slug(tmp_path: Path) -> None:
 
 def test_bibtex_escapes_latex_specials() -> None:
     """BibTeX fields must escape every LaTeX special, leaving none bare."""
-    escaped = GraphExporter._bibtex_escape("100% $x$ & #tag_1 ~ ^ back\\slash {b}")
+    from citemesh.visualization.export.bibtex import _bibtex_escape
+
+    escaped = _bibtex_escape("100% $x$ & #tag_1 ~ ^ back\\slash {b}")
 
     assert escaped == (
         "100\\% \\$x\\$ \\& \\#tag\\_1 \\textasciitilde{} "
