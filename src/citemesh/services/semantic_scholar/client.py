@@ -687,7 +687,11 @@ class SemanticScholarClient(_EndpointsMixin):
 
 
 _client_instance: SemanticScholarClient | None = None
-_client_lock = threading.Lock()
+# Re-entrant on purpose: get_client() allocates a whole client under this lock,
+# which can trigger a cyclic-GC pass that finalizes an unclosed client caught in
+# a reference cycle. Its __del__ calls close(), which takes this lock on the
+# same thread; a plain Lock deadlocks there.
+_client_lock = threading.RLock()
 
 
 def get_client() -> SemanticScholarClient:

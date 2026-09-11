@@ -2969,3 +2969,33 @@ def test_invalid_batch_rows_warn_and_are_skipped(
         client._session.post.assert_called_once()
         client._session.get.assert_not_called()
     assert "Skipping malformed batch paper for p1." in caplog.text
+
+
+def test_client_finalization_under_client_lock_does_not_deadlock() -> None:
+    """Finalizing an unclosed client while ``_client_lock`` is held must not hang.
+
+    ``get_client()`` constructs the singleton under ``_client_lock``. That
+    allocation can trigger a cyclic-GC pass, which runs ``__del__`` (and thus
+    ``close()``, which takes the same lock) for any unclosed client caught in a
+    reference cycle, on the same thread. A non-reentrant lock deadlocks there,
+    so re-entrancy is asserted first: with a plain lock this test would hang
+    instead of failing.
+    """
+    import gc
+    import weakref
+
+    lock = semantic_module.client._client_lock
+    assert lock.acquire(timeout=5)
+    try:
+        assert lock.acquire(blocking=False), "_client_lock must be re-entrant"
+        lock.release()
+    finally:
+        lock.release()
+
+    client = SemanticScholarClient(timeout=1)
+    client._cycle = client  # reachable only through the cyclic collector
+    finalized = weakref.ref(client)
+    del client
+    with lock:
+        gc.collect()
+    assert finalized() is None

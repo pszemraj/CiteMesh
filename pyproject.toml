@@ -98,6 +98,8 @@ local_scheme = "no-local-version"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --tb=short -m \"not slow\""
+# Dump every thread's stack when a test exceeds this, so a hang self-diagnoses in CI.
+faulthandler_timeout = 300
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "cuda: marks tests that require a real CUDA device",
