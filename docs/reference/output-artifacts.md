@@ -9,6 +9,8 @@ A dashboard run writes two shared files at the collection root, and sharing a fi
 - `dashboard.html` - reusable tri-pane viewer with an embedded snapshot, so it opens from the local filesystem
 - `dashboard.citemesh.json` - authoritative, portable package holding one or more graph results and their build settings
 
+The repository includes a ready-to-open [Megalodon dashboard](../../assets/examples/megalodon/dashboard.html) and its [collection package](../../assets/examples/megalodon/dashboard.citemesh.json) under `assets/examples/megalodon/` (45 papers, 108 links). Open the HTML locally to explore the saved graph without running a build, or use **Add Results** in any CiteMesh dashboard to load the package.
+
 A hidden `.dashboard.citemesh.json.lock` beside the package serializes collection updates and viewer refreshes, including builds using different `CITEMESH_CACHE_DIR` roots (60-second timeout).
 
 Every collection build also writes a per-seed directory `<title-slug>-<hash>/` holding `<strategy>.json` and `<strategy>.config.json`, even under `--export dashboard` alone. Other formats are written when selected; `png` is the default when `--export` is omitted.

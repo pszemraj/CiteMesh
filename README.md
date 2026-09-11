@@ -8,6 +8,8 @@ It runs locally from a single CLI with four switchable strategies — recommenda
 
 _A hybrid graph seeded by “Megalodon” over a full arXiv corpus index, with “LM-Infinite” selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
 
+Try the same graph without running the pipeline: after cloning this repository, open [assets/examples/megalodon/dashboard.html](assets/examples/megalodon/dashboard.html) in your browser. The saved example works offline with no installation, API key, or model download. To practice importing results, click **Add Results** and select [dashboard.citemesh.json](assets/examples/megalodon/dashboard.citemesh.json) from the same folder; importing this example into its own dashboard refreshes the existing result rather than adding a duplicate. Use **Export Collection** to save results imported into your browser session.
+
 ## What you get
 
 | | CiteMesh | Typical hosted graph tool |
