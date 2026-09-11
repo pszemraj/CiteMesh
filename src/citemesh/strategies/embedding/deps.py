@@ -8,8 +8,9 @@ single module attribute and the rest of the package never imports ``torch``,
 
 from __future__ import annotations
 
+import importlib
 import importlib.util
-from typing import Any
+from typing import Any, Optional
 
 from . import runtime
 
@@ -46,7 +47,7 @@ def _check_embedding_deps(require_corpus: bool = True) -> None:
         )
 
     raw_torch_version = str(getattr(torch_module, "__version__", "")).strip()
-    torch_version = runtime._parse_torch_major_minor(raw_torch_version)
+    torch_version = runtime._parse_major_minor(raw_torch_version, default=(0, 0))
     if torch_version < runtime._EMBEDDING_MIN_TORCH_VERSION:
         raise ImportError(
             "Embedding strategy requires torch>=2.9.0 (runtime precision policy). "
@@ -66,14 +67,36 @@ def _module_available(module_name: str) -> bool:
         return False
 
 
+def _import_optional(module_name: str, attribute: Optional[str] = None) -> Any:
+    """Import an optional dependency module, or one attribute from it.
+
+    Mirrors ``from <module_name> import <attribute>``: a missing module and a
+    missing attribute both surface as ``ImportError``, which is the only
+    exception the dependency check and the model loader expect to catch.
+
+    :param str module_name: Absolute module name to import.
+    :param Optional[str] attribute: Attribute to read from the imported module.
+    :return Any: The imported module, or the named attribute when given.
+    :raises ImportError: If the module or the requested attribute is unavailable.
+    """
+    module = importlib.import_module(module_name)
+    if attribute is None:
+        return module
+    try:
+        return getattr(module, attribute)
+    except AttributeError as error:
+        raise ImportError(
+            f"cannot import name {attribute!r} from {module_name!r}",
+            name=module_name,
+        ) from error
+
+
 def _import_torch() -> Any:
     """Import and return the ``torch`` module.
 
     :return Any: Imported ``torch`` module object.
     """
-    import torch
-
-    return torch
+    return _import_optional("torch")
 
 
 def _import_sentence_transformer_class() -> Any:
@@ -81,9 +104,7 @@ def _import_sentence_transformer_class() -> Any:
 
     :return Any: Imported ``SentenceTransformer`` class.
     """
-    from sentence_transformers import SentenceTransformer
-
-    return SentenceTransformer
+    return _import_optional("sentence_transformers", "SentenceTransformer")
 
 
 def _import_datasets_module() -> Any:
@@ -91,9 +112,7 @@ def _import_datasets_module() -> Any:
 
     :return Any: Imported ``datasets`` module object.
     """
-    import datasets
-
-    return datasets
+    return _import_optional("datasets")
 
 
 def _import_huggingface_hub_module() -> Any:
@@ -101,6 +120,4 @@ def _import_huggingface_hub_module() -> Any:
 
     :return Any: Imported ``huggingface_hub`` module object.
     """
-    import huggingface_hub
-
-    return huggingface_hub
+    return _import_optional("huggingface_hub")

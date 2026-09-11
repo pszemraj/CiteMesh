@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from importlib import metadata as importlib_metadata
 from typing import (
     Any,
+    Callable,
     Iterator,
     Optional,
 )
@@ -150,27 +151,22 @@ def _suppress_transformers_progress_for_non_tty() -> Iterator[None]:
         transformers_logging.enable_progress_bar()
 
 
-def _parse_torch_major_minor(version: str) -> tuple[int, int]:
-    """Parse major/minor tuple from a torch version string.
-
-    :param str version: Raw torch version string.
-    :return tuple[int, int]: Parsed ``(major, minor)`` tuple, ``(0, 0)`` on parse miss.
-    """
-    version_match = re.match(r"^(\d+)\.(\d+)", str(version).strip())
-    if version_match:
-        return int(version_match.group(1)), int(version_match.group(2))
-    return (0, 0)
-
-
-def _parse_major_minor(version: str) -> Optional[tuple[int, int]]:
+def _parse_major_minor(
+    version: object, *, default: Optional[tuple[int, int]] = None
+) -> Optional[tuple[int, int]]:
     """Parse a leading semantic-version major/minor pair.
 
-    :param str version: Raw package version string.
-    :return Optional[tuple[int, int]]: Parsed pair, or ``None`` when unavailable.
+    Callers that compare against a version floor pass ``default=(0, 0)`` so an
+    unparseable version sorts below every floor; callers that must distinguish
+    "older" from "unknown" keep the ``None`` default.
+
+    :param object version: Raw package version string.
+    :param Optional[tuple[int, int]] default: Value returned on a parse miss.
+    :return Optional[tuple[int, int]]: Parsed pair, or ``default`` when unavailable.
     """
     version_match = re.match(r"^(\d+)\.(\d+)", str(version).strip())
     if version_match is None:
-        return None
+        return default
     return int(version_match.group(1)), int(version_match.group(2))
 
 
@@ -284,59 +280,81 @@ def _mps_capabilities(torch: Any) -> tuple[bool, bool]:
     return built, available
 
 
-def _cuda_native_bf16_supported(torch: Any) -> bool:
-    """Return whether CUDA provides native rather than emulated bfloat16.
+def _native_bf16_supported(
+    torch: Any, backend: str, probe: Callable[[Any], bool]
+) -> bool:
+    """Run one backend's bf16 capability probe, failing closed on any error.
 
     :param Any torch: Imported torch module object.
-    :return bool: ``True`` only for a live CUDA backend with native bf16 support.
+    :param str backend: Torch submodule attribute holding the probe (``cuda``/``cpu``).
+    :param Callable[[Any], bool] probe: Capability probe for that submodule.
+    :return bool: Probe result, or ``False`` when the backend cannot answer.
     """
-    cuda_module = getattr(torch, "cuda", None)
+    backend_module = getattr(torch, backend, None)
+    try:
+        return bool(probe(backend_module))
+    except Exception:
+        return False
+
+
+def _cuda_bf16_probe(cuda_module: Any) -> bool:
+    """Ask a live CUDA backend for native (non-emulated) bf16 support.
+
+    :param Any cuda_module: ``torch.cuda`` module object, or ``None``.
+    :return bool: Whether CUDA reports native bf16 support.
+    """
     is_supported = getattr(cuda_module, "is_bf16_supported", None)
     if not callable(is_supported):
         return False
     try:
         return bool(is_supported(including_emulation=False))
     except TypeError:
+        # Older torch releases have no emulation keyword; fall back to the
+        # compute capability, since bf16 is native from Ampere (8.x) onward.
         get_capability = getattr(cuda_module, "get_device_capability", None)
-        try:
-            capability = get_capability(0) if callable(get_capability) else None
-        except Exception:
-            return False
+        capability = get_capability(0) if callable(get_capability) else None
         return bool(
             isinstance(capability, tuple)
             and capability
             and int(capability[0]) >= 8
             and is_supported()
         )
-    except Exception:
-        return False
+
+
+def _cpu_bf16_probe(cpu_module: Any) -> bool:
+    """Check native CPU BF16 instructions using available torch capability APIs.
+
+    :param Any cpu_module: ``torch.cpu`` module object, or ``None``.
+    :return bool: Whether x86 or ARM BF16 support can be established.
+    """
+    capabilities = getattr(cpu_module, "get_capabilities", None)
+    if callable(capabilities):
+        supported = capabilities()
+        return any(
+            supported.get(name, False)
+            for name in ("avx512_bf16", "amx_bf16", "bf16", "sve_bf16")
+        )
+    # Older supported torch versions expose only this x86 BF16 probe.
+    probe = getattr(cpu_module, "_is_avx512_bf16_supported", None)
+    return bool(probe()) if callable(probe) else False
+
+
+def _cuda_native_bf16_supported(torch: Any) -> bool:
+    """Return whether CUDA provides native rather than emulated bfloat16.
+
+    :param Any torch: Imported torch module object.
+    :return bool: ``True`` only for a live CUDA backend with native bf16 support.
+    """
+    return _native_bf16_supported(torch, "cuda", _cuda_bf16_probe)
 
 
 def _cpu_native_bf16_supported(torch: Any) -> bool:
-    """Check native CPU BF16 instructions using available torch capability APIs.
+    """Return whether the CPU exposes native bfloat16 instructions.
 
     :param Any torch: Imported torch module object.
     :return bool: Whether x86 or ARM BF16 support can be established.
     """
-    cpu_module = getattr(torch, "cpu", None)
-    capabilities = getattr(cpu_module, "get_capabilities", None)
-    try:
-        if callable(capabilities):
-            supported = capabilities()
-            return any(
-                supported.get(name, False)
-                for name in (
-                    "avx512_bf16",
-                    "amx_bf16",
-                    "bf16",
-                    "sve_bf16",
-                )
-            )
-        # Older supported torch versions expose only this x86 BF16 probe.
-        probe = getattr(cpu_module, "_is_avx512_bf16_supported", None)
-        return bool(probe()) if callable(probe) else False
-    except Exception:
-        return False
+    return _native_bf16_supported(torch, "cpu", _cpu_bf16_probe)
 
 
 def resolve_embedding_device(requested: Optional[str]) -> str:

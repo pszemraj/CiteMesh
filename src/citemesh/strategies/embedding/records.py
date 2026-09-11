@@ -24,8 +24,8 @@ from typing import (
 
 from citemesh.core.paper_fields import coerce_authors, coerce_categories, coerce_venue
 from citemesh.paper_ids import (
+    canonicalize_or_none,
     external_ids_from_canonical_paper_id,
-    normalize_paper_id,
     recognize_arxiv_identifier,
 )
 
@@ -226,10 +226,9 @@ def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) 
     paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
     arxiv_id, doi = external_ids_from_canonical_paper_id(paper_id)
     source_doi = re.split(r"[\s,;]+", str(paper.get("doi") or "").strip())[0]
-    if source_doi:
-        _, normalized_doi = external_ids_from_canonical_paper_id(
-            normalize_paper_id(source_doi)
-        )
+    canonical_source_doi = canonicalize_or_none(source_doi) if source_doi else None
+    if canonical_source_doi is not None:
+        _, normalized_doi = external_ids_from_canonical_paper_id(canonical_source_doi)
         if normalized_doi and normalized_doi.startswith("10."):
             doi = normalized_doi
     title = paper.get("title", "Unknown")

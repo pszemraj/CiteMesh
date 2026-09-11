@@ -21,6 +21,7 @@ from typing import (
     List,
     Optional,
     Set,
+    Tuple,
 )
 
 from . import deps
@@ -325,113 +326,17 @@ class _FingerprintMixin:
         if not root.is_dir():
             raise RuntimeError(f"Local embedding model path is not readable: {root}")
 
-        artifacts: Set[Path] = set()
-        artifact_roots = {root}
-        python_references: List[object] = []
-        modules_path = root / "modules.json"
-        if modules_path.is_file():
-            artifacts.add(modules_path)
-            try:
-                modules_payload = json.loads(modules_path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise RuntimeError(
-                    f"Malformed SentenceTransformers modules.json: {exc}"
-                ) from exc
-            if not isinstance(modules_payload, list):
-                raise RuntimeError("SentenceTransformers modules.json must be a list.")
-            for module in modules_payload:
-                if not isinstance(module, dict):
-                    raise RuntimeError(
-                        "SentenceTransformers modules.json entries must be objects."
-                    )
-                python_references.append(module.get("type"))
-                module_path = str(module.get("path", "") or "").strip()
-                if not module_path:
-                    continue
-                resolved_module = cls._safe_artifact_reference(
-                    root, modules_path, module_path
-                )
-                if not resolved_module.exists():
-                    raise RuntimeError(
-                        f"SentenceTransformers module path is missing: {module_path}"
-                    )
-                if resolved_module.is_dir():
-                    artifact_roots.add(resolved_module)
-                    artifacts.update(
-                        path for path in resolved_module.rglob("*.py") if path.is_file()
-                    )
-                elif resolved_module.is_file():
-                    artifacts.add(resolved_module)
-
+        artifacts, artifact_roots, python_references = cls._declared_module_artifacts(
+            root
+        )
         for current_root in artifact_roots:
             artifacts.update(
                 path
                 for file_name in _INFERENCE_ARTIFACT_FILENAMES
                 if (path := current_root / file_name).is_file()
             )
-            tokenizer_config_path = current_root / "tokenizer_config.json"
-            if tokenizer_config_path.is_file():
-                try:
-                    tokenizer_config = json.loads(
-                        tokenizer_config_path.read_text(encoding="utf-8")
-                    )
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    tokenizer_config = {}
-                if isinstance(tokenizer_config, dict):
-                    for key, raw_reference in tokenizer_config.items():
-                        if key.endswith("_file") and isinstance(raw_reference, str):
-                            references = [raw_reference]
-                        elif key.endswith("_files") and isinstance(raw_reference, list):
-                            references = raw_reference
-                        else:
-                            continue
-                        for reference in references:
-                            if not isinstance(reference, str):
-                                continue
-                            try:
-                                referenced_path = cls._safe_artifact_reference(
-                                    root, tokenizer_config_path, reference
-                                )
-                            except RuntimeError:
-                                continue
-                            if referenced_path.is_file():
-                                artifacts.add(referenced_path)
-
-            selected_weight = next(
-                (
-                    current_root / file_name
-                    for file_name in _TORCH_WEIGHT_LAYOUTS
-                    if (current_root / file_name).is_file()
-                ),
-                None,
-            )
-            if selected_weight is None:
-                continue
-            artifacts.add(selected_weight)
-            if not selected_weight.name.endswith(".index.json"):
-                continue
-            try:
-                index_payload = json.loads(selected_weight.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise RuntimeError(
-                    f"Malformed weight index {selected_weight}: {exc}"
-                ) from exc
-            weight_map = (
-                index_payload.get("weight_map")
-                if isinstance(index_payload, dict)
-                else None
-            )
-            if not isinstance(weight_map, dict) or not weight_map:
-                raise RuntimeError(f"Weight index has no weight_map: {selected_weight}")
-            for shard_name in sorted({str(value) for value in weight_map.values()}):
-                shard_path = cls._safe_artifact_reference(
-                    root, selected_weight, shard_name
-                )
-                if not shard_path.is_file():
-                    raise RuntimeError(
-                        f"Weight index references a missing shard: {shard_name}"
-                    )
-                artifacts.add(shard_path)
+            artifacts.update(cls._tokenizer_referenced_artifacts(root, current_root))
+            artifacts.update(cls._torch_weight_artifacts(root, current_root))
 
         for reference in python_references:
             artifacts.update(cls._referenced_python_artifact_paths(root, reference))
@@ -441,6 +346,160 @@ class _FingerprintMixin:
                 f"No inference-relevant artifacts found under local model path {root}."
             )
         return sorted(artifacts, key=lambda path: path.relative_to(root).as_posix())
+
+    @classmethod
+    def _declared_module_artifacts(
+        cls, root: Path
+    ) -> Tuple[Set[Path], Set[Path], List[object]]:
+        """Read ``modules.json`` and expand the module layout it declares.
+
+        Each declared module contributes its own artifact root (so config and
+        tokenizer files under a submodule directory are scanned too) and its
+        ``type``, which may name an importable Python module whose source is
+        part of the checkpoint's inference behavior.
+
+        :param Path root: Resolved local model directory.
+        :return Tuple[Set[Path], Set[Path], List[object]]: Artifacts found so far,
+            the roots still to scan, and the declared module type references.
+        :raises RuntimeError: If ``modules.json`` is malformed or points at a
+            missing path.
+        """
+        artifacts: Set[Path] = set()
+        artifact_roots: Set[Path] = {root}
+        python_references: List[object] = []
+        modules_path = root / "modules.json"
+        if not modules_path.is_file():
+            return artifacts, artifact_roots, python_references
+
+        artifacts.add(modules_path)
+        try:
+            modules_payload = json.loads(modules_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Malformed SentenceTransformers modules.json: {exc}"
+            ) from exc
+        if not isinstance(modules_payload, list):
+            raise RuntimeError("SentenceTransformers modules.json must be a list.")
+        for module in modules_payload:
+            if not isinstance(module, dict):
+                raise RuntimeError(
+                    "SentenceTransformers modules.json entries must be objects."
+                )
+            python_references.append(module.get("type"))
+            module_path = str(module.get("path", "") or "").strip()
+            if not module_path:
+                continue
+            resolved_module = cls._safe_artifact_reference(
+                root, modules_path, module_path
+            )
+            if not resolved_module.exists():
+                raise RuntimeError(
+                    f"SentenceTransformers module path is missing: {module_path}"
+                )
+            if resolved_module.is_dir():
+                artifact_roots.add(resolved_module)
+                artifacts.update(
+                    path for path in resolved_module.rglob("*.py") if path.is_file()
+                )
+            elif resolved_module.is_file():
+                artifacts.add(resolved_module)
+        return artifacts, artifact_roots, python_references
+
+    @classmethod
+    def _tokenizer_referenced_artifacts(
+        cls, root: Path, current_root: Path
+    ) -> Set[Path]:
+        """Collect files a ``tokenizer_config.json`` points at by ``*_file(s)`` keys.
+
+        Tokenizer configs reference vocabularies and merge tables by relative
+        path. A missing or unreadable config is not fatal here: the config file
+        itself is already digested through the declared-filename scan, and an
+        unresolvable reference simply contributes nothing.
+
+        :param Path root: Resolved local model directory used as the escape boundary.
+        :param Path current_root: Artifact root whose tokenizer config is read.
+        :return Set[Path]: Existing files referenced by the tokenizer config.
+        """
+        tokenizer_config_path = current_root / "tokenizer_config.json"
+        if not tokenizer_config_path.is_file():
+            return set()
+        try:
+            tokenizer_config = json.loads(
+                tokenizer_config_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            tokenizer_config = {}
+        if not isinstance(tokenizer_config, dict):
+            return set()
+
+        artifacts: Set[Path] = set()
+        for key, raw_reference in tokenizer_config.items():
+            if key.endswith("_file") and isinstance(raw_reference, str):
+                references = [raw_reference]
+            elif key.endswith("_files") and isinstance(raw_reference, list):
+                references = raw_reference
+            else:
+                continue
+            for reference in references:
+                if not isinstance(reference, str):
+                    continue
+                try:
+                    referenced_path = cls._safe_artifact_reference(
+                        root, tokenizer_config_path, reference
+                    )
+                except RuntimeError:
+                    continue
+                if referenced_path.is_file():
+                    artifacts.add(referenced_path)
+        return artifacts
+
+    @classmethod
+    def _torch_weight_artifacts(cls, root: Path, current_root: Path) -> Set[Path]:
+        """Select one weight layout and expand a sharded index into its shards.
+
+        Only the first matching layout in :data:`_TORCH_WEIGHT_LAYOUTS` counts, so
+        a checkpoint shipping both safetensors and a pickle mirror digests once.
+        Unlike the tokenizer references, a declared-but-missing shard is fatal:
+        the digest would otherwise claim to cover weights that cannot load.
+
+        :param Path root: Resolved local model directory used as the escape boundary.
+        :param Path current_root: Artifact root whose weight layout is selected.
+        :return Set[Path]: The selected weight file plus any shards it indexes.
+        :raises RuntimeError: If a weight index is malformed or names a missing shard.
+        """
+        selected_weight = next(
+            (
+                current_root / file_name
+                for file_name in _TORCH_WEIGHT_LAYOUTS
+                if (current_root / file_name).is_file()
+            ),
+            None,
+        )
+        if selected_weight is None:
+            return set()
+        artifacts: Set[Path] = {selected_weight}
+        if not selected_weight.name.endswith(".index.json"):
+            return artifacts
+
+        try:
+            index_payload = json.loads(selected_weight.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                f"Malformed weight index {selected_weight}: {exc}"
+            ) from exc
+        weight_map = (
+            index_payload.get("weight_map") if isinstance(index_payload, dict) else None
+        )
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise RuntimeError(f"Weight index has no weight_map: {selected_weight}")
+        for shard_name in sorted({str(value) for value in weight_map.values()}):
+            shard_path = cls._safe_artifact_reference(root, selected_weight, shard_name)
+            if not shard_path.is_file():
+                raise RuntimeError(
+                    f"Weight index references a missing shard: {shard_name}"
+                )
+            artifacts.add(shard_path)
+        return artifacts
 
     @classmethod
     def _resolve_inference_artifact_digest(cls, artifact_root: Path) -> str:

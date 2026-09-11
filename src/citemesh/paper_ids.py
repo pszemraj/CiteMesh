@@ -82,11 +82,10 @@ def paper_identifier_aliases(
         if not normalized:
             continue
         aliases.add(normalized)
-        try:
-            canonical_identifier = normalize_paper_id(normalized)
-            aliases.add(canonical_identifier)
-        except ValueError:
+        canonical_identifier = canonicalize_or_none(normalized)
+        if canonical_identifier is None:
             continue
+        aliases.add(canonical_identifier)
         arxiv_alias = recognize_arxiv_identifier(canonical_identifier)
         if arxiv_alias:
             aliases.add(arxiv_alias)
@@ -239,3 +238,20 @@ def normalize_paper_id(paper_id: str) -> str:
             return hosted_identifier
 
     return normalized
+
+
+def canonicalize_or_none(paper_id: Any) -> Optional[str]:
+    """Best-effort canonicalization that reports failure instead of raising.
+
+    :func:`normalize_paper_id` raises for anything it cannot canonicalize. Every
+    caller that treats an unrecognizable identifier as "leave it alone" rather
+    than an error wraps it in the same ``try``/``except ValueError``; this is
+    that wrapper, so the fallback each caller wants stays at the call site.
+
+    :param Any paper_id: Raw identifier or URL.
+    :return Optional[str]: Canonical identifier, or ``None`` when unrecognizable.
+    """
+    try:
+        return normalize_paper_id(paper_id)
+    except ValueError:
+        return None

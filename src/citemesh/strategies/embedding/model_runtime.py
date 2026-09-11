@@ -39,7 +39,7 @@ from .runtime import (
     EmbeddingPrecisionCompatibilityError,
     _cpu_native_bf16_supported,
     _cuda_native_bf16_supported,
-    _parse_torch_major_minor,
+    _parse_major_minor,
     _require_transformers_compatibility,
     _suppress_expected_fa2_load_dtype_warning,
     _suppress_transformers_progress_for_non_tty,
@@ -198,7 +198,9 @@ class _ModelRuntimeMixin:
         :param Any torch: Imported ``torch`` module object.
         :return bool: ``True`` when torch meets the MPS bf16 policy floor.
         """
-        torch_version = _parse_torch_major_minor(getattr(torch, "__version__", ""))
+        torch_version = _parse_major_minor(
+            getattr(torch, "__version__", ""), default=(0, 0)
+        )
         if torch_version >= _MPS_MIN_TORCH_VERSION:
             return True
         logger.warning(
@@ -656,128 +658,168 @@ class _ModelRuntimeMixin:
 
         :return None: Model is initialized in-place on first access.
         """
-        if self.model is None:
-            sentence_transformer_cls = deps._import_sentence_transformer_class()
+        if self.model is not None:
+            return
+        sentence_transformer_cls = deps._import_sentence_transformer_class()
+        logger.info(f"Loading embedding model: {self.model_name}")
+        self._load_first_available_candidate(sentence_transformer_cls)
+        self._bind_loaded_model_runtime()
 
-            logger.info(f"Loading embedding model: {self.model_name}")
-            load_candidates = self._model_load_candidates()
-            model_errors: List[Tuple[str, Exception]] = []
-            for idx, candidate_model in enumerate(load_candidates):
-                try:
-                    self._bind_model_contract(candidate_model)
-                    _require_transformers_compatibility(self.model_profile)
-                    model_kwargs = self._resolve_model_kwargs()
-                    st_kwargs: Dict[str, Any] = {"device": self.device}
-                    if model_kwargs:
-                        st_kwargs["model_kwargs"] = model_kwargs
-                    if self.truncate_dim is not None:
-                        st_kwargs["truncate_dim"] = self.truncate_dim
-                    if self.model_revision is not None:
-                        st_kwargs["revision"] = self.model_revision
-                    try:
-                        with _suppress_transformers_progress_for_non_tty():
-                            with _suppress_expected_fa2_load_dtype_warning(
-                                enabled=(
-                                    self._attention_implementation_hint
-                                    == "flash_attention_2"
-                                    and self._autocast_enabled
-                                    and self._autocast_device_type == "cuda"
-                                )
-                            ):
-                                loaded_model = sentence_transformer_cls(
-                                    candidate_model, **st_kwargs
-                                )
-                    except (ImportError, ValueError) as exc:
-                        fa2_error_markers = (
-                            "flashattention2",
-                            "flash attention 2",
-                            "flash_attn",
-                            "flash_attention_2",
-                        )
-                        if (
-                            self._attention_implementation_hint != "flash_attention_2"
-                            or not any(
-                                marker in str(exc).casefold()
-                                for marker in fa2_error_markers
-                            )
-                        ):
-                            raise
-                        logger.warning(
-                            "FlashAttention 2 could not load for %s (%s); retrying with SDPA.",
-                            candidate_model,
-                            exc,
-                        )
-                        self._attention_implementation_hint = "sdpa"
-                        model_kwargs["attn_implementation"] = "sdpa"
-                        with _suppress_transformers_progress_for_non_tty():
-                            loaded_model = sentence_transformer_cls(
-                                candidate_model, **st_kwargs
-                            )
-                    self._validate_loaded_model_precision(loaded_model, candidate_model)
-                    self._validate_loaded_model_contract(loaded_model, candidate_model)
-                    self.model = loaded_model
-                except (
-                    EmbeddingBackendCompatibilityError,
-                    EmbeddingPrecisionCompatibilityError,
-                ):
-                    raise
-                except Exception as exc:
-                    model_errors.append((candidate_model, exc))
-                    has_more_candidates = idx + 1 < len(load_candidates)
-                    if has_more_candidates:
-                        logger.warning(
-                            "Failed to load embedding model %s (%s: %s). "
-                            "Trying fallback checkpoint...",
-                            candidate_model,
-                            type(exc).__name__,
-                            exc,
-                        )
-                        continue
-                    summary = "; ".join(
-                        f"{model_id}: {type(error).__name__}: {error}"
-                        for model_id, error in model_errors
-                    )
-                    raise RuntimeError(
-                        "Could not load embedding model from candidate chain "
-                        f"{load_candidates}: {summary}"
-                    ) from exc
+    def _load_first_available_candidate(self, sentence_transformer_cls: Any) -> None:
+        """Construct the first checkpoint in the fallback chain that loads cleanly.
 
-                if candidate_model != self.model_name:
-                    logger.info(
-                        "Using fallback embedding checkpoint: requested=%s active=%s.",
-                        self.model_name,
-                        candidate_model,
-                    )
-                if self._active_model_name != candidate_model:
-                    self._resolved_model_fingerprint = None
-                self._active_model_name = candidate_model
-                break
+        Backend and precision incompatibilities are policy decisions rather than
+        load failures, so they abort the chain instead of falling through to a
+        checkpoint that would silently run under a different contract.
 
-            self._bind_embedding_cache_to_active_model()
-            self._configure_tf32_runtime()
-            if (
-                self.enable_torch_compile
-                and self.semantic_source == "arxiv-corpus"
-                and self.device == "mps"
+        :param Any sentence_transformer_cls: Resolved ``SentenceTransformer`` class.
+        :return None: Binds ``model`` and ``_active_model_name`` to the winner.
+        :raises EmbeddingBackendCompatibilityError: If a candidate needs a newer backend.
+        :raises EmbeddingPrecisionCompatibilityError: If loaded weights violate policy.
+        :raises RuntimeError: If every candidate in the chain fails to load.
+        """
+        load_candidates = self._model_load_candidates()
+        model_errors: List[Tuple[str, Exception]] = []
+        for idx, candidate_model in enumerate(load_candidates):
+            try:
+                self.model = self._construct_candidate_model(
+                    candidate_model, sentence_transformer_cls
+                )
+            except (
+                EmbeddingBackendCompatibilityError,
+                EmbeddingPrecisionCompatibilityError,
             ):
-                # Warm-cache compile policy needs the exact artifact namespace.
-                self._ensure_cache_model_fingerprint()
-            if self._should_defer_compile_for_cache_hydration():
-                self._compile_status_reason = (
-                    "deferred while hydrating cache; compile resumes on warm-cache runs"
+                raise
+            except Exception as exc:
+                model_errors.append((candidate_model, exc))
+                has_more_candidates = idx + 1 < len(load_candidates)
+                if has_more_candidates:
+                    logger.warning(
+                        "Failed to load embedding model %s (%s: %s). "
+                        "Trying fallback checkpoint...",
+                        candidate_model,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    continue
+                summary = "; ".join(
+                    f"{model_id}: {type(error).__name__}: {error}"
+                    for model_id, error in model_errors
                 )
-                logger.debug(
-                    "Deferring torch.compile for %s until cache hydration completes.",
-                    self.model_name,
-                )
-            else:
-                self._maybe_compile_inner_transformer()
+                raise RuntimeError(
+                    "Could not load embedding model from candidate chain "
+                    f"{load_candidates}: {summary}"
+                ) from exc
 
-            self._log_dimension_policy()
-            if self.model_profile.notes and not self._profile_logged:
-                logger.debug(self.model_profile.notes)
-                self._profile_logged = True
-            self._log_runtime_summary()
+            if candidate_model != self.model_name:
+                logger.info(
+                    "Using fallback embedding checkpoint: requested=%s active=%s.",
+                    self.model_name,
+                    candidate_model,
+                )
+            if self._active_model_name != candidate_model:
+                self._resolved_model_fingerprint = None
+            self._active_model_name = candidate_model
+            break
+
+    def _construct_candidate_model(
+        self, candidate_model: str, sentence_transformer_cls: Any
+    ) -> Any:
+        """Bind one candidate's runtime contract, construct it, and validate it.
+
+        :param str candidate_model: Checkpoint identifier to construct.
+        :param Any sentence_transformer_cls: Resolved ``SentenceTransformer`` class.
+        :return Any: Loaded model that satisfies the precision and dimension contract.
+        :raises EmbeddingBackendCompatibilityError: If the backend is too old.
+        :raises EmbeddingPrecisionCompatibilityError: If loaded weights violate policy.
+        """
+        self._bind_model_contract(candidate_model)
+        _require_transformers_compatibility(self.model_profile)
+        model_kwargs = self._resolve_model_kwargs()
+        st_kwargs: Dict[str, Any] = {"device": self.device}
+        if model_kwargs:
+            st_kwargs["model_kwargs"] = model_kwargs
+        if self.truncate_dim is not None:
+            st_kwargs["truncate_dim"] = self.truncate_dim
+        if self.model_revision is not None:
+            st_kwargs["revision"] = self.model_revision
+        try:
+            with _suppress_transformers_progress_for_non_tty():
+                with _suppress_expected_fa2_load_dtype_warning(
+                    enabled=(
+                        self._attention_implementation_hint == "flash_attention_2"
+                        and self._autocast_enabled
+                        and self._autocast_device_type == "cuda"
+                    )
+                ):
+                    loaded_model = sentence_transformer_cls(
+                        candidate_model, **st_kwargs
+                    )
+        except (ImportError, ValueError) as exc:
+            if not self._is_flash_attention_load_error(exc):
+                raise
+            logger.warning(
+                "FlashAttention 2 could not load for %s (%s); retrying with SDPA.",
+                candidate_model,
+                exc,
+            )
+            # ``model_kwargs`` is the same object st_kwargs carries, so the
+            # downgrade reaches the retry without rebuilding the kwargs.
+            self._attention_implementation_hint = "sdpa"
+            model_kwargs["attn_implementation"] = "sdpa"
+            with _suppress_transformers_progress_for_non_tty():
+                loaded_model = sentence_transformer_cls(candidate_model, **st_kwargs)
+        self._validate_loaded_model_precision(loaded_model, candidate_model)
+        self._validate_loaded_model_contract(loaded_model, candidate_model)
+        return loaded_model
+
+    def _is_flash_attention_load_error(self, error: Exception) -> bool:
+        """Return whether a failed construction is attributable to FlashAttention 2.
+
+        :param Exception error: Import or value error raised while constructing.
+        :return bool: ``True`` when FA2 was requested and named in the error text.
+        """
+        if self._attention_implementation_hint != "flash_attention_2":
+            return False
+        fa2_error_markers = (
+            "flashattention2",
+            "flash attention 2",
+            "flash_attn",
+            "flash_attention_2",
+        )
+        message = str(error).casefold()
+        return any(marker in message for marker in fa2_error_markers)
+
+    def _bind_loaded_model_runtime(self) -> None:
+        """Bind cache, TF32 and compile runtime state to the checkpoint that loaded.
+
+        :return None: Rebinds the cache namespace and applies the compile policy.
+        """
+        self._bind_embedding_cache_to_active_model()
+        self._configure_tf32_runtime()
+        if (
+            self.enable_torch_compile
+            and self.semantic_source == "arxiv-corpus"
+            and self.device == "mps"
+        ):
+            # Warm-cache compile policy needs the exact artifact namespace.
+            self._ensure_cache_model_fingerprint()
+        if self._should_defer_compile_for_cache_hydration():
+            self._compile_status_reason = (
+                "deferred while hydrating cache; compile resumes on warm-cache runs"
+            )
+            logger.debug(
+                "Deferring torch.compile for %s until cache hydration completes.",
+                self.model_name,
+            )
+        else:
+            self._maybe_compile_inner_transformer()
+
+        self._log_dimension_policy()
+        if self.model_profile.notes and not self._profile_logged:
+            logger.debug(self.model_profile.notes)
+            self._profile_logged = True
+        self._log_runtime_summary()
 
     def _configure_tf32_runtime(self) -> None:
         """Best-effort TF32 enablement for Ampere+ CUDA devices.
@@ -825,7 +867,9 @@ class _ModelRuntimeMixin:
             )
             return
 
-        torch_version = _parse_torch_major_minor(getattr(torch, "__version__", ""))
+        torch_version = _parse_major_minor(
+            getattr(torch, "__version__", ""), default=(0, 0)
+        )
         compile_fn = getattr(torch, "compile", None)
         should_use_compile_bridge = (
             self.enable_torch_compile

@@ -214,38 +214,22 @@ class EmbeddingGraphBuilder(
                 binary_prefilter = False
             if binary_rescore_multiplier is None:
                 binary_rescore_multiplier = 1
-        normalized_model_name = str(model_name).strip()
-        if not normalized_model_name:
-            raise ValueError("model_name must be a non-empty string")
-        normalized_dataset_split = str(dataset_split).strip()
-        if not normalized_dataset_split:
-            raise ValueError("dataset_split must be a non-empty string")
-        normalized_dataset_source = str(dataset_source).strip()
-        if not normalized_dataset_source:
-            raise ValueError("dataset_source must be a non-empty string")
-        if corpus_size is not None:
-            if isinstance(corpus_size, bool):
-                raise ValueError("corpus_size must be at least 1 when provided")
-            try:
-                corpus_size = int(corpus_size)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "corpus_size must be at least 1 when provided"
-                ) from exc
-            if corpus_size < 1:
-                raise ValueError("corpus_size must be at least 1 when provided")
-        if str(storage_precision) not in {"int8", "float32"}:
-            raise ValueError("storage_precision must be one of {'float32', 'int8'}")
-        if top_k < 1:
-            raise ValueError("top_k must be at least 1")
-        if binary_rescore_multiplier is not None and binary_rescore_multiplier < 1:
-            raise ValueError("binary_rescore_multiplier must be at least 1")
-        if calibration_sample_size < 1:
-            raise ValueError("calibration_sample_size must be at least 1")
-        if encode_batch_size < 1:
-            raise ValueError("encode_batch_size must be at least 1")
-        validate_compression_filter(cache_compression)
+        normalized_model_name = self._required_text(model_name, "model_name")
+        normalized_dataset_split = self._required_text(dataset_split, "dataset_split")
+        normalized_dataset_source = self._required_text(
+            dataset_source, "dataset_source"
+        )
+        corpus_size = self._normalized_corpus_size(corpus_size)
+        self._validate_scalar_options(
+            storage_precision=storage_precision,
+            top_k=top_k,
+            binary_rescore_multiplier=binary_rescore_multiplier,
+            calibration_sample_size=calibration_sample_size,
+            encode_batch_size=encode_batch_size,
+            cache_compression=cache_compression,
+        )
         super().__init__(max_papers)
+
         self.semantic_source = normalized_semantic_source
         self.candidate_pool_size = int(candidate_pool_size)
         self.model_name = normalized_model_name
@@ -259,6 +243,125 @@ class EmbeddingGraphBuilder(
         self.dataset_split = normalized_dataset_split
         self.corpus_size = corpus_size
         self.storage_precision = str(storage_precision)
+        self._bind_binary_search_options(
+            storage_precision=storage_precision,
+            binary_prefilter=binary_prefilter,
+            binary_rescore_multiplier=binary_rescore_multiplier,
+            calibration_sample_size=calibration_sample_size,
+            int8_rewritten_for_candidates=int8_rewritten_for_candidates,
+        )
+        self.cache_compression = cache_compression
+        self.cache_compression_level = int(cache_compression_level)
+        self.encode_batch_size = int(encode_batch_size)
+        self.enable_torch_compile = bool(enable_torch_compile)
+        self._bind_requested_model_contract(device=device, truncate_dim=truncate_dim)
+
+        self.top_k = top_k
+        self.model = None
+        self.retrieval_embeddings: Dict[str, np.ndarray] = {}
+        self.embeddings: Dict[str, np.ndarray] = {}
+        self.candidate_source_status: Dict[str, str] = {}
+        self._client = client
+        self._active_model_name: Optional[str] = None
+        self._embedding_cache: Optional[EmbeddingCache] = None
+        self._graph_embedding_cache: Optional[EmbeddingCache] = None
+        self._pending_force_rebuild_reason = self._deferred_force_rebuild_reason(
+            force_rebuild_cache, force_rebuild_reason
+        )
+        self.use_streaming = use_streaming
+        self._validate_streaming_contract()
+        self._reset_model_runtime_state()
+
+    @staticmethod
+    def _required_text(value: object, field: str) -> str:
+        """Normalize a required string option, rejecting blank input.
+
+        :param object value: Raw option value.
+        :param str field: Option name quoted back in the error message.
+        :return str: Stripped, non-empty option value.
+        :raises ValueError: If the option is empty after stripping.
+        """
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError(f"{field} must be a non-empty string")
+        return normalized
+
+    @staticmethod
+    def _normalized_corpus_size(corpus_size: Optional[int]) -> Optional[int]:
+        """Coerce the optional corpus-size cap to a positive integer.
+
+        ``bool`` is rejected before ``int`` conversion because ``True`` would
+        otherwise silently become a one-paper corpus.
+
+        :param Optional[int] corpus_size: Requested cap, or ``None`` for no cap.
+        :return Optional[int]: Parsed cap, or ``None`` when uncapped.
+        :raises ValueError: If a cap is provided but is not an integer >= 1.
+        """
+        if corpus_size is None:
+            return None
+        if isinstance(corpus_size, bool):
+            raise ValueError("corpus_size must be at least 1 when provided")
+        try:
+            parsed_corpus_size = int(corpus_size)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("corpus_size must be at least 1 when provided") from exc
+        if parsed_corpus_size < 1:
+            raise ValueError("corpus_size must be at least 1 when provided")
+        return parsed_corpus_size
+
+    @staticmethod
+    def _validate_scalar_options(
+        *,
+        storage_precision: str,
+        top_k: int,
+        binary_rescore_multiplier: Optional[int],
+        calibration_sample_size: int,
+        encode_batch_size: int,
+        cache_compression: str,
+    ) -> None:
+        """Reject out-of-range scalar options before any state is bound.
+
+        :param str storage_precision: Requested persistent cache precision.
+        :param int top_k: Requested neighbor count per node.
+        :param Optional[int] binary_rescore_multiplier: Requested oversampling factor.
+        :param int calibration_sample_size: Requested int8 calibration sample size.
+        :param int encode_batch_size: Requested encode batch size.
+        :param str cache_compression: Requested HDF5 compression filter.
+        :return None: Raises on the first violated constraint.
+        :raises ValueError: If any option is outside its supported range.
+        """
+        if str(storage_precision) not in {"int8", "float32"}:
+            raise ValueError("storage_precision must be one of {'float32', 'int8'}")
+        if top_k < 1:
+            raise ValueError("top_k must be at least 1")
+        if binary_rescore_multiplier is not None and binary_rescore_multiplier < 1:
+            raise ValueError("binary_rescore_multiplier must be at least 1")
+        if calibration_sample_size < 1:
+            raise ValueError("calibration_sample_size must be at least 1")
+        if encode_batch_size < 1:
+            raise ValueError("encode_batch_size must be at least 1")
+        validate_compression_filter(cache_compression)
+
+    def _bind_binary_search_options(
+        self,
+        *,
+        storage_precision: str,
+        binary_prefilter: Optional[bool],
+        binary_rescore_multiplier: Optional[int],
+        calibration_sample_size: int,
+        int8_rewritten_for_candidates: bool,
+    ) -> None:
+        """Resolve the int8-only search options and reject them for other precisions.
+
+        :param str storage_precision: Effective persistent cache precision.
+        :param Optional[bool] binary_prefilter: Requested prefilter toggle, or ``None``.
+        :param Optional[int] binary_rescore_multiplier: Requested oversampling factor.
+        :param int calibration_sample_size: Requested int8 calibration sample size.
+        :param bool int8_rewritten_for_candidates: Whether candidate mode downgraded
+            an int8 request to float32.
+        :return None: Binds the prefilter, multiplier and calibration attributes.
+        :raises ValueError: If an int8-only option was requested for other storage.
+        """
         resolved_prefilter = (
             EMBEDDING_STORAGE_CONFIG.binary_prefilter
             if binary_prefilter is None and storage_precision == "int8"
@@ -303,10 +406,20 @@ class EmbeddingGraphBuilder(
         self.binary_prefilter = bool(resolved_prefilter)
         self.binary_rescore_multiplier = int(requested_multiplier)
         self.calibration_sample_size = int(calibration_sample_size)
-        self.cache_compression = cache_compression
-        self.cache_compression_level = int(cache_compression_level)
-        self.encode_batch_size = int(encode_batch_size)
-        self.enable_torch_compile = bool(enable_torch_compile)
+
+    def _bind_requested_model_contract(
+        self, *, device: Optional[str], truncate_dim: Optional[int]
+    ) -> None:
+        """Resolve the model profile, device and dimension contract for this build.
+
+        This is the construction-time counterpart of :meth:`_bind_model_contract`,
+        which rebinds the same contract to whichever checkpoint actually loads.
+
+        :param Optional[str] device: Requested compute device token, or ``None``.
+        :param Optional[int] truncate_dim: Requested embedding truncation dimension.
+        :return None: Binds the profile, device, formatter fingerprints and hints.
+        :raises ValueError: If the requested device is unknown or unavailable.
+        """
         self.model_profile = resolve_embedding_model_profile(
             self.model_name,
             self.requested_model_profile,
@@ -328,33 +441,42 @@ class EmbeddingGraphBuilder(
         self._attention_implementation_hint = (
             self._resolve_attention_implementation_hint()
         )
-        self.top_k = top_k
-        self.model = None
-        self.retrieval_embeddings: Dict[str, np.ndarray] = {}
-        self.embeddings: Dict[str, np.ndarray] = {}
-        self.candidate_source_status: Dict[str, str] = {}
-        self._client = client
-        self._active_model_name: Optional[str] = None
-        self._embedding_cache: Optional[EmbeddingCache] = None
-        self._graph_embedding_cache: Optional[EmbeddingCache] = None
-        self._pending_force_rebuild_reason: Optional[str] = None
-        normalized_force_rebuild_reason = (
+
+    @staticmethod
+    def _deferred_force_rebuild_reason(
+        force_rebuild_cache: bool, force_rebuild_reason: Optional[str]
+    ) -> Optional[str]:
+        """Compose the rebuild rationale logged once the namespace is known.
+
+        The clear itself is deferred: the namespace depends on the model that
+        actually loads, so the reason is recorded here and consumed later.
+
+        :param bool force_rebuild_cache: Whether an explicit rebuild was requested.
+        :param Optional[str] force_rebuild_reason: Optional operator rationale.
+        :return Optional[str]: Reason string, or ``None`` when no rebuild is pending.
+        """
+        if not force_rebuild_cache:
+            return None
+        logger.info(
+            "Embedding cache rebuild requested; deferring clear until the "
+            "runtime-active model namespace is resolved."
+        )
+        normalized_reason = (
             " ".join(str(force_rebuild_reason).split())
             if force_rebuild_reason is not None
             else ""
         )
-        if force_rebuild_cache:
-            logger.info(
-                "Embedding cache rebuild requested; deferring clear until the "
-                "runtime-active model namespace is resolved."
-            )
-            clear_reason = "explicit --force-rebuild-cache request"
-            if normalized_force_rebuild_reason:
-                clear_reason = (
-                    f"{clear_reason}; user_reason={normalized_force_rebuild_reason}"
-                )
-            self._pending_force_rebuild_reason = clear_reason
-        self.use_streaming = use_streaming
+        clear_reason = "explicit --force-rebuild-cache request"
+        if normalized_reason:
+            clear_reason = f"{clear_reason}; user_reason={normalized_reason}"
+        return clear_reason
+
+    def _validate_streaming_contract(self) -> None:
+        """Reject streaming corpus hydration over a sliced dataset split.
+
+        :return None: Raises when streaming cannot honor the requested slice.
+        :raises ValueError: If a sliced split is streamed in corpus mode.
+        """
         if (
             self.semantic_source == "arxiv-corpus"
             and self.use_streaming
@@ -365,6 +487,12 @@ class EmbeddingGraphBuilder(
                 f"'{self.dataset_split}'. Use --dataset-split train with "
                 "--corpus-size to cap runtime, or disable --streaming."
             )
+
+    def _reset_model_runtime_state(self) -> None:
+        """Clear the per-load model runtime flags to their unloaded defaults.
+
+        :return None: Resets logging latches, autocast/TF32 state and compile state.
+        """
         self._profile_logged = False
         self._dim_logged = False
         self._autocast_dtype: Optional[Any] = None
@@ -698,6 +826,36 @@ class EmbeddingGraphBuilder(
         # Load model lazily.
         self._load_model()
 
+        resolved_seed_paper = self._resolve_seed_paper(seed_id, seed_paper)
+        papers[resolved_seed_paper.paper_id] = resolved_seed_paper
+
+        seed_identities = IdentityRegistry()
+        register_aliases(
+            seed_identities,
+            resolved_seed_paper.paper_id,
+            resolved_seed_paper,
+        )
+        seed_embedding = self._encode_seed_embedding(resolved_seed_paper)
+
+        if self.semantic_source != "arxiv-corpus":
+            self._collect_candidate_pool_papers(
+                papers, seed_identities, seed_embedding, resolved_seed_paper
+            )
+            return papers
+
+        self._collect_corpus_cache_papers(papers, seed_identities, seed_embedding)
+        return papers
+
+    def _resolve_seed_paper(self, seed_id: str, seed_paper: Optional[Paper]) -> "Paper":
+        """Resolve the seed node from caller metadata, Semantic Scholar, or query text.
+
+        An identifier Semantic Scholar cannot resolve is treated as a free-text
+        query, which gets a synthetic seed node so the graph still has a root.
+
+        :param str seed_id: Seed paper identifier or free-text query.
+        :param Optional[Paper] seed_paper: Pre-fetched seed metadata to reuse.
+        :return Paper: Seed paper flagged as the graph seed.
+        """
         # Reuse caller-provided seed metadata when available to avoid redundant
         # Semantic Scholar fetches in hybrid mode.
         resolved_seed_paper = seed_paper
@@ -709,55 +867,75 @@ class EmbeddingGraphBuilder(
         if resolved_seed_paper:
             # Found via S2 API
             resolved_seed_paper.is_seed = True
-            papers[resolved_seed_paper.paper_id] = resolved_seed_paper
-        else:
-            # Treat as text query
-            logger.info(f"Using '{seed_id}' as text query")
-            # Create dummy seed paper
-            query_seed = _query_seed_id(seed_id)
-            resolved_seed_paper = Paper(
-                paper_id=query_seed,
-                title=seed_id,
-                year=None,
-                is_seed=True,
-            )
-            papers[query_seed] = resolved_seed_paper
+            return resolved_seed_paper
 
-        seed_identities = IdentityRegistry()
-        register_aliases(
-            seed_identities,
-            resolved_seed_paper.paper_id,
-            resolved_seed_paper,
+        # Treat as text query
+        logger.info(f"Using '{seed_id}' as text query")
+        # Create dummy seed paper
+        return Paper(
+            paper_id=_query_seed_id(seed_id),
+            title=seed_id,
+            year=None,
+            is_seed=True,
         )
 
-        # Compute normalized seed embedding
+    def _encode_seed_embedding(self, seed_paper: Paper) -> np.ndarray:
+        """Encode the seed in the model's query prompt space and record it.
+
+        :param Paper seed_paper: Resolved seed paper.
+        :return np.ndarray: Normalized seed embedding, also stored for graph export.
+        """
         logger.debug("Computing seed embedding...")
         formatted_seed_text = format_paper_for_embedding(
             profile=self.model_profile,
-            paper=resolved_seed_paper,
+            paper=seed_paper,
             task=EmbeddingTask.RETRIEVAL_QUERY,
         )
         seed_embedding = self._encode_texts(
             [formatted_seed_text], show_progress_bar=False
         )[0]
-        self.retrieval_embeddings[resolved_seed_paper.paper_id] = seed_embedding
+        self.retrieval_embeddings[seed_paper.paper_id] = seed_embedding
+        return seed_embedding
 
-        if self.semantic_source != "arxiv-corpus":
-            logger.debug("Using candidate-pool semantic search...")
-            pool_candidates = self._select_candidates_from_pool(
-                seed_embedding, resolved_seed_paper
-            )
-            for paper_id, paper, embedding in pool_candidates:
-                if len(papers) >= self.max_papers:
-                    break
-                if paper_id in papers or resolve_aliases(seed_identities, paper):
-                    continue
-                papers[paper_id] = paper
-                self.retrieval_embeddings[paper_id] = embedding
-            return papers
+    def _collect_candidate_pool_papers(
+        self,
+        papers: Dict[str, Paper],
+        seed_identities: IdentityRegistry,
+        seed_embedding: np.ndarray,
+        seed_paper: Paper,
+    ) -> None:
+        """Rank a Semantic Scholar candidate pool and admit the closest papers.
 
+        :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
+        :param IdentityRegistry seed_identities: Alias registry for the seed paper.
+        :param np.ndarray seed_embedding: Normalized seed embedding.
+        :param Paper seed_paper: Resolved seed paper used to fetch the pool.
+        :return None: Extends ``papers`` and ``retrieval_embeddings`` in place.
+        """
+        logger.debug("Using candidate-pool semantic search...")
+        pool_candidates = self._select_candidates_from_pool(seed_embedding, seed_paper)
+        for paper_id, paper, embedding in pool_candidates:
+            if len(papers) >= self.max_papers:
+                break
+            if paper_id in papers or resolve_aliases(seed_identities, paper):
+                continue
+            papers[paper_id] = paper
+            self.retrieval_embeddings[paper_id] = embedding
+
+    def _collect_corpus_cache_papers(
+        self,
+        papers: Dict[str, Paper],
+        seed_identities: IdentityRegistry,
+        seed_embedding: np.ndarray,
+    ) -> None:
+        """Search the hydrated corpus cache and admit the closest papers.
+
+        :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
+        :param IdentityRegistry seed_identities: Alias registry for the seed paper.
+        :param np.ndarray seed_embedding: Normalized seed embedding.
+        :return None: Extends ``papers`` in place and backfills citation counts.
+        """
         use_streaming = self.use_streaming
-
         if use_streaming:
             logger.debug(
                 "Using streaming hydration path for cache-native semantic search..."
@@ -776,22 +954,7 @@ class EmbeddingGraphBuilder(
             if paper_id in papers:
                 continue
 
-            authors = [Author(name=name) for name in metadata.get("authors", [])]
-
-            paper = Paper(
-                paper_id=paper_id,
-                title=metadata.get("title", "Unknown"),
-                year=metadata.get("year"),
-                authors=authors,
-                abstract=metadata.get("abstract", ""),
-                venue=metadata.get("venue", ""),
-                arxiv_id=metadata.get("arxiv_id", ""),
-                doi=metadata.get("doi", ""),
-                categories=metadata.get("categories", []),
-                citation_count=0,  # ArXiv data lacks citation counts
-                is_seed=False,
-            )
-
+            paper = self._paper_from_cached_metadata(paper_id, metadata)
             if resolve_aliases(seed_identities, paper):
                 continue
 
@@ -799,7 +962,28 @@ class EmbeddingGraphBuilder(
             self.retrieval_embeddings[paper_id] = embedding
 
         self._update_citation_counts(papers)
-        return papers
+
+    @staticmethod
+    def _paper_from_cached_metadata(paper_id: str, metadata: Dict) -> Paper:
+        """Build a Paper from one cached corpus metadata row.
+
+        :param str paper_id: Canonical cached paper identifier.
+        :param Dict metadata: Normalized metadata row persisted alongside vectors.
+        :return Paper: Paper carrying the cached bibliographic fields.
+        """
+        return Paper(
+            paper_id=paper_id,
+            title=metadata.get("title", "Unknown"),
+            year=metadata.get("year"),
+            authors=[Author(name=name) for name in metadata.get("authors", [])],
+            abstract=metadata.get("abstract", ""),
+            venue=metadata.get("venue", ""),
+            arxiv_id=metadata.get("arxiv_id", ""),
+            doi=metadata.get("doi", ""),
+            categories=metadata.get("categories", []),
+            citation_count=0,  # ArXiv data lacks citation counts
+            is_seed=False,
+        )
 
     def _candidate_pool_budgets(self) -> Tuple[int, int, int]:
         """Split the candidate pool size into per-source fetch budgets.
