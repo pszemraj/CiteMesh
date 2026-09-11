@@ -820,7 +820,7 @@ def test_embedding_cache_replacement_journal_retains_rows_when_fsync_fails(
         raise OSError("forced fsync failure")
 
     with monkeypatch.context() as patch:
-        patch.setattr(embedding_cache_module.os, "fsync", fail_fsync)
+        patch.setattr(embedding_cache_module.recovery.os, "fsync", fail_fsync)
         with pytest.raises(RuntimeError, match="failed to durably flush"):
             cache.get_embeddings(replacement, model, show_progress=False)
 
@@ -1874,7 +1874,9 @@ def test_embedding_cache_search_keeps_tied_top_k_order_across_chunks(
     storage_precision: str,
 ) -> None:
     """Float and int8 searches should rank ties by row over multiple chunks."""
-    monkeypatch.setattr(embedding_cache_module, "EMBEDDING_SEARCH_CHUNK_ROWS", 2)
+    monkeypatch.setattr(
+        embedding_cache_module.constants, "EMBEDDING_SEARCH_CHUNK_ROWS", 2
+    )
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(
             cache_dir=tmpdir,
@@ -3641,7 +3643,7 @@ def test_embedding_cache_open_errors_preserve_namespace(
             patch.setattr(Path, "stat", fail_stat)
             patch.setattr(Path, "exists", suppress_exists_error)
         elif backend == "hdf5":
-            patch.setattr(embedding_cache_module.h5py, "File", fail_open)
+            patch.setattr(embedding_cache_module.store.h5py, "File", fail_open)
         else:
             patch.setattr(cache, "_connect_db", fail_open)
         if operation == "open":
