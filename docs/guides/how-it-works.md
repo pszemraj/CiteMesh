@@ -73,7 +73,7 @@ Hybrid collects two pools, citation-derived and semantic, and reranks the union 
 score = 0.62 · semantic + 0.16 · temporal + 0.14 · citation + 0.08 · bibliographic
 ```
 
-where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation = log1p(citations) / log1p(max_citations_in_pool + 1)` compresses the long tail. Then **+0.10** when both branches found the candidate, since citation-plus-semantic agreement is the strongest evidence available, and **+0.02** for citation-derived candidates. `--max-semantic` (default `min(20, max_papers - 1)`) caps semantic-*only* additions; overlap papers do not count against it.
+where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation = log1p(citations) / log1p(max_citations_in_pool + 1)` compresses the long tail. Then **+0.10** when both branches found the candidate, since citation-plus-semantic agreement is the strongest evidence available, and **+0.02** for citation-derived candidates. `--max-semantic` (default `min(20, max_papers - 1)`) caps semantic-*only* additions; overlap papers do not count against it. It is a ceiling, not a reservation: if citation-derived candidates fill `--max-papers` first, no semantic-only paper is added.
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 
