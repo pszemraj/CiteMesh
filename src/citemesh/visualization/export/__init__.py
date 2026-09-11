@@ -433,7 +433,8 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 tmp_path,
                 _theme_color_scheme(theme_obj),
                 title=_export_page_title(self.graph, self.seed_id),
-                style=_export_page_style(theme_obj),
+                style=_export_page_style(theme_obj)
+                + "#mynetwork{border:0 !important;}",
                 # Pyvis always emits Bootstrap CDN tags (used only by its
                 # select/filter menus, which this export does not enable) plus
                 # a commented-out node_modules block; both are dropped so the

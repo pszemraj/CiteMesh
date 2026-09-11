@@ -1652,8 +1652,9 @@
         return;
       }
 
-      const relationTag = String(node.seed_relation || "");
-      const relationLabel = relationTag || (node.provenance || "unknown");
+      // Share the list badge's label map so one paper never reads
+      // "semantic-only" in the list and "semantic_only" in this card.
+      const relationLabel = relationBadgeLabel(node);
       const neighbors = (adjacency.get(node.id) || [])
         .slice()
         .sort((left, right) => Number(right.weight || 0) - Number(left.weight || 0))

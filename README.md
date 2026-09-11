@@ -4,9 +4,9 @@ CiteMesh turns one paper you already know into a graph of the research around it
 
 It runs locally from a single CLI with four switchable strategies — recommendation, citation, embedding, and hybrid — and exports the same graph to every format you might want.
 
-![CiteMesh dashboard showing a Megalodon hybrid graph with LM-Infinite selected](assets/ui.png)
+![CiteMesh dashboard showing a Megalodon hybrid graph with Ring Attention selected](assets/ui.png)
 
-_A repository-local hybrid graph seeded by “Megalodon,” with “LM-Infinite” selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
+_A hybrid graph seeded by “Megalodon,” with “Ring Attention” selected to expose its relation to the seed and the shortest path between them (45 papers, 102 links)._
 
 ## What you get
 
