@@ -12,6 +12,8 @@ git clone https://github.com/pszemraj/CiteMesh.git && cd CiteMesh
 pip install -e ".[all]"
 ```
 
+Versions come from git tags via setuptools-scm; a fork or shallow clone without tags reports `0.0.post1.devN`, so run `git fetch --tags` before installing.
+
 Python >= 3.10. The `embeddings` extra needs torch (`>=2.9` Linux/Windows, `>=2.13` macOS); everything else runs without it.
 
 Semantic Scholar SDK support is bounded to `>=0.8.0,<0.13` because CiteMesh adapts

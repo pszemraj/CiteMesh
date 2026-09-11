@@ -19,9 +19,10 @@ Practical conventions for working on CiteMesh (humans and coding agents).
 
 ## Environment
 
-- Python >= 3.10. The maintainer's dev environment is the conda env `inf` (Python 3.11.16, torch 2.13+); install with `pip install -e ".[all]"`.
+- Python >= 3.10. The maintainer's dev environment is the conda env `inf` (Python 3.12, torch 2.13+); install with `pip install -e ".[all]"`.
 - Run project commands through the env, e.g. `conda run -n inf python -m pytest`.
 - Torch floors are platform-split: `>=2.9` Linux/Windows, `>=2.13` macOS (required for reliable MPS bf16).
+- The package uses a `src/` layout; tests import the installed package, so run `pip install -e ".[all]"` again after pulling a change that moves files.
 
 ## Model and dtype policy (non-negotiable)
 
@@ -51,7 +52,7 @@ Run validation locally: the suite must be green and `ruff check` + `ruff format 
 - Docstrings: reST field style (`:param type name:`, `:return type:`) on every function, including tests' helpers where present.
 - Comments state constraints the code can't, not narration of the change.
 - Optional dependencies (torch, sentence-transformers, datasets, plotly, pyvis) must stay lazily imported so the core CLI works with no extras.
-- Argparse choices duplicated in `citemesh/core/user_config.py` are guarded by sync tests in `tests/test_user_config.py` — update both together.
+- Argparse choices duplicated in `src/citemesh/core/user_config.py` are guarded by sync tests in `tests/test_user_config.py` — update both together.
 
 ## Docs rule
 

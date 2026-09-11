@@ -12,7 +12,7 @@ Related docs:
 ## Execution Flow
 
 ```text
-CLI (citemesh/cli.py)
+CLI (src/citemesh/cli.py)
     ├── Parse arguments and resolve output/export targets
     ├── Instantiate selected GraphBuilderStrategy
     └── Invoke build_graph(seed_id, **kwargs)
@@ -35,7 +35,7 @@ Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `a
 
 ## Module Overview
 
-### `citemesh/cli.py`
+### `src/citemesh/cli.py`
 
 - Defines `citemesh` entry point and command dispatch.
 - Parses validated arguments and resolves output paths.
@@ -44,7 +44,7 @@ Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `a
 
 Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
-### `citemesh/strategies/base.py`
+### `src/citemesh/strategies/base.py`
 
 - Provides the shared template method for graph construction.
 - Defines extension hooks (`collect_papers`, `compute_similarity`).
@@ -56,42 +56,42 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 - Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
 - Selection guidance, tradeoffs, and user-facing strategy behavior are covered in [Guides: Strategies](../guides/strategies.md).
 
-### `citemesh/strategies/candidates.py`
+### `src/citemesh/strategies/candidates.py`
 
 - Shared candidate-acquisition layer used by every strategy: `fetch_candidate_source` tracks per-source outcomes (`complete`/`empty`/`unavailable`), and `require_available_candidate_source` implements the partial-outage-versus-fail policy recorded in export metadata.
 - `IdentityRegistry` and `reconcile_paper_identity` de-duplicate papers across requested IDs and Semantic Scholar/arXiv/DOI aliases; `merge_seed_relation` folds seed relations when identities merge.
 - `fetch_candidate_pool` implements the reference/citation/recommendation budget split and the free-text `query:` seed proxy.
 
-### `citemesh/similarity.py` and `citemesh/dashboard_contracts.py`
+### `src/citemesh/similarity.py` and `src/citemesh/dashboard_contracts.py`
 
 - `similarity.py` provides `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity.
 - `dashboard_contracts.py` holds the `kind`/`schema_version` identities shared by the export producers and the dashboard viewer.
 
-### `citemesh/core/models.py`
+### `src/citemesh/core/models.py`
 
 - `Paper` and `Author` dataclasses encapsulate validated metadata.
 - Utility helpers support label generation and overlap checks.
 - Model payloads are designed for both graph operations and export serialization.
 
-### `citemesh/core/user_config.py`
+### `src/citemesh/core/user_config.py`
 
 - Loads, validates, and rewrites the persistent `config.toml` at the cache root.
 - Whitelists `[defaults]` build-flag keys and `[api] s2_api_key` with per-key casters; invalid entries are ignored with warnings so a bad config never blocks CLI usage.
 - The CLI applies these values after argument parsing; precedence and supported
   keys are described in [User Configuration](../guides/configuration.md).
 
-### Visualization (`citemesh/visualization/render.py`)
+### Visualization (`src/citemesh/visualization/render.py`)
 
 - Computes layouts, node sizes/colors, labels, and metadata overlays.
 - Applies selected theme values from `themes.py`.
 - Produces static PNG output via Matplotlib.
 
-### Themes (`citemesh/visualization/themes.py`)
+### Themes (`src/citemesh/visualization/themes.py`)
 
 - Defines the immutable `light`, `dark`, and `solarized` palettes.
 - Resolves `auto` from environment and host appearance signals.
 
-### Exporter (`citemesh/visualization/export.py`)
+### Exporter (`src/citemesh/visualization/export.py`)
 
 - `GraphExporter` writes interactive and structured output formats from one graph object.
 - Reuses computed layout and style values for cross-format consistency.
@@ -101,7 +101,7 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 ### Dashboard Collections
 
-- `citemesh/cli.py` stages per-result artifacts, serializes collection updates under the package lock, restores the prior result bundle on ordinary commit failures, and writes the package as the final commit marker.
+- `src/citemesh/cli.py` stages per-result artifacts, serializes collection updates under the package lock, restores the prior result bundle on ordinary commit failures, and writes the package as the final commit marker.
 - `GraphExporter` embeds the selected collection snapshot in the reusable viewer.
 - Every collection build also writes the current seed's graph JSON and build sidecar to its stable seed-ID-derived output directory. A successful refresh prunes only obsolete known formats for the same strategy; other strategy files and unrelated files are retained.
 
@@ -110,14 +110,14 @@ behavior are described in [Output Artifacts](../reference/output-artifacts.md).
 
 ### Caching Support
 
-- `citemesh/data/cache.py` resolves user-scoped cache roots.
-- `citemesh/data/embedding_cache.py` manages SQLite metadata and HDF5 embedding
+- `src/citemesh/data/cache.py` resolves user-scoped cache roots.
+- `src/citemesh/data/embedding_cache.py` manages SQLite metadata and HDF5 embedding
   datasets.
-- `citemesh/data/model_profiles.py` stores model-specific runtime profile metadata.
+- `src/citemesh/data/model_profiles.py` stores model-specific runtime profile metadata.
 
 On-disk layout and invalidation behavior are documented in [Caching & Data](../guides/caching.md).
 
-### Service Client (`citemesh/services/semantic_scholar.py`)
+### Service Client (`src/citemesh/services/semantic_scholar.py`)
 
 - Wraps Semantic Scholar API calls with retries and rate-limit handling.
 - Handles reference-list caching integration.

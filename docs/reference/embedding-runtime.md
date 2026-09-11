@@ -119,7 +119,7 @@ and the optional binary prefilter are described in
 
 ## Implementation References
 
-- Model defaults, aliases, and fallback chain: [citemesh/data/model_profiles.py](../../citemesh/data/model_profiles.py)
-- Embedding model load and fallback execution: [citemesh/strategies/embedding.py](../../citemesh/strategies/embedding.py)
-- TF32 and compile guard behavior: [citemesh/strategies/embedding.py](../../citemesh/strategies/embedding.py)
-- CLI default model wiring: [citemesh/cli.py](../../citemesh/cli.py)
+- Model defaults, aliases, and fallback chain: [src/citemesh/data/model_profiles.py](../../src/citemesh/data/model_profiles.py)
+- Embedding model load and fallback execution: [src/citemesh/strategies/embedding.py](../../src/citemesh/strategies/embedding.py)
+- TF32 and compile guard behavior: [src/citemesh/strategies/embedding.py](../../src/citemesh/strategies/embedding.py)
+- CLI default model wiring: [src/citemesh/cli.py](../../src/citemesh/cli.py)
