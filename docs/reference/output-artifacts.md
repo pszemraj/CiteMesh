@@ -14,7 +14,7 @@ A hidden `.dashboard.citemesh.json.lock` beside the package serializes collectio
 Every collection build also writes a per-seed directory `<title-slug>-<hash>/` holding `<strategy>.json` and `<strategy>.config.json`, even under `--export dashboard` alone. Other formats are written when selected; `png` is the default when `--export` is omitted.
 
 - `<strategy>.png` - static Matplotlib render
-- `<strategy>.html` - Pyvis interactive network
+- `<strategy>.html` - Pyvis interactive network; it loads vis-network from a CDN, so it needs internet access to open
 - `<strategy>.plotly.html` - Plotly interactive graph
 - `<strategy>.json` - enriched graph payload
 - `<strategy>.csv` - flat paper table
@@ -23,6 +23,14 @@ Every collection build also writes a per-seed directory `<title-slug>-<hash>/` h
 - `<strategy>.config.json` - run config + metadata sidecar
 
 The sidecar is always written except for a standalone-only `--export dashboard -o *.dashboard.html` run, and `--export json` never duplicates the graph JSON a dashboard build already wrote. Every artifact goes to a temporary file first and is published by atomic replacement, so a failed writer or post-processing step leaves the existing file in place.
+
+The same hybrid graph through the three non-dashboard renderers:
+
+| Pyvis (`--export html`) | Plotly (`--export plotly`) | Static PNG (`--export png`) |
+| --- | --- | --- |
+| ![Pyvis export of a hybrid graph](../../assets/export-pyvis.png) | ![Plotly export of the same graph](../../assets/export-plotly.png) | ![Static PNG export of the same graph](../../assets/export-static-png.png) |
+
+_Pyvis settles under browser physics and labels every node; Plotly keeps the Python layout but uses its own year colorbar and labels every node; the PNG adds a run-info box._
 
 ## Output location
 
@@ -88,7 +96,7 @@ _**Prior works** active with a paper selected: the graph and paper list narrow t
 
 Toolbar controls and data actions:
 
-- **Prior works / Derivative works** - scope graph and list to papers the seed builds on, or that build on it
+- **Prior works / Derivative works** - scope the graph and list by publication year relative to the seed (earlier papers, or later ones; same-year papers stay in both); the row badge still shows the citation direction
 - **List view** - scroll the paper list pane into view
 - **Filters** - text search, sort, year range, provenance chips (citation/semantic/both), `Saved` chip
 - **More** - open the selected paper, or the seed, on Semantic Scholar
@@ -98,9 +106,13 @@ Toolbar controls and data actions:
 - **Add Results** - import `citemesh-graph` files, packages, or dashboard HTML into the session, refreshing matching `(strategy, seed_id)` slots rather than duplicating them
 - **Export Collection** - download the browser session as `dashboard.citemesh.json`, the only way to persist an imported set
 
+![CiteMesh dashboard with the Filters row open and a search term narrowing the graph](../../assets/ui-dashboard-search-filter.png)
+
+_Filters open with `attention` typed: the list narrows from 45 to 28 papers and the graph dims everything else._
+
 Downloads are named from a seed-title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics. Starred papers persist in `localStorage` per `(strategy, seed_id)` result, and that list is a superset of the displayed one - entries a later rebuild drops reappear if the paper returns.
 
-Node color is a publication-year gradient shared with the legend and year timeline, node size tracks citation count, the seed wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone; theme choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
+Node color is a publication-year gradient shared with the legend and year timeline, node size tracks citation count, the seed wears a ring halo, and edge opacity and width scale with relative link weight. All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening extensions leave the palettes alone; exports written before that fix landed still repaint under Dark Reader, so rebuild them. The theme is fixed at build time by `--theme` and the dashboard has no toggle; choices are in [CLI Usage](../guides/cli.md), auto-detection inputs in [Environment Variables](environment.md).
 
 ## Sidecar (`<strategy>.config.json`)
 

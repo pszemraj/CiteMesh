@@ -150,6 +150,10 @@ The prefilter, rescore-multiplier, and calibration flags are int8-only: passing 
 
 Formats, dashboard collection and standalone behavior, package schemas, sidecars, and determinism notes: [Output Artifacts](../reference/output-artifacts.md). Interactive exports need the viz dependencies — in the `recommended` extra, otherwise `pip install -e ".[viz]"`.
 
+![CiteMesh dashboard built with --theme light, with a paper selected](../../assets/ui-dashboard-light-theme.png)
+
+_`--theme light` with a paper selected. The theme is applied when the export is written; the dashboard has no toggle._
+
 ## Appendix A: Validation rules
 
 - `build <paper-id>` and `search <query>` require non-empty strings.
