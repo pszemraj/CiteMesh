@@ -5,18 +5,14 @@ This module defines the interface that all graph building strategies must implem
 enabling the Strategy pattern for different similarity computation approaches.
 """
 
+from __future__ import annotations
+
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterable, Mapping
 from typing import (
     Any,
-    Callable,
     ClassVar,
-    Dict,
-    Iterable,
-    List,
-    Mapping,
-    Optional,
-    Tuple,
 )
 
 import networkx as nx
@@ -35,7 +31,7 @@ def validate_embedding_vectors(
     context: str,
     vector_label: str = "vector",
     error_factory: Callable[[str], Exception] = RuntimeError,
-) -> Dict[str, np.ndarray]:
+) -> dict[str, np.ndarray]:
     """Validate a complete finite, nonzero, dimensionally consistent vector map.
 
     :param Iterable[str] required_ids: Paper IDs that require vectors.
@@ -54,8 +50,8 @@ def validate_embedding_vectors(
             + ", ".join(missing[:5])
         )
 
-    validated: Dict[str, np.ndarray] = {}
-    expected_dimension: Optional[int] = None
+    validated: dict[str, np.ndarray] = {}
+    expected_dimension: int | None = None
     for paper_id in ordered_ids:
         vector = np.asarray(embeddings[paper_id], dtype=np.float32)
         if vector.ndim != 1 or vector.size == 0:
@@ -84,9 +80,9 @@ def validate_embedding_vectors(
 def deterministic_sort_key(
     primary: float,
     primary_id: Any,
-    secondary_id: Optional[Any] = None,
+    secondary_id: Any | None = None,
     stable_index: int = 0,
-) -> Tuple[Any, ...]:
+) -> tuple[Any, ...]:
     """Build a strict deterministic ordering key for ranking and heap comparisons.
 
     :param float primary: Primary numeric score used for ordering.
@@ -100,11 +96,11 @@ def deterministic_sort_key(
 
 
 def select_capped_undirected_edges(
-    edges: Iterable[Tuple[Any, Any, Mapping[str, Any]]],
+    edges: Iterable[tuple[Any, Any, Mapping[str, Any]]],
     max_edges_per_node: int,
     *,
-    seed_id: Optional[Any] = None,
-) -> List[Tuple[Any, Any, float]]:
+    seed_id: Any | None = None,
+) -> list[tuple[Any, Any, float]]:
     """Select edges for an undirected graph while capping per-node degree.
 
     :param Iterable[Tuple[Any, Any, Mapping[str, Any]]] edges: Edge tuples with optional
@@ -113,7 +109,7 @@ def select_capped_undirected_edges(
     :param Optional[Any] seed_id: Reserve this seed's strongest existing edges first.
     :return List[Tuple[Any, Any, float]]: Selected canonicalized edges with weights.
     """
-    canonical_edges: Dict[Tuple[str, str], Tuple[Any, Any, float]] = {}
+    canonical_edges: dict[tuple[str, str], tuple[Any, Any, float]] = {}
     for u, v, *_rest in edges:
         data = _rest[0] if _rest else {}
         if not isinstance(data, Mapping):
@@ -138,11 +134,11 @@ def select_capped_undirected_edges(
     if max_edges_per_node <= 0:
         return sorted_edges
 
-    edge_counts: Dict[str, int] = {
+    edge_counts: dict[str, int] = {
         node_id: 0 for edge in sorted_edges for node_id in (str(edge[0]), str(edge[1]))
     }
 
-    selected_edges: List[Tuple[Any, Any, float]] = []
+    selected_edges: list[tuple[Any, Any, float]] = []
     for u, v, weight in sorted_edges:
         u_key = str(u)
         v_key = str(v)
@@ -159,7 +155,7 @@ def select_capped_undirected_edges(
 
 
 def build_capped_undirected_graph(
-    graph: nx.Graph, max_edges_per_node: int, *, seed_id: Optional[Any] = None
+    graph: nx.Graph, max_edges_per_node: int, *, seed_id: Any | None = None
 ) -> nx.Graph:
     """Copy a graph while retaining only the strongest capped undirected edges.
 
@@ -208,11 +204,11 @@ class GraphBuilderStrategy(ABC):
             raise ValueError("max_papers must be at least 1")
 
         self.max_papers = parsed_max_papers
-        self.papers: Dict[str, Paper] = {}  # paper_id -> Paper object
-        self._collection_summary: Optional[str] = None
+        self.papers: dict[str, Paper] = {}  # paper_id -> Paper object
+        self._collection_summary: str | None = None
 
     @abstractmethod
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> dict[str, Paper]:
         """
         Collect papers for the graph using strategy-specific method.
 
@@ -251,7 +247,7 @@ class GraphBuilderStrategy(ABC):
         threshold = coerce_float(getattr(self, "similarity_threshold", 0.0), 0.0)
         return similarity > 0.0 and similarity >= threshold
 
-    def get_collection_summary(self) -> Optional[str]:
+    def get_collection_summary(self) -> str | None:
         """
         Optional one-line summary describing collected papers.
 
@@ -266,7 +262,7 @@ class GraphBuilderStrategy(ABC):
         """Allow subclasses to provide a collection summary."""
         self._collection_summary = summary
 
-    def prepare_graph_scoring(self, papers: Dict[str, Paper]) -> None:
+    def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:
         """Prepare strategy-specific state required by pairwise graph scoring.
 
         :param Dict[str, Paper] papers: Final collected papers keyed by ID.
@@ -274,7 +270,7 @@ class GraphBuilderStrategy(ABC):
         """
         del papers
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
         """
         Build the complete similarity graph.
 

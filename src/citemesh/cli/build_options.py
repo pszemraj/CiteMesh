@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 import networkx as nx
 
-from citemesh.core.user_config import UserConfig, format_config_value
+from citemesh.data.user_config import UserConfig, format_config_value
 from citemesh.services import SemanticScholarClient
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, EmbeddingGraphBuilder

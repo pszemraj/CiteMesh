@@ -11,11 +11,12 @@ import sys
 import tempfile
 import threading
 import types
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from queue import Empty
-from typing import Any, Iterator
+from typing import Any
 
 import h5py
 import numpy as np
@@ -64,7 +65,7 @@ class _FakeInferenceTensor:
         """
         self.values = np.asarray(values)
 
-    def __getitem__(self, key: object) -> "_FakeInferenceTensor":
+    def __getitem__(self, key: object) -> _FakeInferenceTensor:
         """Return a sliced fake tensor.
 
         :param object key: NumPy-compatible index or slice.
@@ -72,14 +73,14 @@ class _FakeInferenceTensor:
         """
         return _FakeInferenceTensor(self.values[key])
 
-    def float(self) -> "_FakeInferenceTensor":
+    def float(self) -> _FakeInferenceTensor:
         """Return FP32 values.
 
         :return _FakeInferenceTensor: FP32 tensor view.
         """
         return _FakeInferenceTensor(self.values.astype(np.float32))
 
-    def cpu(self) -> "_FakeInferenceTensor":
+    def cpu(self) -> _FakeInferenceTensor:
         """Return the already-hosted tensor.
 
         :return _FakeInferenceTensor: This tensor.

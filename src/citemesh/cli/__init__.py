@@ -22,9 +22,9 @@ from rich.console import Console as Console
 
 from citemesh import __version__ as __version__
 from citemesh.core import EMBEDDING_STORAGE_CONFIG as EMBEDDING_STORAGE_CONFIG
-from citemesh.core.user_config import load_user_config
-from citemesh.core.user_config import set_config_value as set_config_value
 from citemesh.data.cache import atomic_write_json as atomic_write_json
+from citemesh.data.user_config import load_user_config
+from citemesh.data.user_config import set_config_value as set_config_value
 from citemesh.strategies.embedding import EmbeddingGraphBuilder as EmbeddingGraphBuilder
 from citemesh.visualization.dashboard.contracts import (
     DASHBOARD_COLLECTION_KIND,

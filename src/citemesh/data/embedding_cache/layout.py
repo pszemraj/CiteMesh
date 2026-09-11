@@ -12,7 +12,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 import stat
-from typing import Any, Dict, Iterator, Optional, Sequence, Tuple
+from collections.abc import Iterator, Sequence
+from typing import Any
 
 import h5py
 import numpy as np
@@ -149,9 +150,9 @@ class _H5LayoutMixin:
 
         sqlite_rows = 0
         hydration_complete = False
-        hydration_split: Optional[str] = None
-        hydration_corpus_size: Optional[str] = None
-        hydration_dataset_source: Optional[str] = None
+        hydration_split: str | None = None
+        hydration_corpus_size: str | None = None
+        hydration_dataset_source: str | None = None
         if self.db_path in existing_paths:
             try:
                 with self._connect_db() as conn:
@@ -205,7 +206,7 @@ class _H5LayoutMixin:
     @staticmethod
     def _set_cache_metadata(
         conn: sqlite3.Connection,
-        values: Dict[str, object],
+        values: dict[str, object],
         *,
         preserve_existing: bool = False,
     ) -> None:
@@ -233,7 +234,7 @@ class _H5LayoutMixin:
         )
 
     @staticmethod
-    def _load_cache_metadata(conn: sqlite3.Connection) -> Dict[str, str]:
+    def _load_cache_metadata(conn: sqlite3.Connection) -> dict[str, str]:
         """Load cache metadata table into an in-memory mapping.
 
         :param sqlite3.Connection conn: Open SQLite connection.
@@ -260,7 +261,7 @@ class _H5LayoutMixin:
             value = value.item()
         return str(value)
 
-    def _runtime_contract_values(self) -> Dict[str, object]:
+    def _runtime_contract_values(self) -> dict[str, object]:
         """Return the canonical values shared by SQLite and HDF5 metadata.
 
         :return Dict[str, object]: Runtime cache-contract values keyed by field name.
@@ -282,7 +283,7 @@ class _H5LayoutMixin:
         self,
         conn: sqlite3.Connection,
         h5_file: h5py.File,
-        embeddings_dataset: Optional[h5py.Dataset],
+        embeddings_dataset: h5py.Dataset | None,
         *,
         fail_mode: str,
         check_row_mapping: bool = True,
@@ -665,11 +666,11 @@ class _H5LayoutMixin:
     @staticmethod
     def _metadata_tuple(
         paper_id: str,
-        metadata: Dict[str, object],
+        metadata: dict[str, object],
         text_hash: str,
         embedding_dim: int,
         row_idx: int,
-    ) -> Tuple[Any, ...]:
+    ) -> tuple[Any, ...]:
         """Build metadata row tuple for SQLite upsert.
 
         :param str paper_id: Paper identifier.
@@ -695,8 +696,8 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _normalized_metadata_fields(
-        metadata: Dict[str, object],
-    ) -> Tuple[str, str, Optional[int], str, str, str, str, str]:
+        metadata: dict[str, object],
+    ) -> tuple[str, str, int | None, str, str, str, str, str]:
         """Normalize metadata fields to stable cache representations.
 
         :param Dict[str, object] metadata: Paper metadata payload.
@@ -731,7 +732,7 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _metadata_fields_changed(
-        existing_row: Dict[str, Any], metadata: Dict[str, object]
+        existing_row: dict[str, Any], metadata: dict[str, object]
     ) -> bool:
         """Return whether cached non-vector metadata differs from incoming payload.
 
@@ -758,8 +759,8 @@ class _H5LayoutMixin:
 
     @staticmethod
     def _metadata_refresh_tuple(
-        paper_id: str, metadata: Dict[str, object]
-    ) -> Tuple[Any, ...]:
+        paper_id: str, metadata: dict[str, object]
+    ) -> tuple[Any, ...]:
         """Build SQL update tuple for metadata-only refresh paths.
 
         :param str paper_id: Paper identifier.
@@ -787,14 +788,14 @@ class _H5LayoutMixin:
         self,
         conn: sqlite3.Connection,
         paper_ids: Sequence[str],
-    ) -> Dict[str, Dict[str, Any]]:
+    ) -> dict[str, dict[str, Any]]:
         """Fetch existing metadata rows for target paper IDs.
 
         :param sqlite3.Connection conn: Open SQLite connection.
         :param Sequence[str] paper_ids: Paper IDs to look up.
         :return Dict[str, Dict[str, Any]]: Mapping of paper ID to cached metadata payload.
         """
-        existing_rows: Dict[str, Dict[str, Any]] = {}
+        existing_rows: dict[str, dict[str, Any]] = {}
         for row in self._query_paper_rows(conn, paper_ids, lookup_column="paper_id"):
             decoded = _decode_paper_row(row, parse_json_lists=False)
             paper_id = decoded.pop("paper_id")
@@ -808,7 +809,7 @@ class _H5LayoutMixin:
         lookup_values: Sequence[Any],
         *,
         lookup_column: str,
-    ) -> Iterator[Tuple[Any, ...]]:
+    ) -> Iterator[tuple[Any, ...]]:
         """Yield common paper rows for batched SQLite key lookups.
 
         :param sqlite3.Connection conn: Open SQLite connection.
@@ -836,7 +837,7 @@ class _H5LayoutMixin:
                 yield row[:-1]
 
     @staticmethod
-    def _get_embeddings_dataset(h5_file: h5py.File) -> Optional[h5py.Dataset]:
+    def _get_embeddings_dataset(h5_file: h5py.File) -> h5py.Dataset | None:
         """Return matrix embedding dataset when available.
 
         :param h5py.File h5_file: Open HDF5 cache handle.
@@ -871,7 +872,7 @@ class _H5LayoutMixin:
 
     def _ensure_binary_dataset(
         self, h5_file: h5py.File, embedding_dim: int
-    ) -> Optional[h5py.Dataset]:
+    ) -> h5py.Dataset | None:
         """Create or validate binary-index dataset for int8 cache search.
 
         :param h5py.File h5_file: Open HDF5 file handle.
@@ -959,7 +960,7 @@ class _H5LayoutMixin:
         width: int,
         dtype: np.dtype,
         enabled: bool = True,
-    ) -> Optional[h5py.Dataset]:
+    ) -> h5py.Dataset | None:
         """Create or validate an enabled resizable two-dimensional HDF5 matrix.
 
         :param h5py.File h5_file: Open HDF5 file handle.
@@ -1026,7 +1027,7 @@ class _H5LayoutMixin:
             return False
         return True
 
-    def _dataset_compression_kwargs(self) -> Dict[str, Any]:
+    def _dataset_compression_kwargs(self) -> dict[str, Any]:
         """Build HDF5 dataset compression kwargs for active cache configuration.
 
         ``lzf`` does not accept ``compression_opts``. Other configured codecs keep
@@ -1038,7 +1039,7 @@ class _H5LayoutMixin:
         if not compression:
             return {}
 
-        kwargs: Dict[str, Any] = {"compression": compression}
+        kwargs: dict[str, Any] = {"compression": compression}
         if compression.lower() != "lzf":
             kwargs["compression_opts"] = int(self._effective_compression_level)
         return kwargs

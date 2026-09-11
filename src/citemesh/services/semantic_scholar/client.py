@@ -22,10 +22,7 @@ from typing import Any
 
 import requests
 from semanticscholar import SemanticScholar
-from semanticscholar.SemanticScholarException import (
-    BadQueryParametersException,  # noqa: F401  re-exported for the SDK error vocabulary
-    ObjectNotFoundException,
-)
+from semanticscholar.SemanticScholarException import ObjectNotFoundException
 from tenacity import (
     RetryCallState,
     Retrying,
@@ -39,12 +36,7 @@ from citemesh.core import API_CONFIG, Paper
 from citemesh.data.cache import atomic_write_json
 
 from . import disk_cache, payloads, retry
-from .endpoints import (
-    PAPER_BASE_URL,  # noqa: F401  re-exported at its documented location
-    RECOMMENDATION_BASE_URL,  # noqa: F401  re-exported at its documented location
-    SEARCH_BASE_URL,  # noqa: F401  re-exported at its documented location
-    _EndpointsMixin,
-)
+from .endpoints import _EndpointsMixin
 from .errors import (
     SemanticScholarRequestError,
     SemanticScholarUnavailableError,

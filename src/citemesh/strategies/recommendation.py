@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 
 from citemesh.core import Paper
 from citemesh.services import get_client
-from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     build_capped_undirected_graph,
@@ -23,6 +22,7 @@ from citemesh.strategies.candidates import (
     require_available_candidate_source,
     scope_candidate_collection,
 )
+from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -43,7 +43,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
         similarity_threshold: float = 0.2,
-        client: Optional[SemanticScholarClient] = None,
+        client: SemanticScholarClient | None = None,
     ):
         """Initialize recommendation graph builder.
 
@@ -59,7 +59,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         self.similarity_threshold = similarity_threshold
         self.client = client or get_client()
         self._abstract_index = AbstractSimilarityIndex()
-        self.candidate_source_status: Dict[str, str] = {}
+        self.candidate_source_status: dict[str, str] = {}
         self._reference_source_unavailable = False
 
     def _hydrate_references(self, paper: Paper) -> None:
@@ -95,14 +95,14 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             )
 
     @scope_candidate_collection
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> dict[str, Paper]:
         """Collect recommendations for a seed paper.
 
         :param str seed_id: Seed paper identifier.
         :param Any kwargs: Strategy-specific arguments (currently unused).
         :return Dict[str, Paper]: Papers included in graph.
         """
-        papers: Dict[str, Paper] = {}
+        papers: dict[str, Paper] = {}
         self.candidate_source_status = {}
         self._reference_source_unavailable = False
 
@@ -174,7 +174,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         )
         return papers
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
         """Build a recommendation graph with candidate-source status metadata.
 
         :param str seed_id: Seed paper identifier.

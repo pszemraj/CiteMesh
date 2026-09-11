@@ -5,9 +5,10 @@ This module defines typed data structures to replace raw dictionaries,
 providing type safety, validation, and encapsulation of paper-related logic.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional, Set
 
 
 @dataclass
@@ -20,7 +21,7 @@ class Author:
     """
 
     name: str
-    author_id: Optional[str] = None
+    author_id: str | None = None
 
     @property
     def surname(self) -> str:
@@ -55,15 +56,15 @@ class Paper:
 
     paper_id: str
     title: str
-    year: Optional[int]
-    authors: List[Author] = field(default_factory=list)
+    year: int | None
+    authors: list[Author] = field(default_factory=list)
     citation_count: int = 0
     abstract: str = ""
     venue: str = ""
     arxiv_id: str = ""
     doi: str = ""
-    categories: List[str] = field(default_factory=list)
-    references: List[str] = field(default_factory=list)
+    categories: list[str] = field(default_factory=list)
+    references: list[str] = field(default_factory=list)
     is_seed: bool = False
 
     def __post_init__(self):
@@ -97,7 +98,7 @@ class Paper:
         return "Unknown"
 
     @property
-    def author_names(self) -> Set[str]:
+    def author_names(self) -> set[str]:
         """Get set of all author names for comparison.
 
         :return Set[str]: Unique author names for the paper.
@@ -113,7 +114,7 @@ class Paper:
         year = self.year if self.year is not None else "n.d."
         return f"{self.first_author_surname}, {year}"
 
-    def shares_authors_with(self, other: "Paper") -> bool:
+    def shares_authors_with(self, other: Paper) -> bool:
         """Check if this paper shares any authors with another paper.
 
         :param Paper other: Paper to compare authors against.
@@ -121,7 +122,7 @@ class Paper:
         """
         return bool(self.author_names & other.author_names)
 
-    def category_overlap(self, other: "Paper") -> float:
+    def category_overlap(self, other: Paper) -> float:
         """
         Compute category overlap coefficient.
 
@@ -137,7 +138,7 @@ class Paper:
 
         return intersection / union if union > 0 else 0.0
 
-    def reference_overlap(self, other: "Paper") -> float:
+    def reference_overlap(self, other: Paper) -> float:
         """
         Compute bibliographic coupling strength.
 

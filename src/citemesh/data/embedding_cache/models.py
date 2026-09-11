@@ -10,7 +10,7 @@ incompatible and the namespace must be rebuilt.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -26,7 +26,7 @@ class CacheSearchResult:
     paper_id: str
     score: float
     embedding: np.ndarray
-    metadata: Dict[str, Any]
+    metadata: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -38,9 +38,9 @@ class CacheNamespacePayloadStats:
     sqlite_rows: int
     embedding_rows: int
     hydration_complete: bool
-    hydration_split: Optional[str]
-    hydration_corpus_size: Optional[str]
-    hydration_dataset_source: Optional[str]
+    hydration_split: str | None
+    hydration_corpus_size: str | None
+    hydration_dataset_source: str | None
 
 
 @dataclass(frozen=True)
@@ -48,18 +48,18 @@ class PendingEmbeddingRecord:
     """Cache-miss record staged across lookup/encode/commit phases."""
 
     paper_id: str
-    metadata: Dict[str, object]
+    metadata: dict[str, object]
     text_hash: str
     text: str
-    row_idx: Optional[int]
+    row_idx: int | None
 
 
 @dataclass(frozen=True)
 class _CacheLookupPlan:
     """Outcome of the pre-encode cache scan for one embedding request."""
 
-    cached_embeddings: Dict[str, np.ndarray]
-    papers_to_embed: List[PendingEmbeddingRecord]
+    cached_embeddings: dict[str, np.ndarray]
+    papers_to_embed: list[PendingEmbeddingRecord]
 
 
 @dataclass(frozen=True)
@@ -80,11 +80,11 @@ class _VectorWritePlan:
     """
 
     existing_row_count: int
-    new_embeddings: Dict[str, np.ndarray]
-    rows_to_upsert: List[Tuple[Any, ...]]
-    append_embeddings: List[np.ndarray]
-    append_binary_embeddings: List[np.ndarray]
-    append_records: List[Tuple[str, Dict[str, object], str]]
-    replacement_rows: List[
-        Tuple[int, np.ndarray, Optional[np.ndarray], np.ndarray, Optional[np.ndarray]]
+    new_embeddings: dict[str, np.ndarray]
+    rows_to_upsert: list[tuple[Any, ...]]
+    append_embeddings: list[np.ndarray]
+    append_binary_embeddings: list[np.ndarray]
+    append_records: list[tuple[str, dict[str, object], str]]
+    replacement_rows: list[
+        tuple[int, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray | None]
     ]

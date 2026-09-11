@@ -1,7 +1,10 @@
 """CiteMesh package exports."""
 
-from importlib import import_module
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from ._lazy import install_lazy_exports
 
 try:
     from ._version import version as __version__
@@ -11,6 +14,13 @@ except ImportError:  # pragma: no cover - fallback for editable/source environme
 __author__ = "CiteMesh Contributors"
 
 from .core import Author, Paper
+
+if TYPE_CHECKING:
+    from .strategies.base import GraphBuilderStrategy
+    from .strategies.citation import CitationGraphBuilder
+    from .strategies.embedding import EmbeddingGraphBuilder
+    from .strategies.hybrid import HybridGraphBuilder
+    from .strategies.recommendation import RecommendationGraphBuilder
 
 __all__ = [
     "__version__",
@@ -23,41 +33,24 @@ __all__ = [
     "HybridGraphBuilder",
 ]
 
-_LAZY_STRATEGY_EXPORTS = {
-    "GraphBuilderStrategy": ("citemesh.strategies.base", "GraphBuilderStrategy"),
-    "CitationGraphBuilder": ("citemesh.strategies.citation", "CitationGraphBuilder"),
-    "RecommendationGraphBuilder": (
-        "citemesh.strategies.recommendation",
-        "RecommendationGraphBuilder",
-    ),
-    "EmbeddingGraphBuilder": (
-        "citemesh.strategies.embedding",
-        "EmbeddingGraphBuilder",
-    ),
-    "HybridGraphBuilder": ("citemesh.strategies.hybrid", "HybridGraphBuilder"),
-}
-
-
-def __getattr__(name: str) -> Any:
-    """Resolve strategy exports lazily to preserve the historical top-level API.
-
-    :param str name: Requested module attribute.
-    :return Any: Lazily imported strategy export.
-    :raises AttributeError: If ``name`` is not a supported export.
-    """
-    target = _LAZY_STRATEGY_EXPORTS.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-    module_name, attr_name = target
-    value = getattr(import_module(module_name), attr_name)
-    globals()[name] = value
-    return value
-
-
-def __dir__() -> list[str]:
-    """Return sorted module attribute names for interactive inspection.
-
-    :return list[str]: Sorted module attribute names plus lazy exports.
-    """
-    return sorted(set(globals()) | set(__all__))
+# Strategy exports stay lazy so ``import citemesh`` never pulls the embedding or
+# visualization stacks.
+__getattr__, __dir__ = install_lazy_exports(
+    globals(),
+    {
+        "GraphBuilderStrategy": ("citemesh.strategies.base", "GraphBuilderStrategy"),
+        "CitationGraphBuilder": (
+            "citemesh.strategies.citation",
+            "CitationGraphBuilder",
+        ),
+        "RecommendationGraphBuilder": (
+            "citemesh.strategies.recommendation",
+            "RecommendationGraphBuilder",
+        ),
+        "EmbeddingGraphBuilder": (
+            "citemesh.strategies.embedding",
+            "EmbeddingGraphBuilder",
+        ),
+        "HybridGraphBuilder": ("citemesh.strategies.hybrid", "HybridGraphBuilder"),
+    },
+)

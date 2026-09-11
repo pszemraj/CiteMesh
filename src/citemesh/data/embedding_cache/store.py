@@ -13,19 +13,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import sqlite3
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import (
     Any,
-    Callable,
-    Dict,
-    Iterable,
-    Iterator,
-    List,
-    Optional,
-    Sequence,
-    Set,
-    Tuple,
 )
 
 import h5py
@@ -89,7 +81,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
 
     def __init__(
         self,
-        cache_dir: Optional[Path] = None,
+        cache_dir: Path | None = None,
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         storage_precision: str = "int8",
         binary_prefilter: bool = True,
@@ -98,7 +90,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         compression_level: int = 1,
         source_torch_dtype: str = "float32",
         text_formatter_fingerprint: str = "default",
-        progress: Optional[ProgressWrapper] = None,
+        progress: ProgressWrapper | None = None,
     ):
         """Create a persistent embedding cache for a model variant.
 
@@ -162,9 +154,9 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         if not self.text_formatter_fingerprint:
             raise ValueError("text_formatter_fingerprint must be a non-empty string.")
         self.embedding_vector_dtype = "float32"
-        self.last_search_used_binary_prefilter: Optional[bool] = None
-        self.last_search_total_embeddings: Optional[int] = None
-        self.last_search_rescored_embeddings: Optional[int] = None
+        self.last_search_used_binary_prefilter: bool | None = None
+        self.last_search_total_embeddings: int | None = None
+        self.last_search_rescored_embeddings: int | None = None
         self._int8_saturation_warning_emitted = False
         self._progress = progress
 
@@ -179,12 +171,12 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
 
     def get_embeddings(
         self,
-        papers: Dict[str, Dict],
+        papers: dict[str, dict],
         model: Any,
         batch_size: int = 32,
         show_progress: bool = True,
-        text_builder: Optional[Callable[[Dict[str, object]], str]] = None,
-    ) -> Dict[str, np.ndarray]:
+        text_builder: Callable[[dict[str, object]], str] | None = None,
+    ) -> dict[str, np.ndarray]:
         """Return embeddings for provided papers, computing only missing ones.
 
         :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
@@ -207,11 +199,11 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
 
     def upsert_embeddings(
         self,
-        papers: Dict[str, Dict],
+        papers: dict[str, dict],
         model: Any,
         batch_size: int = 32,
         show_progress: bool = False,
-        text_builder: Optional[Callable[[Dict[str, object]], str]] = None,
+        text_builder: Callable[[dict[str, object]], str] | None = None,
     ) -> None:
         """Persist embeddings for papers without materializing float32 return payloads.
 
@@ -255,7 +247,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         *,
         binary_prefilter: bool,
         binary_rescore_multiplier: int,
-    ) -> List[CacheSearchResult]:
+    ) -> list[CacheSearchResult]:
         """Search cached embeddings and return ranked metadata-rich candidates.
 
         :param np.ndarray query_embedding: Query embedding in float32.
@@ -377,7 +369,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                         f"{len(missing_rows)} scored embeddings (row_idx={sampled_rows}). "
                         "Rebuild this cache namespace to restore row mapping consistency."
                     )
-                results: List[CacheSearchResult] = []
+                results: list[CacheSearchResult] = []
                 for idx, row_idx in enumerate(row_values):
                     payload = metadata_by_row[row_idx]
                     result_metadata = {
@@ -433,7 +425,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                 f"existing cache files were preserved: {exc}"
             ) from exc
 
-    def get_cached_paper_ids(self) -> Set[str]:
+    def get_cached_paper_ids(self) -> set[str]:
         """Return all cached paper IDs for this namespace.
 
         :return Set[str]: Cached paper IDs loaded from SQLite metadata rows.
@@ -441,7 +433,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         if not path_exists(self.db_path):
             return set()
 
-        paper_ids: Set[str] = set()
+        paper_ids: set[str] = set()
         with self._cache_lock(), self._connect_db() as conn:
             self._recover_pending_replacements_with_connection_locked(conn)
             cursor = conn.cursor()
@@ -558,8 +550,8 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
     def is_hydrated(
         self,
         dataset_split: str,
-        corpus_size: Optional[int],
-        dataset_source: Optional[str] = None,
+        corpus_size: int | None,
+        dataset_source: str | None = None,
     ) -> bool:
         """Return whether cache hydration metadata matches target corpus spec.
 
@@ -668,7 +660,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         with self._cache_lock(), self._connect_db() as conn:
             yield conn
 
-    def _read_cache_metadata(self) -> Dict[str, str]:
+    def _read_cache_metadata(self) -> dict[str, str]:
         """Load the persisted metadata table under the namespace lock.
 
         :return Dict[str, str]: Metadata key/value pairs for the active namespace.
@@ -676,7 +668,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         with self._locked_connection() as conn:
             return self._load_cache_metadata(conn)
 
-    def _write_cache_metadata(self, values: Dict[str, object]) -> None:
+    def _write_cache_metadata(self, values: dict[str, object]) -> None:
         """Persist metadata key/value pairs under the namespace lock.
 
         :param Dict[str, object] values: Metadata keys to upsert.
@@ -685,7 +677,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         with self._locked_connection() as conn:
             self._set_cache_metadata(conn, values)
 
-    def get_hydrated_dataset_source(self) -> Optional[str]:
+    def get_hydrated_dataset_source(self) -> str | None:
         """Return dataset source captured for the latest hydrated cache attempt.
 
         :return Optional[str]: Hydrated dataset source token when set.
@@ -710,7 +702,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
             {CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION}
         )
 
-    def update_corpus_metadata(self, papers: Sequence[Dict]) -> None:
+    def update_corpus_metadata(self, papers: Sequence[dict]) -> None:
         """Correct years and DOIs on existing corpus rows without touching vectors.
 
         :param Sequence[Dict] papers: Source metadata with paper IDs, years and DOIs.
@@ -722,7 +714,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                 [(paper["year"], paper["doi"], paper["paper_id"]) for paper in papers],
             )
 
-    def get_model_fingerprint(self) -> Optional[str]:
+    def get_model_fingerprint(self) -> str | None:
         """Return model fingerprint captured for this cache namespace.
 
         :return Optional[str]: Active model fingerprint or ``None`` when unset.
@@ -731,7 +723,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         fingerprint = str(metadata.get(MODEL_FINGERPRINT_KEY, "")).strip()
         return fingerprint or None
 
-    def get_hydration_rowcount_reconciliation(self) -> Optional[Tuple[int, int]]:
+    def get_hydration_rowcount_reconciliation(self) -> tuple[int, int] | None:
         """Return persisted full-split reconciliation marker for row-count deltas.
 
         :return Optional[Tuple[int, int]]: ``(upstream_rows, cached_rows)`` when
@@ -819,7 +811,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         self,
         dataset_source: str,
         dataset_split: str,
-        corpus_size: Optional[int],
+        corpus_size: int | None,
         *,
         complete: bool,
     ) -> None:
@@ -847,7 +839,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
             }
         )
 
-    def clear(self, reason: Optional[str] = None) -> None:
+    def clear(self, reason: str | None = None) -> None:
         """Purge cache artifacts for this cache namespace.
 
         :param Optional[str] reason: Optional rationale for the clear operation.

@@ -7,11 +7,10 @@ vectors and cached corpus rows are all formatted identically.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import Enum
 from typing import (
     Any,
-    Dict,
-    Mapping,
 )
 
 from citemesh.core import Paper
@@ -38,7 +37,7 @@ class EmbeddingTask(str, Enum):
     GRAPH_SIMILARITY = "graph-similarity"
 
 
-def _embedding_text_metadata(title: object, abstract: object) -> Dict[str, str]:
+def _embedding_text_metadata(title: object, abstract: object) -> dict[str, str]:
     """Normalize title/abstract fields without treating placeholders as content.
 
     :param object title: Raw paper title.

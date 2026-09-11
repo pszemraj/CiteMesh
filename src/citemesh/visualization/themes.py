@@ -11,7 +11,6 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Dict, Tuple
 
 
 @dataclass(frozen=True)
@@ -20,13 +19,13 @@ class Theme:
 
     name: str
     background: str
-    node_color_old: Tuple[float, float, float]
-    node_color_new: Tuple[float, float, float]
-    seed_color: Tuple[float, float, float]
-    edge_color: Tuple[float, float, float]
+    node_color_old: tuple[float, float, float]
+    node_color_new: tuple[float, float, float]
+    seed_color: tuple[float, float, float]
+    edge_color: tuple[float, float, float]
     text_color: str
 
-    def interpolate(self, norm: float) -> Tuple[float, float, float]:
+    def interpolate(self, norm: float) -> tuple[float, float, float]:
         """Linear interpolation between old and new node colors.
 
         :param float norm: Normalized position in [0, 1].
@@ -47,7 +46,7 @@ class Theme:
         return (r, g, b)
 
 
-THEMES: Dict[str, Theme] = {
+THEMES: dict[str, Theme] = {
     "light": Theme(
         name="light",
         background="#fafafa",

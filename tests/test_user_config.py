@@ -18,9 +18,10 @@ import pytest
 from citemesh import cli as cli_module
 from citemesh.cli import build_contract as build_contract_module
 from citemesh.cli import build_options as build_options_module
-from citemesh.core import user_config as user_config_module
 from citemesh.core.config import EmbeddingStorageConfig
-from citemesh.core.user_config import (
+from citemesh.data import cache as cache_module
+from citemesh.data import user_config as user_config_module
+from citemesh.data.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
     DEVICE_CHOICES,
     EXPORT_CHOICES,
@@ -40,7 +41,6 @@ from citemesh.core.user_config import (
     unset_config_value,
     user_config_path,
 )
-from citemesh.data import cache as cache_module
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.hybrid import HYBRID_DEFAULT_MAX_REFERENCES
 
@@ -295,7 +295,7 @@ def test_load_skips_unknown_and_invalid_entries(
         ),
         encoding="utf-8",
     )
-    with caplog.at_level(logging.WARNING, logger="citemesh.core.user_config"):
+    with caplog.at_level(logging.WARNING, logger="citemesh.data.user_config"):
         config = load_user_config(config_path)
     assert config.defaults == {"theme": "dark"}
     messages = " ".join(record.getMessage() for record in caplog.records)
@@ -317,7 +317,7 @@ def test_load_corrupt_file_warns_and_returns_empty(
     """
     config_path = tmp_path / "config.toml"
     config_path.write_bytes(payload)
-    with caplog.at_level(logging.WARNING, logger="citemesh.core.user_config"):
+    with caplog.at_level(logging.WARNING, logger="citemesh.data.user_config"):
         config = load_user_config(config_path)
     assert config.defaults == {}
     assert any(

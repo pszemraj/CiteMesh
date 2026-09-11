@@ -9,16 +9,11 @@ thread.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from itertools import chain
 from typing import (
     Any,
-    Callable,
-    Dict,
-    Optional,
-    Sequence,
-    Set,
-    Tuple,
 )
 
 import numpy as np
@@ -30,7 +25,7 @@ from . import deps
 logger = logging.getLogger(__name__)
 
 
-def _model_floating_dtype_names(model: Any) -> Optional[Set[str]]:
+def _model_floating_dtype_names(model: Any) -> set[str] | None:
     """Return floating-point parameter and buffer dtypes from a loaded model.
 
     :param Any model: Model object that may expose ``parameters()``.
@@ -42,7 +37,7 @@ def _model_floating_dtype_names(model: Any) -> Optional[Set[str]]:
         return None
     buffers = getattr(model, "buffers", None)
 
-    observed: Set[str] = set()
+    observed: set[str] = set()
     aliases = {
         "float": "float32",
         "float16": "float16",
@@ -136,8 +131,8 @@ class _PrecisionEncodeProxy:
     def _prepare_prefetched_batch(
         self,
         texts: list[str],
-        prompt: Optional[str],
-    ) -> Tuple[Dict[str, Any], int]:
+        prompt: str | None,
+    ) -> tuple[dict[str, Any], int]:
         """Preprocess one batch and count inputs that will be truncated.
 
         :param list[str] texts: Text payloads in encode order.
@@ -205,7 +200,7 @@ class _PrecisionEncodeProxy:
         model.eval()
         prompt = model._resolve_prompt(None, None)
         batches = length_bucketed_index_batches(texts, batch_size)
-        ordered_embeddings: Dict[int, np.ndarray] = {}
+        ordered_embeddings: dict[int, np.ndarray] = {}
         truncated_count = 0
         torch = deps._import_torch()
 

@@ -8,7 +8,7 @@ comprehensive paper discovery.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 import numpy as np
@@ -72,8 +72,8 @@ class EmbeddingInferenceError(RuntimeError):
 def require_complete_embeddings(
     *,
     seed_id: str,
-    candidate_ids: List[str],
-    embeddings: Dict[str, np.ndarray],
+    candidate_ids: list[str],
+    embeddings: dict[str, np.ndarray],
 ) -> np.ndarray:
     """Validate that hybrid reranking has one usable vector per required paper.
 
@@ -113,28 +113,28 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_references: int = HYBRID_DEFAULT_MAX_REFERENCES,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
-        max_semantic: Optional[int] = None,
+        max_semantic: int | None = None,
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_profile: str = "auto",
-        model_revision: Optional[str] = None,
+        model_revision: str | None = None,
         dataset_split: str = "train",  # Full snapshot split; use corpus_size in embedding strategy to bound runtime.
-        corpus_size: Optional[int] = None,
-        truncate_dim: Optional[int] = None,
+        corpus_size: int | None = None,
+        truncate_dim: int | None = None,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
-        force_rebuild_reason: Optional[str] = None,
+        force_rebuild_reason: str | None = None,
         storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
-        binary_prefilter: Optional[bool] = None,
-        binary_rescore_multiplier: Optional[int] = None,
+        binary_prefilter: bool | None = None,
+        binary_rescore_multiplier: int | None = None,
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         encode_batch_size: int = ENCODE_BATCH_SIZE,
         enable_torch_compile: bool = False,
-        device: Optional[str] = None,
+        device: str | None = None,
         semantic_source: str = "candidates",
         candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
-        client: Optional[SemanticScholarClient] = None,
+        client: SemanticScholarClient | None = None,
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
         dataset_source: str = DEFAULT_DATASET_SOURCE,
     ):
@@ -265,21 +265,21 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         )
 
         # Track paper sources for adaptive similarity
-        self.paper_sources: Dict[str, str] = {}  # paper_id -> citation|semantic|both
-        self.seed_relations: Dict[str, str] = {}
-        self.candidate_source_status: Dict[str, str] = {}
+        self.paper_sources: dict[str, str] = {}  # paper_id -> citation|semantic|both
+        self.seed_relations: dict[str, str] = {}
+        self.candidate_source_status: dict[str, str] = {}
 
     def _ingest_candidate(
         self,
         aliases: IdentityRegistry,
         seed: Paper,
-        candidates: Dict[str, Paper],
-        candidate_sources: Dict[str, Set[str]],
+        candidates: dict[str, Paper],
+        candidate_sources: dict[str, set[str]],
         incoming: Paper,
         *,
         source: str,
         relation: str,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Reconcile and tag one pre-ranking candidate.
 
         :param IdentityRegistry aliases: Identity registry.
@@ -328,9 +328,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     def _embed_candidates(
         self,
-        candidate_ids: List[str],
-        candidates: Dict[str, Paper],
-        embeddings_map: Dict[str, np.ndarray],
+        candidate_ids: list[str],
+        candidates: dict[str, Paper],
+        embeddings_map: dict[str, np.ndarray],
     ) -> None:
         """Embed rerank candidates for seed-relevance scoring.
 
@@ -378,8 +378,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 "Hybrid semantic reranking has no embedding encoder."
             )
 
-        texts: List[str] = []
-        ordered_candidate_ids: List[str] = []
+        texts: list[str] = []
+        ordered_candidate_ids: list[str] = []
         for paper_id in candidate_ids:
             paper = candidates.get(paper_id)
             if paper is None:
@@ -426,8 +426,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             embeddings_map[paper_id] = encoded_array[idx]
 
     def _ensure_candidate_embeddings(
-        self, seed_paper: Paper, candidates: Dict[str, Paper]
-    ) -> Optional[np.ndarray]:
+        self, seed_paper: Paper, candidates: dict[str, Paper]
+    ) -> np.ndarray | None:
         """Ensure seed/candidate embeddings are materialized for reranking.
 
         :param Paper seed_paper: Seed paper.
@@ -480,10 +480,10 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     def _seed_relevance_score(
         self,
-        seed_embedding: Optional[np.ndarray],
+        seed_embedding: np.ndarray | None,
         seed_paper: Paper,
         candidate: Paper,
-        source_tags: Set[str],
+        source_tags: set[str],
         max_citation_count: int,
     ) -> float:
         """Score candidate relevance to seed for hybrid adjudication.
@@ -537,9 +537,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
     def _rank_candidates(
         self,
         seed_paper: Paper,
-        candidates: Dict[str, Paper],
-        candidate_sources: Dict[str, Set[str]],
-    ) -> List[str]:
+        candidates: dict[str, Paper],
+        candidate_sources: dict[str, set[str]],
+    ) -> list[str]:
         """Return candidate IDs ranked by seed-centric hybrid relevance.
 
         :param Paper seed_paper: Seed paper.
@@ -554,7 +554,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         max_citation_count = max(
             (paper.citation_count for paper in candidates.values()), default=0
         )
-        scored: List[Tuple[float, str, int]] = []
+        scored: list[tuple[float, str, int]] = []
         for idx, (paper_id, paper) in enumerate(candidates.items()):
             score = self._seed_relevance_score(
                 seed_embedding=seed_embedding,
@@ -572,7 +572,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         return [paper_id for _, paper_id, _ in scored]
 
     @scope_candidate_collection
-    def collect_papers(self, seed_id: str, **kwargs: Any) -> Dict[str, Paper]:
+    def collect_papers(self, seed_id: str, **kwargs: Any) -> dict[str, Paper]:
         """
         Collect papers from both citation and semantic sources.
 
@@ -580,7 +580,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Combined dictionary of papers
         """
-        papers: Dict[str, Paper] = {}
+        papers: dict[str, Paper] = {}
         self.paper_sources = {}
         self.seed_relations = {}
         self.candidate_source_status = {}
@@ -616,8 +616,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         register_aliases(alias_map, seed_paper.paper_id, seed_paper)
         citation_seed_relations = getattr(self.citation_builder, "seed_relations", {})
 
-        candidate_pool: Dict[str, Paper] = {}
-        candidate_sources: Dict[str, Set[str]] = {}
+        candidate_pool: dict[str, Paper] = {}
+        candidate_sources: dict[str, set[str]] = {}
         for paper in citation_papers.values():
             if paper.paper_id == seed_paper.paper_id or paper.is_seed:
                 continue
@@ -756,7 +756,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         return papers
 
-    def prepare_graph_scoring(self, papers: Dict[str, Paper]) -> None:
+    def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:
         """Build the final symmetric vector space used by hybrid graph edges.
 
         :param Dict[str, Paper] papers: Final selected papers.
@@ -845,7 +845,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
         return min(similarity, 1.0)  # Cap at 1.0
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
         """
         Build graph and enforce per-node edge limits for readability.
 

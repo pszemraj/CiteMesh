@@ -5,8 +5,9 @@ This module centralizes all magic numbers, thresholds, and weights
 to make the codebase self-documenting and enable easy experimentation.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Dict, Tuple
 
 
 @dataclass
@@ -82,9 +83,9 @@ class HybridSimilarityConfig:
     """Configuration for hybrid similarity approach."""
 
     # Adaptive weights for different relationship types
-    semantic_semantic_weights: Tuple[float, float, float, float] = (0.6, 0.2, 0.1, 0.1)
-    citation_citation_weights: Tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
-    mixed_weights: Tuple[float, float, float, float] = (0.4, 0.3, 0.2, 0.1)
+    semantic_semantic_weights: tuple[float, float, float, float] = (0.6, 0.2, 0.1, 0.1)
+    citation_citation_weights: tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
+    mixed_weights: tuple[float, float, float, float] = (0.4, 0.3, 0.2, 0.1)
 
     # Edge limiting
     max_edges_per_node: int = 5
@@ -95,7 +96,7 @@ class VisualizationConfig:
     """Configuration for graph visualization."""
 
     # Figure settings
-    figure_size: Tuple[int, int] = (14, 8)
+    figure_size: tuple[int, int] = (14, 8)
     dpi: int = 150
 
     # Node area caps and minimum (in square points for static scatter plots)
@@ -104,7 +105,7 @@ class VisualizationConfig:
     min_size: int = 100
 
     # Node size tiers (rank: (base, increment))
-    size_tiers: Dict[str, Tuple[int, int]] = field(
+    size_tiers: dict[str, tuple[int, int]] = field(
         default_factory=lambda: {
             "top_3": (1200, 200),
             "top_8": (500, 80),
@@ -120,7 +121,7 @@ class VisualizationConfig:
 
     # Layout parameters
     layout_scale: float = 0.9
-    layout_center: Tuple[float, float] = (0.5, 0.5)
+    layout_center: tuple[float, float] = (0.5, 0.5)
     perturbation_std: float = 0.02  # Random perturbation for organic look
     spring_k_factor: float = 0.8  # Spring layout k parameter divisor
 

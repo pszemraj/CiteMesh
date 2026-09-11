@@ -10,7 +10,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from citemesh.paper_ids import normalize_paper_id
+from citemesh.core.paper_ids import canonicalize_or_none
 
 from .build_options import (
     _CORPUS_ONLY_OPTION_DESTS,
@@ -177,7 +177,5 @@ def canonicalize_paper_id_for_metadata(paper_id: str) -> str:
     :param str paper_id: Raw CLI paper identifier.
     :return str: Canonicalized identifier when possible; otherwise original input.
     """
-    try:
-        return normalize_paper_id(paper_id)
-    except ValueError:
-        return paper_id
+    canonical = canonicalize_or_none(paper_id)
+    return canonical if canonical is not None else paper_id

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Dict
-
 from citemesh.core import Paper
 from citemesh.data.model_profiles import compose_title_abstract_text
 
@@ -18,9 +16,9 @@ class AbstractSimilarityIndex:
         """
         self.max_features = max_features
         self._matrix = None
-        self._id_to_idx: Dict[str, int] = {}
+        self._id_to_idx: dict[str, int] = {}
 
-    def build(self, papers: Dict[str, Paper]) -> None:
+    def build(self, papers: dict[str, Paper]) -> None:
         """Build cosine index from normalized paper titles + abstracts."""
         from sklearn.feature_extraction.text import TfidfVectorizer
 

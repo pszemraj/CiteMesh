@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, List, Optional
+from typing import Any
 from urllib.parse import unquote, urlparse
 
 
@@ -24,7 +24,7 @@ _ARXIV_IDENTIFIER_PATTERN = re.compile(
 
 def recognize_arxiv_identifier(
     identifier: Any, *, allow_bare: bool = False
-) -> Optional[str]:
+) -> str | None:
     """Recognize and canonicalize an arXiv identifier candidate.
 
     ``normalize_paper_id`` deliberately leaves a bare arXiv-looking user input
@@ -60,7 +60,7 @@ def recognize_arxiv_identifier(
 
 def paper_identifier_aliases(
     *, paper_id: Any = "", arxiv_id: Any = "", doi: Any = ""
-) -> List[str]:
+) -> list[str]:
     """Build stable identifier aliases for one paper payload.
 
     This expands identifiers supplied by separate API fields as well as the
@@ -106,7 +106,7 @@ def paper_identifier_aliases(
     return sorted(aliases)
 
 
-def extract_arxiv_identifier(raw_path: str) -> Optional[str]:
+def extract_arxiv_identifier(raw_path: str) -> str | None:
     """Extract an arXiv identifier from an arXiv-style URL path.
 
     :param str raw_path: URL path component such as ``/abs/2508.14040``.
@@ -172,7 +172,7 @@ def external_ids_from_canonical_paper_id(paper_id: str) -> tuple[str, str]:
     return "", ""
 
 
-def _normalize_hosted_identifier(candidate: str) -> Optional[str]:
+def _normalize_hosted_identifier(candidate: str) -> str | None:
     """Normalize DOI/arXiv identifiers embedded in hosted URL-like inputs.
 
     :param str candidate: URL-like identifier candidate.
@@ -240,7 +240,7 @@ def normalize_paper_id(paper_id: str) -> str:
     return normalized
 
 
-def canonicalize_or_none(paper_id: Any) -> Optional[str]:
+def canonicalize_or_none(paper_id: Any) -> str | None:
     """Best-effort canonicalization that reports failure instead of raising.
 
     :func:`normalize_paper_id` raises for anything it cannot canonicalize. Every

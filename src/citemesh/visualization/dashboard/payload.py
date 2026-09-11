@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Hashable
 from functools import lru_cache
 from importlib import resources
-from typing import Any, Dict, Hashable
+from typing import Any
 
 from citemesh.visualization.export.geometry import (
     _UI_PALETTES,
@@ -133,10 +134,10 @@ class DashboardPayloadMixin:
         *,
         theme_obj: Theme,
         node_ids: list[Hashable],
-        node_payloads: list[Dict[str, Any]],
-        sorted_edges: list[tuple[Hashable, Hashable, Dict[str, Any]]],
+        node_payloads: list[dict[str, Any]],
+        sorted_edges: list[tuple[Hashable, Hashable, dict[str, Any]]],
         include_plotly_geometry: bool,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Build dashboard metadata shared by dashboard HTML and JSON exports.
 
         :param Theme theme_obj: Active visualization theme.
@@ -158,7 +159,7 @@ class DashboardPayloadMixin:
         )
         year_range = {"min": bounds[0], "max": bounds[1]} if bounds else None
 
-        meta: Dict[str, Any] = {
+        meta: dict[str, Any] = {
             "seed_id": str(self.seed_id),
             "strategy": strategy,
             "theme": theme_obj.name,
@@ -190,7 +191,7 @@ class DashboardPayloadMixin:
 
     def _dashboard_payload(
         self, *, theme_obj: Theme, node_ids: list[Hashable]
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Build deterministic dashboard payload from graph metadata.
 
         :param Theme theme_obj: Active visualization theme.
@@ -199,7 +200,7 @@ class DashboardPayloadMixin:
         """
         node_payloads = self._enriched_nodes()
         sorted_edges = _sorted_edges(self.graph)
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "meta": self._dashboard_meta(
                 theme_obj=theme_obj,
                 node_ids=node_ids,
@@ -219,12 +220,12 @@ class DashboardPayloadMixin:
         }
         return payload
 
-    def _dashboard_collection_bundle(self) -> Dict[str, Any]:
+    def _dashboard_collection_bundle(self) -> dict[str, Any]:
         """Normalize optional collection metadata for shared dashboard shells.
 
         :return Dict[str, Any]: Collection result descriptors and embedded payloads.
         """
-        empty_bundle: Dict[str, Any] = {
+        empty_bundle: dict[str, Any] = {
             "kind": DASHBOARD_COLLECTION_KIND,
             "schema_version": DASHBOARD_COLLECTION_SCHEMA_VERSION,
             "current_result_id": None,
@@ -238,7 +239,7 @@ class DashboardPayloadMixin:
         raw_results = raw_bundle.get("results")
         raw_payloads = raw_bundle.get("payloads")
         legacy_payloads = raw_payloads if isinstance(raw_payloads, dict) else {}
-        results: list[Dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
         if isinstance(raw_results, list):
             for raw_entry in raw_results:
                 if not isinstance(raw_entry, dict):
@@ -249,7 +250,7 @@ class DashboardPayloadMixin:
                     payload = legacy_payloads.get(result_id)
                 if not result_id or not isinstance(payload, dict):
                     continue
-                entry: Dict[str, Any] = {
+                entry: dict[str, Any] = {
                     key: raw_entry[key]
                     for key in (
                         "result_id",
@@ -281,7 +282,7 @@ class DashboardPayloadMixin:
             # Malformed entries are dropped above, and the viewer rejects a bundle
             # whose current_result_id names no included result.
             current_result_id = results[0]["result_id"] if results else None
-        bundle: Dict[str, Any] = {
+        bundle: dict[str, Any] = {
             "current_result_id": current_result_id,
             "results": results,
         }

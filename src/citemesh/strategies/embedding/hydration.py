@@ -11,17 +11,11 @@ from __future__ import annotations
 import logging
 import os
 import random
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
 from typing import (
     Any,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Sequence,
-    Set,
-    Tuple,
 )
 
 import numpy as np
@@ -67,7 +61,7 @@ class _CorpusHydrationMixin:
 
     def _search_cache_candidates(
         self, seed_embedding: np.ndarray
-    ) -> List[Tuple[str, Dict, np.ndarray]]:
+    ) -> list[tuple[str, dict, np.ndarray]]:
         """Run cache-native retrieval and map results to candidate tuples.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
@@ -198,8 +192,8 @@ class _CorpusHydrationMixin:
         self._mark_hydration_complete(dataset_source)
 
     def _revalidate_hydrated_cache(
-        self, cached_dataset_source: Optional[str], use_streaming: bool
-    ) -> Tuple[bool, Optional[str]]:
+        self, cached_dataset_source: str | None, use_streaming: bool
+    ) -> tuple[bool, str | None]:
         """Re-verify a cache that already claims to be hydrated for this request.
 
         Revalidation can itself invalidate the cache (an upstream split that
@@ -248,8 +242,8 @@ class _CorpusHydrationMixin:
         return False, cached_dataset_source
 
     def _resolve_hydration_dataset(
-        self, cached_dataset_source: Optional[str], use_streaming: bool
-    ) -> Tuple[Optional[str], Iterable[Dict[str, Any]]]:
+        self, cached_dataset_source: str | None, use_streaming: bool
+    ) -> tuple[str | None, Iterable[dict[str, Any]]]:
         """Resolve the dataset to hydrate from, warning first about a rebuild.
 
         A source that cannot be resolved is fatal rather than a fall back to the
@@ -282,8 +276,8 @@ class _CorpusHydrationMixin:
     def _prepare_clean_hydration_namespace(
         self,
         *,
-        dataset_source: Optional[str],
-        cached_dataset_source: Optional[str],
+        dataset_source: str | None,
+        cached_dataset_source: str | None,
         use_streaming: bool,
     ) -> None:
         """Clear the namespace and re-mark it for a fresh hydration attempt.
@@ -342,8 +336,8 @@ class _CorpusHydrationMixin:
     def _hydrate_selected_dataset(
         self,
         *,
-        dataset: Iterable[Dict[str, Any]],
-        dataset_source: Optional[str],
+        dataset: Iterable[dict[str, Any]],
+        dataset_source: str | None,
         use_streaming: bool,
     ) -> int:
         """Encode and persist every selected dataset row into the clean namespace.
@@ -370,7 +364,7 @@ class _CorpusHydrationMixin:
             progress_label="Hydrating dataset",
         )
 
-    def _mark_hydration_complete(self, dataset_source: Optional[str]) -> None:
+    def _mark_hydration_complete(self, dataset_source: str | None) -> None:
         """Close out a successful hydration, reconciling full-corpus row counts.
 
         A full uncapped corpus is reconciled against the upstream row count,
@@ -409,7 +403,7 @@ class _CorpusHydrationMixin:
         )
 
     def _refresh_cached_corpus_metadata(
-        self, source: Optional[str], use_streaming: bool
+        self, source: str | None, use_streaming: bool
     ) -> None:
         """Backfill corpus years and DOIs without changing persisted vectors.
 
@@ -434,7 +428,7 @@ class _CorpusHydrationMixin:
             streaming=use_streaming,
             num_proc=None if use_streaming else max(1, (os.cpu_count() or 1) // 2),
         )
-        batch: List[Dict] = []
+        batch: list[dict] = []
         for index, record in enumerate(dataset):
             batch.append(_extract_dataset_paper_metadata(record, index))
             if len(batch) >= HYDRATION_FLUSH_SIZE:
@@ -450,7 +444,7 @@ class _CorpusHydrationMixin:
         self,
         *,
         use_streaming: bool,
-        cached_dataset_source: Optional[str],
+        cached_dataset_source: str | None,
     ) -> bool:
         """Resume an incomplete corpus hydration when cached rows are reusable.
 
@@ -719,8 +713,8 @@ class _CorpusHydrationMixin:
         self,
         *,
         source: str,
-        row_limit: Optional[int],
-        upstream_rows: Optional[int],
+        row_limit: int | None,
+        upstream_rows: int | None,
         resume_result: _HydrationSourceSliceResult,
     ) -> bool:
         """Check that a resumed tail slice consumed exactly the rows it promised.
@@ -768,9 +762,9 @@ class _CorpusHydrationMixin:
         use_streaming: bool,
         source: str,
         operation: str,
-        row_limit: Optional[int] = None,
-        row_offset: Optional[int] = None,
-    ) -> Iterable[Dict[str, Any]]:
+        row_limit: int | None = None,
+        row_offset: int | None = None,
+    ) -> Iterable[dict[str, Any]]:
         """Load a hydration slice while requiring the recorded source exactly.
 
         :param bool use_streaming: Whether to load a streaming dataset iterator.
@@ -798,13 +792,13 @@ class _CorpusHydrationMixin:
         *,
         use_streaming: bool,
         source: str,
-        progress_total: Optional[int],
+        progress_total: int | None,
         progress_label: str,
         operation: str,
-        row_limit: Optional[int] = None,
-        row_offset: Optional[int] = None,
-        existing_paper_ids: Optional[Set[str]] = None,
-        max_new_records: Optional[int] = None,
+        row_limit: int | None = None,
+        row_offset: int | None = None,
+        existing_paper_ids: set[str] | None = None,
+        max_new_records: int | None = None,
     ) -> _HydrationSourceSliceResult:
         """Load an exact-source slice and report cache and source progress.
 
@@ -832,7 +826,7 @@ class _CorpusHydrationMixin:
         source_rows_consumed = 0
         source_exhausted = False
 
-        def tracked_dataset() -> Iterable[Dict[str, Any]]:
+        def tracked_dataset() -> Iterable[dict[str, Any]]:
             """Yield source rows while recording clean iterator exhaustion.
 
             :return Iterable[Dict[str, Any]]: Tracked source records.
@@ -867,7 +861,7 @@ class _CorpusHydrationMixin:
         *,
         source: str,
         updated_rows: int,
-        upstream_rows: Optional[int],
+        upstream_rows: int | None,
         mark_complete: bool,
     ) -> bool:
         """Finalize hydration completion and row-count reconciliation metadata.
@@ -895,8 +889,8 @@ class _CorpusHydrationMixin:
         return True
 
     def _resolve_hydration_progress_total(
-        self, dataset: Iterable[Dict[str, Any]], *, use_streaming: bool
-    ) -> Optional[int]:
+        self, dataset: Iterable[dict[str, Any]], *, use_streaming: bool
+    ) -> int | None:
         """Resolve best-effort progress totals for hydration-related passes.
 
         :param Iterable[Dict[str, Any]] dataset: Dataset iterable used by the pass.
@@ -923,11 +917,11 @@ class _CorpusHydrationMixin:
 
     def _sample_calibration_records(
         self,
-        dataset: Iterable[Dict[str, Any]],
+        dataset: Iterable[dict[str, Any]],
         *,
-        progress_total: Optional[int],
+        progress_total: int | None,
         progress_label: str,
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """Reservoir-sample representative metadata records for int8 calibration.
 
         The sample is deterministic so cache bootstrap remains reproducible under
@@ -939,7 +933,7 @@ class _CorpusHydrationMixin:
         :return List[Dict]: Reservoir-sampled metadata records.
         """
         rng = random.Random(CALIBRATION_RESERVOIR_SEED)
-        sampled_records: List[Dict] = []
+        sampled_records: list[dict] = []
 
         with progress_task(
             total=progress_total,
@@ -969,7 +963,7 @@ class _CorpusHydrationMixin:
         *,
         use_streaming: bool,
         dataset_source: str,
-        selected_dataset: Optional[Sequence[Dict[str, Any]]] = None,
+        selected_dataset: Sequence[dict[str, Any]] | None = None,
     ) -> None:
         """Initialize representative int8 calibration ranges before hydration writes.
 
@@ -991,8 +985,8 @@ class _CorpusHydrationMixin:
             self.calibration_sample_size,
         )
         if selected_dataset is not None:
-            calibration_dataset: Iterable[Dict[str, Any]] = selected_dataset
-            progress_total: Optional[int] = len(selected_dataset)
+            calibration_dataset: Iterable[dict[str, Any]] = selected_dataset
+            progress_total: int | None = len(selected_dataset)
         else:
             calibration_dataset = self._load_exact_hydration_source_slice(
                 use_streaming=use_streaming,
@@ -1020,12 +1014,12 @@ class _CorpusHydrationMixin:
 
     def _hydrate_dataset_records(
         self,
-        dataset: Iterable[Dict[str, Any]],
+        dataset: Iterable[dict[str, Any]],
         *,
-        progress_total: Optional[int],
+        progress_total: int | None,
         progress_label: str,
-        existing_paper_ids: Optional[Set[str]] = None,
-        max_new_records: Optional[int] = None,
+        existing_paper_ids: set[str] | None = None,
+        max_new_records: int | None = None,
         fallback_index_offset: int = 0,
     ) -> int:
         """Hydrate cache records from dataset iterator without clearing namespace.
@@ -1051,8 +1045,8 @@ class _CorpusHydrationMixin:
             unit="papers",
         ) as progress:
             with ThreadPoolExecutor(max_workers=1) as executor:
-                batch: List[Dict] = []
-                pending_write: Optional[Future[int]] = None
+                batch: list[dict] = []
+                pending_write: Future[int] | None = None
                 pending_batch_size = 0
                 for local_idx, raw_record in enumerate(dataset):
                     if self.corpus_size is not None and local_idx >= self.corpus_size:
@@ -1111,8 +1105,8 @@ class _CorpusHydrationMixin:
         return max(int(stats.sqlite_rows), int(stats.embedding_rows))
 
     def _select_newest_corpus_rows(
-        self, dataset: Iterable[Dict[str, Any]], dataset_source: str
-    ) -> Iterable[Dict[str, Any]]:
+        self, dataset: Iterable[dict[str, Any]], dataset_source: str
+    ) -> Iterable[dict[str, Any]]:
         """Select the ``corpus_size`` most recently submitted rows by arXiv ID.
 
         Snapshot datasets are not ordered by submission time (the arXiv
@@ -1193,7 +1187,7 @@ class _CorpusHydrationMixin:
             )
         return selected
 
-    def _resolve_dataset_split_row_count(self, dataset_source: str) -> Optional[int]:
+    def _resolve_dataset_split_row_count(self, dataset_source: str) -> int | None:
         """Resolve dataset split row count from HuggingFace metadata when available.
 
         :param str dataset_source: Dataset source identifier.
@@ -1232,7 +1226,7 @@ class _CorpusHydrationMixin:
             return None
 
     def _refresh_hydrated_full_corpus_cache(
-        self, *, use_streaming: bool, cached_dataset_source: Optional[str]
+        self, *, use_streaming: bool, cached_dataset_source: str | None
     ) -> None:
         """Incrementally refresh hydrated full-corpus cache when source row count grows.
 
@@ -1316,7 +1310,7 @@ class _CorpusHydrationMixin:
                 upstream_rows,
             )
 
-    def _incremental_refresh_row_counts(self, source: str) -> Optional[Tuple[int, int]]:
+    def _incremental_refresh_row_counts(self, source: str) -> tuple[int, int] | None:
         """Decide whether an append-only refresh applies, and for how many rows.
 
         Returning ``None`` means the caller must not run an incremental refresh:
@@ -1384,7 +1378,7 @@ class _CorpusHydrationMixin:
         delta_rows: int,
         upstream_rows: int,
         updated_rows: int,
-    ) -> Tuple[List[int], int]:
+    ) -> tuple[list[int], int]:
         """Chase rows a tail-only refresh missed, widening the scan as needed.
 
         An upstream that reorders rather than purely appends leaves gaps the tail
@@ -1463,9 +1457,9 @@ class _CorpusHydrationMixin:
     def _load_dataset_for_hydration(
         self,
         use_streaming: bool,
-        row_limit: Optional[int] = None,
-        row_offset: Optional[int] = None,
-    ) -> Tuple[str, Iterable[Dict[str, Any]]]:
+        row_limit: int | None = None,
+        row_offset: int | None = None,
+    ) -> tuple[str, Iterable[dict[str, Any]]]:
         """Load the configured arXiv metadata dataset for hydration.
 
         :param bool use_streaming: Whether to load streaming dataset iterator.
@@ -1475,7 +1469,7 @@ class _CorpusHydrationMixin:
         """
         load_dataset = deps._import_datasets_module().load_dataset
 
-        parsed_row_limit: Optional[int] = None
+        parsed_row_limit: int | None = None
         if row_limit is not None:
             parsed_row_limit = int(row_limit)
             if parsed_row_limit < 1:
@@ -1532,7 +1526,7 @@ class _CorpusHydrationMixin:
         )
         return self.dataset_source, dataset
 
-    def _initialize_calibration_ranges(self, records: List[Dict]) -> None:
+    def _initialize_calibration_ranges(self, records: list[dict]) -> None:
         """Compute and persist int8 calibration ranges from metadata records.
 
         :param List[Dict] records: Records used for calibration embedding sample.
@@ -1561,7 +1555,7 @@ class _CorpusHydrationMixin:
             embedding_dim=int(sample_embeddings.shape[1]),
         )
 
-    def _cache_metadata_batch(self, batch: List[Dict]) -> int:
+    def _cache_metadata_batch(self, batch: list[dict]) -> int:
         """Encode/cache a batch of metadata records.
 
         :param List[Dict] batch: Metadata records including ``paper_id``.
@@ -1570,7 +1564,7 @@ class _CorpusHydrationMixin:
         if not batch:
             return 0
 
-        metadata_map: Dict[str, Dict] = {}
+        metadata_map: dict[str, dict] = {}
         for metadata in batch:
             paper_id = str(metadata.get("paper_id", "")).strip()
             if not paper_id:

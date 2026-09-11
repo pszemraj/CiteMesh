@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 import networkx as nx
 import numpy as np
@@ -77,7 +78,7 @@ class SeededRandomEncodeModel:
 class LookupEncodeModel:
     """Deterministic encode model backed by a text-to-embedding lookup."""
 
-    def __init__(self, lookup: Dict[str, np.ndarray]) -> None:
+    def __init__(self, lookup: dict[str, np.ndarray]) -> None:
         """Store lookup table used by encode calls.
 
         :param Dict[str, np.ndarray] lookup: Text-to-embedding lookup table.
@@ -95,7 +96,7 @@ class LookupEncodeModel:
         return np.asarray([self.lookup[text] for text in texts], dtype=np.float32)
 
 
-def get_paper_id_normalization_cases() -> List[tuple[str, str]]:
+def get_paper_id_normalization_cases() -> list[tuple[str, str]]:
     """Return shared paper-id normalization fixtures.
 
     :return List[tuple[str, str]]: Pairs of raw ID and expected normalized ID.

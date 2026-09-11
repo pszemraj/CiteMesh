@@ -12,9 +12,9 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
@@ -92,7 +92,7 @@ class _RecoveryMixin:
     @staticmethod
     def _resolve_managed_cache_root(
         cache_dir: Path, configured_cache_root: Path
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """Return the configured root when ``cache_dir`` is cleared by the CLI.
 
         :param Path cache_dir: Embedding namespace directory.
@@ -154,7 +154,7 @@ class _RecoveryMixin:
     def _persist_replacement_journal(
         self,
         conn: sqlite3.Connection,
-        replacements: Sequence[Tuple[int, np.ndarray, Optional[np.ndarray]]],
+        replacements: Sequence[tuple[int, np.ndarray, np.ndarray | None]],
     ) -> None:
         """Commit prior replacement rows before mutating HDF5 storage.
 

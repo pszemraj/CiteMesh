@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ..years import coerce_publication_year
 from .keys import slug_key
@@ -67,9 +67,7 @@ def _bibtex_verbatim(raw_value: str) -> str:
     return re.sub(r"[{}\\]", "", collapsed)
 
 
-def _node_bibtex(
-    node_payload: Dict[str, Any], *, links: Dict[str, Optional[str]]
-) -> str:
+def _node_bibtex(node_payload: dict[str, Any], *, links: dict[str, str | None]) -> str:
     """Render a deterministic BibTeX entry for dashboard actions.
 
     :param Dict[str, Any] node_payload: Node payload.

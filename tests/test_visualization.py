@@ -14,9 +14,10 @@ import subprocess
 import sys
 import types
 import xml.etree.ElementTree as ET
+from collections.abc import Callable, Hashable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Callable, Hashable
+from typing import Any
 from unittest.mock import MagicMock
 
 import networkx as nx

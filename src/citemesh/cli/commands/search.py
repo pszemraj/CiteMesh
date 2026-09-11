@@ -7,7 +7,7 @@ import logging
 
 from rich.text import Text
 
-from citemesh.core.user_config import UserConfig
+from citemesh.data.user_config import UserConfig
 from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.embedding import (
     EmbeddingGraphBuilder,

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
 
 import h5py
 import numpy as np
@@ -97,7 +96,7 @@ def _resolve_cache_lock_timeout_seconds() -> float:
     return parsed
 
 
-def _corpus_size_token(corpus_size: Optional[int]) -> str:
+def _corpus_size_token(corpus_size: int | None) -> str:
     """Convert optional corpus size into stable metadata token.
 
     Capped tokens carry the slice policy (``newest:N``) so caches hydrated

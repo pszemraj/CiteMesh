@@ -7,7 +7,7 @@ from typing import Any
 
 from rich.text import Text
 
-from citemesh.core.user_config import (
+from citemesh.data.user_config import (
     ConfigFileError,
     ConfigKeyError,
     ConfigValueError,

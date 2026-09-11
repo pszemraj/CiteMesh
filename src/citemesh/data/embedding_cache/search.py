@@ -9,7 +9,8 @@ SQLite metadata join that turns winning row indices back into paper payloads.
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import h5py
 import numpy as np
@@ -34,7 +35,7 @@ class _SearchMixin:
     def _require_calibration_ranges(
         self,
         h5_file: h5py.File,
-        embedding_dim: Optional[int] = None,
+        embedding_dim: int | None = None,
     ) -> np.ndarray:
         """Load persisted int8 calibration ranges or fail closed.
 
@@ -77,8 +78,8 @@ class _SearchMixin:
         self,
         h5_file: h5py.File,
         dataset: h5py.Dataset,
-        cached_rows: Sequence[Tuple[str, int]],
-    ) -> Dict[str, np.ndarray]:
+        cached_rows: Sequence[tuple[str, int]],
+    ) -> dict[str, np.ndarray]:
         """Load cached embeddings from matrix dataset in row-index order.
 
         :param h5py.File h5_file: Open HDF5 cache handle.
@@ -129,8 +130,8 @@ class _SearchMixin:
         keep_k = min(max(int(candidate_count), 0), row_count)
         if keep_k == 0:
             return np.asarray([], dtype=np.int64)
-        all_rows: List[np.ndarray] = []
-        all_dists: List[np.ndarray] = []
+        all_rows: list[np.ndarray] = []
+        all_dists: list[np.ndarray] = []
         chunk_size = constants.EMBEDDING_SEARCH_CHUNK_ROWS
 
         for start in range(0, row_count, chunk_size):
@@ -169,7 +170,7 @@ class _SearchMixin:
     @staticmethod
     def _matrix_chunk_loader(
         embeddings_dataset: h5py.Dataset,
-        dequantize: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        dequantize: Callable[[np.ndarray], np.ndarray] | None = None,
     ) -> Callable[[int, int], np.ndarray]:
         """Build the chunk loader :meth:`_score_chunked_rows` reads rows through.
 
@@ -201,8 +202,8 @@ class _SearchMixin:
         h5_file: h5py.File,
         query_embedding: np.ndarray,
         top_k: int,
-        row_indices: Optional[np.ndarray],
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        row_indices: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Score int8 embeddings against a float32 query.
 
         :param h5py.Dataset embeddings_dataset: Int8 matrix dataset.
@@ -250,7 +251,7 @@ class _SearchMixin:
         embeddings_dataset: h5py.Dataset,
         query_embedding: np.ndarray,
         top_k: int,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Score float32 embeddings against a float32 query.
 
         :param h5py.Dataset embeddings_dataset: Float matrix dataset.
@@ -272,7 +273,7 @@ class _SearchMixin:
         query_embedding: np.ndarray,
         top_k: int,
         load_chunk: Callable[[int, int], np.ndarray],
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Score a matrix through a loader while retaining a bounded global top-k.
 
         :param h5py.Dataset embeddings_dataset: Matrix dataset whose rows are scored.
@@ -334,7 +335,7 @@ class _SearchMixin:
         scores: np.ndarray,
         embeddings: np.ndarray,
         top_k: int,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Select top-k rows from scored embedding arrays.
 
         :param np.ndarray rows: Row-index vector.
@@ -379,14 +380,14 @@ class _SearchMixin:
         self,
         conn: sqlite3.Connection,
         row_indices: Sequence[int],
-    ) -> Dict[int, Dict[str, Any]]:
+    ) -> dict[int, dict[str, Any]]:
         """Load metadata rows keyed by embedding matrix row index.
 
         :param sqlite3.Connection conn: Open SQLite connection.
         :param Sequence[int] row_indices: Matrix row indices.
         :return Dict[int, Dict[str, Any]]: Metadata payloads keyed by row index.
         """
-        output: Dict[int, Dict[str, Any]] = {}
+        output: dict[int, dict[str, Any]] = {}
         for row in self._query_paper_rows(
             conn,
             [int(idx) for idx in row_indices],

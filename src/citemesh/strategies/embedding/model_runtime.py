@@ -9,14 +9,10 @@ attempt plus its eager-restore recovery path.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from typing import (
     Any,
-    Dict,
-    Iterator,
-    List,
-    Optional,
-    Tuple,
 )
 
 import numpy as np
@@ -105,7 +101,7 @@ class _ModelRuntimeMixin:
         self._dim_logged = False
         self._runtime_summary_logged = False
 
-    def _resolve_attention_implementation_hint(self) -> Optional[str]:
+    def _resolve_attention_implementation_hint(self) -> str | None:
         """Resolve preferred attention implementation for the resolved device.
 
         :return Optional[str]: Attention implementation token or ``None``.
@@ -268,7 +264,7 @@ class _ModelRuntimeMixin:
                 self.truncate_dim,
             )
 
-    def _resolve_model_kwargs(self) -> Dict[str, Any]:
+    def _resolve_model_kwargs(self) -> dict[str, Any]:
         """Compute SentenceTransformer kwargs and configure autocast policy.
 
         :return Dict[str, Any]: ``SentenceTransformer`` constructor kwargs.
@@ -277,7 +273,7 @@ class _ModelRuntimeMixin:
         self._autocast_device_type = None
         self._autocast_enabled = False
         self._encode_model = None
-        model_kwargs: Dict[str, Any] = {"dtype": "auto"}
+        model_kwargs: dict[str, Any] = {"dtype": "auto"}
         if self._attention_implementation_hint is not None:
             model_kwargs["attn_implementation"] = self._attention_implementation_hint
 
@@ -582,8 +578,8 @@ class _ModelRuntimeMixin:
 
     def _encode_texts(
         self,
-        texts: List[str],
-        batch_size: Optional[int] = None,
+        texts: list[str],
+        batch_size: int | None = None,
         show_progress_bar: bool = False,
     ) -> np.ndarray:
         """Encode text inputs and return normalized float32 embeddings.
@@ -605,7 +601,7 @@ class _ModelRuntimeMixin:
             show_progress_bar=show_progress_bar,
         )
 
-    def _model_load_candidates(self) -> Tuple[str, ...]:
+    def _model_load_candidates(self) -> tuple[str, ...]:
         """Return ordered candidate model IDs used for lazy model loading.
 
         Fallbacks are intentionally scoped to default-revision checkpoints so
@@ -614,7 +610,7 @@ class _ModelRuntimeMixin:
         :return Tuple[str, ...]: Ordered model IDs to try.
         """
         requested = str(self.model_name).strip()
-        candidates: List[str] = [requested]
+        candidates: list[str] = [requested]
         if self.model_revision is not None:
             return tuple(candidates)
         for fallback_model in DEFAULT_EMBEDDING_MODEL_FALLBACKS.get(requested, ()):
@@ -679,7 +675,7 @@ class _ModelRuntimeMixin:
         :raises RuntimeError: If every candidate in the chain fails to load.
         """
         load_candidates = self._model_load_candidates()
-        model_errors: List[Tuple[str, Exception]] = []
+        model_errors: list[tuple[str, Exception]] = []
         for idx, candidate_model in enumerate(load_candidates):
             try:
                 self.model = self._construct_candidate_model(
@@ -736,7 +732,7 @@ class _ModelRuntimeMixin:
         self._bind_model_contract(candidate_model)
         _require_transformers_compatibility(self.model_profile)
         model_kwargs = self._resolve_model_kwargs()
-        st_kwargs: Dict[str, Any] = {"device": self.device}
+        st_kwargs: dict[str, Any] = {"device": self.device}
         if model_kwargs:
             st_kwargs["model_kwargs"] = model_kwargs
         if self.truncate_dim is not None:
@@ -1032,7 +1028,7 @@ class _ModelRuntimeMixin:
             return
 
         try:
-            compile_kwargs: Dict[str, Any] = (
+            compile_kwargs: dict[str, Any] = (
                 {"dynamic": True} if self.device in {"cuda", "cpu"} else {}
             )
             if self.device == "cpu":

@@ -8,10 +8,11 @@ import json
 import os
 import platform
 import tempfile
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Iterator, TextIO
+from typing import Any, TextIO
 
 from filelock import ReadWriteLock
 

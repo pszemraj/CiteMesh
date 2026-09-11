@@ -7,7 +7,8 @@ import html
 import json
 import math
 import textwrap
-from typing import Any, Dict, Hashable, NamedTuple, Optional, Tuple
+from collections.abc import Hashable
+from typing import Any, NamedTuple
 
 import networkx as nx
 
@@ -61,12 +62,12 @@ class _NodeStyle(NamedTuple):
 
     labels: list[str]
     text_position: str
-    text_font: Dict[str, Any]
+    text_font: dict[str, Any]
     color_scale: object
     marker_line_width: Any
     marker_line_color: Any
     marker_showscale: bool
-    marker_colorbar: Optional[Dict[str, Any]]
+    marker_colorbar: dict[str, Any] | None
 
 
 def _build_edge_layer(
@@ -74,9 +75,9 @@ def _build_edge_layer(
     go: Any,
     theme_obj: Theme,
     graph: nx.Graph,
-    pos: Dict[Hashable, Any],
+    pos: dict[Hashable, Any],
     for_dashboard: bool,
-) -> tuple[list[Dict[str, Any]], Optional[Any]]:
+) -> tuple[list[dict[str, Any]], Any | None]:
     """Build the edge layer as curved dashboard shapes or a straight-line trace.
 
     :param Any go: Plotly graph_objects module.
@@ -87,8 +88,8 @@ def _build_edge_layer(
     :return tuple[list[Dict[str, Any]], Optional[Any]]: Layout shapes and the
         optional straight-edge scatter trace.
     """
-    layout_shapes: list[Dict[str, Any]] = []
-    edge_trace: Optional[Any] = None
+    layout_shapes: list[dict[str, Any]] = []
+    edge_trace: Any | None = None
 
     if for_dashboard:
         curvature = 0.15
@@ -147,7 +148,7 @@ def _build_node_style(
     *,
     graph: nx.Graph,
     node_ids: list[Hashable],
-    pos: Dict[Hashable, Any],
+    pos: dict[Hashable, Any],
     base_labels: list[Any],
     theme_obj: Theme,
     for_dashboard: bool,
@@ -186,7 +187,7 @@ def _build_node_style(
             for node in node_ids
         ]
         marker_showscale = False
-        marker_colorbar: Optional[Dict[str, Any]] = None
+        marker_colorbar: dict[str, Any] | None = None
     else:
         node_labels = [str(label) for label in base_labels]
         text_position = "bottom center"
@@ -226,7 +227,7 @@ def _build_hover_texts(*, graph: nx.Graph, node_ids: list[Hashable]) -> list[str
     hover_texts = []
     for node in node_ids:
         attrs = graph.nodes[node]
-        paper: Optional[Paper] = attrs.get("paper")
+        paper: Paper | None = attrs.get("paper")
         raw_title = " ".join(
             str(paper.title if paper else attrs.get("title", node)).split()
         )
@@ -347,8 +348,8 @@ def _build_label_annotations(
     node_sizes: list[float],
     marker_sizeref: float,
     marker_line_width: Any,
-    text_font: Dict[str, Any],
-) -> list[Dict[str, Any]]:
+    text_font: dict[str, Any],
+) -> list[dict[str, Any]]:
     """Build dashboard label annotations shifted clear of every selection halo.
 
     :param list[float] node_x: Node x coordinates.
@@ -390,7 +391,7 @@ def _build_label_annotations(
 
 
 def _apply_axis_ranges(
-    layout_kwargs: Dict[str, Any],
+    layout_kwargs: dict[str, Any],
     node_x: list[float],
     node_y: list[float],
 ) -> None:
@@ -425,7 +426,7 @@ class PlotlyFigureMixin:
         *,
         go: Any,
         theme_obj: Theme,
-        title_prefix: Optional[str] = "CiteMesh",
+        title_prefix: str | None = "CiteMesh",
         margin_top: int = 40,
         for_dashboard: bool = False,
     ) -> tuple[Any, list[Hashable]]:
@@ -520,8 +521,8 @@ class PlotlyFigureMixin:
             hoverlabel=node_hoverlabel,
         )
 
-        halo_trace: Optional[Any] = None
-        neighborhood_trace: Optional[Any] = None
+        halo_trace: Any | None = None
+        neighborhood_trace: Any | None = None
         if for_dashboard:
             halo_trace, neighborhood_trace = _build_dashboard_overlay_traces(
                 go=go,
@@ -534,7 +535,7 @@ class PlotlyFigureMixin:
                 theme_obj=theme_obj,
             )
 
-        layout_kwargs: Dict[str, Any] = {
+        layout_kwargs: dict[str, Any] = {
             "showlegend": False,
             "hovermode": "closest",
             "margin": dict(
@@ -611,7 +612,7 @@ class PlotlyFigureMixin:
 
     def _plotly_year_scale(
         self, node_ids: list[Hashable]
-    ) -> Tuple[list[float], float, float]:
+    ) -> tuple[list[float], float, float]:
         """Build deterministic Plotly marker years and explicit scale bounds.
 
         :param list[Hashable] node_ids: Sorted node identifiers for the current graph.

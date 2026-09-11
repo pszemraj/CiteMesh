@@ -15,17 +15,17 @@ from filelock import Timeout
 from rich.text import Text
 
 from citemesh._runtime import stdin_isatty
-from citemesh.core.user_config import (
-    USER_CONFIG_FILENAME,
-    ConfigFileError,
-    config_lock,
-)
 from citemesh.data import format_bytes, get_cache_dir
 from citemesh.data.cache import (
     CACHE_COORDINATION_DIRNAME,
     cache_operation_lock,
     legacy_macos_cache_root,
     path_exists,
+)
+from citemesh.data.user_config import (
+    USER_CONFIG_FILENAME,
+    ConfigFileError,
+    config_lock,
 )
 
 from . import console

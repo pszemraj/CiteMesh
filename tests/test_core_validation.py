@@ -18,12 +18,12 @@ from citemesh.cli.parser import (
     _positive_int,
     _threshold_float,
 )
-from citemesh.core.user_config import ConfigValueError, _cast_similarity, _int_caster
 from citemesh.core.validation import (
     ValueValidationError,
     parse_bounded_int,
     parse_unit_interval_float,
 )
+from citemesh.data.user_config import ConfigValueError, _cast_similarity, _int_caster
 
 
 @pytest.mark.parametrize(

@@ -12,24 +12,17 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from typing import (
     TYPE_CHECKING,
     Any,
-    Callable,
-    Dict,
-    Iterator,
-    List,
-    Mapping,
-    Optional,
-    Sequence,
-    Set,
 )
 
 from citemesh.core import Paper
-from citemesh.paper_ids import (
+from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
     normalize_paper_id,
     paper_identifier_aliases,
@@ -128,13 +121,13 @@ def _normalized_doi(raw_identifier: object) -> str:
     return normalized.lower() if _DOI_PATTERN.fullmatch(normalized) else ""
 
 
-def _strong_identifier_evidence(paper: Paper) -> Dict[str, frozenset[str]]:
+def _strong_identifier_evidence(paper: Paper) -> dict[str, frozenset[str]]:
     """Build namespaced strong identifier evidence for one paper.
 
     :param Paper paper: Paper payload to inspect.
     :return Dict[str, frozenset[str]]: Stable identifier sets by namespace.
     """
-    identifiers: Dict[str, Set[str]] = {}
+    identifiers: dict[str, set[str]] = {}
 
     primary = str(paper.paper_id or "").strip()
     primary_arxiv = recognize_arxiv_identifier(primary, allow_bare=True)
@@ -274,8 +267,8 @@ class IdentityRegistry:
 
     def __init__(self) -> None:
         """Initialize an empty identity registry."""
-        self._owners: Dict[str, Set[str]] = {}
-        self._evidence: Dict[str, IdentityEvidence] = {}
+        self._owners: dict[str, set[str]] = {}
+        self._evidence: dict[str, IdentityEvidence] = {}
 
     def __getitem__(self, alias: str) -> str:
         """Return one unambiguous alias owner.
@@ -289,7 +282,7 @@ class IdentityRegistry:
             raise KeyError(alias)
         return owner
 
-    def get(self, alias: str) -> Optional[str]:
+    def get(self, alias: str) -> str | None:
         """Return the sole owner of an alias, ignoring contested aliases.
 
         :param str alias: Alias key.
@@ -300,7 +293,7 @@ class IdentityRegistry:
             return None
         return next(iter(owners))
 
-    def owners(self, alias: str) -> Set[str]:
+    def owners(self, alias: str) -> set[str]:
         """Return every current owner of an alias.
 
         :param str alias: Alias key.
@@ -308,7 +301,7 @@ class IdentityRegistry:
         """
         return set(self._owners.get(alias, set()))
 
-    def evidence(self, canonical_id: str) -> Optional[IdentityEvidence]:
+    def evidence(self, canonical_id: str) -> IdentityEvidence | None:
         """Return accumulated evidence for one canonical class.
 
         :param str canonical_id: Canonical paper ID.
@@ -357,7 +350,7 @@ class IdentityRegistry:
                 continue
             self._owners.setdefault(alias, set()).add(canonical_id)
 
-    def repoint(self, canonical_id: str, replaced_ids: Set[str]) -> None:
+    def repoint(self, canonical_id: str, replaced_ids: set[str]) -> None:
         """Collapse compatible classes into one survivor.
 
         :param str canonical_id: Surviving canonical ID.
@@ -384,7 +377,7 @@ class IdentityRegistry:
 
 def fetch_candidate_source(
     source: str,
-    fetch: Callable[[], List[Paper]],
+    fetch: Callable[[], list[Paper]],
 ) -> CandidateSourceResult:
     """Fetch one source without confusing an outage with valid empty evidence.
 
@@ -462,13 +455,13 @@ def normalize_identity_text(raw_text: str) -> str:
     return " ".join(compact.split())
 
 
-def paper_identity_aliases(paper: Paper) -> List[str]:
+def paper_identity_aliases(paper: Paper) -> list[str]:
     """Return strong aliases plus conservative metadata corroboration keys.
 
     :param Paper paper: Paper candidate to alias.
     :return List[str]: Stable sorted alias keys.
     """
-    aliases: Set[str] = set()
+    aliases: set[str] = set()
     for identifier in paper_identifier_aliases(
         paper_id=paper.paper_id,
         arxiv_id=paper.arxiv_id,
@@ -481,7 +474,7 @@ def paper_identity_aliases(paper: Paper) -> List[str]:
     return sorted(aliases)
 
 
-def resolve_aliases(aliases: IdentityRegistry, paper: Paper) -> List[str]:
+def resolve_aliases(aliases: IdentityRegistry, paper: Paper) -> list[str]:
     """Resolve every canonical paper ID matched by an incoming payload.
 
     A record may bridge two previously distinct identifier classes (for
@@ -494,8 +487,8 @@ def resolve_aliases(aliases: IdentityRegistry, paper: Paper) -> List[str]:
     :return List[str]: Distinct matching canonical IDs in alias-key order.
     """
     incoming_evidence = paper_identity_evidence(paper)
-    candidates: List[str] = []
-    seen: Set[str] = set()
+    candidates: list[str] = []
+    seen: set[str] = set()
     for alias in paper_identity_aliases(paper):
         for canonical_id in aliases.owners(alias):
             if canonical_id in seen:
@@ -507,7 +500,7 @@ def resolve_aliases(aliases: IdentityRegistry, paper: Paper) -> List[str]:
     exact_match = (
         exact_primary if exact_primary in set(aliases.canonical_ids()) else None
     )
-    compatible: List[str] = []
+    compatible: list[str] = []
     for canonical_id in candidates:
         if canonical_id == exact_match:
             compatible.append(canonical_id)
@@ -556,7 +549,7 @@ def register_aliases(
 def repoint_aliases(
     aliases: IdentityRegistry,
     canonical_id: str,
-    replaced_ids: Set[str],
+    replaced_ids: set[str],
 ) -> None:
     """Point aliases owned by reconciled records at their surviving paper.
 
@@ -632,8 +625,8 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
             preferred.doi = record.doi or doi
     if (not preferred.categories) and incoming.categories:
         preferred.categories = incoming.categories
-    reference_ids: List[str] = []
-    seen_references: Set[str] = set()
+    reference_ids: list[str] = []
+    seen_references: set[str] = set()
     for reference_source in (preferred.references, incoming.references):
         for reference_id in reference_source:
             normalized_reference_id = str(reference_id).strip()
@@ -653,7 +646,7 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
 class IdentityReconciliation:
     """Result of reconciling one paper against known identity classes."""
 
-    canonical_id: Optional[str]
+    canonical_id: str | None
     collapsed_ids: tuple[str, ...] = ()
     seed_matched: bool = False
 
@@ -661,7 +654,7 @@ class IdentityReconciliation:
 def reconcile_paper_identity(
     aliases: IdentityRegistry,
     seed: Paper,
-    papers: Dict[str, Paper],
+    papers: dict[str, Paper],
     incoming: Paper,
 ) -> IdentityReconciliation:
     """Merge an incoming payload into its seed or candidate identity class.
@@ -711,7 +704,7 @@ def reconcile_paper_identity(
     return IdentityReconciliation(canonical_id, collapsed_ids)
 
 
-def paper_embedding_metadata(paper: Paper) -> Dict[str, object]:
+def paper_embedding_metadata(paper: Paper) -> dict[str, object]:
     """Build embedding-cache metadata payload for a paper.
 
     :param Paper paper: Paper to normalize.
@@ -734,10 +727,10 @@ class CandidatePool:
     """Deduplicated candidate papers fetched from Semantic Scholar."""
 
     seed: Paper
-    papers: Dict[str, Paper] = field(default_factory=dict)
-    sources: Dict[str, Set[str]] = field(default_factory=dict)
-    seed_relations: Dict[str, str] = field(default_factory=dict)
-    source_status: Dict[str, str] = field(default_factory=dict)
+    papers: dict[str, Paper] = field(default_factory=dict)
+    sources: dict[str, set[str]] = field(default_factory=dict)
+    seed_relations: dict[str, str] = field(default_factory=dict)
+    source_status: dict[str, str] = field(default_factory=dict)
 
     def add(self, paper: Paper, *, source: str, relation: str) -> None:
         """Add a paper to the pool, merging duplicates by identity aliases.
@@ -789,7 +782,7 @@ class CandidatePool:
 
 
 def fetch_candidate_pool(
-    client: "SemanticScholarClient",
+    client: SemanticScholarClient,
     seed_paper: Paper,
     *,
     max_references: int = 0,
@@ -819,7 +812,7 @@ def fetch_candidate_pool(
 
 
 def _fetch_candidate_pool(
-    client: "SemanticScholarClient",
+    client: SemanticScholarClient,
     seed_paper: Paper,
     *,
     max_references: int = 0,
@@ -836,7 +829,7 @@ def _fetch_candidate_pool(
     :return CandidatePool: Deduplicated candidate pool with provenance tags.
     """
     pool = CandidatePool(seed=seed_paper)
-    source_results: List[CandidateSourceResult] = []
+    source_results: list[CandidateSourceResult] = []
     seed_id = str(seed_paper.paper_id)
     is_query_seed = seed_id.startswith("query:")
 

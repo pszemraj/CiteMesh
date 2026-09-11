@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import Callable, Iterator, Optional
 from unittest.mock import MagicMock, call, patch
 
 import networkx as nx
@@ -18,7 +18,6 @@ from citemesh.core import API_CONFIG, EMBEDDING_CONFIG, HYBRID_CONFIG, Author, P
 from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import SemanticScholarClient
-from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies import hybrid as hybrid_strategy
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -37,6 +36,7 @@ from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import EmbeddingInferenceError, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
+from citemesh.strategies.similarity import AbstractSimilarityIndex
 from tests._helpers import disable_embedding_dep_checks
 
 
@@ -2144,7 +2144,7 @@ def test_capped_strategies_log_final_edge_count(
 def test_select_capped_undirected_edges_is_deterministic_and_dedupes(
     edges: list[tuple[object, object, dict[str, float]]],
     max_edges_per_node: int,
-    expected: Optional[list[tuple[object, object, float]]],
+    expected: list[tuple[object, object, float]] | None,
 ) -> None:
     """Edge capping should be deterministic across duplicate and mixed-id inputs."""
     first = select_capped_undirected_edges(edges, max_edges_per_node=max_edges_per_node)

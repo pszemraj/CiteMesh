@@ -8,7 +8,7 @@ bibliographic coupling (shared references), and topical similarity.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 
@@ -16,7 +16,6 @@ from citemesh._runtime import stderr_isatty
 from citemesh.core import Paper
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
-from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     build_capped_undirected_graph,
@@ -31,6 +30,7 @@ from citemesh.strategies.candidates import (
     require_available_candidate_source,
     scope_candidate_collection,
 )
+from citemesh.strategies.similarity import AbstractSimilarityIndex
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient
@@ -59,7 +59,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         similarity_threshold: float = 0.2,
         fetch_references: bool = True,
         refresh_reference_cache: bool = False,
-        client: Optional[SemanticScholarClient] = None,
+        client: SemanticScholarClient | None = None,
     ):
         """
         Initialize citation graph builder.
@@ -79,9 +79,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.fetch_references = fetch_references
         self.refresh_reference_cache = bool(refresh_reference_cache)
         self.client: SemanticScholarClient = client or get_client()
-        self.reference_cache: Dict[str, list] = {}  # Cache reference lists
-        self.seed_relations: Dict[str, str] = {}
-        self.candidate_source_status: Dict[str, str] = {}
+        self.reference_cache: dict[str, list] = {}  # Cache reference lists
+        self.seed_relations: dict[str, str] = {}
+        self.candidate_source_status: dict[str, str] = {}
         self.candidate_source_results: tuple[CandidateSourceResult, ...] = ()
         self._identity_aliases = IdentityRegistry()
         self._abstract_index = AbstractSimilarityIndex()
@@ -131,7 +131,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
     def _ingest_relation_batch(
         self,
-        papers: Dict[str, Paper],
+        papers: dict[str, Paper],
         seed: Paper,
         relation_records: list[Paper],
         progress_enabled: bool,
@@ -264,7 +264,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         *,
         validate_source_availability: bool = True,
         **kwargs: Any,
-    ) -> Dict[str, Paper]:
+    ) -> dict[str, Paper]:
         """
         Collect papers via citations and references.
 
@@ -372,7 +372,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         return papers
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
         """Build citation graph and persist seed-relation metadata.
 
         :param str seed_id: Seed paper identifier.

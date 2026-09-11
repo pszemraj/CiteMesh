@@ -33,7 +33,7 @@ from semanticscholar.SemanticScholarException import (
 )
 
 from citemesh.core import API_CONFIG, Paper
-from citemesh.paper_ids import normalize_paper_id
+from citemesh.core.paper_ids import normalize_paper_id
 
 from . import disk_cache, payloads
 from .errors import (

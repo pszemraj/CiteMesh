@@ -14,10 +14,11 @@ loading configuration never imports strategy or visualization modules.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, Optional, Tuple
+from typing import Any
 
 try:
     import tomllib
@@ -42,19 +43,19 @@ DEFAULTS_TABLE = "defaults"
 API_TABLE = "api"
 
 # Kept in sync with the CLI parser by tests/test_user_config.py contract tests.
-STRATEGY_CHOICES: Tuple[str, ...] = (
+STRATEGY_CHOICES: tuple[str, ...] = (
     "recommendation",
     "citation",
     "embedding",
     "hybrid",
 )
-THEME_CHOICES: Tuple[str, ...] = ("light", "dark", "solarized", "auto")
-DEVICE_CHOICES: Tuple[str, ...] = ("auto", "cuda", "mps", "cpu")
-MODEL_PROFILE_CHOICES: Tuple[str, ...] = ("auto", "default", "embeddinggemma")
-SEMANTIC_SOURCE_CHOICES: Tuple[str, ...] = ("candidates", "arxiv-corpus")
-STORAGE_PRECISION_CHOICES: Tuple[str, ...] = ("int8", "float32")
-SEARCH_MODE_CHOICES: Tuple[str, ...] = ("auto", "local", "s2")
-EXPORT_CHOICES: Tuple[str, ...] = (
+THEME_CHOICES: tuple[str, ...] = ("light", "dark", "solarized", "auto")
+DEVICE_CHOICES: tuple[str, ...] = ("auto", "cuda", "mps", "cpu")
+MODEL_PROFILE_CHOICES: tuple[str, ...] = ("auto", "default", "embeddinggemma")
+SEMANTIC_SOURCE_CHOICES: tuple[str, ...] = ("candidates", "arxiv-corpus")
+STORAGE_PRECISION_CHOICES: tuple[str, ...] = ("int8", "float32")
+SEARCH_MODE_CHOICES: tuple[str, ...] = ("auto", "local", "s2")
+EXPORT_CHOICES: tuple[str, ...] = (
     "png",
     "html",
     "plotly",
@@ -131,7 +132,7 @@ def _int_caster(minimum: int) -> Callable[[Any], int]:
     return _cast
 
 
-def _choice_caster(choices: Tuple[str, ...]) -> Callable[[Any], str]:
+def _choice_caster(choices: tuple[str, ...]) -> Callable[[Any], str]:
     """Build a caster validating membership in a fixed choice tuple.
 
     :param Tuple[str, ...] choices: Accepted string values.
@@ -200,7 +201,7 @@ def _cast_export(value: Any) -> list[str]:
 ConfigCaster = Callable[[Any], Any]
 
 
-CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigCaster] = {
+CONFIG_DEFAULT_KEY_SPECS: dict[str, ConfigCaster] = {
     "strategy": _choice_caster(STRATEGY_CHOICES),
     "export": _cast_export,
     "theme": _choice_caster(THEME_CHOICES),
@@ -230,11 +231,11 @@ CONFIG_DEFAULT_KEY_SPECS: Dict[str, ConfigCaster] = {
     "search_mode": _choice_caster(SEARCH_MODE_CHOICES),
 }
 
-CONFIG_API_KEY_SPECS: Dict[str, ConfigCaster] = {
+CONFIG_API_KEY_SPECS: dict[str, ConfigCaster] = {
     "s2_api_key": _cast_str,
 }
 
-_TABLE_SPECS: Dict[str, Dict[str, ConfigCaster]] = {
+_TABLE_SPECS: dict[str, dict[str, ConfigCaster]] = {
     DEFAULTS_TABLE: CONFIG_DEFAULT_KEY_SPECS,
     API_TABLE: CONFIG_API_KEY_SPECS,
 }
@@ -245,8 +246,8 @@ class UserConfig:
     """Validated snapshot of persisted user configuration."""
 
     path: Path
-    defaults: Dict[str, Any] = field(default_factory=dict)
-    s2_api_key: Optional[str] = None
+    defaults: dict[str, Any] = field(default_factory=dict)
+    s2_api_key: str | None = None
 
 
 def user_config_path() -> Path:
@@ -267,7 +268,7 @@ def known_config_keys() -> list[str]:
     return sorted(keys)
 
 
-def parse_config_key(dotted_key: str) -> Tuple[str, str, ConfigCaster]:
+def parse_config_key(dotted_key: str) -> tuple[str, str, ConfigCaster]:
     """Resolve a dotted config key into its table, key, and validation spec.
 
     :param str dotted_key: Dotted key such as ``defaults.semantic_source``.
@@ -284,11 +285,11 @@ def parse_config_key(dotted_key: str) -> Tuple[str, str, ConfigCaster]:
 
 
 def _validated_table(
-    document: Dict[str, Any],
+    document: dict[str, Any],
     table: str,
-    specs: Dict[str, ConfigCaster],
+    specs: dict[str, ConfigCaster],
     config_path: Path,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract and validate one config table, warning on invalid entries.
 
     :param Dict[str, Any] document: Parsed TOML document.
@@ -308,7 +309,7 @@ def _validated_table(
             type(raw_table).__name__,
         )
         return {}
-    validated: Dict[str, Any] = {}
+    validated: dict[str, Any] = {}
     for key, raw_value in raw_table.items():
         caster = specs.get(key)
         if caster is None:
@@ -329,7 +330,7 @@ def _validated_table(
     return validated
 
 
-def load_user_config(path: Optional[Path] = None) -> UserConfig:
+def load_user_config(path: Path | None = None) -> UserConfig:
     """Load and validate the persisted user configuration.
 
     Missing files yield an empty config; unreadable files and invalid entries
@@ -364,7 +365,7 @@ def load_user_config(path: Optional[Path] = None) -> UserConfig:
     )
 
 
-def _read_raw_document(config_path: Path) -> Dict[str, Any]:
+def _read_raw_document(config_path: Path) -> dict[str, Any]:
     """Read the raw TOML document for read-modify-write operations.
 
     Unlike :func:`load_user_config`, corrupt files fail loudly here so a
@@ -385,7 +386,7 @@ def _read_raw_document(config_path: Path) -> Dict[str, Any]:
         ) from exc
 
 
-def _write_document(config_path: Path, document: Dict[str, Any]) -> None:
+def _write_document(config_path: Path, document: dict[str, Any]) -> None:
     """Atomically persist a TOML document (temp file + rename).
 
     :param Path config_path: Target config file path.
@@ -440,7 +441,7 @@ def config_lock(config_path: Path) -> Iterator[Path]:
 
 
 def set_config_value(
-    dotted_key: str, raw_value: Any, *, path: Optional[Path] = None
+    dotted_key: str, raw_value: Any, *, path: Path | None = None
 ) -> Any:
     """Validate and persist one config value.
 
@@ -470,7 +471,7 @@ def set_config_value(
     return value
 
 
-def unset_config_value(dotted_key: str, *, path: Optional[Path] = None) -> bool:
+def unset_config_value(dotted_key: str, *, path: Path | None = None) -> bool:
     """Remove one config value if present.
 
     :param str dotted_key: Dotted key such as ``defaults.semantic_source``.

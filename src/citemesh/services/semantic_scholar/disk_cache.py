@@ -13,9 +13,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 from citemesh.core import Author, Paper
+from citemesh.core.paper_ids import paper_identifier_aliases
 from citemesh.data import get_cache_dir
 from citemesh.data.cache import atomic_write_json, read_json_object
-from citemesh.paper_ids import paper_identifier_aliases
 
 logger = logging.getLogger(__name__)
 

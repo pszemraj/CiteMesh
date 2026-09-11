@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Dict, Hashable, Iterable, Optional
+from collections.abc import Hashable, Iterable
+from typing import Any
 
 import networkx as nx
 
@@ -27,7 +28,7 @@ from .links import _derive_links
 logger = logging.getLogger(__name__)
 
 
-def _ordered_attrs(attrs: Dict[str, object]) -> Dict[str, object]:
+def _ordered_attrs(attrs: dict[str, object]) -> dict[str, object]:
     """Return a copy of mapping with deterministic key ordering.
 
     :param Dict[str, object] attrs: Source attribute mapping.
@@ -60,14 +61,14 @@ def _normalized_edge_weight(raw_weight: object) -> float:
     return parsed
 
 
-def _serialize_node(node_id: Hashable, attrs: Dict[str, Any]) -> Dict[str, Any]:
+def _serialize_node(node_id: Hashable, attrs: dict[str, Any]) -> dict[str, Any]:
     """Serialize node attributes into JSON/GraphML friendly dict.
 
     :param Hashable node_id: Graph node identifier.
     :param Dict[str, Any] attrs: Raw node attributes.
     :return Dict[str, Any]: JSON/GraphML-safe node payload.
     """
-    paper: Optional[Paper] = attrs.get("paper")
+    paper: Paper | None = attrs.get("paper")
 
     node_data = {
         "id": node_id,
@@ -101,7 +102,7 @@ def _serialize_node(node_id: Hashable, attrs: Dict[str, Any]) -> Dict[str, Any]:
     return node_data
 
 
-def _node_title(attrs: Dict[str, Any], node_id: Hashable) -> str:
+def _node_title(attrs: dict[str, Any], node_id: Hashable) -> str:
     """Return stable node title for edge-sidecar export fields.
 
     :param Dict[str, Any] attrs: Node attributes map.
@@ -114,7 +115,7 @@ def _node_title(attrs: Dict[str, Any], node_id: Hashable) -> str:
     return str(node_id)
 
 
-def _node_short_label(attrs: Dict[str, Any], node_id: Hashable) -> str:
+def _node_short_label(attrs: dict[str, Any], node_id: Hashable) -> str:
     """Return compact node label for edge export fields.
 
     :param Dict[str, Any] attrs: Node attributes map.
@@ -136,7 +137,7 @@ def _node_short_label(attrs: Dict[str, Any], node_id: Hashable) -> str:
     return title
 
 
-def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, Dict[str, Any]]]:
+def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, dict[str, Any]]]:
     """Return nodes sorted by ID for deterministic serialization.
 
     :param nx.Graph graph: Graph whose nodes should be ordered.
@@ -157,7 +158,7 @@ def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, Dict[str, Any]]]:
 
 def _sorted_edges(
     graph: nx.Graph,
-) -> list[tuple[Hashable, Hashable, Dict[str, Any]]]:
+) -> list[tuple[Hashable, Hashable, dict[str, Any]]]:
     """Return undirected edges with canonical endpoints in stable order.
 
     :param nx.Graph graph: Graph whose edges should be ordered.
@@ -186,7 +187,7 @@ def _default_provenance(*, strategy: str) -> str:
     return "citation"
 
 
-def _strategy(graph: nx.Graph, metadata: Dict[str, Any]) -> str:
+def _strategy(graph: nx.Graph, metadata: dict[str, Any]) -> str:
     """Resolve effective strategy token for export metadata and enrichment.
 
     Explicit exporter metadata wins. When omitted, exporter falls back to graph
@@ -221,7 +222,7 @@ _SEED_RELATION_CLASSES = frozenset(
 
 def _graph_class_map(
     graph: nx.Graph, attribute: str, allowed: frozenset[str]
-) -> Dict[str, str]:
+) -> dict[str, str]:
     """Read a graph-level node classification map, keeping known classes only.
 
     :param nx.Graph graph: Graph carrying the classification mapping.
@@ -233,7 +234,7 @@ def _graph_class_map(
     if not isinstance(raw_map, dict):
         return {}
 
-    resolved: Dict[str, str] = {}
+    resolved: dict[str, str] = {}
     for raw_id, raw_value in raw_map.items():
         value = str(raw_value).strip().lower()
         if value in allowed:
@@ -241,7 +242,7 @@ def _graph_class_map(
     return resolved
 
 
-def _provenance_map(graph: nx.Graph) -> Dict[str, str]:
+def _provenance_map(graph: nx.Graph) -> dict[str, str]:
     """Resolve normalized per-node provenance map.
 
     :param nx.Graph graph: Graph carrying a ``paper_sources`` mapping.
@@ -250,7 +251,7 @@ def _provenance_map(graph: nx.Graph) -> Dict[str, str]:
     return _graph_class_map(graph, "paper_sources", _PROVENANCE_CLASSES)
 
 
-def _seed_relation_map(graph: nx.Graph) -> Dict[str, str]:
+def _seed_relation_map(graph: nx.Graph) -> dict[str, str]:
     """Resolve normalized relation-to-seed mapping when available.
 
     :param nx.Graph graph: Graph carrying a ``seed_relations`` mapping.
@@ -262,7 +263,7 @@ def _seed_relation_map(graph: nx.Graph) -> Dict[str, str]:
 class NodesMixin:
     """Exporter-state node helpers: enrichment, layout, size, and color caches."""
 
-    def _enriched_nodes(self) -> list[Dict[str, Any]]:
+    def _enriched_nodes(self) -> list[dict[str, Any]]:
         """Build enriched node payloads with provenance, relevance, links, and BibTeX.
 
         This is the canonical node enrichment used by JSON export, CSV export,
@@ -276,7 +277,7 @@ class NodesMixin:
         sorted_nodes = _sorted_nodes(self.graph)
         strategy = _strategy(self.graph, self.metadata)
 
-        node_payloads: list[Dict[str, Any]] = []
+        node_payloads: list[dict[str, Any]] = []
         for node_id, attrs in sorted_nodes:
             node_str = str(node_id)
             serialized = _serialize_node(node_id, attrs)
@@ -321,7 +322,7 @@ class NodesMixin:
             node_payloads.append(serialized)
         return node_payloads
 
-    def _seed_relevance_scores(self) -> Dict[str, float]:
+    def _seed_relevance_scores(self) -> dict[str, float]:
         """Compute seed-centric personalized PageRank scores.
 
         :return Dict[str, float]: Node-ID keyed relevance scores.
@@ -366,7 +367,7 @@ class NodesMixin:
 
         return {str(node_id): float(score) for node_id, score in scores.items()}
 
-    def _get_layout(self) -> Dict[Hashable, Iterable[float]]:
+    def _get_layout(self) -> dict[Hashable, Iterable[float]]:
         """Compute or reuse cached graph layout.
 
         :return Dict[Hashable, Iterable[float]]: Mapping of node ID to coordinates.

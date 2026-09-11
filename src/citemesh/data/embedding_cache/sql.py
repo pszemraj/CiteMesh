@@ -9,7 +9,8 @@ clauses under SQLite's variable limit.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 PAPERS_TABLE_CREATE_SQL = """
     CREATE TABLE IF NOT EXISTS papers (
@@ -86,7 +87,7 @@ def _safe_json_list(value: Any) -> str:
     return json.dumps([])
 
 
-def _parse_json_list(value: Optional[str]) -> List[str]:
+def _parse_json_list(value: str | None) -> list[str]:
     """Parse JSON list payload from SQLite metadata rows.
 
     :param Optional[str] value: Raw JSON string.
@@ -107,10 +108,10 @@ def _parse_json_list(value: Optional[str]) -> List[str]:
 
 
 def _decode_paper_row(
-    row: Tuple[Any, ...],
+    row: tuple[Any, ...],
     *,
     parse_json_lists: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Normalize one common paper row while retaining JSON shape choice.
 
     :param Tuple[Any, ...] row: Row returned by ``_query_paper_rows``.
@@ -130,7 +131,7 @@ def _decode_paper_row(
         arxiv_id,
         doi,
     ) = row
-    decoded: Dict[str, Any] = {
+    decoded: dict[str, Any] = {
         "paper_id": str(paper_id),
         "text_hash": str(text_hash),
         "row_idx": int(row_idx) if row_idx is not None else None,
@@ -150,7 +151,7 @@ def _decode_paper_row(
     return decoded
 
 
-def _chunked(values: Sequence[Any], chunk_size: int) -> Iterable[List[Any]]:
+def _chunked(values: Sequence[Any], chunk_size: int) -> Iterable[list[Any]]:
     """Yield fixed-size chunks from a sequence.
 
     :param Sequence[Any] values: Sequence to split into chunks.

@@ -13,16 +13,17 @@ from __future__ import annotations
 import argparse
 import logging
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import networkx as nx
 
-from citemesh.core.user_config import UserConfig
 from citemesh.data.cache import atomic_write_json, path_exists
+from citemesh.data.user_config import UserConfig
 from citemesh.visualization import (
     GraphExporter,
     compute_layout,

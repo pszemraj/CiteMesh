@@ -12,17 +12,10 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from contextlib import nullcontext
 from hashlib import sha256
 from pathlib import Path
-from typing import (
-    Callable,
-    Dict,
-    List,
-    Optional,
-    Set,
-    Tuple,
-)
 
 from . import deps
 from .runtime import (
@@ -54,7 +47,7 @@ class _FingerprintMixin:
         self,
         *,
         formatter: Callable[..., str],
-        probe_renderer: Callable[[Dict[str, str]], str],
+        probe_renderer: Callable[[dict[str, str]], str],
     ) -> str:
         """Resolve a deterministic cache fingerprint for one formatter role.
 
@@ -114,7 +107,7 @@ class _FingerprintMixin:
             self._resolved_model_fingerprint = fingerprint
             return fingerprint
         resolved_sha = ""
-        resolution_error: Optional[Exception] = None
+        resolution_error: Exception | None = None
 
         local_snapshot_sha = self._resolve_local_hf_snapshot_sha(
             model_id=model_id,
@@ -171,7 +164,7 @@ class _FingerprintMixin:
     @staticmethod
     def _resolve_local_hf_snapshot_path(
         model_id: str, requested_revision: str
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """Resolve an existing Hugging Face snapshot without network access.
 
         :param str model_id: Hugging Face repository ID.
@@ -192,7 +185,7 @@ class _FingerprintMixin:
 
     def _resolve_local_hf_snapshot_sha(
         self, model_id: str, requested_revision: str
-    ) -> Optional[str]:
+    ) -> str | None:
         """Best-effort local SHA resolution from existing HF snapshot cache.
 
         :param str model_id: Hugging Face repository ID.
@@ -267,7 +260,7 @@ class _FingerprintMixin:
     def _referenced_python_artifact_paths(
         root: Path,
         raw_reference: object,
-    ) -> Set[Path]:
+    ) -> set[Path]:
         """Resolve locally referenced custom Python model code.
 
         SentenceTransformers loads repository-local module classes through the
@@ -313,7 +306,7 @@ class _FingerprintMixin:
         return paths
 
     @classmethod
-    def _inference_artifact_paths(cls, artifact_root: Path) -> List[Path]:
+    def _inference_artifact_paths(cls, artifact_root: Path) -> list[Path]:
         """Enumerate and validate inference-relevant checkpoint artifacts.
 
         :param Path artifact_root: Local model file or directory.
@@ -350,7 +343,7 @@ class _FingerprintMixin:
     @classmethod
     def _declared_module_artifacts(
         cls, root: Path
-    ) -> Tuple[Set[Path], Set[Path], List[object]]:
+    ) -> tuple[set[Path], set[Path], list[object]]:
         """Read ``modules.json`` and expand the module layout it declares.
 
         Each declared module contributes its own artifact root (so config and
@@ -364,9 +357,9 @@ class _FingerprintMixin:
         :raises RuntimeError: If ``modules.json`` is malformed or points at a
             missing path.
         """
-        artifacts: Set[Path] = set()
-        artifact_roots: Set[Path] = {root}
-        python_references: List[object] = []
+        artifacts: set[Path] = set()
+        artifact_roots: set[Path] = {root}
+        python_references: list[object] = []
         modules_path = root / "modules.json"
         if not modules_path.is_file():
             return artifacts, artifact_roots, python_references
@@ -408,7 +401,7 @@ class _FingerprintMixin:
     @classmethod
     def _tokenizer_referenced_artifacts(
         cls, root: Path, current_root: Path
-    ) -> Set[Path]:
+    ) -> set[Path]:
         """Collect files a ``tokenizer_config.json`` points at by ``*_file(s)`` keys.
 
         Tokenizer configs reference vocabularies and merge tables by relative
@@ -432,7 +425,7 @@ class _FingerprintMixin:
         if not isinstance(tokenizer_config, dict):
             return set()
 
-        artifacts: Set[Path] = set()
+        artifacts: set[Path] = set()
         for key, raw_reference in tokenizer_config.items():
             if key.endswith("_file") and isinstance(raw_reference, str):
                 references = [raw_reference]
@@ -454,7 +447,7 @@ class _FingerprintMixin:
         return artifacts
 
     @classmethod
-    def _torch_weight_artifacts(cls, root: Path, current_root: Path) -> Set[Path]:
+    def _torch_weight_artifacts(cls, root: Path, current_root: Path) -> set[Path]:
         """Select one weight layout and expand a sharded index into its shards.
 
         Only the first matching layout in :data:`_TORCH_WEIGHT_LAYOUTS` counts, so
@@ -477,7 +470,7 @@ class _FingerprintMixin:
         )
         if selected_weight is None:
             return set()
-        artifacts: Set[Path] = {selected_weight}
+        artifacts: set[Path] = {selected_weight}
         if not selected_weight.name.endswith(".index.json"):
             return artifacts
 
@@ -523,7 +516,7 @@ class _FingerprintMixin:
 
     def _resolve_local_hf_artifact_fingerprint(
         self, model_id: str, requested_revision: str
-    ) -> Optional[str]:
+    ) -> str | None:
         """Best-effort local artifact fingerprint using config + weights files.
 
         :param str model_id: Hugging Face repository ID.

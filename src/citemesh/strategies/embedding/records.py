@@ -11,19 +11,15 @@ from __future__ import annotations
 
 import heapq
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha1
 from typing import (
     Any,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Tuple,
 )
 
 from citemesh.core.paper_fields import coerce_authors, coerce_categories, coerce_venue
-from citemesh.paper_ids import (
+from citemesh.core.paper_ids import (
     canonicalize_or_none,
     external_ids_from_canonical_paper_id,
     recognize_arxiv_identifier,
@@ -75,7 +71,7 @@ def _query_seed_id(query_text: str) -> str:
     return f"query:{digest}"
 
 
-def _parse_year(paper: Dict[str, Any]) -> Optional[int]:
+def _parse_year(paper: dict[str, Any]) -> int | None:
     """Extract publication year from dataset metadata.
 
     :param Dict[str, Any] paper: Raw dataset record.
@@ -98,7 +94,7 @@ _OLD_STYLE_ARXIV_ID_RE = re.compile(
 )
 
 
-def _arxiv_id_chronology_key(raw_id: Any) -> Optional[Tuple[int, int, int]]:
+def _arxiv_id_chronology_key(raw_id: Any) -> tuple[int, int, int] | None:
     """Return a sortable submission-chronology key for an arXiv identifier.
 
     Both identifier styles encode the submission year/month: new-style
@@ -123,8 +119,8 @@ def _arxiv_id_chronology_key(raw_id: Any) -> Optional[Tuple[int, int, int]]:
 
 
 def _newest_records_by_arxiv_id(
-    records: Iterable[Dict[str, Any]], limit: int
-) -> List[Dict[str, Any]]:
+    records: Iterable[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
     """Select the ``limit`` most recently submitted records in one bounded pass.
 
     Prefer records with parseable arXiv IDs, filling any shortfall from the
@@ -134,8 +130,8 @@ def _newest_records_by_arxiv_id(
     :param int limit: Number of newest records to keep.
     :return List[Dict[str, Any]]: Selected records in chronological order.
     """
-    heap: List[Tuple[Tuple[int, int, int], int, Dict[str, Any]]] = []
-    head_fallback: List[Dict[str, Any]] = []
+    heap: list[tuple[tuple[int, int, int], int, dict[str, Any]]] = []
+    head_fallback: list[dict[str, Any]] = []
     for order, record in enumerate(records):
         key = _arxiv_id_chronology_key((record or {}).get("id"))
         if key is None:
@@ -151,7 +147,7 @@ def _newest_records_by_arxiv_id(
     return selected + head_fallback[: limit - len(selected)]
 
 
-def _parse_authors(authors_data: Any, authors_parsed_data: Any = None) -> List[str]:
+def _parse_authors(authors_data: Any, authors_parsed_data: Any = None) -> list[str]:
     """Normalize author metadata to a list of names.
 
     arXiv snapshots ship a structured ``authors_parsed`` field (last, first,
@@ -185,7 +181,7 @@ def _parse_authors(authors_data: Any, authors_parsed_data: Any = None) -> List[s
     return coerce_authors(authors_data, split_string=True)
 
 
-def _parse_categories(categories_data: Any) -> List[str]:
+def _parse_categories(categories_data: Any) -> list[str]:
     """Normalize category metadata to a list of arXiv category codes.
 
     arXiv packs several codes into one comma/whitespace-separated string, so the
@@ -197,7 +193,7 @@ def _parse_categories(categories_data: Any) -> List[str]:
     return coerce_categories(categories_data, split_whitespace=True)
 
 
-def _parse_venue(paper: Dict[str, Any]) -> str:
+def _parse_venue(paper: dict[str, Any]) -> str:
     """Normalize venue/journal metadata from dataset records.
 
     :param Dict[str, Any] paper: Raw dataset record.
@@ -210,7 +206,7 @@ def _parse_venue(paper: Dict[str, Any]) -> str:
     return ""
 
 
-def _extract_dataset_paper_metadata(paper: Dict[str, Any], fallback_index: int) -> Dict:
+def _extract_dataset_paper_metadata(paper: dict[str, Any], fallback_index: int) -> dict:
     """Normalize a raw dataset record to embedding metadata fields.
 
     :param Dict[str, Any] paper: Raw dataset record.

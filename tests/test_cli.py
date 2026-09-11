@@ -47,10 +47,10 @@ from citemesh.cli import parser as parser_module
 from citemesh.cli.commands import build as build_module
 from citemesh.cli.commands import search as search_module
 from citemesh.core import Author, Paper
-from citemesh.core.user_config import UserConfig
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
+from citemesh.data.user_config import UserConfig
 from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, ENCODE_BATCH_SIZE
 from citemesh.strategies.hybrid import (

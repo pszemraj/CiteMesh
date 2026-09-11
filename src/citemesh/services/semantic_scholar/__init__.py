@@ -9,7 +9,7 @@ re-exported here are part of the supported public surface.
 
 from __future__ import annotations
 
-from citemesh.paper_ids import normalize_paper_id
+from citemesh.core.paper_ids import normalize_paper_id
 
 from .client import SemanticScholarClient, get_client, reset_client
 from .errors import SemanticScholarRequestError, SemanticScholarUnavailableError

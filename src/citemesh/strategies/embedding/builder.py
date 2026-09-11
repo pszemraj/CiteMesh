@@ -12,16 +12,11 @@ modules.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
 from typing import (
     TYPE_CHECKING,
     Any,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
 )
 
 import networkx as nx
@@ -29,6 +24,7 @@ import numpy as np
 
 from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
+from citemesh.core.paper_ids import normalize_paper_id
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
@@ -37,7 +33,6 @@ from citemesh.data import (
     validate_compression_filter,
 )
 from citemesh.data.embedding_cache import CacheSearchResult
-from citemesh.paper_ids import normalize_paper_id
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
@@ -124,26 +119,26 @@ class EmbeddingGraphBuilder(
         max_papers: int = 40,
         model_name: str = DEFAULT_EMBEDDING_MODEL_NAME,
         model_profile: str = "auto",
-        model_revision: Optional[str] = None,
+        model_revision: str | None = None,
         dataset_split: str = "train",
-        corpus_size: Optional[int] = None,
-        truncate_dim: Optional[int] = None,
+        corpus_size: int | None = None,
+        truncate_dim: int | None = None,
         top_k: int = 4,
         use_streaming: bool = False,
         force_rebuild_cache: bool = False,
-        force_rebuild_reason: Optional[str] = None,
+        force_rebuild_reason: str | None = None,
         storage_precision: str = EMBEDDING_STORAGE_CONFIG.storage_precision,
-        binary_prefilter: Optional[bool] = None,
-        binary_rescore_multiplier: Optional[int] = None,
+        binary_prefilter: bool | None = None,
+        binary_rescore_multiplier: int | None = None,
         calibration_sample_size: int = EMBEDDING_STORAGE_CONFIG.calibration_sample_size,
         cache_compression: str = EMBEDDING_STORAGE_CONFIG.compression,
         cache_compression_level: int = EMBEDDING_STORAGE_CONFIG.compression_level,
         encode_batch_size: int = ENCODE_BATCH_SIZE,
         enable_torch_compile: bool = False,
-        device: Optional[str] = None,
+        device: str | None = None,
         semantic_source: str = "candidates",
         candidate_pool_size: int = DEFAULT_CANDIDATE_POOL_SIZE,
-        client: Optional[SemanticScholarClient] = None,
+        client: SemanticScholarClient | None = None,
         min_semantic_similarity: float = EMBEDDING_CONFIG.min_semantic_similarity,
         dataset_source: str = DEFAULT_DATASET_SOURCE,
     ):
@@ -258,13 +253,13 @@ class EmbeddingGraphBuilder(
 
         self.top_k = top_k
         self.model = None
-        self.retrieval_embeddings: Dict[str, np.ndarray] = {}
-        self.embeddings: Dict[str, np.ndarray] = {}
-        self.candidate_source_status: Dict[str, str] = {}
+        self.retrieval_embeddings: dict[str, np.ndarray] = {}
+        self.embeddings: dict[str, np.ndarray] = {}
+        self.candidate_source_status: dict[str, str] = {}
         self._client = client
-        self._active_model_name: Optional[str] = None
-        self._embedding_cache: Optional[EmbeddingCache] = None
-        self._graph_embedding_cache: Optional[EmbeddingCache] = None
+        self._active_model_name: str | None = None
+        self._embedding_cache: EmbeddingCache | None = None
+        self._graph_embedding_cache: EmbeddingCache | None = None
         self._pending_force_rebuild_reason = self._deferred_force_rebuild_reason(
             force_rebuild_cache, force_rebuild_reason
         )
@@ -287,7 +282,7 @@ class EmbeddingGraphBuilder(
         return normalized
 
     @staticmethod
-    def _normalized_corpus_size(corpus_size: Optional[int]) -> Optional[int]:
+    def _normalized_corpus_size(corpus_size: int | None) -> int | None:
         """Coerce the optional corpus-size cap to a positive integer.
 
         ``bool`` is rejected before ``int`` conversion because ``True`` would
@@ -314,7 +309,7 @@ class EmbeddingGraphBuilder(
         *,
         storage_precision: str,
         top_k: int,
-        binary_rescore_multiplier: Optional[int],
+        binary_rescore_multiplier: int | None,
         calibration_sample_size: int,
         encode_batch_size: int,
         cache_compression: str,
@@ -346,8 +341,8 @@ class EmbeddingGraphBuilder(
         self,
         *,
         storage_precision: str,
-        binary_prefilter: Optional[bool],
-        binary_rescore_multiplier: Optional[int],
+        binary_prefilter: bool | None,
+        binary_rescore_multiplier: int | None,
         calibration_sample_size: int,
         int8_rewritten_for_candidates: bool,
     ) -> None:
@@ -408,7 +403,7 @@ class EmbeddingGraphBuilder(
         self.calibration_sample_size = int(calibration_sample_size)
 
     def _bind_requested_model_contract(
-        self, *, device: Optional[str], truncate_dim: Optional[int]
+        self, *, device: str | None, truncate_dim: int | None
     ) -> None:
         """Resolve the model profile, device and dimension contract for this build.
 
@@ -444,8 +439,8 @@ class EmbeddingGraphBuilder(
 
     @staticmethod
     def _deferred_force_rebuild_reason(
-        force_rebuild_cache: bool, force_rebuild_reason: Optional[str]
-    ) -> Optional[str]:
+        force_rebuild_cache: bool, force_rebuild_reason: str | None
+    ) -> str | None:
         """Compose the rebuild rationale logged once the namespace is known.
 
         The clear itself is deferred: the namespace depends on the model that
@@ -495,21 +490,21 @@ class EmbeddingGraphBuilder(
         """
         self._profile_logged = False
         self._dim_logged = False
-        self._autocast_dtype: Optional[Any] = None
-        self._autocast_device_type: Optional[str] = None
+        self._autocast_dtype: Any | None = None
+        self._autocast_device_type: str | None = None
         self._autocast_enabled = False
-        self._encode_model: Optional[Any] = None
+        self._encode_model: Any | None = None
         self._inner_model_compiled = False
-        self._eager_inner_transformer: Optional[Any] = None
-        self._compile_status_reason: Optional[str] = None
+        self._eager_inner_transformer: Any | None = None
+        self._compile_status_reason: str | None = None
         self._runtime_summary_logged = False
         self._tf32_runtime_configured = False
         self._tf32_mode = "off"
-        self._resolved_model_fingerprint: Optional[str] = None
-        self._last_search_used_binary_prefilter: Optional[bool] = None
+        self._resolved_model_fingerprint: str | None = None
+        self._last_search_used_binary_prefilter: bool | None = None
 
     @property
-    def client(self) -> "SemanticScholarClient":
+    def client(self) -> SemanticScholarClient:
         """Return the injected S2 client or create one when an API call needs it.
 
         :return SemanticScholarClient: Shared client for Semantic Scholar operations.
@@ -519,7 +514,7 @@ class EmbeddingGraphBuilder(
         return self._client
 
     @client.setter
-    def client(self, client: "SemanticScholarClient") -> None:
+    def client(self, client: SemanticScholarClient) -> None:
         """Replace the Semantic Scholar client for tests and specialized callers.
 
         :param SemanticScholarClient client: Client instance to use for S2 operations.
@@ -584,9 +579,9 @@ class EmbeddingGraphBuilder(
         self,
         namespace: str,
         *,
-        storage_precision: Optional[str] = None,
-        binary_prefilter: Optional[bool] = None,
-        formatter_identity: Optional[str] = None,
+        storage_precision: str | None = None,
+        binary_prefilter: bool | None = None,
+        formatter_identity: str | None = None,
     ) -> EmbeddingCache:
         """Construct one cache for the supplied representation namespace.
 
@@ -629,7 +624,7 @@ class EmbeddingGraphBuilder(
         )
 
     def _create_graph_embedding_cache(
-        self, namespace: Optional[str] = None
+        self, namespace: str | None = None
     ) -> EmbeddingCache:
         """Construct the float32 cache for graph-similarity vectors.
 
@@ -700,7 +695,7 @@ class EmbeddingGraphBuilder(
         normalized_reason = str(reason).strip() or "unspecified"
         self.embedding_cache.clear(reason=normalized_reason)
 
-    def _embedding_runtime_metadata(self) -> Dict[str, object]:
+    def _embedding_runtime_metadata(self) -> dict[str, object]:
         """Return runtime metadata describing effective embedding retrieval behavior.
 
         :return Dict[str, object]: Runtime metadata payload for downstream export.
@@ -733,7 +728,7 @@ class EmbeddingGraphBuilder(
             return active_model_name
         return str(self.model_name).strip()
 
-    def _resolve_truncate_dim(self, requested_dim: Optional[int]) -> Optional[int]:
+    def _resolve_truncate_dim(self, requested_dim: int | None) -> int | None:
         """Resolve effective embedding dimension from request + model profile defaults.
 
         :param Optional[int] requested_dim: Requested truncate dimension from caller.
@@ -759,9 +754,9 @@ class EmbeddingGraphBuilder(
         self,
         *,
         representation: str = _RETRIEVAL_DOCUMENT_REPRESENTATION,
-        artifact_identity: Optional[str] = None,
-        storage_precision: Optional[str] = None,
-        formatter_identity: Optional[str] = None,
+        artifact_identity: str | None = None,
+        storage_precision: str | None = None,
+        formatter_identity: str | None = None,
     ) -> str:
         """Build a cache key for the active model and representation contract.
 
@@ -806,9 +801,9 @@ class EmbeddingGraphBuilder(
         self,
         seed_id: str,
         *,
-        seed_paper: Optional[Paper] = None,
+        seed_paper: Paper | None = None,
         **kwargs: Any,
-    ) -> Dict[str, Paper]:
+    ) -> dict[str, Paper]:
         """
         Collect papers via semantic similarity search.
 
@@ -818,7 +813,7 @@ class EmbeddingGraphBuilder(
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
-        papers: Dict[str, Paper] = {}
+        papers: dict[str, Paper] = {}
         self.retrieval_embeddings = {}
         self.embeddings = {}
         self.candidate_source_status = {}
@@ -846,7 +841,7 @@ class EmbeddingGraphBuilder(
         self._collect_corpus_cache_papers(papers, seed_identities, seed_embedding)
         return papers
 
-    def _resolve_seed_paper(self, seed_id: str, seed_paper: Optional[Paper]) -> "Paper":
+    def _resolve_seed_paper(self, seed_id: str, seed_paper: Paper | None) -> Paper:
         """Resolve the seed node from caller metadata, Semantic Scholar, or query text.
 
         An identifier Semantic Scholar cannot resolve is treated as a free-text
@@ -899,7 +894,7 @@ class EmbeddingGraphBuilder(
 
     def _collect_candidate_pool_papers(
         self,
-        papers: Dict[str, Paper],
+        papers: dict[str, Paper],
         seed_identities: IdentityRegistry,
         seed_embedding: np.ndarray,
         seed_paper: Paper,
@@ -924,7 +919,7 @@ class EmbeddingGraphBuilder(
 
     def _collect_corpus_cache_papers(
         self,
-        papers: Dict[str, Paper],
+        papers: dict[str, Paper],
         seed_identities: IdentityRegistry,
         seed_embedding: np.ndarray,
     ) -> None:
@@ -964,7 +959,7 @@ class EmbeddingGraphBuilder(
         self._update_citation_counts(papers)
 
     @staticmethod
-    def _paper_from_cached_metadata(paper_id: str, metadata: Dict) -> Paper:
+    def _paper_from_cached_metadata(paper_id: str, metadata: dict) -> Paper:
         """Build a Paper from one cached corpus metadata row.
 
         :param str paper_id: Canonical cached paper identifier.
@@ -985,7 +980,7 @@ class EmbeddingGraphBuilder(
             is_seed=False,
         )
 
-    def _candidate_pool_budgets(self) -> Tuple[int, int, int]:
+    def _candidate_pool_budgets(self) -> tuple[int, int, int]:
         """Split the candidate pool size into per-source fetch budgets.
 
         :return Tuple[int, int, int]: ``(max_references, max_citations,
@@ -1000,7 +995,7 @@ class EmbeddingGraphBuilder(
 
     def _select_candidates_from_pool(
         self, seed_embedding: np.ndarray, seed_paper: Paper
-    ) -> List[Tuple[str, Paper, np.ndarray]]:
+    ) -> list[tuple[str, Paper, np.ndarray]]:
         """Rank S2 candidate-pool papers by cosine similarity to the seed.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
@@ -1027,7 +1022,7 @@ class EmbeddingGraphBuilder(
 
         embeddings = self.embed_papers(pool.papers)
         query = np.asarray(seed_embedding, dtype=np.float32)
-        scored: List[Tuple[float, str, Paper, np.ndarray, int]] = []
+        scored: list[tuple[float, str, Paper, np.ndarray, int]] = []
         for idx, (paper_id, paper) in enumerate(pool.papers.items()):
             embedding = embeddings.get(paper_id)
             if embedding is None:
@@ -1047,7 +1042,7 @@ class EmbeddingGraphBuilder(
         )
         return [(paper_id, paper, vector) for _, paper_id, paper, vector, _ in scored]
 
-    def embed_papers(self, papers: Dict[str, Paper]) -> Dict[str, np.ndarray]:
+    def embed_papers(self, papers: dict[str, Paper]) -> dict[str, np.ndarray]:
         """Embed retrieval documents through cache, encoding only missing ones.
 
         :param Dict[str, Paper] papers: Mapping of paper ID to paper payload.
@@ -1074,7 +1069,7 @@ class EmbeddingGraphBuilder(
         self.retrieval_embeddings.update(embeddings)
         return embeddings
 
-    def _format_retrieval_document_metadata(self, metadata: Dict[str, object]) -> str:
+    def _format_retrieval_document_metadata(self, metadata: dict[str, object]) -> str:
         """Format cached metadata for retrieval-document encoding.
 
         :param Dict[str, object] metadata: Cache metadata including paper identity.
@@ -1087,7 +1082,7 @@ class EmbeddingGraphBuilder(
             task=EmbeddingTask.RETRIEVAL_DOCUMENT,
         )
 
-    def _format_graph_similarity_metadata(self, metadata: Dict[str, object]) -> str:
+    def _format_graph_similarity_metadata(self, metadata: dict[str, object]) -> str:
         """Format cached paper metadata for symmetric graph similarity.
 
         :param Dict[str, object] metadata: Cache metadata including paper identity.
@@ -1101,8 +1096,8 @@ class EmbeddingGraphBuilder(
         )
 
     def materialize_graph_embeddings(
-        self, papers: Dict[str, Paper]
-    ) -> Dict[str, np.ndarray]:
+        self, papers: dict[str, Paper]
+    ) -> dict[str, np.ndarray]:
         """Materialize selected papers in a symmetric graph-similarity space.
 
         :param Dict[str, Paper] papers: Final graph papers by canonical ID.
@@ -1134,7 +1129,7 @@ class EmbeddingGraphBuilder(
         )
         return dict(self.embeddings)
 
-    def prepare_graph_scoring(self, papers: Dict[str, Paper]) -> None:
+    def prepare_graph_scoring(self, papers: dict[str, Paper]) -> None:
         """Populate symmetric vectors immediately before pairwise edge scoring.
 
         :param Dict[str, Paper] papers: Final selected graph papers.
@@ -1142,7 +1137,7 @@ class EmbeddingGraphBuilder(
         """
         self.materialize_graph_embeddings(papers)
 
-    def search_local(self, query: str, top_k: int) -> List[CacheSearchResult]:
+    def search_local(self, query: str, top_k: int) -> list[CacheSearchResult]:
         """Semantically search this builder's persistent embedding cache.
 
         Encodes the free-text query in the model's query prompt space and
@@ -1213,7 +1208,7 @@ class EmbeddingGraphBuilder(
 
     def _select_candidates(
         self, seed_embedding: np.ndarray, use_streaming: bool
-    ) -> List[Tuple[str, Dict, np.ndarray]]:
+    ) -> list[tuple[str, dict, np.ndarray]]:
         """Select candidates after hydrating cache with a specific loading mode.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
@@ -1225,7 +1220,7 @@ class EmbeddingGraphBuilder(
             self._ensure_cache_hydrated(use_streaming=use_streaming)
             return self._search_cache_candidates(seed_embedding)
 
-    def _update_citation_counts(self, papers: Dict[str, Paper]) -> None:
+    def _update_citation_counts(self, papers: dict[str, Paper]) -> None:
         """
         Enrich top semantic candidates with citation counts from Semantic Scholar.
 
@@ -1322,7 +1317,7 @@ class EmbeddingGraphBuilder(
         # The build_graph method will filter to top-k
         return similarity > 0.1
 
-    def build_graph(self, seed_id: str, **kwargs: Any) -> Tuple[nx.Graph, str]:
+    def build_graph(self, seed_id: str, **kwargs: Any) -> tuple[nx.Graph, str]:
         """
         Build graph with top-k edge selection.
 

@@ -8,9 +8,10 @@ import multiprocessing as mp
 import sys
 import threading
 import types
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any
 from unittest.mock import MagicMock, call, patch
 
 import h5py
@@ -507,7 +508,7 @@ def _install_fake_torch(
         def __init__(self, device_type: str, dtype: object):
             autocast_log.append(("call", device_type, dtype))
 
-        def __enter__(self) -> "_FakeAutocast":
+        def __enter__(self) -> _FakeAutocast:
             autocast_log.append(("enter",))
             if autocast_behavior == "raise":
                 raise RuntimeError("autocast unavailable")

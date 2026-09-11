@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
 
 import h5py
 import numpy as np
@@ -67,14 +68,14 @@ class _IngestMixin:
 
     def _process_embeddings(
         self,
-        papers: Dict[str, Dict],
+        papers: dict[str, dict],
         model: Any,
         *,
         batch_size: int,
         show_progress: bool,
-        text_builder: Optional[Callable[[Dict[str, object]], str]],
+        text_builder: Callable[[dict[str, object]], str] | None,
         return_embeddings: bool,
-    ) -> Optional[Dict[str, np.ndarray]]:
+    ) -> dict[str, np.ndarray] | None:
         """Coordinate one complete embedding cache operation with root clearing.
 
         :param Dict[str, Dict] papers: Mapping of paper ID to metadata payload.
@@ -97,14 +98,14 @@ class _IngestMixin:
 
     def _process_embeddings_locked(
         self,
-        papers: Dict[str, Dict],
+        papers: dict[str, dict],
         model: Any,
         *,
         batch_size: int,
         show_progress: bool,
-        text_builder: Optional[Callable[[Dict[str, object]], str]],
+        text_builder: Callable[[dict[str, object]], str] | None,
         return_embeddings: bool,
-    ) -> Optional[Dict[str, np.ndarray]]:
+    ) -> dict[str, np.ndarray] | None:
         """Hydrate cache entries while the root operation lock is held.
 
         Runs three phases in order: a locked scan that separates hits from
@@ -129,7 +130,7 @@ class _IngestMixin:
         builder = text_builder or compose_title_abstract_text
         items = list(papers.items())
 
-        calibration_ranges: Optional[np.ndarray] = None
+        calibration_ranges: np.ndarray | None = None
         with (
             self._cache_lock(),
             self._connect_db() as conn,
@@ -190,8 +191,8 @@ class _IngestMixin:
         *,
         conn: sqlite3.Connection,
         h5_file: h5py.File,
-        items: Sequence[Tuple[str, Dict]],
-        builder: Callable[[Dict[str, object]], str],
+        items: Sequence[tuple[str, dict]],
+        builder: Callable[[dict[str, object]], str],
         return_embeddings: bool,
         show_progress: bool,
     ) -> _CacheLookupPlan:
@@ -228,11 +229,11 @@ class _IngestMixin:
             int(embeddings_dataset.shape[0]) if embeddings_dataset is not None else 0
         )
 
-        cached_rows: List[Tuple[str, int]] = []
-        papers_to_embed: List[PendingEmbeddingRecord] = []
-        metadata_updates_on_hit: List[Tuple[Any, ...]] = []
+        cached_rows: list[tuple[str, int]] = []
+        papers_to_embed: list[PendingEmbeddingRecord] = []
+        metadata_updates_on_hit: list[tuple[Any, ...]] = []
 
-        iterator: Iterable[Tuple[str, Dict]] = self._report_progress(
+        iterator: Iterable[tuple[str, dict]] = self._report_progress(
             items, "Checking cache", enabled=show_progress and len(items) > 50
         )
         for paper_id, metadata in iterator:
@@ -267,7 +268,7 @@ class _IngestMixin:
 
         _close_progress(iterator)
 
-        cached_embeddings: Dict[str, np.ndarray] = {}
+        cached_embeddings: dict[str, np.ndarray] = {}
         if return_embeddings and cached_rows and embeddings_dataset is not None:
             cached_embeddings = self._load_cached_embeddings(
                 h5_file,
@@ -284,7 +285,7 @@ class _IngestMixin:
     def _refresh_hit_metadata(
         conn: sqlite3.Connection,
         cursor: sqlite3.Cursor,
-        updates: Sequence[Tuple[Any, ...]],
+        updates: Sequence[tuple[Any, ...]],
     ) -> None:
         """Rewrite non-vector metadata for cache hits whose payload drifted.
 
@@ -347,9 +348,9 @@ class _IngestMixin:
         self,
         embeddings_array: np.ndarray,
         *,
-        calibration_ranges: Optional[np.ndarray],
+        calibration_ranges: np.ndarray | None,
         embedding_dim: int,
-    ) -> Tuple[np.ndarray, _Int8Saturation]:
+    ) -> tuple[np.ndarray, _Int8Saturation]:
         """Convert encoded float vectors into this namespace's storage dtype.
 
         :param np.ndarray embeddings_array: Validated float embedding matrix.
@@ -394,11 +395,11 @@ class _IngestMixin:
         papers_to_embed: Sequence[PendingEmbeddingRecord],
         embeddings_array: np.ndarray,
         storage_embeddings: np.ndarray,
-        calibration_ranges: Optional[np.ndarray],
+        calibration_ranges: np.ndarray | None,
         saturation: _Int8Saturation,
         embedding_dim: int,
         return_embeddings: bool,
-    ) -> Dict[str, np.ndarray]:
+    ) -> dict[str, np.ndarray]:
         """Persist one encoded batch while the cache lock is held.
 
         :param sqlite3.Connection conn: Open SQLite connection for the active namespace.
@@ -465,7 +466,7 @@ class _IngestMixin:
         self,
         h5_file: h5py.File,
         *,
-        calibration_ranges: Optional[np.ndarray],
+        calibration_ranges: np.ndarray | None,
         saturation: _Int8Saturation,
         embedding_dim: int,
     ) -> None:
@@ -506,7 +507,7 @@ class _IngestMixin:
         storage_embeddings: np.ndarray,
         embeddings_array: np.ndarray,
         return_embeddings: bool,
-    ) -> Tuple[Optional[np.ndarray], np.ndarray]:
+    ) -> tuple[np.ndarray | None, np.ndarray]:
         """Derive the binary index rows and the vectors handed back to callers.
 
         Callers must see the vectors this cache will return forever after, so
@@ -544,10 +545,10 @@ class _IngestMixin:
         conn: sqlite3.Connection,
         h5_file: h5py.File,
         embeddings_dataset: h5py.Dataset,
-        binary_dataset: Optional[h5py.Dataset],
+        binary_dataset: h5py.Dataset | None,
         papers_to_embed: Sequence[PendingEmbeddingRecord],
         storage_embeddings: np.ndarray,
-        binary_embeddings: Optional[np.ndarray],
+        binary_embeddings: np.ndarray | None,
         returned_embeddings: np.ndarray,
         embedding_dim: int,
         return_embeddings: bool,
@@ -664,11 +665,9 @@ class _IngestMixin:
         *,
         conn: sqlite3.Connection,
         embeddings_dataset: h5py.Dataset,
-        binary_dataset: Optional[h5py.Dataset],
+        binary_dataset: h5py.Dataset | None,
         replacement_rows: Sequence[
-            Tuple[
-                int, np.ndarray, Optional[np.ndarray], np.ndarray, Optional[np.ndarray]
-            ]
+            tuple[int, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray | None]
         ],
     ) -> None:
         """Journal the rows about to be overwritten, then overwrite them.
@@ -708,7 +707,7 @@ class _IngestMixin:
         self,
         *,
         embeddings_dataset: h5py.Dataset,
-        binary_dataset: Optional[h5py.Dataset],
+        binary_dataset: h5py.Dataset | None,
         plan: _VectorWritePlan,
         embedding_dim: int,
     ) -> None:
@@ -754,11 +753,9 @@ class _IngestMixin:
         *,
         cursor: sqlite3.Cursor,
         h5_file: h5py.File,
-        rows_to_upsert: Sequence[Tuple[Any, ...]],
+        rows_to_upsert: Sequence[tuple[Any, ...]],
         replacement_rows: Sequence[
-            Tuple[
-                int, np.ndarray, Optional[np.ndarray], np.ndarray, Optional[np.ndarray]
-            ]
+            tuple[int, np.ndarray, np.ndarray | None, np.ndarray, np.ndarray | None]
         ],
     ) -> None:
         """Flush vectors, then commit the SQLite rows that point at them.

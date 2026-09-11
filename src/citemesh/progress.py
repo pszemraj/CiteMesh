@@ -8,8 +8,9 @@ console, which keeps a single owner for stream, width, and TTY policy.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from typing import Iterable, Iterator, Optional, Sequence, TypeVar
+from typing import TypeVar
 
 from rich.console import Console
 from rich.progress import (
@@ -28,7 +29,7 @@ from ._runtime import stderr_isatty
 
 T = TypeVar("T")
 
-_progress_console: Optional[Console] = None
+_progress_console: Console | None = None
 
 
 def set_progress_console(console: Console) -> None:
@@ -132,10 +133,10 @@ class ProgressTask:
 @contextmanager
 def progress_task(
     *,
-    total: Optional[int],
+    total: int | None,
     description: str,
     unit: str = "items",
-    enabled: Optional[bool] = None,
+    enabled: bool | None = None,
 ) -> Iterator[ProgressTask]:
     """Run a live progress display for a manually advanced task.
 
@@ -172,8 +173,8 @@ def progress_iterator(
     *,
     description: str,
     unit: str = "items",
-    total: Optional[int] = None,
-    enabled: Optional[bool] = None,
+    total: int | None = None,
+    enabled: bool | None = None,
 ) -> Iterator[T]:
     """Yield items from an iterable while rendering a progress bar.
 

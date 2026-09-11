@@ -13,13 +13,11 @@ import importlib.util
 import logging
 import re
 import warnings
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib import metadata as importlib_metadata
 from typing import (
     Any,
-    Callable,
-    Iterator,
-    Optional,
 )
 
 from citemesh._runtime import stderr_isatty
@@ -152,8 +150,8 @@ def _suppress_transformers_progress_for_non_tty() -> Iterator[None]:
 
 
 def _parse_major_minor(
-    version: object, *, default: Optional[tuple[int, int]] = None
-) -> Optional[tuple[int, int]]:
+    version: object, *, default: tuple[int, int] | None = None
+) -> tuple[int, int] | None:
     """Parse a leading semantic-version major/minor pair.
 
     Callers that compare against a version floor pass ``default=(0, 0)`` so an
@@ -170,7 +168,7 @@ def _parse_major_minor(
     return int(version_match.group(1)), int(version_match.group(2))
 
 
-def _installed_transformers_major_minor(transformers: Any) -> Optional[tuple[int, int]]:
+def _installed_transformers_major_minor(transformers: Any) -> tuple[int, int] | None:
     """Resolve the installed Transformers version from module or distribution data.
 
     Editable and development builds sometimes expose a nonstandard module
@@ -357,7 +355,7 @@ def _cpu_native_bf16_supported(torch: Any) -> bool:
     return _native_bf16_supported(torch, "cpu", _cpu_bf16_probe)
 
 
-def resolve_embedding_device(requested: Optional[str]) -> str:
+def resolve_embedding_device(requested: str | None) -> str:
     """Resolve a requested device token to a concrete torch device string.
 
     ``auto`` (or ``None``) prefers ``cuda``, then ``mps``, then ``cpu``. An

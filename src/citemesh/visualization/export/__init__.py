@@ -16,8 +16,9 @@ import html
 import io
 import json
 import logging
+from collections.abc import Hashable, Iterable
 from pathlib import Path
-from typing import Any, Dict, Hashable, Iterable, Optional
+from typing import Any
 
 import networkx as nx
 
@@ -95,9 +96,9 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         self,
         graph: nx.Graph,
         seed_id: str,
-        metadata: Optional[Dict] = None,
+        metadata: dict | None = None,
         theme_name: str = "dark",
-        layout: Optional[Dict[Hashable, Iterable[float]]] = None,
+        layout: dict[Hashable, Iterable[float]] | None = None,
     ):
         """Create exporter bound to a graph and seed paper metadata.
 
@@ -115,13 +116,13 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         self.metadata = metadata or {}
         self.theme = get_theme(theme_name)
         self._layout = layout
-        self._size_map: Optional[Dict[Hashable, float]] = None
-        self._color_map_cache: Dict[str, Dict[Hashable, tuple]] = {}
+        self._size_map: dict[Hashable, float] | None = None
+        self._color_map_cache: dict[str, dict[Hashable, tuple]] = {}
 
     # ------------------------------------------------------------------
     # Public export methods
 
-    def graph_payload(self) -> Dict[str, Any]:
+    def graph_payload(self) -> dict[str, Any]:
         """Build the canonical versioned graph payload shared by JSON consumers.
 
         Dashboard geometry is always embedded (computing a layout on demand when
@@ -141,7 +142,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             sorted_edges=sorted_edges,
             include_plotly_geometry=True,
         )
-        portable_meta: Dict[str, Any] = {
+        portable_meta: dict[str, Any] = {
             "strategy": dashboard_meta["strategy"],
             "year_range": dashboard_meta["year_range"],
         }
@@ -307,7 +308,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
     def to_interactive_html(
         self,
         path: Path,
-        theme: Optional[str] = None,
+        theme: str | None = None,
         physics: bool = True,
     ) -> None:
         """
@@ -355,7 +356,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             )
 
         for node, attrs in _sorted_nodes(self.graph):
-            paper: Optional[Paper] = attrs.get("paper")
+            paper: Paper | None = attrs.get("paper")
             size = self._node_size(node)
             color = self._node_color_hex(node, theme_obj)
 
@@ -391,7 +392,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             net.save_graph(str(tmp_path))
             geometry._inject_darkreader_lock(tmp_path, _theme_color_scheme(theme_obj))
 
-    def to_plotly_html(self, path: Path, theme: Optional[str] = None) -> None:
+    def to_plotly_html(self, path: Path, theme: str | None = None) -> None:
         """Create Plotly interactive visualization.
 
         :param Path path: Output HTML path.
@@ -418,7 +419,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 ) from exc
             geometry._inject_darkreader_lock(tmp_path, _theme_color_scheme(theme_obj))
 
-    def to_dashboard_html(self, path: Path, theme: Optional[str] = None) -> None:
+    def to_dashboard_html(self, path: Path, theme: str | None = None) -> None:
         """Create a standalone Plotly-backed research dashboard HTML export.
 
         :param Path path: Output HTML path.

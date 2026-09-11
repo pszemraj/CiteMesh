@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Hashable, Iterable
 from pathlib import Path
-from typing import Dict, Hashable, Iterable
 
 import networkx as nx
 
@@ -26,7 +26,7 @@ DARKREADER_LOCK_META = '<meta name="darkreader-lock" />'
 
 # Shared UI chrome palette for HTML exports (dashboard vars and Plotly
 # hoverlabels must agree so tooltips look native to the page).
-_UI_PALETTES: Dict[str, Dict[str, str]] = {
+_UI_PALETTES: dict[str, dict[str, str]] = {
     "dark": {
         "body_bg": "#0f1318",
         "panel_bg": "#171d25",
@@ -58,7 +58,7 @@ def _theme_color_scheme(theme_obj: Theme) -> str:
 
 
 # as fallback. The tooltip's job is answering "why is this paper here".
-_HOVER_RELATION_LABELS: Dict[str, str] = {
+_HOVER_RELATION_LABELS: dict[str, str] = {
     "seed": "seed paper",
     "referenced_by_seed": "referenced by seed",
     "cites_seed": "cites seed",
@@ -108,7 +108,7 @@ def _stable_curve_direction(left_id: object, right_id: object) -> float:
 def _select_dashboard_label_nodes(
     graph: nx.Graph,
     node_ids: list[Hashable],
-    pos: Dict[Hashable, Iterable[float]],
+    pos: dict[Hashable, Iterable[float]],
 ) -> set[Hashable]:
     """Select prominent dashboard labels without crowding one graph region.
 
@@ -155,12 +155,8 @@ def _rgb_tuple_to_hex(color: tuple) -> str:
     :param tuple color: RGB triple in [0, 1] space.
     :return str: HTML hex color code.
     """
-    r, g, b = color
-    return "#{:02x}{:02x}{:02x}".format(
-        int(max(0, min(1, r)) * 255),
-        int(max(0, min(1, g)) * 255),
-        int(max(0, min(1, b)) * 255),
-    )
+    r, g, b = (int(max(0, min(1, channel)) * 255) for channel in color)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def _rgb_tuple_to_rgba(color: object, alpha: float) -> str:

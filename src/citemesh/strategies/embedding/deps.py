@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-from typing import Any, Optional
+from typing import Any
 
 from . import runtime
 
@@ -67,7 +67,7 @@ def _module_available(module_name: str) -> bool:
         return False
 
 
-def _import_optional(module_name: str, attribute: Optional[str] = None) -> Any:
+def _import_optional(module_name: str, attribute: str | None = None) -> Any:
     """Import an optional dependency module, or one attribute from it.
 
     Mirrors ``from <module_name> import <attribute>``: a missing module and a

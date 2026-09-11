@@ -17,7 +17,7 @@ from citemesh.core.paper_fields import (
     coerce_categories,
     coerce_venue,
 )
-from citemesh.paper_ids import external_ids_from_canonical_paper_id
+from citemesh.core.paper_ids import external_ids_from_canonical_paper_id
 
 from .errors import SemanticScholarUnavailableError
 

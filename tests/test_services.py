@@ -12,7 +12,7 @@ import threading
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Optional
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,7 +21,7 @@ from semanticscholar.Reference import Reference
 
 import citemesh.services as services_module
 from citemesh.core import API_CONFIG, Author, Paper
-from citemesh.paper_ids import paper_identifier_aliases
+from citemesh.core.paper_ids import paper_identifier_aliases
 from citemesh.services import semantic_scholar as s2
 from citemesh.services import semantic_scholar as semantic_module
 from citemesh.services.semantic_scholar import (
@@ -296,8 +296,8 @@ class _MockResponse:
     def __init__(
         self,
         status_code: int,
-        payload: Optional[Dict[str, Any]] = None,
-        headers: Optional[Dict[str, str]] = None,
+        payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         """Create a minimal mock requests response."""
         self.status_code = status_code
@@ -1840,7 +1840,7 @@ def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
     "error",
     [
         pytest.param(
-            semantic_module.client.BadQueryParametersException("unsupported field"),
+            semantic_module.endpoints.BadQueryParametersException("unsupported field"),
             id="bad-query",
         ),
         pytest.param(PermissionError("HTTP status 403 Forbidden."), id="forbidden"),
@@ -2896,7 +2896,8 @@ def test_paper_lookup_preserves_slashes_in_prepared_path(
         client._session.send.assert_called_once()
         prepared = client._session.send.call_args.args[0]
         assert (
-            prepared.url.split("?")[0] == f"{s2.client.PAPER_BASE_URL}/{expected_path}"
+            prepared.url.split("?")[0]
+            == f"{s2.endpoints.PAPER_BASE_URL}/{expected_path}"
         )
 
 

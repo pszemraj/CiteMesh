@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Optional
+from typing import Any
 from urllib.parse import quote
 
 
@@ -43,7 +43,7 @@ def _script_safe_json(payload: Any) -> str:
 def _derive_doi_value(
     node_id: str,
     *,
-    node_payload: Optional[Dict[str, Any]] = None,
+    node_payload: dict[str, Any] | None = None,
 ) -> str:
     """Resolve the raw DOI of a node from metadata or its canonical ID.
 
@@ -69,8 +69,8 @@ def _derive_doi_value(
 def _derive_links(
     node_id: str,
     *,
-    node_payload: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Optional[str]]:
+    node_payload: dict[str, Any] | None = None,
+) -> dict[str, str | None]:
     """Derive external links from canonical node IDs.
 
     :param str node_id: Canonical graph node identifier.
@@ -78,7 +78,7 @@ def _derive_links(
         explicit ``arxiv_id``/``doi`` values.
     :return Dict[str, Optional[str]]: External links dictionary.
     """
-    links: Dict[str, Optional[str]] = {
+    links: dict[str, str | None] = {
         "arxiv_abs": None,
         "arxiv_pdf": None,
         "doi": None,

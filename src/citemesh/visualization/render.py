@@ -5,12 +5,15 @@ This module provides a single implementation of the CiteMesh-style
 visualization that all strategies can use, eliminating code duplication.
 """
 
+from __future__ import annotations
+
 import hashlib
 import logging
 import math
 import textwrap
+from collections.abc import Hashable
 from pathlib import Path
-from typing import Any, Dict, Hashable, List, Optional, Tuple
+from typing import Any
 
 import matplotlib
 import matplotlib.patches as mpatches
@@ -132,7 +135,7 @@ def _similarity_to_layout_distance(raw_similarity: object) -> float:
     return 1.0 / (KK_LAYOUT_DISTANCE_EPSILON + similarity)
 
 
-def _detect_communities(graph: nx.Graph) -> List[List[Hashable]]:
+def _detect_communities(graph: nx.Graph) -> list[list[Hashable]]:
     """Detect deterministic communities for layout clustering.
 
     :param nx.Graph graph: Canonicalized graph used for layout.
@@ -160,13 +163,13 @@ def _detect_communities(graph: nx.Graph) -> List[List[Hashable]]:
     return communities
 
 
-def _community_index(communities: List[List[Hashable]]) -> Dict[Hashable, int]:
+def _community_index(communities: list[list[Hashable]]) -> dict[Hashable, int]:
     """Build node to community-index mapping.
 
     :param List[List[Hashable]] communities: Ordered community memberships.
     :return Dict[Hashable, int]: Node-to-community index map.
     """
-    community_index: Dict[Hashable, int] = {}
+    community_index: dict[Hashable, int] = {}
     for idx, members in enumerate(communities):
         for node in members:
             community_index[node] = idx
@@ -174,11 +177,11 @@ def _community_index(communities: List[List[Hashable]]) -> Dict[Hashable, int]:
 
 
 def _spread_layout_by_communities(
-    pos: Dict[Hashable, np.ndarray],
+    pos: dict[Hashable, np.ndarray],
     graph: nx.Graph,
-    communities: List[List[Hashable]],
-    layout_seed: Optional[int],
-) -> Dict[Hashable, np.ndarray]:
+    communities: list[list[Hashable]],
+    layout_seed: int | None,
+) -> dict[Hashable, np.ndarray]:
     """Shift community centers toward deterministic anchor positions.
 
     :param Dict[Hashable, np.ndarray] pos: Base node positions.
@@ -271,8 +274,8 @@ def _spread_layout_by_communities(
 
 
 def _choose_metadata_anchor(
-    pos: Dict[Hashable, np.ndarray],
-) -> Tuple[float, float, str, str]:
+    pos: dict[Hashable, np.ndarray],
+) -> tuple[float, float, str, str]:
     """
     Choose which corner to place the metadata box in based on node density.
 
@@ -303,7 +306,7 @@ def _choose_metadata_anchor(
     }
 
     window = 0.22  # area around corner to gauge crowding
-    scores: Dict[str, float] = {}
+    scores: dict[str, float] = {}
 
     for name, ((cx, cy), ha, va) in corners.items():
         dist_x = np.abs(norm_x - cx)
@@ -318,8 +321,8 @@ def _choose_metadata_anchor(
 
 
 def normalize_layout_positions(
-    pos: Dict[Hashable, np.ndarray], padding_ratio: float = LAYOUT_PADDING_RATIO
-) -> Dict[Hashable, np.ndarray]:
+    pos: dict[Hashable, np.ndarray], padding_ratio: float = LAYOUT_PADDING_RATIO
+) -> dict[Hashable, np.ndarray]:
     """Normalize layout positions to a centered square viewport.
 
     :param Dict[Hashable, np.ndarray] pos: Raw layout map from NetworkX.
@@ -356,8 +359,8 @@ def normalize_layout_positions(
 
 
 def _orient_layout_horizontally(
-    pos: Dict[Hashable, np.ndarray],
-) -> Dict[Hashable, np.ndarray]:
+    pos: dict[Hashable, np.ndarray],
+) -> dict[Hashable, np.ndarray]:
     """Rotate a portrait-oriented layout to use the landscape export viewport.
 
     :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
@@ -386,8 +389,8 @@ def _orient_layout_horizontally(
 
 
 def _layout_viewport_limits(
-    pos: Dict[Hashable, np.ndarray], viewport_aspect: float
-) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+    pos: dict[Hashable, np.ndarray], viewport_aspect: float
+) -> tuple[tuple[float, float], tuple[float, float]]:
     """Fit equal-scale plot limits to the graph and export viewport.
 
     :param Dict[Hashable, np.ndarray] pos: Normalized node positions.
@@ -427,8 +430,8 @@ def _layout_viewport_limits(
 
 
 def _pack_disconnected_components(
-    pos: Dict[Hashable, np.ndarray], graph: nx.Graph
-) -> Dict[Hashable, np.ndarray]:
+    pos: dict[Hashable, np.ndarray], graph: nx.Graph
+) -> dict[Hashable, np.ndarray]:
     """Pack disconnected components into deterministic size-aware rows.
 
     :param Dict[Hashable, np.ndarray] pos: Raw layout positions.
@@ -449,11 +452,11 @@ def _pack_disconnected_components(
 
     components.sort(key=lambda members: (-len(members), tuple(map(str, members))))
     largest_size = max(len(component) for component in components)
-    component_layouts: List[
-        Tuple[
-            Dict[Hashable, np.ndarray],
-            Tuple[float, float],
-            Tuple[float, float],
+    component_layouts: list[
+        tuple[
+            dict[Hashable, np.ndarray],
+            tuple[float, float],
+            tuple[float, float],
         ]
     ] = []
 
@@ -499,7 +502,7 @@ def _pack_disconnected_components(
         math.sqrt(padded_area * DISCONNECTED_COMPONENT_TARGET_ASPECT),
     )
 
-    packed: Dict[Hashable, np.ndarray] = {}
+    packed: dict[Hashable, np.ndarray] = {}
     cursor_x = 0.0
     cursor_y = 0.0
     row_height = 0.0
@@ -530,8 +533,8 @@ def _pack_disconnected_components(
 
 def add_metadata_box(
     ax: plt.Axes,
-    metadata: Dict[str, Any],
-    pos: Dict[Hashable, np.ndarray],
+    metadata: dict[str, Any],
+    pos: dict[Hashable, np.ndarray],
     theme: Theme,
 ) -> None:
     """
@@ -587,7 +590,7 @@ def add_metadata_box(
     )
 
 
-def compute_node_sizes(graph: nx.Graph) -> List[float]:
+def compute_node_sizes(graph: nx.Graph) -> list[float]:
     """
     Compute node sizes with extreme variation matching CiteMesh style.
 
@@ -654,7 +657,7 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
 
 def compute_node_colors(
     graph: nx.Graph, seed_id: str, theme: Theme
-) -> Tuple[List[Tuple[float, float, float]], int, int]:
+) -> tuple[list[tuple[float, float, float]], int, int]:
     """
     Compute smooth color gradient by publication year.
 
@@ -689,8 +692,8 @@ def compute_node_colors(
 def compute_layout(
     graph: nx.Graph,
     iterations: int = 100,
-    layout_seed: Optional[int] = None,
-) -> Dict[Hashable, np.ndarray]:
+    layout_seed: int | None = None,
+) -> dict[Hashable, np.ndarray]:
     """
     Compute force-directed layout with organic clustering.
 
@@ -757,7 +760,7 @@ def compute_layout(
 
 
 def draw_edges(
-    ax: plt.Axes, graph: nx.Graph, pos: Dict[Hashable, np.ndarray], theme: Theme
+    ax: plt.Axes, graph: nx.Graph, pos: dict[Hashable, np.ndarray], theme: Theme
 ) -> None:
     """
     Draw edges with varying thickness and opacity based on weight.
@@ -795,9 +798,9 @@ def draw_edges(
 def draw_nodes(
     ax: plt.Axes,
     graph: nx.Graph,
-    pos: Dict[Hashable, np.ndarray],
-    sizes: List[float],
-    colors: List[Tuple[float, float, float]],
+    pos: dict[Hashable, np.ndarray],
+    sizes: list[float],
+    colors: list[tuple[float, float, float]],
     theme: Theme,
 ) -> None:
     """
@@ -830,10 +833,10 @@ def draw_nodes(
 def draw_labels(
     ax: plt.Axes,
     graph: nx.Graph,
-    pos: Dict[Hashable, np.ndarray],
+    pos: dict[Hashable, np.ndarray],
     seed_id: str,
     theme: Theme,
-    sizes: Optional[List[float]] = None,
+    sizes: list[float] | None = None,
 ) -> None:
     """
     Draw paper labels in "Author, Year" format.
@@ -873,8 +876,8 @@ def draw_labels(
         ),
     )
 
-    placed: List[np.ndarray] = []
-    label_bounds: List[Any] = []
+    placed: list[np.ndarray] = []
+    label_bounds: list[Any] = []
     non_seed_label_count = 0
     ax.figure.canvas.draw()
     renderer = _figure_renderer(ax.figure)
@@ -965,10 +968,10 @@ def visualize_graph(
     output_path: Path,
     iterations: int = 100,
     dpi: int = None,
-    metadata: Optional[Dict[str, Any]] = None,
+    metadata: dict[str, Any] | None = None,
     theme_name: str = "dark",
-    layout: Optional[Dict[Hashable, np.ndarray]] = None,
-    layout_seed: Optional[int] = None,
+    layout: dict[Hashable, np.ndarray] | None = None,
+    layout_seed: int | None = None,
 ) -> None:
     """
     Create CiteMesh visualization.

@@ -9,21 +9,21 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Mapping, Optional, Tuple
 
-QueryFormatter = Callable[[str, Optional[Dict[str, str]]], str]
-DocumentFormatter = Callable[[Dict[str, str]], str]
-SimilarityFormatter = Callable[[str, Optional[Dict[str, str]]], str]
+QueryFormatter = Callable[[str, dict[str, str] | None], str]
+DocumentFormatter = Callable[[dict[str, str]], str]
+SimilarityFormatter = Callable[[str, dict[str, str] | None], str]
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_EMBEDDING_MODEL_NAME = "unsloth/embeddinggemma-300m"
-DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, Tuple[str, ...]] = {
+DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, tuple[str, ...]] = {
     "unsloth/embeddinggemma-300m": ("google/embeddinggemma-300m",),
 }
-EMBEDDING_MODEL_PROFILE_CHOICES: Tuple[str, ...] = (
+EMBEDDING_MODEL_PROFILE_CHOICES: tuple[str, ...] = (
     "auto",
     "default",
     "embeddinggemma",
@@ -47,7 +47,7 @@ def compose_title_abstract_text(metadata: Mapping[str, object]) -> str:
     return abstract
 
 
-def _identity_query_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
+def _identity_query_formatter(text: str, _: dict[str, str] | None) -> str:
     """Return input text unchanged for query formatting.
 
     :param str text: Original query text.
@@ -57,7 +57,7 @@ def _identity_query_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
     return text
 
 
-def _identity_document_formatter(metadata: Dict[str, str]) -> str:
+def _identity_document_formatter(metadata: dict[str, str]) -> str:
     """Compose a minimal document string from title and abstract.
 
     :param Dict[str, str] metadata: Paper metadata payload.
@@ -66,7 +66,7 @@ def _identity_document_formatter(metadata: Dict[str, str]) -> str:
     return compose_title_abstract_text(metadata)
 
 
-def _identity_similarity_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
+def _identity_similarity_formatter(text: str, _: dict[str, str] | None) -> str:
     """Return symmetric-similarity input text unchanged.
 
     :param str text: Composed paper text.
@@ -82,21 +82,21 @@ class EmbeddingModelProfile:
 
     name: str
     schema_token: str
-    aliases: Tuple[str, ...] = ()
-    minimum_transformers_version: Optional[Tuple[int, int]] = None
+    aliases: tuple[str, ...] = ()
+    minimum_transformers_version: tuple[int, int] | None = None
     query_formatter: QueryFormatter = _identity_query_formatter
     document_formatter: DocumentFormatter = _identity_document_formatter
     similarity_formatter: SimilarityFormatter = _identity_similarity_formatter
-    preferred_compute_dtype: Optional[str] = None
-    autocast_devices: Tuple[str, ...] = ()
-    preferred_attention_implementation: Optional[str] = None
+    preferred_compute_dtype: str | None = None
+    autocast_devices: tuple[str, ...] = ()
+    preferred_attention_implementation: str | None = None
     requires_bidirectional_attention: bool = False
     compile_inner_transformer: bool = False
-    available_truncate_dims: Optional[Tuple[int, ...]] = None
-    recommended_truncate_dim: Optional[int] = None
-    notes: Optional[str] = None
+    available_truncate_dims: tuple[int, ...] | None = None
+    recommended_truncate_dim: int | None = None
+    notes: str | None = None
 
-    def format_query(self, text: str, metadata: Optional[Dict[str, str]] = None) -> str:
+    def format_query(self, text: str, metadata: dict[str, str] | None = None) -> str:
         """Format a query using the profile-specific rule.
 
         :param str text: Raw query string.
@@ -105,7 +105,7 @@ class EmbeddingModelProfile:
         """
         return self.query_formatter(text, metadata)
 
-    def format_document(self, metadata: Dict[str, str]) -> str:
+    def format_document(self, metadata: dict[str, str]) -> str:
         """Format paper metadata into embedding model input text.
 
         :param Dict[str, str] metadata: Paper metadata payload.
@@ -114,7 +114,7 @@ class EmbeddingModelProfile:
         return self.document_formatter(metadata)
 
     def format_similarity(
-        self, text: str, metadata: Optional[Dict[str, str]] = None
+        self, text: str, metadata: dict[str, str] | None = None
     ) -> str:
         """Format paper text for symmetric semantic-similarity scoring.
 
@@ -135,7 +135,7 @@ class EmbeddingModelProfile:
         return any(model_name.startswith(alias) for alias in self.aliases)
 
 
-def _gemma_query_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
+def _gemma_query_formatter(text: str, _: dict[str, str] | None) -> str:
     """Format a query with Gemma-style task prompt.
 
     :param str text: Raw query text.
@@ -146,7 +146,7 @@ def _gemma_query_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
     return f"task: search result | query: {text}"
 
 
-def _gemma_document_formatter(metadata: Dict[str, str]) -> str:
+def _gemma_document_formatter(metadata: dict[str, str]) -> str:
     """Format paper metadata with explicit fields for Gemma models.
 
     :param Dict[str, str] metadata: Paper metadata payload.
@@ -159,7 +159,7 @@ def _gemma_document_formatter(metadata: Dict[str, str]) -> str:
     return f"title: {title} | text: {abstract}"
 
 
-def _gemma_similarity_formatter(text: str, _: Optional[Dict[str, str]]) -> str:
+def _gemma_similarity_formatter(text: str, _: dict[str, str] | None) -> str:
     """Format paper text for EmbeddingGemma's symmetric STS task.
 
     :param str text: Composed title and abstract text.
@@ -205,7 +205,7 @@ _PROFILE_BY_KEY: Mapping[str, EmbeddingModelProfile] = {
 }
 
 
-def _read_json_object(path: Path) -> Dict[str, object]:
+def _read_json_object(path: Path) -> dict[str, object]:
     """Read a JSON object, returning an empty mapping for absent/invalid files.
 
     :param Path path: JSON file to inspect.
@@ -220,7 +220,7 @@ def _read_json_object(path: Path) -> Dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _local_transformer_configs(root: Path) -> Tuple[Dict[str, object], ...]:
+def _local_transformer_configs(root: Path) -> tuple[dict[str, object], ...]:
     """Read transformer configs from root and SentenceTransformers modules.
 
     :param Path root: Local model directory.
@@ -246,7 +246,7 @@ def _local_transformer_configs(root: Path) -> Tuple[Dict[str, object], ...]:
     return tuple(config for config in configs if config)
 
 
-def _local_embeddinggemma_evidence(root: Path) -> Tuple[bool, bool, bool]:
+def _local_embeddinggemma_evidence(root: Path) -> tuple[bool, bool, bool]:
     """Inspect local metadata for EmbeddingGemma contract evidence.
 
     :param Path root: Local model directory.

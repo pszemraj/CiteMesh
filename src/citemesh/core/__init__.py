@@ -1,5 +1,7 @@
 """Core data structures and configuration for CiteMesh."""
 
+from __future__ import annotations
+
 from .config import (
     API_CONFIG,
     EMBEDDING_CONFIG,

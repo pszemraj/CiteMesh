@@ -21,13 +21,13 @@ from rich_argparse import RichHelpFormatter
 
 from citemesh import __version__
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG
-from citemesh.core.user_config import SEARCH_MODE_CHOICES
 from citemesh.core.validation import (
     ValueValidationError,
     parse_bounded_int,
     parse_unit_interval_float,
 )
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME, EMBEDDING_MODEL_PROFILE_CHOICES
+from citemesh.data.user_config import SEARCH_MODE_CHOICES
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
