@@ -23,6 +23,7 @@ import networkx as nx
 import numpy as np
 
 from citemesh.core import TEMPORAL_CONFIG, Paper
+from citemesh.core.values import coerce_float
 
 logger = logging.getLogger(__name__)
 
@@ -247,11 +248,7 @@ class GraphBuilderStrategy(ABC):
         """
         del paper1
         del paper2
-        raw_threshold = getattr(self, "similarity_threshold", 0.0)
-        try:
-            threshold = float(raw_threshold)
-        except (TypeError, ValueError):
-            threshold = 0.0
+        threshold = coerce_float(getattr(self, "similarity_threshold", 0.0), 0.0)
         return similarity > 0.0 and similarity >= threshold
 
     def get_collection_summary(self) -> Optional[str]:

@@ -10,7 +10,7 @@ import logging
 import math
 import textwrap
 from pathlib import Path
-from typing import Any, Dict, Hashable, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 import matplotlib
 import matplotlib.patches as mpatches
@@ -19,6 +19,7 @@ import networkx as nx
 import numpy as np
 
 from citemesh.core import VIZ_CONFIG
+from citemesh.core.values import coerce_citation_count, coerce_float
 from citemesh.data.cache import atomic_output_path
 
 from .ordering import (
@@ -79,21 +80,6 @@ def _figure_renderer(figure: plt.Figure) -> Any:
         figure.set_canvas(original_canvas)
 
 
-def _citation_count(attrs: Mapping[str, Any]) -> int:
-    """Normalize citation count values for deterministic ranking.
-
-    :param Mapping[str, Any] attrs: Raw node attributes mapping.
-    :return int: Non-negative citation count value.
-    """
-    raw = attrs.get("citation_count", 0)
-    if isinstance(raw, bool) or raw is None:
-        return 0
-    try:
-        return max(int(raw), 0)
-    except (TypeError, ValueError):
-        return 0
-
-
 def _filename_safe(text: str, max_chars: int = MAX_TITLE_CHARS) -> str:
     """Create a filesystem-safe slug from input text.
 
@@ -137,10 +123,7 @@ def _similarity_to_layout_distance(raw_similarity: object) -> float:
     :param object raw_similarity: Raw edge similarity value.
     :return float: Strictly positive distance used by Kamada-Kawai.
     """
-    try:
-        similarity = float(raw_similarity)
-    except (TypeError, ValueError):
-        similarity = 0.0
+    similarity = coerce_float(raw_similarity, 0.0)
 
     if not np.isfinite(similarity):
         similarity = 0.0
@@ -616,13 +599,18 @@ def compute_node_sizes(graph: nx.Graph) -> List[float]:
     seed_nodes = {node for node in nodes if graph.nodes[node].get("is_seed")}
     sorted_nodes = sorted(
         nodes,
-        key=lambda node: (-_citation_count(graph.nodes[node]), str(node)),
+        key=lambda node: (
+            -coerce_citation_count(graph.nodes[node].get("citation_count", 0)),
+            str(node),
+        ),
     )
     rank_of = {node: rank for rank, node in enumerate(sorted_nodes)}
 
     for node in nodes:
         rank = rank_of.get(node, len(nodes))
-        citation_count = _citation_count(graph.nodes[node])
+        citation_count = coerce_citation_count(
+            graph.nodes[node].get("citation_count", 0)
+        )
 
         if node in seed_nodes:
             # Seed paper gets special treatment
@@ -880,7 +868,7 @@ def draw_labels(
         ordered,
         key=lambda node: (
             0 if node == seed_id else 1,
-            -_citation_count(graph.nodes[node]),
+            -coerce_citation_count(graph.nodes[node].get("citation_count", 0)),
             str(node),
         ),
     )

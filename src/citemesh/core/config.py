@@ -5,8 +5,8 @@ This module centralizes all magic numbers, thresholds, and weights
 to make the codebase self-documenting and enable easy experimentation.
 """
 
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
+from typing import Dict, Tuple
 
 
 @dataclass
@@ -103,12 +103,14 @@ class VisualizationConfig:
     max_non_seed_size: int = 2200
     min_size: int = 100
 
-    # Node size tiers (rank: base_size)
-    size_tiers = {
-        "top_3": (1200, 200),  # (base, increment)
-        "top_8": (500, 80),
-        "top_15": (250, 30),
-    }
+    # Node size tiers (rank: (base, increment))
+    size_tiers: Dict[str, Tuple[int, int]] = field(
+        default_factory=lambda: {
+            "top_3": (1200, 200),
+            "top_8": (500, 80),
+            "top_15": (250, 30),
+        }
+    )
 
     # Edge rendering
     edge_alpha_min: float = 0.3

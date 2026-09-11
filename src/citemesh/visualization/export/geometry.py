@@ -9,7 +9,10 @@ from typing import Dict, Hashable, Iterable
 
 import networkx as nx
 
+from citemesh.core.values import coerce_citation_count
+
 from ..themes import Theme
+from ..years import coerce_publication_year
 
 DASHBOARD_AXIS_MIN_PADDING = 0.14
 DASHBOARD_AXIS_X_PADDING = 0.18
@@ -122,14 +125,8 @@ def _select_dashboard_label_nodes(
         :return tuple[int, int, int, str]: Sort key for label priority.
         """
         attrs = graph.nodes[node_id]
-        try:
-            citations = max(int(attrs.get("citation_count", 0) or 0), 0)
-        except (TypeError, ValueError):
-            citations = 0
-        try:
-            year = max(int(attrs.get("year", 0) or 0), 0)
-        except (TypeError, ValueError):
-            year = 0
+        citations = coerce_citation_count(attrs.get("citation_count", 0))
+        year = max(coerce_publication_year(attrs.get("year", 0)), 0)
         return (
             0 if bool(attrs.get("is_seed", False)) else 1,
             -citations,

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 
+from .keys import slug_key
+
 GRAPHML_LAYOUT_METADATA_KEY = "citemesh_graphml_determinism"
 GRAPHML_LAYOUT_VERSION_KEY = "citemesh_graphml_writer_version"
 
@@ -37,10 +39,12 @@ def _graphml_metadata_key(raw_key: object) -> str:
     :param object raw_key: Source metadata key.
     :return str: Sanitized GraphML-safe key.
     """
-    normalized = re.sub(r"[^0-9a-zA-Z_]+", "_", str(raw_key)).strip("_")
-    if not normalized:
-        normalized = "metadata"
-    return f"citemesh_meta_{normalized}"
+    return slug_key(
+        raw_key,
+        prefix="citemesh_meta_",
+        fallback="metadata",
+        keep_underscores=True,
+    )
 
 
 def _graphml_metadata_value(raw_value: object) -> str:

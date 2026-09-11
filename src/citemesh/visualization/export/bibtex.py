@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
 from typing import Any, Dict, Optional
 
 from ..years import coerce_publication_year
+from .keys import slug_key
 from .links import _derive_doi_value
 
 # Identifier fields BibTeX consumers resolve verbatim, so LaTeX escaping them
@@ -20,11 +20,13 @@ def _bibtex_entry_key(node_id: str) -> str:
     :param str node_id: Graph node ID.
     :return str: Readable node slug plus a stable identifier-derived suffix.
     """
-    normalized = re.sub(r"[^0-9a-zA-Z]+", "_", node_id).strip("_").lower()
-    if not normalized:
-        normalized = "paper"
-    suffix = hashlib.sha256(node_id.encode("utf-8")).hexdigest()[:12]
-    return f"citemesh_{normalized}_{suffix}"
+    return slug_key(
+        node_id,
+        prefix="citemesh_",
+        fallback="paper",
+        lowercase=True,
+        digest_length=12,
+    )
 
 
 def _bibtex_escape(raw_value: str) -> str:

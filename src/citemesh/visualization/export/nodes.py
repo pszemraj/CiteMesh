@@ -9,6 +9,7 @@ from typing import Any, Dict, Hashable, Iterable, Optional
 import networkx as nx
 
 from citemesh.core import Paper
+from citemesh.core.values import coerce_float
 
 from ..ordering import ordered_edges_with_data, ordered_nodes
 from ..render import (
@@ -53,10 +54,7 @@ def _normalized_edge_weight(raw_weight: object) -> float:
     :param object raw_weight: Raw edge weight candidate.
     :return float: Positive finite weight.
     """
-    try:
-        parsed = float(raw_weight)
-    except (TypeError, ValueError):
-        parsed = 0.0
+    parsed = coerce_float(raw_weight, 0.0)
     if not math.isfinite(parsed) or parsed <= 0.0:
         return 1e-6
     return parsed
@@ -208,23 +206,48 @@ def _strategy(graph: nx.Graph, metadata: Dict[str, Any]) -> str:
     return ""
 
 
-def _provenance_map(graph: nx.Graph) -> Dict[str, str]:
-    """Resolve normalized per-node provenance map.
+_PROVENANCE_CLASSES = frozenset({"citation", "semantic", "both"})
+_SEED_RELATION_CLASSES = frozenset(
+    {
+        "seed",
+        "referenced_by_seed",
+        "cites_seed",
+        "overlap",
+        "semantic_only",
+        "citation",
+    }
+)
 
-    :param nx.Graph graph: Graph carrying a ``paper_sources`` mapping.
-    :return Dict[str, str]: Mapping from node ID to provenance class.
+
+def _graph_class_map(
+    graph: nx.Graph, attribute: str, allowed: frozenset[str]
+) -> Dict[str, str]:
+    """Read a graph-level node classification map, keeping known classes only.
+
+    :param nx.Graph graph: Graph carrying the classification mapping.
+    :param str attribute: Graph attribute holding the raw mapping.
+    :param frozenset[str] allowed: Normalized class tokens to retain.
+    :return Dict[str, str]: Node ID to normalized class, unknown values dropped.
     """
-    raw_map = graph.graph.get("paper_sources")
+    raw_map = graph.graph.get(attribute)
     if not isinstance(raw_map, dict):
         return {}
 
     resolved: Dict[str, str] = {}
     for raw_id, raw_value in raw_map.items():
         value = str(raw_value).strip().lower()
-        if value not in {"citation", "semantic", "both"}:
-            continue
-        resolved[str(raw_id)] = value
+        if value in allowed:
+            resolved[str(raw_id)] = value
     return resolved
+
+
+def _provenance_map(graph: nx.Graph) -> Dict[str, str]:
+    """Resolve normalized per-node provenance map.
+
+    :param nx.Graph graph: Graph carrying a ``paper_sources`` mapping.
+    :return Dict[str, str]: Mapping from node ID to provenance class.
+    """
+    return _graph_class_map(graph, "paper_sources", _PROVENANCE_CLASSES)
 
 
 def _seed_relation_map(graph: nx.Graph) -> Dict[str, str]:
@@ -233,24 +256,7 @@ def _seed_relation_map(graph: nx.Graph) -> Dict[str, str]:
     :param nx.Graph graph: Graph carrying a ``seed_relations`` mapping.
     :return Dict[str, str]: Node-ID to relation class mapping.
     """
-    raw_map = graph.graph.get("seed_relations")
-    if not isinstance(raw_map, dict):
-        return {}
-
-    allowed = {
-        "seed",
-        "referenced_by_seed",
-        "cites_seed",
-        "overlap",
-        "semantic_only",
-        "citation",
-    }
-    resolved: Dict[str, str] = {}
-    for raw_id, raw_value in raw_map.items():
-        value = str(raw_value).strip().lower()
-        if value in allowed:
-            resolved[str(raw_id)] = value
-    return resolved
+    return _graph_class_map(graph, "seed_relations", _SEED_RELATION_CLASSES)
 
 
 class NodesMixin:
