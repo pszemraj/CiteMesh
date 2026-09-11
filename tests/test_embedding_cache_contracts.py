@@ -237,9 +237,10 @@ def _make_prefetch_proxy(
     monkeypatch.setitem(sys.modules, "sentence_transformers.util", fake_util)
 
     from citemesh.strategies import embedding as embedding_module
+    from citemesh.strategies.embedding import deps as embedding_deps
 
     fake_torch = types.SimpleNamespace(inference_mode=nullcontext)
-    monkeypatch.setattr(embedding_module, "_import_torch", lambda: fake_torch)
+    monkeypatch.setattr(embedding_deps, "_import_torch", lambda: fake_torch)
     return embedding_module._PrecisionEncodeProxy(
         model,
         nullcontext,

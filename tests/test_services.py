@@ -73,7 +73,7 @@ def test_service_and_strategy_package_exports() -> None:
     assert services_module.reset_client is reset_client
     assert services_module.SemanticScholarClient is SemanticScholarClient
     assert TopLevelEmbeddingGraphBuilder is EmbeddingGraphBuilder
-    assert EmbeddingGraphBuilder.__module__ == "citemesh.strategies.embedding"
+    assert EmbeddingGraphBuilder.__module__ == "citemesh.strategies.embedding.builder"
 
 
 def test_candidate_operation_scope_is_thread_local() -> None:

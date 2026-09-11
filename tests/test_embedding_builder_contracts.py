@@ -43,6 +43,12 @@ from citemesh.strategies.embedding import (
     format_paper_for_embedding,
     resolve_embedding_device,
 )
+from citemesh.strategies.embedding import builder as builder_module
+from citemesh.strategies.embedding import deps as deps_module
+from citemesh.strategies.embedding import hydration as hydration_module
+from citemesh.strategies.embedding import model_runtime as model_runtime_module
+from citemesh.strategies.embedding import records as records_module
+from citemesh.strategies.embedding import runtime as runtime_module
 from citemesh.text_batching import estimate_text_length_bucket
 from tests._helpers import (
     ConstantEncodeModel,
@@ -66,9 +72,9 @@ def _disable_embedding_optional_deps(
     ):
         return
     disable_embedding_dep_checks(monkeypatch)
-    module_available = embedding_module._module_available
+    module_available = deps_module._module_available
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_module_available",
         lambda name: False if name == "flash_attn" else module_available(name),
     )
@@ -98,7 +104,7 @@ def test_model_load_enforces_profile_transformers_floor(
     )
     fake_transformers = types.SimpleNamespace(__version__=transformers_version)
     monkeypatch.setattr(
-        embedding_module.importlib,
+        runtime_module.importlib,
         "import_module",
         lambda module_name: fake_transformers,
     )
@@ -133,12 +139,12 @@ def test_transformers_version_falls_back_to_distribution_metadata(
     )
     fake_transformers = types.SimpleNamespace(__version__="development-build")
     monkeypatch.setattr(
-        embedding_module.importlib,
+        runtime_module.importlib,
         "import_module",
         lambda _module_name: fake_transformers,
     )
     monkeypatch.setattr(
-        embedding_module.importlib_metadata,
+        runtime_module.importlib_metadata,
         "version",
         lambda _distribution: "5.14.1",
     )
@@ -162,12 +168,12 @@ def test_transformers_unknown_version_fails_with_verification_guidance(
     )
     fake_transformers = types.SimpleNamespace(__version__="development-build")
     monkeypatch.setattr(
-        embedding_module.importlib,
+        runtime_module.importlib,
         "import_module",
         lambda _module_name: fake_transformers,
     )
     monkeypatch.setattr(
-        embedding_module.importlib_metadata,
+        runtime_module.importlib_metadata,
         "version",
         lambda _distribution: "unknown",
     )
@@ -276,7 +282,7 @@ def _install_fake_sentence_transformers(
     fake_module = types.ModuleType("sentence_transformers")
     fake_module.SentenceTransformer = _FakeSentenceTransformer
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_sentence_transformer_class",
         lambda: fake_module.SentenceTransformer,
     )
@@ -629,7 +635,7 @@ def _install_fake_torch(
     fake_torch._inductor = types.SimpleNamespace(config=inductor_config)
     fake_torch.cuda = cuda_module
     fake_torch.backends = fake_backends
-    monkeypatch.setattr(embedding_module, "_import_torch", lambda: fake_torch)
+    monkeypatch.setattr(deps_module, "_import_torch", lambda: fake_torch)
 
     return bf16_token, autocast_log, fake_torch
 
@@ -638,14 +644,14 @@ def test_embedding_builder_requires_optional_deps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Embedding builder should fail with guidance when deps are missing."""
-    monkeypatch.setattr(embedding_module, "_import_torch", raise_import_error)
+    monkeypatch.setattr(deps_module, "_import_torch", raise_import_error)
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_sentence_transformer_class",
         raise_import_error,
     )
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_datasets_module",
         raise_import_error,
     )
@@ -676,14 +682,14 @@ def test_embedding_builder_requires_modern_torch(
     """Embedding builder should require torch>=2.9 for runtime precision policy."""
     fake_torch = types.ModuleType("torch")
     fake_torch.__version__ = "2.8.1"
-    monkeypatch.setattr(embedding_module, "_import_torch", lambda: fake_torch)
+    monkeypatch.setattr(deps_module, "_import_torch", lambda: fake_torch)
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_sentence_transformer_class",
         lambda: object,
     )
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_datasets_module",
         lambda: types.ModuleType("datasets"),
     )
@@ -700,7 +706,7 @@ def test_embedding_runtime_precision_compile_tf32_and_logging_contracts(
 ) -> None:
     """Runtime should enforce precision, compile, TF32, and logging policies."""
     monkeypatch.setattr(
-        "citemesh.strategies.embedding._module_available",
+        "citemesh.strategies.embedding.deps._module_available",
         lambda _module_name: False,
     )
 
@@ -1108,7 +1114,7 @@ def test_automatic_checkpoint_dtype_must_match_verified_runtime_policy(
             return iter(self._buffers)
 
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_sentence_transformer_class",
         lambda: _DtypeModel,
     )
@@ -1153,7 +1159,7 @@ def test_automatic_checkpoint_dtype_inspection_must_succeed(
             raise RuntimeError("parameters unavailable")
 
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_sentence_transformer_class",
         lambda: _OpaqueModel,
     )
@@ -1187,7 +1193,7 @@ def test_embedding_runtime_policy_keeps_fp32_fallback_unmodified(
         bf16_supported=False,
     )
     monkeypatch.setattr(
-        "citemesh.strategies.embedding._module_available",
+        "citemesh.strategies.embedding.deps._module_available",
         lambda module_name: module_name == "flash_attn",
     )
     accelerator_builder = EmbeddingGraphBuilder(
@@ -1215,7 +1221,7 @@ def test_embedding_runtime_policy_keeps_fp32_fallback_unmodified(
         bf16_supported=False,
     )
     monkeypatch.setattr(
-        "citemesh.strategies.embedding._module_available",
+        "citemesh.strategies.embedding.deps._module_available",
         lambda _module_name: True,
     )
     cpu_builder = EmbeddingGraphBuilder(
@@ -1399,7 +1405,7 @@ def test_attention_selection_uses_fa2_only_on_bf16_cuda(
         mps_available=True,
         torch_version="2.13.0",
     )
-    monkeypatch.setattr(embedding_module, "_module_available", lambda _name: installed)
+    monkeypatch.setattr(deps_module, "_module_available", lambda _name: installed)
     builder = EmbeddingGraphBuilder(device=device, client=MagicMock())
     builder._load_model()
     assert builder._attention_implementation_hint == expected
@@ -1428,7 +1434,7 @@ def test_fa2_load_failure_retries_same_checkpoint_with_sdpa(
     """
     _install_fake_sentence_transformers(monkeypatch)
     _install_fake_torch(monkeypatch, cuda_available=True, bf16_supported=True)
-    original_cls = embedding_module._import_sentence_transformer_class()
+    original_cls = deps_module._import_sentence_transformer_class()
     attempts = []
 
     def load(model_name: str, **kwargs: Any) -> Any:
@@ -1443,10 +1449,8 @@ def test_fa2_load_failure_retries_same_checkpoint_with_sdpa(
             raise error_type(message)
         return original_cls(model_name, **kwargs)
 
-    monkeypatch.setattr(embedding_module, "_module_available", lambda _name: True)
-    monkeypatch.setattr(
-        embedding_module, "_import_sentence_transformer_class", lambda: load
-    )
+    monkeypatch.setattr(deps_module, "_module_available", lambda _name: True)
+    monkeypatch.setattr(deps_module, "_import_sentence_transformer_class", lambda: load)
     builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
     builder._load_model()
     assert attempts == [
@@ -1488,10 +1492,8 @@ def test_fa2_load_unrelated_failure_does_not_retry_with_sdpa(
         attempts.append((model_name, dict(kwargs["model_kwargs"])))
         raise error_type("temporary checkpoint read failure")
 
-    monkeypatch.setattr(embedding_module, "_module_available", lambda _name: True)
-    monkeypatch.setattr(
-        embedding_module, "_import_sentence_transformer_class", lambda: load
-    )
+    monkeypatch.setattr(deps_module, "_module_available", lambda _name: True)
+    monkeypatch.setattr(deps_module, "_import_sentence_transformer_class", lambda: load)
     builder = EmbeddingGraphBuilder(device="cuda", client=MagicMock())
 
     with pytest.raises(
@@ -1542,7 +1544,7 @@ def test_non_tty_model_load_suppresses_transformers_progress_temporarily(
     _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
     transformers_logging = init_log["transformers_logging"]
     transformers_logging.progress_enabled = initially_enabled
-    original_cls = embedding_module._import_sentence_transformer_class()
+    original_cls = deps_module._import_sentence_transformer_class()
 
     def load(model_name: str, **kwargs: Any) -> Any:
         """Emit a fake progress frame only while the global bar is enabled.
@@ -1555,10 +1557,8 @@ def test_non_tty_model_load_suppresses_transformers_progress_temporarily(
             print("transformers progress frame", file=sys.stderr, end="\r")
         return original_cls(model_name, **kwargs)
 
-    monkeypatch.setattr(embedding_module, "stderr_isatty", lambda: interactive)
-    monkeypatch.setattr(
-        embedding_module, "_import_sentence_transformer_class", lambda: load
-    )
+    monkeypatch.setattr(runtime_module, "stderr_isatty", lambda: interactive)
+    monkeypatch.setattr(deps_module, "_import_sentence_transformer_class", lambda: load)
     EmbeddingGraphBuilder(client=MagicMock())._load_model()
 
     captured = capsys.readouterr()
@@ -1577,7 +1577,7 @@ def test_verified_fa2_autocast_filters_only_redundant_load_warning(
     """
     _install_fake_sentence_transformers(monkeypatch)
     _install_fake_torch(monkeypatch, cuda_available=True, bf16_supported=True)
-    original_cls = embedding_module._import_sentence_transformer_class()
+    original_cls = deps_module._import_sentence_transformer_class()
     transformers_logger = logging.getLogger("transformers.modeling_utils")
 
     def load(model_name: str, **kwargs: Any) -> Any:
@@ -1598,10 +1598,8 @@ def test_verified_fa2_autocast_filters_only_redundant_load_warning(
         transformers_logger.warning("independent Transformers load warning")
         return original_cls(model_name, **kwargs)
 
-    monkeypatch.setattr(embedding_module, "_module_available", lambda _name: True)
-    monkeypatch.setattr(
-        embedding_module, "_import_sentence_transformer_class", lambda: load
-    )
+    monkeypatch.setattr(deps_module, "_module_available", lambda _name: True)
+    monkeypatch.setattr(deps_module, "_import_sentence_transformer_class", lambda: load)
     handler = MagicMock(spec=logging.Handler)
     handler.level = logging.NOTSET
     transformers_logger.addHandler(handler)
@@ -1632,7 +1630,7 @@ def test_fa2_load_warning_filter_disabled_preserves_fp32_warning() -> None:
     transformers_logger.addHandler(handler)
 
     try:
-        with embedding_module._suppress_expected_fa2_load_dtype_warning(enabled=False):
+        with runtime_module._suppress_expected_fa2_load_dtype_warning(enabled=False):
             transformers_logger.warning(
                 "Flash Attention 2 only supports torch.float16 and torch.bfloat16 "
                 "dtypes, but the current dype is torch.float32."
@@ -1658,9 +1656,7 @@ def test_fa2_load_warning_filter_is_removed_after_failure() -> None:
 
     try:
         with pytest.raises(RuntimeError, match="load failed"):
-            with embedding_module._suppress_expected_fa2_load_dtype_warning(
-                enabled=True
-            ):
+            with runtime_module._suppress_expected_fa2_load_dtype_warning(enabled=True):
                 raise RuntimeError("load failed")
         transformers_logger.warning(
             "Flash Attention 2 only supports torch.float16 and torch.bfloat16 "
@@ -2187,7 +2183,7 @@ def test_embedding_fallback_rebinds_profile_before_model_load(
         bf16_supported=False,
     )
     monkeypatch.setattr(
-        embedding_module,
+        model_runtime_module,
         "DEFAULT_EMBEDDING_MODEL_FALLBACKS",
         {requested_model: (str(fallback_model),)},
     )
@@ -2233,7 +2229,7 @@ def test_embedding_fingerprint_uses_active_fallback_model_identity(
     fake_hf_module = types.ModuleType("huggingface_hub")
     fake_hf_module.HfApi = _FakeHfApi
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_huggingface_hub_module",
         lambda: fake_hf_module,
     )
@@ -2263,7 +2259,7 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
     """
     _install_fake_torch(monkeypatch, cuda_available=False, bf16_supported=False)
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
-    cache_dir = embedding_module.get_cache_dir("embeddings", create=False)
+    cache_dir = builder_module.get_cache_dir("embeddings", create=False)
     assert not cache_dir.exists()
     assert not builder.has_persistent_embedding_artifacts()
     assert builder._embedding_cache is None
@@ -2734,7 +2730,7 @@ def test_embedding_fingerprint_resolution_contracts(
     fake_hf_module = types.ModuleType("huggingface_hub")
     fake_hf_module.HfApi = _FailingHfApi
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_huggingface_hub_module",
         lambda: fake_hf_module,
     )
@@ -3096,7 +3092,7 @@ def test_metadata_and_streaming_loader_contracts(
     assert snapshot["year"] == 2023
     assert versioned["paper_id"] == "arxiv:1706.03762"
 
-    monkeypatch.setattr(embedding_module.os, "cpu_count", lambda: cpu_count)
+    monkeypatch.setattr(hydration_module.os, "cpu_count", lambda: cpu_count)
     load_calls: list[tuple[str, str, bool, int | None]] = []
 
     def fake_load_dataset(
@@ -3126,7 +3122,7 @@ def test_metadata_and_streaming_loader_contracts(
     fake_datasets = types.ModuleType("datasets")
     fake_datasets.load_dataset = fake_load_dataset
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_datasets_module",
         lambda: fake_datasets,
     )
@@ -3281,7 +3277,7 @@ def test_corpus_metadata_prefers_structured_authors_without_lab_fragments() -> N
 
 def test_arxiv_id_chronology_key_parses_both_styles() -> None:
     """Submission chronology must parse new-style, old-style, and prefixed IDs."""
-    key = embedding_module._arxiv_id_chronology_key
+    key = records_module._arxiv_id_chronology_key
     assert key("2508.01234") == (2025, 8, 1234)
     assert key("2508.01234v2") == (2025, 8, 1234)
     assert key("arXiv:1706.03762") == (2017, 6, 3762)
@@ -3309,7 +3305,7 @@ def test_embedding_dataset_ids_share_arxiv_recognition(
     raw_id: str, expected: str
 ) -> None:
     """Dataset ID normalization should use shared arXiv recognition rules."""
-    assert embedding_module._canonicalize_embedding_paper_id(raw_id) == expected
+    assert records_module._canonicalize_embedding_paper_id(raw_id) == expected
 
 
 @pytest.mark.parametrize(
@@ -3373,7 +3369,7 @@ def test_fresh_hydration_resume_skips_metadata_backfill(
     )
     monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
     monkeypatch.setattr(builder, "_get_model_for_encoding", ConstantEncodeModel)
-    monkeypatch.setattr(embedding_module, "HYDRATION_FLUSH_SIZE", 1)
+    monkeypatch.setattr(hydration_module, "HYDRATION_FLUSH_SIZE", 1)
     monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
     records = [
         {"id": "1706.03762", "title": "First", "abstract": "First abstract"},
@@ -3392,7 +3388,7 @@ def test_fresh_hydration_resume_skips_metadata_backfill(
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load)
     backfill = MagicMock()
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_datasets_module",
         lambda: types.SimpleNamespace(load_dataset=backfill),
     )
@@ -3440,7 +3436,7 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     model.encode = MagicMock(wraps=model.encode)
     monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
     monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
-    monkeypatch.setattr(embedding_module, "HYDRATION_FLUSH_SIZE", 1)
+    monkeypatch.setattr(hydration_module, "HYDRATION_FLUSH_SIZE", 1)
     cache = builder.embedding_cache
     if storage_precision == "int8":
         cache.set_calibration_ranges(
@@ -3473,7 +3469,7 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
 
     load_dataset = MagicMock(side_effect=lambda *args, **kwargs: source_rows())
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_datasets_module",
         lambda: types.SimpleNamespace(load_dataset=load_dataset),
     )
@@ -3487,7 +3483,7 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
         source,
         split="train",
         streaming=False,
-        num_proc=max(1, (embedding_module.os.cpu_count() or 1) // 2),
+        num_proc=max(1, (hydration_module.os.cpu_count() or 1) // 2),
     )
     assert cache.has_current_corpus_metadata()
     assert cache.get_cached_paper_ids() == {"arxiv:1210.8272"}
@@ -3543,9 +3539,7 @@ def test_capped_hydration_selects_newest_rows_by_arxiv_id(
     fake_datasets.load_dataset = lambda name, split, streaming=False, num_proc=None: (
         iter(records)
     )
-    monkeypatch.setattr(
-        embedding_module, "_import_datasets_module", lambda: fake_datasets
-    )
+    monkeypatch.setattr(deps_module, "_import_datasets_module", lambda: fake_datasets)
 
     builder = EmbeddingGraphBuilder(
         max_papers=1,
@@ -4127,7 +4121,7 @@ def test_local_search_does_not_create_semantic_scholar_client(
     :return None: Asserts local search completes without an S2 client.
     """
     client_factory = MagicMock()
-    monkeypatch.setattr(embedding_module, "get_client", client_factory)
+    monkeypatch.setattr(builder_module, "get_client", client_factory)
     builder = EmbeddingGraphBuilder(semantic_source="arxiv-corpus", client=None)
     cache = MagicMock()
     cache.hydration_operation_lock.return_value = nullcontext()
@@ -4156,7 +4150,7 @@ def test_embedding_client_is_lazy_and_preserves_injection(
     """
     default_client = MagicMock()
     client_factory = MagicMock(return_value=default_client)
-    monkeypatch.setattr(embedding_module, "get_client", client_factory)
+    monkeypatch.setattr(builder_module, "get_client", client_factory)
     lazy_builder = EmbeddingGraphBuilder(client=None)
 
     client_factory.assert_not_called()
@@ -4212,7 +4206,7 @@ def test_configured_dataset_source_replaces_previous_corpus(
         return_value=[{"id": "2609.03430", "title": "New corpus", "abstract": "A"}]
     )
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_datasets_module",
         lambda: types.SimpleNamespace(load_dataset=load),
     )
@@ -4226,7 +4220,7 @@ def test_configured_dataset_source_replaces_previous_corpus(
         source,
         split="train",
         streaming=False,
-        num_proc=max(1, (embedding_module.os.cpu_count() or 1) // 2),
+        num_proc=max(1, (hydration_module.os.cpu_count() or 1) // 2),
     )
     assert cache.get_cached_paper_ids() == {"arxiv:2609.03430"}
     assert cache.is_hydrated("train", corpus_size, dataset_source=source)
@@ -4261,7 +4255,7 @@ def test_dataset_load_failure_preserves_cache_without_fallback(
     )
     load = MagicMock(side_effect=RuntimeError("dataset unavailable"))
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_datasets_module",
         lambda: types.SimpleNamespace(load_dataset=load),
     )
@@ -4279,7 +4273,7 @@ def test_dataset_load_failure_preserves_cache_without_fallback(
         source,
         split="train",
         streaming=False,
-        num_proc=max(1, (embedding_module.os.cpu_count() or 1) // 2),
+        num_proc=max(1, (hydration_module.os.cpu_count() or 1) // 2),
     )
     assert cache.get_cached_paper_ids() == {"arxiv:1706.03762"}
     assert cache.get_hydrated_dataset_source() == "example/previous-arxiv"
@@ -4667,7 +4661,7 @@ def test_incomplete_selected_corpus_cache_resumes_without_clear(
     clear_cache_mock = MagicMock()
     monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
     monkeypatch.setattr(
-        embedding_module,
+        deps_module,
         "_import_datasets_module",
         lambda: types.SimpleNamespace(
             load_dataset=lambda *args, **kwargs: iter(records)
@@ -4833,7 +4827,9 @@ def test_initial_full_corpus_hydration_memoizes_duplicate_id_row_deficit(
         client=MagicMock(),
     )
     monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
-    monkeypatch.setattr("citemesh.strategies.embedding.HYDRATION_FLUSH_SIZE", 2)
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding.hydration.HYDRATION_FLUSH_SIZE", 2
+    )
     builder.embedding_cache.is_hydrated = MagicMock(return_value=False)
     builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=None)
     builder.embedding_cache.mark_hydrated = MagicMock()
@@ -5475,7 +5471,7 @@ def test_int8_hydration_calibration_uses_representative_prepass(
         {"id": f"p{idx}", "title": f"Title {idx}", "abstract": f"Abstract {idx}"}
         for idx in range(5)
     ]
-    dataset = embedding_module._import_datasets_module().Dataset.from_list(records)
+    dataset = deps_module._import_datasets_module().Dataset.from_list(records)
     load_mock = MagicMock(return_value=(source, dataset))
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
 
@@ -5605,7 +5601,9 @@ def test_hydration_flush_size_controls_cache_write_bursting(
     """Hydration should flush metadata batches using configured flush threshold."""
     assert embedding_module.HYDRATION_FLUSH_SIZE == EMBEDDING_DATASET_CHUNK_ROWS
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
-    monkeypatch.setattr("citemesh.strategies.embedding.HYDRATION_FLUSH_SIZE", 3)
+    monkeypatch.setattr(
+        "citemesh.strategies.embedding.hydration.HYDRATION_FLUSH_SIZE", 3
+    )
 
     builder = EmbeddingGraphBuilder(
         max_papers=2,
@@ -5648,7 +5646,7 @@ def test_hydration_prepares_next_batch_while_cache_write_runs(
         coordinated cache writer.
     :return None: Checks overlap, write ordering, and the final partial batch.
     """
-    monkeypatch.setattr(embedding_module, "HYDRATION_FLUSH_SIZE", 2)
+    monkeypatch.setattr(hydration_module, "HYDRATION_FLUSH_SIZE", 2)
     builder = EmbeddingGraphBuilder(
         max_papers=2,
         storage_precision="float32",
@@ -5703,7 +5701,7 @@ def test_hydration_cache_write_failure_preserves_completed_prefix(
     :param pytest.MonkeyPatch monkeypatch: Installs a deterministic failing writer.
     :return None: Checks only the successful prefix is completed before failure.
     """
-    monkeypatch.setattr(embedding_module, "HYDRATION_FLUSH_SIZE", 2)
+    monkeypatch.setattr(hydration_module, "HYDRATION_FLUSH_SIZE", 2)
     builder = EmbeddingGraphBuilder(
         max_papers=2,
         storage_precision="float32",
@@ -5740,7 +5738,7 @@ def test_hydration_cache_write_failure_preserves_completed_prefix(
         return len(batch)
 
     monkeypatch.setattr(builder, "_cache_metadata_batch", _cache_batch)
-    monkeypatch.setattr(embedding_module, "progress_task", _progress_task)
+    monkeypatch.setattr(hydration_module, "progress_task", _progress_task)
     dataset = [{"id": f"p{index}", "title": f"Paper {index}"} for index in range(5)]
 
     with pytest.raises(RuntimeError, match="cache write failed"):
@@ -6349,7 +6347,7 @@ def test_embedding_mps_never_probes_flash_attn(
         return True
 
     monkeypatch.setattr(
-        "citemesh.strategies.embedding._module_available", _record_probe
+        "citemesh.strategies.embedding.deps._module_available", _record_probe
     )
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
 
@@ -6609,13 +6607,13 @@ def test_embedding_real_cpu_compile_executes_graphs(
     torch = pytest.importorskip("torch")
     from torch._inductor import config as inductor_config
 
-    if compute_dtype == "bfloat16" and not embedding_module._cpu_native_bf16_supported(
+    if compute_dtype == "bfloat16" and not runtime_module._cpu_native_bf16_supported(
         torch
     ):
         pytest.skip("Native CPU BF16 unavailable")
     if compute_dtype == "float32":
         monkeypatch.setattr(
-            embedding_module, "_cpu_native_bf16_supported", lambda _: False
+            runtime_module, "_cpu_native_bf16_supported", lambda _: False
         )
     previous_threads = torch.get_num_threads()
     try:
