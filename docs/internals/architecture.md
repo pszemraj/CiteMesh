@@ -111,17 +111,20 @@ behavior are described in [Output Artifacts](../reference/output-artifacts.md).
 ### Caching Support
 
 - `src/citemesh/data/cache.py` resolves user-scoped cache roots.
-- `src/citemesh/data/embedding_cache.py` manages SQLite metadata and HDF5 embedding
+- `src/citemesh/data/embedding_cache/` manages SQLite metadata and HDF5 embedding
   datasets.
 - `src/citemesh/data/model_profiles.py` stores model-specific runtime profile metadata.
 
 On-disk layout and invalidation behavior are documented in [Caching & Data](../guides/caching.md).
 
-### Service Client (`src/citemesh/services/semantic_scholar.py`)
+### Service Client (`src/citemesh/services/semantic_scholar/`)
 
 - Wraps Semantic Scholar API calls with retries and rate-limit handling.
 - Handles reference-list caching integration.
 - Exposes `get_client()` for strategy use.
+- Split into `client.py` (transport and endpoints), `retry.py` (backoff policy),
+  `disk_cache.py` (persisted reference/paper caches), `payloads.py` (payload
+  parsing and conversion), and `errors.py` (failure taxonomy).
 
 ## External Dependencies
 

@@ -18,10 +18,10 @@ Related docs:
 
 Implementation references:
 
-- [Semantic Scholar API key lookup](../../src/citemesh/services/semantic_scholar.py)
+- [Semantic Scholar API key lookup](../../src/citemesh/services/semantic_scholar/client.py)
 - [Cache-root override handling](../../src/citemesh/data/cache.py)
 - [User config precedence handling](../../src/citemesh/core/user_config.py)
-- [Embedding lock-timeout handling](../../src/citemesh/data/embedding_cache.py)
+- [Embedding lock-timeout handling](../../src/citemesh/data/embedding_cache/constants.py)
 
 ## Platform Variables Respected by Cache-Root Resolution
 

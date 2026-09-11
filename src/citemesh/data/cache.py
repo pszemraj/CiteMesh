@@ -281,6 +281,21 @@ def atomic_write_json(
     _atomic_write_text_payload(path, writer, newline=None)
 
 
+def read_json_object(path: Path) -> dict[str, Any] | None:
+    """Read a JSON object from disk, treating any unusable payload as absent.
+
+    :param Path path: JSON file path to read.
+    :return dict[str, Any] | None: Parsed mapping, or ``None`` when the file
+        cannot be read or decoded (``OSError``, ``UnicodeDecodeError``,
+        ``json.JSONDecodeError``) or its parsed value is not a JSON object.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def format_bytes(num_bytes: int) -> str:
     """Format byte counts into readable binary units.
 
