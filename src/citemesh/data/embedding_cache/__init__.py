@@ -10,12 +10,23 @@ The cache is split across focused modules and re-exported here so
 - :mod:`.layout` — SQLite schema and HDF5 physical-layout management.
 - :mod:`.recovery` — locking, connections, and crash recovery.
 - :mod:`.search` — the query-time scoring kernel.
+- :mod:`.ingest` — the cache-miss/encode/commit ingestion pipeline.
 - :mod:`.store` — the :class:`EmbeddingCache` facade and public API.
 """
 
 from __future__ import annotations
 
-from . import constants, layout, models, quantization, recovery, search, sql, store
+from . import (
+    constants,
+    ingest,
+    layout,
+    models,
+    quantization,
+    recovery,
+    search,
+    sql,
+    store,
+)
 from .constants import (
     BINARY_INDEX_DATASET_NAME,
     BINARY_INDEX_ENCODING,
@@ -107,6 +118,7 @@ __all__ = [
     "EmbeddingCache",
     "PendingEmbeddingRecord",
     "constants",
+    "ingest",
     "layout",
     "models",
     "quantization",
