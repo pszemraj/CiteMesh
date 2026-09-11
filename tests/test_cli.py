@@ -109,6 +109,34 @@ def _run_captured_cli(entrypoint: Any) -> SimpleNamespace:
     )
 
 
+def flatten_console_text(text: str) -> str:
+    """Collapse Rich's soft line wrapping so phrase assertions survive re-wrapping.
+
+    Log records render through ``RichHandler`` at a fixed 140-column width, so a
+    long interpolated path pushes later words onto the next line and splits
+    asserted phrases. Collapsing every whitespace run makes those assertions
+    independent of how much of the line the path consumed.
+
+    :param str text: Captured stdout or stderr from a CLI run.
+    :return str: Text with each whitespace run replaced by a single space.
+    """
+    return " ".join(text.split())
+
+
+def unwrapped_console_token(text: str) -> str:
+    """Drop every whitespace character so a hard-folded long token rejoins.
+
+    Rich folds a token longer than the remaining line without inserting a
+    separator, so a temporary-directory path can be split mid-segment. Removing
+    whitespace entirely restores such tokens; use this only to look for values
+    that contain no whitespace of their own, such as filesystem paths.
+
+    :param str text: Captured stdout or stderr from a CLI run.
+    :return str: Text with every whitespace character removed.
+    """
+    return "".join(text.split())
+
+
 def _make_builder_stub(
     captured_kwargs: dict[str, object],
     *,
@@ -375,12 +403,13 @@ def test_view_rejects_missing_or_non_html_results(
     result = run_cli_command(["view", target])
 
     assert result.returncode == 1
-    assert target in result.stderr
+    flat_stderr = flatten_console_text(result.stderr)
+    assert target in unwrapped_console_token(result.stderr)
     if target == "graph.json":
-        assert "HTML" in result.stderr
-        assert "Add Results" in result.stderr
+        assert "HTML" in flat_stderr
+        assert "Add Results" in flat_stderr
     else:
-        assert "Cannot read saved results" in result.stderr
+        assert "Cannot read saved results" in flat_stderr
     open_default.assert_not_called()
 
 
@@ -410,8 +439,8 @@ def test_view_reports_browser_launch_failure(
     result = run_cli_command(arguments)
 
     assert result.returncode == 1
-    assert "browser" in result.stderr.lower()
-    assert str(saved_html) in result.stderr
+    assert "browser" in flatten_console_text(result.stderr).lower()
+    assert str(saved_html) in unwrapped_console_token(result.stderr)
 
 
 def test_cache_commands_contracts(
@@ -453,13 +482,13 @@ def test_cache_commands_contracts(
         "TOTAL",
         "Cache root:",
     ]:
-        assert token in scan_result.stdout
+        assert token in flatten_console_text(scan_result.stdout)
 
     scan_debug_result = run_cli_command(["cache", "scan", "--log-level", "debug"])
     assert scan_debug_result.returncode == 0, (
         f"STDOUT: {scan_debug_result.stdout}\nSTDERR: {scan_debug_result.stderr}"
     )
-    assert "CiteMesh Cache Scan" in scan_debug_result.stdout
+    assert "CiteMesh Cache Scan" in flatten_console_text(scan_debug_result.stdout)
 
     clear_result = run_cli_command(
         ["cache", "clear", "--yes", "--reason", "manual local reset"]
@@ -938,7 +967,7 @@ def test_search_mode_local_prints_cached_results(
     result = run_cli_command(["search", "cached topic", "--mode", "local", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     # Rich folds table cells at console width; compare on whitespace-normalized text.
-    plain_stdout = " ".join(result.stdout.split())
+    plain_stdout = flatten_console_text(result.stdout)
     assert "Local semantic search for 'cached topic'" in plain_stdout
     assert _FAKE_LOCAL_RESULT.paper_id in plain_stdout
     assert "0.876" in plain_stdout
@@ -1222,7 +1251,9 @@ def test_search_namespace_flag_implies_local_mode(
 
     result = run_cli_command(["search", "cached topic", *namespace_args])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    assert "Local semantic search for 'cached topic'" in " ".join(result.stdout.split())
+    assert "Local semantic search for 'cached topic'" in flatten_console_text(
+        result.stdout
+    )
     assert builder_factory.call_args.kwargs[expected_kwarg] == expected_value
     client_factory.assert_not_called()
 
@@ -1244,7 +1275,9 @@ def test_search_auto_uses_local_when_cache_populated(
 
     result = run_cli_command(["search", "cached topic", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    assert "Local semantic search for 'cached topic'" in " ".join(result.stdout.split())
+    assert "Local semantic search for 'cached topic'" in flatten_console_text(
+        result.stdout
+    )
     notices = str(info_mock.call_args_list)
     assert "locally cached embeddings" in notices
     assert "--mode s2" in notices
@@ -4289,7 +4322,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
         assert result.stderr == ""
         assert "\x1b[" not in result.stdout
         assert max(map(len, result.stdout.splitlines())) <= width
-        lowered = " ".join(result.stdout.lower().split())
+        lowered = flatten_console_text(result.stdout).lower()
         for token in expected_tokens:
             assert token.lower() in lowered
 

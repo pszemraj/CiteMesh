@@ -27,6 +27,11 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
 import tomli_w
 from filelock import FileLock, Timeout
 
+from citemesh.core.validation import (
+    ValueValidationError,
+    parse_bounded_int,
+    parse_unit_interval_float,
+)
 from citemesh.data.cache import atomic_write_text, get_cache_dir
 
 logger = logging.getLogger(__name__)
@@ -118,18 +123,10 @@ def _int_caster(minimum: int) -> Callable[[Any], int]:
         :param Any value: Raw TOML or CLI-provided value.
         :return int: Parsed integer greater than or equal to ``minimum``.
         """
-        if isinstance(value, bool):
-            raise ConfigValueError("expected an integer, got a boolean")
-        if isinstance(value, str):
-            try:
-                value = int(value.strip())
-            except ValueError as exc:
-                raise ConfigValueError("expected an integer") from exc
-        if not isinstance(value, int):
-            raise ConfigValueError("expected an integer")
-        if value < minimum:
-            raise ConfigValueError(f"expected an integer >= {minimum}")
-        return value
+        try:
+            return parse_bounded_int(value, minimum=minimum)
+        except ValueValidationError as exc:
+            raise ConfigValueError(str(exc)) from exc
 
     return _cast
 
@@ -161,15 +158,14 @@ def _cast_similarity(value: Any) -> float:
     :param Any value: Raw TOML or CLI-provided value.
     :return float: Threshold between zero and one, inclusive.
     """
-    if isinstance(value, bool):
-        raise ConfigValueError("expected a float, got a boolean")
     try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ConfigValueError("expected a float") from exc
-    if not 0.0 <= parsed <= 1.0:
-        raise ConfigValueError("expected a finite float between 0.0 and 1.0")
-    return parsed
+        return parse_unit_interval_float(value)
+    except ValueValidationError as exc:
+        if exc.reason in {"not_finite", "out_of_range"}:
+            raise ConfigValueError(
+                "expected a finite float between 0.0 and 1.0"
+            ) from exc
+        raise ConfigValueError(str(exc)) from exc
 
 
 def _cast_export(value: Any) -> list[str]:

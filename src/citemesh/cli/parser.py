@@ -8,7 +8,6 @@ which builds the full command tree.
 from __future__ import annotations
 
 import argparse
-import math
 import shutil
 import sys
 from pathlib import Path
@@ -23,6 +22,11 @@ from rich_argparse import RichHelpFormatter
 from citemesh import __version__
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG
 from citemesh.core.user_config import SEARCH_MODE_CHOICES
+from citemesh.core.validation import (
+    ValueValidationError,
+    parse_bounded_int,
+    parse_unit_interval_float,
+)
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME, EMBEDDING_MODEL_PROFILE_CHOICES
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
@@ -242,15 +246,12 @@ def _bounded_int(value: str, *, minimum: int) -> int:
     :return int: Parsed integer.
     :raises argparse.ArgumentTypeError: If parsing fails or value is below minimum.
     """
-    if isinstance(value, bool):
-        raise argparse.ArgumentTypeError("must be an integer")
     try:
-        parsed = int(value)
-    except ValueError as exc:
+        return parse_bounded_int(value, minimum=minimum)
+    except ValueValidationError as exc:
+        if exc.reason == "below_minimum":
+            raise argparse.ArgumentTypeError(f"must be at least {minimum}") from exc
         raise argparse.ArgumentTypeError("must be an integer") from exc
-    if parsed < minimum:
-        raise argparse.ArgumentTypeError(f"must be at least {minimum}")
-    return parsed
 
 
 def _positive_int(value: str) -> int:
@@ -278,17 +279,14 @@ def _threshold_float(value: str) -> float:
     :return float: Parsed threshold value.
     :raises argparse.ArgumentTypeError: If value is outside [0, 1].
     """
-    if isinstance(value, bool):
-        raise argparse.ArgumentTypeError("must be a float")
     try:
-        parsed = float(value)
-    except ValueError as exc:
+        return parse_unit_interval_float(value)
+    except ValueValidationError as exc:
+        if exc.reason == "not_finite":
+            raise argparse.ArgumentTypeError("must be a finite float") from exc
+        if exc.reason == "out_of_range":
+            raise argparse.ArgumentTypeError("must be between 0.0 and 1.0") from exc
         raise argparse.ArgumentTypeError("must be a float") from exc
-    if not math.isfinite(parsed):
-        raise argparse.ArgumentTypeError("must be a finite float")
-    if parsed < 0.0 or parsed > 1.0:
-        raise argparse.ArgumentTypeError("must be between 0.0 and 1.0")
-    return parsed
 
 
 def _non_empty_str(value: str) -> str:
@@ -345,17 +343,11 @@ def _add_logging_arguments(
     )
 
 
-def _create_parser() -> tuple[
-    argparse.ArgumentParser,
-    argparse.ArgumentParser,
-    argparse.ArgumentParser,
-    argparse.ArgumentParser,
-]:
-    """Create and return the root parser and key subcommand parsers.
+def _create_root_parser() -> tuple[_ArgumentParser, argparse._SubParsersAction]:
+    """Build the root ``citemesh`` parser and its command subparser action.
 
-    :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
-        Root parser, build subcommand parser, cache subcommand parser,
-        config subcommand parser.
+    :return tuple[_ArgumentParser, argparse._SubParsersAction]: Root parser and
+        the subparser action every command attaches itself to.
     """
     parser = _ArgumentParser(
         prog="citemesh",
@@ -393,50 +385,18 @@ def _create_parser() -> tuple[
         metavar="COMMAND",
     )
 
-    # Build command
-    build_parser = subparsers.add_parser(
-        "build",
-        help="Build a graph from a paper or topic",
-        description="Discover related papers using recommendations, citations, embeddings, or a hybrid of citations and embeddings.",
-        epilog=_help_examples(
-            (
-                "Create or extend the dashboard collection in out/",
-                'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard',
-            ),
-            (
-                "Search 10,000 recent papers by topic",
-                'citemesh build "long-context models" -s embedding --corpus-size 10000',
-            ),
-        ),
-    )
+    return parser, subparsers
 
-    # Required arguments
-    build_parser.add_argument(
-        "paper_id",
-        type=_non_empty_str,
-        metavar="PAPER",
-        help="DOI, arXiv ID/URL, S2 ID, or free text with --strategy embedding",
-    )
 
-    graph_group = build_parser.add_argument_group("Graph")
-    graph_group.add_argument(
-        "--refresh-paper-cache",
-        action="store_true",
-        help="Fetch fresh S2 paper metadata and citation counts, retaining embedding caches.",
-    )
-    export_group = build_parser.add_argument_group("Output")
-    citation_group = build_parser.add_argument_group("Citations and references")
-    semantic_group = build_parser.add_argument_group(
-        "Semantic discovery", "For embedding and hybrid strategies."
-    )
-    embedding_group = build_parser.add_argument_group("Embedding runtime")
-    corpus_group = build_parser.add_argument_group(
-        "arXiv corpus",
-        "These options select arxiv-corpus sourcing when --semantic-source is omitted.",
-    )
-    storage_group = build_parser.add_argument_group("Embedding cache")
-    hybrid_group = build_parser.add_argument_group("Hybrid expansion")
+def _add_build_graph_arguments(
+    graph_group: argparse._ArgumentGroup, export_group: argparse._ArgumentGroup
+) -> None:
+    """Add strategy selection and the export/output options shared by every strategy.
 
+    :param argparse._ArgumentGroup graph_group: "Graph" help section.
+    :param argparse._ArgumentGroup export_group: "Output" help section.
+    :return None: Mutates the groups in place.
+    """
     # Strategy selection
     graph_group.add_argument(
         "--strategy",
@@ -528,6 +488,15 @@ def _create_parser() -> tuple[
         help="Include generation timestamp in output metadata annotations",
     )
 
+
+def _add_build_citation_arguments(
+    citation_group: argparse._ArgumentGroup,
+) -> None:
+    """Add the citation/reference traversal options.
+
+    :param argparse._ArgumentGroup citation_group: "Citations and references" section.
+    :return None: Mutates the group in place.
+    """
     # Citation strategy arguments
     citation_group.add_argument(
         "--max-citations",
@@ -576,6 +545,22 @@ def _create_parser() -> tuple[
         ),
     )
 
+
+def _add_build_corpus_arguments(
+    build_parser: argparse.ArgumentParser,
+    embedding_group: argparse._ArgumentGroup,
+    corpus_group: argparse._ArgumentGroup,
+    semantic_group: argparse._ArgumentGroup,
+) -> None:
+    """Add embedding model selection and arXiv corpus sourcing options.
+
+    :param argparse.ArgumentParser build_parser: Build parser carrying the
+        streaming tri-state default.
+    :param argparse._ArgumentGroup embedding_group: "Embedding runtime" section.
+    :param argparse._ArgumentGroup corpus_group: "arXiv corpus" section.
+    :param argparse._ArgumentGroup semantic_group: "Semantic discovery" section.
+    :return None: Mutates the parser and groups in place.
+    """
     # Embedding strategy arguments
     embedding_group.add_argument(
         "--model",
@@ -687,6 +672,18 @@ def _create_parser() -> tuple[
     )
     build_parser.set_defaults(streaming=False)
 
+
+def _add_build_cache_arguments(
+    build_parser: argparse.ArgumentParser,
+    storage_group: argparse._ArgumentGroup,
+) -> None:
+    """Add embedding cache storage, precision, and prefilter options.
+
+    :param argparse.ArgumentParser build_parser: Build parser carrying the
+        binary-prefilter tri-state default.
+    :param argparse._ArgumentGroup storage_group: "Embedding cache" section.
+    :return None: Mutates the parser and group in place.
+    """
     storage_group.add_argument(
         "--force-rebuild-cache",
         action="store_true",
@@ -776,6 +773,20 @@ def _create_parser() -> tuple[
         ),
     )
 
+
+def _add_build_runtime_arguments(
+    build_parser: argparse.ArgumentParser,
+    embedding_group: argparse._ArgumentGroup,
+    semantic_group: argparse._ArgumentGroup,
+) -> None:
+    """Add encode-time runtime options: batching, compile, pool size, and device.
+
+    :param argparse.ArgumentParser build_parser: Build parser carrying the
+        torch-compile tri-state default.
+    :param argparse._ArgumentGroup embedding_group: "Embedding runtime" section.
+    :param argparse._ArgumentGroup semantic_group: "Semantic discovery" section.
+    :return None: Mutates the parser and groups in place.
+    """
     embedding_group.add_argument(
         "--batch-size",
         "-bs",
@@ -841,6 +852,15 @@ def _create_parser() -> tuple[
         ),
     )
 
+
+def _add_build_hybrid_arguments(
+    hybrid_group: argparse._ArgumentGroup,
+) -> None:
+    """Add the hybrid expansion budget option.
+
+    :param argparse._ArgumentGroup hybrid_group: "Hybrid expansion" section.
+    :return None: Mutates the group in place.
+    """
     # Hybrid strategy arguments
     hybrid_group.add_argument(
         "--max-semantic",
@@ -853,6 +873,83 @@ def _create_parser() -> tuple[
         ),
     )
 
+
+def _add_build_arguments(
+    subparsers: argparse._SubParsersAction,
+) -> argparse.ArgumentParser:
+    """Add the ``build`` subcommand and every option it accepts.
+
+    Argument groups are created up front because help sections render in
+    creation order, while each group's options render in the order they are
+    added; the per-section helpers below therefore run in argv-documentation
+    order rather than group order.
+
+    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :return argparse.ArgumentParser: The ``build`` subcommand parser.
+    """
+    # Build command
+    build_parser = subparsers.add_parser(
+        "build",
+        help="Build a graph from a paper or topic",
+        description="Discover related papers using recommendations, citations, embeddings, or a hybrid of citations and embeddings.",
+        epilog=_help_examples(
+            (
+                "Create or extend the dashboard collection in out/",
+                'citemesh build "arxiv:1706.03762" -s hybrid -e dashboard',
+            ),
+            (
+                "Search 10,000 recent papers by topic",
+                'citemesh build "long-context models" -s embedding --corpus-size 10000',
+            ),
+        ),
+    )
+
+    # Required arguments
+    build_parser.add_argument(
+        "paper_id",
+        type=_non_empty_str,
+        metavar="PAPER",
+        help="DOI, arXiv ID/URL, S2 ID, or free text with --strategy embedding",
+    )
+
+    graph_group = build_parser.add_argument_group("Graph")
+    graph_group.add_argument(
+        "--refresh-paper-cache",
+        action="store_true",
+        help="Fetch fresh S2 paper metadata and citation counts, retaining embedding caches.",
+    )
+    export_group = build_parser.add_argument_group("Output")
+    citation_group = build_parser.add_argument_group("Citations and references")
+    semantic_group = build_parser.add_argument_group(
+        "Semantic discovery", "For embedding and hybrid strategies."
+    )
+    embedding_group = build_parser.add_argument_group("Embedding runtime")
+    corpus_group = build_parser.add_argument_group(
+        "arXiv corpus",
+        "These options select arxiv-corpus sourcing when --semantic-source is omitted.",
+    )
+    storage_group = build_parser.add_argument_group("Embedding cache")
+    hybrid_group = build_parser.add_argument_group("Hybrid expansion")
+
+    _add_build_graph_arguments(graph_group, export_group)
+    _add_build_citation_arguments(citation_group)
+    _add_build_corpus_arguments(
+        build_parser, embedding_group, corpus_group, semantic_group
+    )
+    _add_build_cache_arguments(build_parser, storage_group)
+    _add_build_runtime_arguments(build_parser, embedding_group, semantic_group)
+    _add_build_hybrid_arguments(hybrid_group)
+    return build_parser
+
+
+def _add_view_arguments(
+    subparsers: argparse._SubParsersAction,
+) -> argparse.ArgumentParser:
+    """Add the ``view`` subcommand.
+
+    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :return argparse.ArgumentParser: The ``view`` subcommand parser.
+    """
     view_parser = subparsers.add_parser(
         "view",
         help="Open saved results in a browser",
@@ -877,7 +974,17 @@ def _create_parser() -> tuple[
         help="Browser name, such as google-chrome (default: system browser)",
     )
 
-    # Search subcommand
+    return view_parser
+
+
+def _add_search_arguments(
+    subparsers: argparse._SubParsersAction,
+) -> argparse.ArgumentParser:
+    """Add the ``search`` subcommand.
+
+    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :return argparse.ArgumentParser: The ``search`` subcommand parser.
+    """
     search_parser = subparsers.add_parser(
         "search",
         help="Search papers (local semantic index or the Semantic Scholar API)",
@@ -953,6 +1060,19 @@ def _create_parser() -> tuple[
         default=None,
         help="auto, cuda, mps, cpu for query encoding (implies --mode local)",
     )
+
+    return search_parser
+
+
+def _add_cache_arguments(
+    subparsers: argparse._SubParsersAction,
+) -> tuple[argparse.ArgumentParser, list[tuple[argparse.ArgumentParser, str]]]:
+    """Add the ``cache`` subcommand and its ``clear``/``scan`` operations.
+
+    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :return tuple[argparse.ArgumentParser, list[tuple[argparse.ArgumentParser, str]]]:
+        The ``cache`` parser and the usage synopses it owns, in help order.
+    """
     cache_parser = subparsers.add_parser(
         "cache",
         help="Inspect or clear local caches",
@@ -990,7 +1110,22 @@ def _create_parser() -> tuple[
         description="Show the cache root, usage by section, and total disk space.",
     )
 
-    # Config subcommand
+    return cache_parser, [
+        (cache_parser, "COMMAND [options]"),
+        (cache_clear_parser, "[options]"),
+        (cache_scan_parser, "[options]"),
+    ]
+
+
+def _add_config_arguments(
+    subparsers: argparse._SubParsersAction,
+) -> tuple[argparse.ArgumentParser, list[tuple[argparse.ArgumentParser, str]]]:
+    """Add the ``config`` subcommand and its list/get/set/unset/path operations.
+
+    :param argparse._SubParsersAction subparsers: Root command subparser action.
+    :return tuple[argparse.ArgumentParser, list[tuple[argparse.ArgumentParser, str]]]:
+        The ``config`` parser and the usage synopses it owns, in help order.
+    """
     config_parser = subparsers.add_parser(
         "config",
         help="View or change personal defaults",
@@ -1056,52 +1191,102 @@ def _create_parser() -> tuple[
         "path",
         help="Print the config file path",
     )
-    for command_parser, synopsis in (
-        (parser, "COMMAND [options]"),
-        (build_parser, "PAPER [options]"),
-        (view_parser, "[PATH] [options]"),
-        (search_parser, "QUERY [options]"),
-        (cache_parser, "COMMAND [options]"),
-        (cache_clear_parser, "[options]"),
-        (cache_scan_parser, "[options]"),
+
+    return config_parser, [
         (config_parser, "COMMAND [options]"),
         (config_list_parser, "[options]"),
         (config_get_parser, "KEY [options]"),
         (config_set_parser, "KEY VALUE [options]"),
         (config_unset_parser, "KEY [options]"),
         (config_path_parser, "[options]"),
+    ]
+
+
+def _normalize_action_metavars(command_parser: argparse.ArgumentParser) -> None:
+    """Give every action an explicit metavar so help columns stay predictable.
+
+    Positionals fall back to their upper-cased destination; free-text options
+    get a short placeholder keyed by destination so ``--output PATH`` reads
+    better than ``--output OUTPUT``.
+
+    :param argparse.ArgumentParser command_parser: Parser whose actions are labeled.
+    :return None: Mutates each action's ``metavar`` in place.
+    """
+    for action in command_parser._actions:
+        if not action.option_strings and not isinstance(
+            action, argparse._SubParsersAction
+        ):
+            action.metavar = (
+                action.dest.upper() if action.metavar is None else action.metavar
+            )
+        elif (
+            action.option_strings
+            and action.type in (str, _non_empty_str)
+            and action.choices is None
+        ):
+            action.metavar = {
+                "output": "PATH",
+                "log_file": "PATH",
+                "model": "MODEL",
+                "model_revision": "REV",
+                "dataset_source": "DATASET",
+                "dataset_split": "SPLIT",
+                "browser": "NAME",
+            }.get(action.dest, "TEXT")
+
+
+def _finalize_command_parser(
+    command_parser: argparse.ArgumentParser, synopsis: str, *, is_root: bool
+) -> None:
+    """Apply the shared help chrome to one command parser.
+
+    :param argparse.ArgumentParser command_parser: Parser to finalize.
+    :param str synopsis: Usage suffix rendered after the program name.
+    :param bool is_root: Whether this is the root parser, which keeps logging
+        defaults instead of suppressing them.
+    :return None: Mutates the parser's help presentation in place.
+    """
+    command_parser.formatter_class = _HelpFormatter
+    command_parser.usage = f"%(prog)s {synopsis}"
+    command_parser._positionals.title = "Arguments"
+    command_parser._optionals.title = "Options"
+    _add_logging_arguments(command_parser, suppress_defaults=not is_root)
+    command_parser._action_groups.sort(
+        key=lambda group: {"Options": 1, "Logging": 2}.get(group.title, 0)
+    )
+    _normalize_action_metavars(command_parser)
+
+
+def _create_parser() -> tuple[
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
+    argparse.ArgumentParser,
+]:
+    """Create and return the root parser and key subcommand parsers.
+
+    :return Tuple[argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser, argparse.ArgumentParser]:
+        Root parser, build subcommand parser, cache subcommand parser,
+        config subcommand parser.
+    """
+    parser, subparsers = _create_root_parser()
+    build_parser = _add_build_arguments(subparsers)
+    view_parser = _add_view_arguments(subparsers)
+    search_parser = _add_search_arguments(subparsers)
+    cache_parser, cache_synopses = _add_cache_arguments(subparsers)
+    config_parser, config_synopses = _add_config_arguments(subparsers)
+
+    for command_parser, synopsis in (
+        (parser, "COMMAND [options]"),
+        (build_parser, "PAPER [options]"),
+        (view_parser, "[PATH] [options]"),
+        (search_parser, "QUERY [options]"),
+        *cache_synopses,
+        *config_synopses,
     ):
-        command_parser.formatter_class = _HelpFormatter
-        command_parser.usage = f"%(prog)s {synopsis}"
-        command_parser._positionals.title = "Arguments"
-        command_parser._optionals.title = "Options"
-        _add_logging_arguments(
-            command_parser, suppress_defaults=command_parser is not parser
+        _finalize_command_parser(
+            command_parser, synopsis, is_root=command_parser is parser
         )
-        command_parser._action_groups.sort(
-            key=lambda group: {"Options": 1, "Logging": 2}.get(group.title, 0)
-        )
-        for action in command_parser._actions:
-            if not action.option_strings and not isinstance(
-                action, argparse._SubParsersAction
-            ):
-                action.metavar = (
-                    action.dest.upper() if action.metavar is None else action.metavar
-                )
-            elif (
-                action.option_strings
-                and action.type in (str, _non_empty_str)
-                and action.choices is None
-            ):
-                action.metavar = {
-                    "output": "PATH",
-                    "log_file": "PATH",
-                    "model": "MODEL",
-                    "model_revision": "REV",
-                    "dataset_source": "DATASET",
-                    "dataset_split": "SPLIT",
-                    "browser": "NAME",
-                }.get(action.dest, "TEXT")
 
     _instrument_parser_actions(parser)
     return parser, build_parser, cache_parser, config_parser
