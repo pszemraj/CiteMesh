@@ -8,7 +8,8 @@ from .._lazy import install_lazy_exports
 
 if TYPE_CHECKING:
     from .export import GraphExporter
-    from .render import compute_layout, generate_output_path, visualize_graph
+    from .paths import generate_output_path
+    from .render import compute_layout, visualize_graph
     from .themes import THEMES, get_theme
 
 __all__ = [
@@ -25,7 +26,7 @@ __all__ = [
 __getattr__, __dir__ = install_lazy_exports(
     globals(),
     {
-        "generate_output_path": (".render", "generate_output_path"),
+        "generate_output_path": (".paths", "generate_output_path"),
         "visualize_graph": (".render", "visualize_graph"),
         "compute_layout": (".render", "compute_layout"),
         "GraphExporter": (".export", "GraphExporter"),

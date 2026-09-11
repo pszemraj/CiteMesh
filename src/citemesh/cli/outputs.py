@@ -11,12 +11,12 @@ from pathlib import Path
 
 import networkx as nx
 
-from citemesh.visualization import generate_output_path
 from citemesh.visualization.dashboard.package import (
     DASHBOARD_COLLECTION_FILENAME,
     DASHBOARD_PACKAGE_FILENAME,
     LEGACY_DASHBOARD_MANIFEST_FILENAME,
 )
+from citemesh.visualization.paths import generate_output_path
 
 __all__ = [
     "DASHBOARD_COLLECTION_FILENAME",
