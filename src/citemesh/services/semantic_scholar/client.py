@@ -15,7 +15,7 @@ import re
 import threading
 import time
 import weakref
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -34,6 +34,7 @@ from tenacity import (
     retry_if_not_exception_type,
     stop_after_attempt,
 )
+from tenacity.retry import retry_base
 
 from citemesh.core import API_CONFIG, Paper
 from citemesh.data.cache import atomic_write_json
@@ -287,6 +288,102 @@ class SemanticScholarClient:
         """
         return retry._is_rate_limit_error(error)
 
+    def _run_with_retries(
+        self,
+        operation: Callable[[], Any],
+        *,
+        failure_domain: _FailureDomain,
+        predicate: retry_base,
+        on_skip: Callable[
+            [_CandidateOperationSkippedError, SemanticScholarUnavailableError], Any
+        ],
+        on_retry: Callable[[RetryCallState, Exception | None, float], None],
+        on_exhausted: Callable[[Exception], Any],
+        caught: tuple[type[Exception], ...] = (Exception,),
+    ) -> Any:
+        """Drive one API operation through the shared retry schedule.
+
+        Both transports share the per-capability circuit breaker, the attempt
+        budget, the jittered backoff, and the outage-scale wait warning. They
+        differ only in which failures are retryable and in what a skipped or
+        exhausted budget means, which the caller supplies as callbacks.
+
+        :param Callable[[], Any] operation: Zero-argument API operation to execute.
+        :param _FailureDomain failure_domain: Capability sharing this retry budget.
+        :param retry_base predicate: Tenacity predicate selecting retryable failures.
+        :param Callable[..., Any] on_skip: Policy applied when this capability already
+            failed in the active scope, receiving the skip error and that outage.
+        :param Callable[[RetryCallState, Exception | None, float], None] on_retry:
+            Callback invoked before each sleep with the retry state, the triggering
+            exception, and the upcoming wait in seconds.
+        :param Callable[[Exception], Any] on_exhausted: Policy applied to the final
+            failure; it decides when to record the outage and whether to raise.
+        :param tuple[type[Exception], ...] caught: Exception types routed to
+            ``on_exhausted``; anything else propagates to the caller unchanged.
+        :return Any: Result of ``operation``, or of one of the policy callbacks.
+        """
+        scope_failure = self._candidate_operation_failure(failure_domain)
+        if scope_failure is not None:
+            return on_skip(
+                self._skipped_candidate_operation_error(failure_domain, scope_failure),
+                scope_failure,
+            )
+
+        def _before_sleep(retry_state: RetryCallState) -> None:
+            """Warn on outage-scale waits, then run the transport's own callback.
+
+            :param RetryCallState retry_state: Failed attempt with its next action.
+            :return None: Invokes ``on_retry``.
+            """
+            retry._warn_on_long_wait(retry_state)
+            on_retry(
+                retry_state,
+                retry_state.outcome.exception() if retry_state.outcome else None,
+                retry_state.next_action.sleep if retry_state.next_action else 0.0,
+            )
+
+        retryer = Retrying(
+            stop=stop_after_attempt(API_CONFIG.max_retries),
+            wait=retry._S2BackoffWait(),
+            retry=predicate,
+            before_sleep=_before_sleep,
+            sleep=lambda seconds: time.sleep(seconds),
+            reraise=True,
+        )
+        try:
+            return retryer(operation)
+        except caught as exc:
+            return on_exhausted(exc)
+
+    def _record_unavailable(
+        self,
+        context: str,
+        exc: Exception,
+        *,
+        failure_domain: _FailureDomain,
+        omit_rate_limited_detail: bool = False,
+        record_domain_failure: bool = True,
+    ) -> SemanticScholarUnavailableError:
+        """Build the exhausted-budget error and remember it for the active scope.
+
+        :param str context: Human-readable request context.
+        :param Exception exc: Final operational failure.
+        :param _FailureDomain failure_domain: Capability whose retry budget exhausted.
+        :param bool omit_rate_limited_detail: Whether a rate-limited failure drops the
+            trailing exception text, as the REST endpoints' message shape does.
+        :param bool record_domain_failure: Whether the active scope should skip later
+            calls to the same capability.
+        :return SemanticScholarUnavailableError: Availability error to raise or log.
+        """
+        rate_limited = self._is_rate_limit_error(exc)
+        detail = "" if rate_limited and omit_rate_limited_detail else f": {exc}"
+        unavailable = payloads._unavailable_error(
+            context, detail, rate_limited=rate_limited
+        )
+        if record_domain_failure:
+            self._record_candidate_operation_failure(failure_domain, unavailable)
+        return unavailable
+
     def _call_with_retries(
         self,
         operation: Callable[[], Any],
@@ -312,68 +409,55 @@ class SemanticScholarClient:
             Exception-specific handlers that short-circuit normal retry handling.
         :return Any: Result produced by ``operation`` or one of the failure handlers.
         """
-        scope_failure = self._candidate_operation_failure(failure_domain)
-        if scope_failure is not None:
-            return on_final_failure(
-                self._skipped_candidate_operation_error(failure_domain, scope_failure)
-            )
+        local_failures = (TypeError, ValueError, SemanticScholarRequestError)
+        decode_failures = (json.JSONDecodeError, requests.exceptions.JSONDecodeError)
 
-        def _before_sleep(state: RetryCallState) -> None:
-            """Report the scheduled retry using the endpoint's existing logger.
+        def _attempt() -> Any:
+            """Run the operation, surfacing the cause behind the SDK's retry wrapper.
 
-            :param RetryCallState state: Failed attempt with its next sleep action.
-            :return None: Invokes the endpoint's retry callback.
+            :return Any: Result produced by ``operation``.
             """
-            retry._warn_on_long_wait(state)
-            on_retry(
-                state.attempt_number, state.next_action.sleep, state.outcome.exception()
-            )
+            try:
+                return operation()
+            except Exception as raw_exc:
+                raise _unwrap_sdk_retry_error(raw_exc)
 
-        retryer = Retrying(
-            stop=stop_after_attempt(API_CONFIG.max_retries),
-            wait=retry._S2BackoffWait(),
-            retry=(
-                retry_if_exception_type(Exception)
-                & retry_if_not_exception_type(
-                    (TypeError, ValueError, SemanticScholarRequestError)
-                    + tuple(kind for kind, _handler in handled_exceptions)
-                )
-            )
-            | retry_if_exception_type(
-                (json.JSONDecodeError, requests.exceptions.JSONDecodeError)
-            ),
-            before_sleep=_before_sleep,
-            sleep=lambda seconds: time.sleep(seconds),
-            reraise=True,
-        )
-        try:
-            for attempt in retryer:
-                with attempt:
-                    try:
-                        return operation()
-                    except Exception as raw_exc:
-                        raise _unwrap_sdk_retry_error(raw_exc)
-        except Exception as exc:
+        def _on_exhausted(exc: Exception) -> Any:
+            """Apply the SDK contract to the failure that ended the retry budget.
+
+            :param Exception exc: Final failure raised by the SDK operation.
+            :return Any: Value produced by a handler or by ``on_final_failure``.
+            :raises Exception: Local contract failures propagate unchanged.
+            """
             # SDK JSON decoding can fail on transient HTML/plain-text error bodies.
-            if not isinstance(
-                exc, (json.JSONDecodeError, requests.exceptions.JSONDecodeError)
-            ):
+            if not isinstance(exc, decode_failures):
                 for error_type, handler in handled_exceptions:
                     if isinstance(exc, error_type):
                         return handler(exc)
-                if isinstance(
-                    exc, (TypeError, ValueError, SemanticScholarRequestError)
-                ):
-                    raise
-            unavailable = payloads._unavailable_error(
-                failure_context,
-                f": {exc}",
-                rate_limited=self._is_rate_limit_error(exc),
+                if isinstance(exc, local_failures):
+                    raise exc
+            self._record_unavailable(
+                failure_context, exc, failure_domain=failure_domain
             )
-            self._record_candidate_operation_failure(failure_domain, unavailable)
             return on_final_failure(exc)
 
-        raise AssertionError("retry loop exhausted without returning")
+        return self._run_with_retries(
+            _attempt,
+            failure_domain=failure_domain,
+            predicate=(
+                retry_if_exception_type(Exception)
+                & retry_if_not_exception_type(
+                    local_failures
+                    + tuple(kind for kind, _handler in handled_exceptions)
+                )
+            )
+            | retry_if_exception_type(decode_failures),
+            on_skip=lambda skipped, _scope_failure: on_final_failure(skipped),
+            on_retry=lambda retry_state, exc, wait_seconds: on_retry(
+                retry_state.attempt_number, wait_seconds, exc
+            ),
+            on_exhausted=_on_exhausted,
+        )
 
     @staticmethod
     def _convert_api_paper(api_paper: Any) -> Paper | None:
@@ -480,7 +564,9 @@ class SemanticScholarClient:
         if response.status_code == 429:
             raise _RetryableRequestError(
                 f"HTTP 429 from {url}",
-                retry_after=retry._safe_retry_after(response),
+                retry_after=retry.retry_after_seconds(
+                    response, default=API_CONFIG.retry_delay
+                ),
                 rate_limited=True,
             )
         if 400 <= response.status_code < 500 and response.status_code != 408:
@@ -521,6 +607,7 @@ class SemanticScholarClient:
         :raises SemanticScholarRequestError: If a non-408/429 HTTP 4xx response
             rejects the request.
         """
+        retryable = (_RetryableRequestError, requests.RequestException, ValueError)
 
         def _attempt() -> dict[str, Any] | None:
             """Issue one paced request, raising on retryable failures.
@@ -529,12 +616,19 @@ class SemanticScholarClient:
             """
             return self._request_json_once(url, params, context=context)
 
-        scope_failure = self._candidate_operation_failure(failure_domain)
-        if scope_failure is not None:
+        def _on_skip(
+            skipped: _CandidateOperationSkippedError,
+            scope_failure: SemanticScholarUnavailableError,
+        ) -> None:
+            """Skip this request after an earlier outage in the same capability.
+
+            :param _CandidateOperationSkippedError skipped: Breaker error for this call.
+            :param SemanticScholarUnavailableError scope_failure: Original outage.
+            :return None: Reports the skip and yields no payload in tolerant mode.
+            :raises _CandidateOperationSkippedError: In strict mode.
+            """
             if raise_on_unavailable:
-                raise self._skipped_candidate_operation_error(
-                    failure_domain, scope_failure
-                ) from scope_failure
+                raise skipped from scope_failure
             logger.warning(
                 "Skipped %s after an earlier Semantic Scholar %s outage: %s",
                 url,
@@ -543,16 +637,16 @@ class SemanticScholarClient:
             )
             return None
 
-        def _log_before_sleep(retry_state: RetryCallState) -> None:
+        def _log_retry(
+            retry_state: RetryCallState, exc: Exception | None, wait_seconds: float
+        ) -> None:
             """Log the upcoming retry with its computed wait.
 
             :param RetryCallState retry_state: Tenacity retry state.
+            :param Exception | None exc: Failure that triggered this retry.
+            :param float wait_seconds: Upcoming sleep duration in seconds.
+            :return None: Emits one DEBUG line.
             """
-            retry._warn_on_long_wait(retry_state)
-            exc = retry_state.outcome.exception() if retry_state.outcome else None
-            wait_seconds = (
-                retry_state.next_action.sleep if retry_state.next_action else 0.0
-            )
             if exc is not None and self._is_rate_limit_error(exc):
                 logger.debug(
                     "Rate limited by Semantic Scholar. Waiting %.1fs before retry.",
@@ -567,27 +661,20 @@ class SemanticScholarClient:
                     wait_seconds,
                 )
 
-        retryer = Retrying(
-            stop=stop_after_attempt(API_CONFIG.max_retries),
-            wait=retry._S2BackoffWait(),
-            retry=retry_if_exception_type(
-                (_RetryableRequestError, requests.RequestException, ValueError)
-            ),
-            before_sleep=_log_before_sleep,
-            sleep=lambda seconds: time.sleep(seconds),
-            reraise=True,
-        )
+        def _on_exhausted(exc: Exception) -> None:
+            """Apply the REST contract to an exhausted retry budget.
 
-        try:
-            return retryer(_attempt)
-        except (_RetryableRequestError, requests.RequestException, ValueError) as exc:
-            rate_limited = self._is_rate_limit_error(exc)
-            detail = "" if rate_limited else f": {exc}"
-            unavailable = payloads._unavailable_error(
-                context, detail, rate_limited=rate_limited
+            :param Exception exc: Final operational failure.
+            :return None: Reports the outage and yields no payload in tolerant mode.
+            :raises SemanticScholarUnavailableError: In strict mode.
+            """
+            unavailable = self._record_unavailable(
+                context,
+                exc,
+                failure_domain=failure_domain,
+                omit_rate_limited_detail=True,
+                record_domain_failure=record_domain_failure,
             )
-            if record_domain_failure:
-                self._record_candidate_operation_failure(failure_domain, unavailable)
             if raise_on_unavailable:
                 raise unavailable from exc
             logger.error(
@@ -597,6 +684,16 @@ class SemanticScholarClient:
                 exc,
             )
             return None
+
+        return self._run_with_retries(
+            _attempt,
+            failure_domain=failure_domain,
+            predicate=retry_if_exception_type(retryable),
+            on_skip=_on_skip,
+            on_retry=_log_retry,
+            on_exhausted=_on_exhausted,
+            caught=retryable,
+        )
 
     def get_paper(
         self,
@@ -807,13 +904,9 @@ class SemanticScholarClient:
         :return list[Paper]: Citation Papers (may be empty).
         :raises SemanticScholarRequestError: If Semantic Scholar rejects the request.
         """
-        parsed_limit = payloads._validate_integer_limit(limit, "limit", allow_zero=True)
-        if parsed_limit == 0:
-            return []
-
         return self._get_related_papers(
             paper_id=paper_id,
-            limit=parsed_limit,
+            limit=limit,
             fetch_method=self.client.get_paper_citations,
             relation_label="citations",
             failure_domain=_FailureDomain.CITATIONS,
@@ -837,13 +930,9 @@ class SemanticScholarClient:
         :return list[Paper]: List of Paper objects (may be shorter than limit)
         :raises SemanticScholarRequestError: If Semantic Scholar rejects the request.
         """
-        parsed_limit = payloads._validate_integer_limit(limit, "limit", allow_zero=True)
-        if parsed_limit == 0:
-            return []
-
         return self._get_related_papers(
             paper_id=paper_id,
-            limit=parsed_limit,
+            limit=limit,
             fetch_method=self.client.get_paper_references,
             relation_label="references",
             failure_domain=_FailureDomain.REFERENCES,
@@ -867,8 +956,13 @@ class SemanticScholarClient:
         :param str relation_label: Human-readable label used in logs.
         :param _FailureDomain failure_domain: Capability sharing this retry budget.
         :param bool raise_on_unavailable: Whether exhausted operational retries raise.
-        :return list[Paper]: Converted relation papers.
+        :return list[Paper]: Converted relation papers, empty when ``limit`` is zero.
+        :raises ValueError: If ``limit`` is not a non-negative integer.
         """
+        limit = payloads._validate_integer_limit(limit, "limit", allow_zero=True)
+        if limit == 0:
+            return []
+
         normalized_paper_id = normalize_paper_id(paper_id)
 
         def _operation() -> list[Paper]:
@@ -1167,7 +1261,7 @@ class SemanticScholarClient:
         if not references:
             return _persist_empty()
 
-        normalized_ref_ids = payloads._normalize_reference_ids(references, strict=True)
+        normalized_ref_ids = payloads._coerce_cached_reference_ids(references)
         if normalized_ref_ids is None:
             if all(payloads._is_unresolved_reference(record) for record in references):
                 logger.warning(
@@ -1185,6 +1279,41 @@ class SemanticScholarClient:
             normalized_ref_ids,
         )
         return normalized_ref_ids
+
+    @staticmethod
+    def _resolve_paper_fields(fields: list[str] | None) -> tuple[list[str], bool]:
+        """Default the requested field set and decide whether results are cacheable.
+
+        Persisting a paper is only safe when the response carries every field the
+        metadata cache stores, so a caller-narrowed field list disables caching.
+
+        :param list[str] | None fields: Caller-supplied fields, or ``None`` for the
+            default paper field set.
+        :return tuple[list[str], bool]: Fields to request, and whether the responses
+            carry full metadata worth persisting.
+        """
+        default_fields = payloads._default_paper_fields()
+        if fields is None:
+            fields = default_fields
+        return fields, set(default_fields).issubset(fields)
+
+    def _papers_from_records(
+        self, records: Iterable[Any], *, cache_full_metadata: bool
+    ) -> list[Paper]:
+        """Convert recommendation/search records, persisting full-metadata results.
+
+        :param Iterable[Any] records: Raw records from a search-like response.
+        :param bool cache_full_metadata: Whether converted papers may be persisted.
+        :return list[Paper]: Converted papers, skipping malformed records.
+        """
+        papers: list[Paper] = []
+        for record in records:
+            paper = self._convert_recommendation(record)
+            if paper:
+                papers.append(paper)
+                if cache_full_metadata:
+                    disk_cache._persist_paper(paper, paper.paper_id)
+        return papers
 
     def get_recommended_papers(
         self,
@@ -1206,9 +1335,7 @@ class SemanticScholarClient:
             successful empty primary result.
         :return list[Paper]: Ranked recommendation papers.
         """
-        if fields is None:
-            fields = payloads._default_paper_fields()
-        cache_full_metadata = set(payloads._default_paper_fields()).issubset(fields)
+        fields, cache_full_metadata = self._resolve_paper_fields(fields)
         # Semantic Scholar's recommendations endpoint does not currently support
         # requesting ``references`` in field lists (returns HTTP 400 with
         # unsupported nested-reference field tokens). Keep the request field set
@@ -1265,14 +1392,9 @@ class SemanticScholarClient:
                     normalized_paper_id,
                 )
 
-        papers = []
-        for rec in raw_recommendations:
-            paper = self._convert_recommendation(rec)
-            if paper:
-                papers.append(paper)
-                if cache_full_metadata:
-                    disk_cache._persist_paper(paper, paper.paper_id)
-        return papers
+        return self._papers_from_records(
+            raw_recommendations, cache_full_metadata=cache_full_metadata
+        )
 
     def search_papers(
         self,
@@ -1299,9 +1421,7 @@ class SemanticScholarClient:
         if not normalized_query:
             raise ValueError("query must not be empty")
 
-        if fields is None:
-            fields = payloads._default_paper_fields()
-        cache_full_metadata = set(payloads._default_paper_fields()).issubset(fields)
+        fields, cache_full_metadata = self._resolve_paper_fields(fields)
 
         payload = self._request_json(
             SEARCH_BASE_URL,
@@ -1317,14 +1437,9 @@ class SemanticScholarClient:
         if not payload:
             return []
 
-        papers = []
-        for rec in payload.get("data", []):
-            paper = self._convert_recommendation(rec)
-            if paper:
-                papers.append(paper)
-                if cache_full_metadata:
-                    disk_cache._persist_paper(paper, paper.paper_id)
-        return papers
+        return self._papers_from_records(
+            payload.get("data", []), cache_full_metadata=cache_full_metadata
+        )
 
 
 _client_instance: SemanticScholarClient | None = None

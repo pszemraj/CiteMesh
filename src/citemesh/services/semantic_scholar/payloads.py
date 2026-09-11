@@ -12,6 +12,11 @@ import numbers
 from typing import Any
 
 from citemesh.core import API_CONFIG, Author, Paper
+from citemesh.core.paper_fields import (
+    coerce_author_name,
+    coerce_categories,
+    coerce_venue,
+)
 from citemesh.paper_ids import external_ids_from_canonical_paper_id
 
 from .errors import SemanticScholarUnavailableError
@@ -115,45 +120,46 @@ def _is_unresolved_reference(record: Any) -> bool:
     return hasattr(paper, "paperId") and paper.paperId is None
 
 
-def _normalize_reference_ids(payload: Any, *, strict: bool) -> list[str] | None:
-    """Normalize reference payloads under cache or live-response rules.
+def _coerce_cached_reference_ids(payload: Any) -> list[str] | None:
+    """Normalize a reference payload, rejecting one that is malformed.
 
-    Both callers accept current list-of-string payloads and legacy mixed
-    relation-shaped entries. Strict cache parsing marks malformed non-empty
-    lists invalid so they can be rebuilt; live API parsing tolerates them.
+    Accepts current list-of-string payloads and legacy mixed relation-shaped
+    entries, from either a cache entry or a live relation response. A non-list
+    payload, or a non-empty one holding no usable paper ID, is invalid: the
+    caller rebuilds the cache entry or reports a contract failure.
 
-    :param Any payload: Raw reference payload.
-    :param bool strict: Whether malformed payloads return ``None``.
-    :return list[str] | None: Normalized IDs, or ``None`` for invalid strict data.
+    :param Any payload: Cached ``references`` field or live relation records.
+    :return list[str] | None: Normalized IDs, or ``None`` when the payload is invalid.
     """
     if not isinstance(payload, list):
-        return None if strict else []
+        return None
 
     normalized: list[str] = []
     seen: set[str] = set()
 
     for raw_value in payload:
         candidate = _reference_id_candidate(raw_value)
-        if candidate is None:
-            continue
-        paper_id = candidate.strip()
+        paper_id = candidate.strip() if candidate is not None else ""
         if not paper_id or paper_id in seen:
             continue
         seen.add(paper_id)
         normalized.append(paper_id)
 
     if payload and not normalized:
-        return None if strict else []
+        return None
     return normalized
 
 
-def _coerce_cached_reference_ids(payload: Any) -> list[str] | None:
-    """Validate and normalize cached reference ID payloads.
+def _extract_reference_ids(raw_references: Any) -> list[str]:
+    """Extract reference IDs from recommendation/search payload shapes.
 
-    :param Any payload: Cached ``references`` field from JSON payload.
-    :return list[str] | None: Normalized ID list, or ``None`` when invalid.
+    Tolerant counterpart of :func:`_coerce_cached_reference_ids`: a malformed
+    payload yields no references instead of signalling invalid data.
+
+    :param Any raw_references: Raw ``references`` payload from API response.
+    :return list[str]: Parsed reference ID list (order-preserving, deduplicated).
     """
-    return _normalize_reference_ids(payload, strict=True)
+    return _coerce_cached_reference_ids(raw_references) or []
 
 
 def _validate_integer_limit(
@@ -177,23 +183,6 @@ def _validate_integer_limit(
     return parsed_limit
 
 
-def _extract_venue_name(value: object) -> str:
-    """Normalize venue-like payload values into a display string.
-
-    :param object value: Raw venue payload value.
-    :return str: Normalized venue string (empty when unavailable).
-    """
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    if isinstance(value, dict):
-        value = value.get("name")
-    else:
-        value = getattr(value, "name", None)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return ""
-
-
 def _extract_venue(*candidates: object) -> str:
     """Extract the first non-empty venue label from candidate payloads.
 
@@ -201,7 +190,7 @@ def _extract_venue(*candidates: object) -> str:
     :return str: Normalized venue string (empty when unavailable).
     """
     for candidate in candidates:
-        venue = _extract_venue_name(candidate)
+        venue = coerce_venue(candidate)
         if venue:
             return venue
     return ""
@@ -279,14 +268,11 @@ def _extract_authors(raw_authors: object) -> list[Author]:
 
     authors: list[Author] = []
     for raw_author in raw_authors:
-        name = _payload_get(raw_author, "name")
-        if not isinstance(name, str) or not name.strip():
+        name = coerce_author_name(raw_author)
+        if not name:
             continue
         authors.append(
-            Author(
-                name=name.strip(),
-                author_id=_payload_get(raw_author, "authorId"),
-            )
+            Author(name=name, author_id=_payload_get(raw_author, "authorId"))
         )
     return authors
 
@@ -294,14 +280,16 @@ def _extract_authors(raw_authors: object) -> list[Author]:
 def _extract_categories(*raw_candidates: object) -> list[str]:
     """Return the first usable category list from candidate payload fields.
 
+    The first candidate of a usable type wins, even when it normalizes to an
+    empty list. Semantic Scholar's ``fieldsOfStudy`` labels contain spaces, so
+    the shared coercer must keep each label whole.
+
     :param object raw_candidates: Candidate category payload values.
-    :return list[str]: First normalized non-empty category list.
+    :return list[str]: First normalized category list.
     """
     for raw_categories in raw_candidates:
-        if isinstance(raw_categories, str):
-            return [raw_categories]
-        if isinstance(raw_categories, list):
-            return [category for category in raw_categories if category]
+        if isinstance(raw_categories, (str, list)):
+            return coerce_categories(raw_categories)
     return []
 
 
@@ -380,15 +368,6 @@ def _convert_recommendation(rec: dict[str, Any]) -> Paper | None:
     except (TypeError, ValueError) as exc:
         logger.debug("Skipping malformed recommendation record: %s", exc)
         return None
-
-
-def _extract_reference_ids(raw_references: Any) -> list[str]:
-    """Extract reference IDs from recommendation/search payload shapes.
-
-    :param Any raw_references: Raw ``references`` payload from API response.
-    :return list[str]: Parsed reference ID list (order-preserving, deduplicated).
-    """
-    return _normalize_reference_ids(raw_references, strict=False) or []
 
 
 def _unavailable_error(

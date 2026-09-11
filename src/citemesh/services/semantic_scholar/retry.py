@@ -72,49 +72,35 @@ def _is_rate_limit_error(error: Exception) -> bool:
     )
 
 
-def _get_retry_after(error: Exception) -> float | None:
-    """Extract Retry-After from library or HTTP errors.
+def retry_after_seconds(
+    source: BaseException | requests.Response, *, default: float | None = None
+) -> float | None:
+    """Read the server's Retry-After hint from a response or from a failed request.
 
-    :param Exception error: Exception instance captured from request.
-    :return float | None: Parsed Retry-After value in seconds, if available.
+    Accepts either side of the transport split: a :class:`requests.Response` held
+    by the REST path, or an exception carrying one on ``response`` as the SDK
+    path sees it.
+
+    :param BaseException | requests.Response source: Response to inspect, or an
+        exception carrying one.
+    :param float | None default: Value returned when no usable header is present.
+    :return float | None: Retry-After seconds, or ``default`` when no response is
+        available and when its header is missing or unparseable.
     """
-    if isinstance(error, requests.RequestException) and error.response is not None:
-        header = error.response.headers.get("Retry-After")
-        if header:
-            try:
-                return float(header)
-            except ValueError:
-                pass
-        return None
-
-    for candidate in ("response",):
-        response = getattr(error, candidate, None)
-        if response is not None and hasattr(response, "headers"):
-            header = response.headers.get("Retry-After")  # type: ignore[attr-defined]
-            if header:
-                try:
-                    return float(header)
-                except ValueError:
-                    pass
-    return None
-
-
-def _safe_retry_after(response: requests.Response) -> float:
-    """Extract Retry-After from direct HTTP responses safely.
-
-    :param requests.Response response: HTTP response to inspect.
-    :return float: Retry delay in seconds (header value or default delay).
-    """
-    header = response.headers.get("Retry-After")
-    if header:
-        try:
-            return float(header)
-        except ValueError:
-            logger.debug(
-                "Ignoring invalid Retry-After value %s; using default delay",
-                header,
-            )
-    return API_CONFIG.retry_delay
+    response = (
+        source if hasattr(source, "headers") else getattr(source, "response", None)
+    )
+    headers = getattr(response, "headers", None)
+    header = headers.get("Retry-After") if headers is not None else None
+    if not header:
+        return default
+    try:
+        return float(header)
+    except (TypeError, ValueError):
+        logger.debug(
+            "Ignoring invalid Retry-After value %s; using default delay", header
+        )
+    return default
 
 
 def _warn_on_long_wait(retry_state: RetryCallState) -> None:
@@ -151,7 +137,7 @@ class _S2BackoffWait(wait_base):
         exc = retry_state.outcome.exception() if retry_state.outcome else None
         retry_after = getattr(exc, "retry_after", None)
         if retry_after is None and exc is not None:
-            retry_after = _get_retry_after(exc)
+            retry_after = retry_after_seconds(exc)
         return _jittered_backoff(
             retry_state.attempt_number,
             retry_after=retry_after,
