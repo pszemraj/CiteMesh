@@ -88,7 +88,7 @@ where = ["src"]
 include = ["citemesh*"]
 
 [tool.setuptools.package-data]
-citemesh = ["py.typed"]
+citemesh = ["py.typed", "visualization/dashboard/assets/*"]
 
 [tool.setuptools_scm]
 version_file = "src/citemesh/_version.py"
