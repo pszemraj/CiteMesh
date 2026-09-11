@@ -166,6 +166,35 @@ class _SearchMixin:
         # HDF5 fancy indexing requires monotonically increasing integer indices.
         return np.sort(candidate_rows.astype(np.int64, copy=False))
 
+    @staticmethod
+    def _matrix_chunk_loader(
+        embeddings_dataset: h5py.Dataset,
+        dequantize: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    ) -> Callable[[int, int], np.ndarray]:
+        """Build the chunk loader :meth:`_score_chunked_rows` reads rows through.
+
+        Float32 namespaces read their stored rows directly; int8 namespaces read
+        the raw codes and hand them to ``dequantize`` before scoring.
+
+        :param h5py.Dataset embeddings_dataset: Matrix dataset whose rows are scored.
+        :param Optional[Callable[[np.ndarray], np.ndarray]] dequantize: Storage-to-float32
+            conversion applied to each raw chunk; ``None`` reads float32 rows directly.
+        :return Callable[[int, int], np.ndarray]: Loader yielding float32 matrix chunks.
+        """
+        storage_dtype = np.float32 if dequantize is None else np.int8
+
+        def load_chunk(start: int, end: int) -> np.ndarray:
+            """Load one cache matrix chunk as float32.
+
+            :param int start: Inclusive row offset.
+            :param int end: Exclusive row offset.
+            :return np.ndarray: Float32 matrix chunk.
+            """
+            chunk = np.asarray(embeddings_dataset[start:end], dtype=storage_dtype)
+            return chunk if dequantize is None else dequantize(chunk)
+
+        return load_chunk
+
     def _score_int8_rows(
         self,
         embeddings_dataset: h5py.Dataset,
@@ -201,17 +230,20 @@ class _SearchMixin:
             self._require_finite_scores(scores)
             return self._select_top_k(rows, scores, matrix, top_k)
 
-        def load_chunk(start: int, end: int) -> np.ndarray:
-            """Load and normalize one int8 cache matrix chunk.
+        def dequantize_chunk(chunk: np.ndarray) -> np.ndarray:
+            """Dequantize and normalize one stored int8 chunk.
 
-            :param int start: Inclusive row offset.
-            :param int end: Exclusive row offset.
+            :param np.ndarray chunk: Raw int8 rows read from the matrix dataset.
             :return np.ndarray: Dequantized, normalized float32 matrix.
             """
-            int8_chunk = np.asarray(embeddings_dataset[start:end], dtype=np.int8)
-            return l2_normalize_embeddings(self._dequantize_int8(h5_file, int8_chunk))
+            return l2_normalize_embeddings(self._dequantize_int8(h5_file, chunk))
 
-        return self._score_chunked_rows(embeddings_dataset, query, top_k, load_chunk)
+        return self._score_chunked_rows(
+            embeddings_dataset,
+            query,
+            top_k,
+            self._matrix_chunk_loader(embeddings_dataset, dequantize_chunk),
+        )
 
     def _score_float_rows(
         self,
@@ -227,20 +259,11 @@ class _SearchMixin:
         :return Tuple[np.ndarray, np.ndarray, np.ndarray]: Rows, scores, and embeddings.
         """
 
-        def load_chunk(start: int, end: int) -> np.ndarray:
-            """Load one float cache matrix chunk as float32.
-
-            :param int start: Inclusive row offset.
-            :param int end: Exclusive row offset.
-            :return np.ndarray: Float32 matrix chunk.
-            """
-            return np.asarray(embeddings_dataset[start:end], dtype=np.float32)
-
         return self._score_chunked_rows(
             embeddings_dataset,
             query_embedding,
             top_k,
-            load_chunk,
+            self._matrix_chunk_loader(embeddings_dataset),
         )
 
     def _score_chunked_rows(

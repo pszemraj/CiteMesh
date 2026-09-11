@@ -64,7 +64,7 @@ from citemesh.paper_ids import (
     normalize_paper_id,
     recognize_arxiv_identifier,
 )
-from citemesh.progress import progress_task
+from citemesh.progress import progress_iterator, progress_task
 from citemesh.services import get_client
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -188,6 +188,25 @@ def _suppress_expected_fa2_load_dtype_warning(*, enabled: bool) -> Iterator[None
         yield
     finally:
         transformers_logger.removeFilter(keep_relevant_warning)
+
+
+def _cache_scan_progress(values: Sequence[Any], description: str) -> Iterable[Any]:
+    """Render a progress bar over an embedding-cache scan.
+
+    Injected into :class:`EmbeddingCache` so the storage layer stays free of UI
+    imports: the TTY gate and the bar's presentation options live here, with the
+    rest of this module's progress handling.
+
+    :param Sequence[Any] values: Items the cache is about to iterate.
+    :param str description: Label shown ahead of the bar.
+    :return Iterable[Any]: Items from ``values``, unchanged.
+    """
+    return progress_iterator(
+        values,
+        description=description,
+        unit="papers",
+        enabled=stderr_isatty(),
+    )
 
 
 @contextmanager
@@ -1501,6 +1520,7 @@ class EmbeddingGraphBuilder(GraphBuilderStrategy):
         )
         return EmbeddingCache(
             model_name=namespace,
+            progress=_cache_scan_progress,
             storage_precision=resolved_storage,
             binary_prefilter=resolved_prefilter,
             calibration_sample_size=self.calibration_sample_size,

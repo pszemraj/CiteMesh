@@ -39,6 +39,20 @@ REPLACEMENT_JOURNAL_TABLE_CREATE_SQL = """
     )
     """
 
+PAPER_ROW_UPSERT_SQL = """
+    INSERT OR REPLACE INTO papers
+    (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx,
+     authors_json, categories_json, venue, arxiv_id, doi)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+PAPER_METADATA_REFRESH_SQL = """
+    UPDATE papers
+    SET title = ?, abstract = ?, year = ?, authors_json = ?, categories_json = ?,
+        venue = ?, arxiv_id = ?, doi = ?
+    WHERE paper_id = ?
+    """
+
 PAPER_ROW_QUERY_SQL_TEMPLATE = (
     "SELECT {columns}, "
     "(SELECT COUNT(*) FROM papers AS owners "
