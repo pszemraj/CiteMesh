@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import io
+from collections.abc import Iterator
 from functools import partial
-from typing import Any, Iterator
+from typing import Any
 
 import pytest
 from rich.console import Console

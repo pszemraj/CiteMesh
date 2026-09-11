@@ -1,141 +1,85 @@
 # CiteMesh Architecture
 
-The CLI orchestrates the same high-level pipeline for `recommendation`, `citation`, `embedding`, and `hybrid`, then hands strategy-agnostic graph data to the visualization and export layers.
+Where code lives and how to extend it. For what the pipeline *does* at each stage, read [How CiteMesh builds a graph](../guides/how-it-works.md) instead.
 
-Related docs:
+## Execution flow
 
-- CLI flags and command examples: [CLI Usage](../guides/cli.md)
-- Cache layout and hydration details: [Caching & Data](../guides/caching.md)
-- Environment variables: [Environment Variables](../reference/environment.md)
-- Export/sidecar file contracts: [Output Artifacts](../reference/output-artifacts.md)
+`cli/` parses arguments, applies `config.toml` defaults, resolves export targets, and calls `build_graph` on the selected `GraphBuilderStrategy`. The strategy collects papers through `strategies/candidates.py` (source fetch, availability policy, identity reconciliation, pool budgets), builds its scoring space in `prepare_graph_scoring`, scores pairs in `compute_similarity`, and returns a `networkx.Graph`. `visualization/` computes one shared layout for `render.visualize_graph`, `export.GraphExporter`, and `dashboard/package.py`.
 
-## Execution Flow
+Every node carries the same attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `venue`, `arxiv_id`, `doi`, `is_seed`), which is what keeps visualization and export strategy-agnostic.
 
-```text
-CLI (citemesh/cli.py)
-    ├── Parse arguments and resolve output/export targets
-    ├── Instantiate selected GraphBuilderStrategy
-    └── Invoke build_graph(seed_id, **kwargs)
-            ↓
-GraphBuilderStrategy (base class)
-    ├── collect_papers(seed_id, **kwargs) -> Dict[str, Paper]
-    │       └── strategies/candidates.py: candidate-source fetch, availability
-    │           policy, identity reconciliation, and pool budgets
-    ├── compute_similarity(paper_a, paper_b) -> float
-    └── build_graph(..) -> (networkx.Graph, seed_id)
-            ↓
-Visualization + Export
-    ├── visualization.visualize_graph -> PNG
-    ├── export.GraphExporter -> HTML / Plotly / Dashboard / JSON / CSV / BibTeX / GraphML
-    ├── dashboard collection writer -> dashboard.citemesh.json + dashboard.html
-    └── per-seed exports -> <title-slug>-<hash>/*.json + *.config.json (also for dashboards)
-```
+## Package map
 
-Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `venue`, `arxiv_id`, `doi`, `is_seed`) so visualization and export layers remain strategy-agnostic.
+### `core/` — data model and constants, no I/O
 
-## Module Overview
+- `config.py` — default dataclasses and their singletons (`TemporalConfig`, `EmbeddingSimilarityConfig`, `EmbeddingStorageConfig`, `HybridSimilarityConfig`, `VisualizationConfig`, `APIConfig`); weight sets validate on import
+- `models.py` — `Paper`, `Author`, and the overlap helpers the scorers rely on
+- `paper_fields.py` — tolerant coercion of venue, author, and category fields out of inconsistent upstream payloads
+- `paper_ids.py` — identifier normalization and alias derivation
+- `values.py`, `validation.py` — shared value coercion and input validation primitives
 
-### `citemesh/cli.py`
+### `data/` — persistence
 
-- Defines `citemesh` entry point and command dispatch.
-- Parses validated arguments and resolves output paths.
-- Selects strategy implementations and triggers graph construction.
-- Coordinates render/export steps, writes sidecar config artifacts, upserts dashboard collection packages, and passes run metadata downstream.
+- `cache.py` — cache-root resolution across platforms, atomic text/JSON writers, `atomic_output_path`, the cache-root `ReadWriteLock`
+- `user_config.py` — loads, validates, and rewrites `config.toml`, whitelisting `[defaults]` keys and `[api] s2_api_key` with per-key casters; invalid entries are ignored so a bad config never blocks the CLI
+- `model_profiles.py` — the embedding profile registry: EmbeddingGemma, its three prompt formatters, truncate-dim policy, attention and compile eligibility, and the fallback chain
+- `embedding_cache/` — `store.py` composes `EmbeddingCache` from the `ingest`, `layout`, `recovery`, and `search` mixins over `constants`, `sql`, `models`, `quantization`; see [Embedding Cache Internals](embedding-cache.md)
 
-Command-line behavior is documented in [CLI Usage](../guides/cli.md).
+### `services/semantic_scholar/` — the only network boundary
 
-### `citemesh/strategies/base.py`
+`errors.py` (failure taxonomy, per-capability `_FailureDomain` budgets) · `retry.py` (Tenacity backoff, `Retry-After`) · `disk_cache.py` (persisted paper and reference-ID caches) · `payloads.py` (parsing into `Paper`) · `endpoints.py` (one method per capability) · `client.py` (transport, rate limiting, `candidate_operation_scope`, `get_client`).
 
-- Provides the shared template method for graph construction.
-- Defines extension hooks (`collect_papers`, `compute_similarity`).
-- Handles edge selection/pruning flow used by concrete strategies.
+### `strategies/` — candidate acquisition and scoring
 
-### Strategy Implementations
+- `base.py` — `GraphBuilderStrategy`: the template method and its four hooks, the shared temporal/citation/bibliographic scorers, `deterministic_sort_key`, edge capping
+- `candidates.py` — pool budgets, `fetch_candidate_source` and its `complete`/`empty`/`unavailable` vocabulary, `IdentityRegistry`, `reconcile_paper_identity`, `scope_candidate_collection`
+- `similarity.py` — `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity
+- `citation.py`, `recommendation.py`, `hybrid.py` — the concrete strategies
+- `embedding/` — `deps` (lazy dependency guards) · `runtime` (device resolution, probes) · `model_runtime` (load, fallback, precision validation, TF32 and compile guards) · `precision` · `text` (`EmbeddingTask`, formatters) · `records` · `config` · `fingerprint` · `hydration` (corpus selection, calibration, resume) · `builder`
 
-- `citation.py`, `recommendation.py`, `embedding.py`, and `hybrid.py` implement `GraphBuilderStrategy`.
-- Strategies may emit collection summaries through `_set_collection_summary` for consistent logging.
-- Selection guidance, tradeoffs, and user-facing strategy behavior are covered in [Guides: Strategies](../guides/strategies.md).
+### `visualization/` — layout, render, export
 
-### `citemesh/strategies/candidates.py`
+- `render.py` — `compute_layout` and its chain (community detection, spreading, packing, orientation, normalization), `compute_node_sizes`, `visualize_graph`
+- `paths.py` — output-path and filename derivation (`generate_output_path`), free of matplotlib and numpy so the CLI resolver skips the rendering stack; `render` re-exports it.
+- `themes.py` — the immutable `light`/`dark`/`solarized` palettes and `auto` resolution
+- `years.py`, `ordering.py` — year coercion and the deterministic node/edge ordering every export depends on
+- `export/` — `__init__` (`GraphExporter`, the `to_*` writers) · `nodes` (enrichment, seed-relevance PageRank) · `geometry` (primitives shared with the dashboard) · `plotly_figure`, `links`, `keys`, `loaders`, `bibtex`, `graphml`, `csv_`
+- `dashboard/` — `contracts.py` (`kind`/`schema_version`), `payload.py` (bundle assembly), `package.py` (locking, staging, upsert, rollback), `assets/`
 
-- Shared candidate-acquisition layer used by every strategy: `fetch_candidate_source` tracks per-source outcomes (`complete`/`empty`/`unavailable`), and `require_available_candidate_source` implements the partial-outage-versus-fail policy recorded in export metadata.
-- `IdentityRegistry` and `reconcile_paper_identity` de-duplicate papers across requested IDs and Semantic Scholar/arXiv/DOI aliases; `merge_seed_relation` folds seed relations when identities merge.
-- `fetch_candidate_pool` implements the reference/citation/recommendation budget split and the free-text `query:` seed proxy.
+### `cli/` and top-level modules
 
-### `citemesh/similarity.py` and `citemesh/dashboard_contracts.py`
+`__init__.py` (entry point and dispatch) · `parser.py` · `console.py` (Rich console and logging) · `build_options.py` and `build_contract.py` (strategy-scoped option validation and builder selection) · `outputs.py` · `graph_config.py` (the `*.config.json` sidecar) · `cache_ops.py` · `commands/{build,search,view,config,cache}.py`.
 
-- `similarity.py` provides `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity.
-- `dashboard_contracts.py` holds the `kind`/`schema_version` identities shared by the export producers and the dashboard viewer.
+Top-level: `__main__.py` (`python -m citemesh`), `_lazy.py` (the shared PEP 562 lazy-export plumbing every `__init__` uses), `progress.py`, `_runtime.py` (process-level runtime setup), `text_batching.py` (length-bucketed encode batching, `l2_normalize_embeddings`), `_version.py`.
 
-### `citemesh/core/models.py`
+## Rules
 
-- `Paper` and `Author` dataclasses encapsulate validated metadata.
-- Utility helpers support label generation and overlap checks.
-- Model payloads are designed for both graph operations and export serialization.
+**Dependency direction is one-way**: `core` → `data` → `services` → `strategies` → `visualization` → `cli`; a module never imports from a layer to its right, and `visualization/` never imports `cli`, so exporters stay usable without an argument parser.
 
-### `citemesh/core/user_config.py`
+**Optional dependencies stay lazily imported.** torch, sentence-transformers, datasets, plotly, and pyvis must never be imported at module scope on a path the base CLI reaches: a bare `pip install citemesh` has to run `citemesh build --strategy recommendation` and `citemesh --help` without them. Follow the guards in `strategies/embedding/deps.py` and `visualization/export/loaders.py`.
 
-- Loads, validates, and rewrites the persistent `config.toml` at the cache root.
-- Whitelists `[defaults]` build-flag keys and `[api] s2_api_key` with per-key casters; invalid entries are ignored with warnings so a bad config never blocks CLI usage.
-- The CLI applies these values after argument parsing; precedence and supported
-  keys are described in [User Configuration](../guides/configuration.md).
+**Duplicated choice lists are pinned by tests.** `data/user_config.py` declares its own `*_CHOICES` tuples instead of importing the parser's, so loading configuration never drags in strategy or visualization modules; `tests/test_user_config.py` keeps the two in sync — change both together.
 
-### Visualization (`citemesh/visualization/render.py`)
+**Tests are white-box and network-free**, patching the binding in the module under test; see [Contributing](../../CONTRIBUTING.md#before-you-open-a-pr).
 
-- Computes layouts, node sizes/colors, labels, and metadata overlays.
-- Applies selected theme values from `themes.py`.
-- Produces static PNG output via Matplotlib.
+## Python ↔ JavaScript duplication
 
-### Themes (`citemesh/visualization/themes.py`)
+The viewer rebuilds its Plotly figure client-side from the embedded payload, so a dozen algorithms exist in both languages on purpose: `stableCurveDirection`, `selectDashboardLabelIds`, `normalizeDashboardEdgeStrengths`, `dashboardHoverText`, `buildFigureSpecFromPayload` (mirroring `_build_plotly_figure` and its label/halo geometry), `csvGuard`/`csvEscape` and the CSV column order, `seedSlug`, `dashboardNodeLabel`, `safeExternalUrl`, `normalizeCollectionPackage`/`hasCompleteDashboardGeometry`, and `upsertCollectionEntries`. The Python counterparts live in `visualization/export/{geometry,plotly_figure,links,csv_,nodes}.py`, `visualization/render.py`, and `visualization/dashboard/{package,payload}.py`.
 
-- Defines the immutable `light`, `dark`, and `solarized` palettes.
-- Resolves `auto` from environment and host appearance signals.
+`tests/test_visualization.py` pins both sides: it checks the emitted script against formula fragments interpolated from the Python constants, then runs those functions in a Node subprocess and compares outputs, label offsets, color math, and package validation. It skips without Node, so run it with `node` on `PATH` before touching either side.
 
-### Exporter (`citemesh/visualization/export.py`)
+## Extension points
 
-- `GraphExporter` writes interactive and structured output formats from one graph object.
-- Reuses computed layout and style values for cross-format consistency.
-- Normalizes node attributes for serializer compatibility (for example GraphML-safe fields).
-- `visualization/years.py` centralizes publication-year coercion (including the optional-bounds split behind `meta.year_range: null`); `visualization/ordering.py` provides the deterministic node/edge ordering every export relies on.
-- Artifact-level format details and sidecar schema are documented in [Output Artifacts](../reference/output-artifacts.md).
+**A strategy** subclasses `GraphBuilderStrategy` in `strategies/<name>.py` with `collect_papers` (fetching through `candidates.py`, not the client, to inherit budget splitting, identity reconciliation, and the outage policy) and `compute_similarity`. Register it in the lazy export maps of `strategies/__init__.py` and `citemesh/__init__.py`, in the parser's `--strategy` choices and `STRATEGY_CHOICES`, and in `cli/build_contract.py`.
 
-### Dashboard Collections
+**An export format** adds a writer under `visualization/export/` and a `to_<format>(path, ...)` method on `GraphExporter` reading `graph_payload()`, then registers the extension in the CLI's export routing, `EXPORT_CHOICES`, and the optional-format cleanup in `dashboard/package.py` so switching formats removes stale siblings. Write through `atomic_output_path`.
 
-- `citemesh/cli.py` stages per-result artifacts, serializes collection updates under the package lock, restores the prior result bundle on ordinary commit failures, and writes the package as the final commit marker.
-- `GraphExporter` embeds the selected collection snapshot in the reusable viewer.
-- Every collection build also writes the current seed's graph JSON and build sidecar to its stable seed-ID-derived output directory. A successful refresh prunes only obsolete known formats for the same strategy; other strategy files and unrelated files are retained.
+**A corpus source** joins the arXiv adapter in `strategies/embedding/hydration.py`, yielding the same record shape (`id`, `title`, `abstract`, optionally `authors`, `categories`, `year`, `doi`, `venue`) and preserving hydration metadata, newest-first selection, and resumability. Custom column mappings are deliberately unsupported.
 
-File placement, schemas, migration, browser imports, and standalone-dashboard
-behavior are described in [Output Artifacts](../reference/output-artifacts.md).
+**A model profile** appends an `EmbeddingModelProfile` to `EMBEDDING_MODEL_PROFILES` in `data/model_profiles.py` and its key to `_PROFILE_BY_KEY` and `MODEL_PROFILE_CHOICES`. Its `schema_token` is part of the cache namespace, so bump it whenever a change alters what a vector means. A profile with no detection evidence still works through an explicit `--model-profile`.
 
-### Caching Support
+**A theme** extends `THEMES` in `visualization/themes.py`, which renderer, Plotly figure, dashboard, and dashboard CSS all read.
 
-- `citemesh/data/cache.py` resolves user-scoped cache roots.
-- `citemesh/data/embedding_cache.py` manages SQLite metadata and HDF5 embedding
-  datasets.
-- `citemesh/data/model_profiles.py` stores model-specific runtime profile metadata.
+## External dependencies
 
-On-disk layout and invalidation behavior are documented in [Caching & Data](../guides/caching.md).
-
-### Service Client (`citemesh/services/semantic_scholar.py`)
-
-- Wraps Semantic Scholar API calls with retries and rate-limit handling.
-- Handles reference-list caching integration.
-- Exposes `get_client()` for strategy use.
-
-## External Dependencies
-
-- **Semantic Scholar API** for citation/recommendation data.
-- **HuggingFace Datasets** for embedding corpus sources.
-- **SentenceTransformers** for semantic embeddings.
-- **`.[recommended]` extra** for the primary embedding + interactive-export runtime bundle.
-- **Optional `.[viz]` extra** when a base/dev install only needs interactive HTML exporters.
-
-## Extensibility
-
-- **Add a strategy**: subclass `GraphBuilderStrategy`, implement hooks, register in CLI dispatch.
-- **Add an export format**: extend `GraphExporter` and wire CLI export routing.
-- **Add themes**: extend `THEMES` definitions and renderer/export color lookups.
-- **Add corpus source**: adapt embedding-corpus loading while preserving shared cache/graph contracts.
-
-The user-facing workflow stays stable while ranking, similarity, visualization, and data-source internals evolve behind the strategy/export interfaces.
+The Semantic Scholar API is the only network dependency of the core CLI. Everything torch- or Plotly-shaped lives behind the `embeddings` and `viz` extras; h5py, NetworkX, Matplotlib, scikit-learn, and Rich ship in the base install.

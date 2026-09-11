@@ -1,23 +1,26 @@
 # Documentation
 
-New here? Read the [CLI guide](guides/cli.md), then the [Strategy guide](guides/strategies.md); the rest is reference. For development conventions see [Contributing](../CONTRIBUTING.md).
+Start with the [CLI guide](guides/cli.md) for the commands, then [How CiteMesh builds a graph](guides/how-it-works.md) for what happens between a seed paper and a rendered graph. The rest is reference.
 
-## Overview
+## Guides
 
-- Project overview, installation, and current project status: [README](../README.md)
-- Command usage: [CLI guide](guides/cli.md)
-- Strategy selection: [Strategy guide](guides/strategies.md)
-- Cache behavior and maintenance: [Caching guide](guides/caching.md)
-- Persistent user defaults (`citemesh config`): [Configuration guide](guides/configuration.md)
-- Change history: [Release notes](https://github.com/pszemraj/CiteMesh/releases)
+- [CLI guide](guides/cli.md) — for anyone running `citemesh`: the workflows, the full flag contract, and what to do when a run misbehaves.
+- [How CiteMesh builds a graph](guides/how-it-works.md) — for readers who want the mechanism: seed resolution, candidates, embedding, ranking, edge scoring, layout, export.
+- [Strategy guide](guides/strategies.md) — for deciding which of the four strategies fits the question you are asking.
+- [Caching & Data](guides/caching.md) — for anyone wondering where the disk went, what gets reused between runs, and how to reset it.
+- [User configuration](guides/configuration.md) — for people tired of retyping the same flags every run.
+- [Python API](guides/python-api.md) — for importing CiteMesh instead of shelling out; unstable before 1.0.
+
+Project overview and installation: [README](../README.md). Change history: [release notes](https://github.com/pszemraj/CiteMesh/releases). Development conventions: [Contributing](../CONTRIBUTING.md).
 
 ## Reference
 
-- Runtime environment variables: [reference/environment.md](reference/environment.md)
-- Output formats, the interactive dashboard UI, and sidecar schema: [reference/output-artifacts.md](reference/output-artifacts.md)
-- Embedding model defaults, fallback chain, and precision/compile behavior: [reference/embedding-runtime.md](reference/embedding-runtime.md)
-- Default-parameter tuning results and methodology: [reference/defaults-tuning-study.md](reference/defaults-tuning-study.md)
+- [Environment variables](reference/environment.md) — for CI and shared machines: every variable CiteMesh reads.
+- [Output artifacts](reference/output-artifacts.md) — for consumers of the exports: file formats, the dashboard collection, the sidecar schema.
+- [Embedding runtime](reference/embedding-runtime.md) — for tuning the encoder: model defaults, fallback chain, device, precision, and compile policy.
+- [Defaults tuning studies](reference/defaults-tuning-study.md) — for anyone who wants to argue with a shipped default: the sweeps behind each one.
 
 ## Internals
 
-- Package structure and execution flow: [internals/architecture.md](internals/architecture.md)
+- [Architecture](internals/architecture.md) — for contributors: package map, dependency rules, test conventions, extension points.
+- [Embedding cache internals](internals/embedding-cache.md) — for debugging a cache that crashed: mixin structure, write ordering, recovery invariants.

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import MethodType, SimpleNamespace
-from typing import Callable, Iterator, Optional
 from unittest.mock import MagicMock, call, patch
 
 import networkx as nx
@@ -18,7 +18,6 @@ from citemesh.core import API_CONFIG, EMBEDDING_CONFIG, HYBRID_CONFIG, Author, P
 from citemesh.data.model_profiles import compose_title_abstract_text
 from citemesh.services import semantic_scholar as s2
 from citemesh.services.semantic_scholar import SemanticScholarClient
-from citemesh.similarity import AbstractSimilarityIndex
 from citemesh.strategies import hybrid as hybrid_strategy
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
@@ -37,6 +36,7 @@ from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
 from citemesh.strategies.hybrid import EmbeddingInferenceError, HybridGraphBuilder
 from citemesh.strategies.recommendation import RecommendationGraphBuilder
+from citemesh.strategies.similarity import AbstractSimilarityIndex
 from tests._helpers import disable_embedding_dep_checks
 
 
@@ -324,7 +324,7 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
             side_effect=requests.ConnectionError("offline")
         )
         client._persist_reference_cache_entry(
-            s2._reference_cache_path("warm"), "warm", ["shared"]
+            s2.disk_cache._reference_cache_path("warm"), "warm", ["shared"]
         )
         if builder_type is CitationGraphBuilder:
             client.get_paper_references = MagicMock(return_value=[cold, warm])
@@ -344,7 +344,7 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
                 client=client,
             )
 
-        with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with patch("time.sleep"):
             papers = builder.collect_papers("seed")
 
     assert set(papers) == {"seed", "cold", "warm"}
@@ -374,7 +374,7 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
     :return None: Checks domain isolation, cache reuse, and fresh top-level scopes.
     """
-    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
     seed = _paper("scope-seed")
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
@@ -412,9 +412,9 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
             builder = RecommendationGraphBuilder(max_papers=3, client=client)
 
         client._persist_reference_cache_entry(
-            s2._reference_cache_path("warm"), "warm", ["cached-reference"]
+            s2.disk_cache._reference_cache_path("warm"), "warm", ["cached-reference"]
         )
-        with patch("citemesh.services.semantic_scholar.time.sleep") as sleep_mock:
+        with patch("time.sleep") as sleep_mock:
             for expected_calls in (API_CONFIG.max_retries, API_CONFIG.max_retries * 2):
                 with client.candidate_operation_scope():
                     papers = builder.collect_papers("scope-seed")
@@ -463,7 +463,7 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
     :return None: Verifies reference retry sharing and healthy parent enrichment.
     """
-    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
     seed = _paper("hybrid-scope-seed")
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
@@ -495,7 +495,7 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
             lambda _seed, candidates, _sources: list(candidates),
         )
 
-        with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with patch("time.sleep"):
             papers = builder.collect_papers("hybrid-scope-seed")
 
         assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
@@ -523,7 +523,7 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
     :return None: Verifies healthy source candidates and accurate status survive.
     """
-    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
     seed = _paper("embedding-scope-seed")
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
@@ -559,7 +559,7 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
             },
         )
 
-        with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with patch("time.sleep"):
             papers = builder.collect_papers("embedding-scope-seed")
 
         assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
@@ -599,7 +599,7 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
     :return None: Verifies a citation outage does not suppress recommendations.
     """
-    monkeypatch.setattr(s2, "REFERENCE_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
         client.get_paper_references = MagicMock(return_value=reference_papers)
@@ -612,7 +612,7 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
             }
         )
 
-        with patch("citemesh.services.semantic_scholar.time.sleep"):
+        with patch("time.sleep"):
             pool = fetch_candidate_pool(
                 client,
                 _seed_paper("partial-scope-seed"),
@@ -2144,7 +2144,7 @@ def test_capped_strategies_log_final_edge_count(
 def test_select_capped_undirected_edges_is_deterministic_and_dedupes(
     edges: list[tuple[object, object, dict[str, float]]],
     max_edges_per_node: int,
-    expected: Optional[list[tuple[object, object, float]]],
+    expected: list[tuple[object, object, float]] | None,
 ) -> None:
     """Edge capping should be deterministic across duplicate and mixed-id inputs."""
     first = select_capped_undirected_edges(edges, max_edges_per_node=max_edges_per_node)

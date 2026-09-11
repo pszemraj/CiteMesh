@@ -1,126 +1,79 @@
 # CiteMesh
 
-Build exploration-friendly paper graphs from a known paper with recommendation, citation, embedding, or hybrid strategies, or start the embedding strategy from a free-text query. CiteMesh ships as a single CLI with consistent visuals and export formats so you can switch approaches without changing tools -- an open-source alternative to hosted literature-mapping services.
+CiteMesh turns one paper you already know into a graph of the research around it: the newer papers that follow up on it, and the older foundational work it rests on.
 
-**By default, CiteMesh uses Semantic Scholar recommendations.** Local embeddings are opt-in: choose `--strategy embedding` or `--strategy hybrid`. Both use Semantic Scholar candidates by default; to download and search a local arXiv corpus, also set `--semantic-source arxiv-corpus`. You can save these choices as personal defaults with [user configuration](docs/guides/configuration.md).
+It runs locally from a single CLI with four switchable strategies — recommendation, citation, embedding, and hybrid — and exports the same graph to every format you might want.
 
 ![CiteMesh dashboard showing a Megalodon hybrid graph with LM-Infinite selected](assets/ui.png)
 
-_A repository-local hybrid graph seeded by “Megalodon,” with “LM-Infinite” selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
+_A hybrid graph seeded by “Megalodon” over a full arXiv corpus index, with “LM-Infinite” selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
 
-## Core Use Case
+## What you get
 
-Start from one paper you already know, then quickly discover:
-
-- newer papers that are genuinely related to that paper's core topic
-- older, high-quality foundational papers that matter for understanding the same area
-
-Use `--strategy hybrid` to combine citation links and local semantic ranking for this discovery pattern.
-
-## Why CiteMesh (vs. hosted literature-mapping tools)
-
-| | CiteMesh | Typical hosted graph tools |
+| | CiteMesh | Typical hosted graph tool |
 | --- | --- | --- |
-| Open source | MIT, self-hosted CLI | Closed, web-only |
-| Graph quota | None - build as many as you like | Limited free graphs |
-| Strategies | Recommendation, citation, embedding, hybrid | Single fixed algorithm |
-| Semantic similarity | Your embeddings, computed locally (CUDA / Apple Silicon MPS / CPU) | Opaque server-side |
-| Outputs | PNG, interactive HTML/Plotly, reusable dashboard collections, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
-| Automation | Scriptable CLI with deterministic exports and JSON sidecars | Manual browsing |
+| Licensing | MIT, self-hosted CLI | Closed, web-only |
+| Graph quota | None | Limited free graphs |
+| Strategies | Four, switchable per run | One fixed algorithm |
+| Semantic similarity | Local embeddings (CUDA / MPS / CPU) | Server-side, opaque |
+| Outputs | PNG, HTML/Plotly, dashboard collections, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
+| Automation | Scriptable CLI, deterministic exports, JSON sidecars | Manual browsing |
 
-## Project Status
-
-Public beta, pre-1.0. CiteMesh optimizes for discovery quality, correctness, and simple internals over backward compatibility: export formats, cache layouts, and defaults may change between revisions unless explicitly documented otherwise. macOS (Apple Silicon, MPS), Linux, and Windows are supported.
-
-## Documentation
-
-[Documentation index](docs/README.md)
+Public beta, pre-1.0: export formats, cache layouts, and defaults may change between revisions unless documented otherwise. Runs on macOS (Apple Silicon, MPS), Linux, and Windows.
 
 ## Quick Start
 
-### Install
-
-Before installing the recommended or embeddings extras, install PyTorch for your
-hardware using the [official installation selector](https://pytorch.org/get-started/locally/).
-Otherwise, pip may install a build you did not intend to use. Then install from GitHub:
+Install PyTorch for your hardware first with the [official selector](https://pytorch.org/get-started/locally/), or pip may resolve a build you did not intend. Then install from GitHub (no PyPI release yet):
 
 ```bash
 pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.git"
 ```
 
-Optional extras:
+Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly exports), `recommended` (both), `all` (adds dev tooling). Omit the extra for the citation/recommendation-only CLI. Editable installs: [Contributing](CONTRIBUTING.md).
 
-```bash
-# Minimal citation/recommendation CLI only
-pip install "citemesh @ git+https://github.com/pszemraj/CiteMesh.git"
-
-# Embedding strategy + semantic enrichment support
-pip install "citemesh[embeddings] @ git+https://github.com/pszemraj/CiteMesh.git"
-
-# Interactive HTML/Plotly exports
-pip install "citemesh[viz] @ git+https://github.com/pszemraj/CiteMesh.git"
-```
-
-For an editable development install, follow [Contributing](CONTRIBUTING.md).
-
-On macOS the `embeddings` extra requires torch >= 2.13 and runs on the MPS backend with bfloat16 autocast when supported, falling back to float32; see [Embedding Runtime](docs/reference/embedding-runtime.md).
+Python >= 3.10. Only the `embeddings` extra needs torch: `>=2.9` on Linux and Windows, `>=2.13` on macOS (the release verified for MPS bfloat16; float32 is the fallback wherever bf16 is unavailable). Details: [Embedding Runtime](docs/reference/embedding-runtime.md).
 
 ### Semantic Scholar API key (recommended)
 
-CiteMesh works without credentials using Semantic Scholar's shared anonymous pool, but that pool is small and 429 rate-limit errors are common — an unkeyed first run can spend most of its time waiting out retries. A free API key gives you a dedicated 1 request/second budget:
+CiteMesh runs without credentials on Semantic Scholar's shared anonymous pool, but an unkeyed first run can spend most of its time waiting out 429 retries. A free key from <https://www.semanticscholar.org/product/api> buys a dedicated 1 request/second budget — pass it as `export S2_API_KEY=...`, or persist it:
 
-1. Request a key at <https://www.semanticscholar.org/product/api>
-2. Provide it via the environment (`export S2_API_KEY=...`) or persist it:
+```bash
+citemesh config set api.s2_api_key YOUR_KEY
+```
 
-   ```bash
-   citemesh config set api.s2_api_key YOUR_KEY
-   ```
+### Run one graph
 
-### Run One Graph
+Builds default to Semantic Scholar recommendations. Local embeddings are opt-in with `--strategy embedding` or `--strategy hybrid`; add `--semantic-source arxiv-corpus` to swap the S2 candidates for a downloaded arXiv corpus. Any of these can be saved as personal defaults ([user configuration](docs/guides/configuration.md)).
 
 ```bash
 # Default: Semantic Scholar recommendations
-citemesh build "arxiv:1706.03762" --export all --theme dark
+citemesh build "arxiv:1706.03762"
 
-# Opt in to local embeddings over Semantic Scholar candidates, plus citation links
-citemesh build "arxiv:1706.03762" --strategy hybrid --export all --theme dark
+# Local embeddings over S2 candidates, plus citation links
+citemesh build "arxiv:1706.03762" --strategy hybrid --export all
 
-# Opt in to embedding search over a downloaded arXiv corpus
+# Embedding search over a downloaded arXiv corpus
 citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-corpus
 ```
 
-The default recommendation strategy does not download an embedding model or corpus. The first embedding or hybrid run downloads the `unsloth/embeddinggemma-300m` checkpoint (~300M parameters). With the default Semantic Scholar candidate source, it encodes up to 400 candidate abstracts. When you opt into arXiv corpus mode, CiteMesh hydrates the full selected split by default; add `--corpus-size N` to choose a smaller newest-first corpus. Later runs reuse the persistent embedding cache. See [CLI Usage](docs/guides/cli.md) for corpus size and loading options.
+The first embedding or hybrid run downloads `unsloth/embeddinggemma-300m` and encodes up to `--candidate-pool-size` abstracts (default 400); `arxiv-corpus` mode hydrates the full selected split unless capped with `--corpus-size N` ([CLI guide](docs/guides/cli.md)).
 
-Omit `--output` and generated files land in `out/` under the current working directory (a source checkout already gitignores that path). Repeated dashboard builds share an offline collection there:
+Omit `--output` and each build saves under `out/<title-slug>-<hash>/`, while repeated dashboard builds accumulate into a shared `out/dashboard.html` collection. Open it with `citemesh view`, or name a collection or file (`citemesh view out/my-collection`) — see [Output Artifacts](docs/reference/output-artifacts.md).
 
-```bash
-citemesh build "arxiv:1706.03762" --strategy hybrid --export dashboard
-citemesh build "arxiv:1810.04805" --strategy recommendation --export dashboard
-```
+## How it works
 
-Each build saves its graph under `out/<title-slug>-<hash>/`, reusing the existing seed directory if the title changes. The shared `out/dashboard.html` viewer collects the results for browsing — different seeds add results, rebuilding the same seed and strategy replaces its result. See [Output Artifacts](docs/reference/output-artifacts.md) for collection semantics, standalone dashboard files, and the portable package format.
+Every strategy runs the same eight-stage pipeline; they differ only in where candidates come from and how pairs are scored.
 
-Open the saved default viewer with `citemesh view`, a named collection with `citemesh view out/my-collection`, or an explicit HTML file with `citemesh view out/report.dashboard.html --browser google-chrome`.
+1. **Seed resolution** — your DOI / arXiv ID / URL / S2 ID is normalized and resolved against Semantic Scholar; under `--strategy embedding`, an identifier S2 cannot resolve is reinterpreted as a free-text query.
+2. **Candidate acquisition** — references, citations, and recommendations are fetched within a `--candidate-pool-size` budget (default 400, split roughly 1:2:1) and de-duplicated across S2 / arXiv / DOI identities.
+3. **Embedding** — EmbeddingGemma encodes the seed as a retrieval *query* and candidates as retrieval *documents*, at 512 dimensions in float32.
+4. **Caching** — vectors persist in a SQLite + HDF5 cache keyed by a namespace fingerprint, so later runs skip encoding.
+5. **Ranking and selection** — candidates are ranked against the seed and cut down to `--max-papers` (default 40; hybrid 45).
+6. **Edge scoring** — selected papers are re-encoded with a *symmetric* prompt; pairs need cosine >= 0.74 (`--min-semantic-similarity`) before temporal, category, and shared-author signals adjust the weight, and per-node caps prune the rest.
+7. **Layout** — one deterministic layout (`--seed`) is computed in Python and shared by every layout-based export.
+8. **Export** — a single graph payload is rendered to PNG, Plotly, dashboard, JSON, CSV, BibTeX, and GraphML.
 
-For command syntax and operational details, use:
-
-- [CLI Usage](docs/guides/cli.md)
-- [Strategy Guide](docs/guides/strategies.md)
-- [Caching & Data](docs/guides/caching.md)
-- [User Configuration](docs/guides/configuration.md)
-
-## Highlights
-
-- One CLI for recommendation, citation, embedding, and hybrid graphs.
-- Built for seed-paper-driven discovery of both recent follow-up work and foundational prior work.
-- Local embeddings with first-class device support: CUDA, Apple Silicon (MPS), and CPU, using bf16 autocast on supported runtimes.
-- Multi-format outputs with one shared run contract across static, interactive, and structured exports; dashboard collections retain separate graph files per seed.
-- Persistent user-level caching for embeddings and reference expansion; caches are portable across machines at matching compute dtype.
-- Mode-aware `citemesh search`: offline semantic search over the active retrieval
-  cache, used automatically when that namespace has vectors, with Semantic Scholar
-  keyword search as the fallback (`--mode local|s2|auto`).
-- Persistent personal defaults via `citemesh config` (`config.toml`).
-- Typed, modular internals that are straightforward to extend.
+The full walkthrough, with the numbers that matter at each stage: [How CiteMesh builds a graph](docs/guides/how-it-works.md). For syntax and operational detail: [CLI guide](docs/guides/cli.md), [Strategy guide](docs/guides/strategies.md), [Caching & Data](docs/guides/caching.md), [User configuration](docs/guides/configuration.md), and the [documentation index](docs/README.md).
 
 ## Contributing
 

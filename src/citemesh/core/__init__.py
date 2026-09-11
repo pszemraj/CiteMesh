@@ -1,0 +1,24 @@
+"""Core data structures and configuration for CiteMesh."""
+
+from __future__ import annotations
+
+from .config import (
+    API_CONFIG,
+    EMBEDDING_CONFIG,
+    EMBEDDING_STORAGE_CONFIG,
+    HYBRID_CONFIG,
+    TEMPORAL_CONFIG,
+    VIZ_CONFIG,
+)
+from .models import Author, Paper
+
+__all__ = [
+    "Author",
+    "Paper",
+    "API_CONFIG",
+    "EMBEDDING_CONFIG",
+    "EMBEDDING_STORAGE_CONFIG",
+    "HYBRID_CONFIG",
+    "TEMPORAL_CONFIG",
+    "VIZ_CONFIG",
+]

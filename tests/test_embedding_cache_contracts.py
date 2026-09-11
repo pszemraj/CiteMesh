@@ -11,11 +11,12 @@ import sys
 import tempfile
 import threading
 import types
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from queue import Empty
-from typing import Any, Iterator
+from typing import Any
 
 import h5py
 import numpy as np
@@ -64,7 +65,7 @@ class _FakeInferenceTensor:
         """
         self.values = np.asarray(values)
 
-    def __getitem__(self, key: object) -> "_FakeInferenceTensor":
+    def __getitem__(self, key: object) -> _FakeInferenceTensor:
         """Return a sliced fake tensor.
 
         :param object key: NumPy-compatible index or slice.
@@ -72,14 +73,14 @@ class _FakeInferenceTensor:
         """
         return _FakeInferenceTensor(self.values[key])
 
-    def float(self) -> "_FakeInferenceTensor":
+    def float(self) -> _FakeInferenceTensor:
         """Return FP32 values.
 
         :return _FakeInferenceTensor: FP32 tensor view.
         """
         return _FakeInferenceTensor(self.values.astype(np.float32))
 
-    def cpu(self) -> "_FakeInferenceTensor":
+    def cpu(self) -> _FakeInferenceTensor:
         """Return the already-hosted tensor.
 
         :return _FakeInferenceTensor: This tensor.
@@ -237,9 +238,10 @@ def _make_prefetch_proxy(
     monkeypatch.setitem(sys.modules, "sentence_transformers.util", fake_util)
 
     from citemesh.strategies import embedding as embedding_module
+    from citemesh.strategies.embedding import deps as embedding_deps
 
     fake_torch = types.SimpleNamespace(inference_mode=nullcontext)
-    monkeypatch.setattr(embedding_module, "_import_torch", lambda: fake_torch)
+    monkeypatch.setattr(embedding_deps, "_import_torch", lambda: fake_torch)
     return embedding_module._PrecisionEncodeProxy(
         model,
         nullcontext,
@@ -820,7 +822,7 @@ def test_embedding_cache_replacement_journal_retains_rows_when_fsync_fails(
         raise OSError("forced fsync failure")
 
     with monkeypatch.context() as patch:
-        patch.setattr(embedding_cache_module.os, "fsync", fail_fsync)
+        patch.setattr(embedding_cache_module.recovery.os, "fsync", fail_fsync)
         with pytest.raises(RuntimeError, match="failed to durably flush"):
             cache.get_embeddings(replacement, model, show_progress=False)
 
@@ -1874,7 +1876,9 @@ def test_embedding_cache_search_keeps_tied_top_k_order_across_chunks(
     storage_precision: str,
 ) -> None:
     """Float and int8 searches should rank ties by row over multiple chunks."""
-    monkeypatch.setattr(embedding_cache_module, "EMBEDDING_SEARCH_CHUNK_ROWS", 2)
+    monkeypatch.setattr(
+        embedding_cache_module.constants, "EMBEDDING_SEARCH_CHUNK_ROWS", 2
+    )
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(
             cache_dir=tmpdir,
@@ -3641,7 +3645,7 @@ def test_embedding_cache_open_errors_preserve_namespace(
             patch.setattr(Path, "stat", fail_stat)
             patch.setattr(Path, "exists", suppress_exists_error)
         elif backend == "hdf5":
-            patch.setattr(embedding_cache_module.h5py, "File", fail_open)
+            patch.setattr(embedding_cache_module.store.h5py, "File", fail_open)
         else:
             patch.setattr(cache, "_connect_db", fail_open)
         if operation == "open":

@@ -2,7 +2,8 @@
 .DS_Store
 out/*
 cache/*
-citemesh/_version.py
+src/citemesh/_version.py
+local-scratch/
 # stray run configs at repo root only
 /*.yaml
 .claude/

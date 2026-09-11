@@ -39,11 +39,18 @@ from citemesh.cli import (
     resolve_output_paths,
     update_dashboard_package,
 )
+from citemesh.cli import build_contract as build_contract_module
+from citemesh.cli import build_options as build_options_module
+from citemesh.cli import cache_ops as cache_ops_module
+from citemesh.cli import console as console_module
+from citemesh.cli import parser as parser_module
+from citemesh.cli.commands import build as build_module
+from citemesh.cli.commands import search as search_module
 from citemesh.core import Author, Paper
-from citemesh.core.user_config import UserConfig
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
+from citemesh.data.user_config import UserConfig
 from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, ENCODE_BATCH_SIZE
 from citemesh.strategies.hybrid import (
@@ -54,6 +61,7 @@ from citemesh.strategies.hybrid import (
 )
 from citemesh.visualization import GraphExporter as ProductionGraphExporter
 from citemesh.visualization import generate_output_path
+from citemesh.visualization.dashboard import package as dashboard_package_module
 from tests._helpers import (
     build_seed_graph,
     get_paper_id_normalization_cases,
@@ -99,6 +107,34 @@ def _run_captured_cli(entrypoint: Any) -> SimpleNamespace:
         stdout=stdout.getvalue(),
         stderr=stderr.getvalue(),
     )
+
+
+def flatten_console_text(text: str) -> str:
+    """Collapse Rich's soft line wrapping so phrase assertions survive re-wrapping.
+
+    Log records render through ``RichHandler`` at a fixed 140-column width, so a
+    long interpolated path pushes later words onto the next line and splits
+    asserted phrases. Collapsing every whitespace run makes those assertions
+    independent of how much of the line the path consumed.
+
+    :param str text: Captured stdout or stderr from a CLI run.
+    :return str: Text with each whitespace run replaced by a single space.
+    """
+    return " ".join(text.split())
+
+
+def unwrapped_console_token(text: str) -> str:
+    """Drop every whitespace character so a hard-folded long token rejoins.
+
+    Rich folds a token longer than the remaining line without inserting a
+    separator, so a temporary-directory path can be split mid-segment. Removing
+    whitespace entirely restores such tokens; use this only to look for values
+    that contain no whitespace of their own, such as filesystem paths.
+
+    :param str text: Captured stdout or stderr from a CLI run.
+    :return str: Text with every whitespace character removed.
+    """
+    return "".join(text.split())
 
 
 def _make_builder_stub(
@@ -252,10 +288,10 @@ def _reset_cli_logging_state() -> tuple[list[logging.Handler], int, bool]:
     root_logger = logging.getLogger()
     saved_handlers = list(root_logger.handlers)
     saved_level = int(root_logger.level)
-    saved_configured = bool(cli_module._LOGGING_CONFIGURED)
+    saved_configured = bool(console_module._LOGGING_CONFIGURED)
     for handler in list(root_logger.handlers):
         root_logger.removeHandler(handler)
-    cli_module._LOGGING_CONFIGURED = False
+    console_module._LOGGING_CONFIGURED = False
     return saved_handlers, saved_level, saved_configured
 
 
@@ -273,7 +309,7 @@ def _restore_cli_logging_state(
     for handler in saved_handlers:
         root_logger.addHandler(handler)
     root_logger.setLevel(saved_level)
-    cli_module._LOGGING_CONFIGURED = saved_configured
+    console_module._LOGGING_CONFIGURED = saved_configured
 
 
 def _populate_cache_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -367,12 +403,13 @@ def test_view_rejects_missing_or_non_html_results(
     result = run_cli_command(["view", target])
 
     assert result.returncode == 1
-    assert target in result.stderr
+    flat_stderr = flatten_console_text(result.stderr)
+    assert target in unwrapped_console_token(result.stderr)
     if target == "graph.json":
-        assert "HTML" in result.stderr
-        assert "Add Results" in result.stderr
+        assert "HTML" in flat_stderr
+        assert "Add Results" in flat_stderr
     else:
-        assert "Cannot read saved results" in result.stderr
+        assert "Cannot read saved results" in flat_stderr
     open_default.assert_not_called()
 
 
@@ -402,8 +439,8 @@ def test_view_reports_browser_launch_failure(
     result = run_cli_command(arguments)
 
     assert result.returncode == 1
-    assert "browser" in result.stderr.lower()
-    assert str(saved_html) in result.stderr
+    assert "browser" in flatten_console_text(result.stderr).lower()
+    assert str(saved_html) in unwrapped_console_token(result.stderr)
 
 
 def test_cache_commands_contracts(
@@ -445,13 +482,13 @@ def test_cache_commands_contracts(
         "TOTAL",
         "Cache root:",
     ]:
-        assert token in scan_result.stdout
+        assert token in flatten_console_text(scan_result.stdout)
 
     scan_debug_result = run_cli_command(["cache", "scan", "--log-level", "debug"])
     assert scan_debug_result.returncode == 0, (
         f"STDOUT: {scan_debug_result.stdout}\nSTDERR: {scan_debug_result.stderr}"
     )
-    assert "CiteMesh Cache Scan" in scan_debug_result.stdout
+    assert "CiteMesh Cache Scan" in flatten_console_text(scan_debug_result.stdout)
 
     clear_result = run_cli_command(
         ["cache", "clear", "--yes", "--reason", "manual local reset"]
@@ -554,7 +591,7 @@ def test_cache_clear_reports_config_inspection_failure(
         lambda path: False if path == config_path else original_exists(path),
     )
     monkeypatch.setattr(
-        cli_module, "_confirmed_cache_clear", lambda *_args, **_kwargs: True
+        cache_ops_module, "_confirmed_cache_clear", lambda *_args, **_kwargs: True
     )
 
     assert cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
@@ -566,7 +603,7 @@ def test_cache_clear_declined_at_prompt_keeps_cache(
 ) -> None:
     """Answering the cache clear prompt with ``n`` should abort and keep every file."""
     cache_root = _populate_cache_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: True)
+    monkeypatch.setattr(cache_ops_module, "stdin_isatty", lambda: True)
     prompt_mock = MagicMock(return_value="n")
     monkeypatch.setattr(cli_module.Console, "input", prompt_mock)
 
@@ -584,7 +621,7 @@ def test_cache_clear_prompt_eof_keeps_cache(
 ) -> None:
     """``EOFError`` while reading the confirmation should be treated as a decline."""
     cache_root = _populate_cache_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: True)
+    monkeypatch.setattr(cache_ops_module, "stdin_isatty", lambda: True)
     monkeypatch.setattr(cli_module.Console, "input", MagicMock(side_effect=EOFError))
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
@@ -605,7 +642,7 @@ def test_cache_clear_without_tty_refuses_before_prompting(
 ) -> None:
     """Non-interactive stdin without ``--yes`` should refuse and point at ``--yes``."""
     cache_root = _populate_cache_root(tmp_path, monkeypatch)
-    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: False)
+    monkeypatch.setattr(cache_ops_module, "stdin_isatty", lambda: False)
     prompt_mock = MagicMock(return_value="y")
     monkeypatch.setattr(cli_module.Console, "input", prompt_mock)
     error_mock = MagicMock()
@@ -631,14 +668,14 @@ def test_force_rebuild_cache_confirmation_contracts(
     graph = build_seed_graph("seed")
 
     build_graph_mock = MagicMock(return_value=(graph, "seed"))
-    monkeypatch.setattr(cli_module, "_build_strategy_graph", build_graph_mock)
+    monkeypatch.setattr(build_module, "_build_strategy_graph", build_graph_mock)
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub({}, methods=("to_json",)),
     )
 
-    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: True)
+    monkeypatch.setattr(cache_ops_module, "stdin_isatty", lambda: True)
     monkeypatch.setattr(
         cli_module.Console, "input", lambda self, prompt="", **kwargs: "n"
     )
@@ -658,7 +695,7 @@ def test_force_rebuild_cache_confirmation_contracts(
     assert cancelled.returncode != 0
     assert build_graph_mock.call_count == 0
 
-    monkeypatch.setattr(cli_module, "stdin_isatty", lambda: False)
+    monkeypatch.setattr(cache_ops_module, "stdin_isatty", lambda: False)
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     non_interactive = run_cli_command(
@@ -846,7 +883,7 @@ def test_search_command_prints_results_to_stdout(
             abstract="Transformer model paper",
         )
     ]
-    monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+    monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
 
     result = run_cli_command(["search", "attention", "--limit", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
@@ -925,12 +962,12 @@ def test_search_mode_local_prints_cached_results(
         cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
     builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
 
     result = run_cli_command(["search", "cached topic", "--mode", "local", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
     # Rich folds table cells at console width; compare on whitespace-normalized text.
-    plain_stdout = " ".join(result.stdout.split())
+    plain_stdout = flatten_console_text(result.stdout)
     assert "Local semantic search for 'cached topic'" in plain_stdout
     assert _FAKE_LOCAL_RESULT.paper_id in plain_stdout
     assert "0.876" in plain_stdout
@@ -963,7 +1000,7 @@ def test_search_local_uses_configured_corpus_dataset_source(
         cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
     builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
     dataset_source = "research/arxiv-snapshot"
     for key, value in {
         "semantic_source": "arxiv-corpus",
@@ -1008,7 +1045,7 @@ def test_configured_local_corpus_hybrid_build_uses_full_split(
         ),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_options_module,
         "HybridGraphBuilder",
         _make_builder_stub(
             captured_builder,
@@ -1017,7 +1054,7 @@ def test_configured_local_corpus_hybrid_build_uses_full_split(
         ),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub({}, methods=("to_dashboard_html",)),
     )
@@ -1063,14 +1100,14 @@ def test_search_forces_embedding_strategy_over_configured_build_strategy(
         cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
     builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
     config = UserConfig(
         path=Path("cfg-home") / "config.toml",
         defaults={"strategy": "recommendation", "calibration_sample_size": 100},
     )
     monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
     client_factory = MagicMock()
-    monkeypatch.setattr(cli_module, "get_client", client_factory)
+    monkeypatch.setattr(search_module, "get_client", client_factory)
 
     result = run_cli_command(["search", "cached topic", *search_args])
 
@@ -1098,10 +1135,10 @@ def test_search_auto_falls_back_on_config_contract_error(
         path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
     )
     monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    device_resolver = MagicMock(side_effect=ValueError("CUDA is unavailable"))
+    monkeypatch.setattr(search_module, "resolve_embedding_device", device_resolver)
     monkeypatch.setattr(
-        cli_module,
-        "resolve_embedding_device",
-        MagicMock(side_effect=ValueError("CUDA is unavailable")),
+        build_contract_module, "resolve_embedding_device", device_resolver
     )
     mock_client = MagicMock()
     mock_client.search_papers.return_value = [
@@ -1114,7 +1151,7 @@ def test_search_auto_falls_back_on_config_contract_error(
             abstract="Fallback result",
         )
     ]
-    monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+    monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
     info = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info)
 
@@ -1141,10 +1178,10 @@ def test_search_local_reports_config_contract_error_without_build_usage(
         path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
     )
     monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
+    device_resolver = MagicMock(side_effect=ValueError("CUDA is unavailable"))
+    monkeypatch.setattr(search_module, "resolve_embedding_device", device_resolver)
     monkeypatch.setattr(
-        cli_module,
-        "resolve_embedding_device",
-        MagicMock(side_effect=ValueError("CUDA is unavailable")),
+        build_contract_module, "resolve_embedding_device", device_resolver
     )
     error = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error)
@@ -1172,12 +1209,13 @@ def test_search_device_flag_overrides_config_before_local_validation(
     )
     monkeypatch.setattr(cli_module, "load_user_config", lambda: config)
     resolver = MagicMock(return_value="cpu")
-    monkeypatch.setattr(cli_module, "resolve_embedding_device", resolver)
+    monkeypatch.setattr(search_module, "resolve_embedding_device", resolver)
+    monkeypatch.setattr(build_contract_module, "resolve_embedding_device", resolver)
     fake_builder = _fake_local_search_builder(
         cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
     builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
 
     result = run_cli_command(
         ["search", "cached topic", "--mode", "local", "--device", "cpu"]
@@ -1207,13 +1245,15 @@ def test_search_namespace_flag_implies_local_mode(
         cached_count=7, results=[_FAKE_LOCAL_RESULT]
     )
     builder_factory = MagicMock(return_value=fake_builder)
-    monkeypatch.setattr(cli_module, "EmbeddingGraphBuilder", builder_factory)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
     client_factory = MagicMock()
-    monkeypatch.setattr(cli_module, "get_client", client_factory)
+    monkeypatch.setattr(search_module, "get_client", client_factory)
 
     result = run_cli_command(["search", "cached topic", *namespace_args])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    assert "Local semantic search for 'cached topic'" in " ".join(result.stdout.split())
+    assert "Local semantic search for 'cached topic'" in flatten_console_text(
+        result.stdout
+    )
     assert builder_factory.call_args.kwargs[expected_kwarg] == expected_value
     client_factory.assert_not_called()
 
@@ -1226,16 +1266,18 @@ def test_search_auto_uses_local_when_cache_populated(
         cached_count=42, results=[_FAKE_LOCAL_RESULT]
     )
     monkeypatch.setattr(
-        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
     client_factory = MagicMock()
-    monkeypatch.setattr(cli_module, "get_client", client_factory)
+    monkeypatch.setattr(search_module, "get_client", client_factory)
     info_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
 
     result = run_cli_command(["search", "cached topic", "-n", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
-    assert "Local semantic search for 'cached topic'" in " ".join(result.stdout.split())
+    assert "Local semantic search for 'cached topic'" in flatten_console_text(
+        result.stdout
+    )
     notices = str(info_mock.call_args_list)
     assert "locally cached embeddings" in notices
     assert "--mode s2" in notices
@@ -1252,10 +1294,10 @@ def test_search_auto_resolves_artifact_namespace_when_cache_files_exist(
     fake_builder.embedding_cache.embedding_count = MagicMock(return_value=42)
     fake_builder.has_persistent_embedding_artifacts.return_value = True
     monkeypatch.setattr(
-        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
     client_factory = MagicMock()
-    monkeypatch.setattr(cli_module, "get_client", client_factory)
+    monkeypatch.setattr(search_module, "get_client", client_factory)
 
     result = run_cli_command(["search", "cached topic", "-n", "1"])
 
@@ -1277,7 +1319,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
     """Default (auto) mode falls back to S2 keyword search with a notice."""
     fake_builder = _fake_local_search_builder(cached_count=0)
     monkeypatch.setattr(
-        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
     mock_client = MagicMock()
     mock_client.search_papers.return_value = [
@@ -1290,7 +1332,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
             abstract="Transformer model paper",
         )
     ]
-    monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+    monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
     with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
         result = run_cli_command(["search", "attention", "--limit", "1"])
     assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
@@ -1312,7 +1354,7 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     fake_builder = _fake_local_search_builder(cached_count=0)
     monkeypatch.setattr(
-        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
 
     result = run_cli_command(["search", "anything", "--mode", "local"])
@@ -1342,10 +1384,10 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
     fake_builder.compute_dtype = "bfloat16"
     fake_builder.prepare_embedding_cache.side_effect = RuntimeError("model unavailable")
     monkeypatch.setattr(
-        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
     s2_search = MagicMock(return_value=0)
-    monkeypatch.setattr(cli_module, "_run_s2_search", s2_search)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
 
     parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
     args = parser.parse_args(["search", "attention"])
@@ -1372,7 +1414,7 @@ def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
     """
     fake_builder = _fake_local_search_builder(cached_count=0)
     monkeypatch.setattr(
-        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
     mock_client = MagicMock()
     mock_client.search_papers.return_value = [
@@ -1383,7 +1425,7 @@ def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
             abstract="fallback",
         )
     ]
-    monkeypatch.setattr(cli_module, "get_client", lambda: mock_client)
+    monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
     info_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
 
@@ -1408,7 +1450,7 @@ def test_search_namespace_flag_empty_cache_error_names_the_flags(
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     fake_builder = _fake_local_search_builder(cached_count=0)
     monkeypatch.setattr(
-        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
 
     result = run_cli_command(["search", "anything", "--model", "custom/model"])
@@ -1427,7 +1469,7 @@ def test_search_mode_from_config_local_empty_cache_cites_config(
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     fake_builder = _fake_local_search_builder(cached_count=0)
     monkeypatch.setattr(
-        cli_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
     )
     config = UserConfig(
         path=Path("cfg-home") / "config.toml", defaults={"search_mode": "local"}
@@ -1449,7 +1491,7 @@ def test_invalid_paper_id_fails_cleanly(
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         MagicMock(side_effect=ValueError("Seed paper not found")),
     )
@@ -1465,7 +1507,7 @@ def test_invalid_paper_id_fails_cleanly(
     output = tmp_path / "unavailable.json"
     error_mock.reset_mock()
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         MagicMock(
             side_effect=CandidateAcquisitionError(
@@ -1919,7 +1961,7 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
     graph = build_seed_graph("seed")
 
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
@@ -2011,7 +2053,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
@@ -2024,9 +2066,9 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
         captured["layout_seed"] = layout_seed
         return shared_layout
 
-    monkeypatch.setattr(cli_module, "compute_layout", _fake_compute_layout)
+    monkeypatch.setattr(build_module, "compute_layout", _fake_compute_layout)
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(captured, methods=("to_json",)),
     )
@@ -2035,7 +2077,7 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
         del args
         captured["visualize_layout"] = kwargs.get("layout")
 
-    monkeypatch.setattr(cli_module, "visualize_graph", _fake_visualize)
+    monkeypatch.setattr(build_module, "visualize_graph", _fake_visualize)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output = Path(tmpdir) / "seeded.png"
@@ -2079,10 +2121,10 @@ def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> No
         json_layout_params["layout_seed"] = layout_seed
         return json_layout
 
-    monkeypatch.setattr(cli_module, "compute_layout", _fake_json_compute_layout)
+    monkeypatch.setattr(build_module, "compute_layout", _fake_json_compute_layout)
     captured.clear()
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(captured, methods=("to_json",)),
     )
@@ -2112,14 +2154,14 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Dashboard collections should retain the shared viewer and per-seed graph."""
     graph = build_seed_graph("seed")
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
 
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(
             captured,
@@ -2172,7 +2214,7 @@ def test_dashboard_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
 
     captured.clear()
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(
             captured,
@@ -2233,12 +2275,12 @@ def test_dashboard_default_collection_retains_seed_directory(
     graph = build_seed_graph("seed")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub({}, methods=("to_dashboard_html",)),
     )
@@ -2282,12 +2324,12 @@ def test_dashboard_package_tracks_multiple_runs(
     captured: dict[str, object] = {}
     build_results = iter([(first_graph, "seed-a"), (second_graph, "seed-b")])
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: next(build_results),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(
             captured,
@@ -2375,12 +2417,12 @@ def test_dashboard_package_refreshes_same_seed_strategy_slot(
     captured: dict[str, object] = {}
     build_results = iter([(seed_graph, "seed"), (updated_graph, "seed")])
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: next(build_results),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(
             captured,
@@ -2499,7 +2541,7 @@ def test_dashboard_build_serializes_all_result_artifacts_with_package(
     second_graph.add_node("extra", title="Second Run Paper")
     second_graph.add_edge("seed", "extra", weight=0.4)
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **kwargs: (
             first_graph if args.max_papers == 1 else second_graph,
@@ -2532,11 +2574,11 @@ def test_dashboard_build_serializes_all_result_artifacts_with_package(
         exporter.to_csv = write_csv
         return exporter
 
-    monkeypatch.setattr(cli_module, "GraphExporter", graph_sensitive_exporter)
+    monkeypatch.setattr(build_module, "GraphExporter", graph_sensitive_exporter)
 
     first_update_started = threading.Event()
     allow_first_update = threading.Event()
-    original_update = cli_module.update_dashboard_package
+    original_update = build_module.update_dashboard_package
 
     def delayed_update(package_path: Path, **kwargs: Any) -> dict[str, Any]:
         """Let the second build finish before the first acquires the package lock.
@@ -2550,7 +2592,7 @@ def test_dashboard_build_serializes_all_result_artifacts_with_package(
             assert allow_first_update.wait(timeout=10), "first update never released"
         return original_update(package_path, **kwargs)
 
-    monkeypatch.setattr(cli_module, "update_dashboard_package", delayed_update)
+    monkeypatch.setattr(build_module, "update_dashboard_package", delayed_update)
     returncodes: list[int] = []
     errors: list[BaseException] = []
 
@@ -2630,7 +2672,7 @@ def test_dashboard_export_failure_preserves_previous_result_bundle(
     second_graph.add_edge("seed", "extra", weight=0.4)
     build_results = iter([(first_graph, "seed"), (second_graph, "seed")])
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **kwargs: next(build_results),
     )
@@ -2661,7 +2703,7 @@ def test_dashboard_export_failure_preserves_previous_result_bundle(
         exporter.to_bibtex = write_bibtex
         return exporter
 
-    monkeypatch.setattr(cli_module, "GraphExporter", failing_exporter)
+    monkeypatch.setattr(build_module, "GraphExporter", failing_exporter)
     first_result = run_cli_command(
         [
             "build",
@@ -2767,10 +2809,12 @@ def test_dashboard_commit_failure_restores_promoted_and_removed_files(
     if failure_stage == "promotion":
         monkeypatch.setattr(Path, "replace", fail_second_promotion)
     else:
-        monkeypatch.setattr(cli_module, "atomic_write_json", fail_package_write)
+        monkeypatch.setattr(
+            dashboard_package_module, "atomic_write_json", fail_package_write
+        )
 
     with pytest.raises(OSError, match=f"{failure_stage} write failed"):
-        cli_module._commit_staged_dashboard_artifacts(
+        dashboard_package_module._commit_staged_dashboard_artifacts(
             package_path,
             {"results": []},
             staged_result_files={
@@ -2854,7 +2898,7 @@ def test_dashboard_package_serializes_concurrent_updates(
     second_write_started = threading.Event()
     write_counter = 0
     write_counter_lock = threading.Lock()
-    original_atomic_write = cli_module.atomic_write_json
+    original_atomic_write = dashboard_package_module.atomic_write_json
 
     def delayed_atomic_write(
         path: Path, payload: dict[str, object], **kwargs: object
@@ -2877,7 +2921,9 @@ def test_dashboard_package_serializes_concurrent_updates(
             second_write_started.set()
         original_atomic_write(path, payload, **kwargs)
 
-    monkeypatch.setattr(cli_module, "atomic_write_json", delayed_atomic_write)
+    monkeypatch.setattr(
+        dashboard_package_module, "atomic_write_json", delayed_atomic_write
+    )
 
     errors: list[BaseException] = []
 
@@ -2952,12 +2998,12 @@ def test_dashboard_standalone_export_preserves_explicit_single_file(
     graph = build_seed_graph("seed")
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(
             captured,
@@ -3142,12 +3188,12 @@ def test_dashboard_build_preflights_invalid_package_before_writing(
         side_effect=AssertionError("graph construction must not run before preflight")
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         build_graph,
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub({}, methods=("to_dashboard_html", "to_json")),
     )
@@ -3360,7 +3406,7 @@ def test_dashboard_render_failure_preserves_package_and_reports_recovery(
     """A viewer failure must not imply that the completed graph build was lost."""
     graph = build_seed_graph("seed")
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
@@ -3387,7 +3433,7 @@ def test_dashboard_render_failure_preserves_package_and_reports_recovery(
         exporter.to_dashboard_html = fail_dashboard
         return exporter
 
-    monkeypatch.setattr(cli_module, "GraphExporter", failing_exporter)
+    monkeypatch.setattr(build_module, "GraphExporter", failing_exporter)
     error_log = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_log)
     output_root = tmp_path / "collection"
@@ -3502,12 +3548,12 @@ def test_dashboard_collection_mode_logs_side_effects(
     info_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(
             {},
@@ -3546,12 +3592,12 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
     captured: dict[str, object] = {}
     logged: list[str] = []
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(
             captured,
@@ -3576,7 +3622,7 @@ def test_build_uses_compact_plot_metadata_and_summary_export_log(
         rendered = message % args if args else message
         logged.append(str(rendered))
 
-    monkeypatch.setattr(cli_module, "visualize_graph", _fake_visualize)
+    monkeypatch.setattr(build_module, "visualize_graph", _fake_visualize)
     monkeypatch.setattr(cli_module.logger, "info", _capture_info)
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -3641,12 +3687,12 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
         graph = local_graph.copy()
         captured: dict[str, object] = {}
         monkeypatch.setattr(
-            cli_module,
+            build_module,
             "_build_strategy_graph",
             lambda args, _strategy_name, **_kwargs: (graph, "seed"),
         )
         monkeypatch.setattr(
-            cli_module,
+            build_module,
             "GraphExporter",
             _make_exporter_stub(captured, methods=("to_json",)),
         )
@@ -3802,12 +3848,12 @@ def test_embedding_build_logs_side_effect_contract(
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
     monkeypatch.setattr(cli_module.logger, "warning", warning_mock)
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub({}, methods=("to_json",)),
     )
@@ -3855,17 +3901,17 @@ def test_hybrid_disabled_semantic_branch_skips_embedding_side_effect_logs(
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
     monkeypatch.setattr(cli_module.logger, "warning", warning_mock)
     monkeypatch.setattr(
-        cli_module,
+        build_contract_module,
         "_embedding_cache_directory_stats",
         lambda: (Path("/tmp/cache"), 0, 0),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub({}, methods=("to_json",)),
     )
@@ -4040,7 +4086,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         captured: dict[str, object] = {}
         namespace = _dispatch_namespace(**namespace_overrides)
         monkeypatch.setattr(
-            cli_module,
+            build_options_module,
             builder_name,
             _make_builder_stub(captured, graph=build_seed_graph("seed")),
         )
@@ -4067,7 +4113,9 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         else:
             assert "top_k" not in build_config.get("embedding", {})
         client_factory = MagicMock()
-        monkeypatch.setattr(cli_module, "SemanticScholarClient", client_factory)
+        monkeypatch.setattr(
+            build_options_module, "SemanticScholarClient", client_factory
+        )
         namespace.refresh_paper_cache = True
         namespace._s2_api_key = "configured-key"
         cli_module._build_strategy_graph(namespace, strategy, validate_contract=False)
@@ -4085,7 +4133,7 @@ def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
     namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        cli_module,
+        build_options_module,
         "HybridGraphBuilder",
         _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
@@ -4111,7 +4159,7 @@ def test_programmatic_embedding_dispatch_normalizes_lzf_level(
     )
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        cli_module,
+        build_options_module,
         "EmbeddingGraphBuilder",
         _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
@@ -4135,7 +4183,7 @@ def test_programmatic_embedding_dispatch_propagates_normalized_scalars(
     )
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        cli_module,
+        build_options_module,
         "EmbeddingGraphBuilder",
         _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
@@ -4181,7 +4229,7 @@ def test_programmatic_strategy_dispatch_validates_scalar_contracts(
     """Programmatic dispatch should enforce parser-equivalent scalar validation."""
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        cli_module,
+        build_options_module,
         "CitationGraphBuilder",
         _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
@@ -4274,7 +4322,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
         assert result.stderr == ""
         assert "\x1b[" not in result.stdout
         assert max(map(len, result.stdout.splitlines())) <= width
-        lowered = " ".join(result.stdout.lower().split())
+        lowered = flatten_console_text(result.stdout).lower()
         for token in expected_tokens:
             assert token.lower() in lowered
 
@@ -4289,7 +4337,7 @@ def test_cli_help_survives_unusable_terminal_width(
     """
     with monkeypatch.context() as terminal_patch:
         terminal_patch.setattr(
-            cli_module.shutil,
+            parser_module.shutil,
             "get_terminal_size",
             lambda: SimpleNamespace(columns=1),
         )
@@ -4507,12 +4555,12 @@ def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> No
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "GraphExporter",
         _make_exporter_stub(captured, methods=("to_json", "to_csv", "to_bibtex")),
     )
@@ -4560,11 +4608,11 @@ def test_multi_export_deduplicates_repeated_formats(
             Path(path).write_text("{}")
 
     monkeypatch.setattr(
-        cli_module,
+        build_module,
         "_build_strategy_graph",
         lambda args, strategy, **_kwargs: (graph, "seed"),
     )
-    monkeypatch.setattr(cli_module, "GraphExporter", _CountingExporter)
+    monkeypatch.setattr(build_module, "GraphExporter", _CountingExporter)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         output = Path(tmpdir) / "dedup.json"
@@ -4604,7 +4652,7 @@ def test_programmatic_dispatch_respects_explicit_provided_set(
     namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
     captured: dict[str, object] = {}
     monkeypatch.setattr(
-        cli_module,
+        build_options_module,
         "HybridGraphBuilder",
         _make_builder_stub(captured, graph=build_seed_graph("seed")),
     )
@@ -4663,7 +4711,9 @@ def test_build_rejects_unavailable_explicit_device(
             "device='cuda' was requested but CUDA is not available in this runtime."
         )
 
-    monkeypatch.setattr(cli_module, "resolve_embedding_device", _raise_unavailable)
+    monkeypatch.setattr(
+        build_contract_module, "resolve_embedding_device", _raise_unavailable
+    )
     result = run_cli_command(
         [
             "build",

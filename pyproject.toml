@@ -26,6 +26,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -62,16 +63,10 @@ embeddings = [
 ]
 recommended = ["citemesh[embeddings,viz]"]
 dev = [
-    "datasets>=2.14.0",
-    "huggingface_hub>=0.24.0",
+    "citemesh[embeddings]",
     "pytest>=8.0.0",
-    "pytest-cov>=4.0.0",
     "pytest-mock>=3.14.0",
     "ruff>=0.9.0",
-    "sentence-transformers>=5.7.0",
-    "torch>=2.9.0; sys_platform != 'darwin'",
-    "torch>=2.13.0; sys_platform == 'darwin'",
-    "transformers>=5.2.0",
 ]
 all = ["citemesh[dev,embeddings,viz]"]
 
@@ -89,20 +84,22 @@ Documentation = "https://github.com/pszemraj/CiteMesh/tree/main/docs"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]
 include = ["citemesh*"]
 
 [tool.setuptools.package-data]
-citemesh = ["py.typed"]
+citemesh = ["py.typed", "visualization/dashboard/assets/*"]
 
 [tool.setuptools_scm]
-write_to = "citemesh/_version.py"
-version_scheme = "no-guess-dev"
-local_scheme = "dirty-tag"
+version_file = "src/citemesh/_version.py"
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --tb=short -m \"not slow\""
+# Dump every thread's stack when a test exceeds this, so a hang self-diagnoses in CI.
+faulthandler_timeout = 300
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "cuda: marks tests that require a real CUDA device",
@@ -111,10 +108,14 @@ markers = [
 [tool.ruff]
 line-length = 88
 target-version = "py310"
+src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W"]
+select = ["E", "F", "I", "N", "UP", "W"]
 ignore = ["E501"]                  # Line too long (handled by formatter)
+
+[tool.ruff.lint.isort]
+known-first-party = ["citemesh"]
 
 [tool.ruff.format]
 quote-style = "double"
