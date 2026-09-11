@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import math
 import re
 from collections.abc import Hashable, Iterable
@@ -23,6 +24,18 @@ DASHBOARD_MAX_NODE_DIAMETER = 58.0
 DASHBOARD_SELECTION_HALO_SCALE = 2.2
 
 DARKREADER_LOCK_META = '<meta name="darkreader-lock" />'
+
+# Head rewriting patterns. Kept deliberately narrow: they run over the raw
+# ``<head>`` text of a library-generated export, which may already carry large
+# inlined script and style bundles.
+_HEAD_COMMENT_PATTERN = re.compile(r"<!--.*?-->", re.DOTALL)
+_HEAD_REMOTE_ASSET_PATTERN = re.compile(
+    r"<link\b[^>]*\bhref\s*=[^>]*>|<script\b[^>]*\bsrc\s*=[^>]*>\s*</script>",
+    re.IGNORECASE,
+)
+_HEAD_TITLE_PATTERN = re.compile(
+    r"<title\b[^>]*>.*?</title>", re.DOTALL | re.IGNORECASE
+)
 
 # Shared UI chrome palette for HTML exports (dashboard vars and Plotly
 # hoverlabels must agree so tooltips look native to the page).
@@ -47,6 +60,17 @@ _UI_PALETTES: dict[str, dict[str, str]] = {
     },
 }
 
+# One font stack for the dashboard stylesheet and every Plotly hover tooltip.
+# Injected into both so the tooltip never falls back to Plotly's Arial default
+# while the page around it renders in a different face.
+UI_FONT_FAMILY = '"IBM Plex Sans", "Source Sans 3", "Segoe UI", sans-serif'
+HOVER_LABEL_FONT_SIZE = 12
+
+# Dashboard labels sit on the plot surface rather than on panel chrome, so they
+# are drawn from the theme text color at reduced alpha. Light backgrounds need
+# far less fading than dark ones before the text stops reading as a label.
+DASHBOARD_LABEL_TEXT_ALPHA: dict[str, float] = {"dark": 0.72, "light": 0.9}
+
 
 def _theme_color_scheme(theme_obj: Theme) -> str:
     """Resolve the CSS ``color-scheme`` value a theme should declare.
@@ -55,6 +79,39 @@ def _theme_color_scheme(theme_obj: Theme) -> str:
     :return str: ``"dark"`` or ``"light"``.
     """
     return "dark" if theme_obj.name in {"dark", "solarized"} else "light"
+
+
+def theme_hover_label(theme_obj: Theme) -> dict[str, object]:
+    """Build the Plotly ``hoverlabel`` spec shared by every hoverable trace.
+
+    Tooltips are page chrome, not data, so they take the dashboard panel
+    surface, the panel text color, the accent as a border, and the page font
+    stack. The dashboard rebuilds its figure in JavaScript from the same
+    values, injected as ``__HOVER_LABEL_JSON__``, so the two cannot drift.
+
+    :param Theme theme_obj: Active visualization theme.
+    :return Dict[str, object]: Plotly hoverlabel specification.
+    """
+    palette = _UI_PALETTES[_theme_color_scheme(theme_obj)]
+    return {
+        "align": "left",
+        "bgcolor": palette["panel_bg"],
+        "bordercolor": palette["accent"],
+        "font": {
+            "color": palette["text_primary"],
+            "family": UI_FONT_FAMILY,
+            "size": HOVER_LABEL_FONT_SIZE,
+        },
+    }
+
+
+def theme_label_text_alpha(theme_obj: Theme) -> float:
+    """Resolve the dashboard node-label alpha for a theme.
+
+    :param Theme theme_obj: Active visualization theme.
+    :return float: Alpha applied to the theme text color for graph labels.
+    """
+    return DASHBOARD_LABEL_TEXT_ALPHA[_theme_color_scheme(theme_obj)]
 
 
 # as fallback. The tooltip's job is answering "why is this paper here".
@@ -211,20 +268,41 @@ def _rgb_tuple_to_rgba(color: object, alpha: float) -> str:
     return f"rgba({r},{g},{b},{clamped_alpha:.3f})"
 
 
-def _inject_darkreader_lock(path: Path | str, color_scheme: str = "light") -> None:
-    """Insert dark-mode-extension defenses into a written HTML export.
+def _inject_darkreader_lock(
+    path: Path | str,
+    color_scheme: str = "light",
+    *,
+    title: str | None = None,
+    style: str | None = None,
+    strip_remote_assets: bool = False,
+) -> None:
+    """Finalize the ``<head>`` of a library-written HTML export.
 
     CiteMesh HTML exports ship their own tuned themes; auto-darkening
     re-theming breaks them outright (Dark Reader paints Plotly's transparent
     overlay SVGs with an opaque background, hiding the entire graph). Two
-    signals are injected: the Dark Reader-specific ``darkreader-lock`` opt-out
-    meta, and the standards-based ``color-scheme`` meta that Chrome's Auto
-    Dark Mode and well-behaved extensions consult before repainting a page.
+    signals are always injected: the Dark Reader-specific ``darkreader-lock``
+    opt-out meta, and the standards-based ``color-scheme`` meta that Chrome's
+    Auto Dark Mode and well-behaved extensions consult before repainting a page.
+
+    Pyvis and Plotly both emit a bare page with no title and unstyled body
+    chrome, so the same pass optionally sets the browser tab title, prepends
+    page CSS, and drops the generator's leftover remote ``<link>``/``<script
+    src>`` tags that would otherwise make a "self-contained" export depend on a
+    CDN. Rewrites are confined to the head so inlined runtime bundles in the
+    body are never touched, and the whole pass is idempotent: a file that
+    already carries the lock is left alone.
 
     :param Path | str path: HTML file to rewrite in place (no-op when it has no
         ``<head>`` tag or already carries the lock).
     :param str color_scheme: Declared scheme for the export, ``dark`` or
         ``light``.
+    :param Optional[str] title: Plain-text browser tab title; HTML-escaped here,
+        replacing an existing head ``<title>`` when the generator wrote one.
+    :param Optional[str] style: CSS injected as the first head stylesheet, so
+        generator styles later in the document can still override it.
+    :param bool strip_remote_assets: Whether to remove head comments and remote
+        stylesheet/script tags, for exports that must open offline.
     :return None: Rewrites the file in place.
     """
     resolved_path = Path(path)
@@ -235,8 +313,27 @@ def _inject_darkreader_lock(path: Path | str, color_scheme: str = "light") -> No
     if "darkreader-lock" in content or "<head>" not in content:
         return
     scheme = color_scheme if color_scheme in {"dark", "light"} else "light"
-    scheme_meta = f'<meta name="color-scheme" content="{scheme}" />'
-    resolved_path.write_text(
-        content.replace("<head>", f"<head>{DARKREADER_LOCK_META}{scheme_meta}", 1),
-        encoding="utf-8",
-    )
+
+    head_start = content.find("<head>")
+    head_end = content.find("</head>", head_start)
+    head = content if head_end < 0 else content[:head_end]
+    tail = "" if head_end < 0 else content[head_end:]
+
+    if strip_remote_assets:
+        head = _HEAD_COMMENT_PATTERN.sub("", head)
+        head = _HEAD_REMOTE_ASSET_PATTERN.sub("", head)
+
+    injected = [
+        DARKREADER_LOCK_META,
+        f'<meta name="color-scheme" content="{scheme}" />',
+    ]
+    if title is not None:
+        title_tag = f"<title>{html.escape(title)}</title>"
+        head, replaced = _HEAD_TITLE_PATTERN.subn(lambda _match: title_tag, head, 1)
+        if not replaced:
+            injected.append(title_tag)
+    if style:
+        injected.append(f"<style>{style}</style>")
+
+    head = head.replace("<head>", f"<head>{''.join(injected)}", 1)
+    resolved_path.write_text(head + tail, encoding="utf-8")

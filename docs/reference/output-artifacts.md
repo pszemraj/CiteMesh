@@ -14,8 +14,8 @@ A hidden `.dashboard.citemesh.json.lock` beside the package serializes collectio
 Every collection build also writes a per-seed directory `<title-slug>-<hash>/` holding `<strategy>.json` and `<strategy>.config.json`, even under `--export dashboard` alone. Other formats are written when selected; `png` is the default when `--export` is omitted.
 
 - `<strategy>.png` - static Matplotlib render
-- `<strategy>.html` - Pyvis interactive network; it loads vis-network from a CDN, so it needs internet access to open
-- `<strategy>.plotly.html` - Plotly interactive graph
+- `<strategy>.html` - Pyvis interactive network; self-contained, with vis-network inlined, so it opens offline and needs no sibling asset folder
+- `<strategy>.plotly.html` - Plotly interactive graph; self-contained, filling the browser window in the export theme
 - `<strategy>.json` - enriched graph payload
 - `<strategy>.csv` - flat paper table
 - `<strategy>.bib` - combined BibTeX entries
@@ -92,14 +92,14 @@ A reduced node schema: `provenance`, `provenance_base`, `seed_relation`, `seed_r
 
 ![CiteMesh dashboard with Prior works active and a paper selected](../../assets/ui-prior-works.png)
 
-_**Prior works** active with a paper selected: the graph and paper list narrow to earlier papers, and the detail pane explains that paper's path to the seed._
+_**Prior works** active with a paper selected: the graph and paper list narrow to papers the seed references, plus undirected ones published no later than the seed, and the detail pane explains that paper's path to the seed._
 
 Toolbar controls and data actions:
 
-- **Prior works / Derivative works** - scope the graph and list by publication year relative to the seed (earlier papers, or later ones; same-year papers stay in both); the row badge still shows the citation direction
-- **List view** - scroll the paper list pane into view
+- **Prior works / Derivative works** - scope the graph and list by citation direction relative to the seed - papers it references, or papers that cite it - falling back to publication year at or before (or at or after) the seed only for papers the citation graph gives no direction, so the seed, `overlap` papers, and papers without a usable year stay in both
+- **List view** - scroll the paper list pane into view; shown only on the stacked layout at 1100px and below, where the list sits under the graph
 - **Filters** - text search, sort, year range, provenance chips (citation/semantic/both), `Saved` chip
-- **More** - open the selected paper, or the seed, on Semantic Scholar
+- **Semantic Scholar ↗** - open the selected paper, or the seed, on Semantic Scholar; disabled when that paper has no Semantic Scholar link
 - **Graph selector** - switch between graph slots in the active collection
 - **Export JSON / CSV / All BibTeX** - download the embedded payload, a client-side CSV, or every paper's BibTeX
 - **Saved BibTeX / Copy Saved Links** - appear once papers are starred: the reading list as `.bib`, or as markdown links

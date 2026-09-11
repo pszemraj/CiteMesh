@@ -27,7 +27,7 @@ from citemesh.data.cache import atomic_output_path, atomic_write_text
 
 from ..dashboard.contracts import GRAPH_PAYLOAD_KIND, GRAPH_PAYLOAD_SCHEMA_VERSION
 from ..dashboard.payload import DashboardPayloadMixin, _dashboard_template
-from ..themes import get_theme
+from ..themes import Theme, get_theme
 from ..years import coerce_publication_year
 from . import geometry, loaders
 from .csv_ import _csv_cell_guard
@@ -66,9 +66,43 @@ from .nodes import (
     _sorted_edges,
     _sorted_nodes,
 )
-from .plotly_figure import PlotlyFigureMixin
+from .plotly_figure import PlotlyFigureMixin, _plotly_title_text
 
 logger = logging.getLogger(__name__)
+
+PAGE_TITLE_PREFIX = "CiteMesh"
+
+
+def _export_page_title(graph: nx.Graph, seed_id: str) -> str:
+    """Build the browser tab title shared by CiteMesh HTML exports.
+
+    Reuses the Plotly figure title text so the tab and the on-canvas title name
+    the same paper. That helper returns Plotly pseudo-HTML (escaped entities
+    joined by ``<br>``), so it is flattened back to plain text here and
+    re-escaped by the head injector.
+
+    :param nx.Graph graph: Graph containing the seed node.
+    :param str seed_id: Seed paper identifier.
+    :return str: Plain-text page title.
+    """
+    seed_title = html.unescape(_plotly_title_text(graph, seed_id).replace("<br>", " "))
+    if not seed_title or seed_title == PAGE_TITLE_PREFIX:
+        return PAGE_TITLE_PREFIX
+    return f"{PAGE_TITLE_PREFIX}: {seed_title}"
+
+
+def _export_page_style(theme_obj: Theme) -> str:
+    """Build the page chrome CSS injected into standalone HTML exports.
+
+    Both library writers emit a default white body with an 8px margin, which
+    frames a themed figure in white; painting the page in the theme background
+    with no margin lets the visualization own the viewport.
+
+    :param Theme theme_obj: Active visualization theme.
+    :return str: CSS text for the injected head stylesheet.
+    """
+    return f"html,body{{margin:0;padding:0;background:{theme_obj.background};}}"
+
 
 __all__ = [
     "DASHBOARD_AXIS_MIN_PADDING",
@@ -333,6 +367,11 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             bgcolor=theme_obj.background,
             font_color=theme_obj.text_color,
             notebook=False,
+            # Pyvis defaults to "local", which references a lib/ folder it
+            # writes into the *process* working directory rather than next to
+            # the export, and pulls vis-network from a CDN. Inlining keeps the
+            # single HTML file openable offline and side-effect free.
+            cdn_resources="in_line",
         )
 
         if physics:
@@ -390,7 +429,17 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
 
         with atomic_output_path(path) as tmp_path:
             net.save_graph(str(tmp_path))
-            geometry._inject_darkreader_lock(tmp_path, _theme_color_scheme(theme_obj))
+            geometry._inject_darkreader_lock(
+                tmp_path,
+                _theme_color_scheme(theme_obj),
+                title=_export_page_title(self.graph, self.seed_id),
+                style=_export_page_style(theme_obj),
+                # Pyvis always emits Bootstrap CDN tags (used only by its
+                # select/filter menus, which this export does not enable) plus
+                # a commented-out node_modules block; both are dropped so the
+                # page has no external references left.
+                strip_remote_assets=True,
+            )
 
     def to_plotly_html(self, path: Path, theme: str | None = None) -> None:
         """Create Plotly interactive visualization.
@@ -406,18 +455,33 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             ) from exc
 
         theme_obj = get_theme(theme) if theme else self.theme
-        fig, _ = self._build_plotly_figure(go=go, theme_obj=theme_obj)
+        fig, _ = self._build_plotly_figure(
+            go=go, theme_obj=theme_obj, title_prefix=PAGE_TITLE_PREFIX
+        )
 
         div_id = self._plotly_div_id()
         with atomic_output_path(path) as tmp_path:
             try:
-                fig.write_html(str(tmp_path), div_id=div_id)
+                fig.write_html(
+                    str(tmp_path),
+                    div_id=div_id,
+                    # Plotly sizes the div from the figure layout by default,
+                    # leaving a white band under the plot; the graph should own
+                    # the viewport instead.
+                    default_width="100%",
+                    default_height="100vh",
+                )
             except TypeError as exc:
                 raise RuntimeError(
                     "Deterministic Plotly export requires write_html(div_id=...). "
                     "Upgrade plotly to a version that supports div_id."
                 ) from exc
-            geometry._inject_darkreader_lock(tmp_path, _theme_color_scheme(theme_obj))
+            geometry._inject_darkreader_lock(
+                tmp_path,
+                _theme_color_scheme(theme_obj),
+                title=_export_page_title(self.graph, self.seed_id),
+                style=_export_page_style(theme_obj),
+            )
 
     def to_dashboard_html(self, path: Path, theme: str | None = None) -> None:
         """Create a standalone Plotly-backed research dashboard HTML export.

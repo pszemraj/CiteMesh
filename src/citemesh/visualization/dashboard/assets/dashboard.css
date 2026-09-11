@@ -10,6 +10,7 @@
       --graph-bg: __GRAPH_BG__;
       --shadow-soft: rgba(0, 0, 0, 0.18);
       --seed-ring: __SEED_RING__;
+      --ui-font: __UI_FONT_FAMILY__;
     }
     * { box-sizing: border-box; }
     /* Plotly overlay SVGs must stay transparent; dark-mode extensions that
@@ -35,7 +36,7 @@
                   radial-gradient(900px 520px at 100% 0%, rgba(214, 108, 191, 0.08), transparent 55%),
                   var(--body-bg);
       color: var(--text-primary);
-      font-family: "IBM Plex Sans", "Source Sans 3", "Segoe UI", sans-serif;
+      font-family: var(--ui-font);
     }
     body {
       min-height: 100vh;
@@ -108,6 +109,15 @@
       color: var(--text-primary);
       border-color: color-mix(in srgb, var(--accent) 70%, var(--panel-border));
       background: var(--accent-soft);
+    }
+    .nav-btn[disabled] {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .nav-btn[disabled]:hover {
+      border-color: var(--panel-border);
+      background: rgba(255, 255, 255, 0.01);
+      transform: none;
     }
     #result-select {
       min-width: 240px;
@@ -596,5 +606,12 @@
       .toolbar-row.primary #search-input,
       #provenance-filters {
         grid-column: auto;
+      }
+    }
+    /* The panes only stack at 1100px and below; on a tri-pane layout the list is
+       already on screen, so scrolling it into view has nothing to offer. */
+    @media (min-width: 1101px) {
+      #list-view-btn {
+        display: none;
       }
     }

@@ -488,9 +488,43 @@ def test_exporter_interactive_html_contracts(
     assert out_path.exists()
     assert out_path.stat().st_mode & 0o7777 == 0o640
     assert instance.options is not None
+    assert instance.kwargs["cdn_resources"] == "in_line"
     assert len(instance.nodes) == 2
     assert len(instance.edges) == 1
     assert [node_id for node_id, _ in instance.nodes] == ["related", "seed"]
+
+
+def test_interactive_html_is_self_contained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pyvis export must open offline and leave no asset folder behind.
+
+    :param Path tmp_path: Isolated working and output directory.
+    :param pytest.MonkeyPatch monkeypatch: Runs the export from ``tmp_path``.
+    :return None: Checks the page for external references and stray side files.
+    """
+    pytest.importorskip("pyvis")
+
+    graph, seed_id = _build_graph()
+    monkeypatch.chdir(tmp_path)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out_path = out_dir / "hybrid.html"
+    GraphExporter(graph, seed_id, theme_name="dark").to_interactive_html(out_path)
+
+    rendered = out_path.read_text(encoding="utf-8")
+    assert "new vis.Network(" in rendered
+    assert not re.search(
+        r"<(?:script|link|img|iframe)\b[^>]*\b(?:src|href)\s*=", rendered
+    )
+    assert "<title>CiteMesh: Seed Paper</title>" in rendered
+    assert '<meta name="color-scheme" content="dark" />' in rendered
+    assert f"background:{get_theme('dark').background};" in rendered
+    # Pyvis writes its CDN fallbacks into a lib/ folder in the process working
+    # directory, which never travels with the HTML file.
+    assert not (tmp_path / "lib").exists()
+    assert list(tmp_path.iterdir()) == [out_dir]
+    assert list(out_dir.iterdir()) == [out_path]
 
 
 def test_exporter_plotly_contracts(
@@ -553,6 +587,65 @@ def test_exporter_plotly_contracts(
     )
     with pytest.raises(RuntimeError, match="Deterministic Plotly export requires"):
         exporter.to_plotly_html(tmp_path / "nodivid.plotly.html")
+
+
+def test_plotly_html_page_is_titled_and_themed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plotly page chrome must be titled, themed, and sized to the viewport.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the fake Plotly module.
+    :return None: Checks injected head markup and Plotly sizing arguments.
+    """
+    captured: dict[str, object] = {}
+
+    class FakeFigure(_BaseFakeFigure):
+        """Write a Plotly-shaped shell page and record write arguments."""
+
+        def write_html(self, path: str, **kwargs: Any) -> None:
+            """Record serialization options and emit a bare Plotly page.
+
+            :param str path: Temporary HTML destination.
+            :param Any kwargs: Plotly serialization options.
+            :return None: Writes the shell page.
+            """
+            captured["kwargs"] = kwargs
+            Path(path).write_text(
+                '<html>\n<head><meta charset="utf-8" /></head>\n<body></body>\n</html>',
+                encoding="utf-8",
+            )
+
+    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    layout = {"seed": (0.0, 0.0), "related": (1.0, 1.0)}
+    graph, seed_id = _build_graph()
+    out_path = tmp_path / "graph.plotly.html"
+    GraphExporter(graph, seed_id, layout=layout, theme_name="dark").to_plotly_html(
+        out_path
+    )
+
+    rendered = out_path.read_text(encoding="utf-8")
+    background = get_theme("dark").background
+    assert "<title>CiteMesh: Seed Paper</title>" in rendered
+    assert (
+        f"<style>html,body{{margin:0;padding:0;background:{background};}}</style>"
+        in rendered
+    )
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["default_width"] == "100%"
+    assert kwargs["default_height"] == "100vh"
+
+    hostile_graph, hostile_seed = _build_hostile_graph(
+        title="Pwned</title><script>alert(1)</script>"
+    )
+    hostile_path = tmp_path / "hostile.plotly.html"
+    GraphExporter(hostile_graph, hostile_seed, layout=layout).to_plotly_html(
+        hostile_path
+    )
+    hostile_rendered = hostile_path.read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in hostile_rendered
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in hostile_rendered
 
 
 def test_plotly_html_survives_empty_and_seedless_graphs(
@@ -906,14 +999,15 @@ def test_interactive_html_failure_preserves_previous_output(
             if failure_stage == "writer":
                 raise RuntimeError("writer failed")
 
-    def fail_injection(path: Path, scheme: str) -> None:
+    def fail_injection(path: Path, scheme: str, **kwargs: Any) -> None:
         """Simulate post-processing failure after the library write.
 
         :param Path path: Temporary HTML path.
         :param str scheme: Requested color scheme.
+        :param Any kwargs: Head-injection options (title, style, stripping).
         :return None: Always raises for the injection test case.
         """
-        del path, scheme
+        del path, scheme, kwargs
         raise RuntimeError("injection failed")
 
     monkeypatch.setattr(
@@ -959,14 +1053,15 @@ def test_plotly_html_failure_preserves_previous_output(
             if failure_stage == "writer":
                 raise RuntimeError("writer failed")
 
-    def fail_injection(path: Path, scheme: str) -> None:
+    def fail_injection(path: Path, scheme: str, **kwargs: Any) -> None:
         """Simulate post-processing failure after the library write.
 
         :param Path path: Temporary HTML path.
         :param str scheme: Requested color scheme.
+        :param Any kwargs: Head-injection options (title, style, stripping).
         :return None: Always raises for the injection test case.
         """
-        del path, scheme
+        del path, scheme, kwargs
         raise RuntimeError("injection failed")
 
     _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
@@ -1190,6 +1285,9 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         'id="saved-filter"',
         'id="export-saved-bib-btn"',
         'id="copy-saved-links-btn"',
+        'id="list-view-btn" class="nav-btn" type="button">List view',
+        'title="Open the selected paper, or the seed, on Semantic Scholar"',
+        "Semantic Scholar ↗",
         "legend-gradient",
         "star-btn",
         "citemesh-saved:",
@@ -1201,6 +1299,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "legend-marker citation",
         "legend-marker semantic",
         "legend-marker both",
+        # Nothing toggles "List view", so it must not ship pre-highlighted.
+        'class="nav-btn active"',
     ]:
         assert stale_token not in rendered
     for css_token in [
@@ -1213,6 +1313,8 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
         "#detail-pane { grid-area: detail; min-height: 620px; }",
         ".toolbar-row.secondary { grid-template-columns: 140px 140px 1fr auto; }",
         "@media (max-width: 640px) {\n      #dashboard-toolbar { position: static; }",
+        ".nav-btn[disabled] {\n      opacity: 0.45;\n      cursor: default;",
+        "@media (min-width: 1101px) {\n      #list-view-btn {\n        display: none;",
         ".toolbar-row.primary,\n      .toolbar-row.secondary {\n        grid-template-columns: minmax(0, 1fr);",
         ".toolbar-row.primary #search-input,\n      #provenance-filters {\n        grid-column: auto;",
         ".js-plotly-plot .modebar-btn path {\n      fill: var(--text-muted) !important;",
@@ -1320,6 +1422,62 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert "seed paper" in seed_hover
     # Hover cards use the dashboard panel chrome, not the marker color.
     assert node_trace["hoverlabel"]["bgcolor"] == "#171d25"
+
+
+@pytest.mark.parametrize("theme_name", ["dark", "light", "solarized", "auto"])
+def test_dashboard_hover_label_is_shared_by_python_and_javascript(
+    tmp_path: Path, theme_name: str
+) -> None:
+    """Both figure builders must theme every hover card from one injected spec."""
+    pytest.importorskip("plotly")
+
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        metadata={"strategy": "hybrid"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / f"hover-{theme_name}.dashboard.html"
+    exporter.to_dashboard_html(out_path, theme=theme_name)
+    rendered = out_path.read_text(encoding="utf-8")
+
+    expected = geometry_module.theme_hover_label(get_theme(theme_name))
+    figure = _extract_dashboard_script_json(rendered, "citemesh-dashboard-figure")
+    hoverable = [trace for trace in figure["data"] if trace.get("hoverinfo") != "none"]
+    assert hoverable
+    for trace in hoverable:
+        assert trace["hoverlabel"] == expected
+    # Layout default so a trace Plotly resolves outside the node trace still
+    # gets the themed card rather than the light Plotly default.
+    assert figure["layout"]["hoverlabel"] == expected
+
+    # The viewer rebuilds the figure client-side; it must read the same spec
+    # rather than carry a hand-copied twin.
+    assert f"const HOVER_LABEL = {json.dumps(expected, sort_keys=True)};" in rendered
+    assert "nodeTrace.hoverlabel = deepClone(HOVER_LABEL);" in rendered
+    assert "layout.hoverlabel = deepClone(HOVER_LABEL);" in rendered
+
+    # One font stack for the stylesheet and the tooltip.
+    assert f"--ui-font: {geometry_module.UI_FONT_FAMILY};" in rendered
+    assert "font-family: var(--ui-font);" in rendered
+    assert expected["font"]["family"] == geometry_module.UI_FONT_FAMILY
+
+    rebuilt = _probe_dashboard_runtime_in_node(
+        out_path,
+        "(() => {"
+        " const spec = buildFigureSpecFromPayload(payload);"
+        " return {"
+        "   traces: spec.data"
+        "     .filter((trace) => trace.hoverinfo !== 'none')"
+        "     .map((trace) => trace.hoverlabel),"
+        "   layout: spec.layout.hoverlabel,"
+        " };"
+        "})()",
+    )
+    assert rebuilt["traces"]
+    assert all(label == expected for label in rebuilt["traces"])
+    assert rebuilt["layout"] == expected
 
 
 def test_exporter_does_not_relabel_legacy_collection_metadata() -> None:
@@ -2133,6 +2291,197 @@ def test_copy_saved_links_escapes_bracketed_titles(
     )
 
     assert probed == ["Attention \\[Is\\] All You Need", "Plain"]
+
+
+def _build_seed_relation_graph() -> nx.Graph:
+    """Create a graph covering every seed-relation token the dashboard scopes on.
+
+    Citation direction is deliberately set against publication year (a reference
+    published after the seed, a citing paper published before it) so a year-only
+    scope filter cannot pass.
+
+    :return nx.Graph: Graph whose ``seed_relations`` span all exported tokens.
+    """
+    graph = nx.Graph()
+    graph.graph["strategy"] = "citation"
+    graph.graph["seed_relations"] = {
+        "seed": "seed",
+        "late-reference": "referenced_by_seed",
+        "early-citer": "cites_seed",
+        "both-ways": "overlap",
+        "early-semantic": "semantic_only",
+        "same-year-semantic": "semantic_only",
+        "late-semantic": "semantic_only",
+        "undated-semantic": "semantic_only",
+    }
+    years: dict[str, int | None] = {
+        "seed": 2020,
+        "late-reference": 2023,
+        "early-citer": 2018,
+        "both-ways": 2019,
+        "early-semantic": 2016,
+        "same-year-semantic": 2020,
+        "late-semantic": 2024,
+        "undated-semantic": None,
+    }
+    for node_id, year in years.items():
+        graph.add_node(
+            node_id,
+            title=f"Paper {node_id}",
+            year=year,
+            authors=["A Person"],
+            citation_count=5,
+            is_seed=node_id == "seed",
+        )
+        if node_id != "seed":
+            graph.add_edge("seed", node_id, weight=0.6)
+    return graph
+
+
+def test_dashboard_scope_filter_keys_on_seed_relation_before_year(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prior/derivative scope must follow citation direction, not publication year.
+
+    A referenced paper stays prior work even when it postdates the seed, and a
+    citing paper stays derivative even when it predates it; only nodes the
+    citation graph gives no direction fall back to the seed year.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks the single runtime predicate under all three scope modes.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph = _build_seed_relation_graph()
+    layout = {
+        node_id: (float(index), float(index % 3))
+        for index, node_id in enumerate(sorted(graph.nodes))
+    }
+    exporter = GraphExporter(graph, "seed", layout=layout)
+    out_path = tmp_path / "scope.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        "(() => {"
+        " const scoped = (mode) => {"
+        "   state.scopeMode = mode;"
+        "   return filteredNodes().map((node) => node.id).sort();"
+        " };"
+        ' return { prior: scoped("prior"), derivative: scoped("derivative"), all: scoped("all") };'
+        "})()",
+    )
+
+    assert probed["prior"] == [
+        "both-ways",
+        "early-semantic",
+        "late-reference",
+        "same-year-semantic",
+        "seed",
+        "undated-semantic",
+    ]
+    assert probed["derivative"] == [
+        "both-ways",
+        "early-citer",
+        "late-semantic",
+        "same-year-semantic",
+        "seed",
+        "undated-semantic",
+    ]
+    assert probed["all"] == sorted(graph.nodes)
+
+
+def test_dashboard_list_hover_never_demotes_the_clicked_row_to_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clicking a row must leave the detail panel locked without moving the mouse.
+
+    Re-rendering the list drops a fresh row under a stationary cursor, so the
+    runtime ignores hover previews until the pointer actually moves, and hovering
+    the selected row renders it as a selection rather than a preview.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks the detail-mode label across re-render and hover.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "hover.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        "(() => {"
+        ' controls.detailMode = { textContent: "" };'
+        ' controls.graphHint = { textContent: "" };'
+        ' state.selectedId = "seed";'
+        " renderList();"
+        ' previewRowOnHover("related");'
+        " const afterRerender = controls.detailMode.textContent;"
+        " armListPreview();"
+        ' previewRowOnHover("seed");'
+        " const hoverSelected = controls.detailMode.textContent;"
+        ' previewRowOnHover("related");'
+        " return {"
+        "   afterRerender: afterRerender,"
+        "   hoverSelected: hoverSelected,"
+        "   hoverOther: controls.detailMode.textContent,"
+        " };"
+        "})()",
+    )
+
+    assert probed["afterRerender"] == ""
+    assert probed["hoverSelected"] == "Selected"
+    assert probed["hoverOther"] == "Preview"
+
+
+def test_dashboard_semantic_scholar_button_disables_without_a_link(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Semantic Scholar button must disable when the focused paper has no link.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs the JSON-capable Plotly stub.
+    :return None: Checks the ``disabled`` attribute across selection changes.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
+    graph, seed_id = _build_graph()
+    exporter = GraphExporter(
+        graph,
+        seed_id,
+        layout={"seed": (0.0, 0.0), "related": (1.0, 1.0)},
+    )
+    out_path = tmp_path / "more.dashboard.html"
+    exporter.to_dashboard_html(out_path)
+
+    probed = _probe_dashboard_runtime_in_node(
+        out_path,
+        "(() => {"
+        " const attrs = {};"
+        " controls.moreBtn = {"
+        "   setAttribute(name, value) { attrs[name] = value; },"
+        "   removeAttribute(name) { delete attrs[name]; },"
+        " };"
+        ' state.selectedId = "seed";'
+        " renderList();"
+        " const withLink = Object.keys(attrs);"
+        ' nodeById.get("related").links.semantic_scholar = null;'
+        ' state.selectedId = "related";'
+        " renderList();"
+        " return { withLink: withLink, withoutLink: Object.keys(attrs) };"
+        "})()",
+    )
+
+    assert probed["withLink"] == []
+    assert probed["withoutLink"] == ["disabled"]
 
 
 def test_dashboard_year_range_is_null_when_no_paper_has_a_year(

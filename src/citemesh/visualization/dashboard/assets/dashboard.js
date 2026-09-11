@@ -2,6 +2,9 @@
     const GRAPH_PAYLOAD_SCHEMA_VERSION = __GRAPH_PAYLOAD_SCHEMA_VERSION__;
     const COLLECTION_KIND = __COLLECTION_KIND_JSON__;
     const COLLECTION_SCHEMA_VERSION = __COLLECTION_SCHEMA_VERSION__;
+    // Injected from the Python theme so a client-rebuilt figure keeps the same
+    // themed hover card as the server-rendered one.
+    const HOVER_LABEL = __HOVER_LABEL_JSON__;
     let payload = JSON.parse(document.getElementById("citemesh-dashboard-data").textContent);
     const baseFigureTemplate = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
     let figureSpec = JSON.parse(document.getElementById("citemesh-dashboard-figure").textContent);
@@ -511,6 +514,7 @@
       nodeTrace.y = yPairs;
       nodeTrace.text = nodeTexts;
       nodeTrace.hovertext = hoverTexts;
+      nodeTrace.hoverlabel = deepClone(HOVER_LABEL);
       nodeTrace.marker = Object.assign({}, templateMarker, {
         size: alignedNodeSizes,
         sizeref: nextMarkerSizeRef,
@@ -553,6 +557,7 @@
         autorange: false,
         range: [yMin - yPad, yMax + yPad],
       });
+      layout.hoverlabel = deepClone(HOVER_LABEL);
       layout.shapes = edgeShapes;
       layout.annotations = nodeTexts.flatMap((text, idx) => text ? [{
         x: xPairs[idx],
@@ -834,6 +839,35 @@
       return state.filters[base] === true;
     }
 
+    // Scope is a citation-direction question, not a chronology one: a paper the
+    // seed references is prior work whatever year it carries, and a paper citing
+    // the seed is derivative work even when it predates the seed. Publication
+    // year only decides nodes the citation graph places in neither direction.
+    const PRIOR_SEED_RELATIONS = new Set(["referenced_by_seed", "overlap"]);
+    const DERIVATIVE_SEED_RELATIONS = new Set(["cites_seed", "overlap"]);
+
+    function nodeScopeMatches(node) {
+      if (state.scopeMode !== "prior" && state.scopeMode !== "derivative") {
+        return true;
+      }
+      const relation = String(node.seed_relation || "").trim().toLowerCase();
+      if (node.is_seed || relation === "seed") {
+        return true;
+      }
+      const priorRelation = PRIOR_SEED_RELATIONS.has(relation);
+      const derivativeRelation = DERIVATIVE_SEED_RELATIONS.has(relation);
+      if (priorRelation || derivativeRelation) {
+        return state.scopeMode === "prior" ? priorRelation : derivativeRelation;
+      }
+      // "semantic_only", the direction-less "citation" token, and an absent
+      // relation all fall back to the seed year; an unusable year stays visible.
+      if (seedYear === null || !hasYear(node)) {
+        return true;
+      }
+      const nodeYear = Number(node.year);
+      return state.scopeMode === "prior" ? nodeYear <= seedYear : nodeYear >= seedYear;
+    }
+
     function nodeMatches(node) {
       if (state.savedOnly && !state.savedIds.has(String(node.id || ""))) {
         return false;
@@ -841,14 +875,8 @@
       if (!nodeFilterClass(node)) {
         return false;
       }
-      if (!node.is_seed && seedYear !== null && hasYear(node)) {
-        const nodeYear = Number(node.year);
-        if (state.scopeMode === "prior" && nodeYear > seedYear) {
-          return false;
-        }
-        if (state.scopeMode === "derivative" && nodeYear < seedYear) {
-          return false;
-        }
+      if (!nodeScopeMatches(node)) {
+        return false;
       }
       if (state.yearMin !== null && (!hasYear(node) || Number(node.year) < state.yearMin)) {
         return false;
@@ -1876,8 +1904,48 @@
       syncGraphHighlights();
     }
 
+    function semanticScholarTarget() {
+      const focusId = state.selectedId || ((payload.meta && payload.meta.seed_id) || null);
+      const focusNode = focusId ? nodeById.get(focusId) : null;
+      return safeExternalUrl(
+        focusNode && focusNode.links && focusNode.links.semantic_scholar
+      );
+    }
+
+    function syncSemanticScholarButton() {
+      if (!controls.moreBtn) {
+        return;
+      }
+      if (semanticScholarTarget()) {
+        controls.moreBtn.removeAttribute("disabled");
+      } else {
+        controls.moreBtn.setAttribute("disabled", "");
+      }
+    }
+
+    // Rebuilding the list drops the row under the cursor and inserts a fresh one,
+    // which fires mouseenter with the pointer stationary. Previews stay disarmed
+    // until the pointer really moves, so a click leaves the panel on "Selected".
+    let listPreviewArmed = false;
+
+    function armListPreview() {
+      listPreviewArmed = true;
+    }
+
+    function previewRowOnHover(nodeId) {
+      if (!listPreviewArmed) {
+        return;
+      }
+      state.hoverId = nodeId;
+      // Hovering the locked row must never demote the panel back to a preview.
+      renderDetail(nodeId, nodeId !== state.selectedId);
+      syncHighlights();
+    }
+
     function renderList() {
       const listNodes = filteredNodes();
+      listPreviewArmed = false;
+      syncSemanticScholarButton();
       controls.count.textContent = `${listNodes.length.toLocaleString()} ${listNodes.length === 1 ? "paper" : "papers"}`;
       controls.list.innerHTML = "";
       state.visibleIds = new Set(listNodes.map((node) => node.id));
@@ -1931,9 +1999,7 @@
         }
 
         row.addEventListener("mouseenter", () => {
-          state.hoverId = node.id;
-          renderDetail(node.id, true);
-          syncHighlights();
+          previewRowOnHover(node.id);
         });
         row.addEventListener("mouseleave", () => {
           state.hoverId = null;
@@ -1962,6 +2028,9 @@
     }
 
     function setupControls() {
+      // The list element survives every rebuild, so one listener re-arms previews
+      // as soon as the pointer moves after a re-render.
+      controls.list.addEventListener("mousemove", armListPreview);
       controls.search.addEventListener("input", (event) => {
         state.searchText = String(event.target.value || "").trim().toLowerCase();
         renderList();
@@ -2031,15 +2100,12 @@
         }
       });
       controls.moreBtn.addEventListener("click", () => {
-        const focusId = state.selectedId || ((payload.meta && payload.meta.seed_id) || null);
-        const focusNode = focusId ? nodeById.get(focusId) : null;
-        const target = safeExternalUrl(
-          focusNode && focusNode.links && focusNode.links.semantic_scholar
-        );
+        const target = semanticScholarTarget();
         if (target) {
           window.open(target, "_blank", "noopener,noreferrer");
         }
       });
+      syncSemanticScholarButton();
 
       function downloadBlob(content, filename, mime) {
         const blob = new Blob([content], { type: mime });

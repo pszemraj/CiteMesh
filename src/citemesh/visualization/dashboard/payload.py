@@ -17,8 +17,10 @@ from citemesh.visualization.export.geometry import (
     DASHBOARD_LABEL_MIN_DISTANCE,
     DASHBOARD_MAX_NODE_DIAMETER,
     DASHBOARD_SELECTION_HALO_SCALE,
+    UI_FONT_FAMILY,
     _rgb_tuple_to_hex,
     _theme_color_scheme,
+    theme_hover_label,
 )
 from citemesh.visualization.export.nodes import _sorted_edges, _strategy
 
@@ -94,6 +96,13 @@ def _dashboard_template(
         "__TEXT_MUTED__": palette["text_muted"],
         "__ACCENT__": palette["accent"],
         "__ACCENT_SOFT__": palette["accent_soft"],
+        "__UI_FONT_FAMILY__": UI_FONT_FAMILY,
+        # The viewer rebuilds the figure client-side, so the hoverlabel it
+        # applies is the very dict the Python figure carries rather than a
+        # hand-copied twin.
+        "__HOVER_LABEL_JSON__": json.dumps(
+            theme_hover_label(theme_obj), sort_keys=True
+        ),
         "__GRAPH_BG__": theme_obj.background,
         "__NODE_COLOR_OLD__": _rgb_tuple_to_hex(theme_obj.node_color_old),
         "__NODE_COLOR_NEW__": _rgb_tuple_to_hex(theme_obj.node_color_new),

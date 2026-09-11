@@ -50,10 +50,14 @@ THEMES: dict[str, Theme] = {
     "light": Theme(
         name="light",
         background="#fafafa",
-        node_color_old=(0.72, 0.83, 0.89),
-        node_color_new=(0.45, 0.64, 0.61),
-        seed_color=(0.87, 0.27, 0.27),
-        edge_color=(0.5, 0.5, 0.5),
+        # Tuned for legibility on the near-white background: both ends of the
+        # year gradient clear 5:1 contrast against it and separate from each
+        # other by hue as well as luminance, and the edge color is dark enough
+        # that the 0.07-0.32 alpha band used for link strength stays visible.
+        node_color_old=(0.22, 0.43, 0.68),
+        node_color_new=(0.02, 0.37, 0.34),
+        seed_color=(0.8, 0.16, 0.18),
+        edge_color=(0.16, 0.21, 0.29),
         text_color="#2d3748",
     ),
     "dark": Theme(

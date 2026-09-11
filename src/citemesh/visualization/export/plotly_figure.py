@@ -18,7 +18,6 @@ from ..themes import Theme
 from ..years import coerce_publication_year, publication_year_scale
 from .geometry import (
     _HOVER_RELATION_LABELS,
-    _UI_PALETTES,
     DASHBOARD_AXIS_MIN_PADDING,
     DASHBOARD_AXIS_X_PADDING,
     DASHBOARD_FOOTER_MARGIN,
@@ -29,7 +28,8 @@ from .geometry import (
     _rgb_tuple_to_rgba,
     _select_dashboard_label_nodes,
     _stable_curve_direction,
-    _theme_color_scheme,
+    theme_hover_label,
+    theme_label_text_alpha,
 )
 from .nodes import (
     _provenance_map,
@@ -172,7 +172,12 @@ def _build_node_style(
         text_position = "top center"
         # Keep one marker trace so point indices stay stable for hover/click sync;
         # use a muted shared text alpha instead of per-point text styling.
-        text_font = dict(size=10, color=_rgb_tuple_to_rgba(theme_obj.text_color, 0.72))
+        text_font = dict(
+            size=10,
+            color=_rgb_tuple_to_rgba(
+                theme_obj.text_color, theme_label_text_alpha(theme_obj)
+            ),
+        )
         color_scale: object = [
             [0.0, _rgb_tuple_to_hex(theme_obj.node_color_old)],
             [1.0, _rgb_tuple_to_hex(theme_obj.node_color_new)],
@@ -487,13 +492,7 @@ class PlotlyFigureMixin:
 
         hover_texts = _build_hover_texts(graph=self.graph, node_ids=node_ids)
 
-        hover_palette = _UI_PALETTES[_theme_color_scheme(theme_obj)]
-        node_hoverlabel = dict(
-            bgcolor=hover_palette["panel_bg"],
-            bordercolor=hover_palette["panel_border"],
-            font=dict(color=hover_palette["text_primary"], size=12),
-            align="left",
-        )
+        node_hoverlabel = theme_hover_label(theme_obj)
 
         node_trace = go.Scatter(
             x=node_x,
@@ -549,6 +548,10 @@ class PlotlyFigureMixin:
             "plot_bgcolor": theme_obj.background,
             "paper_bgcolor": theme_obj.background,
             "font": dict(color=theme_obj.text_color),
+            # Layout default as well as the per-trace spec: a trace added later
+            # (or a hover path Plotly resolves outside the node trace) then
+            # still gets the themed card instead of the light default.
+            "hoverlabel": node_hoverlabel,
         }
         if for_dashboard:
             # Pixel shifts clear the largest selection halo at every zoom level.
