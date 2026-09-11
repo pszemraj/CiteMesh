@@ -2,13 +2,6 @@
 
 Runtime behavior that affects embedding model selection, fallback, precision, and compilation.
 
-Related docs:
-
-- CLI flags: [CLI Usage](../guides/cli.md)
-- Cache layout and hydration: [Caching & Data](../guides/caching.md)
-- Output metadata fields in exports: [Output Artifacts](output-artifacts.md)
-- Defaults parameter study: [Defaults Tuning Study](defaults-tuning-study.md)
-
 ## Default Model Selection
 
 - Default embedding model: `unsloth/embeddinggemma-300m`
@@ -29,14 +22,8 @@ Fallback behavior:
 - A local Gemma 3 artifact with neither form of EmbeddingGemma evidence stays on the default profile and emits a warning instead of silently claiming the EmbeddingGemma contract.
 - `--model-profile embeddinggemma` binds the same contract for stripped/custom fine-tune exports; `--model-profile default` explicitly disables family-specific behavior.
 - This means both receive the same prompt formatting, truncate-dim policy, and compile eligibility behavior.
-- When `--truncate-dim` is omitted, this profile uses its recommended dimension of
-  `512`. This applies to embedding/hybrid builds, local search, and symmetric
-  graph-similarity encoding on CUDA, MPS, and CPU, including recognized local
-  checkpoints and the Google fallback. Explicit CLI or configuration values take
-  precedence. Supported dimensions remain `768`, `512`, `256`, and `128`.
-- The [September 2026 dimension study](defaults-tuning-study.md#embedding-dimensions-september-2026)
-  motivates the default: better retention of full-model neighbors at similar GPU
-  encoding cost, with larger vector storage and slower local searches.
+- When `--truncate-dim` is omitted, this profile uses its recommended dimension of `512`. This applies to embedding/hybrid builds, local search, and symmetric graph-similarity encoding on CUDA, MPS, and CPU, including recognized local checkpoints and the Google fallback. Explicit CLI or configuration values take precedence. Supported dimensions remain `768`, `512`, `256`, and `128`.
+- The [September 2026 dimension study](defaults-tuning-study.md#embedding-dimensions-september-2026) motivates the default: better retention of full-model neighbors at similar GPU encoding cost, with larger vector storage and slower local searches.
 - Every fallback load candidate resolves its own profile before loader kwargs, formatter fingerprints, and cache namespaces are computed.
 - The profile requires Transformers 5.2 or newer, where `dtype="auto"` is the supported checkpoint-loading API and Gemma 3 honors the checkpoint's bidirectional-attention setting. CiteMesh checks this before constructing the model and does not treat an incompatible backend as a checkpoint-load failure eligible for fallback.
 
@@ -52,11 +39,7 @@ For EmbeddingGemma, the symmetric formatter is exactly `task: sentence similarit
 
 Retrieval documents and graph-similarity vectors have independent cache namespaces, formatter fingerprints, and storage contracts. The graph namespace is always float32 with no binary prefilter. This prevents a dimension match from making asymmetric retrieval vectors eligible for symmetric graph scoring.
 
-Before encoding, CiteMesh warns when text exceeds the loaded model's token window,
-including prompts and special tokens. The encoder still truncates those inputs;
-their embeddings represent only part of the text. This applies to queries, paper
-documents, corpus hydration, calibration, and graph-similarity encoding. Cached
-vectors reused without encoding do not repeat the warning.
+Before encoding, CiteMesh warns when text exceeds the loaded model's token window, including prompts and special tokens. The encoder still truncates those inputs; their embeddings represent only part of the text. This applies to queries, paper documents, corpus hydration, calibration, and graph-similarity encoding. Cached vectors reused without encoding do not repeat the warning.
 
 The regression suite locks in prompt routing, cache separation, and fail-closed vector completeness. A small frozen real-EmbeddingGemma MPS smoke additionally checks retrieval Recall/nDCG and a related-versus-unrelated STS margin. Real-CUDA smokes load the designated model through the installed encoder stack, verify its live dtype/attention/autocast contract, and round-trip a tiny network-free corpus through INT8 hydration and retrieval. These real-model checks remain opt-in local validation (`pytest -m slow`, or `pytest -m "slow and cuda"` for CUDA only) on the relevant hardware.
 
@@ -88,11 +71,7 @@ Notes:
 - bf16-on-MPS requires torch >= 2.13 (the floor verified on Apple Silicon). Older torch releases fall back to float32.
 - CPU BF16 selection checks native x86 or ARM instructions through `torch.cpu.get_capabilities()` where available, or the older x86 BF16 probe. Missing or unverified hardware support keeps CPU compute in float32. When using the precision wrapper, final embedding normalization after dimension truncation runs once in float32 outside autocast; SentenceTransformers' additional encode-time normalization is disabled. The checkpoint's own modules remain intact.
 - Attention selection is model-profile-driven. EmbeddingGemma prefers `flash_attention_2` on CUDA when `flash_attn` is installed and BF16 compute is available. Missing FA2 or FP32 compute selects SDPA; an FA2 model-load failure retries the same checkpoint with SDPA. MPS uses SDPA and CPU leaves attention automatic. Profiles without an explicit preference leave the Transformers backend automatic.
-- FP32 checkpoint weights are compatible with FA2 when encoding uses BF16 autocast:
-  Transformers converts attention inputs to the active autocast dtype before
-  calling FA2. For this verified CUDA path only, CiteMesh filters the upstream
-  FP32-weight warning during model construction. Other load warnings and runtime
-  failures remain visible; weights still load with `dtype="auto"`.
+- FP32 checkpoint weights are compatible with FA2 when encoding uses BF16 autocast: Transformers converts attention inputs to the active autocast dtype before calling FA2. For this verified CUDA path only, CiteMesh filters the upstream FP32-weight warning during model construction. Other load warnings and runtime failures remain visible; weights still load with `dtype="auto"`.
 - CiteMesh does not select OpenVINO or ONNX backends on top of torch.
 - On Ampere+ CUDA devices in eager mode, TF32 is scoped to the CUDA matmul and cuDNN convolution backends for each encode call, then the prior process settings are restored. TF32 configuration is skipped entirely for non-CUDA devices, including `--device cpu` on a CUDA host.
 
@@ -109,9 +88,7 @@ Compile policy:
 
 ## Cache Storage and Portability
 
-Namespace identity, cross-device reuse, physical storage precision, calibration,
-and the optional binary prefilter are described in
-[Caching & Data](../guides/caching.md).
+Namespace identity, cross-device reuse, physical storage precision, calibration, and the optional binary prefilter are described in [Caching & Data](../guides/caching.md).
 
 ## Dependency Floor
 

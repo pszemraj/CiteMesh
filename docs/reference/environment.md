@@ -2,12 +2,6 @@
 
 Runtime environment variables consumed by CiteMesh.
 
-Related docs:
-
-- CLI usage: [Guides: CLI Usage](../guides/cli.md)
-- Cache behavior: [Guides: Caching & Data](../guides/caching.md)
-- Persistent defaults and API-key precedence: [User Configuration](../guides/configuration.md)
-
 ## CiteMesh Variables
 
 | Variable | Default | Accepted values | Runtime effect |
@@ -18,10 +12,10 @@ Related docs:
 
 Implementation references:
 
-- [Semantic Scholar API key lookup](../../src/citemesh/services/semantic_scholar/client.py)
-- [Cache-root override handling](../../src/citemesh/data/cache.py)
-- [User config precedence handling](../../src/citemesh/core/user_config.py)
-- [Embedding lock-timeout handling](../../src/citemesh/data/embedding_cache/constants.py)
+- Semantic Scholar API key lookup: `src/citemesh/services/semantic_scholar/client.py`
+- Cache-root override handling, including the Windows `LOCALAPPDATA` / `APPDATA` fallback: `src/citemesh/data/cache.py`
+- User config precedence handling: `src/citemesh/data/user_config.py`
+- Embedding lock-timeout handling: `src/citemesh/data/embedding_cache/constants.py`
 
 ## Platform Variables Respected by Cache-Root Resolution
 
@@ -31,11 +25,9 @@ These are not CiteMesh-specific, but CiteMesh honors them when `CITEMESH_CACHE_D
 | --- | --- | --- |
 | `XDG_CACHE_HOME` | Linux/macOS | Base for default cache root (`$XDG_CACHE_HOME/citemesh`). |
 | `LOCALAPPDATA` | Windows | Primary base for default cache root (`%LOCALAPPDATA%\\CiteMesh`). |
-| `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset. |
+| `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset (`%APPDATA%\\CiteMesh`). With both unset, the root falls back to `%USERPROFILE%\\AppData\\Local\\CiteMesh`. |
 
-Cache-root behavior details are covered in [Guides: Caching & Data](../guides/caching.md).
-Explicit `CITEMESH_CACHE_DIR` or `XDG_CACHE_HOME` overrides suppress the legacy
-macOS cache-location hint.
+Cache-root behavior details are covered in [Guides: Caching & Data](../guides/caching.md). Explicit `CITEMESH_CACHE_DIR` or `XDG_CACHE_HOME` overrides suppress the legacy macOS cache-location hint.
 
 ## Other Respected Variables
 

@@ -4,7 +4,8 @@ Practical conventions for working on CiteMesh (humans and coding agents).
 
 ## Scope
 
-- Do not add CI, release infrastructure, compatibility layers, support for hypothetical platforms/users, or security/integrity machinery unless requested or intrinsic to the task.
+- CI exists and is maintained: [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check .`, `ruff format --check .`, and `python -m pytest` on Python 3.10-3.13 (ubuntu-latest, CPU torch), plus a build job (`python -m build`, `twine check dist/*`, and a wheel-contents assertion for `py.typed` and the dashboard JS asset). Fix it when it breaks; do not add parallel workflows, release automation, or publishing steps unless asked.
+- Do not add compatibility layers, support for hypothetical platforms/users, or security/integrity machinery unless requested or intrinsic to the task.
 - Do not generate checksums, verification manifests, or extra reporting artifacts for ordinary local work.
 - Keep the input validation and error handling that real failure modes require; do not invent trust boundaries or defensive frameworks.
 - Ask before expanding the request's or the repo's natural scope.
@@ -21,7 +22,7 @@ Practical conventions for working on CiteMesh (humans and coding agents).
 
 - Python >= 3.10. The maintainer's dev environment is the conda env `inf` (Python 3.12, torch 2.13+); install with `pip install -e ".[all]"`.
 - Run project commands through the env, e.g. `conda run -n inf python -m pytest`.
-- Torch floors are platform-split: `>=2.9` Linux/Windows, `>=2.13` macOS (required for reliable MPS bf16).
+- Install instructions and the platform-split torch floors are in the [README](README.md#install) — that is the single source; do not restate them elsewhere.
 - The package uses a `src/` layout; tests import the installed package, so run `pip install -e ".[all]"` again after pulling a change that moves files.
 
 ## Model and dtype policy (non-negotiable)
@@ -38,13 +39,14 @@ Inside sandboxed agent shells (e.g. Claude Code's sandbox), Metal is not visible
 
 ## Commands
 
+The pre-PR command triple (pytest + `ruff check` + `ruff format --check`) is documented once, in [CONTRIBUTING.md](CONTRIBUTING.md#before-you-open-a-pr). Run it through the env:
+
 ```bash
 conda run -n inf python -m pytest              # unit suite (slow tests excluded by default)
 conda run -n inf python -m pytest -m slow      # real-model smoke tests (needs escalation on macOS)
-conda run -n inf ruff check . && conda run -n inf ruff format .
 ```
 
-Run validation locally: the suite must be green and `ruff check` + `ruff format --check` clean before committing. Real-model and MPS quality smokes remain opt-in local validation on the relevant hardware.
+The suite must be green and lint/format clean before committing. Real-model and MPS quality smokes remain opt-in local validation on the relevant hardware.
 
 ## Code conventions
 
@@ -52,7 +54,8 @@ Run validation locally: the suite must be green and `ruff check` + `ruff format 
 - Docstrings: reST field style (`:param type name:`, `:return type:`) on every function, including tests' helpers where present.
 - Comments state constraints the code can't, not narration of the change.
 - Optional dependencies (torch, sentence-transformers, datasets, plotly, pyvis) must stay lazily imported so the core CLI works with no extras.
-- Argparse choices duplicated in `src/citemesh/core/user_config.py` are guarded by sync tests in `tests/test_user_config.py` — update both together.
+- The test suite is white-box: patch the name where it is used (the module under test's own binding), not the module that originally defined it.
+- Argparse choices duplicated in `src/citemesh/data/user_config.py` are guarded by sync tests in `tests/test_user_config.py` — update both together.
 
 ## Docs rule
 
@@ -64,6 +67,6 @@ Release notes are the sole change history. Do not create or maintain a separate 
 
 ## Runtime data
 
-- Cache root: `~/.cache/citemesh` (Linux/macOS) or `%LOCALAPPDATA%\CiteMesh` (Windows); override with `CITEMESH_CACHE_DIR`. Tests isolate it per-test via `tests/conftest.py`.
+- Cache root: `~/.cache/citemesh` (Linux/macOS) or `%LOCALAPPDATA%\CiteMesh` (Windows, falling back to `%APPDATA%`); override with `CITEMESH_CACHE_DIR`. Tests isolate it per-test via `tests/conftest.py`.
 - Persistent user config: `<cache_root>/config.toml` (`citemesh config`).
 - Live Semantic Scholar calls need `S2_API_KEY` for a dedicated rate limit; tests must never depend on network access.

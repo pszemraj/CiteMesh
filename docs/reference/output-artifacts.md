@@ -1,14 +1,6 @@
 # Output Artifacts
 
-CiteMesh writes graph outputs by format. Dashboard collections use one reusable
-viewer plus one versioned data package instead of generating a dashboard for every
-seed.
-
-Related docs:
-
-- CLI flags and output-path behavior: [CLI Usage](../guides/cli.md)
-- Strategy behavior and score semantics: [Strategy Guide](../guides/strategies.md)
-- Embedding runtime metadata terms: [Embedding Runtime](embedding-runtime.md)
+CiteMesh writes graph outputs by format. Dashboard collections use one reusable viewer plus one versioned data package instead of generating a dashboard for every seed.
 
 ## Artifact Set
 
@@ -21,23 +13,18 @@ A persistent hidden `.dashboard.citemesh.json.lock` beside the package serialize
 
 Every collection build also saves its own graph and build settings under the seed's `<title-slug>-<hash>/` directory, even with only `--export dashboard`:
 
-- `<strategy>.json` - complete standalone graph payload, including titles, IDs,
-  papers, edges, and dashboard layout; readable independently and loadable through
-  **Add Results**
+- `<strategy>.json` - complete standalone graph payload, including titles, IDs, papers, edges, and dashboard layout; readable independently and loadable through **Add Results**
 - `<strategy>.config.json` - build settings, output paths, and runtime metadata
 
 Reusing the same collection root adds or refreshes a package result and writes the current seed's files without rewriting other seeds' files. Results are keyed by `(strategy, seed_id)`, so rebuilding the same seed with the same strategy updates that slot while a different strategy remains a separate result. A refresh also removes known optional formats for that strategy that were produced by an earlier run but are not selected now. Files for other strategies and unrelated user files in the directory are left untouched.
 
-The filenames identify the collection; seed titles and IDs live inside it.
-The dashboard's **Graph selector** labels results by title and strategy. On each build:
+The filenames identify the collection; seed titles and IDs live inside it. The dashboard's **Graph selector** labels results by title and strategy. On each build:
 
 - A different seed adds a result and retains existing results.
 - The same seed with a different strategy adds a separate result.
-- The same seed and strategy replaces that result, even if model or build
-  settings changed. Collections do not retain a history of those reruns.
+- The same seed and strategy replaces that result, even if model or build settings changed. Collections do not retain a history of those reruns.
 
-Other formats are written when selected (`png` remains the default when no export
-format is supplied):
+Other formats are written when selected (`png` remains the default when no export format is supplied):
 
 - `<strategy>.png` (static Matplotlib render)
 - `<strategy>.html` (Pyvis interactive network)
@@ -68,9 +55,7 @@ out/
     hybrid.config.json
 ```
 
-The collection package remains a portable copy of all results. The per-seed JSON
-files let you inspect, copy, or import a single graph without extracting it from
-that package.
+The collection package remains a portable copy of all results. The per-seed JSON files let you inspect, copy, or import a single graph without extracting it from that package.
 
 Open the saved collection directly with `citemesh view`; use `citemesh view out/my-collection` for a named existing collection or `citemesh view out/report.dashboard.html` for a standalone file. The command opens the local HTML file without rebuilding or starting a server.
 
@@ -117,16 +102,9 @@ The package is ordinary UTF-8 JSON with:
 - `current_result_id`
 - `results`, ordered with the most recently added or refreshed result first
 
-Each result contains its stable result identity, seed/title/strategy summary,
-an `updated_at` timestamp, canonical graph payload, and the portable `build`
-settings needed to understand or reproduce the run. Machine-local output paths are excluded from the embedded build
-settings, so the package can be moved between directories and machines as one file.
-Each embedded graph uses `kind: "citemesh-graph"` and `schema_version: 1`.
+Each result contains its stable result identity, seed/title/strategy summary, an `updated_at` timestamp, canonical graph payload, and the portable `build` settings needed to understand or reproduce the run. Machine-local output paths are excluded from the embedded build settings, so the package can be moved between directories and machines as one file. Each embedded graph uses `kind: "citemesh-graph"` and `schema_version: 1`.
 
-Collections created by the former `dashboard.manifest.json` layout are migrated on
-the next collection build. CiteMesh reads valid legacy entries and merges them into
-`dashboard.citemesh.json`; migration does not rewrite or delete the legacy manifest
-or its referenced artifacts.
+Collections created by the former `dashboard.manifest.json` layout are migrated on the next collection build. CiteMesh reads valid legacy entries and merges them into `dashboard.citemesh.json`; migration does not rewrite or delete the legacy manifest or its referenced artifacts.
 
 An existing malformed, unsupported, or inaccessible package stops the build before CiteMesh makes API calls or starts model work, and the file is left untouched. Failed filesystem inspection never counts as a missing package. Package persistence precedes viewer refresh so an unexpected HTML-rendering failure cannot discard a completed graph: the error reports the saved package path, which can be loaded from another current dashboard with **Add Results**, or the command can be rerun after the renderer is repaired.
 
@@ -172,25 +150,15 @@ The JSON and dashboard formats share the same enriched node schema. Every JSON e
 
 Flat table with one row per paper. Columns: `id`, `title`, `year`, `authors` (semicolon-separated), `citation_count`, `venue`, `arxiv_id`, `doi`, `categories` (semicolon-separated), `is_seed`, `provenance`, `seed_relation`, `seed_relevance`, `arxiv_url`, `doi_url`, `semantic_scholar_url`, `abstract`.
 
-An empty graph still writes the column header. Both CLI and dashboard exports
-quote fields containing commas, quotes, newlines, or carriage returns. Text cells
-beginning with `=`, `+`, `-`, `@`, tab, or carriage return are prefixed with an
-apostrophe (spreadsheet formula-injection guard) in both writers, so consumers
-parsing those columns may see a leading `'`.
+An empty graph still writes the column header. Both CLI and dashboard exports quote fields containing commas, quotes, newlines, or carriage returns. Text cells beginning with `=`, `+`, `-`, `@`, tab, or carriage return are prefixed with an apostrophe (spreadsheet formula-injection guard) in both writers, so consumers parsing those columns may see a leading `'`.
 
 ### BibTeX (`<strategy>.bib`)
 
 Combined BibTeX entries for all papers in the graph, one `@article` per paper. Ready for direct import into reference managers or LaTeX projects.
 
-Entries carry `title`, `author`, `year`, `doi`, `url`, and `abstract` when
-available. `doi` and `url` are written verbatim (never LaTeX-escaped) so
-reference managers and resolvers receive usable values; `doi` is the raw
-identifier from the node payload while `url` is the percent-encoded
-`https://doi.org/...` link. All other fields are LaTeX-escaped.
+Entries carry `title`, `author`, `year`, `doi`, `url`, and `abstract` when available. `doi` and `url` are written verbatim (never LaTeX-escaped) so reference managers and resolvers receive usable values; `doi` is the raw identifier from the node payload while `url` is the percent-encoded `https://doi.org/...` link. All other fields are LaTeX-escaped.
 
-Citation keys combine a readable paper-ID slug with a stable ID-derived suffix,
-so IDs differing only in punctuation or letter case retain distinct keys.
-An empty graph produces a bibliography with no entries.
+Citation keys combine a readable paper-ID slug with a stable ID-derived suffix, so IDs differing only in punctuation or letter case retain distinct keys. An empty graph produces a bibliography with no entries.
 
 ### GraphML (`<strategy>.graphml`)
 
@@ -223,25 +191,13 @@ _The Megalodon hybrid graph with **Prior works** active and â€œFlashAttention-2â
 
 In-browser downloads are named from a seed-title slug (`<slug>.json`, `<slug>.csv`, `<slug>.bib`, `<slug>-saved.bib`), falling back to `citemesh` when the title has no ASCII alphanumerics; **Export Collection** always writes `dashboard.citemesh.json`.
 
-In collection mode, keep one `dashboard.html` open and move between results rather
-than opening a separate dashboard for each paper. Browser imports change the
-in-memory session; use **Export Collection** to persist that merged set.
+In collection mode, keep one `dashboard.html` open and move between results rather than opening a separate dashboard for each paper. Browser imports change the in-memory session; use **Export Collection** to persist that merged set.
 
-**Reading list:** every paper row and the detail panel carry a star toggle. Starred
-papers persist in browser `localStorage` per `(strategy, seed_id)` result, the
-`Saved` chip filters the list down to them, and the saved-scoped export buttons
-above turn a triage session into a `.bib` file or a markdown link list without
-opening each paper in a tab. The stored list is a superset of what is displayed:
-entries for papers a later rebuild drops are retained in `localStorage` and
-reappear if the paper returns; only the visible list and the saved-scoped exports
-are pruned to the current graph.
+**Reading list:** every paper row and the detail panel carry a star toggle. Starred papers persist in browser `localStorage` per `(strategy, seed_id)` result, the `Saved` chip filters the list down to them, and the saved-scoped export buttons above turn a triage session into a `.bib` file or a markdown link list without opening each paper in a tab. The stored list is a superset of what is displayed: entries for papers a later rebuild drops are retained in `localStorage` and reappear if the paper returns; only the visible list and the saved-scoped exports are pruned to the current graph.
 
 **Visual encodings:** node color is a publication-year gradient (the on-graph legend and year timeline share the exact colorscale), node size tracks citation count, the seed wears a ring halo, and edge opacity/width scale with relative link weight within the graph. Hovering a node shows a theme-styled card (wrapped title, authors, year | citations | venue, and its relation to the seed) and previews the full details panel; clicking locks the selection and draws its strongest links as arcs.
 
-All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta
-so auto-darkening browser extensions leave the tuned palettes alone. Theme choices
-and defaults are described in [CLI Usage](../guides/cli.md); auto-detection inputs
-are described in [Environment Variables](environment.md).
+All HTML exports declare `darkreader-lock` and a theme-matched `color-scheme` meta so auto-darkening browser extensions leave the tuned palettes alone. Theme choices and defaults are described in [CLI Usage](../guides/cli.md); auto-detection inputs are described in [Environment Variables](environment.md).
 
 ### Sidecar (`<strategy>.config.json`)
 
@@ -258,18 +214,9 @@ Top-level fields:
 - `hybrid` for resolved `max_semantic`.
 - `embedding` for embedding/hybrid semantic settings, including the requested `device` and `model_profile` tokens. Embedding-strategy sidecars also record `top_k`, the per-node edge cap.
 
-Inactive source and storage options are omitted: candidate runs do not record
-corpus-hydration flags, corpus runs do not record candidate-pool budgets, and
-FP32 storage does not record INT8 calibration or prefilter settings.
-`build.refresh_paper_cache` records whether fresh paper metadata was requested.
+Inactive source and storage options are omitted: candidate runs do not record corpus-hydration flags, corpus runs do not record candidate-pool budgets, and FP32 storage does not record INT8 calibration or prefilter settings. `build.refresh_paper_cache` records whether fresh paper metadata was requested.
 
-Exports accept integral numeric years (including values such as `2017.0`);
-fractional or non-finite years are treated as missing. GraphML writes nullable
-text fields as empty values. Null or non-finite edge weights raise a clear error
-before exports replace existing files. GraphExporter rejects empty node IDs and
-IDs with surrounding whitespace, matching the dashboard's import contract.
-Plotly marker labels display upstream markup as literal text. Static PNG exports
-use an `Unknown` title when the requested seed is absent, including empty graphs.
+Exports accept integral numeric years (including values such as `2017.0`); fractional or non-finite years are treated as missing. GraphML writes nullable text fields as empty values. Null or non-finite edge weights raise a clear error before exports replace existing files. GraphExporter rejects empty node IDs and IDs with surrounding whitespace, matching the dashboard's import contract. Plotly marker labels display upstream markup as literal text. Static PNG exports use an `Unknown` title when the requested seed is absent, including empty graphs.
 
 Static labels sit outside each marker's outline. Dashboard labels also clear the selection halo, keeping the same pixel clearance during zoom, resizing, and result imports. Citation-based node areas are capped at 2,500 square points for seeds and 2,200 for other papers before interactive-display scaling.
 
@@ -277,11 +224,7 @@ Static labels sit outside each marker's outline. Dashboard labels also clear the
 
 - common run metadata (`paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`)
 - strategy score semantics (`score_contract`): `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, and `score_type` (`<strategy>_similarity_composite`); hybrid additionally records an `adjudication_policy` sentence describing candidate reranking
-- Semantic Scholar neighborhood outcomes (`candidate_source_status`) keyed by
-  attempted source. Values are `complete` (papers returned), `empty` (successful
-  response with no papers), or `unavailable` (operational failure). Partial
-  results remain usable and preserve the unavailable source; if every attempted
-  source is unavailable, the build fails and writes no normal result artifacts.
+- Semantic Scholar neighborhood outcomes (`candidate_source_status`) keyed by attempted source. Values are `complete` (papers returned), `empty` (successful response with no papers), or `unavailable` (operational failure). Partial results remain usable and preserve the unavailable source; if every attempted source is unavailable, the build fails and writes no normal result artifacts.
 - embedding/hybrid runtime metadata when available, including `effective_device`, `effective_compute_dtype`, and the resolved `model_profile`, plus `retrieval_representation` and `graph_representation` identifying the distinct prompt-conditioned vector roles
 
 See embedding metadata term definitions in [Embedding Runtime](embedding-runtime.md).

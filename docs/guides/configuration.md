@@ -8,19 +8,12 @@ CiteMesh stores durable personal defaults in a TOML file at the cache root:
 
 Use it for preferences you would otherwise repeat on every invocation - for example always using corpus-backed semantic sourcing, a preferred theme, or a Semantic Scholar API key.
 
-Related docs:
-
-- Command syntax: [CLI Usage](cli.md)
-- Cache root resolution: [Caching & Data](caching.md)
-- Environment variables: [Environment Variables](../reference/environment.md)
-
 ## Precedence
 
 Effective values resolve in this order (first match wins):
 
 1. Explicit CLI flag (`--semantic-source arxiv-corpus`)
-2. Environment variable (only `S2_API_KEY` today; presence wins even when empty,
-   and an empty value explicitly selects anonymous access)
+2. Environment variable (only `S2_API_KEY` today; presence wins even when empty, and an empty value explicitly selects anonymous access)
 3. `config.toml` value
 4. Built-in default
 
@@ -92,13 +85,9 @@ Invalid keys and values are rejected at `set` time with the list of valid option
 | --- | --- |
 | `s2_api_key` | Semantic Scholar API key used only when `S2_API_KEY` is absent. Masked in `config list` output; `config get` prints the full value. |
 
-The configured key is passed directly to the API client; CiteMesh does not add it
-to subprocess environments. Keys explicitly supplied through `S2_API_KEY` retain
-normal environment inheritance.
+The configured key is passed directly to the API client; CiteMesh does not add it to subprocess environments. Keys explicitly supplied through `S2_API_KEY` retain normal environment inheritance.
 
-Corpus-only defaults ignored in candidate mode are reported at INFO level and
-omitted from the build sidecar's embedding settings. The sidecar records settings
-applicable to the selected source and storage precision.
+Corpus-only defaults ignored in candidate mode are reported at INFO level and omitted from the build sidecar's embedding settings. The sidecar records settings applicable to the selected source and storage precision.
 
 Example `config.toml`:
 
@@ -118,5 +107,4 @@ s2_api_key = "your-key-here"
 - The file lives at the cache root, so `CITEMESH_CACHE_DIR` moves it too.
 - CiteMesh rewrites the file with mode `0600` (owner read/write only) because it can hold `api.s2_api_key`; broader pre-existing permission bits are narrowed on every write.
 - `citemesh cache clear` deletes cached payloads but **never** `config.toml`. It preserves the configuration lock and cache-operation coordination directory, acquires the exclusive cache lock before deletion, then acquires the configuration lock so clearing cannot interrupt a pending configuration write or let concurrent writers bypass the lock.
-- To reset configuration, delete the path printed by `citemesh config path`, or
-  use `citemesh config unset` for individual keys.
+- To reset configuration, delete the path printed by `citemesh config path`, or use `citemesh config unset` for individual keys.
