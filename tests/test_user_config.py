@@ -16,6 +16,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from citemesh import cli as cli_module
+from citemesh.cli import build_contract as build_contract_module
+from citemesh.cli import build_options as build_options_module
 from citemesh.core import user_config as user_config_module
 from citemesh.core.config import EmbeddingStorageConfig
 from citemesh.core.user_config import (
@@ -910,7 +912,7 @@ def test_config_device_is_inert_when_hybrid_semantic_branch_is_disabled(
     config = UserConfig(path=Path("config.toml"), defaults={"device": "cuda"})
     applied = cli_module._apply_user_config_defaults(args, provided, config)
     resolver = MagicMock(side_effect=ValueError("CUDA is unavailable"))
-    monkeypatch.setattr(cli_module, "resolve_embedding_device", resolver)
+    monkeypatch.setattr(build_contract_module, "resolve_embedding_device", resolver)
 
     cli_module._validate_build_cli_contract(
         args,
@@ -939,7 +941,7 @@ def test_config_device_validation_names_the_config_source(
     )
     applied = cli_module._apply_user_config_defaults(args, provided, config)
     monkeypatch.setattr(
-        cli_module,
+        build_contract_module,
         "resolve_embedding_device",
         MagicMock(side_effect=ValueError("CUDA is unavailable")),
     )
@@ -1138,7 +1140,7 @@ def test_config_api_key_resolved_without_environment_export(
     assert key == "config-key"
     assert "S2_API_KEY" not in os.environ
     factory = MagicMock()
-    monkeypatch.setattr(cli_module, "SemanticScholarClient", factory)
+    monkeypatch.setattr(build_options_module, "SemanticScholarClient", factory)
     kwargs = cli_module._configured_client_kwargs(
         argparse.Namespace(_s2_api_key=key, refresh_paper_cache=True)
     )

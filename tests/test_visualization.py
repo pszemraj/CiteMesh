@@ -23,11 +23,6 @@ import networkx as nx
 import numpy as np
 import pytest
 
-from citemesh.cli import (
-    _validate_dashboard_graph_payload,
-    render_dashboard_collection_snapshot,
-    update_dashboard_package,
-)
 from citemesh.core import Author, Paper
 from citemesh.data import cache as cache_module
 from citemesh.data.model_profiles import get_embedding_model_profile
@@ -40,6 +35,11 @@ from citemesh.visualization.dashboard.contracts import (
     DASHBOARD_COLLECTION_SCHEMA_VERSION,
     GRAPH_PAYLOAD_KIND,
     GRAPH_PAYLOAD_SCHEMA_VERSION,
+)
+from citemesh.visualization.dashboard.package import (
+    _validate_dashboard_graph_payload,
+    render_dashboard_collection_snapshot,
+    update_dashboard_package,
 )
 from citemesh.visualization.export import (
     DASHBOARD_AXIS_MIN_PADDING,

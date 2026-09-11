@@ -12,7 +12,7 @@ Related docs:
 ## Execution Flow
 
 ```text
-CLI (src/citemesh/cli.py)
+CLI (src/citemesh/cli/)
     ├── Parse arguments and resolve output/export targets
     ├── Instantiate selected GraphBuilderStrategy
     └── Invoke build_graph(seed_id, **kwargs)
@@ -35,12 +35,12 @@ Each graph node carries a shared attribute payload (`paper`, `title`, `year`, `a
 
 ## Module Overview
 
-### `src/citemesh/cli.py`
+### `src/citemesh/cli/`
 
-- Defines `citemesh` entry point and command dispatch.
-- Parses validated arguments and resolves output paths.
-- Selects strategy implementations and triggers graph construction.
-- Coordinates render/export steps, writes sidecar config artifacts, upserts dashboard collection packages, and passes run metadata downstream.
+- `cli/__init__.py` defines the `citemesh` entry point and command dispatch.
+- `cli/parser.py` builds the parser; `cli/outputs.py` resolves export paths.
+- `cli/build_options.py` and `cli/build_contract.py` validate build options, select strategy implementations, and trigger graph construction.
+- `cli/commands/` holds one module per subcommand; `cli/commands/build.py` coordinates render/export steps, writes sidecar config artifacts (`cli/graph_config.py`), upserts dashboard collection packages, and passes run metadata downstream.
 
 Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
@@ -101,7 +101,7 @@ Command-line behavior is documented in [CLI Usage](../guides/cli.md).
 
 ### Dashboard Collections
 
-- `src/citemesh/cli.py` stages per-result artifacts, serializes collection updates under the package lock, restores the prior result bundle on ordinary commit failures, and writes the package as the final commit marker.
+- `src/citemesh/cli/commands/build.py` stages per-result artifacts and `src/citemesh/visualization/dashboard/package.py` serializes collection updates under the package lock, restores the prior result bundle on ordinary commit failures, and writes the package as the final commit marker.
 - `GraphExporter` embeds the selected collection snapshot in the reusable viewer.
 - Every collection build also writes the current seed's graph JSON and build sidecar to its stable seed-ID-derived output directory. A successful refresh prunes only obsolete known formats for the same strategy; other strategy files and unrelated files are retained.
 
