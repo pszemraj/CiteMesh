@@ -3,8 +3,10 @@
 `citemesh config` saves the flags you would otherwise retype on every run — a preferred theme, corpus-backed semantic sourcing, a Semantic Scholar API key — into a TOML file at `<cache_root>/config.toml`.
 
 ```bash
-citemesh config list                                   # configured values + file path
-citemesh config get defaults.semantic_source           # one value, raw on stdout
+# configured values + file path
+citemesh config list
+# one value, raw on stdout
+citemesh config get defaults.semantic_source
 citemesh config set defaults.semantic_source arxiv-corpus
 citemesh config unset defaults.semantic_source
 citemesh config path

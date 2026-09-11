@@ -51,7 +51,8 @@ The default `auto` picks local when the cache has vectors and S2 otherwise, logg
 ```bash
 citemesh view
 citemesh view out/my-collection
-citemesh view out/report.dashboard.html --browser google-chrome   # pick a browser
+# pick a browser
+citemesh view out/report.dashboard.html --browser google-chrome
 ```
 
 ### Save defaults, inspect the cache

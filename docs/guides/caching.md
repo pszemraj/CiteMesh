@@ -64,7 +64,8 @@ One caveat worth internalizing: hydration compatibility is keyed to dataset sour
 ## Inspecting and clearing
 
 ```bash
-citemesh cache scan                                    # usage by section
+# usage by section
+citemesh cache scan
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
