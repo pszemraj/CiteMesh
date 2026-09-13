@@ -25,6 +25,7 @@ import numpy as np
 from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.core.paper_ids import normalize_paper_id
+from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
@@ -51,7 +52,6 @@ from citemesh.strategies.candidates import (
     resolve_aliases,
     scope_candidate_collection,
 )
-from citemesh.text_batching import l2_normalize_embeddings
 
 from . import deps
 from .config import (

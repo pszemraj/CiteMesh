@@ -24,7 +24,7 @@ import h5py
 import numpy as np
 from filelock import FileLock
 
-from citemesh.text_batching import (
+from citemesh.core.text_batching import (
     l2_normalize_embeddings,
 )
 

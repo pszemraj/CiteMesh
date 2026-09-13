@@ -17,6 +17,7 @@ Every node carries the same attribute payload (`paper`, `title`, `year`, `author
 - `paper_fields.py` — tolerant coercion of venue, author, and category fields out of inconsistent upstream payloads
 - `paper_ids.py` — identifier normalization and alias derivation
 - `values.py`, `validation.py` — shared value coercion and input validation primitives
+- `text_batching.py` — length-bucketed encode batching and `l2_normalize_embeddings`; it sits here rather than under `strategies/embedding/` because `data/embedding_cache/` encodes through it too
 
 ### `data/` — persistence
 
@@ -50,7 +51,7 @@ Every node carries the same attribute payload (`paper`, `title`, `year`, `author
 
 `__init__.py` (entry point and dispatch) · `parser.py` · `console.py` (Rich console and logging) · `build_options.py` and `build_contract.py` (strategy-scoped option validation and builder selection) · `outputs.py` · `graph_config.py` (the `*.config.json` sidecar) · `cache_ops.py` · `commands/{build,search,view,config,cache}.py`.
 
-Top-level: `__main__.py` (`python -m citemesh`), `_lazy.py` (the shared PEP 562 lazy-export plumbing every `__init__` uses), `progress.py`, `_runtime.py` (process-level runtime setup), `text_batching.py` (length-bucketed encode batching, `l2_normalize_embeddings`), `_version.py`.
+Top-level: `__main__.py` (`python -m citemesh`), `_lazy.py` (the shared PEP 562 lazy-export plumbing every `__init__` uses), `progress.py`, `_runtime.py` (process-level runtime setup), `_version.py`.
 
 ## Rules
 

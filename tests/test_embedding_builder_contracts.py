@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from citemesh.core import Author, Paper
+from citemesh.core.text_batching import estimate_text_length_bucket
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
     DEFAULT_EMBEDDING_MODEL_NAME,
@@ -50,7 +51,6 @@ from citemesh.strategies.embedding import hydration as hydration_module
 from citemesh.strategies.embedding import model_runtime as model_runtime_module
 from citemesh.strategies.embedding import records as records_module
 from citemesh.strategies.embedding import runtime as runtime_module
-from citemesh.text_batching import estimate_text_length_bucket
 from tests._helpers import (
     ConstantEncodeModel,
     disable_embedding_dep_checks,

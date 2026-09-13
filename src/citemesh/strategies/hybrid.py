@@ -19,6 +19,7 @@ from citemesh.core import (
     HYBRID_CONFIG,
     Paper,
 )
+from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.services import get_client
 from citemesh.strategies.base import (
@@ -49,7 +50,6 @@ from citemesh.strategies.embedding import (
     _check_embedding_deps,
     format_paper_for_embedding,
 )
-from citemesh.text_batching import l2_normalize_embeddings
 
 if TYPE_CHECKING:
     from citemesh.services.semantic_scholar import SemanticScholarClient

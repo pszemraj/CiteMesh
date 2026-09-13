@@ -15,7 +15,7 @@ from typing import Any
 import h5py
 import numpy as np
 
-from citemesh.text_batching import l2_normalize_embeddings
+from citemesh.core.text_batching import l2_normalize_embeddings
 
 from . import constants
 from .constants import CALIBRATION_RANGES_DATASET_NAME

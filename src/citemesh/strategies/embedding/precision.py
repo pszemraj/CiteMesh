@@ -18,7 +18,7 @@ from typing import (
 
 import numpy as np
 
-from citemesh.text_batching import l2_normalize_embeddings
+from citemesh.core.text_batching import l2_normalize_embeddings
 
 from . import deps
 
@@ -194,7 +194,7 @@ class _PrecisionEncodeProxy:
 
         from sentence_transformers.util import batch_to_device
 
-        from citemesh.text_batching import length_bucketed_index_batches
+        from citemesh.core.text_batching import length_bucketed_index_batches
 
         model = self._model
         model.eval()

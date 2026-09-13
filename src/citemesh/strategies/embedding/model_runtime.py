@@ -18,11 +18,11 @@ from typing import (
 import numpy as np
 
 from citemesh.core import EMBEDDING_CONFIG
+from citemesh.core.text_batching import encode_texts
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
     resolve_embedding_model_profile,
 )
-from citemesh.text_batching import encode_texts
 
 from . import deps
 from .precision import _model_floating_dtype_names, _PrecisionEncodeProxy

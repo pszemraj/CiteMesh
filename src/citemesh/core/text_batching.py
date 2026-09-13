@@ -1,4 +1,10 @@
-"""Length-aware text batching helpers for embedding encode workloads."""
+"""Length-aware text batching helpers for embedding encode workloads.
+
+This lives in ``citemesh.core`` rather than beside the embedding strategy
+because ``citemesh.data.embedding_cache`` encodes through it as well, and the
+one-way dependency direction forbids ``data`` from importing ``strategies``.
+Nothing here performs I/O or touches an optional dependency.
+"""
 
 from __future__ import annotations
 
