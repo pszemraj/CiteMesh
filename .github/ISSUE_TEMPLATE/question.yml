@@ -1,0 +1,23 @@
+name: Question
+description: Ask how to do something with CiteMesh
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The [CLI guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/cli.md) and [strategy guide](https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/strategies.md) cover most flag and tuning questions.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What are you trying to do?
+      description: Describe the result you want. Include the command you tried, with any API key removed.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: CiteMesh version
+      description: Output of `citemesh --version`, if the question is about behavior you observed.
+      placeholder: citemesh 0.3.0

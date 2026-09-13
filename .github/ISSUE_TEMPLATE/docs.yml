@@ -1,0 +1,20 @@
+name: Documentation issue
+description: Something in the docs is wrong, missing, or unclear
+labels: [documentation]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page
+      description: The file or URL. The documentation index lists every page.
+      placeholder: docs/guides/strategies.md, or README.md
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong or missing?
+      description: Quote the passage if it is inaccurate. If a default or flag is documented differently from how it behaves, say what you observed.
+    validations:
+      required: true

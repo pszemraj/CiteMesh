@@ -2,13 +2,22 @@ name: Feature request
 description: Suggest an improvement or new capability
 labels: [enhancement]
 body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before requesting
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+
   - type: textarea
     id: problem
     attributes:
       label: What problem would this solve?
-      description: Describe the workflow you're trying to accomplish.
+      description: Describe the workflow you are trying to accomplish, not the solution you have in mind.
     validations:
       required: true
+
   - type: textarea
     id: proposal
     attributes:
@@ -16,7 +25,9 @@ body:
       description: What should CiteMesh do? CLI sketches welcome.
     validations:
       required: true
+
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
+      description: Other flags, strategies, or tools you tried, and why they fell short.
