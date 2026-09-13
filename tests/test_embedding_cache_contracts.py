@@ -45,6 +45,7 @@ from citemesh.data.embedding_cache import (
     INT8_TOTAL_VALUE_COUNT_KEY,
     MODEL_FINGERPRINT_KEY,
     SCHEMA_VERSION_KEY,
+    SOURCE_TORCH_DTYPE_KEY,
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
     _corpus_size_coverage,
@@ -3974,6 +3975,45 @@ def test_embedding_cache_reopens_across_source_dtype_without_discarding_rows(
         binary_rescore_multiplier=2,
     )
     assert [result.paper_id for result in results] == ["p1"]
+
+
+def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
+    tmp_path: Path,
+) -> None:
+    """The stored source dtype must survive a reopen under a different dtype.
+
+    The dtype is provenance, not identity, so it is never compared on open. That
+    only makes it a usable record if the opener leaves it alone: restamping it
+    would erase what produced the vectors, including from a run that reads
+    nothing.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks the recorded dtype and row count after an fp32 reopen.
+    """
+    built = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="source-dtype-provenance",
+        storage_precision="float32",
+        source_torch_dtype="bfloat16",
+    )
+    built.get_embeddings(
+        {"p1": {"title": "Alpha", "abstract": "First"}},
+        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    with built._connect_db() as conn:
+        assert built._load_cache_metadata(conn)[SOURCE_TORCH_DTYPE_KEY] == "bfloat16"
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="source-dtype-provenance",
+        storage_precision="float32",
+        source_torch_dtype="float32",
+    )
+    assert reopened.embedding_count() == 1
+
+    with reopened._connect_db() as conn:
+        assert reopened._load_cache_metadata(conn)[SOURCE_TORCH_DTYPE_KEY] == "bfloat16"
 
 
 def test_embedding_cache_detects_diverged_sqlite_contract_value(

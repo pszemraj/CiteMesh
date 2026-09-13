@@ -441,10 +441,21 @@ class _H5LayoutMixin:
         runtime: either the consistency check passed, the namespace was rebuilt,
         or it holds no vectors yet.
 
+        The source compute dtype is the one exception. It is provenance rather
+        than identity, so it is never compared on open (see
+        :meth:`_assert_runtime_cache_consistency`); restamping it would let any
+        later opener — including one that reads nothing and exits — claim
+        authorship of vectors another dtype produced. It is therefore written
+        only while the namespace has no recorded value.
+
         :param sqlite3.Connection conn: Open SQLite connection.
         :return None: Updates runtime contract metadata in-place.
         """
-        self._set_cache_metadata(conn, self._runtime_contract_values())
+        values = self._runtime_contract_values()
+        metadata = self._load_cache_metadata(conn)
+        if str(metadata.get(SOURCE_TORCH_DTYPE_KEY, "")).strip():
+            values.pop(SOURCE_TORCH_DTYPE_KEY)
+        self._set_cache_metadata(conn, values)
 
     def _adopt_existing_dataset_compression(self, dataset: h5py.Dataset) -> None:
         """Adopt immutable compression layout from an existing embedding matrix.
