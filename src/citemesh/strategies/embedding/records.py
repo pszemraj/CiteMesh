@@ -169,10 +169,13 @@ def _parse_categories(categories_data: Any) -> list[str]:
 def _parse_venue(paper: dict[str, Any]) -> str:
     """Normalize venue/journal metadata from dataset records.
 
+    The arXiv metadata snapshots ship this column as ``journal-ref``; other
+    sources spell it ``journal_ref`` or nest it under ``journal``.
+
     :param Dict[str, Any] paper: Raw dataset record.
     :return str: Best-effort venue string (empty when unavailable).
     """
-    for key in ("venue", "journal_ref", "journal"):
+    for key in ("venue", "journal_ref", "journal-ref", "journal"):
         venue = coerce_venue(paper.get(key))
         if venue:
             return venue

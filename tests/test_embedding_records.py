@@ -3,7 +3,8 @@
 These pin the arXiv-specific behavior layered over the shared coercers in
 :mod:`citemesh.core.paper_fields`: structured ``authors_parsed`` rows winning
 over the free-text ``authors`` string, whitespace-packed category codes, and
-the venue key precedence used by the corpus cache.
+the venue key precedence used by the corpus cache, including the hyphenated
+``journal-ref`` column the arXiv metadata snapshot actually ships.
 """
 
 from __future__ import annotations
@@ -88,14 +89,18 @@ def test_parse_categories_splits_packed_arxiv_codes(
     [
         ({"venue": " ICLR "}, "ICLR"),
         ({"venue": "  ", "journal_ref": "Nature 2020"}, "Nature 2020"),
+        # The arXiv metadata snapshot spells the column with a hyphen.
+        ({"journal-ref": " Nature 2020 "}, "Nature 2020"),
+        ({"venue": "  ", "journal-ref": "Nature 2020"}, "Nature 2020"),
         ({"journal": {"name": " JMLR "}}, "JMLR"),
         ({"venue": "ICLR", "journal_ref": "Nature"}, "ICLR"),
         ({"venue": None, "journal_ref": None, "journal": None}, ""),
+        ({"venue": None, "journal-ref": None, "journal": None}, ""),
         ({}, ""),
     ],
 )
 def test_parse_venue_follows_key_precedence(paper: dict, expected: str) -> None:
-    """Venue resolution walks ``venue`` then ``journal_ref`` then ``journal``.
+    """Venue walks ``venue``, ``journal_ref``, ``journal-ref``, then ``journal``.
 
     :param dict paper: Raw dataset record.
     :param str expected: Normalized venue string.
@@ -107,6 +112,9 @@ def test_parse_venue_follows_key_precedence(paper: dict, expected: str) -> None:
 def test_extract_dataset_paper_metadata_normalizes_an_arxiv_row() -> None:
     """A full arXiv row normalizes into the metadata dict the cache stores.
 
+    The row uses the arXiv metadata snapshot's own column spellings, hyphenated
+    ``journal-ref`` included.
+
     :return None: Checks identity, text, and the three coerced fields together.
     """
     metadata = _extract_dataset_paper_metadata(
@@ -117,7 +125,7 @@ def test_extract_dataset_paper_metadata_normalizes_an_arxiv_row() -> None:
             "authors": "ignored",
             "authors_parsed": [["Vaswani", "Ashish", ""]],
             "categories": "cs.CL cs.LG, cs.CL",
-            "journal_ref": " NeurIPS 2017 ",
+            "journal-ref": " NeurIPS 2017 ",
             "update_date": "2017-12-06",
         },
         0,
