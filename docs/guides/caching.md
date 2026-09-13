@@ -55,6 +55,8 @@ Hydration is resumable. An interrupted run resumes from its cached rows whenever
 
 A completed capped cache keeps its original selection, so `--corpus-size` does not roll forward as the dataset grows; rebuild to reselect. A resume can exceed the cap once the upstream newest selection has moved, and CiteMesh reports the actual count.
 
+Changing the cap between runs never costs you the vectors you already have. The recorded cap describes what is cached, so a larger `--corpus-size` — or `--all-corpus` — extends the same namespace in place, encoding only the newly selected papers, and a smaller one reuses the existing rows as-is: CiteMesh warns that results come from the larger cached corpus and leaves the recorded cap where the vectors actually are. Reach for `citemesh cache clear` or `--force-rebuild-cache` when you want a namespace holding exactly the requested size.
+
 Changing `--dataset-source` replaces the corpus in the same namespace through that rebuild path; a failed load stops the build before anything is replaced, and local search refuses a source mismatch outright. A failed storage inspection surfaces the paths and the original error rather than reading as an empty cache.
 
 An int8 write whose coordinates fall outside the persisted calibration ranges warns once per run; persistent warnings are the one signal worth acting on. Ranges cannot be replaced in place, since they also decode existing rows, so recalibrating means `--force-rebuild-cache` — and a larger `--calibration-sample-size` starts a fresh namespace.

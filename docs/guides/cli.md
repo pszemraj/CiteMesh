@@ -125,7 +125,7 @@ The logging flags work on `build`, `search`, `cache`, and `config`, subcommands 
 - `--dataset-source`: HuggingFace arXiv metadata repository (default `librarian-bots/arxiv-metadata-snapshot`). It must supply `id` (or `paper_id` / `paperId`), `title`, and `abstract` (or `summary`); `authors`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal` are used when present.
 - `--dataset-split`: split within that source (default `train`). Non-streaming slices such as `train[:5%]` bound the rows exposed to CiteMesh after dataset preparation.
 - `--corpus-size`: embed and cache only the N newest submissions by arXiv ID from the selected split; it does not cap the scan establishing that order. Without it, CiteMesh hydrates the full split.
-- `--all-corpus`: the full selected split, overriding a configured cap — "all of `--dataset-split`", not every split the dataset publishes. It rejects an explicit `--corpus-size` and rebuilds a namespace previously hydrated with a cap.
+- `--all-corpus`: the full selected split, overriding a configured cap — "all of `--dataset-split`", not every split the dataset publishes. It rejects an explicit `--corpus-size`, and extends a namespace previously hydrated with a cap rather than re-encoding it.
 - `--streaming` / `--no-streaming`: stream the dataset or load cached shards. Streaming requires a non-sliced split; the negative form overrides `defaults.streaming` for one run.
 
 **Graph edges and cache storage**
