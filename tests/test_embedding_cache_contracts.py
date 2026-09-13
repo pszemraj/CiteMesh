@@ -48,6 +48,7 @@ from citemesh.data.embedding_cache import (
     SOURCE_TORCH_DTYPE_KEY,
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
+    _corpus_size_coverage,
     _corpus_size_token,
     _resolve_cache_lock_timeout_seconds,
 )
@@ -2158,6 +2159,34 @@ def test_corpus_size_token_encodes_newest_slice_policy() -> None:
     """Capped tokens carry the slice policy so legacy head-slice caches rehydrate."""
     assert _corpus_size_token(None) == "all"
     assert _corpus_size_token(1000) == "newest:1000"
+
+
+@pytest.mark.parametrize(
+    ("cached_token", "requested_corpus_size", "expected"),
+    [
+        ("newest:100", 100, "exact"),
+        ("all", None, "exact"),
+        ("all", 100, "covers"),
+        ("newest:200", 100, "covers"),
+        ("newest:100", 200, "extends"),
+        ("newest:100", None, "extends"),
+        ("100", 200, "incompatible"),
+        ("newest:oldest", 200, "incompatible"),
+        ("", 200, "incompatible"),
+        (None, 200, "incompatible"),
+    ],
+)
+def test_corpus_size_coverage_routes_resizes_away_from_rebuilds(
+    cached_token: str | None, requested_corpus_size: int | None, expected: str
+) -> None:
+    """Coverage compares what is cached to what is asked for, not raw equality.
+
+    :param str | None cached_token: Corpus token recorded on the cache.
+    :param int | None requested_corpus_size: Newly requested corpus-size cap.
+    :param str expected: Coverage verdict the hydration router must receive.
+    :return None: Asserts only unreadable tokens force a destructive rebuild.
+    """
+    assert _corpus_size_coverage(cached_token, requested_corpus_size) == expected
 
 
 def test_legacy_head_slice_hydration_metadata_fails_is_hydrated() -> None:

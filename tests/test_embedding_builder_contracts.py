@@ -4681,6 +4681,243 @@ def test_incomplete_selected_corpus_cache_resumes_without_clear(
     assert (warning in caplog.text) is snapshot_advanced
 
 
+def _complete_corpus_cache_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    corpus_size: int | None,
+    cached_corpus_size: int | None,
+    cached_ids: tuple[str, ...],
+    source: str = "fixture/source",
+    cached_source: str | None = None,
+) -> tuple[EmbeddingGraphBuilder, MagicMock, MagicMock]:
+    """Build a request over a COMPLETE cache recorded at another corpus size.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param int | None corpus_size: Corpus size the new run requests.
+    :param int | None cached_corpus_size: Corpus size stamped on the cached rows.
+    :param tuple[str, ...] cached_ids: arXiv IDs already present in the cache.
+    :param str source: Dataset source the new run configures.
+    :param str | None cached_source: Source stamped on the cache, defaulting to ``source``.
+    :return tuple[EmbeddingGraphBuilder, MagicMock, MagicMock]: Builder, its patched
+        ``_clear_embedding_cache`` mock, and the mocked encode model.
+    """
+    builder = EmbeddingGraphBuilder(
+        storage_precision="float32",
+        corpus_size=corpus_size,
+        dataset_source=source,
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder)
+    cache = builder.embedding_cache
+    for paper_id in cached_ids:
+        _put_concurrent_hydration_record(cache, f"arxiv:{paper_id}")
+    cache.mark_hydrated(
+        dataset_source=cached_source or source,
+        dataset_split=builder.dataset_split,
+        corpus_size=cached_corpus_size,
+        complete=True,
+    )
+    cache.set_model_fingerprint("test-fingerprint")
+    cache.mark_corpus_metadata_current()
+    model = ConstantEncodeModel()
+    model.encode = MagicMock(wraps=model.encode)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    clear_cache_mock = MagicMock()
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
+    return builder, clear_cache_mock, model
+
+
+def test_complete_capped_cache_extends_to_larger_corpus_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raising --corpus-size must top the cache up instead of re-encoding it.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :return None: Asserts reuse of cached vectors and the new recorded corpus size.
+    """
+    source = "fixture/source"
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=2,
+        cached_corpus_size=1,
+        cached_ids=("2601.00001",),
+    )
+    cache = builder.embedding_cache
+    records = [
+        {"id": "2601.00001", "title": "First", "abstract": "A"},
+        {"id": "2601.00002", "title": "Second", "abstract": "A"},
+    ]
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *args, **kwargs: iter(records)
+        ),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
+    assert cache.payload_stats().hydration_corpus_size == "newest:2"
+    assert cache.is_hydrated("train", 2, dataset_source=source)
+    assert model.encode.call_count == 1
+    clear_cache_mock.assert_not_called()
+
+
+def test_complete_cache_reused_for_smaller_corpus_size(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Lowering --corpus-size must reuse the larger cache and disclose it.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param pytest.LogCaptureFixture caplog: Captured disclosure warning.
+    :return None: Asserts nothing is encoded and the recorded token stays truthful.
+    """
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=1,
+        cached_corpus_size=2,
+        cached_ids=("2601.00001", "2601.00002"),
+    )
+    cache = builder.embedding_cache
+    load = MagicMock()
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
+    assert cache.payload_stats().hydration_corpus_size == "newest:2"
+    model.encode.assert_not_called()
+    load.assert_not_called()
+    clear_cache_mock.assert_not_called()
+    assert "holds newest:2, which already covers the requested newest:1" in caplog.text
+
+
+def test_complete_capped_cache_extends_to_all_corpus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--all-corpus over a capped cache must extend it rather than clear it.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :return None: Asserts the capped rows survive and the token becomes ``all``.
+    """
+    source = "fixture/source"
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=None,
+        cached_corpus_size=1,
+        cached_ids=("2601.00001",),
+    )
+    cache = builder.embedding_cache
+    records = [
+        {"id": "2601.00001", "title": "First", "abstract": "A"},
+        {"id": "2601.00002", "title": "Second", "abstract": "A"},
+    ]
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *args, **kwargs: iter(records)
+        ),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
+    assert cache.payload_stats().hydration_corpus_size == "all"
+    assert cache.is_hydrated("train", None, dataset_source=source)
+    assert model.encode.call_count == 1
+    clear_cache_mock.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["raises", "short-read"])
+def test_failed_corpus_extension_retains_complete_cache(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """A failed extension must leave the cache complete at its recorded size.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param str failure: Whether the pass raises or returns short of clean EOF.
+    :return None: Asserts retained rows, retained metadata, and no rebuild.
+    """
+    builder, clear_cache_mock, _model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=2,
+        cached_corpus_size=1,
+        cached_ids=("2601.00001",),
+    )
+    cache = builder.embedding_cache
+    load_mock = MagicMock()
+    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
+
+    def extend(**_kwargs: Any) -> records_module._HydrationSourceSliceResult:
+        """Fail the extension pass, or return it short of clean EOF.
+
+        :param Any _kwargs: Hydration slice options.
+        :return _HydrationSourceSliceResult: Unexhausted slice outcome.
+        """
+        if failure == "raises":
+            raise RuntimeError("extension source failed")
+        return records_module._HydrationSourceSliceResult(
+            hydrated_records=0,
+            source_rows_consumed=1,
+            source_exhausted=False,
+        )
+
+    monkeypatch.setattr(builder, "_hydrate_exact_hydration_source_slice", extend)
+
+    if failure == "raises":
+        with pytest.raises(RuntimeError, match="extension source failed"):
+            builder._ensure_cache_hydrated(use_streaming=False)
+    else:
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    stats = cache.payload_stats()
+    assert stats.hydration_complete
+    assert stats.hydration_corpus_size == "newest:1"
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001"}
+    clear_cache_mock.assert_not_called()
+    load_mock.assert_not_called()
+
+
+def test_resized_complete_cache_still_clears_on_source_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source change must still rebuild even when the corpus size also changed.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :return None: Asserts the rebuild path runs for an incompatible corpus.
+    """
+    builder, clear_cache_mock, _model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=2,
+        cached_corpus_size=1,
+        cached_ids=("2601.00001",),
+        source="fixture/new-source",
+        cached_source="fixture/previous-source",
+    )
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *args, **kwargs: iter(
+                [{"id": "2601.00002", "title": "Second", "abstract": "A"}]
+            )
+        ),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    clear_cache_mock.assert_called_once()
+    assert "fixture/previous-source" in clear_cache_mock.call_args.args[0]
+
+
 @pytest.mark.parametrize("inserted_id", ["2601.00004", "2601.00001"])
 @pytest.mark.parametrize("fail_reconciliation", [False, True])
 @pytest.mark.parametrize("upstream_rows", [4, None])
