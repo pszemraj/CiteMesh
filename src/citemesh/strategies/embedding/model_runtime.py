@@ -24,7 +24,7 @@ from citemesh.data import (
     resolve_embedding_model_profile,
 )
 
-from . import deps
+from . import deps, runtime
 from .precision import _model_floating_dtype_names, _PrecisionEncodeProxy
 from .runtime import (
     _COMPILE_ELIGIBLE_DEVICES,
@@ -33,8 +33,6 @@ from .runtime import (
     _TF32_COMPILE_BRIDGE_TORCH_VERSIONS,
     EmbeddingBackendCompatibilityError,
     EmbeddingPrecisionCompatibilityError,
-    _cpu_native_bf16_supported,
-    _cuda_native_bf16_supported,
     _parse_major_minor,
     _require_transformers_compatibility,
     _suppress_expected_fa2_load_dtype_warning,
@@ -164,11 +162,14 @@ class _ModelRuntimeMixin:
             )
             return False
 
+        # Reached through the defining module, not a direct import: tests patch
+        # these probes on ``runtime`` to force the float32 fallback, and a local
+        # name binding would keep pointing at the original function.
         if self.device == "cpu":
-            if not _cpu_native_bf16_supported(torch):
+            if not runtime._cpu_native_bf16_supported(torch):
                 return False
         elif self.device == "cuda":
-            if not _cuda_native_bf16_supported(torch):
+            if not runtime._cuda_native_bf16_supported(torch):
                 return False
         elif self.device == "mps" and not self._mps_bf16_allowed(torch):
             return False
