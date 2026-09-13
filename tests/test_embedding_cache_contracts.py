@@ -3977,6 +3977,21 @@ def test_embedding_cache_reopens_across_source_dtype_without_discarding_rows(
     assert [result.paper_id for result in results] == ["p1"]
 
 
+def _recorded_source_dtypes(cache: EmbeddingCache) -> tuple[str, str]:
+    """Return the source dtype recorded by the SQLite and HDF5 witnesses.
+
+    :param EmbeddingCache cache: Cache whose namespace is inspected.
+    :return Tuple[str, str]: ``(sqlite_value, hdf5_attr_value)`` provenance pair.
+    """
+    with cache._connect_db() as conn:
+        sqlite_value = cache._load_cache_metadata(conn).get(SOURCE_TORCH_DTYPE_KEY, "")
+    with h5py.File(cache.h5_path, "r") as h5:
+        h5_value = cache._metadata_value_from_h5_attr(
+            h5.attrs.get(SOURCE_TORCH_DTYPE_KEY)
+        )
+    return str(sqlite_value), h5_value
+
+
 def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
     tmp_path: Path,
 ) -> None:
@@ -3988,7 +4003,7 @@ def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
     nothing.
 
     :param Path tmp_path: Isolated cache directory.
-    :return None: Checks the recorded dtype and row count after an fp32 reopen.
+    :return None: Checks both witnesses and the row count after an fp32 reopen.
     """
     built = EmbeddingCache(
         cache_dir=tmp_path,
@@ -4001,8 +4016,7 @@ def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
         LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
         show_progress=False,
     )
-    with built._connect_db() as conn:
-        assert built._load_cache_metadata(conn)[SOURCE_TORCH_DTYPE_KEY] == "bfloat16"
+    assert _recorded_source_dtypes(built) == ("bfloat16", "bfloat16")
 
     reopened = EmbeddingCache(
         cache_dir=tmp_path,
@@ -4011,9 +4025,64 @@ def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
         source_torch_dtype="float32",
     )
     assert reopened.embedding_count() == 1
+    # Appending rewrites the HDF5 contract attrs, so the fp32 host gets the one
+    # chance it has to overwrite the other witness too.
+    reopened.get_embeddings(
+        {"p2": {"title": "Beta", "abstract": "Second"}},
+        LookupEncodeModel({"Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32)}),
+        show_progress=False,
+    )
 
-    with reopened._connect_db() as conn:
-        assert reopened._load_cache_metadata(conn)[SOURCE_TORCH_DTYPE_KEY] == "bfloat16"
+    assert reopened.embedding_count() == 2
+    assert _recorded_source_dtypes(reopened) == ("bfloat16", "bfloat16")
+
+
+def test_embedding_cache_rebuild_records_the_rebuilding_source_dtype(
+    tmp_path: Path,
+) -> None:
+    """Discarding the vectors must hand the provenance record to the rebuilder.
+
+    Preserving the creating dtype is only honest while its vectors are still
+    there. A rebuild keeps none of them, so a stale record would attribute the
+    new vectors to a runtime that never produced them.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks both witnesses name the rebuilding runtime.
+    """
+    built = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="source-dtype-rebuild",
+        storage_precision="float32",
+        source_torch_dtype="bfloat16",
+        text_formatter_fingerprint="old",
+    )
+    built.get_embeddings(
+        {"p1": {"title": "Alpha", "abstract": "First"}},
+        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    assert _recorded_source_dtypes(built) == ("bfloat16", "bfloat16")
+
+    # A changed formatter fingerprint is a proven incompatibility: the namespace
+    # is rebuilt from empty rather than reused.
+    rebuilt = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="source-dtype-rebuild",
+        storage_precision="float32",
+        source_torch_dtype="float32",
+        text_formatter_fingerprint="new",
+    )
+    assert not rebuilt.h5_path.exists()
+    assert rebuilt.embedding_count() == 0
+
+    rebuilt.get_embeddings(
+        {"p2": {"title": "Beta", "abstract": "Second"}},
+        LookupEncodeModel({"Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+
+    assert rebuilt.embedding_count() == 1
+    assert _recorded_source_dtypes(rebuilt) == ("float32", "float32")
 
 
 def test_embedding_cache_detects_diverged_sqlite_contract_value(

@@ -434,26 +434,50 @@ class _H5LayoutMixin:
         self._effective_compression = self.compression
         self._effective_compression_level = self.compression_level
 
+    @classmethod
+    def _keeps_recorded_source_dtype(cls, stored_value: Any) -> bool:
+        """Return whether an already-recorded source dtype must be left alone.
+
+        The source compute dtype is provenance rather than identity, so it is
+        never compared on open (see :meth:`_assert_runtime_cache_consistency`).
+        That only makes it useful if it keeps naming the runtime whose vectors
+        are actually stored: restamping it would let any later opener — one that
+        reads nothing and exits included — claim authorship of another dtype's
+        vectors. Every non-blank recorded value therefore outranks the opening
+        runtime, in both the SQLite and HDF5 witnesses; the paths that discard
+        the vectors clear it so the rebuilding runtime records its own.
+
+        :param Any stored_value: Value already recorded in metadata or HDF5 attrs.
+        :return bool: ``True`` when the stored value must not be overwritten.
+        """
+        return bool(cls._metadata_value_from_h5_attr(stored_value).strip())
+
+    @staticmethod
+    def _clear_recorded_source_dtype(conn: sqlite3.Connection) -> None:
+        """Forget which runtime created a namespace that no longer holds vectors.
+
+        Called only where the persisted vectors are gone, so the next runtime to
+        write any is recorded as the creator instead of a discarded build.
+
+        :param sqlite3.Connection conn: Open SQLite connection.
+        :return None: Blanks the recorded source dtype in-place.
+        """
+        _H5LayoutMixin._set_cache_metadata(conn, {SOURCE_TORCH_DTYPE_KEY: ""})
+
     def _persist_runtime_contract_metadata(self, conn: sqlite3.Connection) -> None:
         """Stamp the active runtime cache contract into SQLite metadata.
 
         Only legitimate once the persisted namespace is known to match this
         runtime: either the consistency check passed, the namespace was rebuilt,
-        or it holds no vectors yet.
-
-        The source compute dtype is the one exception. It is provenance rather
-        than identity, so it is never compared on open (see
-        :meth:`_assert_runtime_cache_consistency`); restamping it would let any
-        later opener — including one that reads nothing and exits — claim
-        authorship of vectors another dtype produced. It is therefore written
-        only while the namespace has no recorded value.
+        or it holds no vectors yet. The source compute dtype is the one
+        exception and is preserved per :meth:`_keeps_recorded_source_dtype`.
 
         :param sqlite3.Connection conn: Open SQLite connection.
         :return None: Updates runtime contract metadata in-place.
         """
         values = self._runtime_contract_values()
         metadata = self._load_cache_metadata(conn)
-        if str(metadata.get(SOURCE_TORCH_DTYPE_KEY, "")).strip():
+        if self._keeps_recorded_source_dtype(metadata.get(SOURCE_TORCH_DTYPE_KEY)):
             values.pop(SOURCE_TORCH_DTYPE_KEY)
         self._set_cache_metadata(conn, values)
 
@@ -540,6 +564,10 @@ class _H5LayoutMixin:
                     )
                     conn.execute("DELETE FROM papers")
                     self._reset_hydration_metadata(conn)
+                # A missing matrix means the namespace holds no vectors at all,
+                # so whichever runtime writes the first ones creates it — not
+                # whoever happened to create this SQLite file.
+                self._clear_recorded_source_dtype(conn)
                 self._persist_runtime_contract_metadata(conn)
                 return
 
@@ -561,6 +589,9 @@ class _H5LayoutMixin:
                         # and no schema attrs. That is an empty cache to fill in,
                         # not a layout this runtime can prove incompatible.
                         self._discard_vectorless_row_mappings(conn)
+                        # Nothing in this file was ever written, so the run that
+                        # fills it is the creator on record.
+                        self._clear_recorded_source_dtype(conn)
                         self._persist_runtime_contract_metadata(conn)
                         return
                     if (
@@ -643,6 +674,9 @@ class _H5LayoutMixin:
             with self._connect_db() as conn:
                 conn.execute("DELETE FROM papers")
                 self._reset_hydration_metadata(conn)
+                # The rebuilt namespace keeps none of the discarded vectors, so
+                # this runtime — not the one that created them — is its creator.
+                self._clear_recorded_source_dtype(conn)
                 self._persist_runtime_contract_metadata(conn)
             return
 
@@ -813,6 +847,10 @@ class _H5LayoutMixin:
                 h5_file.attrs[key] = value
                 continue
             current_value = self._metadata_value_from_h5_attr(h5_file.attrs[key])
+            if key == SOURCE_TORCH_DTYPE_KEY and self._keeps_recorded_source_dtype(
+                current_value
+            ):
+                continue
             expected_value = self._metadata_value_from_h5_attr(value)
             if current_value != expected_value:
                 h5_file.attrs.modify(key, value)
