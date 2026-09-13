@@ -43,7 +43,7 @@ CiteMesh resolves an explicit compute device before loading any model - it never
 
 ## Precision
 
-EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support is reported, bfloat16 on `mps` when torch >= 2.13 and the autocast context is accepted, float32 otherwise. Profiles that do not opt into bf16 autocast run float32 everywhere.
+EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support is reported, bfloat16 on `mps` when torch >= 2.13, and on every device only once a live `torch.autocast` context is entered without raising; float32 otherwise. Profiles that do not opt into bf16 autocast run float32 everywhere.
 
 - Weights load with `dtype="auto"`, preserving the checkpoint dtype. CiteMesh then inspects live parameter and buffer dtypes before binding a cache namespace: float16 is rejected everywhere, bfloat16 unless the device and profile selected the verified bf16 path, anything else outright - so no log line or cache namespace claims float32 for bf16 execution.
 - Reduced precision is bfloat16 only, through `torch.autocast` around encode calls; a rejected capability, API, version, or context probe falls back to float32. CUDA asks for native support (`is_bf16_supported(including_emulation=False)`), so emulation does not qualify; MPS requires torch >= 2.13; CPU probes native x86/ARM instructions. Final normalization after dimension truncation then runs once in float32 outside autocast, with SentenceTransformers' own encode-time normalization disabled.
