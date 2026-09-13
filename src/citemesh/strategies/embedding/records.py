@@ -1,10 +1,10 @@
 """Normalization of raw arXiv dataset records into embedding metadata.
 
-Owns identifier canonicalization, the arXiv-id chronology ordering used to keep
-the newest revision of each paper, and the field coercion that turns a raw
-dataset row into the metadata dict the embedding cache stores. The ``_parse_*``
-helpers layer arXiv-specific behavior over the shared coercers in
-:mod:`citemesh.core.paper_fields`.
+Owns identifier canonicalization, the newest-first record ranking built on the
+arXiv-id chronology keys derived in :mod:`citemesh.core.paper_ids`, and the
+field coercion that turns a raw dataset row into the metadata dict the embedding
+cache stores. The ``_parse_*`` helpers layer arXiv-specific behavior over the
+shared coercers in :mod:`citemesh.core.paper_fields`.
 """
 
 from __future__ import annotations
@@ -19,6 +19,9 @@ from typing import (
 )
 
 from citemesh.core.paper_fields import coerce_authors, coerce_categories, coerce_venue
+from citemesh.core.paper_ids import (
+    arxiv_id_chronology_key as _arxiv_id_chronology_key,
+)
 from citemesh.core.paper_ids import (
     canonicalize_or_none,
     external_ids_from_canonical_paper_id,
@@ -86,36 +89,6 @@ def _parse_year(paper: dict[str, Any]) -> int | None:
     raw_id = paper.get("id") or paper.get("paper_id") or paper.get("paperId")
     chronology = _arxiv_id_chronology_key(raw_id)
     return chronology[0] if chronology is not None else None
-
-
-_NEW_STYLE_ARXIV_ID_RE = re.compile(r"^(\d{2})(\d{2})\.(\d{4,5})(?:v\d+)?$")
-_OLD_STYLE_ARXIV_ID_RE = re.compile(
-    r"^[a-z][a-z-]*(?:\.[a-z-]+)?/(\d{2})(\d{2})(\d{3})(?:v\d+)?$"
-)
-
-
-def _arxiv_id_chronology_key(raw_id: Any) -> tuple[int, int, int] | None:
-    """Return a sortable submission-chronology key for an arXiv identifier.
-
-    Both identifier styles encode the submission year/month: new-style
-    ``YYMM.NNNNN`` and old-style ``archive/YYMMNNN``. Snapshot row order and
-    ``update_date`` do not track submission time (revisions bump old papers),
-    so this key is the only reliable "newest papers" ordering.
-
-    :param Any raw_id: Raw identifier value from a dataset record.
-    :return Optional[Tuple[int, int, int]]: ``(year, month, sequence)`` or
-        ``None`` when the identifier is not a parseable arXiv ID.
-    """
-    text = str(raw_id or "").strip().lower()
-    if text.startswith("arxiv:"):
-        text = text[len("arxiv:") :]
-    match = _NEW_STYLE_ARXIV_ID_RE.match(text) or _OLD_STYLE_ARXIV_ID_RE.match(text)
-    if match is None:
-        return None
-    year_token, month, sequence = (int(group) for group in match.groups())
-    # arXiv started in 1991; two-digit years wrap at the century boundary.
-    year = 1900 + year_token if year_token >= 91 else 2000 + year_token
-    return (year, month, sequence)
 
 
 def _newest_records_by_arxiv_id(

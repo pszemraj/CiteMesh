@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 from citemesh.core import Author, Paper
+from citemesh.core import paper_ids as paper_ids_module
 from citemesh.core.text_batching import estimate_text_length_bucket
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_FALLBACKS,
@@ -3441,6 +3442,54 @@ def test_arxiv_id_chronology_key_parses_both_styles() -> None:
     assert key("fallback-paper") is None
     assert key("") is None
     assert key(None) is None
+
+
+def test_encoded_chronology_key_orders_exactly_like_the_tuple() -> None:
+    """The packed integer key must sort identically to ``(year, month, sequence)``.
+
+    :return None: Checks order isomorphism across both ID styles and the
+        1991/2000 two-digit-year century boundary.
+    """
+    identifiers = [
+        "9101.0001",
+        "hep-th/9101001",
+        "astro-ph/9912999",
+        "math.GT/0001001",
+        "0001.0001",
+        "0704.0001",
+        "0704.00010",
+        "1706.03762",
+        "2508.01234",
+        "2508.99999",
+        "2512.00001",
+    ]
+    keyed = [
+        (records_module._arxiv_id_chronology_key(raw_id), raw_id)
+        for raw_id in identifiers
+    ]
+    assert all(key is not None for key, _ in keyed)
+
+    encoded = {
+        raw_id: paper_ids_module.encode_arxiv_id_chronology_key(raw_id)
+        for raw_id in identifiers
+    }
+    assert all(value is not None for value in encoded.values())
+    # The 1991 branch must sort below the 2000s despite the larger token.
+    assert encoded["hep-th/9101001"] < encoded["0001.0001"]
+
+    # Both IDs at (2000, 1, 1) must tie, so the ID breaks ties on either side.
+    by_tuple = [raw_id for _, raw_id in sorted(keyed)]
+    by_encoded = sorted(identifiers, key=lambda raw_id: (encoded[raw_id], raw_id))
+    assert by_encoded == by_tuple
+
+    assert paper_ids_module.encode_arxiv_id_chronology_key("2508.01234") == (
+        2025 * 10_000_000 + 8 * 100_000 + 1234
+    )
+    assert paper_ids_module.encode_arxiv_id_chronology_key("arXiv:1706.03762v5") == (
+        2017 * 10_000_000 + 6 * 100_000 + 3762
+    )
+    assert paper_ids_module.encode_arxiv_id_chronology_key("fallback-paper") is None
+    assert paper_ids_module.encode_arxiv_id_chronology_key(None) is None
 
 
 @pytest.mark.parametrize(

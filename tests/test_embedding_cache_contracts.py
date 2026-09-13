@@ -2840,6 +2840,124 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
         assert cache.get_cached_paper_ids() == {"p1", "p2"}
 
 
+def test_embedding_cache_persists_chronology_key_only_for_arxiv_ids() -> None:
+    """Ingest must store a submission key per arXiv row and ``NULL`` elsewhere.
+
+    :return None: Checks the derived column, the ``NULL`` rows, and that
+        unparseable identifiers do not break ingestion.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="chronology-column")
+        _set_test_int8_calibration(cache)
+        cache.get_embeddings(
+            {
+                "arxiv:2508.01234": {"title": "New style", "abstract": "A"},
+                "arxiv:hep-th/9901001": {"title": "Old style", "abstract": "B"},
+                "arxiv_7": {"title": "Synthetic", "abstract": "C"},
+                "10.1234/example.doi": {"title": "DOI canonical", "abstract": "D"},
+                "S2:opaque-id": {"title": "Unparseable", "abstract": "E"},
+            },
+            SeededRandomEncodeModel(),
+            show_progress=False,
+        )
+
+        with cache._connect_db() as conn:
+            stored = dict(
+                conn.execute("SELECT paper_id, chronology_key FROM papers").fetchall()
+            )
+
+        assert len(stored) == 5
+        assert stored["arxiv:2508.01234"] == 2025 * 10_000_000 + 8 * 100_000 + 1234
+        assert stored["arxiv:hep-th/9901001"] == 1999 * 10_000_000 + 1 * 100_000 + 1
+        assert stored["arxiv_7"] is None
+        assert stored["10.1234/example.doi"] is None
+        assert stored["S2:opaque-id"] is None
+
+        # A cache hit whose non-vector metadata drifted takes the refresh write
+        # path, which must stay aligned with the same column. The empty lookup
+        # model proves nothing was re-encoded, so the refresh SQL really ran.
+        cache.get_embeddings(
+            {
+                "arxiv:2508.01234": {
+                    "title": "New style",
+                    "abstract": "A",
+                    "venue": "Refreshed venue",
+                }
+            },
+            LookupEncodeModel({}),
+            show_progress=False,
+        )
+        with cache._connect_db() as conn:
+            refreshed = conn.execute(
+                "SELECT venue, chronology_key FROM papers WHERE paper_id = ?",
+                ("arxiv:2508.01234",),
+            ).fetchone()
+        assert refreshed == ("Refreshed venue", 2025 * 10_000_000 + 8 * 100_000 + 1234)
+
+
+def test_embedding_cache_chronology_watermark_contract() -> None:
+    """The watermark must report the newest stored key, or ``None`` without one.
+
+    :return None: Checks the maximum aggregate and the keyless-namespace case.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="chronology-watermark")
+        assert cache.get_max_chronology_key() is None
+
+        _set_test_int8_calibration(cache)
+        cache.get_embeddings(
+            {
+                "arxiv:2401.00001": {"title": "Older", "abstract": "A"},
+                "arxiv:2508.01234": {"title": "Newest", "abstract": "B"},
+                "arxiv_3": {"title": "Keyless", "abstract": "C"},
+            },
+            SeededRandomEncodeModel(),
+            show_progress=False,
+        )
+        assert cache.get_max_chronology_key() == (
+            2025 * 10_000_000 + 8 * 100_000 + 1234
+        )
+
+        keyless = EmbeddingCache(cache_dir=tmpdir, model_name="chronology-keyless")
+        _set_test_int8_calibration(keyless)
+        keyless.get_embeddings(
+            {"arxiv_1": {"title": "Synthetic", "abstract": "A"}},
+            SeededRandomEncodeModel(),
+            show_progress=False,
+        )
+        assert keyless.get_cached_paper_ids() == {"arxiv_1"}
+        assert keyless.get_max_chronology_key() is None
+
+
+def test_embedding_cache_schema_bump_rebuilds_chronology_free_namespace(
+    tmp_path: Path,
+) -> None:
+    """A namespace stamped at the previous schema must be rebuilt, not reused.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks that schema 3 payload is cleared before re-encoding.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="chronology-schema-bump",
+        storage_precision="float32",
+    )
+    cache.get_embeddings(
+        {"arxiv:2508.01234": {"title": "Seed", "abstract": "Abstract"}},
+        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    with h5py.File(cache.h5_path, "a") as h5:
+        h5.attrs.modify(SCHEMA_VERSION_KEY, 3)
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="chronology-schema-bump",
+        storage_precision="float32",
+    )
+    assert reopened.get_cached_paper_ids() == set()
+
+
 def test_embedding_cache_hydration_rowcount_reconciliation_marker_contract() -> None:
     """Row-count reconciliation marker metadata should persist and reset cleanly."""
     with tempfile.TemporaryDirectory() as tmpdir:

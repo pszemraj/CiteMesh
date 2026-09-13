@@ -18,6 +18,8 @@ from typing import Any
 import h5py
 import numpy as np
 
+from citemesh.core.paper_ids import encode_arxiv_id_chronology_key
+
 from ..cache import path_exists
 from .constants import (
     _COMPRESSION_FILTERS,
@@ -93,10 +95,16 @@ class _H5LayoutMixin:
                 conn.execute("ALTER TABLE papers ADD COLUMN arxiv_id TEXT")
             if "doi" not in columns:
                 conn.execute("ALTER TABLE papers ADD COLUMN doi TEXT")
+            if "chronology_key" not in columns:
+                conn.execute("ALTER TABLE papers ADD COLUMN chronology_key INTEGER")
 
             conn.execute("DROP INDEX IF EXISTS idx_papers_text_hash")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_papers_row_idx ON papers(row_idx)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_papers_chronology_key "
+                "ON papers(chronology_key)"
             )
             conn.execute(_metadata_table_create_sql())
             conn.execute(REPLACEMENT_JOURNAL_TABLE_CREATE_SQL)
@@ -692,6 +700,9 @@ class _H5LayoutMixin:
             embedding_dim,
             row_idx,
             *remaining,
+            # Derived from the primary key rather than the arxiv_id column, which
+            # is empty for rows whose paper_id is still a parseable arXiv ID.
+            encode_arxiv_id_chronology_key(paper_id),
         )
 
     @staticmethod
@@ -767,7 +778,13 @@ class _H5LayoutMixin:
         :param Dict[str, object] metadata: Incoming metadata payload.
         :return Tuple[Any, ...]: Tuple for metadata UPDATE query.
         """
-        return (*_H5LayoutMixin._normalized_metadata_fields(metadata), paper_id)
+        # The chronology key rides along so both write paths agree on it; it is
+        # keyed off the immutable primary key, so rewriting it is idempotent.
+        return (
+            *_H5LayoutMixin._normalized_metadata_fields(metadata),
+            encode_arxiv_id_chronology_key(paper_id),
+            paper_id,
+        )
 
     def _set_h5_attrs(self, h5_file: h5py.File) -> None:
         """Write schema/layout metadata attrs to an open HDF5 file.

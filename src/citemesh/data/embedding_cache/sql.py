@@ -4,6 +4,11 @@ Owns the schema statements executed when a namespace is created, the templated
 paper-row lookup query, the JSON list serializers used by the ``papers``
 columns, the shared row decoder, and the batching helper that keeps ``IN``
 clauses under SQLite's variable limit.
+
+``chronology_key`` is deliberately absent from the row-read path: it is an
+aggregate-only column (the newest-submission watermark), and rows whose ID has
+no derivable submission date — synthetic, DOI-canonical, or candidate-mode —
+store ``NULL`` there.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ PAPERS_TABLE_CREATE_SQL = """
         venue TEXT,
         arxiv_id TEXT,
         doi TEXT,
+        chronology_key INTEGER,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """
@@ -43,14 +49,14 @@ REPLACEMENT_JOURNAL_TABLE_CREATE_SQL = """
 PAPER_ROW_UPSERT_SQL = """
     INSERT OR REPLACE INTO papers
     (paper_id, title, abstract, year, text_hash, embedding_dim, row_idx,
-     authors_json, categories_json, venue, arxiv_id, doi)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     authors_json, categories_json, venue, arxiv_id, doi, chronology_key)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
 
 PAPER_METADATA_REFRESH_SQL = """
     UPDATE papers
     SET title = ?, abstract = ?, year = ?, authors_json = ?, categories_json = ?,
-        venue = ?, arxiv_id = ?, doi = ?
+        venue = ?, arxiv_id = ?, doi = ?, chronology_key = ?
     WHERE paper_id = ?
     """
 

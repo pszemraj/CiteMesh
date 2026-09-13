@@ -58,6 +58,60 @@ def recognize_arxiv_identifier(
     return f"arxiv:{strip_arxiv_version(candidate)}"
 
 
+_NEW_STYLE_ARXIV_ID_RE = re.compile(r"^(\d{2})(\d{2})\.(\d{4,5})(?:v\d+)?$")
+_OLD_STYLE_ARXIV_ID_RE = re.compile(
+    r"^[a-z][a-z-]*(?:\.[a-z-]+)?/(\d{2})(\d{2})(\d{3})(?:v\d+)?$"
+)
+
+# Field scales for the packed integer form of a chronology key. A month never
+# reaches 100 and a sequence never reaches 100000, so each field keeps its own
+# decade band and the packed value sorts exactly like the tuple it encodes.
+_CHRONOLOGY_YEAR_SCALE = 10_000_000
+_CHRONOLOGY_MONTH_SCALE = 100_000
+
+
+def arxiv_id_chronology_key(raw_id: Any) -> tuple[int, int, int] | None:
+    """Return a sortable submission-chronology key for an arXiv identifier.
+
+    Both identifier styles encode the submission year/month: new-style
+    ``YYMM.NNNNN`` and old-style ``archive/YYMMNNN``. Snapshot row order and
+    ``update_date`` do not track submission time (revisions bump old papers),
+    so this key is the only reliable "newest papers" ordering.
+
+    :param Any raw_id: Raw identifier value from a dataset record.
+    :return Optional[Tuple[int, int, int]]: ``(year, month, sequence)`` or
+        ``None`` when the identifier is not a parseable arXiv ID.
+    """
+    text = str(raw_id or "").strip().lower()
+    if text.startswith("arxiv:"):
+        text = text[len("arxiv:") :]
+    match = _NEW_STYLE_ARXIV_ID_RE.match(text) or _OLD_STYLE_ARXIV_ID_RE.match(text)
+    if match is None:
+        return None
+    year_token, month, sequence = (int(group) for group in match.groups())
+    # arXiv started in 1991; two-digit years wrap at the century boundary.
+    year = 1900 + year_token if year_token >= 91 else 2000 + year_token
+    return (year, month, sequence)
+
+
+def encode_arxiv_id_chronology_key(raw_id: Any) -> int | None:
+    """Return the chronology key of an arXiv identifier as one sortable integer.
+
+    The packed form is order-isomorphic to :func:`arxiv_id_chronology_key`, so a
+    stored column of these values can be compared and aggregated in SQL. Values
+    exceed 2e10 and therefore require 64-bit integer storage.
+
+    :param Any raw_id: Raw identifier value, with or without an ``arxiv:`` prefix.
+    :return Optional[int]: Packed ``(year, month, sequence)`` key, or ``None``
+        when the identifier is not a parseable arXiv ID.
+    """
+    chronology = arxiv_id_chronology_key(raw_id)
+    if chronology is None:
+        return None
+    year, month, sequence = chronology
+    return year * _CHRONOLOGY_YEAR_SCALE + month * _CHRONOLOGY_MONTH_SCALE + sequence
+
+
 def paper_identifier_aliases(
     *, paper_id: Any = "", arxiv_id: Any = "", doi: Any = ""
 ) -> list[str]:

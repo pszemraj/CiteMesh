@@ -714,6 +714,25 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                 [(paper["year"], paper["doi"], paper["paper_id"]) for paper in papers],
             )
 
+    def get_max_chronology_key(self) -> int | None:
+        """Return the newest arXiv submission key persisted in this namespace.
+
+        This is the recency watermark of the cached corpus: rows whose paper ID
+        carries no submission date store ``NULL`` and are ignored, so a namespace
+        built entirely from synthetic or DOI-canonical IDs reports ``None``.
+
+        :return Optional[int]: Maximum stored ``chronology_key``, or ``None``
+            when the namespace has no row carrying one.
+        """
+        if not path_exists(self.db_path):
+            return None
+
+        with self._locked_connection() as conn:
+            row = conn.execute("SELECT MAX(chronology_key) FROM papers").fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
     def get_model_fingerprint(self) -> str | None:
         """Return model fingerprint captured for this cache namespace.
 
