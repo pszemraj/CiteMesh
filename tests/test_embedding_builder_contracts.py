@@ -38,6 +38,7 @@ from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
+    EmbeddingCacheFingerprintMismatchError,
     EmbeddingGraphBuilder,
     EmbeddingTask,
     _extract_dataset_paper_metadata,
@@ -51,6 +52,7 @@ from citemesh.strategies.embedding import hydration as hydration_module
 from citemesh.strategies.embedding import model_runtime as model_runtime_module
 from citemesh.strategies.embedding import records as records_module
 from citemesh.strategies.embedding import runtime as runtime_module
+from citemesh.strategies.embedding import text as embedding_text_module
 from tests._helpers import (
     ConstantEncodeModel,
     disable_embedding_dep_checks,
@@ -2634,7 +2636,7 @@ def test_embedding_model_revision_forwards_to_model_loader(
 def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hydration should clear namespace payload when model fingerprint mismatches."""
+    """A candidate-scale namespace should still clear itself on a fingerprint change."""
     builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
     _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-new")
 
@@ -2647,11 +2649,155 @@ def test_embedding_cache_rebuilds_when_model_fingerprint_changes(
         return_value="cached-source"
     )
     builder.embedding_cache.is_hydrated = MagicMock(return_value=True)
+    # No hydration source recorded on the payload: a candidate pool that
+    # re-encodes in seconds, so the silent rebuild stays the friendly default.
+    builder.embedding_cache.payload_stats = MagicMock(
+        return_value=CacheNamespacePayloadStats(
+            file_count=2,
+            size_bytes=4096,
+            sqlite_rows=12,
+            embedding_rows=12,
+            hydration_complete=False,
+            hydration_split=None,
+            hydration_corpus_size=None,
+            hydration_dataset_source=None,
+        )
+    )
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
     builder.embedding_cache.clear.assert_called_once()
     builder.embedding_cache.set_model_fingerprint.assert_called_once_with("fp-new")
+
+
+@pytest.mark.parametrize("hydration_complete", [True, False])
+def test_embedding_cache_refuses_to_delete_corpus_payload_on_fingerprint_change(
+    monkeypatch: pytest.MonkeyPatch, hydration_complete: bool
+) -> None:
+    """A hydrated corpus must abort the build instead of being silently deleted.
+
+    :param pytest.MonkeyPatch monkeypatch: Pins the resolved model fingerprint.
+    :param bool hydration_complete: Whether the recorded hydration finished.
+    :return None: Asserts the refusal, its message, and that nothing was cleared.
+    """
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-new")
+
+    builder.embedding_cache.get_model_fingerprint = MagicMock(return_value="fp-old")
+    builder.embedding_cache.has_cached_payload = MagicMock(return_value=True)
+    builder.embedding_cache.clear = MagicMock()
+    builder.embedding_cache.set_model_fingerprint = MagicMock()
+    builder.embedding_cache.payload_stats = MagicMock(
+        return_value=CacheNamespacePayloadStats(
+            file_count=2,
+            size_bytes=3 * 1024**3,
+            sqlite_rows=1_250_000,
+            embedding_rows=1_250_000,
+            hydration_complete=hydration_complete,
+            hydration_split="train",
+            hydration_corpus_size="all",
+            hydration_dataset_source="fake/arxiv-corpus",
+        )
+    )
+
+    with pytest.raises(EmbeddingCacheFingerprintMismatchError) as excinfo:
+        builder._ensure_cache_model_fingerprint()
+
+    message = str(excinfo.value)
+    assert "cached=fp-old" in message
+    assert "active=fp-new" in message
+    assert "1,250,000" in message
+    assert "3.0 GiB" in message
+    assert "refused to delete it automatically" in message
+    assert "--force-rebuild-cache" in message
+    assert "--overwrite-cache" in message
+    assert "citemesh cache clear" in message
+    builder.embedding_cache.clear.assert_not_called()
+    builder.embedding_cache.set_model_fingerprint.assert_not_called()
+
+
+def test_graph_similarity_cache_still_auto_clears_on_fingerprint_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The graph-similarity namespace is candidate-scale and must rebuild silently.
+
+    :param pytest.MonkeyPatch monkeypatch: Pins the resolved model fingerprint.
+    :return None: Asserts the graph namespace clears without operator approval.
+    """
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, semantic_source="arxiv-corpus", client=MagicMock()
+    )
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-new")
+    graph_cache = builder.graph_embedding_cache
+    graph_cache.upsert_embeddings(
+        {"p1": {"title": "Graph paper", "abstract": "Graph abstract"}},
+        ConstantEncodeModel(),
+        batch_size=1,
+        show_progress=False,
+    )
+    graph_cache.set_model_fingerprint("fp-old")
+
+    builder._ensure_cache_model_fingerprint(
+        representation=embedding_text_module._GRAPH_SIMILARITY_REPRESENTATION
+    )
+
+    assert not graph_cache.has_cached_payload()
+    assert graph_cache.get_model_fingerprint() == "fp-new"
+
+
+def test_force_rebuild_cache_rebuilds_corpus_payload_across_fingerprint_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--force-rebuild-cache`` must stay the approval path for a hydrated corpus.
+
+    :param pytest.MonkeyPatch monkeypatch: Pins the resolved model fingerprint.
+    :return None: Proves the same namespace refuses without the flag and rebuilds with it.
+    """
+    builder = EmbeddingGraphBuilder(
+        max_papers=1,
+        semantic_source="arxiv-corpus",
+        storage_precision="float32",
+        client=MagicMock(),
+    )
+    _pin_model_fingerprint(monkeypatch, builder, fingerprint="fp-new")
+    cache = builder.embedding_cache
+    cache.upsert_embeddings(
+        {"p1": {"title": "Corpus paper", "abstract": "Corpus abstract"}},
+        ConstantEncodeModel(),
+        batch_size=1,
+        show_progress=False,
+    )
+    cache.set_model_fingerprint("fp-old")
+    cache.mark_hydrated(
+        dataset_source="fake/arxiv-corpus",
+        dataset_split="train",
+        corpus_size=None,
+        complete=True,
+    )
+
+    with pytest.raises(EmbeddingCacheFingerprintMismatchError):
+        builder._ensure_cache_model_fingerprint()
+    assert cache.has_cached_payload()
+
+    authorized = EmbeddingGraphBuilder(
+        max_papers=1,
+        semantic_source="arxiv-corpus",
+        storage_precision="float32",
+        force_rebuild_cache=True,
+        force_rebuild_reason="switching embedding models",
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(authorized, "_resolve_model_fingerprint", lambda: "fp-new")
+
+    authorized._ensure_cache_model_fingerprint()
+
+    rebuilt = authorized.embedding_cache
+    assert rebuilt.db_path == cache.db_path
+    assert not rebuilt.has_cached_payload()
+    assert rebuilt.get_model_fingerprint() == "fp-new"
+    assert rebuilt.payload_stats().hydration_dataset_source is None
 
 
 def test_embedding_cache_offline_fingerprint_lookup_contracts(

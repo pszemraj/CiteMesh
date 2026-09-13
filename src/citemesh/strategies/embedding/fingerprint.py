@@ -16,6 +16,9 @@ from collections.abc import Callable
 from contextlib import nullcontext
 from hashlib import sha256
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from citemesh.data import format_bytes
 
 from . import deps
 from .runtime import (
@@ -28,7 +31,18 @@ from .text import (
     _RETRIEVAL_DOCUMENT_REPRESENTATION,
 )
 
+if TYPE_CHECKING:
+    from citemesh.data import EmbeddingCache
+
 logger = logging.getLogger(__name__)
+
+
+class EmbeddingCacheFingerprintMismatchError(RuntimeError):
+    """A corpus-scale namespace outlived the model its vectors were built with.
+
+    Raised instead of deleting the payload, so rehydrating hours of GPU time is
+    an explicit operator decision rather than a background heuristic.
+    """
 
 
 class _FingerprintMixin:
@@ -547,6 +561,8 @@ class _FingerprintMixin:
 
         :param str representation: Retrieval-document or graph-similarity role.
         :return None: Validates and records model identity on the selected cache.
+        :raises EmbeddingCacheFingerprintMismatchError: If a corpus-scale payload
+            was built with a different model and no rebuild was authorized.
         """
         try:
             model_fingerprint = self._resolve_model_fingerprint()
@@ -577,6 +593,11 @@ class _FingerprintMixin:
             has_cached_payload = cache.has_cached_payload()
             cached_fingerprint = cache.get_model_fingerprint()
             if has_cached_payload and cached_fingerprint != model_fingerprint:
+                self._refuse_expensive_fingerprint_rebuild(
+                    cache=cache,
+                    cached_fingerprint=cached_fingerprint,
+                    model_fingerprint=model_fingerprint,
+                )
                 logger.warning(
                     "REBUILDING EMBEDDING CACHE — please hang tight. "
                     "Embeddings will be regenerated automatically; this may take a while. "
@@ -594,3 +615,42 @@ class _FingerprintMixin:
                 )
             if not has_cached_payload or cached_fingerprint != model_fingerprint:
                 cache.set_model_fingerprint(model_fingerprint)
+
+    @staticmethod
+    def _refuse_expensive_fingerprint_rebuild(
+        *,
+        cache: EmbeddingCache,
+        cached_fingerprint: str | None,
+        model_fingerprint: str,
+    ) -> None:
+        """Abort before a fingerprint mismatch deletes a hydrated corpus.
+
+        A candidate-pool namespace is bounded by ``--candidate-pool-size`` and
+        re-encodes in seconds, so it keeps the silent-rebuild path. A corpus
+        namespace costs GPU-hours, so its deletion must be an operator decision.
+        Any recorded hydration source marks the namespace as corpus-scale --
+        including an interrupted hydration, which is just as costly to redo --
+        and only the corpus paths ever write that metadata.
+
+        :param EmbeddingCache cache: Namespace whose payload the mismatch targets.
+        :param Optional[str] cached_fingerprint: Fingerprint recorded on the payload.
+        :param str model_fingerprint: Fingerprint of the runtime-active model.
+        :return None: Returns when the namespace is cheap enough to auto-rebuild.
+        :raises EmbeddingCacheFingerprintMismatchError: If the namespace carries
+            corpus hydration metadata.
+        """
+        stats = cache.payload_stats()
+        if not stats.hydration_dataset_source:
+            return
+
+        cached_rows = max(stats.sqlite_rows, stats.embedding_rows)
+        raise EmbeddingCacheFingerprintMismatchError(
+            "Cached embeddings were built with a different embedding model "
+            f"(cached={cached_fingerprint or 'missing'}, active={model_fingerprint}). "
+            f"This cache holds {cached_rows:,} corpus paper(s) "
+            f"({format_bytes(stats.size_bytes)}) hydrated from "
+            f"{stats.hydration_dataset_source}, so CiteMesh refused to delete it "
+            "automatically. Re-run with --force-rebuild-cache to discard it and "
+            "rebuild (add --overwrite-cache to skip the confirmation prompt in "
+            "scripts), or run 'citemesh cache clear' to remove the cache."
+        )
