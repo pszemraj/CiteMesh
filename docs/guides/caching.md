@@ -13,7 +13,7 @@ citemesh cache root
 ├── .locks/
 │   └── cache-operations.db    # SQLite operation/clear coordination
 ├── embeddings/
-│   ├── metadata_<hash>.db     # SQLite: ids, text hashes, row_idx, metadata, hydration
+│   ├── metadata_<hash>.db     # SQLite: ids, text hashes, row_idx, metadata, chronology, hydration
 │   ├── embeddings_<hash>.h5   # HDF5: vectors, int8 calibration ranges, binary index
 │   ├── cache_<hash>.lock      # namespace mutation lock
 │   └── hydration_<hash>.lock  # hydration and consuming-search lock
@@ -29,7 +29,7 @@ citemesh cache root
 
 Every successful Semantic Scholar lookup — paper fetches, citations, references, recommendations, search — persists under `papers/`, keyed by the requested ID and every known S2, arXiv, and DOI alias. Later lookups check disk first, seed resolution included, and batch requests send only the IDs still missing. Failed and malformed responses are not cached.
 
-There is no TTL: entries are reused until you clear them or pass `--refresh-paper-cache`, which bypasses persisted reads for that run and replaces entries — citation counts included — from fresh responses, keeping the old entry if the fetch fails. Refreshing does not re-encode unchanged title and abstract text, so embedding caches are untouched. Entries carry schema version 2; anything older reads as a miss.
+There is no TTL: entries are reused until you clear them or pass `--refresh-paper-cache`, which bypasses persisted reads for that run and replaces entries — citation counts included — from fresh responses, keeping the old entry if the fetch fails. Refreshing does not re-encode unchanged title and abstract text, so embedding caches are untouched. Entries carry paper-cache schema version 2 — the embedding cache further down keeps its own, unrelated number — and anything older reads as a miss.
 
 Reference IDs live in `references/` under the same no-TTL policy with their own `--refresh-reference-cache`, since cached metadata does not imply its references were fetched. Empty reference lists are cached explicitly so those papers stop costing requests; a first-page `paper not found` returns empty *without* caching, so a later lookup can recover. Corrupt or unusable payloads are rebuilt from the API.
 
@@ -40,7 +40,7 @@ Caching does not make a build offline: citation, reference, recommendation, and 
 Vectors are stored once per namespace in a resizable HDF5 matrix, with SQLite tracking metadata and row mappings; filenames carry the first 12 characters of `sha256(<namespace>)`. The namespace binds everything that could change what a vector means, from the resolved model artifact down to the text formatter — [How CiteMesh builds a graph](how-it-works.md) walks through that fingerprint. What it buys you here:
 
 - Two namespaces per model contract: a retrieval-document cache (candidate or corpus papers, what local `citemesh search` reads) and a graph-similarity cache (selected graph papers, always float32, the only source for paper-to-paper edges). Matching dimensions do not make their vectors interchangeable, and candidate mode further tags its retrieval namespace `mode=candidates` so S2 candidates never mix with a corpus hydration.
-- No device or compute-dtype token: CPU, CUDA, and MPS share one namespace whenever the other contracts match, so a corpus built on a bf16 GPU is read directly by an fp32 host instead of being re-encoded. Compute dtype is recorded as provenance rather than bound into identity — like the attention backend, TF32, and `--torch-compile`, it shifts numerics slightly without changing what a vector means.
+- No device or compute-dtype token in the namespace: CPU, CUDA, and MPS resolve the same one whenever the other contracts match, since an auto-resolved compute dtype is provenance rather than identity — like the attention backend, TF32, and `--torch-compile`, it shifts numerics slightly without changing what a vector means. It does still belong to the runtime consistency contract, so a host resolving a different dtype rebuilds that shared namespace on open instead of reading it.
 - Changing model, revision, profile, dimension, or precision selects a *different* namespace rather than invalidating the old one, so switching back reopens the original vectors. EmbeddingGemma now defaults to 512 dimensions; 256-dimensional caches survive, and `--truncate-dim 256` still selects them.
 - The binary prefilter is not part of the namespace: toggling it reuses the same vectors, ranges, and hydration state, rebuilding or dropping only the derived index.
 - A vector is re-encoded only when the paper is new to the namespace or its input text changed. Metadata-only updates refresh the SQLite row, not the vector.
@@ -49,19 +49,21 @@ Crash safety, the replacement journal, flush ordering, and locking are in [Embed
 
 ## Corpus hydration and resume
 
-arXiv-corpus mode hydrates the full selected `--dataset-split` by default — "all of `train`", not every split the dataset publishes. `--corpus-size N` opts into the N newest submissions by arXiv ID; the cap bounds what gets embedded, not how many rows are scanned to establish that order. Under `--streaming` that selection must drain the whole stream first, and CiteMesh warns about it; `--no-streaming` or a slice such as `train[:2%]` avoids the pass.
+arXiv-corpus mode hydrates the full selected `--dataset-split` by default — "all of `train`", not every split the dataset publishes. `--corpus-size N` opts into the N newest submissions by arXiv ID; on a cold build the cap bounds what gets embedded, not how many rows are scanned to establish that order. Under `--streaming` that ranking must drain the whole stream before hydration starts, and CiteMesh warns about it; `--no-streaming` skips the drain but still reads the `id` of every row, and a slice such as `train[:2%]` shrinks the population ranked rather than skipping the ranking.
 
-Hydration is resumable. An interrupted run resumes from its cached rows whenever the recorded source, split, and cap still match, encoding only the missing paper IDs. A full-split cache also gets an incremental growth check against upstream row counts, appending only uncached IDs; same-count replacements and revised abstracts go undetected, so rebuild for those ([issue #13](https://github.com/pszemraj/CiteMesh/issues/13)).
+Hydration is resumable, but narrowly: an interrupted run re-encodes only the paper IDs it is missing, and only when the recorded source, split, and cap all still match *and* the namespace is self-consistent — equal SQLite and embedding row counts, at least one row, and persisted calibration ranges under `--storage-precision int8`. Anything else falls through to a full rebuild.
 
-A completed capped cache keeps its original selection, so `--corpus-size` does not roll forward as the dataset grows; rebuild to reselect. A resume can exceed the cap once the upstream newest selection has moved, and CiteMesh reports the actual count.
+A hydrated cache on a non-sliced split also tracks upstream growth, and an unchanged upstream row count is answered from memoized cache metadata without re-scanning the corpus. A full-split cache compares row counts and appends the uncached IDs; a capped one compares the newest submission it holds against the newest upstream, re-running the newest-N selection when upstream is ahead. Rows are only added, never evicted, so an ordinary rerun can leave a capped cache holding more than `--corpus-size`; CiteMesh warns and reports the actual count. Same-count replacements and revised abstracts still go undetected, so rebuild for those ([issue #13](https://github.com/pszemraj/CiteMesh/issues/13)).
 
-Changing the cap between runs never costs you the vectors you already have. The recorded cap describes what is cached, so a larger `--corpus-size` — or `--all-corpus` — extends the same namespace in place, encoding only the newly selected papers, and a smaller one reuses the existing rows as-is: CiteMesh warns that results come from the larger cached corpus and leaves the recorded cap where the vectors actually are. Reach for `citemesh cache clear` or `--force-rebuild-cache` when you want a namespace holding exactly the requested size.
+Changing the cap never costs you vectors you already have: a larger `--corpus-size` — or `--all-corpus` — extends the same namespace in place, encoding only the newly selected papers; a smaller one reuses the existing rows as-is, warning that results come from the larger cached corpus and leaving the recorded cap where the vectors actually are. An interrupted extension keeps the cache complete at its recorded size rather than discarding it. That recorded cap is a floor, not an inventory — a recency refresh can carry the row count past it — so use `citemesh cache clear` or `--force-rebuild-cache` when you want exactly the requested size.
 
-Changing `--dataset-source` replaces the corpus in the same namespace through that rebuild path; a failed load stops the build before anything is replaced, and local search refuses a source mismatch outright. A failed storage inspection surfaces the paths and the original error rather than reading as an empty cache.
+Of the corpus flags, only a changed `--dataset-source` or `--dataset-split` still clears, and that automatic rebuild empties only the retrieval namespace; `--force-rebuild-cache` is the path that also discards graph-similarity vectors. A failed load stops the build before anything is replaced, and local search refuses a source mismatch outright. A failed storage inspection surfaces the paths and the original error rather than reading as an empty cache.
+
+A model-fingerprint mismatch is not one of those conditions. When a hydrated corpus was built under a different fingerprint than the active model's, CiteMesh stops and names both fingerprints, the rows and on-disk size at stake, and the remedy — `--force-rebuild-cache`, plus `--overwrite-cache` for scripts, or `citemesh cache clear`. Candidate-pool and graph-similarity namespaces re-encode in seconds and still clear silently; corpus hydration metadata is what earns a namespace the protection.
 
 An int8 write whose coordinates fall outside the persisted calibration ranges warns once per run; persistent warnings are the one signal worth acting on. Ranges cannot be replaced in place, since they also decode existing rows, so recalibrating means `--force-rebuild-cache` — and a larger `--calibration-sample-size` starts a fresh namespace.
 
-One caveat worth internalizing: hydration compatibility is keyed to dataset source, split, and cap rather than an immutable upstream revision. If an alias mutates under the same name, treat cache reuse as a performance optimization, not a reproducibility guarantee.
+One caveat worth internalizing: hydration compatibility is keyed to dataset source, split, and cap rather than an immutable upstream revision, and a capped corpus deliberately chases upstream growth even when the alias never changes. Treat cache reuse as a performance optimization, not a reproducibility guarantee; a sliced `--dataset-split` opts out of both growth checks when you need a fixed population.
 
 ## Inspecting and clearing
 
@@ -71,10 +73,10 @@ citemesh cache scan
 citemesh cache clear --yes --reason "manual local reset"
 ```
 
-`cache clear` deletes every entry under the cache root except `config.toml`, its lock, and `.locks/`; omit `--yes` for an interactive prompt. It fails without deleting anything while a cache operation is live, and it cannot interrupt a pending config write. To drop a single namespace instead, delete the matching `.db` and `.h5` in `embeddings/`.
+`cache clear` deletes every entry under the cache root except `config.toml`, its lock, and `.locks/`. It fails without deleting anything while a cache operation is live, and it cannot interrupt a pending config write. To drop a single namespace instead, delete the matching `.db` and `.h5` in `embeddings/`.
 
 > [!CAUTION]
-> `cache clear` and `--force-rebuild-cache` are irreversible. A rebuild clears both namespaces for the resolved model contract and re-encodes from scratch, which on a hydrated corpus means hours of GPU time. Both prompt interactively; `--yes` and `--overwrite-cache` skip the prompt for scripts, and `--cache-overwrite-reason "<text>"` records a rationale that otherwise logs as `reason=unspecified`.
+> `cache clear` and `--force-rebuild-cache` are irreversible. A forced rebuild clears both namespaces for the resolved model contract and re-encodes from scratch, which on a hydrated corpus means hours of GPU time. Both prompt interactively on a TTY and refuse outright without one, so `--yes` and `--overwrite-cache` are how a script approves them; `--cache-overwrite-reason "<text>"` records a rationale that otherwise logs as `reason=unspecified`.
 
 A rewritten HDF5 file can grow in bytes while its row count stays fixed: compressed rows leave holes and CiteMesh does not compact automatically. That is not lost vectors or duplicated rows.
 

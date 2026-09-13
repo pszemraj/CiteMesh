@@ -75,7 +75,7 @@ The viewer rebuilds its Plotly figure client-side from the embedded payload, so 
 
 **An export format** adds a writer under `visualization/export/` and a `to_<format>(path, ...)` method on `GraphExporter` reading `graph_payload()`, then registers the extension in the CLI's export routing, `EXPORT_CHOICES`, and the optional-format cleanup in `dashboard/package.py` so switching formats removes stale siblings. Write through `atomic_output_path`.
 
-**A corpus source** joins the arXiv adapter in `strategies/embedding/hydration.py`, yielding the same record shape (`id`, `title`, `abstract`, optionally `authors`, `categories`, `year`, `doi`, `venue`) and preserving hydration metadata, newest-first selection, and resumability. Custom column mappings are deliberately unsupported.
+**A corpus source** joins the arXiv adapter in `strategies/embedding/hydration.py`, yielding the same record shape (`id`, `title`, `abstract`, optionally `authors`, `categories`, `year`, `doi`, `venue`) and preserving hydration metadata, newest-first selection, and resumability. Its `id` values must parse as arXiv identifiers: they become the persisted `chronology_key`, and without one a capped corpus has no recency watermark, so its upstream-growth refresh degrades silently to a no-op. Custom column mappings are deliberately unsupported.
 
 **A model profile** appends an `EmbeddingModelProfile` to `EMBEDDING_MODEL_PROFILES` in `data/model_profiles.py` and its key to `_PROFILE_BY_KEY` and `MODEL_PROFILE_CHOICES`. Its `schema_token` is part of the cache namespace, so bump it whenever a change alters what a vector means. A profile with no detection evidence still works through an explicit `--model-profile`.
 

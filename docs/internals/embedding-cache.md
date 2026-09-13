@@ -19,7 +19,7 @@ Supporting modules: `constants.py` (metadata keys, schema version, chunk sizes, 
 
 ## Physical layout
 
-All namespaces share one `embeddings/` directory, separated by a filename suffix rather than a subdirectory: `sha256(model_name)[:12]` gives `metadata_<hash>.db`, `embeddings_<hash>.h5`, `cache_<hash>.lock`, and `hydration_<hash>.lock`. SQLite holds three tables — `papers` (keyed by `paper_id`, carrying `text_hash`, `row_idx`, and the metadata fields), `cache_metadata` (key/value), and `replacement_journal` (the undo log below). HDF5 holds `embeddings` (resizable `N x dim`, chunked at 2048 rows), the optional `binary_index` (`N x ceil(dim/8)` `uint8`, tagged `int8-midpoint-sign-v1`), and for int8 namespaces the fixed `calibration_ranges` (`2 x dim` float32). The runtime contract lives in HDF5 root attrs and is re-asserted on every open.
+All namespaces share one `embeddings/` directory, separated by a filename suffix rather than a subdirectory: `sha256(model_name)[:12]` gives `metadata_<hash>.db`, `embeddings_<hash>.h5`, `cache_<hash>.lock`, and `hydration_<hash>.lock`. SQLite holds three tables — `papers` (keyed by `paper_id`, carrying `text_hash`, `row_idx`, the metadata fields, and a nullable `chronology_key`: the packed arXiv submission date, kept off the row-read path because only the aggregate recency watermark reads it), `cache_metadata` (key/value), and `replacement_journal` (the undo log below). `papers` carries two indexes, `idx_papers_row_idx` and `idx_papers_chronology_key`. HDF5 holds `embeddings` (resizable `N x dim`, chunked at 2048 rows), the optional `binary_index` (`N x ceil(dim/8)` `uint8`, tagged `int8-midpoint-sign-v1`), and for int8 namespaces the fixed `calibration_ranges` (`2 x dim` float32). The runtime contract lives in HDF5 root attrs and is re-asserted on every open.
 
 `sqlite3` runs in its default rollback-journal mode, with no WAL or `synchronous` pragma; durability comes from the flush ordering below, not from SQLite settings.
 
@@ -41,7 +41,7 @@ During cache-native search, a scored row with no metadata mapping fails closed w
 
 Runtime consistency keys are seeded once, compared on every reopen, and restamped only after that check passes, the namespace is rebuilt, or it holds no vectors. Ambiguous mappings and file-open, lock, or IO failures propagate without clearing the namespace; proven incompatible layouts or invalid calibration metadata do reset it, with the mismatch named in the warning, and a missing HDF5 file clears its stale SQLite mappings.
 
-Schema **3** requires one-time re-encoding of older namespaces when they are next opened: earlier in-place updates could leave old text paired with a replacement vector after a failed commit, and row counts cannot identify those entries, so the schema-mismatch reset rebuilds each old namespace instead of reusing possibly inconsistent vectors.
+Schema **4** requires one-time re-encoding of older namespaces when they are next opened: rows written before it carry no `chronology_key`, leaving a capped corpus with no trustworthy recency watermark and a growth check that would silently decline. Row counts cannot identify those rows, so the schema-mismatch reset rebuilds each old namespace instead of reusing vectors it cannot vouch for.
 
 ## Locking
 
