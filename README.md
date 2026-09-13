@@ -66,14 +66,11 @@ Omit `--output` and each build saves under `out/<title-slug>-<hash>/`, while rep
 
 Every strategy runs the same eight-stage pipeline; they differ only in where candidates come from and how pairs are scored.
 
-1. **Seed resolution** — your DOI / arXiv ID / URL / S2 ID is normalized and resolved against Semantic Scholar; under `--strategy embedding`, an identifier S2 cannot resolve is reinterpreted as a free-text query.
-2. **Candidate acquisition** — references, citations, and recommendations are fetched within a `--candidate-pool-size` budget (default 400, split roughly 1:2:1) and de-duplicated across S2 / arXiv / DOI identities.
-3. **Embedding** — EmbeddingGemma encodes the seed as a retrieval *query* and candidates as retrieval *documents*, at 512 dimensions in float32.
-4. **Caching** — vectors persist in a SQLite + HDF5 cache keyed by a namespace fingerprint, so later runs skip encoding.
-5. **Ranking and selection** — candidates are ranked against the seed and cut down to `--max-papers` (default 40; hybrid 45).
-6. **Edge scoring** — selected papers are re-encoded with a *symmetric* prompt; pairs need cosine >= 0.74 (`--min-semantic-similarity`) before temporal, category, and shared-author signals adjust the weight, and per-node caps prune the rest.
-7. **Layout** — one deterministic layout (`--seed`) is computed in Python and shared by every layout-based export.
-8. **Export** — a single graph payload is rendered to PNG, Plotly, dashboard, JSON, CSV, BibTeX, and GraphML.
+![The eight stages of a CiteMesh build: seed resolution, candidate acquisition, embedding, caching, ranking, edge scoring, layout, and export](assets/how-it-works.png)
+
+_Defaults for a hybrid build. Recommendation and citation builds skip stages 3 and 4: they never load the model and score pairs from TF-IDF instead._
+
+Four flags move most of the outcome. `--candidate-pool-size` sets how many papers are fetched and encoded, `--max-papers` caps how many survive ranking, `--min-semantic-similarity` is the cosine gate a pair must clear before temporal, category, and shared-author signals adjust its weight, and `--seed` fixes the layout so every export of one graph lines up.
 
 The full walkthrough, with the numbers that matter at each stage: [How CiteMesh builds a graph](docs/guides/how-it-works.md). For syntax and operational detail: [CLI guide](docs/guides/cli.md), [Strategy guide](docs/guides/strategies.md), [Caching & Data](docs/guides/caching.md), [User configuration](docs/guides/configuration.md), and the [documentation index](docs/README.md).
 

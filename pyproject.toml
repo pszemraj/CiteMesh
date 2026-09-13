@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "citemesh"
 dynamic = ["version"]
-description = "Create exploration-friendly semantic paper graphs"
+description = "Turn one paper into an interactive map of the research around it, fusing citations with local embeddings"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,11 +13,14 @@ license-files = ["LICENSE"]
 authors = [{ name = "Peter Szemraj", email = "peterszemraj+dev@gmail.com" }]
 maintainers = [{ name = "Peter Szemraj", email = "peterszemraj+dev@gmail.com" }]
 keywords = [
-    "citation-graph",
-    "citation-analysis",
-    "graph-visualization",
+    "arxiv",
     "bibliometrics",
-    "semantic-similarity",
+    "citation-graph",
+    "citation-network",
+    "embeddings",
+    "graph-visualization",
+    "literature-review",
+    "research-tools",
     "semantic-scholar",
 ]
 classifiers = [
