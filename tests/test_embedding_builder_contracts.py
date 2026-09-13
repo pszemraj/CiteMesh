@@ -5036,6 +5036,109 @@ def test_complete_capped_cache_extends_to_all_corpus(
     clear_cache_mock.assert_not_called()
 
 
+def test_capped_cache_admits_upstream_papers_newer_than_its_watermark(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A capped corpus must track upstream recency instead of freezing.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param pytest.LogCaptureFixture caplog: Captured over-cap disclosure.
+    :return None: Asserts the newer paper is encoded and cached rows are kept.
+    """
+    source = "fixture/source"
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=2,
+        cached_corpus_size=2,
+        cached_ids=("2601.00001", "2601.00002"),
+    )
+    cache = builder.embedding_cache
+    records = [
+        {"id": "2601.00001", "title": "First", "abstract": "A"},
+        {"id": "2601.00002", "title": "Second", "abstract": "A"},
+        {"id": "2602.00003", "title": "Newer", "abstract": "A"},
+    ]
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *args, **kwargs: iter(records)
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {
+        "arxiv:2601.00001",
+        "arxiv:2601.00002",
+        "arxiv:2602.00003",
+    }
+    assert model.encode.call_count == 1
+    assert cache.is_hydrated("train", 2, dataset_source=source)
+    assert cache.payload_stats().hydration_corpus_size == "newest:2"
+    # Admitting newer rows without evicting is the already-documented over-cap
+    # condition, so it must keep warning in the same words.
+    assert (
+        "Refreshed capped corpus has 3 cached rows, exceeding --corpus-size 2"
+        in caplog.text
+    )
+    assert cache.get_hydration_rowcount_reconciliation() == (3, 3)
+    clear_cache_mock.assert_not_called()
+
+
+def test_capped_cache_without_newer_upstream_papers_stops_rescanning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unmoved upstream must be scanned once and then answered from metadata.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :return None: Asserts one source scan across two builds and no encoding.
+    """
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=2,
+        cached_corpus_size=2,
+        cached_ids=("2601.00001", "2601.00002"),
+    )
+    cache = builder.embedding_cache
+    records = [
+        {"id": "2601.00001", "title": "First", "abstract": "A"},
+        {"id": "2601.00002", "title": "Second", "abstract": "A"},
+    ]
+    load_calls: list[str] = []
+
+    def load_dataset(*args: Any, **kwargs: Any) -> Iterator[dict[str, str]]:
+        """Record each upstream scan and serve the unchanged split.
+
+        :param Any args: Dataset loader positional arguments.
+        :param Any kwargs: Dataset loader keyword arguments.
+        :return Iterator[dict[str, str]]: Unchanged source records.
+        """
+        load_calls.append(str(args[0]) if args else "")
+        return iter(records)
+
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load_dataset),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+    assert len(load_calls) == 1
+    assert cache.get_hydration_rowcount_reconciliation() == (2, 2)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert len(load_calls) == 1
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
+    model.encode.assert_not_called()
+    clear_cache_mock.assert_not_called()
+
+
 @pytest.mark.parametrize("failure", ["raises", "short-read"])
 def test_failed_corpus_extension_retains_complete_cache(
     monkeypatch: pytest.MonkeyPatch, failure: str

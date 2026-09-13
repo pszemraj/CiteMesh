@@ -20,6 +20,7 @@ from typing import (
 
 import numpy as np
 
+from citemesh.core.paper_ids import encode_arxiv_id_chronology_key
 from citemesh.data.embedding_cache import (
     EMBEDDING_DATASET_CHUNK_ROWS,
     CacheNamespacePayloadStats,
@@ -216,6 +217,12 @@ class _CorpusHydrationMixin:
 
         self._refresh_cached_corpus_metadata(cached_dataset_source, use_streaming)
         self._refresh_hydrated_full_corpus_cache(
+            use_streaming=use_streaming,
+            cached_dataset_source=cached_dataset_source,
+        )
+        # Mutually exclusive with the call above: each refresh guards on the
+        # corpus shape it can serve, so exactly one of them does any work.
+        self._refresh_capped_corpus_recency(
             use_streaming=use_streaming,
             cached_dataset_source=cached_dataset_source,
         )
@@ -1358,9 +1365,10 @@ class _CorpusHydrationMixin:
         if ":" in str(self.dataset_split):
             return None
 
-        load_dataset_builder = deps._import_datasets_module().load_dataset_builder
-
         try:
+            # Resolved inside the guard: this whole lookup is best-effort, and a
+            # datasets module without the builder API must not fail a build.
+            load_dataset_builder = deps._import_datasets_module().load_dataset_builder
             builder = load_dataset_builder(dataset_source)
             splits = getattr(getattr(builder, "info", None), "splits", None)
             if splits is None:
@@ -1471,6 +1479,194 @@ class _CorpusHydrationMixin:
                 updated_rows,
                 upstream_rows,
             )
+
+    def _refresh_capped_corpus_recency(
+        self, *, use_streaming: bool, cached_dataset_source: str | None
+    ) -> None:
+        """Admit upstream submissions newer than a capped corpus's watermark.
+
+        A capped corpus is defined as the N newest submissions, and upstream
+        keeps publishing, so without this the cache stays frozen at whatever was
+        newest when it was built. The count-driven refresh cannot serve this
+        shape — cached rows are not a source offset for a selection that
+        reshuffles as upstream grows — but the persisted chronology watermark
+        makes the question decidable: re-run the newest-N selection only when
+        upstream actually holds something newer.
+
+        The upstream row count gates how often that is asked at all. An
+        unchanged split is answered from the memoized marker without touching
+        the source, exactly as the uncapped path memoizes a verified row-count
+        delta.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param Optional[str] cached_dataset_source: Hydrated dataset source token.
+        :return None: Mutates cache in-place when newer papers are admitted.
+        """
+        if self.corpus_size is None or ":" in str(self.dataset_split):
+            return
+        source = str(cached_dataset_source or "").strip()
+        if not source:
+            return
+
+        watermark = self.embedding_cache.get_max_chronology_key()
+        if watermark is None:
+            # No cached row carries a submission date, so "newer than the cache"
+            # has no meaning and the selection cannot be reasoned about.
+            return
+        cached_rows = self._cached_payload_row_count()
+        if cached_rows < 1:
+            return
+        upstream_rows = self._resolve_dataset_split_row_count(source)
+        if upstream_rows is None:
+            return
+        if self.embedding_cache.get_hydration_rowcount_reconciliation() == (
+            upstream_rows,
+            cached_rows,
+        ):
+            logger.debug(
+                "Skipping capped-corpus recency refresh for %s/%s: this upstream "
+                "row count was already checked (cache_rows=%d, upstream_rows=%d).",
+                source,
+                self.dataset_split,
+                cached_rows,
+                upstream_rows,
+            )
+            return
+
+        newest_upstream_key = self._upstream_newest_chronology_key(
+            use_streaming=use_streaming, source=source
+        )
+        if newest_upstream_key is None or newest_upstream_key <= watermark:
+            logger.info(
+                "Capped corpus for %s/%s is still the newest %d submissions "
+                "upstream (cache_rows=%d, upstream_rows=%d); memoizing this "
+                "state so the next build skips the source scan.",
+                source,
+                self.dataset_split,
+                self.corpus_size,
+                cached_rows,
+                upstream_rows,
+            )
+            self.embedding_cache.set_hydration_rowcount_reconciliation(
+                upstream_rows=upstream_rows,
+                cached_rows=cached_rows,
+            )
+            return
+
+        self._admit_newer_capped_corpus_rows(
+            use_streaming=use_streaming,
+            source=source,
+            cached_rows=cached_rows,
+            upstream_rows=upstream_rows,
+        )
+
+    def _upstream_newest_chronology_key(
+        self, *, use_streaming: bool, source: str
+    ) -> int | None:
+        """Return the newest submission key the upstream newest-N selection holds.
+
+        The loaded slice is already ranked by submission chronology, so its
+        maximum key is also the upstream maximum; reading it from the selection
+        avoids a second recency policy that could disagree with the one
+        hydration itself applies.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param str source: Hydrated dataset source token.
+        :return Optional[int]: Newest packed chronology key, or ``None`` when no
+            selected row carries a parseable arXiv ID.
+        """
+        dataset = self._load_exact_hydration_source_slice(
+            use_streaming=use_streaming,
+            source=source,
+            operation="Capped corpus recency check",
+        )
+        column_names = getattr(dataset, "column_names", None)
+        if column_names is not None and "id" in column_names:
+            raw_ids: Iterable[Any] = dataset["id"]
+        else:
+            raw_ids = ((record or {}).get("id") for record in dataset)
+
+        newest_key: int | None = None
+        for raw_id in raw_ids:
+            key = encode_arxiv_id_chronology_key(raw_id)
+            if key is not None and (newest_key is None or key > newest_key):
+                newest_key = key
+        return newest_key
+
+    def _admit_newer_capped_corpus_rows(
+        self,
+        *,
+        use_streaming: bool,
+        source: str,
+        cached_rows: int,
+        upstream_rows: int,
+    ) -> None:
+        """Encode the newest-N rows the capped cache is missing, in place.
+
+        The namespace keeps its complete metadata throughout, so an interrupted
+        pass leaves a cache that is still usable at its recorded size rather than
+        an incomplete one the rebuild path would clear.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param str source: Hydrated dataset source token.
+        :param int cached_rows: Cached payload row count before this pass.
+        :param int upstream_rows: Upstream split row count.
+        :return None: Mutates cache rows and the reconciliation marker in-place.
+        """
+        logger.info(
+            "Upstream %s/%s holds submissions newer than the capped corpus; "
+            "re-running the newest-%d selection over %d cached rows and encoding "
+            "only the papers the cache is missing.",
+            source,
+            self.dataset_split,
+            self.corpus_size,
+            cached_rows,
+        )
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=source,
+        )
+        refresh = self._hydrate_exact_hydration_source_slice(
+            use_streaming=use_streaming,
+            source=source,
+            progress_total=self.corpus_size,
+            progress_label="Refreshing dataset",
+            operation="Capped corpus recency refresh",
+            existing_paper_ids=self.embedding_cache.get_cached_paper_ids(),
+        )
+        updated_rows = self._cached_payload_row_count()
+        if not refresh.source_exhausted:
+            logger.warning(
+                "Capped corpus recency refresh for %s/%s did not exhaust its "
+                "source; the cache is retained with %d rows. Re-run to finish "
+                "admitting the newest upstream papers.",
+                source,
+                self.dataset_split,
+                updated_rows,
+            )
+            return
+
+        if updated_rows > self.corpus_size:
+            logger.warning(
+                "Refreshed capped corpus has %d cached rows, exceeding "
+                "--corpus-size %d after the source selection changed. Retained "
+                "existing vectors; rebuild the corpus to apply the cap exactly.",
+                updated_rows,
+                self.corpus_size,
+            )
+        self.embedding_cache.set_hydration_rowcount_reconciliation(
+            upstream_rows=upstream_rows,
+            cached_rows=updated_rows,
+        )
+        logger.info(
+            "Admitted %d newer upstream papers into the capped corpus for %s/%s "
+            "(cache_rows=%d, upstream_rows=%d).",
+            refresh.hydrated_records,
+            source,
+            self.dataset_split,
+            updated_rows,
+            upstream_rows,
+        )
 
     def _incremental_refresh_row_counts(self, source: str) -> tuple[int, int] | None:
         """Decide whether an append-only refresh applies, and for how many rows.
