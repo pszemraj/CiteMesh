@@ -58,7 +58,7 @@ citemesh build "arxiv:1706.03762" --strategy hybrid --export all
 citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-corpus
 ```
 
-The first embedding or hybrid run downloads `unsloth/embeddinggemma-300m` and encodes up to `--candidate-pool-size` abstracts (default 400); `arxiv-corpus` mode hydrates the full selected split unless capped with `--corpus-size N` ([CLI guide](docs/guides/cli.md)).
+The first embedding or hybrid run downloads `unsloth/embeddinggemma-300m` and encodes what it collected — about 100 abstracts for a default hybrid build, or up to `--candidate-pool-size` (default 400) with `--strategy embedding`; `arxiv-corpus` mode hydrates the full selected split unless capped with `--corpus-size N` ([CLI guide](docs/guides/cli.md)).
 
 Omit `--output` and each build saves under `out/<title-slug>-<hash>/`, while repeated dashboard builds accumulate into a shared `out/dashboard.html` collection. Open it with `citemesh view`, or name a collection or file (`citemesh view out/my-collection`) — see [Output Artifacts](docs/reference/output-artifacts.md).
 
@@ -70,7 +70,7 @@ Every strategy runs the same eight-stage pipeline; they differ only in where can
 
 _Defaults for a hybrid build. Recommendation and citation builds skip stages 3 and 4: they never load the model and score pairs from TF-IDF instead._
 
-Four flags move most of the outcome. `--candidate-pool-size` sets how many papers are fetched and encoded, `--max-papers` caps how many survive ranking, `--min-semantic-similarity` is the cosine gate a pair must clear before temporal, category, and shared-author signals adjust its weight, and `--seed` fixes the layout so every export of one graph lines up.
+Five flags move most of the outcome. `--max-references` and `--max-citations` (12 and 45 for hybrid) set the fetch budget, `--max-semantic` (20) caps recommendation-sourced additions, `--max-papers` (45) caps how many survive ranking, and `--min-semantic-similarity` (0.74) is the cosine floor a pair must clear — unless it shares a reference, where bibliographic coupling, recency, and citation counts can still earn the edge. Layouts are already deterministic; `--seed` picks a different one.
 
 The full walkthrough, with the numbers that matter at each stage: [How CiteMesh builds a graph](docs/guides/how-it-works.md). For syntax and operational detail: [CLI guide](docs/guides/cli.md), [Strategy guide](docs/guides/strategies.md), [Caching & Data](docs/guides/caching.md), [User configuration](docs/guides/configuration.md), and the [documentation index](docs/README.md).
 
