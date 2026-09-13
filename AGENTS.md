@@ -13,7 +13,7 @@ Rules for working on CiteMesh, for humans and coding agents. Setup, the pre-PR c
 
 - Commit as you go, at logical increments — never one batch commit of unrelated changes at the end.
 - Assume squash-merge; raise it if that seems wrong for the change at hand.
-- Never commit generated outputs, comparison JSONs, or caches.
+- Never commit generated outputs, comparison JSONs, or caches. The one exception is curated documentation assets under `assets/` — the screenshots and the example dashboard in `assets/examples/` are produced by a build but committed on purpose, refreshed deliberately rather than per run, and linked from README and the docs as the no-install example.
 - Ask before destructive git operations. NEVER `git push` without explicit instruction or approval in the prior turn.
 
 ## Model and dtype policy (non-negotiable)
