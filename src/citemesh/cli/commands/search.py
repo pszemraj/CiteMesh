@@ -255,9 +255,9 @@ def _run_search_command(
             )
             return 2
         if origin != "flag" and mode != "local":
-            # Namespace-selecting flags are explicit local intent; they
-            # outrank a config-level s2/auto default but never an explicit
-            # --mode, so --mode auto keeps its S2 fallback.
+            # Local-only flags are explicit local intent; they outrank a
+            # config-level s2/auto default but never an explicit --mode, so
+            # --mode auto keeps its S2 fallback.
             mode, origin = "local", "namespace-flag"
     if args.device:
         try:
@@ -288,22 +288,22 @@ def _run_search_command(
         else:
             cached_count = 0
     except Exception as exc:
-        namespace_selectors = ""
+        runtime_selectors = ""
         if builder is not None:
-            namespace_selectors = (
+            runtime_selectors = (
                 f" (device={builder.device} compute_dtype={builder.compute_dtype})"
             )
         if mode == "auto":
             logger.info(
                 "Local semantic search unavailable%s (%s); searching the "
                 "Semantic Scholar API instead.",
-                namespace_selectors,
+                runtime_selectors,
                 exc,
             )
             return _run_s2_search(args)
         logger.error(
             "Local search unavailable%s: %s",
-            namespace_selectors,
+            runtime_selectors,
             exc,
             exc_info=logging.getLogger().level == logging.DEBUG,
         )
@@ -319,14 +319,16 @@ def _run_search_command(
             )
             return _render_local_search(args, builder, defaults)
         logger.info(
-            "Local embedding cache is empty for device=%s compute_dtype=%s; "
-            "searching the Semantic Scholar API instead. Run `citemesh build` "
-            "with the same configuration to populate this namespace. A different "
-            "--device can resolve to a different compute dtype and cache namespace; "
-            "select the device matching an existing build, or use --mode s2 for "
-            "keyword search.",
-            builder.device,
-            builder.compute_dtype,
+            "Local embedding cache is empty for model=%s semantic-source=%s; "
+            "searching the Semantic Scholar API instead. The namespace is keyed "
+            "by model, profile, truncate dim, storage precision, and formatter "
+            "(never the device), so run `citemesh build` with this configuration "
+            "to populate it. To search an existing arXiv-corpus build instead, "
+            "run `citemesh config set defaults.semantic_source arxiv-corpus` "
+            "(plus defaults.dataset_source when it is not the default). Use "
+            "--mode s2 for keyword search.",
+            defaults.model,
+            defaults.semantic_source,
         )
         return _run_s2_search(args)
 
@@ -336,22 +338,22 @@ def _run_search_command(
             requested_via = "--mode local"
         elif origin == "namespace-flag":
             requested_via = (
-                "--model/--model-profile/--device (namespace flags imply local search)"
+                "--model/--model-profile/--device (these flags imply local search)"
             )
         else:
             requested_via = f"defaults.search_mode in {user_config.path}"
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
-            "has no vectors for model=%s semantic-source=%s device=%s "
-            "compute_dtype=%s. Run `citemesh build` with the same configuration to "
-            "populate this namespace. A different --device can resolve to a "
-            "different compute dtype and cache namespace; select the device matching "
-            "an existing build, or use --mode s2 for keyword search.",
+            "has no vectors for model=%s semantic-source=%s. The namespace is "
+            "keyed by model, profile, truncate dim, storage precision, and "
+            "formatter (never the device), so run `citemesh build` with this "
+            "configuration to populate it. To search an existing arXiv-corpus "
+            "build instead, run `citemesh config set defaults.semantic_source "
+            "arxiv-corpus` (plus defaults.dataset_source when it is not the "
+            "default). Use --mode s2 for keyword search.",
             requested_via,
             defaults.model,
             defaults.semantic_source,
-            builder.device,
-            builder.compute_dtype,
         )
         return 1
     return _render_local_search(args, builder, defaults)

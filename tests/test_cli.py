@@ -1341,7 +1341,14 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
     assert any(
         "searching the Semantic Scholar API instead" in notice for notice in notices
     )
-    assert any("device=cpu compute_dtype=float32" in notice for notice in notices)
+    empty_notice = next(
+        notice for notice in notices if "Local embedding cache is empty" in notice
+    )
+    assert "semantic-source=candidates" in empty_notice
+    assert "citemesh config set defaults.semantic_source arxiv-corpus" in empty_notice
+    # The namespace has no device or compute-dtype token; guidance must not imply one.
+    assert "device=" not in empty_notice
+    assert "compute dtype" not in empty_notice
     fake_builder.search_local.assert_not_called()
     fake_builder.prepare_embedding_cache.assert_not_called()
 
@@ -1363,8 +1370,11 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     assert "Local search was requested via" in message
     assert "--mode local" in message
     assert "has no vectors" in message
-    assert "device=%s compute_dtype=%s" in message
-    assert error_mock.call_args.args[-2:] == ("cpu", "float32")
+    assert "citemesh config set defaults.semantic_source arxiv-corpus" in message
+    # Device and compute dtype are absent from the namespace contract.
+    assert "device=" not in message
+    assert "compute_dtype" not in message
+    assert error_mock.call_args.args[-1] == "candidates"
     fake_builder.prepare_embedding_cache.assert_not_called()
     fake_builder.search_local.assert_not_called()
 
@@ -1444,7 +1454,7 @@ def test_search_namespace_flag_empty_cache_error_names_the_flags(
     """The implied-local error must not claim the user passed --mode local.
 
     :param pytest.MonkeyPatch monkeypatch: Builder stub and error capture.
-    :return None: Assertions pin the namespace-flag attribution text.
+    :return None: Assertions pin the implied-local attribution text.
     """
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
@@ -1456,7 +1466,7 @@ def test_search_namespace_flag_empty_cache_error_names_the_flags(
     result = run_cli_command(["search", "anything", "--model", "custom/model"])
     assert result.returncode == 1
     message = str(error_mock.call_args)
-    assert "namespace flags imply" in message
+    assert "these flags imply local search" in message
     assert "--mode local" not in message
     fake_builder.search_local.assert_not_called()
 
