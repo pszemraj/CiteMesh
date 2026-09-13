@@ -56,8 +56,8 @@ def _prepare_local_search_builder(
 
     Mirrors a flagless build's defaults pipeline (config.toml defaults plus
     candidate-mode storage normalization) so the search targets the same cache
-    namespace a default build writes to; ``--model``, ``--model-profile``, and
-    ``--device`` override.
+    namespace a default build writes to; ``--model``, ``--model-profile``,
+    ``--device``, ``--semantic-source``, and ``--dataset-source`` override.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
@@ -82,6 +82,20 @@ def _prepare_local_search_builder(
     if args.device:
         defaults.device = args.device
         config_default_dests.discard("device")
+    if args.dataset_source:
+        defaults.dataset_source = args.dataset_source
+        config_default_dests.discard("dataset_source")
+    # Mirrors the build contract: a corpus-only flag implies the corpus source.
+    semantic_source = args.semantic_source or (
+        "arxiv-corpus" if args.dataset_source else None
+    )
+    if semantic_source:
+        defaults.semantic_source = semantic_source
+        config_default_dests.discard("semantic_source")
+    # The overrides must land before contract validation: it coerces int8
+    # storage to float32 outside arxiv-corpus mode, and storage precision is
+    # part of the cache namespace, so a late override would compute a
+    # float32 namespace that no corpus build ever wrote.
     _validate_build_cli_contract(
         defaults,
         _ValueErrorParserErrorSink(),
@@ -247,11 +261,18 @@ def _run_search_command(
     :return int: Process-style exit code.
     """
     mode, origin = _resolve_search_mode(args, user_config)
-    if args.model or args.model_profile or args.device:
+    if (
+        args.model
+        or args.model_profile
+        or args.device
+        or args.semantic_source
+        or args.dataset_source
+    ):
         if args.mode == "s2":
             logger.error(
-                "--model, --model-profile, and --device only apply to local "
-                "semantic search; drop them or use --mode local."
+                "--model, --model-profile, --device, --semantic-source, and "
+                "--dataset-source only apply to local semantic search; drop "
+                "them or use --mode local."
             )
             return 2
         if origin != "flag" and mode != "local":
@@ -324,9 +345,8 @@ def _run_search_command(
             "by model, profile, truncate dim, storage precision, and formatter "
             "(never the device), so run `citemesh build` with this configuration "
             "to populate it. To search an existing arXiv-corpus build instead, "
-            "run `citemesh config set defaults.semantic_source arxiv-corpus` "
-            "(plus defaults.dataset_source when it is not the default). Use "
-            "--mode s2 for keyword search.",
+            "pass --semantic-source arxiv-corpus (plus --dataset-source when it "
+            "is not the default). Use --mode s2 for keyword search.",
             defaults.model,
             defaults.semantic_source,
         )
@@ -338,7 +358,8 @@ def _run_search_command(
             requested_via = "--mode local"
         elif origin == "namespace-flag":
             requested_via = (
-                "--model/--model-profile/--device (these flags imply local search)"
+                "--model/--model-profile/--device/--semantic-source/"
+                "--dataset-source (these flags imply local search)"
             )
         else:
             requested_via = f"defaults.search_mode in {user_config.path}"
@@ -348,9 +369,9 @@ def _run_search_command(
             "keyed by model, profile, truncate dim, storage precision, and "
             "formatter (never the device), so run `citemesh build` with this "
             "configuration to populate it. To search an existing arXiv-corpus "
-            "build instead, run `citemesh config set defaults.semantic_source "
-            "arxiv-corpus` (plus defaults.dataset_source when it is not the "
-            "default). Use --mode s2 for keyword search.",
+            "build instead, pass --semantic-source arxiv-corpus (plus "
+            "--dataset-source when it is not the default). Use --mode s2 for "
+            "keyword search.",
             requested_via,
             defaults.model,
             defaults.semantic_source,

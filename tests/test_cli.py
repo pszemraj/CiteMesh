@@ -922,8 +922,23 @@ _FAKE_LOCAL_RESULT = SimpleNamespace(
 )
 
 
-def test_search_mode_s2_rejects_local_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Embedding namespace flags are meaningless for explicit S2 keyword search."""
+@pytest.mark.parametrize(
+    "local_flags",
+    [
+        ["--model-profile", "embeddinggemma"],
+        ["--semantic-source", "arxiv-corpus"],
+        ["--dataset-source", "research/arxiv-snapshot"],
+    ],
+)
+def test_search_mode_s2_rejects_local_flags(
+    monkeypatch: pytest.MonkeyPatch, local_flags: list[str]
+) -> None:
+    """Embedding namespace flags are meaningless for explicit S2 keyword search.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture capturing the CLI error.
+    :param list[str] local_flags: One local-only flag pair rejected by S2 mode.
+    :return None: Assertions verify the rejection names every local-only flag.
+    """
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     result = run_cli_command(
@@ -932,14 +947,15 @@ def test_search_mode_s2_rejects_local_flags(monkeypatch: pytest.MonkeyPatch) -> 
             "attention",
             "--mode",
             "s2",
-            "--model-profile",
-            "embeddinggemma",
+            *local_flags,
         ]
     )
     assert result.returncode == 2
-    assert "--model, --model-profile, and --device only apply" in str(
-        error_mock.call_args
-    )
+    message = str(error_mock.call_args)
+    assert "only apply to local semantic search" in message
+    for flag in ("--model", "--model-profile", "--device", "--semantic-source"):
+        assert flag in message
+    assert "--dataset-source" in message
 
 
 def test_search_rejects_empty_model_override() -> None:
@@ -1019,6 +1035,75 @@ def test_search_local_uses_configured_corpus_dataset_source(
     assert builder_kwargs["storage_precision"] == "int8"
     assert builder_kwargs["calibration_sample_size"] == 200
     assert builder_kwargs["binary_prefilter"] is binary_prefilter
+
+
+def test_search_semantic_source_flag_selects_corpus_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--semantic-source arxiv-corpus must reach the corpus cache namespace.
+
+    Storage precision is part of the namespace and the build contract coerces
+    ``int8`` to ``float32`` outside corpus mode, so the override has to land
+    before validation or the search targets a namespace no corpus build wrote.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
+    :return None: Assertions pin the corpus namespace the builder receives.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--mode",
+            "local",
+            "--semantic-source",
+            "arxiv-corpus",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
+    assert builder_kwargs["storage_precision"] == "int8"
+    assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
+
+
+def test_search_dataset_source_flag_implies_corpus_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--dataset-source alone implies arxiv-corpus, mirroring the build contract.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
+    :return None: Assertions verify the implied corpus namespace.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+    dataset_source = "research/arxiv-snapshot"
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--mode",
+            "local",
+            "--dataset-source",
+            dataset_source,
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
+    assert builder_kwargs["dataset_source"] == dataset_source
+    assert builder_kwargs["storage_precision"] == "int8"
 
 
 def test_configured_local_corpus_hybrid_build_uses_full_split(
@@ -1232,6 +1317,12 @@ def test_search_device_flag_overrides_config_before_local_validation(
     [
         (["--model", "custom/model"], "model_name", "custom/model"),
         (["--model-profile", "embeddinggemma"], "model_profile", "embeddinggemma"),
+        (["--semantic-source", "arxiv-corpus"], "semantic_source", "arxiv-corpus"),
+        (
+            ["--dataset-source", "research/arxiv-snapshot"],
+            "dataset_source",
+            "research/arxiv-snapshot",
+        ),
     ],
 )
 def test_search_namespace_flag_implies_local_mode(
@@ -1345,7 +1436,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         notice for notice in notices if "Local embedding cache is empty" in notice
     )
     assert "semantic-source=candidates" in empty_notice
-    assert "citemesh config set defaults.semantic_source arxiv-corpus" in empty_notice
+    assert "pass --semantic-source arxiv-corpus" in empty_notice
     # The namespace has no device or compute-dtype token; guidance must not imply one.
     assert "device=" not in empty_notice
     assert "compute dtype" not in empty_notice
@@ -1370,7 +1461,7 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     assert "Local search was requested via" in message
     assert "--mode local" in message
     assert "has no vectors" in message
-    assert "citemesh config set defaults.semantic_source arxiv-corpus" in message
+    assert "pass --semantic-source arxiv-corpus" in message
     # Device and compute dtype are absent from the namespace contract.
     assert "device=" not in message
     assert "compute_dtype" not in message

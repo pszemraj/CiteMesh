@@ -38,11 +38,13 @@ Without `--output`, results land in `out/` (gitignored in a source checkout). A 
 ```bash
 citemesh search "attention mechanism transformers" --limit 5
 citemesh build "<paper-id-from-search>" --strategy recommendation
+# search what an arXiv-corpus build hydrated
+citemesh search "long-context attention" --semantic-source arxiv-corpus
 ```
 
 `--mode local` searches the vectors already in your cache — the query encoded in the model's query prompt space and ranked against every cached retrieval-document vector, offline once the model is downloaded, returning cosine scores and IDs ready for `build`. Every embedding or hybrid build grows that library. `--mode s2` is Semantic Scholar keyword search, convenient from a cold start, but it shares the anonymous rate-limit pool unless `S2_API_KEY` or `api.s2_api_key` is set, and reports a 429 honestly rather than as "no results".
 
-The default `auto` picks local when the cache has vectors and S2 otherwise, logging which and why. `--model`, `--model-profile`, and `--device` imply local mode and are rejected alongside `--mode s2`; local against an empty cache is an error naming whatever asked for it, reported with the model and semantic source whose namespace came up empty. Local search reads the namespace a flagless build writes to, honoring `config.toml`, never the graph-similarity cache — so match any non-default build settings here or in config ([Caching & Data](caching.md)). In particular an arXiv-corpus build lives in its own namespace: reach it with `citemesh config set defaults.semantic_source arxiv-corpus` (and `defaults.dataset_source` when it is not the default), since the search command has no `--semantic-source` flag.
+The default `auto` picks local when the cache has vectors and S2 otherwise, logging which and why. `--model`, `--model-profile`, `--device`, `--semantic-source`, and `--dataset-source` imply local mode and are rejected alongside `--mode s2`; local against an empty cache is an error naming whatever asked for it, reported with the model and semantic source whose namespace came up empty. Otherwise local search reads the namespace a flagless build writes to, honoring `config.toml`, never the graph-similarity cache — so match any non-default build settings here or in config ([Caching & Data](caching.md)). An arXiv-corpus build lives in its own namespace: reach it with `--semantic-source arxiv-corpus`, adding `--dataset-source` when the build hydrated a non-default dataset — that flag implies `arxiv-corpus` by itself, exactly as it does on `build`. Either can also be saved as `defaults.semantic_source` / `defaults.dataset_source`.
 
 ### View a saved dashboard
 

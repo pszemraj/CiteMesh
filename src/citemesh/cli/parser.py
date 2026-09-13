@@ -1003,6 +1003,11 @@ def _add_search_arguments(
                 'citemesh search "long-context language models" --mode local',
             ),
             (
+                "Search an arXiv-corpus build",
+                'citemesh search "long-context attention" '
+                "--semantic-source arxiv-corpus",
+            ),
+            (
                 "Search Semantic Scholar by keyword",
                 'citemesh search "Megalodon" --mode s2',
             ),
@@ -1059,6 +1064,27 @@ def _add_search_arguments(
         choices=list(EMBEDDING_DEVICE_CHOICES),
         default=None,
         help="auto, cuda, mps, cpu for query encoding (implies --mode local)",
+    )
+    search_parser.add_argument(
+        "--semantic-source",
+        metavar="SOURCE",
+        dest="semantic_source",
+        choices=list(SEMANTIC_SOURCE_CHOICES),
+        default=None,
+        help=(
+            "candidates or arxiv-corpus; pick which build's cache namespace to "
+            "search (implies --mode local)"
+        ),
+    )
+    search_parser.add_argument(
+        "--dataset-source",
+        dest="dataset_source",
+        type=_non_empty_str,
+        default=None,
+        help=(
+            "Corpus dataset the build hydrated, when it was not the default "
+            "(implies --mode local and --semantic-source arxiv-corpus)"
+        ),
     )
 
     return search_parser
