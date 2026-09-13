@@ -45,7 +45,6 @@ from citemesh.data.embedding_cache import (
     INT8_TOTAL_VALUE_COUNT_KEY,
     MODEL_FINGERPRINT_KEY,
     SCHEMA_VERSION_KEY,
-    SOURCE_TORCH_DTYPE_KEY,
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
     _corpus_size_coverage,
@@ -2351,14 +2350,6 @@ def test_embedding_cache_search_rejects_non_vector_queries() -> None:
             id="storage_precision",
         ),
         pytest.param(
-            "search-source-dtype-mismatch",
-            {"source_torch_dtype": "float32"},
-            SOURCE_TORCH_DTYPE_KEY,
-            "bfloat16",
-            "metadata key 'source_torch_dtype' mismatch",
-            id="source_torch_dtype",
-        ),
-        pytest.param(
             "search-calibration-sample-mismatch",
             {"storage_precision": "int8", "calibration_sample_size": 8},
             CALIBRATION_SAMPLE_SIZE_KEY,
@@ -2454,10 +2445,10 @@ def test_embedding_cache_recovery_checks_provenance_before_truncation(
     with cache._connect_db() as conn:
         conn.execute(
             "UPDATE cache_metadata SET value = ? WHERE key = ?",
-            ("corrupt-dtype", SOURCE_TORCH_DTYPE_KEY),
+            ("corrupt-formatter", TEXT_FORMATTER_FINGERPRINT_KEY),
         )
 
-    with pytest.raises(RuntimeError, match="source_torch_dtype"):
+    with pytest.raises(RuntimeError, match="text_formatter_fingerprint"):
         if operation == "count":
             cache.embedding_count()
         else:
@@ -2719,8 +2710,8 @@ def test_embedding_cache_adopts_existing_gzip_level_without_masking_corruption()
             assert h5[EMBEDDINGS_DATASET_NAME].compression_opts == 9
 
         with h5py.File(reopened.h5_path, "a") as h5:
-            h5.attrs[SOURCE_TORCH_DTYPE_KEY] = "corrupt-dtype"
-        with pytest.raises(RuntimeError, match="source_torch_dtype"):
+            h5.attrs[TEXT_FORMATTER_FINGERPRINT_KEY] = "corrupt-formatter"
+        with pytest.raises(RuntimeError, match="text_formatter_fingerprint"):
             reopened.search(
                 query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
                 top_k=1,
@@ -3899,7 +3890,6 @@ def test_embedding_cache_reload_preserves_calibration_before_first_write(
     [
         ("text_formatter_fingerprint", "new"),
         ("calibration_sample_size", 2000),
-        ("source_torch_dtype", "bfloat16"),
     ],
 )
 def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
@@ -3940,6 +3930,50 @@ def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
             SeededRandomEncodeModel(),
             show_progress=False,
         )
+
+
+def test_embedding_cache_reopens_across_source_dtype_without_discarding_rows(
+    tmp_path: Path,
+) -> None:
+    """A host resolving a different compute dtype must reuse, not wipe, the cache.
+
+    Compute dtype is auto-resolved from the active device and is deliberately
+    absent from the namespace, so a bf16 GPU and an fp32 host land on the same
+    files. If it were still compared as a runtime contract they would each
+    destroy the other's vectors on open, which is worse than partitioning.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks cached rows survive a reopen under a different dtype.
+    """
+    built = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="shared-dtype-namespace",
+        storage_precision="float32",
+        source_torch_dtype="bfloat16",
+    )
+    built.get_embeddings(
+        {"p1": {"title": "Alpha", "abstract": "First"}},
+        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    assert built.embedding_count() == 1
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="shared-dtype-namespace",
+        storage_precision="float32",
+        source_torch_dtype="float32",
+    )
+
+    assert reopened.h5_path == built.h5_path
+    assert reopened.embedding_count() == 1
+    results = reopened.search(
+        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=False,
+        binary_rescore_multiplier=2,
+    )
+    assert [result.paper_id for result in results] == ["p1"]
 
 
 def test_embedding_cache_detects_diverged_sqlite_contract_value(

@@ -314,6 +314,11 @@ class _H5LayoutMixin:
         # Other live cache objects may enable or remove this derived index.
         # Its presence/encoding is checked separately from primary vector rows.
         expected.pop(BINARY_PREFILTER_ENABLED_KEY)
+        # Compute dtype is provenance, not identity, and is deliberately absent
+        # from the namespace so hosts resolving different dtypes share one cache.
+        # Comparing it here would make each host wipe the other's vectors on open.
+        # The stored value survives as a record of what created the namespace.
+        expected.pop(SOURCE_TORCH_DTYPE_KEY)
         if self.storage_precision != "int8":
             expected.pop(CALIBRATION_SAMPLE_SIZE_KEY)
         if embeddings_dataset is None:
