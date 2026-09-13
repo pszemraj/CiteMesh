@@ -2277,7 +2277,11 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
 def test_embedding_cache_namespace_partition_contracts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Namespace identity should partition precision, source dtype, and calibration."""
+    """Namespace identity should partition storage precision and calibration.
+
+    Compute dtype is deliberately excluded: it is auto-resolved from the active
+    device, so binding it would fork one corpus into a per-hardware cache.
+    """
 
     int8_builder = EmbeddingGraphBuilder(
         max_papers=1,
@@ -2311,8 +2315,9 @@ def test_embedding_cache_namespace_partition_contracts(
     bf16_hint_builder = EmbeddingGraphBuilder(max_papers=1, client=MagicMock())
     assert (
         f32_hint_builder.embedding_cache.model_name
-        != bf16_hint_builder.embedding_cache.model_name
+        == bf16_hint_builder.embedding_cache.model_name
     )
+    assert "source_dtype=" not in f32_hint_builder.embedding_cache.model_name
 
     monkeypatch.setattr(
         EmbeddingGraphBuilder,
@@ -6771,11 +6776,11 @@ def test_embedding_tf32_skipped_for_non_cuda_device(
 
 
 @pytest.mark.parametrize("cpu_bf16", [False, True])
-def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
+def test_embedding_cache_namespace_stable_across_device_and_dtype(
     monkeypatch: pytest.MonkeyPatch,
     cpu_bf16: bool,
 ) -> None:
-    """Matching BF16 compute shares a namespace; CPU FP32 remains distinct.
+    """Every device shares one namespace, whichever compute dtype it resolves.
 
     :param pytest.MonkeyPatch monkeypatch: Isolated runtime patching fixture.
     :param bool cpu_bf16: Whether CPU hardware reports native BF16 support.
@@ -6820,14 +6825,14 @@ def test_embedding_cache_namespace_stable_across_device_for_same_dtype(
     assert cuda_builder.compute_dtype == "bfloat16"
     assert mps_builder.compute_dtype == "bfloat16"
     assert cpu_builder.compute_dtype == ("bfloat16" if cpu_bf16 else "float32")
+    # A float32 CPU host and a bfloat16 GPU host resolve different compute
+    # dtypes and must still land on one namespace, so a cache built on either
+    # is readable by the other instead of being silently re-encoded.
     assert (
         cuda_builder._embedding_cache_namespace()
         == mps_builder._embedding_cache_namespace()
+        == cpu_builder._embedding_cache_namespace()
     )
-    assert (
-        cpu_builder._embedding_cache_namespace()
-        == cuda_builder._embedding_cache_namespace()
-    ) is cpu_bf16
 
 
 @pytest.mark.slow

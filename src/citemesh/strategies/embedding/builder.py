@@ -784,7 +784,10 @@ class EmbeddingGraphBuilder(
         parts.append(f"binary_prefilter={int(resolved_storage == 'int8')}")
         if resolved_storage == "int8":
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
-        parts.append(f"source_dtype={self._source_dtype_hint}")
+        # Compute dtype is provenance, not identity. It is auto-resolved from the
+        # active device, and the contract already ignores the other execution
+        # choices that shift numerics (attention backend, TF32, torch.compile);
+        # binding it forked one corpus into a per-hardware cache for no gain.
         parts.append(f"formatter={resolved_formatter}")
         # Candidate mode gets its own namespace so incremental candidate rows
         # never mix with (and never distort row counts of) corpus hydrations.
