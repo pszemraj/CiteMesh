@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Literal
 
 import h5py
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+CorpusCoverage = Literal["exact", "covers", "extends", "incompatible"]
 
 
 SQLITE_QUERY_BATCH_SIZE = 900
@@ -107,3 +110,33 @@ def _corpus_size_token(corpus_size: int | None) -> str:
     :return str: Tokenized corpus-size value.
     """
     return "all" if corpus_size is None else f"newest:{int(corpus_size)}"
+
+
+def _corpus_size_coverage(
+    cached_corpus_size: str | None, requested_corpus_size: int | None
+) -> CorpusCoverage:
+    """Compare what a namespace already holds against a newly requested cap.
+
+    The recorded token describes the cached rows, not the request that produced
+    them, so a smaller request is already satisfied and a larger one only needs
+    the difference encoded. Only a token this policy cannot read — a legacy bare
+    ``N`` head slice, or missing metadata — forces a rebuild.
+
+    :param Optional[str] cached_corpus_size: Corpus token recorded on the cache.
+    :param Optional[int] requested_corpus_size: Newly requested corpus-size cap.
+    :return CorpusCoverage: How the cached corpus relates to the request.
+    """
+    cached_token = str(cached_corpus_size or "").strip()
+    if cached_token == _corpus_size_token(requested_corpus_size):
+        return "exact"
+    if cached_token == "all":
+        return "covers"
+    if not cached_token.startswith("newest:"):
+        return "incompatible"
+    try:
+        cached_size = int(cached_token.removeprefix("newest:"))
+    except ValueError:
+        return "incompatible"
+    if requested_corpus_size is None:
+        return "extends"
+    return "covers" if cached_size > int(requested_corpus_size) else "extends"

@@ -23,6 +23,8 @@ import numpy as np
 from citemesh.data.embedding_cache import (
     EMBEDDING_DATASET_CHUNK_ROWS,
     CacheNamespacePayloadStats,
+    _corpus_size_coverage,
+    _corpus_size_token,
 )
 from citemesh.progress import progress_task
 from citemesh.strategies.base import deterministic_sort_key
@@ -446,12 +448,16 @@ class _CorpusHydrationMixin:
         use_streaming: bool,
         cached_dataset_source: str | None,
     ) -> bool:
-        """Resume an incomplete corpus hydration when cached rows are reusable.
+        """Reuse cached corpus rows instead of rebuilding, wherever that is safe.
+
+        Covers both an interrupted hydration and a completed one whose recorded
+        corpus merely differs in size from the request; the latter is a resize,
+        not an incompatible corpus, and must never cost an existing cache.
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Dataset source recorded on the
-            incomplete cache attempt.
-        :return bool: ``True`` when the incomplete cache was resumed or safely
+            cached hydration attempt.
+        :return bool: ``True`` when the cache was resumed, extended, or safely
             retained without requiring a full namespace clear.
         """
         source = str(cached_dataset_source or "").strip()
@@ -459,6 +465,10 @@ class _CorpusHydrationMixin:
             return False
 
         stats = self.embedding_cache.payload_stats()
+        if stats.hydration_complete:
+            return self._reuse_resized_complete_corpus_cache(
+                use_streaming=use_streaming, source=source, stats=stats
+            )
         if not self._incomplete_cache_is_resumable(source, stats):
             return False
 
@@ -485,12 +495,25 @@ class _CorpusHydrationMixin:
         """
         if stats.hydration_complete:
             return False
-        if stats.hydration_split != self.dataset_split:
+        if stats.hydration_corpus_size != _corpus_size_token(self.corpus_size):
             return False
-        expected_corpus_size = (
-            "all" if self.corpus_size is None else f"newest:{int(self.corpus_size)}"
-        )
-        if stats.hydration_corpus_size != expected_corpus_size:
+        return self._cached_corpus_rows_are_reusable(source, stats)
+
+    def _cached_corpus_rows_are_reusable(
+        self, source: str, stats: CacheNamespacePayloadStats
+    ) -> bool:
+        """Decide whether cached rows belong to this corpus and are self-consistent.
+
+        These are the checks a resume and a resize share: the rows must have been
+        written for this exact split and source, and the SQLite and HDF5 halves of
+        the namespace must still agree. Anything else would mix two corpora, or
+        build on a namespace that is already internally broken.
+
+        :param str source: Dataset source recorded on the cached attempt.
+        :param CacheNamespacePayloadStats stats: Current namespace payload stats.
+        :return bool: ``True`` when the cached rows may be built upon.
+        """
+        if stats.hydration_split != self.dataset_split:
             return False
         if stats.hydration_dataset_source != source:
             return False
@@ -498,7 +521,7 @@ class _CorpusHydrationMixin:
             return False
         if stats.sqlite_rows != stats.embedding_rows:
             logger.warning(
-                "Incomplete full-corpus cache rows diverged for %s/%s "
+                "Cached corpus rows diverged for %s/%s "
                 "(sqlite_rows=%d, embedding_rows=%d); performing full rebuild.",
                 source,
                 self.dataset_split,
@@ -511,12 +534,151 @@ class _CorpusHydrationMixin:
             and not self.embedding_cache.has_calibration_ranges()
         ):
             logger.warning(
-                "Incomplete full-corpus cache for %s/%s is missing int8 calibration "
-                "ranges; performing full rebuild.",
+                "Cached corpus for %s/%s is missing int8 calibration ranges; "
+                "performing full rebuild.",
                 source,
                 self.dataset_split,
             )
             return False
+        return True
+
+    def _reuse_resized_complete_corpus_cache(
+        self, *, use_streaming: bool, source: str, stats: CacheNamespacePayloadStats
+    ) -> bool:
+        """Serve a request from a complete cache whose recorded size differs.
+
+        The recorded corpus token describes the rows that are actually cached, so
+        a request those rows already contain is satisfiable as-is and a larger one
+        only needs its difference encoded. Only a corpus this policy cannot relate
+        to the request — another split or source, or an unreadable legacy token —
+        falls through to the destructive rebuild.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param str source: Dataset source recorded on the complete cache.
+        :param CacheNamespacePayloadStats stats: Current namespace payload stats.
+        :return bool: ``True`` when the complete cache was reused or extended.
+        """
+        coverage = _corpus_size_coverage(stats.hydration_corpus_size, self.corpus_size)
+        if coverage not in {"covers", "extends"}:
+            return False
+        if not self._cached_corpus_rows_are_reusable(source, stats):
+            return False
+
+        if coverage == "covers":
+            # Re-stamping the smaller request would make the token lie about the
+            # rows the namespace holds, so the cap stays where the vectors are.
+            logger.warning(
+                "Embedding cache for %s/%s holds %s, which already covers the "
+                "requested %s, so it is being reused as-is and results are drawn "
+                "from the larger cached corpus (%d rows). Run `citemesh cache "
+                "clear` or --force-rebuild-cache to rebuild at exactly the "
+                "requested size.",
+                source,
+                self.dataset_split,
+                stats.hydration_corpus_size,
+                _corpus_size_token(self.corpus_size),
+                stats.sqlite_rows,
+            )
+            return True
+
+        return self._extend_cached_corpus_selection(
+            use_streaming=use_streaming, source=source, stats=stats
+        )
+
+    def _extend_cached_corpus_selection(
+        self, *, use_streaming: bool, source: str, stats: CacheNamespacePayloadStats
+    ) -> bool:
+        """Top a complete cache up to a larger requested corpus, in place.
+
+        The namespace keeps its existing metadata until the extension succeeds, so
+        an interrupted or short pass leaves a cache that is still complete at its
+        recorded size — with at worst a few extra valid rows, the same condition a
+        moved upstream selection already produces — rather than an incomplete one
+        the rebuild path would clear.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param str source: Dataset source recorded on the complete cache.
+        :param CacheNamespacePayloadStats stats: Current namespace payload stats.
+        :return bool: ``True`` in every case; the cache is never cleared from here.
+        """
+        cached_token = str(stats.hydration_corpus_size or "").strip()
+        requested_token = _corpus_size_token(self.corpus_size)
+        upstream_rows = (
+            self._resolve_dataset_split_row_count(source)
+            if self.corpus_size is None
+            else None
+        )
+        cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
+        logger.info(
+            "Extending cached corpus for %s/%s from %s to %s; reusing %d cached "
+            "rows and encoding only the newly selected papers.",
+            source,
+            self.dataset_split,
+            cached_token,
+            requested_token,
+            stats.sqlite_rows,
+        )
+        self._ensure_int8_calibration_ranges(
+            use_streaming=use_streaming,
+            dataset_source=source,
+        )
+        extension = self._hydrate_exact_hydration_source_slice(
+            use_streaming=use_streaming,
+            source=source,
+            progress_total=(
+                self.corpus_size if self.corpus_size is not None else upstream_rows
+            ),
+            progress_label="Extending dataset",
+            operation="Corpus extension",
+            existing_paper_ids=cached_paper_ids,
+        )
+        updated_rows = self._cached_payload_row_count()
+        if not extension.source_exhausted:
+            logger.warning(
+                "Corpus extension for %s/%s did not exhaust its source; the cache "
+                "is retained at %s with %d rows instead of being rebuilt. Re-run "
+                "to finish extending it to %s.",
+                source,
+                self.dataset_split,
+                cached_token,
+                updated_rows,
+                requested_token,
+            )
+            return True
+
+        if self.corpus_size is None:
+            self._finalize_full_corpus_hydration_rows(
+                source=source,
+                updated_rows=updated_rows,
+                upstream_rows=upstream_rows,
+                mark_complete=True,
+            )
+        else:
+            if updated_rows > self.corpus_size:
+                logger.warning(
+                    "Extended corpus has %d cached rows, exceeding --corpus-size "
+                    "%d after the source selection changed. Retained existing "
+                    "vectors; rebuild the corpus to apply the cap exactly.",
+                    updated_rows,
+                    self.corpus_size,
+                )
+            self.embedding_cache.mark_hydrated(
+                dataset_source=source,
+                dataset_split=self.dataset_split,
+                corpus_size=self.corpus_size,
+                complete=True,
+            )
+        logger.info(
+            "Extended cached corpus for %s/%s from %s to %s "
+            "(reused=%d, encoded=%d, cache_rows=%d).",
+            source,
+            self.dataset_split,
+            cached_token,
+            requested_token,
+            stats.sqlite_rows,
+            extension.hydrated_records,
+            updated_rows,
+        )
         return True
 
     def _resume_selected_corpus_cache(
