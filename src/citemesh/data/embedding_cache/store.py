@@ -822,12 +822,17 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         :param Optional[int] corpus_size: Corpus-size cap used for hydration.
         :param bool complete: Whether hydration completed successfully.
         :return None: Mutates SQLite metadata in-place.
+        :raises ValueError: If ``dataset_source`` is missing or blank.
         """
-        normalized_source = str(dataset_source).strip()
-        if complete and not normalized_source:
-            raise ValueError(
-                "dataset_source must be non-empty when complete=True for hydration."
-            )
+        normalized_source = (
+            "" if dataset_source is None else str(dataset_source).strip()
+        )
+        # A recorded source is how a corpus namespace is told apart from a cheap
+        # candidate one when a fingerprint mismatch decides whether deleting the
+        # payload needs operator approval, so an incomplete attempt must carry it
+        # too. ``None`` is rejected rather than coerced, which would store "None".
+        if not normalized_source:
+            raise ValueError("dataset_source must be non-empty for hydration metadata.")
         self._write_cache_metadata(
             {
                 HYDRATION_DATASET_SOURCE_KEY: normalized_source,

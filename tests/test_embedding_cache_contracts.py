@@ -2948,16 +2948,29 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
                 assert not cache.is_hydrated(**hydrated_kwargs), case["label"]
 
 
-def test_embedding_cache_mark_hydrated_rejects_empty_source_when_complete() -> None:
-    """Complete hydration markers should reject empty dataset source tokens."""
+@pytest.mark.parametrize("complete", [True, False])
+@pytest.mark.parametrize("dataset_source", ["  ", "", None])
+def test_embedding_cache_mark_hydrated_rejects_empty_source(
+    dataset_source: str | None, complete: bool
+) -> None:
+    """Hydration markers should reject blank sources, complete or not.
+
+    The recorded source is what identifies a namespace as corpus-scale when a
+    fingerprint mismatch decides whether deleting it needs operator approval, so
+    an interrupted attempt that recorded nothing would silently drop that guard.
+
+    :param Optional[str] dataset_source: Blank source token under test.
+    :param bool complete: Whether the marker claims hydration finished.
+    :return None: Asserts every blank source is refused.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-empty-source")
         with pytest.raises(ValueError, match="dataset_source must be non-empty"):
             cache.mark_hydrated(
-                dataset_source="  ",
+                dataset_source=dataset_source,
                 dataset_split="train",
                 corpus_size=16,
-                complete=True,
+                complete=complete,
             )
 
 
