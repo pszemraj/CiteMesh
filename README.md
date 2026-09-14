@@ -68,7 +68,7 @@ Every strategy runs the same eight-stage pipeline; they differ only in where can
 
 ![The eight stages of a CiteMesh build: seed resolution, candidate acquisition, embedding, caching, ranking, edge scoring, layout, and export](assets/how-it-works.png)
 
-_Defaults for a hybrid build. Recommendation and citation builds skip stages 3 and 4: they never load the model and score pairs from TF-IDF instead._
+_Defaults for a `--strategy embedding` build. Hybrid uses its own 12-reference, 45-citation, and 45-paper budgets. Recommendation and citation builds skip stages 3 and 4: they never load the model and score pairs from TF-IDF instead._
 
 Five flags move most of the outcome. `--max-references` and `--max-citations` (12 and 45 for hybrid) set the fetch budget, `--max-semantic` (20) caps recommendation-sourced additions, `--max-papers` (45) caps how many survive ranking, and `--min-semantic-similarity` (0.74) is the cosine floor a pair must clear — unless it shares a reference, where bibliographic coupling, recency, and citation counts can still earn the edge. Layouts are already deterministic; `--seed` picks a different one.
 
