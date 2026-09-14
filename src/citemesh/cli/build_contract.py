@@ -1,8 +1,7 @@
 """Validation of the ``build`` CLI contract and strategy graph construction.
 
 Owns the parser error sinks, cross-option validation for ``build`` (including
-config-sourced defaults), side-effect logging, programmatic-invocation value
-checks, and the dispatch that turns a validated namespace into a graph.
+config-sourced defaults), side-effect logging, and dispatch of validated arguments.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from .build_options import (
     _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS,
     _CORPUS_ONLY_OPTION_DESTS,
     _HYBRID_EMBEDDING_OPTION_DESTS,
-    _PROGRAMMATIC_BUILD_VALUE_DESTS,
     _STRATEGY_DISPATCH,
     _apply_hybrid_default_overrides,
     _build_option_label,
@@ -34,7 +32,6 @@ from .build_options import (
 )
 from .cache_ops import _embedding_cache_directory_stats
 from .console import logger
-from .parser import _create_parser
 
 
 class _ParserErrorSink(Protocol):
@@ -613,166 +610,16 @@ def _log_build_side_effect_contract(args: argparse.Namespace) -> None:
             )
 
 
-def _normalize_programmatic_build_value(
-    action: argparse.Action,
-    value: object,
-    parser_error_sink: _ParserErrorSink,
-) -> object:
-    """Normalize a programmatic build value using the parser action contract.
-
-    :param argparse.Action action: Parser action defining the value contract.
-    :param object value: Programmatic value to validate.
-    :param _ParserErrorSink parser_error_sink: Parser-like error sink.
-    :return object: Normalized value compatible with CLI parsing rules.
-    """
-    if value is None:
-        return None
-
-    primary_label = action.option_strings[0] if action.option_strings else action.dest
-    if isinstance(action, (argparse._StoreTrueAction, argparse._StoreFalseAction)):
-        if not isinstance(value, bool):
-            parser_error_sink.error(f"{primary_label} must be a boolean.")
-        return value
-
-    normalized = value
-    if action.type is not None:
-        try:
-            normalized = action.type(value)
-        except argparse.ArgumentTypeError as exc:
-            parser_error_sink.error(str(exc))
-        except (TypeError, ValueError) as exc:
-            parser_error_sink.error(str(exc))
-
-    if action.choices is not None and normalized not in action.choices:
-        choices_text = ", ".join(str(choice) for choice in action.choices)
-        parser_error_sink.error(f"{primary_label} must be one of: {choices_text}.")
-    return normalized
-
-
-def _validate_programmatic_build_values(
-    args: argparse.Namespace,
-    build_parser: argparse.ArgumentParser,
-    parser_error_sink: _ParserErrorSink,
-) -> None:
-    """Validate programmatic build namespaces against CLI scalar contracts.
-
-    :param argparse.Namespace args: Candidate build namespace.
-    :param argparse.ArgumentParser build_parser: Build parser used for action metadata.
-    :param _ParserErrorSink parser_error_sink: Parser-like error sink.
-    :return None: Mutates ``args`` with normalized CLI-equivalent values.
-    """
-    for action in build_parser._actions:
-        dest = str(getattr(action, "dest", "") or "")
-        if dest not in _PROGRAMMATIC_BUILD_VALUE_DESTS or not hasattr(args, dest):
-            continue
-        normalized = _normalize_programmatic_build_value(
-            action,
-            getattr(args, dest),
-            parser_error_sink,
-        )
-        setattr(args, dest, normalized)
-
-
-def _synchronize_namespace_values(
-    target: argparse.Namespace, source: argparse.Namespace
-) -> None:
-    """Copy validated namespace state back to the caller namespace.
-
-    :param argparse.Namespace target: Namespace mutated in-place.
-    :param argparse.Namespace source: Namespace carrying validated CLI-equivalent values.
-    :return None: Copies every field from ``source`` onto ``target``.
-    """
-    for field, value in vars(source).items():
-        setattr(target, field, value)
-
-
 def _build_strategy_graph(
-    args: argparse.Namespace,
-    strategy: str,
-    *,
-    validate_contract: bool = True,
-    provided: set[str] | None = None,
+    args: argparse.Namespace, strategy: str
 ) -> tuple[nx.Graph, str]:
-    """Build a graph for a strategy selected from CLI arguments.
+    """Dispatch a namespace already normalized by the build command.
 
-    :param argparse.Namespace args: Parsed arguments.
-    :param str strategy: Strategy name.
-    :param bool validate_contract: Whether to run strategy-option contract checks.
-    :param Optional[Set[str]] provided: Explicit set of option destinations that were
-        provided by the caller.  When ``None``, provided fields are inferred by
-        comparing namespace values against parser defaults (note: re-specifying a
-        default value is invisible to the heuristic).
+    :param argparse.Namespace args: Validated build arguments.
+    :param str strategy: Selected strategy name.
     :return tuple[nx.Graph, str]: Graph and normalized seed paper ID.
-    :raises ValueError: If strategy is unsupported.
+    :raises ValueError: If the strategy is unsupported.
     """
     if strategy not in _STRATEGY_DISPATCH:
         raise ValueError(f"Unsupported strategy: {strategy}")
-
-    args_for_validation = argparse.Namespace(**vars(args))
-    setattr(args_for_validation, "strategy", strategy)
-
-    if validate_contract:
-        parser_snapshot, build_parser_snapshot, _, _ = _create_parser()
-        del parser_snapshot
-        defaults_namespace = build_parser_snapshot.parse_args(["seed"])
-        merged_values = vars(defaults_namespace)
-        merged_values.update(vars(args_for_validation))
-        args_for_validation = argparse.Namespace(**merged_values)
-        setattr(args_for_validation, "strategy", strategy)
-        inferred_provided = (
-            provided
-            if provided is not None
-            else _infer_provided_build_option_dests(
-                args=args_for_validation,
-                build_parser=build_parser_snapshot,
-            )
-        )
-
-        _validate_programmatic_build_values(
-            args_for_validation,
-            build_parser_snapshot,
-            _ValueErrorParserErrorSink(),
-        )
-        _validate_build_cli_contract(
-            args_for_validation,
-            _ValueErrorParserErrorSink(),
-            inferred_provided,
-        )
-        _synchronize_namespace_values(args, args_for_validation)
-
-    builder = _STRATEGY_DISPATCH[strategy].factory(args)
-    return builder.build_graph(args.paper_id)
-
-
-def _infer_provided_build_option_dests(
-    args: argparse.Namespace, build_parser: argparse.ArgumentParser
-) -> set[str]:
-    """Infer likely explicit build options from a parsed namespace.
-
-    This heuristic compares namespace values against parser defaults. It cannot detect
-    explicit re-specification of the same default, but it prevents most silent
-    programmatic bypasses for strategy-scoped option contracts.
-
-    For precise control, programmatic callers should pass the ``provided`` parameter
-    to :func:`_build_strategy_graph` directly, bypassing this heuristic entirely.
-
-    :param argparse.Namespace args: Candidate parsed namespace.
-    :param argparse.ArgumentParser build_parser: Build subcommand parser.
-    :return Set[str]: Option destinations inferred as explicitly set.
-    """
-    provided: set[str] = set()
-    for action in build_parser._actions:
-        if not action.option_strings:
-            continue
-        dest = action.dest
-        if not hasattr(args, dest):
-            continue
-        current_value = getattr(args, dest)
-        if isinstance(action, argparse._AppendAction):
-            if current_value is not None:
-                provided.add(dest)
-        else:
-            default_value = build_parser.get_default(dest)
-            if current_value != default_value:
-                provided.add(dest)
-    return provided
+    return _STRATEGY_DISPATCH[strategy](args).build_graph(args.paper_id)

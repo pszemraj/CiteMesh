@@ -2158,6 +2158,9 @@ def test_cli_argument_validation_contracts() -> None:
             ["build", "arxiv:1706.03762", "--similarity-threshold", "nan"],
             "must be a finite float",
         ),
+        (["build", "seed", "--similarity-threshold", "banana"], "must be a float"),
+        (["build", "   "], "must be a non-empty string"),
+        (["build", "seed", "--strategy", "unknown"], "invalid choice"),
         (["search", "attention", "--limit", "0"], "must be at least 1"),
         (["search", ""], "must be a non-empty string"),
         (["build", "", "--strategy", "citation"], "must be a non-empty string"),
@@ -2635,7 +2638,7 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
             "--strategy",
             "hybrid",
             "--max-papers",
-            "30",
+            "40",
             "--max-citations",
             "6",
             "--max-references",
@@ -2649,7 +2652,7 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
         build_parser,
         provided={"max_papers", "max_citations", "max_references", "max_semantic"},
     )
-    assert explicit_hybrid.max_papers == 30
+    assert explicit_hybrid.max_papers == 40
     assert explicit_hybrid.max_citations == 6
     assert explicit_hybrid.max_references == 7
     assert cli_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
@@ -4583,12 +4586,15 @@ def test_hybrid_disabled_semantic_branch_skips_embedding_side_effect_logs(
 
 def test_strategy_dispatches_to_matching_builder_kwargs(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Dispatch and sidecars should retain the same graph-shaping settings.
 
     :param pytest.MonkeyPatch monkeypatch: Replaces builders with recording stubs.
+    :param Path tmp_path: Isolated export directory.
     :return None: Checks builder arguments and strategy-specific sidecar values.
     """
+    monkeypatch.delenv("S2_API_KEY", raising=False)
     cases = [
         (
             "citation",
@@ -4638,6 +4644,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "binary_rescore_multiplier": 9,
                 "calibration_sample_size": 123,
                 "encode_batch_size": 48,
+                "cache_compression": "lzf",
             },
             {
                 "max_papers": 11,
@@ -4657,8 +4664,8 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "binary_prefilter": True,
                 "binary_rescore_multiplier": 9,
                 "calibration_sample_size": 123,
-                "cache_compression": "gzip",
-                "cache_compression_level": 1,
+                "cache_compression": "lzf",
+                "cache_compression_level": 0,
                 "encode_batch_size": 48,
                 "enable_torch_compile": False,
                 "device": "auto",
@@ -4720,23 +4727,41 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
     ]
     for strategy, builder_name, namespace_overrides, expected_kwargs in cases:
         captured: dict[str, object] = {}
-        namespace = _dispatch_namespace(**namespace_overrides)
+        output = tmp_path / f"{strategy}.json"
+        argv = [
+            "build",
+            "seed",
+            "--strategy",
+            strategy,
+            "--max-papers",
+            "11",
+            "--export",
+            "json",
+            "--output",
+            str(output),
+        ]
+        for dest, value in namespace_overrides.items():
+            flag = (
+                "--batch-size"
+                if dest == "encode_batch_size"
+                else "--" + dest.replace("_", "-")
+            )
+            if isinstance(value, bool):
+                if value:
+                    argv.append(flag)
+            else:
+                argv.extend([flag, str(value)])
         monkeypatch.setattr(
             build_options_module,
             builder_name,
             _make_builder_stub(captured, graph=build_seed_graph("seed")),
         )
-        graph, seed_id = cli_module._build_strategy_graph(namespace, strategy)
-        assert seed_id == "seed"
-        assert graph.number_of_nodes() == 1
+        result = run_cli_command(argv)
+        assert result.returncode == 0, result.stderr
         assert captured == expected_kwargs
-        build_config = cli_module._build_graph_config_payload(
-            namespace,
-            seed_id,
-            {},
-            ["json"],
-            {"json": Path(f"out/{strategy}.json")},
-        )["build"]
+        build_config = json.loads(output.with_suffix(".config.json").read_text())[
+            "build"
+        ]
         if "similarity_threshold" in captured:
             assert (
                 build_config["citation"]["similarity_threshold"]
@@ -4752,141 +4777,14 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         monkeypatch.setattr(
             build_options_module, "SemanticScholarClient", client_factory
         )
-        namespace.refresh_paper_cache = True
-        namespace._s2_api_key = "configured-key"
-        cli_module._build_strategy_graph(namespace, strategy, validate_contract=False)
+        monkeypatch.setenv("S2_API_KEY", "configured-key")
+        result = run_cli_command([*argv, "--refresh-paper-cache"])
+        assert result.returncode == 0, result.stderr
         client_factory.assert_called_once_with(
             api_key="configured-key", refresh_paper_cache=True
         )
         assert captured == {**expected_kwargs, "client": client_factory.return_value}
-
-
-def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic hybrid dispatch should carry normalized implicit defaults."""
-    _, build_parser, _, _ = cli_module._create_parser()
-    namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "HybridGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    graph, seed_id = cli_module._build_strategy_graph(namespace, "hybrid")
-    assert seed_id == "seed"
-    assert graph.number_of_nodes() == 1
-    assert captured["max_papers"] == HYBRID_DEFAULT_MAX_PAPERS
-    assert captured["max_citations"] == HYBRID_DEFAULT_MAX_CITATIONS
-    assert captured["max_references"] == HYBRID_DEFAULT_MAX_REFERENCES
-    assert namespace.max_papers == HYBRID_DEFAULT_MAX_PAPERS
-    assert namespace.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
-    assert namespace.max_references == HYBRID_DEFAULT_MAX_REFERENCES
-
-
-def test_programmatic_embedding_dispatch_normalizes_lzf_level(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic embedding dispatch should pass normalized lzf level to builder."""
-    _, build_parser, _, _ = cli_module._create_parser()
-    namespace = build_parser.parse_args(
-        ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
-    )
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "EmbeddingGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
-    assert seed_id == "seed"
-    assert graph.number_of_nodes() == 1
-    assert captured["cache_compression"] == "lzf"
-    assert captured["cache_compression_level"] == 0
-    assert namespace.cache_compression_level == 0
-
-
-def test_programmatic_embedding_dispatch_propagates_normalized_scalars(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic embedding dispatch should pass normalized scalar values to builders."""
-    namespace = _dispatch_namespace(
-        top_k="4",
-        encode_batch_size="32",
-        cache_compression="lzf",
-    )
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "EmbeddingGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
-    assert seed_id == "seed"
-    assert graph.number_of_nodes() == 1
-    assert captured["top_k"] == 4
-    assert captured["encode_batch_size"] == 32
-    assert captured["cache_compression_level"] == 0
-    assert namespace.top_k == 4
-    assert namespace.encode_batch_size == 32
-    assert namespace.cache_compression_level == 0
-
-
-def test_programmatic_strategy_dispatch_contracts() -> None:
-    """Programmatic dispatch should enforce strategy validation."""
-    namespace = _dispatch_namespace()
-    with pytest.raises(ValueError, match="Unsupported strategy: unknown"):
-        cli_module._build_strategy_graph(namespace, "unknown")
-
-    invalid_namespace = _dispatch_namespace(
-        similarity_threshold=0.21,
-        model="org/generic-embedding-model",
-    )
-    with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
-        cli_module._build_strategy_graph(invalid_namespace, "recommendation")
-
-    invalid_embedding_namespace = _dispatch_namespace(
-        storage_precision="float32",
-        calibration_sample_size=512,
-    )
-    with pytest.raises(
-        ValueError,
-        match="--calibration-sample-size requires --storage-precision int8",
-    ):
-        cli_module._build_strategy_graph(invalid_embedding_namespace, "embedding")
-
-
-def test_programmatic_strategy_dispatch_validates_scalar_contracts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic dispatch should enforce parser-equivalent scalar validation."""
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "CitationGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    with pytest.raises(ValueError, match="must be at least 1"):
-        cli_module._build_strategy_graph(_dispatch_namespace(max_papers=0), "citation")
-    assert captured == {}
-
-    with pytest.raises(ValueError, match="must be a float"):
-        cli_module._build_strategy_graph(
-            _dispatch_namespace(similarity_threshold="banana"),
-            "citation",
-        )
-    assert captured == {}
-
-    with pytest.raises(ValueError, match="must be a non-empty string"):
-        cli_module._build_strategy_graph(
-            _dispatch_namespace(paper_id="   "),
-            "citation",
-        )
-    assert captured == {}
+        monkeypatch.delenv("S2_API_KEY")
 
 
 @pytest.mark.parametrize("width", [60, 80, 120])
@@ -5278,28 +5176,6 @@ def test_export_dispatch_table_covers_all_declared_formats() -> None:
         f"Dispatch gap: covered={sorted(covered)}, "
         f"declared={sorted(cli_module.EXPORT_FORMATS)}"
     )
-
-
-def test_programmatic_dispatch_respects_explicit_provided_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """_build_strategy_graph with explicit provided set should bypass inference."""
-    _, build_parser, _, _ = cli_module._create_parser()
-    namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "HybridGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    # Explicitly mark max_papers as provided → hybrid override should NOT apply
-    graph, seed_id = cli_module._build_strategy_graph(
-        namespace, "hybrid", provided={"max_papers"}
-    )
-    assert seed_id == "seed"
-    # max_papers should remain the parser default (40), not the hybrid override (45)
-    assert captured["max_papers"] == 40
 
 
 def test_builder_defaults_match_cli_defaults() -> None:

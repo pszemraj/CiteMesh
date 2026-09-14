@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any, Protocol
 
 import networkx as nx
@@ -127,11 +126,6 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: dict[str, int] = {
     "max_citations": HYBRID_DEFAULT_MAX_CITATIONS,
     "max_references": HYBRID_DEFAULT_MAX_REFERENCES,
 }
-_PROGRAMMATIC_BUILD_VALUE_DESTS: set[str] = set(_BUILD_STRATEGY_OPTION_SUPPORT) | {
-    "paper_id",
-    "max_papers",
-    "refresh_paper_cache",
-}
 _HYBRID_EMBEDDING_OPTION_DESTS: set[str] = {
     "model",
     "model_profile",
@@ -158,13 +152,6 @@ _HYBRID_EMBEDDING_OPTION_DESTS: set[str] = {
     "semantic_source",
     "candidate_pool_size",
 }
-
-
-@dataclass(frozen=True)
-class _StrategyDispatchSpec:
-    """Strategy dispatch metadata for CLI construction."""
-
-    factory: StrategyFactory
 
 
 def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> dict[str, object]:
@@ -471,43 +458,35 @@ def _strategy_score_contract(strategy: str) -> dict[str, object]:
     }
 
 
-_STRATEGY_DISPATCH: dict[str, _StrategyDispatchSpec] = {
-    "citation": _StrategyDispatchSpec(
-        factory=lambda cli_args: CitationGraphBuilder(
-            **_configured_client_kwargs(cli_args),
-            max_papers=cli_args.max_papers,
-            max_citations=cli_args.max_citations,
-            max_references=cli_args.max_references,
-            similarity_threshold=cli_args.similarity_threshold,
-            fetch_references=not cli_args.no_references,
-            refresh_reference_cache=cli_args.refresh_reference_cache,
-        ),
+_STRATEGY_DISPATCH: dict[str, StrategyFactory] = {
+    "citation": lambda cli_args: CitationGraphBuilder(
+        **_configured_client_kwargs(cli_args),
+        max_papers=cli_args.max_papers,
+        max_citations=cli_args.max_citations,
+        max_references=cli_args.max_references,
+        similarity_threshold=cli_args.similarity_threshold,
+        fetch_references=not cli_args.no_references,
+        refresh_reference_cache=cli_args.refresh_reference_cache,
     ),
-    "recommendation": _StrategyDispatchSpec(
-        factory=lambda cli_args: RecommendationGraphBuilder(
-            **_configured_client_kwargs(cli_args),
-            max_papers=cli_args.max_papers,
-            fetch_references=not cli_args.no_references,
-            refresh_reference_cache=cli_args.refresh_reference_cache,
-            similarity_threshold=cli_args.similarity_threshold,
-        ),
+    "recommendation": lambda cli_args: RecommendationGraphBuilder(
+        **_configured_client_kwargs(cli_args),
+        max_papers=cli_args.max_papers,
+        fetch_references=not cli_args.no_references,
+        refresh_reference_cache=cli_args.refresh_reference_cache,
+        similarity_threshold=cli_args.similarity_threshold,
     ),
-    "embedding": _StrategyDispatchSpec(
-        factory=lambda cli_args: EmbeddingGraphBuilder(
-            max_papers=cli_args.max_papers,
-            top_k=cli_args.top_k,
-            **_shared_embedding_builder_kwargs(cli_args),
-        ),
+    "embedding": lambda cli_args: EmbeddingGraphBuilder(
+        max_papers=cli_args.max_papers,
+        top_k=cli_args.top_k,
+        **_shared_embedding_builder_kwargs(cli_args),
     ),
-    "hybrid": _StrategyDispatchSpec(
-        factory=lambda cli_args: HybridGraphBuilder(
-            max_papers=cli_args.max_papers,
-            max_citations=cli_args.max_citations,
-            max_references=cli_args.max_references,
-            fetch_references=not cli_args.no_references,
-            refresh_reference_cache=cli_args.refresh_reference_cache,
-            max_semantic=cli_args.max_semantic,
-            **_shared_embedding_builder_kwargs(cli_args),
-        ),
+    "hybrid": lambda cli_args: HybridGraphBuilder(
+        max_papers=cli_args.max_papers,
+        max_citations=cli_args.max_citations,
+        max_references=cli_args.max_references,
+        fetch_references=not cli_args.no_references,
+        refresh_reference_cache=cli_args.refresh_reference_cache,
+        max_semantic=cli_args.max_semantic,
+        **_shared_embedding_builder_kwargs(cli_args),
     ),
 }
