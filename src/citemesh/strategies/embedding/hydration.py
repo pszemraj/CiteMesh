@@ -16,6 +16,8 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
 from typing import (
     Any,
+    Final,
+    Literal,
 )
 
 import numpy as np
@@ -25,6 +27,7 @@ from citemesh.data.embedding_cache import (
     EMBEDDING_DATASET_CHUNK_ROWS,
     CacheNamespacePayloadStats,
     _corpus_size_coverage,
+    _corpus_size_from_token,
     _corpus_size_token,
 )
 from citemesh.progress import progress_task
@@ -45,6 +48,16 @@ from .records import (
 logger = logging.getLogger(__name__)
 
 HYDRATION_FLUSH_SIZE = EMBEDDING_DATASET_CHUNK_ROWS
+
+#: Threaded marker for "the corpus cap this build requested". A pass that
+#: refreshes a reused cache works at the cap that cache records instead, and
+#: that cap may itself be ``None`` for an uncapped corpus, so "the caller said
+#: nothing" cannot be spelled ``None``.
+_REQUESTED_CORPUS_SIZE: Final = "requested"
+
+#: Corpus cap threaded into a hydration pass: an explicit cap (``None`` meaning
+#: uncapped), or :data:`_REQUESTED_CORPUS_SIZE`.
+_CorpusSizeArg = int | None | Literal["requested"]
 
 
 class _CorpusHydrationMixin:
@@ -127,6 +140,21 @@ class _CorpusHydrationMixin:
             (paper_id, metadata, embedding)
             for _, paper_id, metadata, embedding, _ in scored_candidates[:limited]
         ]
+
+    def _effective_corpus_size(self, corpus_size: _CorpusSizeArg) -> int | None:
+        """Resolve a threaded corpus cap into the cap a pass must apply.
+
+        Most passes work at the cap this build requested; a pass that refreshes
+        a reused cache works at the cap that cache records, which may be larger
+        than the request or uncapped entirely.
+
+        :param _CorpusSizeArg corpus_size: Explicit cap to apply, or
+            :data:`_REQUESTED_CORPUS_SIZE` for the cap this build requested.
+        :return Optional[int]: Cap to apply, ``None`` when the pass is uncapped.
+        """
+        if corpus_size == _REQUESTED_CORPUS_SIZE:
+            return self.corpus_size
+        return None if corpus_size is None else int(corpus_size)
 
     def _ensure_cache_hydrated(self, use_streaming: bool) -> None:
         """Ensure cache contains hydrated corpus embeddings for current split/cap.
@@ -560,6 +588,10 @@ class _CorpusHydrationMixin:
         to the request — another split or source, or an unreadable legacy token —
         falls through to the destructive rebuild.
 
+        Reuse is not a free pass on upstream: every later run at the smaller cap
+        lands here, so a covering cache is still refreshed against the source at
+        the cap it records.
+
         :param bool use_streaming: Whether hydration mode is streaming.
         :param str source: Dataset source recorded on the complete cache.
         :param CacheNamespacePayloadStats stats: Current namespace payload stats.
@@ -586,10 +618,109 @@ class _CorpusHydrationMixin:
                 _corpus_size_token(self.corpus_size),
                 stats.sqlite_rows,
             )
+            self._refresh_reused_corpus_cache(
+                use_streaming=use_streaming, source=source, stats=stats
+            )
             return True
 
         return self._extend_cached_corpus_selection(
             use_streaming=use_streaming, source=source, stats=stats
+        )
+
+    def _refresh_reused_corpus_cache(
+        self, *, use_streaming: bool, source: str, stats: CacheNamespacePayloadStats
+    ) -> None:
+        """Keep a reused covering corpus current with upstream, at its own cap.
+
+        Reuse is settled before the hydrated-cache revalidation can run: the
+        recorded token deliberately stays where the vectors are, so it never
+        matches the smaller request that lands here and the revalidation's
+        refreshes are skipped every time. Without this, a cache reused at a
+        smaller cap would never admit an upstream submission again.
+
+        The refresh therefore runs at the cached cap, not the requested one:
+        that is the corpus the token claims, the corpus the reuse warning just
+        disclosed, and the corpus search reads.
+
+        :param bool use_streaming: Whether hydration mode is streaming.
+        :param str source: Dataset source recorded on the complete cache.
+        :param CacheNamespacePayloadStats stats: Current namespace payload stats.
+        :return None: Mutates cache rows in-place when upstream has moved.
+        """
+        try:
+            cached_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
+        except ValueError:  # pragma: no cover - coverage already read this token
+            return
+
+        try:
+            if cached_corpus_size is None:
+                # An uncapped cache covers every capped request, and recency for
+                # an uncapped corpus is the row-count question. The capped
+                # refresh declines this shape outright, so the two stay mutually
+                # exclusive here exactly as they are on the revalidation path.
+                self._refresh_hydrated_full_corpus_cache(
+                    use_streaming=use_streaming,
+                    cached_dataset_source=source,
+                    corpus_size=None,
+                )
+            else:
+                self._refresh_capped_corpus_recency(
+                    use_streaming=use_streaming,
+                    cached_dataset_source=source,
+                    corpus_size=cached_corpus_size,
+                )
+        except Exception as exc:
+            # Unlike the extension, which is the request, this top-up is
+            # opportunistic over a cache that already covers what was asked for,
+            # so a failed source read is disclosed rather than failing the build.
+            logger.warning(
+                "Could not refresh the reused corpus for %s/%s against upstream: "
+                "%s. The cached %s corpus still serves this request; re-run to "
+                "retry admitting newer papers.",
+                source,
+                self.dataset_split,
+                exc,
+                stats.hydration_corpus_size,
+            )
+        finally:
+            self._restore_reused_corpus_completeness(
+                source=source, corpus_size=cached_corpus_size
+            )
+
+    def _restore_reused_corpus_completeness(
+        self, *, source: str, corpus_size: int | None
+    ) -> None:
+        """Re-stamp a reused namespace as complete at the cap it holds.
+
+        A refresh that marks a namespace incomplete on its way to a rebuild is
+        reasoning about a request that matches the recorded token; this one is
+        not. Left incomplete under a token the request cannot match, the cache
+        would fail the resume's exact-token check on the next run and be handed
+        to the destructive rebuild — a refresh failure costing the very cache
+        this branch just decided to reuse. These passes only ever add rows, so
+        the namespace is still complete at its recorded cap either way.
+
+        :param str source: Dataset source recorded on the complete cache.
+        :param Optional[int] corpus_size: Cap the cached rows were recorded at.
+        :return None: Restores hydration metadata only when a pass changed it.
+        """
+        stats = self.embedding_cache.payload_stats()
+        recorded_token = _corpus_size_token(corpus_size)
+        if stats.hydration_complete and stats.hydration_corpus_size == recorded_token:
+            return
+
+        logger.warning(
+            "Restoring the reused corpus for %s/%s to complete at %s after an "
+            "unfinished refresh; its cached rows still serve this request.",
+            source,
+            self.dataset_split,
+            recorded_token,
+        )
+        self.embedding_cache.mark_hydrated(
+            dataset_source=source,
+            dataset_split=self.dataset_split,
+            corpus_size=corpus_size,
+            complete=True,
         )
 
     def _extend_cached_corpus_selection(
@@ -933,6 +1064,7 @@ class _CorpusHydrationMixin:
         operation: str,
         row_limit: int | None = None,
         row_offset: int | None = None,
+        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> Iterable[dict[str, Any]]:
         """Load a hydration slice while requiring the recorded source exactly.
 
@@ -941,6 +1073,8 @@ class _CorpusHydrationMixin:
         :param str operation: Caller-facing operation name for mismatch errors.
         :param Optional[int] row_limit: Optional number of rows to load.
         :param Optional[int] row_offset: Optional source row offset.
+        :param _CorpusSizeArg corpus_size: Cap the newest-first selection applies,
+            defaulting to the cap this build requested.
         :return Iterable[Dict[str, Any]]: The exact-source dataset slice.
         :raises RuntimeError: If the loader resolves a different source.
         """
@@ -948,6 +1082,7 @@ class _CorpusHydrationMixin:
             use_streaming=use_streaming,
             row_limit=row_limit,
             row_offset=row_offset,
+            corpus_size=self._effective_corpus_size(corpus_size),
         )
         if resolved_source != source:
             raise RuntimeError(
@@ -968,6 +1103,7 @@ class _CorpusHydrationMixin:
         row_offset: int | None = None,
         existing_paper_ids: set[str] | None = None,
         max_new_records: int | None = None,
+        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> _HydrationSourceSliceResult:
         """Load an exact-source slice and report cache and source progress.
 
@@ -983,14 +1119,18 @@ class _CorpusHydrationMixin:
         :param Optional[int] row_offset: Optional source row offset.
         :param Optional[Set[str]] existing_paper_ids: IDs to skip during reconciliation.
         :param Optional[int] max_new_records: Optional cap on newly hydrated records.
+        :param _CorpusSizeArg corpus_size: Cap this pass selects and hydrates at,
+            defaulting to the cap this build requested.
         :return _HydrationSourceSliceResult: Cache writes and source-consumption state.
         """
+        slice_corpus_size = self._effective_corpus_size(corpus_size)
         dataset = self._load_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
             operation=operation,
             row_limit=row_limit,
             row_offset=row_offset,
+            corpus_size=slice_corpus_size,
         )
         source_rows_consumed = 0
         source_exhausted = False
@@ -1018,6 +1158,7 @@ class _CorpusHydrationMixin:
             existing_paper_ids=existing_paper_ids,
             max_new_records=max_new_records,
             fallback_index_offset=int(row_offset or 0),
+            corpus_size=slice_corpus_size,
         )
         return _HydrationSourceSliceResult(
             hydrated_records=hydrated_records,
@@ -1032,6 +1173,7 @@ class _CorpusHydrationMixin:
         updated_rows: int,
         upstream_rows: int | None,
         mark_complete: bool,
+        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> bool:
         """Finalize hydration completion and row-count reconciliation metadata.
 
@@ -1039,13 +1181,15 @@ class _CorpusHydrationMixin:
         :param int updated_rows: Current cached payload row count.
         :param Optional[int] upstream_rows: Upstream split row count, if known.
         :param bool mark_complete: Whether this path has completed hydration.
+        :param _CorpusSizeArg corpus_size: Corpus the rows were hydrated at,
+            defaulting to the one this build requested.
         :return bool: ``True`` when row counts match or cannot be compared.
         """
         if mark_complete:
             self.embedding_cache.mark_hydrated(
                 dataset_source=source,
                 dataset_split=self.dataset_split,
-                corpus_size=self.corpus_size,
+                corpus_size=self._effective_corpus_size(corpus_size),
                 complete=True,
             )
         if upstream_rows is not None and updated_rows < upstream_rows:
@@ -1190,6 +1334,7 @@ class _CorpusHydrationMixin:
         existing_paper_ids: set[str] | None = None,
         max_new_records: int | None = None,
         fallback_index_offset: int = 0,
+        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> int:
         """Hydrate cache records from dataset iterator without clearing namespace.
 
@@ -1200,11 +1345,16 @@ class _CorpusHydrationMixin:
             already-cached paper IDs while hydrating.
         :param Optional[int] max_new_records: Optional cap on newly selected records.
         :param int fallback_index_offset: Source offset for synthetic paper IDs.
+        :param _CorpusSizeArg corpus_size: Cap on rows taken from the slice,
+            defaulting to the cap this build requested. A refresh of a reused
+            cache passes the larger cap that cache holds, so its already-selected
+            rows are not truncated to the smaller request.
         :return int: Number of records routed into cache batching.
         """
         if max_new_records is not None and int(max_new_records) < 1:
             raise ValueError("max_new_records must be at least 1 when provided")
 
+        row_cap = self._effective_corpus_size(corpus_size)
         hydrated_records = 0
         selected_records = 0
 
@@ -1218,7 +1368,7 @@ class _CorpusHydrationMixin:
                 pending_write: Future[int] | None = None
                 pending_batch_size = 0
                 for local_idx, raw_record in enumerate(dataset):
-                    if self.corpus_size is not None and local_idx >= self.corpus_size:
+                    if row_cap is not None and local_idx >= row_cap:
                         break
 
                     metadata = _extract_dataset_paper_metadata(
@@ -1274,7 +1424,7 @@ class _CorpusHydrationMixin:
         return max(int(stats.sqlite_rows), int(stats.embedding_rows))
 
     def _select_newest_corpus_rows(
-        self, dataset: Iterable[dict[str, Any]], dataset_source: str
+        self, dataset: Iterable[dict[str, Any]], dataset_source: str, corpus_size: int
     ) -> Iterable[dict[str, Any]]:
         """Select the ``corpus_size`` most recently submitted rows by arXiv ID.
 
@@ -1287,10 +1437,12 @@ class _CorpusHydrationMixin:
 
         :param Iterable[Dict[str, Any]] dataset: Loaded dataset or record stream.
         :param str dataset_source: Dataset source identifier (for logging).
+        :param int corpus_size: Cap the selection applies. A refresh of a reused
+            cache passes the cap that cache holds, not the requested one.
         :return Iterable[Dict[str, Any]]: Selected rows (or the original
             iterable when no arXiv IDs are parseable).
         """
-        limit = int(self.corpus_size)
+        limit = int(corpus_size)
         column_names = getattr(dataset, "column_names", None)
         select_by_index = column_names is not None and hasattr(dataset, "select")
         if select_by_index:
@@ -1396,7 +1548,11 @@ class _CorpusHydrationMixin:
             return None
 
     def _refresh_hydrated_full_corpus_cache(
-        self, *, use_streaming: bool, cached_dataset_source: str | None
+        self,
+        *,
+        use_streaming: bool,
+        cached_dataset_source: str | None,
+        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> None:
         """Incrementally refresh hydrated full-corpus cache when source row count grows.
 
@@ -1405,10 +1561,17 @@ class _CorpusHydrationMixin:
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Hydrated dataset source token.
+        :param _CorpusSizeArg corpus_size: Corpus this pass refreshes, defaulting
+            to the one this build requested. A reused uncapped cache passes
+            ``None`` so the pass refreshes the corpus the namespace records
+            rather than the smaller cap the request named.
         :return None: Mutates cache in-place when incremental refresh is required.
         """
         source = str(cached_dataset_source or "").strip()
-        row_counts = self._incremental_refresh_row_counts(source)
+        refreshed_corpus_size = self._effective_corpus_size(corpus_size)
+        row_counts = self._incremental_refresh_row_counts(
+            source, corpus_size=refreshed_corpus_size
+        )
         if row_counts is None:
             return
         cached_rows, upstream_rows = row_counts
@@ -1416,7 +1579,7 @@ class _CorpusHydrationMixin:
         self.embedding_cache.mark_hydrated(
             dataset_source=source,
             dataset_split=self.dataset_split,
-            corpus_size=self.corpus_size,
+            corpus_size=refreshed_corpus_size,
             complete=False,
         )
         self._ensure_int8_calibration_ranges(
@@ -1442,6 +1605,7 @@ class _CorpusHydrationMixin:
             progress_total=delta_rows,
             progress_label="Refreshing dataset",
             operation="Incremental refresh",
+            corpus_size=refreshed_corpus_size,
         ).hydrated_records
         updated_rows = self._cached_payload_row_count()
         reconciled_records, updated_rows = self._reconcile_refreshed_corpus_rows(
@@ -1450,6 +1614,7 @@ class _CorpusHydrationMixin:
             delta_rows=delta_rows,
             upstream_rows=upstream_rows,
             updated_rows=updated_rows,
+            corpus_size=refreshed_corpus_size,
         )
 
         logger.info(
@@ -1467,6 +1632,7 @@ class _CorpusHydrationMixin:
             updated_rows=updated_rows,
             upstream_rows=upstream_rows,
             mark_complete=updated_rows > 0,
+            corpus_size=refreshed_corpus_size,
         )
         if not rows_reconciled:
             logger.info(
@@ -1481,7 +1647,11 @@ class _CorpusHydrationMixin:
             )
 
     def _refresh_capped_corpus_recency(
-        self, *, use_streaming: bool, cached_dataset_source: str | None
+        self,
+        *,
+        use_streaming: bool,
+        cached_dataset_source: str | None,
+        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> None:
         """Admit upstream submissions newer than a capped corpus's watermark.
 
@@ -1500,9 +1670,14 @@ class _CorpusHydrationMixin:
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Hydrated dataset source token.
+        :param _CorpusSizeArg corpus_size: Capped corpus this pass refreshes,
+            defaulting to the one this build requested. A reused larger cache
+            passes the cap it records, which is the corpus its token claims and
+            the one search reads.
         :return None: Mutates cache in-place when newer papers are admitted.
         """
-        if self.corpus_size is None or ":" in str(self.dataset_split):
+        refreshed_corpus_size = self._effective_corpus_size(corpus_size)
+        if refreshed_corpus_size is None or ":" in str(self.dataset_split):
             return
         source = str(cached_dataset_source or "").strip()
         if not source:
@@ -1534,7 +1709,9 @@ class _CorpusHydrationMixin:
             return
 
         newest_upstream_key = self._upstream_newest_chronology_key(
-            use_streaming=use_streaming, source=source
+            use_streaming=use_streaming,
+            source=source,
+            corpus_size=refreshed_corpus_size,
         )
         if newest_upstream_key is None or newest_upstream_key <= watermark:
             logger.info(
@@ -1543,7 +1720,7 @@ class _CorpusHydrationMixin:
                 "state so the next build skips the source scan.",
                 source,
                 self.dataset_split,
-                self.corpus_size,
+                refreshed_corpus_size,
                 cached_rows,
                 upstream_rows,
             )
@@ -1558,10 +1735,11 @@ class _CorpusHydrationMixin:
             source=source,
             cached_rows=cached_rows,
             upstream_rows=upstream_rows,
+            corpus_size=refreshed_corpus_size,
         )
 
     def _upstream_newest_chronology_key(
-        self, *, use_streaming: bool, source: str
+        self, *, use_streaming: bool, source: str, corpus_size: int
     ) -> int | None:
         """Return the newest submission key the upstream newest-N selection holds.
 
@@ -1572,6 +1750,7 @@ class _CorpusHydrationMixin:
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param str source: Hydrated dataset source token.
+        :param int corpus_size: Capped corpus the selection is ranked for.
         :return Optional[int]: Newest packed chronology key, or ``None`` when no
             selected row carries a parseable arXiv ID.
         """
@@ -1579,6 +1758,7 @@ class _CorpusHydrationMixin:
             use_streaming=use_streaming,
             source=source,
             operation="Capped corpus recency check",
+            corpus_size=corpus_size,
         )
         column_names = getattr(dataset, "column_names", None)
         if column_names is not None and "id" in column_names:
@@ -1600,6 +1780,7 @@ class _CorpusHydrationMixin:
         source: str,
         cached_rows: int,
         upstream_rows: int,
+        corpus_size: int,
     ) -> None:
         """Encode the newest-N rows the capped cache is missing, in place.
 
@@ -1611,6 +1792,7 @@ class _CorpusHydrationMixin:
         :param str source: Hydrated dataset source token.
         :param int cached_rows: Cached payload row count before this pass.
         :param int upstream_rows: Upstream split row count.
+        :param int corpus_size: Capped corpus the selection is re-run at.
         :return None: Mutates cache rows and the reconciliation marker in-place.
         """
         logger.info(
@@ -1619,7 +1801,7 @@ class _CorpusHydrationMixin:
             "only the papers the cache is missing.",
             source,
             self.dataset_split,
-            self.corpus_size,
+            corpus_size,
             cached_rows,
         )
         self._ensure_int8_calibration_ranges(
@@ -1629,10 +1811,11 @@ class _CorpusHydrationMixin:
         refresh = self._hydrate_exact_hydration_source_slice(
             use_streaming=use_streaming,
             source=source,
-            progress_total=self.corpus_size,
+            progress_total=corpus_size,
             progress_label="Refreshing dataset",
             operation="Capped corpus recency refresh",
             existing_paper_ids=self.embedding_cache.get_cached_paper_ids(),
+            corpus_size=corpus_size,
         )
         updated_rows = self._cached_payload_row_count()
         if not refresh.source_exhausted:
@@ -1646,13 +1829,13 @@ class _CorpusHydrationMixin:
             )
             return
 
-        if updated_rows > self.corpus_size:
+        if updated_rows > corpus_size:
             logger.warning(
                 "Refreshed capped corpus has %d cached rows, exceeding "
                 "--corpus-size %d after the source selection changed. Retained "
                 "existing vectors; rebuild the corpus to apply the cap exactly.",
                 updated_rows,
-                self.corpus_size,
+                corpus_size,
             )
         self.embedding_cache.set_hydration_rowcount_reconciliation(
             upstream_rows=upstream_rows,
@@ -1668,7 +1851,9 @@ class _CorpusHydrationMixin:
             upstream_rows,
         )
 
-    def _incremental_refresh_row_counts(self, source: str) -> tuple[int, int] | None:
+    def _incremental_refresh_row_counts(
+        self, source: str, *, corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE
+    ) -> tuple[int, int] | None:
         """Decide whether an append-only refresh applies, and for how many rows.
 
         Returning ``None`` means the caller must not run an incremental refresh:
@@ -1677,10 +1862,13 @@ class _CorpusHydrationMixin:
         already proved this exact row-count delta is a duplicate-ID artifact.
 
         :param str source: Hydrated dataset source token.
+        :param _CorpusSizeArg corpus_size: Corpus this pass refreshes, defaulting
+            to the one this build requested.
         :return Optional[Tuple[int, int]]: ``(cached_rows, upstream_rows)`` when a
             refresh is warranted, otherwise ``None``.
         """
-        if self.corpus_size is not None:
+        refreshed_corpus_size = self._effective_corpus_size(corpus_size)
+        if refreshed_corpus_size is not None:
             return None
         if ":" in str(self.dataset_split):
             return None
@@ -1707,7 +1895,7 @@ class _CorpusHydrationMixin:
                 self.embedding_cache.mark_hydrated(
                     dataset_source=source,
                     dataset_split=self.dataset_split,
-                    corpus_size=self.corpus_size,
+                    corpus_size=refreshed_corpus_size,
                     complete=False,
                 )
             self.embedding_cache.clear_hydration_rowcount_reconciliation()
@@ -1736,6 +1924,7 @@ class _CorpusHydrationMixin:
         delta_rows: int,
         upstream_rows: int,
         updated_rows: int,
+        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> tuple[list[int], int]:
         """Chase rows a tail-only refresh missed, widening the scan as needed.
 
@@ -1749,6 +1938,8 @@ class _CorpusHydrationMixin:
         :param int delta_rows: Row growth the tail refresh already consumed.
         :param int upstream_rows: Upstream split row count.
         :param int updated_rows: Cache row count after the tail refresh.
+        :param _CorpusSizeArg corpus_size: Corpus the refresh runs at, defaulting
+            to the one this build requested.
         :return Tuple[List[int], int]: Records added per pass (head, full), and the
             cache row count after reconciliation.
         """
@@ -1807,6 +1998,7 @@ class _CorpusHydrationMixin:
                 operation=operation,
                 existing_paper_ids=cached_paper_ids,
                 max_new_records=(remaining_rows if pass_index == 0 else None),
+                corpus_size=corpus_size,
             ).hydrated_records
             updated_rows = self._cached_payload_row_count()
             previous_operation = operation
@@ -1817,15 +2009,19 @@ class _CorpusHydrationMixin:
         use_streaming: bool,
         row_limit: int | None = None,
         row_offset: int | None = None,
+        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> tuple[str, Iterable[dict[str, Any]]]:
         """Load the configured arXiv metadata dataset for hydration.
 
         :param bool use_streaming: Whether to load streaming dataset iterator.
         :param Optional[int] row_limit: Optional row cap override for dataset loading.
         :param Optional[int] row_offset: Optional row offset for delta refresh loading.
+        :param _CorpusSizeArg corpus_size: Cap the newest-first selection applies,
+            defaulting to the cap this build requested.
         :return Tuple[str, Iterable[Dict[str, Any]]]: Dataset source name and iterable.
         """
         load_dataset = deps._import_datasets_module().load_dataset
+        selection_corpus_size = self._effective_corpus_size(corpus_size)
 
         parsed_row_limit: int | None = None
         if row_limit is not None:
@@ -1868,12 +2064,14 @@ class _CorpusHydrationMixin:
             )
             dataset = islice(dataset, parsed_row_offset, stop_idx)
         elif (
-            self.corpus_size is not None
+            selection_corpus_size is not None
             and parsed_row_limit is None
             and parsed_row_offset == 0
         ):
             # Snapshot row order does not track submission time.
-            dataset = self._select_newest_corpus_rows(dataset, self.dataset_source)
+            dataset = self._select_newest_corpus_rows(
+                dataset, self.dataset_source, selection_corpus_size
+            )
         logger.debug(
             "Hydration dataset selected: %s (split=%s, streaming=%s, row_limit=%s, row_offset=%s).",
             self.dataset_source,

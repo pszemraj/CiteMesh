@@ -2495,7 +2495,9 @@ def test_newest_first_selection_drains_streams_with_a_cost_warning(
     )
 
     with caplog.at_level(logging.WARNING, logger="citemesh.strategies.embedding"):
-        selected = builder._select_newest_corpus_rows(stream, "dataset")
+        selected = builder._select_newest_corpus_rows(
+            stream, "dataset", builder.corpus_size
+        )
 
     assert [record["id"] for record in selected] == ["2503.00004", "2505.00002"]
     assert any(
@@ -3792,7 +3794,9 @@ def test_capped_hydration_fills_partial_chronology_with_source_order_rows(
 
     with caplog.at_level(logging.WARNING):
         selected = builder._select_newest_corpus_rows(
-            dataset if use_column_selection else iter(rows), "fake/source"
+            dataset if use_column_selection else iter(rows),
+            "fake/source",
+            builder.corpus_size,
         )
 
     expected = (
@@ -3834,7 +3838,9 @@ def test_select_newest_corpus_rows_uses_dataset_id_column() -> None:
     builder = EmbeddingGraphBuilder(
         max_papers=1, use_streaming=False, corpus_size=2, client=MagicMock()
     )
-    selected = builder._select_newest_corpus_rows(fake_dataset, "fake/source")
+    selected = builder._select_newest_corpus_rows(
+        fake_dataset, "fake/source", builder.corpus_size
+    )
     assert fake_dataset.selected_indices == [0, 3]
     assert [row["title"] for row in selected] == ["Jan 2026", "Mar 2026"]
 
@@ -4543,6 +4549,7 @@ def test_full_corpus_hydrated_cache_refreshes_incremental_delta(
         use_streaming=False,
         row_limit=10,
         row_offset=100,
+        corpus_size=None,
     )
     assert builder.embedding_cache.clear.call_count == 0
     assert builder.embedding_cache.mark_hydrated.call_args_list == [
@@ -4797,6 +4804,7 @@ def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
         use_streaming=False,
         row_limit=50,
         row_offset=100,
+        corpus_size=None,
     )
     clear_cache_mock.assert_not_called()
     builder.embedding_cache.mark_hydrated.assert_called_once_with(
@@ -5137,6 +5145,219 @@ def test_capped_cache_without_newer_upstream_papers_stops_rescanning(
     assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
     model.encode.assert_not_called()
     clear_cache_mock.assert_not_called()
+
+
+def test_reused_larger_capped_cache_still_admits_newer_upstream_papers(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A cache reused at a smaller cap must keep chasing upstream, not freeze.
+
+    The recorded token deliberately stays at the cached cap, so every run at the
+    smaller cap takes the reuse branch and never reaches the revalidation that
+    runs the recency refresh. The refresh must therefore run here, and at the
+    cached cap: selecting at the smaller request would admit only the top of the
+    chronology and leave the rest of the corpus the namespace claims stale.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param pytest.LogCaptureFixture caplog: Captured reuse and over-cap warnings.
+    :return None: Asserts every newly selected paper is encoded into the cache.
+    """
+    source = "fixture/source"
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=1,
+        cached_corpus_size=3,
+        cached_ids=("2501.00001", "2501.00002", "2501.00003"),
+    )
+    cache = builder.embedding_cache
+    # Two papers newer than the watermark: the newest-3 selection the cache
+    # records holds both, while a newest-1 selection would hold only the last.
+    records = [
+        {"id": "2501.00001", "title": "First", "abstract": "A"},
+        {"id": "2501.00002", "title": "Second", "abstract": "A"},
+        {"id": "2501.00003", "title": "Third", "abstract": "A"},
+        {"id": "2602.00001", "title": "Newer", "abstract": "A"},
+        {"id": "2602.00002", "title": "Newest", "abstract": "A"},
+    ]
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 5)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *args, **kwargs: iter(records)
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {
+        "arxiv:2501.00001",
+        "arxiv:2501.00002",
+        "arxiv:2501.00003",
+        "arxiv:2602.00001",
+        "arxiv:2602.00002",
+    }
+    assert model.encode.call_count == 1
+    # The token still describes the rows the namespace holds, and the reuse
+    # disclosure still names the larger cached corpus.
+    assert cache.payload_stats().hydration_corpus_size == "newest:3"
+    assert cache.is_hydrated("train", 3, dataset_source=source)
+    assert "which already covers the requested newest:1" in caplog.text
+    assert (
+        "Refreshed capped corpus has 5 cached rows, exceeding --corpus-size 3"
+        in caplog.text
+    )
+    clear_cache_mock.assert_not_called()
+
+
+def test_reused_uncapped_cache_still_admits_upstream_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An uncapped cache reused for a capped request must still track row growth.
+
+    ``all`` covers every capped request, and recency for an uncapped corpus is
+    the row-count question the capped refresh declines outright, so the reuse
+    must route this shape to the incremental full-corpus refresh.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :return None: Asserts the appended paper is encoded and the token stays ``all``.
+    """
+    source = "fixture/source"
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=1,
+        cached_corpus_size=None,
+        cached_ids=("2601.00001", "2601.00002"),
+    )
+    cache = builder.embedding_cache
+    records = [
+        {"id": "2601.00001", "title": "First", "abstract": "A"},
+        {"id": "2601.00002", "title": "Second", "abstract": "A"},
+        {"id": "2602.00003", "title": "Newer", "abstract": "A"},
+    ]
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *args, **kwargs: iter(records)
+        ),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {
+        "arxiv:2601.00001",
+        "arxiv:2601.00002",
+        "arxiv:2602.00003",
+    }
+    assert cache.payload_stats().hydration_corpus_size == "all"
+    assert cache.is_hydrated("train", None, dataset_source=source)
+    assert model.encode.call_count >= 1
+    clear_cache_mock.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("cached_corpus_size", "refreshed_shape"),
+    [(3, "capped"), (None, "full")],
+)
+def test_reused_corpus_refresh_routes_on_the_cached_corpus_shape(
+    monkeypatch: pytest.MonkeyPatch,
+    cached_corpus_size: int | None,
+    refreshed_shape: str,
+) -> None:
+    """The reuse must run exactly the refresh the cached corpus shape supports.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param int | None cached_corpus_size: Corpus size stamped on the cached rows.
+    :param str refreshed_shape: Which refresh the cached shape must reach.
+    :return None: Asserts the routing and the cap each refresh is handed.
+    """
+    builder, clear_cache_mock, _model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=1,
+        cached_corpus_size=cached_corpus_size,
+        cached_ids=("2601.00001", "2601.00002", "2601.00003"),
+    )
+    capped_refresh = MagicMock()
+    full_refresh = MagicMock()
+    monkeypatch.setattr(builder, "_refresh_capped_corpus_recency", capped_refresh)
+    monkeypatch.setattr(builder, "_refresh_hydrated_full_corpus_cache", full_refresh)
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    ran, skipped = (
+        (capped_refresh, full_refresh)
+        if refreshed_shape == "capped"
+        else (full_refresh, capped_refresh)
+    )
+    ran.assert_called_once_with(
+        use_streaming=False,
+        cached_dataset_source="fixture/source",
+        corpus_size=cached_corpus_size,
+    )
+    skipped.assert_not_called()
+    clear_cache_mock.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["raises", "leaves-incomplete"])
+def test_failed_reused_corpus_refresh_keeps_the_covering_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """A failed top-up must not cost the cache the reuse just decided to serve.
+
+    A namespace left marked incomplete under a token the request cannot match
+    would fail the next run's resume check and be handed to the rebuild, so the
+    reuse restores its recorded completeness whichever way the refresh ended.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param pytest.LogCaptureFixture caplog: Captured disclosure warnings.
+    :param str failure: Whether the refresh raises or only marks the cache incomplete.
+    :return None: Asserts retained rows, restored metadata, and no rebuild.
+    """
+    source = "fixture/source"
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=1,
+        cached_corpus_size=2,
+        cached_ids=("2601.00001", "2601.00002"),
+    )
+    cache = builder.embedding_cache
+
+    def refresh(**_kwargs: Any) -> None:
+        """Abandon the refresh the way an interrupted source read would.
+
+        :param Any _kwargs: Capped-recency refresh options.
+        :return None: Leaves the namespace marked incomplete.
+        :raises RuntimeError: When the parametrized failure is a raised error.
+        """
+        cache.mark_hydrated(
+            dataset_source=source,
+            dataset_split=builder.dataset_split,
+            corpus_size=2,
+            complete=False,
+        )
+        if failure == "raises":
+            raise RuntimeError("recency source failed")
+
+    monkeypatch.setattr(builder, "_refresh_capped_corpus_recency", refresh)
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    stats = cache.payload_stats()
+    assert stats.hydration_complete
+    assert stats.hydration_corpus_size == "newest:2"
+    assert cache.get_cached_paper_ids() == {"arxiv:2601.00001", "arxiv:2601.00002"}
+    assert cache.is_hydrated("train", 2, dataset_source=source)
+    model.encode.assert_not_called()
+    clear_cache_mock.assert_not_called()
+    if failure == "raises":
+        assert "recency source failed" in caplog.text
 
 
 @pytest.mark.parametrize("failure", ["raises", "short-read"])
@@ -5499,6 +5720,7 @@ def test_exact_hydration_slice_fails_closed_on_source_mismatch(
         use_streaming=False,
         row_limit=10,
         row_offset=100,
+        corpus_size=None,
     )
     hydrate_mock.assert_not_called()
 
@@ -5741,11 +5963,13 @@ def test_full_corpus_incremental_refresh_reconciles_missing_ids_when_tail_scan_u
         "use_streaming": False,
         "row_limit": 10,
         "row_offset": 100,
+        "corpus_size": None,
     }
     assert second_call.kwargs == {
         "use_streaming": False,
         "row_limit": 10,
         "row_offset": 0,
+        "corpus_size": None,
     }
     assert hydrate_mock.call_count == 2
     assert "existing_paper_ids" in hydrate_mock.call_args_list[1].kwargs

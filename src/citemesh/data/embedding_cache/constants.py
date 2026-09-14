@@ -112,6 +112,26 @@ def _corpus_size_token(corpus_size: int | None) -> str:
     return "all" if corpus_size is None else f"newest:{int(corpus_size)}"
 
 
+def _corpus_size_from_token(corpus_size_token: str | None) -> int | None:
+    """Read back the cap a recorded corpus token describes.
+
+    The inverse of :func:`_corpus_size_token`, for the paths that must act on
+    the corpus a namespace actually holds rather than on the one a run asked
+    for. A token this policy did not write is refused rather than guessed at,
+    the same tokens :func:`_corpus_size_coverage` calls incompatible.
+
+    :param Optional[str] corpus_size_token: Corpus token recorded on the cache.
+    :return Optional[int]: Recorded cap, or ``None`` for an uncapped corpus.
+    :raises ValueError: If the token is not one this policy writes.
+    """
+    token = str(corpus_size_token or "").strip()
+    if token == "all":
+        return None
+    if not token.startswith("newest:"):
+        raise ValueError(f"Unreadable corpus-size token {corpus_size_token!r}.")
+    return int(token.removeprefix("newest:"))
+
+
 def _corpus_size_coverage(
     cached_corpus_size: str | None, requested_corpus_size: int | None
 ) -> CorpusCoverage:
@@ -129,14 +149,12 @@ def _corpus_size_coverage(
     cached_token = str(cached_corpus_size or "").strip()
     if cached_token == _corpus_size_token(requested_corpus_size):
         return "exact"
-    if cached_token == "all":
-        return "covers"
-    if not cached_token.startswith("newest:"):
-        return "incompatible"
     try:
-        cached_size = int(cached_token.removeprefix("newest:"))
+        cached_size = _corpus_size_from_token(cached_token)
     except ValueError:
         return "incompatible"
+    if cached_size is None:
+        return "covers"
     if requested_corpus_size is None:
         return "extends"
     return "covers" if cached_size > int(requested_corpus_size) else "extends"

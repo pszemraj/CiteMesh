@@ -63,6 +63,7 @@ from .constants import (
     TEXT_FORMATTER_FINGERPRINT_KEY,
     CorpusCoverage,
     _corpus_size_coverage,
+    _corpus_size_from_token,
     _corpus_size_token,  # noqa: F401  (re-exported: white-box test import)
     _resolve_cache_lock_timeout_seconds,  # noqa: F401  (re-exported for tests)
 )
@@ -121,6 +122,7 @@ __all__ = [
     "EmbeddingCache",
     "PendingEmbeddingRecord",
     "_corpus_size_coverage",
+    "_corpus_size_from_token",
     "constants",
     "ingest",
     "layout",
