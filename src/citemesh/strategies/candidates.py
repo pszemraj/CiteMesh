@@ -25,6 +25,7 @@ from citemesh.core import Paper
 from citemesh.core.choices import SEMANTIC_SOURCE_CHOICES as SEMANTIC_SOURCE_CHOICES
 from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
+    is_local_corpus_paper_id,
     normalize_paper_id,
     paper_identifier_aliases,
     recognize_arxiv_identifier,
@@ -119,6 +120,40 @@ def _normalized_doi(raw_identifier: object) -> str:
     except ValueError:
         return ""
     return normalized.lower() if _DOI_PATTERN.fullmatch(normalized) else ""
+
+
+def provider_lookup_identifier(paper_id: str, paper: Paper) -> str | None:
+    """Return an identifier that is safe to send to Semantic Scholar.
+
+    Locally hydrated corpus rows may use arbitrary source-primary keys. Explicit
+    arXiv/DOI metadata remains a valid provider lookup route, while opaque local
+    keys and synthetic query IDs must remain inside CiteMesh.
+
+    :param str paper_id: Graph/cache primary identifier.
+    :param Paper paper: Paper metadata carrying local provenance and aliases.
+    :return Optional[str]: Provider-compatible identifier, or ``None``.
+    """
+    normalized_id = str(paper_id).strip()
+    if normalized_id.startswith("query:"):
+        return None
+    if not paper.is_local_corpus:
+        if is_local_corpus_paper_id(normalized_id):
+            return None
+        return normalized_id or None
+
+    arxiv_id = recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)
+    if arxiv_id:
+        return arxiv_id
+    doi = _normalized_doi(paper.doi)
+    if doi:
+        return doi
+    primary_arxiv = recognize_arxiv_identifier(normalized_id, allow_bare=True)
+    if primary_arxiv:
+        return primary_arxiv
+    if _S2_PATTERN.fullmatch(normalized_id):
+        return normalized_id
+    primary_doi = _normalized_doi(normalized_id)
+    return primary_doi or None
 
 
 def _strong_identifier_evidence(paper: Paper) -> dict[str, frozenset[str]]:

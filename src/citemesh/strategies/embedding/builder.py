@@ -27,14 +27,9 @@ import numpy as np
 from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
 from citemesh.core.paper_ids import (
-    canonicalize_or_none,
-    external_ids_from_canonical_paper_id,
-    normalize_paper_id,
-    recognize_arxiv_identifier,
-)
-from citemesh.core.paper_ids import (
     is_local_corpus_paper_id as _is_local_corpus_paper_id,
 )
+from citemesh.core.paper_ids import normalize_paper_id
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
@@ -66,6 +61,7 @@ from citemesh.strategies.candidates import (
     IdentityRegistry,
     fetch_candidate_pool,
     paper_embedding_metadata,
+    provider_lookup_identifier,
     reconcile_paper_identity,
     register_aliases,
     resolve_aliases,
@@ -282,6 +278,7 @@ class EmbeddingGraphBuilder(
         self._pending_force_rebuild_reason = self._deferred_force_rebuild_reason(
             force_rebuild_cache, force_rebuild_reason
         )
+        self._force_rebuild_seed_hydration_pending = False
         self.use_streaming = use_streaming
         self._validate_streaming_contract()
         self._reset_model_runtime_state()
@@ -704,6 +701,9 @@ class EmbeddingGraphBuilder(
                     reason=self._pending_force_rebuild_reason
                 )
                 self._pending_force_rebuild_reason = None
+                self._force_rebuild_seed_hydration_pending = (
+                    self.semantic_source == "arxiv-corpus"
+                )
 
     def _clear_embedding_cache(self, reason: str) -> None:
         """Clear embedding namespace payload with explicit reason logging.
@@ -853,20 +853,7 @@ class EmbeddingGraphBuilder(
         self.embeddings = {}
         self.candidate_source_status = {}
 
-        # Corpus metadata belongs to the artifact-bound namespace. Preparing it
-        # before seed resolution keeps fresh builders from consulting the
-        # provisional ``artifact=unresolved`` discovery handle. An explicit
-        # rebuild clears that selected namespace during preparation, so restore
-        # its corpus rows before looking up an ID that only the cache can resolve.
-        rebuild_requested = self._pending_force_rebuild_reason is not None
-        if self.semantic_source == "arxiv-corpus":
-            self.prepare_embedding_cache()
-            if rebuild_requested and seed_paper is None:
-                self._ensure_cache_hydrated(use_streaming=self.use_streaming)
-        else:
-            self._load_model()
-
-        resolved_seed_paper = self._resolve_seed_paper(seed_id, seed_paper)
+        resolved_seed_paper = self.resolve_seed_paper(seed_id, seed_paper)
         papers[resolved_seed_paper.paper_id] = resolved_seed_paper
 
         seed_identities = IdentityRegistry()
@@ -890,6 +877,78 @@ class EmbeddingGraphBuilder(
             resolved_seed_paper,
         )
         return papers
+
+    def resolve_seed_paper(
+        self, seed_id: str, seed_paper: Paper | None = None
+    ) -> Paper:
+        """Resolve a build seed only after preparing its persistent namespace.
+
+        Corpus metadata belongs to the artifact-bound retrieval namespace. An
+        explicit rebuild may clear that namespace in any earlier public preflight,
+        so its durable lifecycle marker—not the one-shot clear request—controls
+        whether corpus rows must be restored before a cache-only ID lookup.
+
+        :param str seed_id: Seed paper identifier or free-text query.
+        :param Optional[Paper] seed_paper: Caller-provided bibliographic metadata.
+        :return Paper: Resolved seed carrying the seed role for this build.
+        """
+        if self.semantic_source == "arxiv-corpus":
+            self.prepare_embedding_cache()
+            if self._force_rebuild_seed_hydration_pending and seed_paper is None:
+                self._ensure_cache_hydrated(use_streaming=self.use_streaming)
+        else:
+            self._load_model()
+        return self._resolve_seed_paper(seed_id, seed_paper)
+
+    def resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:
+        """Resolve a seed from the selected corpus cache without provider calls.
+
+        A force rebuild may have been consumed by an earlier public preflight.
+        The durable hydration marker therefore controls whether the cleared corpus
+        must be restored before this lookup.
+
+        :param str seed_id: Cached current, legacy, or source-primary identifier.
+        :return Optional[Paper]: Cached seed metadata, or ``None`` for a cache miss.
+        :raises ValueError: If a recognized local-only ID is absent or incompatible.
+        """
+        if self.semantic_source != "arxiv-corpus":
+            return None
+        self.prepare_embedding_cache()
+        if self._force_rebuild_seed_hydration_pending:
+            self._ensure_cache_hydrated(use_streaming=self.use_streaming)
+        return self._resolve_cached_corpus_seed(seed_id)
+
+    def _resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:
+        """Read one seed from the prepared corpus namespace.
+
+        :param str seed_id: Cache-primary identifier to resolve.
+        :return Optional[Paper]: Cached seed carrying the build seed role, if found.
+        :raises ValueError: If a recognized local-only ID cannot use this namespace.
+        """
+        local_only_id = _is_local_corpus_paper_id(seed_id)
+        cache = self.embedding_cache
+        with cache.hydration_operation_lock():
+            cached_source = cache.get_hydrated_dataset_source()
+            source_matches = not cached_source or cached_source == self.dataset_source
+            if local_only_id and not source_matches:
+                self._validate_cached_corpus_source(cache)
+            metadata = (
+                cache.get_paper_metadata_batch([seed_id]).get(seed_id)
+                if source_matches
+                else None
+            )
+        if metadata is not None:
+            return replace(
+                self._paper_from_cached_metadata(seed_id, metadata), is_seed=True
+            )
+        if local_only_id:
+            raise ValueError(
+                f"Local corpus seed ID '{seed_id}' was not found in the selected "
+                "embedding cache namespace. Re-run local search with the same "
+                "model, profile, revision, dimensions, and cache settings, then "
+                "build that result again."
+            )
+        return None
 
     def _resolve_seed_paper(self, seed_id: str, seed_paper: Paper | None) -> Paper:
         """Resolve a seed from caller metadata, the corpus cache, S2, or query text.
@@ -919,30 +978,7 @@ class EmbeddingGraphBuilder(
                 "used for local search."
             )
         if resolved_seed_paper is None and self.semantic_source == "arxiv-corpus":
-            cache = self.embedding_cache
-            with cache.hydration_operation_lock():
-                cached_source = cache.get_hydrated_dataset_source()
-                source_matches = (
-                    not cached_source or cached_source == self.dataset_source
-                )
-                if local_only_id and not source_matches:
-                    self._validate_cached_corpus_source(cache)
-                metadata = (
-                    cache.get_paper_metadata_batch([seed_id]).get(seed_id)
-                    if source_matches
-                    else None
-                )
-            if metadata is not None:
-                resolved_seed_paper = self._paper_from_cached_metadata(
-                    seed_id, metadata
-                )
-            elif local_only_id:
-                raise ValueError(
-                    f"Local corpus seed ID '{seed_id}' was not found in the selected "
-                    "embedding cache namespace. Re-run local search with the same "
-                    "model, profile, revision, dimensions, and cache settings, then "
-                    "build that result again."
-                )
+            resolved_seed_paper = self._resolve_cached_corpus_seed(seed_id)
         if resolved_seed_paper is None:
             resolved_seed_paper = self.client.get_paper(
                 seed_id, raise_on_unavailable=True
@@ -1349,43 +1385,6 @@ class EmbeddingGraphBuilder(
             self._ensure_cache_hydrated(use_streaming=use_streaming)
             return self._search_cache_candidates(seed_embedding)
 
-    @staticmethod
-    def _citation_enrichment_identifier(paper_id: str, paper: Paper) -> str | None:
-        """Resolve an S2-compatible identifier for citation-count enrichment.
-
-        Corpus rows may use arbitrary source-local primary keys. Their explicit
-        arXiv or DOI metadata remains a valid lookup route, while a source key
-        with no recognized external identity must stay local.
-
-        :param str paper_id: Graph/cache primary identifier.
-        :param Paper paper: Paper metadata carrying corpus provenance and aliases.
-        :return Optional[str]: Identifier safe to send to S2, or ``None``.
-        """
-        normalized_id = str(paper_id).strip()
-        if normalized_id.startswith("query:"):
-            return None
-        if not paper.is_local_corpus:
-            return None if _is_local_corpus_paper_id(normalized_id) else normalized_id
-
-        arxiv_id = recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)
-        if arxiv_id:
-            return arxiv_id
-        raw_doi = str(paper.doi or "").strip()
-        canonical_doi = canonicalize_or_none(f"doi:{raw_doi}") if raw_doi else None
-        _, doi = external_ids_from_canonical_paper_id(canonical_doi or "")
-        if doi:
-            return doi
-        canonical_primary = canonicalize_or_none(normalized_id) or normalized_id
-        primary_arxiv = recognize_arxiv_identifier(canonical_primary, allow_bare=True)
-        if primary_arxiv:
-            return primary_arxiv
-        if re.fullmatch(r"(?:s2:)?[0-9a-f]{40}", normalized_id, flags=re.IGNORECASE):
-            return normalized_id
-        _, primary_doi = external_ids_from_canonical_paper_id(canonical_primary)
-        if primary_doi:
-            return primary_doi.lower()
-        return None
-
     def _update_citation_counts(self, papers: dict[str, Paper]) -> None:
         """
         Enrich top semantic candidates with citation counts from Semantic Scholar.
@@ -1396,7 +1395,7 @@ class EmbeddingGraphBuilder(
         for paper_id, paper in papers.items():
             if paper.is_seed:
                 continue
-            lookup_id = self._citation_enrichment_identifier(paper_id, paper)
+            lookup_id = provider_lookup_identifier(paper_id, paper)
             if lookup_id is None:
                 continue
             targets.append((paper_id, paper, lookup_id))

@@ -19,6 +19,7 @@ from citemesh.core import (
     HYBRID_CONFIG,
     Paper,
 )
+from citemesh.core.paper_ids import is_local_corpus_paper_id
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.services import get_client
@@ -588,12 +589,33 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             self.embedding_builder.embeddings = {}
         alias_map = IdentityRegistry()
 
+        if self.embedding_builder is None and is_local_corpus_paper_id(seed_id):
+            raise ValueError(
+                f"Local corpus seed ID '{seed_id}' requires semantic enrichment. "
+                "Re-run the hybrid build with --max-semantic above 0, "
+                "--semantic-source arxiv-corpus, and the same embedding settings "
+                "used for local search."
+            )
+
+        cached_corpus_seed: Paper | None = None
+        if (
+            self.embedding_builder is not None
+            and self.semantic_source == "arxiv-corpus"
+        ):
+            try:
+                cached_corpus_seed = self.embedding_builder.resolve_cached_corpus_seed(
+                    seed_id
+                )
+            except Exception as exc:
+                raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
+
         # Step 1: Collect from citations
         logger.debug("Collecting papers via citations...")
         if self.embedding_builder is not None:
             citation_papers = self.citation_builder.collect_papers(
                 seed_id,
                 validate_source_availability=False,
+                seed_paper=cached_corpus_seed,
             )
         else:
             citation_papers = self.citation_builder.collect_papers(seed_id)
@@ -610,7 +632,9 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 "Hybrid collection failed: citation branch returned no seed"
             )
         papers[seed_paper.paper_id] = seed_paper
-        self.paper_sources[seed_paper.paper_id] = "citation"
+        self.paper_sources[seed_paper.paper_id] = (
+            "semantic" if cached_corpus_seed is not None else "citation"
+        )
         self.seed_relations[seed_paper.paper_id] = "seed"
         register_aliases(alias_map, seed_paper.paper_id, seed_paper)
         citation_seed_relations = getattr(self.citation_builder, "seed_relations", {})

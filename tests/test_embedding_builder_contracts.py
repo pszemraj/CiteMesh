@@ -55,6 +55,7 @@ from citemesh.strategies.embedding import model_runtime as model_runtime_module
 from citemesh.strategies.embedding import records as records_module
 from citemesh.strategies.embedding import runtime as runtime_module
 from citemesh.strategies.embedding import text as embedding_text_module
+from citemesh.strategies.hybrid import HybridGraphBuilder
 from tests._helpers import (
     ConstantEncodeModel,
     disable_embedding_dep_checks,
@@ -8132,19 +8133,27 @@ def test_generated_corpus_seed_reopens_cached_paper(seed_id: str) -> None:
 @pytest.mark.parametrize(
     "seed_id", ["content:local-paper", "arxiv_7", "local-source-42"]
 )
-@pytest.mark.parametrize("force_rebuild_cache", [False, True])
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+@pytest.mark.parametrize(
+    ("force_rebuild_cache", "prepare_before_build"),
+    [(False, False), (True, False), (True, True)],
+)
 def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     seed_id: str,
+    strategy: str,
     force_rebuild_cache: bool,
+    prepare_before_build: bool,
 ) -> None:
     """A fresh corpus build must reopen a local result from the selected namespace.
 
     :param pytest.MonkeyPatch monkeypatch: Cache and runtime isolation fixture.
     :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
     :param str seed_id: Cached current, legacy, or opaque source identifier.
+    :param str strategy: Direct embedding or hybrid public build path.
     :param bool force_rebuild_cache: Whether the build clears and rehydrates first.
+    :param bool prepare_before_build: Whether a public preflight consumes the clear.
     :return None: Verifies search-to-build identity across fresh builder instances.
     """
     monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
@@ -8200,7 +8209,54 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     search_result = search_builder.search_local("cached seed", top_k=1)[0]
     assert search_result.paper_id == seed_id
 
-    build_builder = make_builder(force_rebuild=force_rebuild_cache)
+    if strategy == "embedding":
+        build_builder: EmbeddingGraphBuilder | HybridGraphBuilder = make_builder(
+            force_rebuild=force_rebuild_cache
+        )
+        active_embedding_builder = build_builder
+    else:
+        hybrid_client = MagicMock()
+        for provider_method in (
+            "get_paper",
+            "get_reference_ids",
+            "get_paper_references",
+            "get_paper_citations",
+        ):
+            getattr(hybrid_client, provider_method).side_effect = AssertionError(
+                "cached local seed without an external alias must stay local"
+            )
+        build_builder = HybridGraphBuilder(
+            max_papers=2,
+            max_references=1,
+            max_citations=1,
+            max_semantic=1,
+            fetch_references=True,
+            semantic_source="arxiv-corpus",
+            dataset_source=dataset_source,
+            dataset_split="train[:1]",
+            corpus_size=1,
+            storage_precision="float32",
+            force_rebuild_cache=force_rebuild_cache,
+            force_rebuild_reason="fresh-build lifecycle regression",
+            client=hybrid_client,
+        )
+        assert build_builder.embedding_builder is not None
+        active_embedding_builder = build_builder.embedding_builder
+        _install_deterministic_builder_runtime(
+            monkeypatch,
+            active_embedding_builder,
+            fingerprint=fingerprint,
+        )
+        monkeypatch.setattr(
+            active_embedding_builder,
+            "_load_dataset_for_hydration",
+            lambda **_kwargs: (dataset_source, [dict(source_row)]),
+        )
+
+    if prepare_before_build:
+        active_embedding_builder.prepare_embedding_cache()
+        assert active_embedding_builder._pending_force_rebuild_reason is None
+        assert active_embedding_builder._force_rebuild_seed_hydration_pending is True
     graph, actual_seed_id = build_builder.build_graph(search_result.paper_id)
 
     assert actual_seed_id == seed_id
@@ -8209,9 +8265,15 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     assert graph.nodes[seed_id]["paper"].abstract == "Cached seed abstract"
     assert graph.nodes[seed_id]["is_local_corpus"] is True
     assert (
-        build_builder.embedding_cache.db_path == search_builder.embedding_cache.db_path
+        active_embedding_builder.embedding_cache.db_path
+        == search_builder.embedding_cache.db_path
     )
-    build_builder.client.get_paper.assert_not_called()
+    active_embedding_builder.client.get_paper.assert_not_called()
+    if strategy == "hybrid":
+        assert build_builder.paper_sources == {seed_id: "semantic"}
+        build_builder.client.get_reference_ids.assert_not_called()
+        build_builder.client.get_paper_references.assert_not_called()
+        build_builder.client.get_paper_citations.assert_not_called()
 
 
 def test_missing_local_corpus_seed_reports_cache_namespace_mismatch() -> None:
