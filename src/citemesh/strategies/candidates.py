@@ -832,21 +832,31 @@ def _fetch_candidate_pool(
     source_results: list[CandidateSourceResult] = []
     seed_id = str(seed_paper.paper_id)
     is_query_seed = seed_id.startswith("query:")
+    query_candidate_budget = (
+        max_references + max_citations + max_recommendations if is_query_seed else 0
+    )
+    recommendation_limit = max_recommendations
 
     if is_query_seed:
         query_text = (seed_paper.title or "").strip() or seed_id
-        search_result = fetch_candidate_source(
-            "search",
-            lambda: client.search_papers(
-                query_text,
-                limit=QUERY_SEED_SEARCH_LIMIT,
-                raise_on_unavailable=True,
-            ),
-        )
-        source_results.append(search_result)
-        for paper in search_result.papers:
-            pool.add(paper, source="recommendation", relation="semantic_only")
+        search_limit = min(QUERY_SEED_SEARCH_LIMIT, query_candidate_budget)
+        if search_limit > 0:
+            search_result = fetch_candidate_source(
+                "search",
+                lambda: client.search_papers(
+                    query_text,
+                    limit=search_limit,
+                    raise_on_unavailable=True,
+                ),
+            )
+            source_results.append(search_result)
+            for paper in search_result.papers:
+                pool.add(paper, source="recommendation", relation="semantic_only")
         anchor_ids = list(pool.papers)[:1]
+        recommendation_limit = min(
+            max_recommendations,
+            max(0, query_candidate_budget - len(pool.papers)),
+        )
     else:
         anchor_ids = [seed_id]
         if max_references > 0:
@@ -874,12 +884,12 @@ def _fetch_candidate_pool(
             for paper in citation_result.papers:
                 pool.add(paper, source="citation", relation="cites_seed")
 
-    if max_recommendations > 0 and anchor_ids:
+    if recommendation_limit > 0 and anchor_ids:
         recommendation_result = fetch_candidate_source(
             "recommendations",
             lambda: client.get_recommended_papers(
                 anchor_ids[0],
-                limit=max_recommendations,
+                limit=recommendation_limit,
                 raise_on_unavailable=True,
             ),
         )

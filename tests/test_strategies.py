@@ -1104,6 +1104,52 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
     }
 
 
+def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:
+    """Free-text bootstrap results must fit inside the candidate pool budget.
+
+    :return None: Checks a one-paper budget cannot admit 20 candidates.
+    """
+    query_client = MagicMock()
+    search_candidates = [_paper(f"search-{index}") for index in range(20)]
+
+    def search_papers(
+        query: str,
+        *,
+        limit: int,
+        raise_on_unavailable: bool,
+    ) -> list[Paper]:
+        """Return as many fake search papers as the request permits.
+
+        :param str query: Search text expected from the synthetic seed.
+        :param int limit: Requested provider result limit.
+        :param bool raise_on_unavailable: Strict availability flag.
+        :return list[Paper]: Prefix of the fake search result set.
+        """
+        assert query == "topic"
+        assert raise_on_unavailable is True
+        return search_candidates[:limit]
+
+    query_client.search_papers.side_effect = search_papers
+    pool = fetch_candidate_pool(
+        query_client,
+        Paper(
+            paper_id="query:topic",
+            title="topic",
+            year=None,
+            is_seed=True,
+        ),
+        max_recommendations=1,
+    )
+
+    assert set(pool.papers) == {"search-0"}
+    query_client.search_papers.assert_called_once_with(
+        "topic",
+        limit=1,
+        raise_on_unavailable=True,
+    )
+    query_client.get_recommended_papers.assert_not_called()
+
+
 def test_hybrid_candidate_recommendation_limit_stays_within_source_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
