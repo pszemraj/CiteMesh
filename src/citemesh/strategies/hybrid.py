@@ -516,8 +516,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         temporal_score = self.temporal_similarity(seed_paper, candidate)
         citation_denominator = max(max_citation_count, 1)
         citation_score = float(
-            np.log1p(max(candidate.citation_count, 0))
-            / np.log1p(citation_denominator + 1)
+            np.log1p(max(candidate.citation_count, 0)) / np.log1p(citation_denominator)
         )
         biblio_score = self.bibliographic_coupling(seed_paper, candidate)
 

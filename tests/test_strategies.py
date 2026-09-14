@@ -1617,6 +1617,72 @@ def test_hybrid_uses_retrieval_vectors_for_rerank_and_graph_vectors_for_edges() 
     assert graph_score == 0.0
 
 
+def test_hybrid_max_citation_count_receives_full_rerank_weight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pool-leading citation count should receive the full citation contribution.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolates the citation score component.
+    :return None: Checks citation normalization reaches one at the pool maximum.
+    """
+    builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
+    seed = _seed_paper("seed")
+    candidate = Paper(
+        paper_id="candidate",
+        title="Candidate",
+        year=seed.year,
+        citation_count=7,
+    )
+    monkeypatch.setattr(builder, "temporal_similarity", lambda _left, _right: 0.0)
+    monkeypatch.setattr(builder, "bibliographic_coupling", lambda _left, _right: 0.0)
+
+    score = builder._seed_relevance_score(
+        seed_embedding=None,
+        seed_paper=seed,
+        candidate=candidate,
+        source_tags={"semantic"},
+        max_citation_count=candidate.citation_count,
+    )
+
+    citation_weight = hybrid_strategy.HYBRID_SEED_RERANK_WEIGHTS[2]
+    assert score == pytest.approx(citation_weight)
+
+
+def test_hybrid_citation_weight_breaks_close_semantic_ranking() -> None:
+    """A pool-leading citation count should overcome a small semantic deficit.
+
+    :return None: Checks candidate order at the semantic/citation tradeoff boundary.
+    """
+    builder = HybridGraphBuilder(max_papers=3, max_semantic=2, client=MagicMock())
+    assert builder.embedding_builder is not None
+    seed = _seed_paper("seed")
+    cited = Paper(
+        paper_id="cited",
+        title="Cited candidate",
+        year=seed.year,
+        citation_count=1,
+    )
+    uncited = Paper(
+        paper_id="uncited",
+        title="Uncited candidate",
+        year=seed.year,
+        citation_count=0,
+    )
+    builder.embedding_builder.retrieval_embeddings = {
+        "seed": np.asarray([1.0, 0.0], dtype=np.float32),
+        "cited": np.asarray([0.0, 1.0], dtype=np.float32),
+        "uncited": np.asarray([0.36, np.sqrt(1.0 - 0.36**2)], dtype=np.float32),
+    }
+
+    ranked = builder._rank_candidates(
+        seed_paper=seed,
+        candidates={"cited": cited, "uncited": uncited},
+        candidate_sources={"cited": {"semantic"}, "uncited": {"semantic"}},
+    )
+
+    assert ranked == ["cited", "uncited"]
+
+
 def test_hybrid_graph_preparation_fails_closed_on_sts_inference() -> None:
     """Hybrid should surface graph-space inference failures before edge creation."""
     builder = HybridGraphBuilder(max_papers=2, max_semantic=1, client=MagicMock())
