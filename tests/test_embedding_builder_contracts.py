@@ -4776,78 +4776,49 @@ def test_hydration_read_failure_preserves_cached_work(
     assert cache.h5_path.read_bytes() == original_h5
 
 
-def test_incomplete_full_corpus_cache_resumes_from_cached_rows(
+def test_incomplete_full_corpus_cache_reconciles_cached_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Incomplete full-corpus hydration should resume from the cached row boundary."""
-    source = "librarian-bots/arxiv-metadata-snapshot"
-    builder = EmbeddingGraphBuilder(
-        max_papers=2,
-        storage_precision="float32",
+    """An interrupted full corpus reuses vectors while scanning source IDs.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated source and encoder fixtures.
+    :return None: Verifies exact missing documents, completion, and no clearing.
+    """
+    builder, clear, model = _complete_corpus_cache_builder(
+        monkeypatch,
         corpus_size=None,
-        use_streaming=False,
-        client=MagicMock(),
+        cached_corpus_size=None,
+        cached_ids=("2601.00001",),
     )
-    _pin_model_fingerprint(monkeypatch, builder)
-    builder.embedding_cache.is_hydrated = MagicMock(return_value=False)
-    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
-    builder.embedding_cache.payload_stats = MagicMock(
-        side_effect=[
-            CacheNamespacePayloadStats(
-                file_count=2,
-                size_bytes=1024,
-                sqlite_rows=100,
-                embedding_rows=100,
-                hydration_complete=False,
-                hydration_split="train",
-                hydration_corpus_size="all",
-                hydration_dataset_source=source,
-            ),
-            CacheNamespacePayloadStats(
-                file_count=2,
-                size_bytes=1024,
-                sqlite_rows=150,
-                embedding_rows=150,
-                hydration_complete=False,
-                hydration_split="train",
-                hydration_corpus_size="all",
-                hydration_dataset_source=source,
-            ),
-        ]
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source=builder.dataset_source,
+        dataset_split="train",
+        corpus_size=None,
+        complete=False,
     )
-    builder.embedding_cache.mark_hydrated = MagicMock()
-    builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
-    clear_cache_mock = MagicMock()
-    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 150)
-    monkeypatch.setattr(builder, "_ensure_int8_calibration_ranges", lambda **_: None)
-    load_mock = MagicMock(
-        return_value=(
-            source,
-            [
-                {"id": f"new-{idx}", "title": f"Title {idx}", "abstract": "A"}
-                for idx in range(50)
-            ],
-        )
+    rows = [
+        {"id": f"2601.0000{index}", "title": str(index), "abstract": "A"}
+        for index in range(1, 4)
+    ]
+    load = MagicMock(
+        return_value=_FakeIndexableDataset(rows, ["id", "title", "abstract"])
     )
-    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
-    monkeypatch.setattr(builder, "_cache_metadata_batch", lambda batch: len(batch))
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load),
+    )
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
-    load_mock.assert_called_once_with(
-        use_streaming=False,
-        row_limit=50,
-        row_offset=100,
-        corpus_size=None,
-    )
-    clear_cache_mock.assert_not_called()
-    builder.embedding_cache.mark_hydrated.assert_called_once_with(
-        dataset_source=source,
-        dataset_split=builder.dataset_split,
-        corpus_size=builder.corpus_size,
-        complete=True,
-    )
+    assert cache.get_cached_paper_ids() == {f"arxiv:{row['id']}" for row in rows}
+    assert cache.is_hydrated("train", None, dataset_source=builder.dataset_source)
+    assert cache.get_hydration_rowcount_reconciliation() == (3, 3)
+    assert load.call_args.kwargs["split"] == "train"
+    _assert_encoded_corpus_records(builder, model, rows[1:])
+    clear.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -5093,7 +5064,9 @@ class _FakeIndexableDataset:
 
 
 @pytest.mark.parametrize("id_column", ["missing", "unparseable"])
-@pytest.mark.parametrize("operation", ["extension", "resume", "recency"])
+@pytest.mark.parametrize(
+    "operation", ["extension", "resume", "recency", "recency-undated"]
+)
 def test_capped_extension_over_an_unrankable_dataset_records_its_new_size(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -5136,10 +5109,11 @@ def test_capped_extension_over_an_unrankable_dataset_records_its_new_size(
         builder, "_resolve_dataset_split_row_count", lambda _: len(rows)
     )
     dataset = _FakeIndexableDataset(rows, [id_key, "title", "abstract"])
+    load = MagicMock(return_value=dataset)
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
-        lambda: types.SimpleNamespace(load_dataset=lambda *args, **kwargs: dataset),
+        lambda: types.SimpleNamespace(load_dataset=load),
     )
 
     with caplog.at_level(logging.WARNING):
@@ -5152,10 +5126,13 @@ def test_capped_extension_over_an_unrankable_dataset_records_its_new_size(
     }
     if operation == "recency":
         expected_ids.add("arxiv:2601.00001")
+    if operation.startswith("recency"):
         assert cache.get_hydration_rowcount_reconciliation() == (
             len(rows),
             len(expected_ids),
         )
+        builder._ensure_cache_hydrated(use_streaming=False)
+        load.assert_called_once()
     assert cache.get_cached_paper_ids() == expected_ids
     assert cache.payload_stats().hydration_corpus_size == "newest:3"
     assert cache.is_hydrated("train", 3, dataset_source=source)
@@ -5742,23 +5719,30 @@ def test_raised_reused_corpus_refresh_keeps_the_covering_cache(
     clear_cache_mock.assert_not_called()
 
 
-@pytest.mark.parametrize("cached_corpus_size", [3, None])
+@pytest.mark.parametrize(
+    ("cached_corpus_size", "requested_corpus_size", "resumed_corpus_size"),
+    [(3, 1, 3), (None, 1, None), (2, 4, 4), (2, None, None)],
+)
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
-def test_incomplete_covering_cache_resumes_at_recorded_cap(
+def test_incomplete_resized_cache_resumes_the_covering_selection(
     monkeypatch: pytest.MonkeyPatch,
     cached_corpus_size: int | None,
+    requested_corpus_size: int | None,
+    resumed_corpus_size: int | None,
     storage_precision: str,
 ) -> None:
-    """A smaller request must resume every row promised by the cached token.
+    """Resizing an interrupted corpus must retain vectors and complete its scope.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
     :param int | None cached_corpus_size: Larger cap or uncapped recorded corpus.
+    :param int | None requested_corpus_size: Smaller or larger requested scope.
+    :param int | None resumed_corpus_size: Scope covering both cache and request.
     :param str storage_precision: Persistent vector dtype.
     :return None: Asserts retained vectors and all newly selected rows.
     """
     builder, clear_cache_mock, model = _complete_corpus_cache_builder(
         monkeypatch,
-        corpus_size=1,
+        corpus_size=requested_corpus_size,
         cached_corpus_size=cached_corpus_size,
         cached_ids=("2601.00004",),
         storage_precision=storage_precision,
@@ -5782,83 +5766,119 @@ def test_incomplete_covering_cache_resumes_at_recorded_cap(
 
     builder._ensure_cache_hydrated(use_streaming=False)
 
-    expected_rows = rows if cached_corpus_size is None else rows[1:]
+    expected_rows = rows if resumed_corpus_size is None else rows[-resumed_corpus_size:]
     assert cache.get_cached_paper_ids() == {
         f"arxiv:{row['id']}" for row in expected_rows
     }
     assert cache.is_hydrated(
-        "train", cached_corpus_size, dataset_source=builder.dataset_source
+        "train", resumed_corpus_size, dataset_source=builder.dataset_source
     )
     _assert_encoded_corpus_records(builder, model, expected_rows[:-1])
     clear_cache_mock.assert_not_called()
 
 
-def test_reused_uncapped_cache_keeps_a_shrunk_upstream_invalidation(
+@pytest.mark.parametrize("requested_cap", [1, None])
+@pytest.mark.parametrize("interrupt_regrowth", [False, True])
+def test_shrunk_corpus_reconciliation_survives_reuse_and_regrowth(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    requested_cap: int | None,
+    interrupt_regrowth: bool,
 ) -> None:
-    """A refresh that invalidated the cache must not be undone by the reuse.
+    """Historical rows must neither trigger rebuilds nor hide upstream growth.
 
-    An upstream holding fewer rows than the cache means the cached rows no
-    longer describe the source, so the full-corpus refresh marks the namespace
-    incomplete to force a full revalidation on the next run. Restoring
-    completeness because the reuse branch ran would keep every later capped run
-    searching rows upstream no longer has.
-
-    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
-    :param pytest.LogCaptureFixture caplog: Captured invalidation warning.
-    :return None: Asserts invalidation then a non-destructive source reconciliation.
+    :param pytest.MonkeyPatch monkeypatch: Source and encoder fixtures.
+    :param pytest.LogCaptureFixture caplog: Retained-history warning capture.
+    :param int | None requested_cap: Smaller request or exact all-corpus request.
+    :param bool interrupt_regrowth: Interrupt after committing part of the new IDs.
+    :return None: Checks stable reuse, retry, zero-row sources, and unchanged vectors.
     """
-    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+    builder, clear, model = _complete_corpus_cache_builder(
         monkeypatch,
-        corpus_size=1,
+        corpus_size=requested_cap,
         cached_corpus_size=None,
         cached_ids=("2601.00001", "2601.00002", "2601.00003"),
     )
     cache = builder.embedding_cache
-    load = MagicMock()
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    with h5py.File(cache.h5_path, "r") as h5:
+        original_vectors = h5["embeddings"][:]
+    rows = [
+        {"id": "2601.00002", "title": "Still upstream", "abstract": "A"},
+        {"id": "2601.00004", "title": "Replacement", "abstract": "B"},
+    ]
+    load = MagicMock(
+        side_effect=lambda *args, **kwargs: _FakeIndexableDataset(
+            list(rows), ["id", "title", "abstract"]
+        )
+    )
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _: len(rows)
+    )
     monkeypatch.setattr(
         deps_module,
         "_import_datasets_module",
         lambda: types.SimpleNamespace(load_dataset=load),
     )
 
-    with caplog.at_level(logging.WARNING):
-        builder._ensure_cache_hydrated(use_streaming=False)
-
-    stats = cache.payload_stats()
-    assert stats.hydration_complete is False
-    assert stats.hydration_corpus_size == "all"
-    assert "marking hydration incomplete for full source revalidation" in caplog.text
-    assert "Restoring the reused corpus" not in caplog.text
-    # The rows themselves are kept: the next run revalidates them against the
-    # source rather than paying for a rebuild here.
-    assert cache.get_cached_paper_ids() == {
-        "arxiv:2601.00001",
-        "arxiv:2601.00002",
-        "arxiv:2601.00003",
-    }
-    model.encode.assert_not_called()
-    load.assert_not_called()
-    clear_cache_mock.assert_not_called()
-
-    rows = [
-        {"id": "2601.00002", "title": "Still upstream", "abstract": "A"},
-        {"id": "2601.00004", "title": "Replacement", "abstract": "B"},
-    ]
-    load.return_value = _FakeIndexableDataset(rows, ["id", "title", "abstract"])
     builder._ensure_cache_hydrated(use_streaming=False)
-    assert cache.is_hydrated("train", None, dataset_source="fixture/source")
-    assert cache.get_cached_paper_ids() == {
-        "arxiv:2601.00001",
-        "arxiv:2601.00002",
-        "arxiv:2601.00003",
-        "arxiv:2601.00004",
-    }
+
+    assert cache.is_hydrated("train", None, dataset_source=builder.dataset_source)
+    assert cache.get_cached_paper_ids() == {f"arxiv:2601.0000{i}" for i in range(1, 5)}
+    assert cache.get_hydration_rowcount_reconciliation() == (2, 4)
     _assert_encoded_corpus_records(builder, model, rows[1:])
-    clear_cache_mock.assert_not_called()
     assert "including any papers removed upstream" in caplog.text
+    builder._ensure_cache_hydrated(use_streaming=False)
+    load.assert_called_once()
+
+    rows.extend(
+        {"id": f"2601.0000{i}", "title": f"New {i}", "abstract": "C"}
+        for i in range(5, 9)
+    )
+    model.encode.reset_mock()
+    if interrupt_regrowth:
+        write_batch = builder._cache_metadata_batch
+
+        def write_partial_batch(batch: list[dict[str, Any]]) -> int:
+            """Commit two new rows before interrupting source reconciliation.
+
+            :param list[dict[str, Any]] batch: Missing upstream records.
+            :return int: Never returns normally.
+            :raises KeyboardInterrupt: Simulates interruption after durable progress.
+            """
+            write_batch(batch[:2])
+            raise KeyboardInterrupt("reconciliation interrupted")
+
+        with monkeypatch.context() as fault:
+            fault.setattr(builder, "_cache_metadata_batch", write_partial_batch)
+            with pytest.raises(KeyboardInterrupt, match="reconciliation interrupted"):
+                builder._ensure_cache_hydrated(use_streaming=False)
+        assert cache.embedding_count() == len(rows)
+        assert "arxiv:2601.00008" not in cache.get_cached_paper_ids()
+        model.encode.reset_mock()
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {f"arxiv:2601.0000{i}" for i in range(1, 9)}
+    assert cache.is_hydrated("train", None, dataset_source=builder.dataset_source)
+    assert cache.get_hydration_rowcount_reconciliation() == (6, 8)
+    _assert_encoded_corpus_records(
+        builder, model, rows[4:] if interrupt_regrowth else rows[2:]
+    )
+    load.reset_mock()
+    builder.corpus_size = None
+    builder._ensure_cache_hydrated(use_streaming=False)
+    load.assert_not_called()
+
+    rows.clear()
+    builder._ensure_cache_hydrated(use_streaming=False)
+    assert cache.get_hydration_rowcount_reconciliation() == (0, 8)
+    load.reset_mock()
+    builder._ensure_cache_hydrated(use_streaming=False)
+    load.assert_not_called()
+    assert cache.embedding_count() == 8
+    with h5py.File(cache.h5_path, "r") as h5:
+        np.testing.assert_array_equal(h5["embeddings"][:3], original_vectors)
+    clear.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["raises", "short-read"])
@@ -6042,9 +6062,7 @@ def test_incomplete_full_corpus_resume_reconciles_missing_ids(
     expected_ids = {f"arxiv:{paper_id}" for paper_id in [inserted_id, *original_ids]}
     assert cache.get_cached_paper_ids() == expected_ids
     assert cache.is_hydrated("train", None, dataset_source=source)
-    assert cache.get_hydration_rowcount_reconciliation() == (
-        (4, 3) if upstream_rows is not None and inserted_id in original_ids else None
-    )
+    assert cache.get_hydration_rowcount_reconciliation() == (4, len(expected_ids))
     results = cache.search(
         np.array([1.0, 0.0], dtype=np.float32),
         top_k=4,
@@ -6346,60 +6364,6 @@ def test_full_corpus_hydrated_cache_skips_incremental_refresh_without_growth(
     builder._ensure_cache_hydrated(use_streaming=False)
 
     builder._load_dataset_for_hydration.assert_not_called()
-
-
-def test_full_corpus_hydrated_cache_revalidates_when_upstream_rows_shrink(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hydrated full-corpus cache should revalidate when upstream row count shrinks."""
-    source = "librarian-bots/arxiv-metadata-snapshot"
-    builder = EmbeddingGraphBuilder(
-        max_papers=2,
-        storage_precision="float32",
-        corpus_size=None,
-        use_streaming=False,
-        client=MagicMock(),
-    )
-    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
-    builder.embedding_cache.is_hydrated = MagicMock(side_effect=[True, False, False])
-    builder.embedding_cache.get_hydrated_dataset_source = MagicMock(return_value=source)
-    builder.embedding_cache.payload_stats = MagicMock(
-        return_value=CacheNamespacePayloadStats(
-            file_count=2,
-            size_bytes=1024,
-            sqlite_rows=120,
-            embedding_rows=120,
-            hydration_complete=True,
-            hydration_split="train",
-            hydration_corpus_size="all",
-            hydration_dataset_source=source,
-        )
-    )
-    builder.embedding_cache.mark_hydrated = MagicMock()
-    builder.embedding_cache.clear_hydration_rowcount_reconciliation = MagicMock()
-    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 100)
-    load_mock = MagicMock(
-        return_value=(
-            source,
-            [{"id": "replacement-1", "title": "Replacement", "abstract": "A"}],
-        )
-    )
-    monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_mock)
-    clear_cache_mock = MagicMock()
-    monkeypatch.setattr(builder, "_clear_embedding_cache", clear_cache_mock)
-    monkeypatch.setattr(builder, "_hydrate_dataset_records", MagicMock(return_value=1))
-
-    builder._ensure_cache_hydrated(use_streaming=False)
-
-    load_mock.assert_called_once_with(
-        use_streaming=False,
-    )
-    clear_cache_mock.assert_called_once()
-    complete_flags = [
-        call.kwargs["complete"]
-        for call in builder.embedding_cache.mark_hydrated.call_args_list
-    ]
-    assert complete_flags == [False, False, True]
 
 
 def test_full_corpus_incremental_refresh_reconciles_missing_ids_when_tail_scan_underfills(

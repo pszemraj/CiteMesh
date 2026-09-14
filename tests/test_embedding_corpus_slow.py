@@ -237,12 +237,6 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     assert new_ids.isdisjoint(historical_ids)
     assert len(new_ids) > builder.corpus_size
 
-    builder._ensure_cache_hydrated(use_streaming=False)
-    shrunk_stats = cache.payload_stats()
-    assert shrunk_stats.hydration_complete is False
-    assert shrunk_stats.hydration_corpus_size == "all"
-    assert cache.get_cached_paper_ids() == historical_ids
-
     requested_splits.clear()
     builder._ensure_cache_hydrated(use_streaming=False)
 
@@ -254,6 +248,15 @@ def test_real_arxiv_corpus_resume_retains_all_cache_after_interrupt_and_shrink(
     assert cache.get_cached_paper_ids() == historical_ids | new_ids
     assert cache.embedding_count() == len(historical_ids) + len(new_ids)
     assert cache.embedding_count() > builder.corpus_size
+    assert cache.get_hydration_rowcount_reconciliation() == (
+        len(current_snapshot["dataset"]),
+        cache.embedding_count(),
+    )
+    requested_splits.clear()
+    builder._ensure_cache_hydrated(use_streaming=False)
+    builder.corpus_size = None
+    builder._ensure_cache_hydrated(use_streaming=False)
+    assert requested_splits == []
     restored_vectors = _read_cached_vectors(cache, historical_ids)
     for paper_id, original_vector in historical_vectors.items():
         np.testing.assert_array_equal(restored_vectors[paper_id], original_vector)

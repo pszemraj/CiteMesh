@@ -761,7 +761,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
             cached_rows = int(raw_cached)
         except ValueError:
             return None
-        if upstream_rows < 1 or cached_rows < 0:
+        if upstream_rows < 0 or cached_rows < 0:
             return None
         return upstream_rows, cached_rows
 
@@ -776,8 +776,8 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         """
         resolved_upstream = int(upstream_rows)
         resolved_cached = int(cached_rows)
-        if resolved_upstream < 1:
-            raise ValueError("upstream_rows must be at least 1")
+        if resolved_upstream < 0:
+            raise ValueError("upstream_rows must be non-negative")
         if resolved_cached < 0:
             raise ValueError("cached_rows must be non-negative")
         self._write_cache_metadata(

@@ -3040,6 +3040,9 @@ def test_embedding_cache_hydration_rowcount_reconciliation_marker_contract() -> 
         cache.clear_hydration_rowcount_reconciliation()
         assert cache.get_hydration_rowcount_reconciliation() is None
 
+        cache.set_hydration_rowcount_reconciliation(upstream_rows=0, cached_rows=100)
+        assert cache.get_hydration_rowcount_reconciliation() == (0, 100)
+
         cache.set_hydration_rowcount_reconciliation(upstream_rows=111, cached_rows=101)
         cache.mark_hydrated(
             dataset_source="librarian-bots/arxiv-metadata-snapshot",
