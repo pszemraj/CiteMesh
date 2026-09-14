@@ -1210,6 +1210,48 @@ def test_search_papers_paginates_above_graph_request_limit() -> None:
     assert (second_params["limit"], second_params["offset"]) == (1, 100)
 
 
+@pytest.mark.parametrize("recovers", [True, False])
+def test_search_papers_retries_later_page_not_found(recovers: bool) -> None:
+    """A later-page 404 should use the page retry budget instead of erasing results.
+
+    :param bool recovers: Whether the later page succeeds on its second attempt.
+    :return None: Checks per-page recovery and strict exhaustion behavior.
+    """
+    first_page = [_paper_payload(paper_id=f"p{i}") for i in range(100)]
+    final_page = [_paper_payload(paper_id="p100")]
+    responses = [
+        _MockResponse(200, {"offset": 0, "next": 100, "data": first_page}),
+        _MockResponse(404),
+    ]
+    if recovers:
+        responses.append(_MockResponse(200, {"offset": 100, "data": final_page}))
+    else:
+        responses.extend(_MockResponse(404) for _ in range(API_CONFIG.max_retries - 1))
+
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = MagicMock()
+    client._session.get = MagicMock(side_effect=responses)
+    with patch("time.sleep") as sleep_mock:
+        if recovers:
+            results = client.search_papers(
+                "attention", limit=101, raise_on_unavailable=True
+            )
+            assert [paper.paper_id for paper in results] == [
+                *(f"p{i}" for i in range(100)),
+                "p100",
+            ]
+        else:
+            with pytest.raises(
+                semantic_module.SemanticScholarUnavailableError,
+                match="unreachable while searching for 'attention'",
+            ):
+                client.search_papers("attention", limit=101, raise_on_unavailable=True)
+
+    expected_page_attempts = 2 if recovers else API_CONFIG.max_retries
+    assert client._session.get.call_count == 1 + expected_page_attempts
+    assert sleep_mock.call_count == expected_page_attempts - 1
+
+
 def test_related_papers_use_sdk_page_size_without_capping_total() -> None:
     """Relation totals above 1,000 should consume the SDK's paginated iterator.
 

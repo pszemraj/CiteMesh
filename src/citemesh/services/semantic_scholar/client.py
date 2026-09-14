@@ -577,6 +577,7 @@ class SemanticScholarClient(_EndpointsMixin):
         failure_domain: _FailureDomain,
         raise_on_unavailable: bool = False,
         record_domain_failure: bool = True,
+        retry_not_found: bool = False,
         context: str = "requesting data",
     ) -> dict[str, Any] | None:
         """Request JSON payload from direct Semantic Scholar REST endpoints.
@@ -587,9 +588,12 @@ class SemanticScholarClient(_EndpointsMixin):
         :param bool raise_on_unavailable: When ``True``, exhausted retries raise
             :class:`SemanticScholarUnavailableError` instead of returning
             ``None``, so callers can distinguish "no data" from "API down".
-            HTTP 404 still returns ``None`` (genuinely absent resource).
+            HTTP 404 returns ``None`` unless ``retry_not_found`` marks it as a
+            transient inconsistency.
         :param bool record_domain_failure: Whether an exhausted optional request
             should suppress later calls to the same capability in this collection.
+        :param bool retry_not_found: Whether HTTP 404 represents a transient
+            inconsistency that should consume the normal retry budget.
         :param str context: Request description used in availability errors.
         :return dict[str, Any] | None: Parsed JSON payload or ``None`` on failure.
         :raises SemanticScholarRequestError: If a non-408/429 HTTP 4xx response
@@ -601,8 +605,12 @@ class SemanticScholarClient(_EndpointsMixin):
             """Issue one paced request, raising on retryable failures.
 
             :return dict[str, Any] | None: Parsed payload or ``None`` on 404.
+            :raises _RetryableRequestError: If this request must retry a 404.
             """
-            return self._request_json_once(url, params, context=context)
+            payload = self._request_json_once(url, params, context=context)
+            if payload is None and retry_not_found:
+                raise _RetryableRequestError(f"HTTP 404 from {url}")
+            return payload
 
         def _on_skip(
             skipped: _CandidateOperationSkippedError,

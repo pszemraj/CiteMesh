@@ -811,6 +811,7 @@ class _EndpointsMixin:
                 },
                 failure_domain=_FailureDomain.SEARCH,
                 raise_on_unavailable=raise_on_unavailable,
+                retry_not_found=offset > 0,
                 context=f"searching for {normalized_query!r}",
             )
             if not payload:
