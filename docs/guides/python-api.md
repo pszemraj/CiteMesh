@@ -3,7 +3,7 @@
 Import the builders and exporters directly when a notebook or script beats shelling out to the CLI.
 
 > [!IMPORTANT]
-> **Unstable, pre-1.0.** The CLI is the supported interface; signatures, keyword names, and payload shapes here can change in any release. Only the names below are meant for import — anything behind a leading underscore or in an unlisted submodule is internal.
+> **Unstable, pre-1.0.** The CLI is the supported interface; signatures, keyword names, and payload shapes here can change in any release. Only the names below are meant for import - anything behind a leading underscore or in an unlisted submodule is internal.
 
 ## What you can import
 
@@ -16,7 +16,7 @@ build_graph(seed_id: str, **kwargs) -> tuple[networkx.Graph, str]  # (graph, res
 collect_papers(seed_id: str, **kwargs) -> dict[str, Paper]
 ```
 
-`build_graph` returns the *resolved* seed ID, which may differ from what you passed: S2 can answer an arXiv ID with its own paper ID, and the free-text embedding path returns a synthesized `query:<digest>`. Always use it downstream — that is what `GraphExporter` and the layout helpers expect.
+`build_graph` returns the *resolved* seed ID, which may differ from what you passed: S2 can answer an arXiv ID with its own paper ID, and the free-text embedding path returns a synthesized `query:<digest>`. Always use it downstream - that is what `GraphExporter` and the layout helpers expect.
 
 ## Exporting
 
@@ -63,7 +63,7 @@ visualize_graph(
 
 - **Credentials.** Set `S2_API_KEY` before the first builder creates the shared API client. Saved `api.s2_api_key` values are applied by the CLI, not by direct builder construction. The [API request policy](cli.md#appendix-b-troubleshooting) also applies to Python calls.
 - **Configuration and caches.** Builders take constructor arguments and built-in defaults; they do not load `[defaults]` from `config.toml`. They share the CLI's [cache root and namespaces](caching.md), so Python runs can reuse or extend those caches.
-- **Constructor keywords mirror CLI flags** (`max_semantic=` is `--max-semantic`, `truncate_dim=` is `--truncate-dim`), but the CLI's cross-flag validation does not run here, so callers can construct combinations the CLI would reject. Builders still check their own invariants — `0 <= max_semantic <= max_papers - 1`, `top_k >= 1`, `max_papers >= 1` — and raise `ValueError`.
+- **Constructor keywords mirror CLI flags** (`max_semantic=` is `--max-semantic`, `truncate_dim=` is `--truncate-dim`), but the CLI's cross-flag validation does not run here, so callers can construct combinations the CLI would reject. Builders still check their own invariants - `0 <= max_semantic <= max_papers - 1`, `top_k >= 1`, `max_papers >= 1` - and raise `ValueError`.
 - **Failures are exceptions, not empty graphs.** A total candidate-source outage raises `CandidateAcquisitionError`, semantic inference that cannot produce a complete ranking space raises `EmbeddingInferenceError`, and an unavailable explicit device raises `ValueError`.
 
 Ordering and layout are deterministic for the same graph inputs; API responses, corpus updates, and runtime numerics can still change results. Pass `layout_seed` to `compute_layout` or `visualize_graph` to choose the layout seed. The [CLI guide](cli.md#flag-reference) describes corresponding controls; constructor names can differ, such as `enable_torch_compile` for `--torch-compile`.

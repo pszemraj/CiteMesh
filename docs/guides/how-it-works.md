@@ -17,7 +17,7 @@ The embedding and vector-cache stages run for `--strategy embedding` and for hyb
 
 `normalize_paper_id` maps the [accepted identifiers](cli.md#accepted-identifiers) to canonical IDs before network access. `paper_identifier_aliases` supplies the metadata cache and candidate identity registry with equivalent identifiers, so one paper reached through several forms stays one node.
 
-The embedding strategy is the only one with a free-text path. A genuine HTTP 404 means S2 has no such paper, so the builder synthesizes a seed whose ID is `query:` plus the first 8 hex of `sha1(query_text)`. An *unavailable* endpoint (retries exhausted) raises instead — an outage is never silently reinterpreted as a search.
+The embedding strategy is the only one with a free-text path. A genuine HTTP 404 means S2 has no such paper, so the builder synthesizes a seed whose ID is `query:` plus the first 8 hex of `sha1(query_text)`. An *unavailable* endpoint (retries exhausted) raises instead - an outage is never silently reinterpreted as a search.
 
 Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 
@@ -27,7 +27,7 @@ S2 candidate acquisition shares availability and identity handling in `strategie
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
-`IdentityRegistry` reconciles duplicate records across `arxiv`, `doi`, `s2`, and a weak title/year/author key. Two records conflict when a namespace on *both* sides has disjoint values — except when the sole disagreement is `s2` and the DOI or arXiv ID agree, which is the duplicate-record case. On a merge the seed wins.
+`IdentityRegistry` reconciles duplicate records across `arxiv`, `doi`, `s2`, and a weak title/year/author key. Two records conflict when a namespace on *both* sides has disjoint values - except when the sole disagreement is `s2` and the DOI or arXiv ID agree, which is the duplicate-record case. On a merge the seed wins.
 
 Acquisition follows the [source-failure and retry policy](cli.md#appendix-b-troubleshooting), recording availability in exported metadata.
 
@@ -51,7 +51,7 @@ Implementation: [embedding_cache](../../src/citemesh/data/embedding_cache/) and 
 
 Selection cuts the pool to `--max-papers`, seed included.
 
-The embedding strategy encodes the seed as a retrieval query and ranks by raw cosine — over the encoded pool in candidates mode, through the cache's top-k search in corpus mode — admitting candidates in order until the budget is full. Ties break on `(-score, paper_id, insertion_index)`, so the same inputs always produce the same graph.
+The embedding strategy encodes the seed as a retrieval query and ranks by raw cosine - over the encoded pool in candidates mode, through the cache's top-k search in corpus mode - admitting candidates in order until the budget is full. Ties break on `(-score, paper_id, insertion_index)`, so the same inputs always produce the same graph.
 
 Hybrid collects two pools, citation-derived and semantic, and reranks the union against the seed:
 
@@ -78,11 +78,11 @@ similarity = (0.5 · semantic + 0.2 · temporal + 0.2 · category) × author_fac
 author_factor = 1.5 if the papers share an author, else 1.0
 ```
 
-The weights stop at 0.9 to leave headroom for the multiplier; temporal similarity decays linearly to five years (`1.0 - (Δyears / 5) × 0.8`), then flattens at `0.1`. Note the ordering: dates, categories, and shared authorship only *modify* a score that already cleared the gate — they never create an edge.
+The weights stop at 0.9 to leave headroom for the multiplier; temporal similarity decays linearly to five years (`1.0 - (Δyears / 5) × 0.8`), then flattens at `0.1`. Note the ordering: dates, categories, and shared authorship only *modify* a score that already cleared the gate - they never create an edge.
 
-Hybrid has provenance the embedding strategy lacks, so it gates on a disjunction — cosine at or above the threshold **or** non-zero bibliographic coupling — letting papers that share a reference list connect even when the model does not see them as similar. Weights adapt over `(embedding, temporal, citation, bibliographic)` — `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed — then asymmetric floors: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
+Hybrid has provenance the embedding strategy lacks, so it gates on a disjunction - cosine at or above the threshold **or** non-zero bibliographic coupling - letting papers that share a reference list connect even when the model does not see them as similar. Weights adapt over `(embedding, temporal, citation, bibliographic)` - `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed - then asymmetric floors: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
 
-Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid — a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts seed-incident edges ahead of everything else regardless of weight, so the seed's strongest neighbors are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
+Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid - a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts seed-incident edges ahead of everything else regardless of weight, so the seed's strongest neighbors are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
 
 Implementation: [base.py](../../src/citemesh/strategies/base.py), `select_capped_undirected_edges`, and [config.py](../../src/citemesh/core/config.py).
 
@@ -90,7 +90,7 @@ Implementation: [base.py](../../src/citemesh/strategies/base.py), `select_capped
 
 One layout is computed in Python and shared by every layout-based export, so the PNG, Plotly page, dashboard, and JSON geometry all agree.
 
-`compute_layout` rebuilds the graph in sorted insertion order, detects communities with weighted greedy modularity (Clauset-Newman-Moore, not Louvain), and converts similarity to the path lengths Kamada-Kawai wants: `1 / (1e-6 + max(weight, 0))`, scaled `1.05` within a community and `1.42` across one — that asymmetry is the anti-hairball term. The layout is `networkx.kamada_kawai_layout` at `scale=0.9`, minimizing path-length error without a random seed. `nx.spring_layout` runs **only if** it raises, the one place `--spring-iterations` is read; on the normal path that flag does nothing.
+`compute_layout` rebuilds the graph in sorted insertion order, detects communities with weighted greedy modularity (Clauset-Newman-Moore, not Louvain), and converts similarity to the path lengths Kamada-Kawai wants: `1 / (1e-6 + max(weight, 0))`, scaled `1.05` within a community and `1.42` across one - that asymmetry is the anti-hairball term. The layout is `networkx.kamada_kawai_layout` at `scale=0.9`, minimizing path-length error without a random seed. `nx.spring_layout` runs **only if** it raises, the one place `--spring-iterations` is read; on the normal path that flag does nothing.
 
 Communities are then spread by anchors from a spring layout over a community meta-graph, every node gets a σ `0.02` Gaussian jitter, disconnected components are shelf-packed, a taller-than-wide result is rotated 90°, and the whole is centered and uniformly scaled. The static PNG viewport *expands* whichever axis is too tight rather than cropping.
 

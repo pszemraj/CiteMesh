@@ -1,4 +1,4 @@
-# Embedding Runtime Policy
+# Embedding runtime policy
 
 How CiteMesh resolves an embedding checkpoint, device, precision, attention backend, and compile mode at run time.
 

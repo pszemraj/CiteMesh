@@ -1,6 +1,6 @@
-# User Configuration
+# User configuration
 
-`citemesh config` saves the flags you would otherwise retype on every run — a preferred theme, corpus-backed semantic sourcing, a Semantic Scholar API key — into a TOML file at `<cache_root>/config.toml`.
+`citemesh config` stores personal defaults and an optional Semantic Scholar API key in `<cache_root>/config.toml`.
 
 ```bash
 # configured values + file path

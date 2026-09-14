@@ -1,4 +1,4 @@
-# Environment Variables
+# Environment variables
 
 Every environment variable CiteMesh reads, plus the platform and library variables it honors.
 

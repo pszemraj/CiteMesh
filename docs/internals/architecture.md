@@ -1,4 +1,4 @@
-# CiteMesh Architecture
+# CiteMesh architecture
 
 CiteMesh separates argument handling, paper acquisition, scoring, persistence, and visualization. The [pipeline walkthrough](../guides/how-it-works.md) follows a complete build.
 
@@ -10,44 +10,44 @@ Every node carries the same attribute payload (`paper`, `title`, `year`, `author
 
 ## Package map
 
-### `core/` — data model and constants, no I/O
+### `core/` - data model and constants, no I/O
 
-- [choices.py](../../src/citemesh/core/choices.py) — shared CLI, config, and runtime option vocabularies
-- `config.py` — default dataclasses and their singletons (`TemporalConfig`, `EmbeddingSimilarityConfig`, `EmbeddingStorageConfig`, `HybridSimilarityConfig`, `VisualizationConfig`, `APIConfig`); embedding weight and storage settings validate on import
-- `models.py` — `Paper`, `Author`, and the overlap helpers the scorers rely on
-- `paper_fields.py` — tolerant coercion of venue, author, and category fields out of inconsistent upstream payloads
-- `paper_ids.py` — identifier normalization and alias derivation
-- `values.py`, `validation.py` — shared value coercion and input validation primitives
-- `text_batching.py` — length-bucketed encode batching and `l2_normalize_embeddings`; it sits here rather than under `strategies/embedding/` because `data/embedding_cache/` encodes through it too
+- [choices.py](../../src/citemesh/core/choices.py) - shared CLI, config, and runtime option vocabularies
+- `config.py` - default dataclasses and their singletons (`TemporalConfig`, `EmbeddingSimilarityConfig`, `EmbeddingStorageConfig`, `HybridSimilarityConfig`, `VisualizationConfig`, `APIConfig`); embedding weight and storage settings validate on import
+- `models.py` - `Paper`, `Author`, and the overlap helpers the scorers rely on
+- `paper_fields.py` - tolerant coercion of venue, author, and category fields out of inconsistent upstream payloads
+- `paper_ids.py` - identifier normalization and alias derivation
+- `values.py`, `validation.py` - shared value coercion and input validation primitives
+- `text_batching.py` - length-bucketed encode batching and `l2_normalize_embeddings`; it sits here rather than under `strategies/embedding/` because `data/embedding_cache/` encodes through it too
 
-### `data/` — persistence
+### `data/` - persistence
 
-- `cache.py` — cache-root resolution across platforms, atomic text/JSON writers, `atomic_output_path`, the cache-root `ReadWriteLock`
-- `user_config.py` — loads, validates, and rewrites `config.toml`, whitelisting `[defaults]` keys and `[api] s2_api_key` with per-key casters; invalid entries are ignored so a bad config never blocks the CLI
-- `model_profiles.py` — the embedding profile registry: EmbeddingGemma, its three prompt formatters, truncate-dim policy, attention and compile eligibility, and the fallback chain
-- `embedding_cache/` — `store.py` composes `EmbeddingCache` from the `ingest`, `layout`, `recovery`, and `search` mixins over `constants`, `sql`, `models`, `quantization`; see [Embedding Cache Internals](embedding-cache.md)
+- `cache.py` - cache-root resolution across platforms, atomic text/JSON writers, `atomic_output_path`, the cache-root `ReadWriteLock`
+- `user_config.py` - loads, validates, and rewrites `config.toml`, whitelisting `[defaults]` keys and `[api] s2_api_key` with per-key casters; invalid entries are ignored so a bad config never blocks the CLI
+- `model_profiles.py` - the embedding profile registry: EmbeddingGemma, its three prompt formatters, truncate-dim policy, attention and compile eligibility, and the fallback chain
+- `embedding_cache/` - `store.py` composes `EmbeddingCache` from the `ingest`, `layout`, `recovery`, and `search` mixins over `constants`, `sql`, `models`, `quantization`; see [Embedding Cache Internals](embedding-cache.md)
 
-### `services/semantic_scholar/` — Semantic Scholar transport
+### `services/semantic_scholar/` - Semantic Scholar transport
 
 `errors.py` (failure taxonomy, per-capability `_FailureDomain` budgets) · `retry.py` (Tenacity backoff, `Retry-After`) · `disk_cache.py` (persisted paper and reference-ID caches) · `payloads.py` (parsing into `Paper`) · `endpoints.py` (one method per capability) · `client.py` (transport, rate limiting, `candidate_operation_scope`, `get_client`).
 
-### `strategies/` — candidate acquisition and scoring
+### `strategies/` - candidate acquisition and scoring
 
-- `base.py` — `GraphBuilderStrategy`: the template method and its four hooks, the shared temporal/citation/bibliographic scorers, `deterministic_sort_key`, edge capping
-- `candidates.py` — pool budgets, `fetch_candidate_source` and its `complete`/`empty`/`unavailable` vocabulary, `IdentityRegistry`, `reconcile_paper_identity`, `scope_candidate_collection`
-- `similarity.py` — `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity
-- `citation.py`, `recommendation.py`, `hybrid.py` — the concrete strategies
-- `embedding/` — `deps` (lazy dependency guards) · `runtime` (device resolution, probes) · `model_runtime` (load, fallback, precision validation, TF32 and compile guards) · `precision` · `text` (`EmbeddingTask`, formatters) · `records` · `config` · `fingerprint` · `hydration` (corpus selection, calibration, resume) · `builder`
+- `base.py` - `GraphBuilderStrategy`: the template method and its four hooks, the shared temporal/citation/bibliographic scorers, `deterministic_sort_key`, edge capping
+- `candidates.py` - pool budgets, `fetch_candidate_source` and its `complete`/`empty`/`unavailable` vocabulary, `IdentityRegistry`, `reconcile_paper_identity`, `scope_candidate_collection`
+- `similarity.py` - `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity
+- `citation.py`, `recommendation.py`, `hybrid.py` - the concrete strategies
+- `embedding/` - `deps` (lazy dependency guards) · `runtime` (device resolution, probes) · `model_runtime` (load, fallback, precision validation, TF32 and compile guards) · `precision` · `text` (`EmbeddingTask`, formatters) · `records` · `config` · `fingerprint` · `hydration` (corpus selection, calibration, resume) · `builder`
 
-### `visualization/` — layout, render, export
+### `visualization/` - layout, render, export
 
-- `render.py` — `compute_layout` and its chain (community detection, spreading, packing, orientation, normalization), `compute_node_sizes`, `visualize_graph`
-- `paths.py` — output-path and filename derivation (`generate_output_path`), free of matplotlib and numpy so the CLI resolver skips the rendering stack; `render` re-exports it.
-- `themes.py` — the immutable `light`/`dark`/`solarized` palettes and `auto` resolution
-- `node_data.py` — [Paper/scalar metadata precedence](../reference/output-artifacts.md#graph-input) shared by exporters, rendering, and filenames
-- `years.py`, `ordering.py` — year coercion and deterministic node/edge ordering
-- `export/` — `__init__` (`GraphExporter`, the `to_*` writers) · `nodes` (enrichment, seed-relevance PageRank) · `geometry` (primitives shared with the dashboard) · `plotly_figure`, `links`, `keys`, `loaders`, `bibtex`, `graphml`, `csv_`
-- `dashboard/` — `contracts.py` (`kind`/`schema_version`), `payload.py` (bundle assembly), `package.py` (locking, staging, upsert, rollback), `assets/`
+- `render.py` - `compute_layout` and its chain (community detection, spreading, packing, orientation, normalization), `compute_node_sizes`, `visualize_graph`
+- `paths.py` - output-path and filename derivation (`generate_output_path`), free of matplotlib and numpy so the CLI resolver skips the rendering stack; `render` re-exports it.
+- `themes.py` - the immutable `light`/`dark`/`solarized` palettes and `auto` resolution
+- `node_data.py` - [Paper/scalar metadata precedence](../reference/output-artifacts.md#graph-input) shared by exporters, rendering, and filenames
+- `years.py`, `ordering.py` - year coercion and deterministic node/edge ordering
+- `export/` - `__init__` (`GraphExporter`, the `to_*` writers) · `nodes` (enrichment, seed-relevance PageRank) · `geometry` (primitives shared with the dashboard) · `plotly_figure`, `links`, `keys`, `loaders`, `bibtex`, `graphml`, `csv_`
+- `dashboard/` - `contracts.py` (`kind`/`schema_version`), `payload.py` (bundle assembly), `package.py` (locking, staging, upsert, rollback), `assets/`
 
 ### `cli/` and top-level modules
 

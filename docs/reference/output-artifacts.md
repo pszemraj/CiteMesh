@@ -1,4 +1,4 @@
-# Output Artifacts
+# Output artifacts
 
 File names, path resolution, and the schema of every format CiteMesh writes. Dashboard runs maintain one reusable viewer plus one versioned data package per collection, not a dashboard per seed.
 

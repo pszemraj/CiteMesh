@@ -2,17 +2,17 @@
 
 CiteMesh turns one paper you already know into a graph of the research around it: the newer papers that follow up on it, and the older foundational work it rests on.
 
-It runs locally from a single CLI with four switchable strategies — recommendation, citation, embedding, and hybrid — and exports the same graph to every format you might want.
+Run it locally with recommendation, citation, embedding, or hybrid discovery, then export an interactive dashboard, graph data, bibliography, or image.
 
 ![CiteMesh dashboard showing a Megalodon hybrid graph with LM-Infinite selected](assets/ui.png)
 
-_A hybrid graph seeded by “Megalodon” over a full arXiv corpus index, with “LM-Infinite” selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
+_A hybrid graph seeded by "Megalodon" over a full arXiv corpus index, with "LM-Infinite" selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
 
 After cloning, open the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) to explore a graph offline without installing CiteMesh. Its [collection package](assets/examples/megalodon/dashboard.citemesh.json) can be imported through the dashboard's [Add Results control](docs/reference/output-artifacts.md#dashboard-html).
 
 Public beta, pre-1.0: export formats, cache layouts, and defaults may change between revisions. Runs on macOS, Linux, and Windows.
 
-## Quick Start
+## Quick start
 
 Install PyTorch for your hardware first with the [official selector](https://pytorch.org/get-started/locally/), or pip may resolve a build you did not intend. Then install from GitHub (no PyPI release yet):
 

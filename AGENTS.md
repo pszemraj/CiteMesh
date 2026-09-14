@@ -11,9 +11,9 @@ Rules for working on CiteMesh, for humans and coding agents. Setup, the pre-PR c
 
 ## Git workflow
 
-- Commit as you go, at logical increments — never one batch commit of unrelated changes at the end.
+- Commit at logical increments; keep unrelated changes in separate commits.
 - Assume squash-merge; raise it if that seems wrong for the change at hand.
-- Never commit generated outputs, comparison JSONs, or caches. The one exception is curated documentation assets under `assets/` — the screenshots and the example dashboard in `assets/examples/` are produced by a build but committed on purpose, refreshed deliberately rather than per run, and linked from README and the docs as the no-install example.
+- Never commit generated outputs, comparison JSONs, or caches. Curated screenshots and the example dashboard under `assets/` are the exception: refresh these deliberately, not on every build.
 - Ask before destructive git operations. NEVER `git push` without explicit instruction or approval in the prior turn.
 
 ## Model and dtype policy (non-negotiable)
@@ -28,8 +28,7 @@ Inside sandboxed agent shells Metal is not visible: `torch.backends.mps.is_avail
 
 ## Environment and commands
 
-The maintainer's dev environment is the conda env `inf` (Python 3.12, torch 2.13+); run every project command through it. Install and setup live once in [CONTRIBUTING.md](CONTRIBUTING.md#getting-set-up), the pre-PR triple once in [its PR section](CONTRIBUTING.md#before-you-open-a-pr) — do not restate either here. Keep the suite green and lint-clean before committing.
-
+Run every project command through the maintainer's `inf` conda environment (Python 3.12, torch 2.13+). Follow the [setup steps](CONTRIBUTING.md#getting-set-up) and [pre-PR checks](CONTRIBUTING.md#before-you-open-a-pr). Keep the suite green and lint-clean before committing.
 
 ## Code conventions
 

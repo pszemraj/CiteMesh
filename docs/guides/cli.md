@@ -1,6 +1,6 @@
-# CLI Usage Guide
+# CLI usage guide
 
-`citemesh build` turns a seed paper into a graph with one of four strategies — `recommendation`, `citation`, `embedding`, `hybrid` — and `search`, `view`, `cache`, and `config` support it. Install notes: [README](../../README.md); mechanism: [How CiteMesh builds a graph](how-it-works.md).
+`citemesh build` creates a graph; `search` finds seeds, `view` opens results, `cache` manages persisted data, and `config` saves defaults. See [installation](../../README.md#quick-start) and the [build pipeline](how-it-works.md).
 
 ## Common workflows
 
@@ -52,7 +52,7 @@ Match the [namespace used by the build](caching.md#embedding-namespaces). `--dat
 
 ### View a saved dashboard
 
-`citemesh view [PATH]` opens a saved dashboard in a browser — no rebuild, no server. `PATH` defaults to `out/dashboard.html`; a directory resolves to its `dashboard.html`, and an explicit `.html`/`.htm` file works. A missing dashboard, non-HTML input, or failed launch exits `1`.
+`citemesh view [PATH]` opens a saved HTML export in a browser without rebuilding or starting a server. `PATH` defaults to `out/dashboard.html`; a directory resolves to its `dashboard.html`, and an explicit `.html`/`.htm` file works. A missing dashboard, non-HTML input, or failed launch exits `1`.
 
 ```bash
 citemesh view
@@ -136,7 +136,7 @@ The logging flags work on every command, including nested `cache` and `config` s
 
 - `--top-k`, `-k`: strict per-node edge cap during embedding-graph pruning (default `4`)
 - `--min-semantic-similarity`: cosine required for embedding/hybrid graph edges (default `0.74`, calibrated for EmbeddingGemma at 512 dimensions); hybrid can also admit pairs with shared references. It does not re-encode anything.
-- `--storage-precision {int8,float32}`: persistent cache precision, `int8` in corpus mode and `float32` in candidates mode, which has no calibration data — so explicit `int8` requires `arxiv-corpus`.
+- `--storage-precision {int8,float32}`: persistent cache precision, `int8` in corpus mode and `float32` in candidates mode, which has no calibration data - so explicit `int8` requires `arxiv-corpus`.
 - `--binary-prefilter` / `--no-binary-prefilter`: binary Hamming prefilter, on for int8 corpus mode and normalized off in candidates mode
 - `--binary-rescore-multiplier`: oversampling factor for prefilter rescoring (int8 default `8`; elsewhere normalized to an unused `1`)
 - `--calibration-sample-size`: sample size for int8 quantization ranges (default `2000`)
@@ -148,7 +148,7 @@ The prefilter, rescore-multiplier, and calibration flags are int8-only: passing 
 ### Hybrid strategy
 
 - Inherits the citation collection flags and every embedding control except `--top-k`.
-- `--max-semantic`: semantic-only non-seed additions after reranking, from `0` through `max-papers - 1`, defaulting to `min(20, max-papers - 1)`. At an effective `0` — explicit, or implied by `--max-papers 1` — semantic enrichment is off and embedding-only flags are rejected.
+- `--max-semantic`: semantic-only non-seed additions after reranking, from `0` through `max-papers - 1`, defaulting to `min(20, max-papers - 1)`. At an effective `0` - explicit, or implied by `--max-papers 1` - semantic enrichment is off and embedding-only flags are rejected.
 
 ### Export formats
 
