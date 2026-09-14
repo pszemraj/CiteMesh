@@ -874,18 +874,27 @@ def test_rich_logging_preserves_unknown_config_table_name(tmp_path: Path) -> Non
     assert "[plugin_settings]" in warning
 
 
+@pytest.mark.parametrize(
+    "author_names",
+    [[], ["Ashish Vaswani"], ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"]],
+)
 def test_search_command_prints_results_to_stdout(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, author_names: list[str]
 ) -> None:
-    """Search should print table + full IDs for shell workflows."""
+    """Search should print ranked metadata and full IDs for shell workflows.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the search client.
+    :param list[str] author_names: Empty, single, or abbreviated author list.
+    :return None: Verifies safe text, citation formatting, and full identifiers.
+    """
     long_paper_id = "0123456789abcdef0123456789abcdef01234567"
     mock_client = MagicMock()
     mock_client.search_papers.return_value = [
         Paper(
             paper_id=long_paper_id,
             title="[Attention] Is All You Need [/bold]",
-            year=2017,
-            authors=[Author(name="Ashish Vaswani")],
+            year=2017 if author_names else None,
+            authors=[Author(name=name) for name in author_names],
             citation_count=12345,
             abstract="Transformer model paper",
         )
@@ -899,6 +908,17 @@ def test_search_command_prints_results_to_stdout(
     assert long_paper_id in result.stdout
     assert result.stdout.count(long_paper_id) == 1
     assert "[Attention] Is All You Need [/bold]" in result.stdout
+
+    plain_stdout = flatten_console_text(result.stdout)
+    assert "Citations" in plain_stdout
+    assert "12,345" in plain_stdout
+    assert "None" not in plain_stdout
+    for name in author_names[:2]:
+        assert name in plain_stdout
+    assert ("et al." in plain_stdout) == (len(author_names) > 2)
+    for name in author_names[2:]:
+        assert name not in plain_stdout
+    assert plain_stdout.index("12,345") < plain_stdout.index("Full paper IDs:")
 
 
 def test_s2_search_forwards_paginated_result_count(
@@ -1102,6 +1122,9 @@ def test_search_mode_local_prints_cached_results(
     assert "0.876" in plain_stdout
     assert "Ada Lovelace" in plain_stdout
     assert "Searched 42 locally cached embeddings" in plain_stdout
+    assert "Score" in plain_stdout
+    assert plain_stdout.index("0.876") < plain_stdout.index("Searched 42")
+    assert plain_stdout.index("Searched 42") < plain_stdout.index("Full paper IDs:")
     fake_builder.search_local.assert_called_once_with("cached topic", top_k=1)
     fake_builder.prepare_embedding_cache.assert_called_once_with()
 

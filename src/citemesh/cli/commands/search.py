@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 import shlex
+from collections.abc import Iterable, Sequence
 
 from rich.text import Text
 
@@ -262,6 +263,57 @@ def _local_result_build_command(
     return shlex.join(command)
 
 
+def _print_search_results(
+    title: str,
+    rows: Iterable[tuple[str, str, Sequence[str], object, str]],
+    *,
+    metric: str,
+    metric_width: int | None = None,
+    summary: str | None = None,
+) -> None:
+    """Render ranked papers with source-specific values and copyable identifiers.
+
+    :param str title: Table heading.
+    :param Iterable rows: Paper ID, title, author names, year, and formatted metric.
+    :param str metric: Label for the source-specific final column.
+    :param int | None metric_width: Fixed metric width, or an unwrapped auto width.
+    :param str | None summary: Optional context between the table and identifiers.
+    :return None: Prints the table, optional summary, and full paper IDs.
+    """
+    table = _output_table(title)
+    table.leading = 1
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Paper / authors", ratio=1)
+    table.add_column("Year", justify="right", no_wrap=True)
+    table.add_column(
+        metric, justify="right", width=metric_width, no_wrap=metric_width is None
+    )
+    paper_ids = []
+    for i, (paper_id, paper_title, authors, year, value) in enumerate(rows, 1):
+        authors_str = ", ".join(authors[:2])
+        if len(authors) > 2:
+            authors_str += " et al."
+        table.add_row(
+            str(i),
+            Text.assemble(
+                (paper_title, "bold"),
+                ("\n" + authors_str, "dim") if authors_str else "",
+            ),
+            str(year) if year is not None else "",
+            value,
+        )
+        paper_ids.append(paper_id)
+    console.output_console.print(table)
+    if summary is not None:
+        console.output_console.print(Text(summary, style="dim"))
+    console.output_console.print("\n[dim]Full paper IDs:[/dim]")
+    for i, paper_id in enumerate(paper_ids, 1):
+        console.output_console.print(
+            Text.assemble((f"{i}. ", "dim"), (paper_id, "cyan")),
+            soft_wrap=True,
+        )
+
+
 def _render_local_search(
     args: argparse.Namespace,
     builder: EmbeddingGraphBuilder,
@@ -293,46 +345,31 @@ def _render_local_search(
         )
         return 1
 
-    table = _output_table(f"Local semantic search for '{args.query}'")
-    table.leading = 1
-    table.add_column("#", style="dim", width=3)
-    table.add_column("Paper / authors", ratio=1)
-    table.add_column("Year", justify="right", no_wrap=True)
-    table.add_column("Score", justify="right", width=6)
-
-    for i, result in enumerate(results, 1):
+    rows = []
+    for result in results:
         metadata = result.metadata or {}
-        authors = [str(name) for name in (metadata.get("authors") or [])]
-        authors_str = ", ".join(authors[:2])
-        if len(authors) > 2:
-            authors_str += " et al."
-        year_value = metadata.get("year")
-        table.add_row(
-            str(i),
-            Text.assemble(
-                (str(metadata.get("title") or ""), "bold"),
-                ("\n" + authors_str, "dim") if authors_str else "",
-            ),
-            str(year_value) if year_value is not None else "",
-            f"{float(result.score):.3f}",
-        )
-
-    console.output_console.print(table)
-    total = getattr(cache, "last_search_total_embeddings", None)
-    if total is not None:
-        console.output_console.print(
-            Text(
-                f"Searched {int(total):,} locally cached embeddings "
-                f"(model={defaults.model}, source={defaults.semantic_source}).",
-                style="dim",
+        rows.append(
+            (
+                str(result.paper_id),
+                str(metadata.get("title") or ""),
+                [str(name) for name in (metadata.get("authors") or [])],
+                metadata.get("year"),
+                f"{float(result.score):.3f}",
             )
         )
-    console.output_console.print("\n[dim]Full paper IDs:[/dim]")
-    for i, result in enumerate(results, 1):
-        console.output_console.print(
-            Text.assemble((f"{i}. ", "dim"), (str(result.paper_id), "cyan")),
-            soft_wrap=True,
-        )
+    total = getattr(cache, "last_search_total_embeddings", None)
+    _print_search_results(
+        f"Local semantic search for '{args.query}'",
+        rows,
+        metric="Score",
+        metric_width=6,
+        summary=(
+            f"Searched {int(total):,} locally cached embeddings "
+            f"(model={defaults.model}, source={defaults.semantic_source})."
+            if total is not None
+            else None
+        ),
+    )
     build_command = _local_result_build_command(defaults, cache)
     if build_command is None:
         logger.warning(
@@ -365,35 +402,20 @@ def _run_s2_search(args: argparse.Namespace) -> int:
             logger.error("No results found.")
             return 1
 
-        table = _output_table(f"Search results for '{args.query}'")
-        table.leading = 1
-        table.add_column("#", style="dim", width=3)
-        table.add_column("Paper / authors", ratio=1)
-        table.add_column("Year", justify="right", no_wrap=True)
-        table.add_column("Citations", justify="right", no_wrap=True)
-
-        for i, paper in enumerate(results, 1):
-            authors_str = ", ".join(a.name for a in paper.authors[:2])
-            if len(paper.authors) > 2:
-                authors_str += " et al."
-
-            table.add_row(
-                str(i),
-                Text.assemble(
-                    (paper.title, "bold"),
-                    ("\n" + authors_str, "dim") if authors_str else "",
-                ),
-                str(paper.year) if paper.year is not None else "",
-                f"{paper.citation_count:,}",
-            )
-
-        console.output_console.print(table)
-        console.output_console.print("\n[dim]Full paper IDs:[/dim]")
-        for i, paper in enumerate(results, 1):
-            console.output_console.print(
-                Text.assemble((f"{i}. ", "dim"), (paper.paper_id, "cyan")),
-                soft_wrap=True,
-            )
+        _print_search_results(
+            f"Search results for '{args.query}'",
+            (
+                (
+                    paper.paper_id,
+                    paper.title,
+                    [author.name for author in paper.authors],
+                    paper.year,
+                    f"{paper.citation_count:,}",
+                )
+                for paper in results
+            ),
+            metric="Citations",
+        )
         console.output_console.print(
             '\nUse a paper ID with: citemesh build "<ID>"', style="dim"
         )
