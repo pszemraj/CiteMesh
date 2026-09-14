@@ -65,6 +65,7 @@ from citemesh.strategies.candidates import (
     IdentityRegistry,
     fetch_candidate_pool,
     paper_embedding_metadata,
+    reconcile_paper_identity,
     register_aliases,
     resolve_aliases,
     scope_candidate_collection,
@@ -871,7 +872,12 @@ class EmbeddingGraphBuilder(
             )
             return papers
 
-        self._collect_corpus_cache_papers(papers, seed_identities, seed_embedding)
+        self._collect_corpus_cache_papers(
+            papers,
+            seed_identities,
+            seed_embedding,
+            resolved_seed_paper,
+        )
         return papers
 
     def _resolve_seed_paper(self, seed_id: str, seed_paper: Paper | None) -> Paper:
@@ -1010,12 +1016,14 @@ class EmbeddingGraphBuilder(
         papers: dict[str, Paper],
         seed_identities: IdentityRegistry,
         seed_embedding: np.ndarray,
+        seed_paper: Paper,
     ) -> None:
         """Search the hydrated corpus cache and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param IdentityRegistry seed_identities: Alias registry for the seed paper.
+        :param IdentityRegistry seed_identities: Alias registry for admitted papers.
         :param np.ndarray seed_embedding: Normalized seed embedding.
+        :param Paper seed_paper: Canonical seed paper that always survives reconciliation.
         :return None: Extends ``papers`` in place and backfills citation counts.
         """
         use_streaming = self.use_streaming
@@ -1030,19 +1038,28 @@ class EmbeddingGraphBuilder(
             use_streaming=use_streaming,
         )
 
-        # Convert candidates to Paper objects while respecting max_papers total.
+        # Reconcile the complete bounded ranking before applying the graph cap. A
+        # later bridge record can collapse two earlier identity classes; retaining
+        # insertion order then keeps the highest-ranked unique papers.
         for paper_id, metadata, embedding in candidates:
-            if len(papers) >= self.max_papers:
-                break
-            if paper_id in papers:
-                continue
-
             paper = self._paper_from_cached_metadata(paper_id, metadata)
-            if resolve_aliases(seed_identities, paper):
+            reconciliation = reconcile_paper_identity(
+                seed_identities,
+                seed_paper,
+                papers,
+                paper,
+            )
+            if reconciliation.canonical_id is not None:
+                for collapsed_id in reconciliation.collapsed_ids:
+                    self.retrieval_embeddings.pop(collapsed_id, None)
                 continue
-
             papers[paper_id] = paper
             self.retrieval_embeddings[paper_id] = embedding
+            register_aliases(seed_identities, paper_id, paper)
+
+        for paper_id in list(papers)[self.max_papers :]:
+            papers.pop(paper_id)
+            self.retrieval_embeddings.pop(paper_id, None)
 
         self._update_citation_counts(papers)
 

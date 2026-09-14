@@ -2464,24 +2464,31 @@ def test_candidate_pool_collapses_identifier_bridge_classes() -> None:
     assert pool._aliases["id:10.1000/bridge"] == arxiv_record.paper_id
 
 
-def test_identity_reconciliation_rejects_conflicting_strong_ids() -> None:
-    """Matching metadata must not override contradictory S2 or DOI evidence."""
+@pytest.mark.parametrize("opaque_case_distinction", [False, True])
+def test_identity_reconciliation_rejects_conflicting_strong_ids(
+    opaque_case_distinction: bool,
+) -> None:
+    """Matching metadata must not override contradictory source ID or DOI evidence.
+
+    :param bool opaque_case_distinction: Use case-sensitive opaque corpus identifiers.
+    :return None: Checks distinct identity classes retain independent provenance.
+    """
     authors = [Author(name="Ada Lovelace")]
     first = Paper(
-        paper_id="1" * 40,
+        paper_id="LocalA" if opaque_case_distinction else "1" * 40,
         title="Shared Scientific Title",
         year=2024,
         authors=authors,
         abstract="Shared abstract",
-        doi="10.1000/first",
+        doi="" if opaque_case_distinction else "10.1000/first",
     )
     second = Paper(
-        paper_id="2" * 40,
+        paper_id="locala" if opaque_case_distinction else "2" * 40,
         title="Shared Scientific Title",
         year=2024,
         authors=authors,
         abstract="Shared abstract",
-        doi="10.1000/second",
+        doi="" if opaque_case_distinction else "10.1000/second",
     )
     seed = Paper(
         paper_id="3" * 40,

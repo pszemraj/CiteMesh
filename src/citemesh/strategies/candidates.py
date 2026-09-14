@@ -140,9 +140,11 @@ def _strong_identifier_evidence(paper: Paper) -> dict[str, frozenset[str]]:
         # Semantic Scholar IDs are normally 40 hexadecimal characters. Treat
         # opaque primary IDs as the same authoritative namespace too: exact
         # equality may reconcile, but metadata must not override disagreement.
-        normalized_primary = primary.lower()
-        if _S2_PATTERN.fullmatch(normalized_primary):
-            normalized_primary = normalized_primary.removeprefix("s2:")
+        # Only recognized S2 IDs are case-insensitive. Dataset-local opaque
+        # IDs may differ solely in case and must retain their source identity.
+        normalized_primary = primary
+        if _S2_PATTERN.fullmatch(primary):
+            normalized_primary = primary.lower().removeprefix("s2:")
         identifiers.setdefault("s2", set()).add(normalized_primary)
 
     arxiv_identifier = recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)

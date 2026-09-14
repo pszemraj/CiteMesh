@@ -4152,6 +4152,164 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
     assert "arxiv:2608.15411" not in builder.retrieval_embeddings
 
 
+@pytest.mark.parametrize(
+    ("identifier_field", "identifier_value"),
+    [
+        ("doi", "10.1000/shared-work"),
+        ("arxiv_id", "2608.15412"),
+    ],
+)
+def test_collect_papers_deduplicates_corpus_candidates_by_strong_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    identifier_field: str,
+    identifier_value: str,
+) -> None:
+    """Strong aliases should merge ranked corpus rows and leave room for unique work.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces model and cache-search behavior.
+    :param str identifier_field: External identifier metadata field shared by duplicates.
+    :param str identifier_value: Strong identifier shared by distinct source rows.
+    :return None: Checks first-ranked identity/vector retention and capacity filling.
+    """
+    seed = Paper(paper_id="seed", title="Seed", year=2025)
+    builder = EmbeddingGraphBuilder(
+        max_papers=3,
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
+    )
+    builder.client.get_paper.return_value = seed
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_encode_texts",
+        lambda _texts, show_progress_bar=False: np.asarray(
+            [[1.0, 0.0]], dtype=np.float32
+        ),
+    )
+    shared_metadata = {
+        "title": "Shared work",
+        "year": 2024,
+        "authors": ["Example Author"],
+        identifier_field: identifier_value,
+    }
+    first_vector = np.asarray([0.9, 0.1], dtype=np.float32)
+    duplicate_vector = np.asarray([0.8, 0.2], dtype=np.float32)
+    unique_vector = np.asarray([0.7, 0.3], dtype=np.float32)
+    monkeypatch.setattr(
+        builder,
+        "_select_candidates",
+        lambda _seed_embedding, *, use_streaming: [
+            ("source-a", {**shared_metadata, "abstract": ""}, first_vector),
+            (
+                "source-b",
+                {**shared_metadata, "abstract": "Supplemental abstract"},
+                duplicate_vector,
+            ),
+            (
+                "source-c",
+                {
+                    "title": "Unique work",
+                    "year": 2023,
+                    "authors": ["Other Author"],
+                },
+                unique_vector,
+            ),
+        ],
+    )
+    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    assert list(papers) == [seed.paper_id, "source-a", "source-c"]
+    assert papers["source-a"].abstract == "Supplemental abstract"
+    assert "source-b" not in builder.retrieval_embeddings
+    np.testing.assert_array_equal(
+        builder.retrieval_embeddings["source-a"], first_vector
+    )
+    np.testing.assert_array_equal(
+        builder.retrieval_embeddings["source-c"], unique_vector
+    )
+
+
+def test_collect_papers_corpus_bridge_collapses_prior_alias_classes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bridge row should collapse prior corpus classes and discard their vectors.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces model and cache-search behavior.
+    :return None: Checks bridge reconciliation and later capacity reuse.
+    """
+    seed = Paper(paper_id="seed", title="Seed", year=2025)
+    builder = EmbeddingGraphBuilder(
+        max_papers=3,
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
+    )
+    builder.client.get_paper.return_value = seed
+    monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_encode_texts",
+        lambda _texts, show_progress_bar=False: np.asarray(
+            [[1.0, 0.0]], dtype=np.float32
+        ),
+    )
+    first_vector = np.asarray([0.9, 0.1], dtype=np.float32)
+    displaced_vector = np.asarray([0.8, 0.2], dtype=np.float32)
+    earlier_unique_vector = np.asarray([0.7, 0.3], dtype=np.float32)
+    later_unique_vector = np.asarray([0.6, 0.4], dtype=np.float32)
+    monkeypatch.setattr(
+        builder,
+        "_select_candidates",
+        lambda _seed_embedding, *, use_streaming: [
+            (
+                "arxiv:2608.15412",
+                {"title": "Bridge work", "year": 2024, "arxiv_id": "2608.15412"},
+                first_vector,
+            ),
+            (
+                "10.1000/bridge",
+                {"title": "Bridge work", "year": 2024, "doi": "10.1000/bridge"},
+                displaced_vector,
+            ),
+            (
+                "earlier-unique",
+                {"title": "Earlier unique work", "year": 2023},
+                earlier_unique_vector,
+            ),
+            (
+                "bridge-source",
+                {
+                    "title": "Bridge work",
+                    "year": 2024,
+                    "arxiv_id": "2608.15412",
+                    "doi": "10.1000/bridge",
+                },
+                np.asarray([0.7, 0.3], dtype=np.float32),
+            ),
+            (
+                "later-unique",
+                {"title": "Later unique work", "year": 2022},
+                later_unique_vector,
+            ),
+        ],
+    )
+    monkeypatch.setattr(builder, "_update_citation_counts", lambda _papers: None)
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    assert list(papers) == [seed.paper_id, "arxiv:2608.15412", "earlier-unique"]
+    assert "10.1000/bridge" not in builder.retrieval_embeddings
+    assert "bridge-source" not in builder.retrieval_embeddings
+    assert "later-unique" not in builder.retrieval_embeddings
+    np.testing.assert_array_equal(
+        builder.retrieval_embeddings["arxiv:2608.15412"], first_vector
+    )
+    np.testing.assert_array_equal(
+        builder.retrieval_embeddings["earlier-unique"], earlier_unique_vector
+    )
+
+
 def test_corpus_collection_preserves_all_candidate_authors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
