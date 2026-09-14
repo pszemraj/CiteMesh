@@ -10,6 +10,7 @@ from rich.text import Text
 from citemesh.data.user_config import UserConfig
 from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.embedding import (
+    EmbeddingCacheFingerprintMismatchError,
     EmbeddingGraphBuilder,
     resolve_embedding_device,
 )
@@ -43,6 +44,24 @@ class _LocalSearchOptionError(ValueError):
     that does not resolve, say — stays an availability failure and keeps the
     fallback it has always had.
     """
+
+
+def _empty_cache_alternative_guidance(defaults: argparse.Namespace) -> str:
+    """Describe the next search option after an empty local namespace.
+
+    :param argparse.Namespace defaults: Effective build-equivalent namespace.
+    :return str: Guidance that does not repeat the active source selector.
+    """
+    if defaults.semantic_source == "arxiv-corpus":
+        return (
+            "This is already the arXiv-corpus namespace; use the same "
+            "--dataset-source when building it. Use --mode s2 for keyword search."
+        )
+    return (
+        "To search an existing arXiv-corpus build instead, pass "
+        "--semantic-source arxiv-corpus (plus --dataset-source when it is not "
+        "the default). Use --mode s2 for keyword search."
+    )
 
 
 def _resolve_search_mode(
@@ -349,6 +368,11 @@ def _run_search_command(
         # would answer a question the flags say was not asked.
         logger.error("%s", exc)
         return 2
+    except EmbeddingCacheFingerprintMismatchError as exc:
+        # This refusal preserves a costly hydrated corpus. Returning keyword
+        # results would hide the operator action needed to resolve it.
+        logger.error("%s", exc)
+        return 1
     except Exception as exc:
         runtime_selectors = ""
         if builder is not None:
@@ -381,15 +405,16 @@ def _run_search_command(
             )
             return _render_local_search(args, builder, defaults)
         logger.info(
-            "Local embedding cache is empty for model=%s semantic-source=%s; "
-            "searching the Semantic Scholar API instead. The namespace is keyed "
-            "by model, profile, truncate dim, storage precision, and formatter "
-            "(never the device), so run `citemesh build` with this configuration "
-            "to populate it. To search an existing arXiv-corpus build instead, "
-            "pass --semantic-source arxiv-corpus (plus --dataset-source when it "
-            "is not the default). Use --mode s2 for keyword search.",
+            "Local embedding cache is empty for model=%s semantic-source=%s "
+            "dataset-source=%s; searching the Semantic Scholar API instead. The "
+            "namespace is keyed by model, profile, semantic source, dataset "
+            "source, truncate dim, storage precision, and formatter (never the "
+            "device), so run `citemesh build` with this configuration to populate "
+            "it. %s",
             defaults.model,
             defaults.semantic_source,
+            defaults.dataset_source,
+            _empty_cache_alternative_guidance(defaults),
         )
         return _run_s2_search(args)
 
@@ -406,16 +431,16 @@ def _run_search_command(
             requested_via = f"defaults.search_mode in {user_config.path}"
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
-            "has no vectors for model=%s semantic-source=%s. The namespace is "
-            "keyed by model, profile, truncate dim, storage precision, and "
-            "formatter (never the device), so run `citemesh build` with this "
-            "configuration to populate it. To search an existing arXiv-corpus "
-            "build instead, pass --semantic-source arxiv-corpus (plus "
-            "--dataset-source when it is not the default). Use --mode s2 for "
-            "keyword search.",
+            "has no vectors for model=%s semantic-source=%s dataset-source=%s. "
+            "The namespace is keyed by model, profile, semantic source, dataset "
+            "source, truncate dim, storage precision, and formatter (never the "
+            "device), so run `citemesh build` with this configuration to populate "
+            "it. %s",
             requested_via,
             defaults.model,
             defaults.semantic_source,
+            defaults.dataset_source,
+            _empty_cache_alternative_guidance(defaults),
         )
         return 1
     return _render_local_search(args, builder, defaults)

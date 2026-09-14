@@ -650,7 +650,8 @@ class _FingerprintMixin:
             f"This cache holds {cached_rows:,} corpus paper(s) "
             f"({format_bytes(stats.size_bytes)}) hydrated from "
             f"{stats.hydration_dataset_source}, so CiteMesh refused to delete it "
-            "automatically. Re-run with --force-rebuild-cache to discard it and "
-            "rebuild (add --overwrite-cache to skip the confirmation prompt in "
-            "scripts), or run 'citemesh cache clear' to remove the cache."
+            "automatically. Re-run with --force-rebuild-cache --overwrite-cache "
+            "to discard it and rebuild; both flags are required in a "
+            "non-interactive script. Or run 'citemesh cache clear' to remove the "
+            "cache."
         )

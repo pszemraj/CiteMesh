@@ -139,7 +139,7 @@ The logging flags work on `build`, `search`, `cache`, and `config`, subcommands 
 - `--binary-rescore-multiplier`: oversampling factor for prefilter rescoring (int8 default `8`; elsewhere normalized to an unused `1`)
 - `--calibration-sample-size`: sample size for int8 quantization ranges (default `2000`)
 - `--cache-compression` / `--cache-compression-level`: HDF5 filter for cache datasets (`gzip` or `lzf`, default `gzip` at level `1`). `lzf` normalizes the level to `0` and rejects an explicit one.
-- `--force-rebuild-cache`, `--overwrite-cache`, `--cache-overwrite-reason`: clear and re-encode this model's namespaces before running. The rebuild prompts unless `--overwrite-cache` is passed; the other two are rejected without it.
+- `--force-rebuild-cache`, `--overwrite-cache`, `--cache-overwrite-reason`: clear and re-encode this model's namespaces before running. The rebuild prompts on a TTY unless `--overwrite-cache` is passed. In a non-interactive command, `--force-rebuild-cache` requires `--overwrite-cache`. Both `--overwrite-cache` and `--cache-overwrite-reason` require `--force-rebuild-cache`.
 
 The prefilter, rescore-multiplier, and calibration flags are int8-only: passing any explicitly requires `--storage-precision int8`. The sweeps behind these numbers are in [Defaults Tuning Study](../reference/defaults-tuning-study.md).
 

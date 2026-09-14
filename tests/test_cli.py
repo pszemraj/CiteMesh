@@ -9,6 +9,7 @@ import logging
 import re
 import runpy
 import shlex
+import sqlite3
 import tempfile
 import threading
 import webbrowser
@@ -52,7 +53,11 @@ from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
 from citemesh.data.user_config import UserConfig
 from citemesh.strategies.candidates import CandidateAcquisitionError
-from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, ENCODE_BATCH_SIZE
+from citemesh.strategies.embedding import (
+    DEFAULT_DATASET_SOURCE,
+    ENCODE_BATCH_SIZE,
+    EmbeddingCacheFingerprintMismatchError,
+)
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
@@ -471,6 +476,20 @@ def test_cache_commands_contracts(
         2050 + sum(link.lstat().st_size for link, _target in links),
     )
 
+    legacy_namespace = "0123456789ab"
+    legacy_metadata = cache_root / "embeddings" / f"metadata_{legacy_namespace}.db"
+    with sqlite3.connect(legacy_metadata) as connection:
+        connection.execute(
+            "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+            ("schema_version", "3"),
+        )
+    (cache_root / "embeddings" / f"embeddings_{legacy_namespace}.h5").write_bytes(
+        b"legacy embeddings"
+    )
+
     scan_result = run_cli_command(["cache", "scan"])
     assert scan_result.returncode == 0, (
         f"STDOUT: {scan_result.stdout}\nSTDERR: {scan_result.stderr}"
@@ -481,6 +500,8 @@ def test_cache_commands_contracts(
         "references",
         "TOTAL",
         "Cache root:",
+        "Embedding Namespace Details",
+        "Legacy dtype-keyed namespace",
     ]:
         assert token in flatten_console_text(scan_result.stdout)
 
@@ -1480,6 +1501,7 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
         notice for notice in notices if "Local embedding cache is empty" in notice
     )
     assert "semantic-source=candidates" in empty_notice
+    assert f"dataset-source={DEFAULT_DATASET_SOURCE}" in empty_notice
     assert "pass --semantic-source arxiv-corpus" in empty_notice
     # The namespace has no device or compute-dtype token; guidance must not imply one.
     assert "device=" not in empty_notice
@@ -1509,7 +1531,9 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     # Device and compute dtype are absent from the namespace contract.
     assert "device=" not in message
     assert "compute_dtype" not in message
-    assert error_mock.call_args.args[-1] == "candidates"
+    assert "semantic-source=%s" in error_mock.call_args.args[0]
+    assert error_mock.call_args.args[3] == "candidates"
+    assert error_mock.call_args.args[4] == DEFAULT_DATASET_SOURCE
     fake_builder.prepare_embedding_cache.assert_not_called()
     fake_builder.search_local.assert_not_called()
 
@@ -1547,6 +1571,112 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
         for record in caplog.records
     )
     s2_search.assert_called_once_with(args)
+
+
+def test_search_auto_refuses_corpus_fingerprint_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto search must surface a protected corpus fingerprint mismatch.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the local cache and S2 path.
+    :return None: Asserts the mismatch exits non-zero without a keyword fallback.
+    """
+    fake_builder = _fake_local_search_builder(cached_count=1)
+    fake_builder.prepare_embedding_cache.side_effect = (
+        EmbeddingCacheFingerprintMismatchError("protected corpus cache")
+    )
+    monkeypatch.setattr(
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+
+    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    args = parser.parse_args(["search", "attention"])
+    result = cli_module._run_search_command(
+        args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
+    )
+
+    assert result == 1
+    assert "protected corpus cache" in str(error_mock.call_args)
+    s2_search.assert_not_called()
+
+
+def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto fallback must name a corpus selector without recommending it again.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the local cache and S2 path.
+    :return None: Asserts the fallback notices both effective source selectors.
+    """
+    dataset_source = "research/arxiv-snapshot"
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+    info_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+
+    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    args = parser.parse_args(["search", "attention"])
+    config = UserConfig(
+        path=Path("config.toml"),
+        defaults={
+            "semantic_source": "arxiv-corpus",
+            "dataset_source": dataset_source,
+        },
+    )
+    result = cli_module._run_search_command(args, build_parser, config)
+
+    assert result == 0
+    assert "semantic-source=%s" in info_mock.call_args.args[0]
+    assert info_mock.call_args.args[2] == "arxiv-corpus"
+    assert info_mock.call_args.args[3] == dataset_source
+    assert "already the arXiv-corpus namespace" in info_mock.call_args.args[4]
+    assert "pass --semantic-source arxiv-corpus" not in info_mock.call_args.args[4]
+    s2_search.assert_called_once_with(args)
+
+
+def test_search_local_empty_corpus_cache_names_the_selected_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit local search must not recommend its active corpus source.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the local cache and logger.
+    :return None: Asserts the empty-cache error names both source selectors.
+    """
+    dataset_source = "research/arxiv-snapshot"
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+
+    result = run_cli_command(
+        [
+            "search",
+            "attention",
+            "--mode",
+            "local",
+            "--semantic-source",
+            "arxiv-corpus",
+            "--dataset-source",
+            dataset_source,
+        ]
+    )
+
+    assert result.returncode == 1
+    assert "semantic-source=%s" in error_mock.call_args.args[0]
+    assert error_mock.call_args.args[3] == "arxiv-corpus"
+    assert error_mock.call_args.args[4] == dataset_source
+    assert "already the arXiv-corpus namespace" in error_mock.call_args.args[5]
+    assert "pass --semantic-source arxiv-corpus" not in error_mock.call_args.args[5]
 
 
 def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
@@ -4675,9 +4805,9 @@ def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
 
 
 def test_documented_cli_examples_are_parseable() -> None:
-    """README and CLI guide command examples should remain parseable."""
+    """Every documented bash command should remain parseable."""
     parser, _, _, _ = cli_module._create_parser()
-    docs = [Path("README.md"), Path("docs/guides/cli.md")]
+    docs = [Path("README.md"), *sorted(Path("docs").rglob("*.md"))]
 
     commands: list[list[str]] = []
     for doc_path in docs:
