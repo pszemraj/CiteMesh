@@ -2793,8 +2793,11 @@ def test_embedding_cache_refuses_to_delete_corpus_payload_on_fingerprint_change(
     assert "1,250,000" in message
     assert "3.0 GiB" in message
     assert "refused to delete it automatically" in message
-    assert "--force-rebuild-cache" in message
-    assert "--overwrite-cache" in message
+    assert (
+        "citemesh build <paper-id> --strategy embedding --semantic-source "
+        "arxiv-corpus --force-rebuild-cache --overwrite-cache"
+    ) in message
+    assert "same model and corpus options that select this cache" in message
     assert "citemesh cache clear" in message
     builder.embedding_cache.clear.assert_not_called()
     builder.embedding_cache.set_model_fingerprint.assert_not_called()

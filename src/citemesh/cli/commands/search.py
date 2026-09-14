@@ -354,6 +354,8 @@ def _run_search_command(
                 ", ".join(override_labels),
             )
             return 2
+        # An already-local default retains its mode provenance; selectors still
+        # choose which namespace that local search reads.
         if origin != "flag" and mode != "local":
             # Local-only flags are explicit local intent; they outrank a
             # config-level s2/auto default but never an explicit --mode, so
@@ -427,6 +429,7 @@ def _run_search_command(
                 f"{cached_count:,}",
                 defaults.model,
             )
+            # Query failures stay visible once local results were selected.
             return _render_local_search(args, builder, defaults)
         logger.info(
             "Local embedding cache is empty for model=%s semantic-source=%s "
@@ -468,4 +471,6 @@ def _run_search_command(
             _empty_cache_alternative_guidance(defaults),
         )
         return 1
+    # Local vectors are available and the search source is now selected.
+    # Query/scoring failures stay visible instead of changing result semantics.
     return _render_local_search(args, builder, defaults)

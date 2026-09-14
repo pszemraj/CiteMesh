@@ -1177,6 +1177,9 @@ class EmbeddingGraphBuilder(
         )
         with operation_lock:
             if self.semantic_source == "arxiv-corpus":
+                # Split and cap describe the rows a build contributed. Searching
+                # every cached row keeps sliced builds reachable with default
+                # query settings; only dataset provenance must agree here.
                 cached_source = cache.get_hydrated_dataset_source()
                 if cached_source and cached_source != self.dataset_source:
                     raise RuntimeError(

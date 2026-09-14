@@ -1634,8 +1634,10 @@ def test_search_auto_refuses_corpus_fingerprint_mismatch(
     :return None: Asserts the mismatch exits non-zero without a keyword fallback.
     """
     fake_builder = _fake_local_search_builder(cached_count=1)
-    fake_builder.prepare_embedding_cache.side_effect = (
-        EmbeddingCacheFingerprintMismatchError("protected corpus cache")
+    fake_builder.prepare_embedding_cache.side_effect = EmbeddingCacheFingerprintMismatchError(
+        "protected corpus cache; run `citemesh build <paper-id> --strategy embedding "
+        "--semantic-source arxiv-corpus --force-rebuild-cache --overwrite-cache` "
+        "with the same model and corpus options"
     )
     monkeypatch.setattr(
         search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
@@ -1652,7 +1654,11 @@ def test_search_auto_refuses_corpus_fingerprint_mismatch(
     )
 
     assert result == 1
-    assert "protected corpus cache" in str(error_mock.call_args)
+    message = str(error_mock.call_args)
+    assert "protected corpus cache" in message
+    assert "citemesh build <paper-id>" in message
+    assert "--strategy embedding" in message
+    assert "--force-rebuild-cache --overwrite-cache" in message
     s2_search.assert_not_called()
 
 
