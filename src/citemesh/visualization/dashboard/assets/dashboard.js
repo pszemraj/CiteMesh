@@ -179,6 +179,8 @@
     }
 
     function normalizeDashboardEdgeStrengths(edges) {
+      // This mirrors Python's _edge_strength_scale because imported offline
+      // payloads rebuild in the browser without running Python.
       const weights = edges.map((edge) =>
         Math.max(safeFiniteNumber(edge && edge.weight, 0), 0)
       );

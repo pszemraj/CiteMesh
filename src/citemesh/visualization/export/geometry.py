@@ -135,6 +135,9 @@ def _edge_strength_scale(weights: list[float]) -> list[float]:
     visually identical strength. Min-max scaling within the graph makes
     *relative* link strength legible.
 
+    This mirrors the dashboard runtime because imported offline payloads rebuild
+    in the browser without running Python.
+
     :param list[float] weights: Non-negative raw edge weights.
     :return list[float]: Normalized strengths (all ``0.5`` when weights tie).
     """

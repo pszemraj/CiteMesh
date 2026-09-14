@@ -9,7 +9,7 @@ from typing import Any
 
 import networkx as nx
 
-from citemesh.core.values import coerce_float
+from citemesh.core.values import coerce_citation_count, coerce_float
 
 from ..node_data import effective_node_metadata as _serialize_node
 from ..node_data import validate_canonical_node_ids
@@ -251,8 +251,8 @@ class NodesMixin:
             serialized = _serialize_node(node_id, attrs)
             serialized["id"] = node_str
             serialized["year"] = coerce_publication_year(serialized.get("year"))
-            serialized["citation_count"] = max(
-                int(serialized.get("citation_count") or 0), 0
+            serialized["citation_count"] = coerce_citation_count(
+                serialized.get("citation_count")
             )
             serialized["authors"] = [
                 str(author).strip()

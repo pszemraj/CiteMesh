@@ -939,6 +939,37 @@ def test_nullable_scalar_collections_export_as_empty_lists(tmp_path: Path) -> No
     assert ET.parse(graphml_path) is not None
 
 
+@pytest.mark.parametrize(
+    ("raw_citation_count", "expected"),
+    [
+        (True, 0),
+        (False, 0),
+        ("not-a-count", 0),
+        (float("nan"), 0),
+    ],
+)
+def test_graph_payload_normalizes_invalid_citation_metadata(
+    raw_citation_count: object, expected: int
+) -> None:
+    """Graph payloads should use the shared citation-count normalizer.
+
+    :param object raw_citation_count: Invalid source citation-count metadata.
+    :param int expected: Canonical citation count expected in the payload.
+    :return None: Checks graph payload normalization.
+    """
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="Seed",
+        citation_count=raw_citation_count,
+        is_seed=True,
+    )
+
+    payload = GraphExporter(graph, "seed", layout={"seed": (0.0, 0.0)}).graph_payload()
+
+    assert payload["nodes"][0]["citation_count"] == expected
+
+
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
     """GraphML should round-trip nullable metadata and XML-invalid text."""
     graph, seed_id = _build_graph()
@@ -2047,11 +2078,7 @@ def test_exporter_dashboard_runtime_script_contracts(
 ) -> None:
     """Dashboard runtime should stay intact and parse imported HTML safely."""
 
-    class FakeFigure(_BaseFakeFigure):
-        def to_plotly_json(self) -> dict[str, object]:
-            return {"data": self.data, "layout": self.layout}
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
 
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
@@ -2315,13 +2342,7 @@ def _execute_dashboard_runtime_in_node(
     :param bool expect_plotly: Whether valid initial graph data should reach Plotly.
     :return subprocess.CompletedProcess[str]: Completed Node.js process.
     """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is unavailable for dashboard runtime validation")
-
-    harness = (
-        _DASHBOARD_NODE_HARNESS_PRELUDE
-        + r"""
+    harness = r"""
 const expectedStatus = process.argv[2];
 const expectPlotly = process.argv[3] === "true";
 eval(runtime);
@@ -2334,13 +2355,45 @@ if (plotlyCalled !== expectPlotly) {
 }
 process.stdout.write(status.textContent);
 """
+    return _run_dashboard_runtime_in_node(
+        path,
+        harness,
+        [expected_status, str(expect_plotly).lower()],
     )
+
+
+def _run_dashboard_runtime_in_node(
+    path: Path,
+    harness: str,
+    arguments: list[str],
+    *,
+    saved_store: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Launch a generated dashboard runtime in the shared Node.js harness.
+
+    :param Path path: Generated dashboard artifact.
+    :param str harness: JavaScript appended to the shared runtime setup.
+    :param list[str] arguments: Additional process arguments consumed by ``harness``.
+    :param dict[str, str] | None saved_store: Optional initial ``localStorage`` values.
+    :return subprocess.CompletedProcess[str]: Completed Node.js process.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is unavailable for dashboard runtime validation")
+
+    environment = None
+    if saved_store is not None:
+        environment = {
+            **os.environ,
+            "CITEMESH_SAVED_STORE": json.dumps(sorted(saved_store.items())),
+        }
     return subprocess.run(
-        [node, "-e", harness, str(path), expected_status, str(expect_plotly).lower()],
+        [node, "-e", _DASHBOARD_NODE_HARNESS_PRELUDE + harness, str(path), *arguments],
         cwd=Path(__file__).parents[1],
         capture_output=True,
         text=True,
         check=False,
+        env=environment,
     )
 
 
@@ -2361,28 +2414,16 @@ def _probe_dashboard_runtime_in_node(
     :param dict[str, str] | None saved_store: Initial ``localStorage`` contents.
     :return Any: JSON-decoded expression result.
     """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is unavailable for dashboard runtime validation")
-
-    harness = (
-        _DASHBOARD_NODE_HARNESS_PRELUDE
-        + r"""
+    harness = r"""
 eval(runtime + "\n;globalThis.citemeshProbe = (source) => eval(source);");
 const probed = globalThis.citemeshProbe(process.argv[2]);
 process.stdout.write(JSON.stringify(probed === undefined ? null : probed));
 """
-    )
-    completed = subprocess.run(
-        [node, "-e", harness, str(path), expression],
-        cwd=Path(__file__).parents[1],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={
-            **os.environ,
-            "CITEMESH_SAVED_STORE": json.dumps(sorted((saved_store or {}).items())),
-        },
+    completed = _run_dashboard_runtime_in_node(
+        path,
+        harness,
+        [expression],
+        saved_store=saved_store or {},
     )
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
@@ -2398,11 +2439,7 @@ def test_dashboard_invalid_bootstrap_surfaces_status_in_node(
     tampered payload (blanked strategy) exercises the runtime guard instead.
     """
 
-    class FakeFigure(_BaseFakeFigure):
-        def to_plotly_json(self) -> dict[str, object]:
-            return {"data": self.data, "layout": self.layout}
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
     graph, seed_id = _build_graph()
     graph.graph.clear()
     exporter = GraphExporter(
@@ -2436,11 +2473,7 @@ def test_dashboard_invalid_embedded_collection_keeps_current_graph_in_node(
 ) -> None:
     """A malformed embedded collection should warn while rendering the graph."""
 
-    class FakeFigure(_BaseFakeFigure):
-        def to_plotly_json(self) -> dict[str, object]:
-            return {"data": self.data, "layout": self.layout}
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
         graph,
