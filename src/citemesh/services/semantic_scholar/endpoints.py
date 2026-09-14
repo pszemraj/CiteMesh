@@ -336,6 +336,8 @@ class _EndpointsMixin:
             """
             attempt_papers: list[Paper] = []
             try:
+                # SDK limit is a page size (at most 1,000), not the total.
+                # Its iterator fetches later pages; our loop bounds the result.
                 relation_records = fetch_method(
                     normalized_paper_id,
                     fields=payloads._default_paper_fields(),

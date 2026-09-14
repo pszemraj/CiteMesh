@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs
 
 import pytest
 import requests
@@ -1255,23 +1256,44 @@ def test_search_papers_retries_later_page_not_found(recovers: bool) -> None:
     assert sleep_mock.call_count == expected_page_attempts - 1
 
 
-def test_related_papers_use_sdk_page_size_without_capping_total() -> None:
+@pytest.mark.parametrize(
+    ("method", "paper_key"),
+    [
+        ("get_paper_references", "citedPaper"),
+        ("get_paper_citations", "citingPaper"),
+    ],
+)
+def test_related_papers_use_sdk_page_size_without_capping_total(
+    method: str, paper_key: str
+) -> None:
     """Relation totals above 1,000 should consume the SDK's paginated iterator.
 
-    :return None: Checks a 1,001-result total uses the 1,000-row SDK page size.
+    :param str method: Public relation endpoint using the real SDK.
+    :param str paper_key: Provider field containing the related paper.
+    :return None: Checks page traversal and the caller's total with HTTP mocked.
     """
-    records = [_make_reference_record(f"r{i}") for i in range(1001)]
-    client = SemanticScholarClient(timeout=1)
-    client.client.get_paper_references = MagicMock(return_value=records)
+    records = [{paper_key: _paper_payload(paper_id=f"r{i}")} for i in range(1002)]
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(200, {"offset": 0, "next": 1000, "data": records[:1000]}),
+                _MockResponse(200, {"offset": 1000, "data": records[1000:]}),
+                AssertionError("the requested total needs only two pages"),
+            ]
+        )
 
-    papers = client.get_paper_references("seed", limit=1001)
+        papers = getattr(client, method)("seed", limit=1001)
 
-    assert [paper.paper_id for paper in papers] == [f"r{i}" for i in range(1001)]
-    client.client.get_paper_references.assert_called_once_with(
-        "seed",
-        fields=s2.payloads._default_paper_fields(),
-        limit=1000,
-    )
+        assert [paper.paper_id for paper in papers] == [f"r{i}" for i in range(1001)]
+        assert client._session.get.call_count == 2
+        for call, offset in zip(client._session.get.call_args_list, (0, 1000)):
+            assert call.args[0].endswith(
+                f"/paper/seed/{method.removeprefix('get_paper_')}"
+            )
+            params = parse_qs(call.kwargs["params"])
+            assert params["offset"] == [str(offset)]
+            assert params["limit"] == ["1000"]
 
 
 @pytest.mark.parametrize(
