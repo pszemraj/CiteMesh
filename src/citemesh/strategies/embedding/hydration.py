@@ -1550,6 +1550,9 @@ class _CorpusHydrationMixin:
 
         The old spelling can also be a legitimate source ID. Aliasing its
         matching bibliographic content avoids renaming or duplicating that row.
+        These aliases apply when a source row has no explicit ID. New explicit
+        IDs remain authoritative: identical bibliographic text can describe
+        distinct works, so remapping source IDs requires an explicit rebuild.
 
         :return Set[str]: Identities safe to skip during source reconciliation.
         """
