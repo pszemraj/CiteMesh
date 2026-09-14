@@ -24,6 +24,7 @@ from citemesh.core import VIZ_CONFIG
 from citemesh.core.values import coerce_citation_count, coerce_float
 from citemesh.data.cache import atomic_output_path
 
+from .node_data import effective_node_metadata
 from .ordering import (
     canonicalize_graph_for_layout,
     ordered_edges_with_data,
@@ -869,10 +870,8 @@ def draw_labels(
         else:
             # Extract author surname
             authors = graph.nodes[node].get("authors", [])
-            if authors and authors[0]:
-                last_name = authors[0].split()[-1]
-            else:
-                last_name = "Unknown"
+            author_parts = str(authors[0]).strip().split() if authors else []
+            last_name = author_parts[-1] if author_parts else "Unknown"
 
             year = graph.nodes[node].get("year")
             year_label = "n.d." if year is None else str(year)
@@ -961,6 +960,10 @@ def visualize_graph(
             raise ValueError(
                 f"Cannot export null or non-finite edge weight for {left!r} -> {right!r}."
             )
+    effective_graph = graph.copy()
+    for node_id, attrs in graph.nodes(data=True):
+        effective_graph.nodes[node_id].update(effective_node_metadata(node_id, attrs))
+    graph = effective_graph
     if dpi is None:
         dpi = VIZ_CONFIG.dpi
 

@@ -9,9 +9,9 @@ from typing import Any
 
 import networkx as nx
 
-from citemesh.core import Paper
 from citemesh.core.values import coerce_float
 
+from ..node_data import effective_node_metadata as _serialize_node
 from ..ordering import ordered_edges_with_data, ordered_nodes
 from ..render import (
     compute_layout,
@@ -59,49 +59,6 @@ def _normalized_edge_weight(raw_weight: object) -> float:
     if not math.isfinite(parsed) or parsed <= 0.0:
         return 1e-6
     return parsed
-
-
-def _serialize_node(node_id: Hashable, attrs: dict[str, Any]) -> dict[str, Any]:
-    """Serialize node attributes into JSON/GraphML friendly dict.
-
-    :param Hashable node_id: Graph node identifier.
-    :param Dict[str, Any] attrs: Raw node attributes.
-    :return Dict[str, Any]: JSON/GraphML-safe node payload.
-    """
-    paper: Paper | None = attrs.get("paper")
-
-    if paper:
-        return {
-            "id": node_id,
-            "title": paper.title,
-            "year": paper.year,
-            "authors": [author.name for author in paper.authors],
-            "citation_count": paper.citation_count,
-            "abstract": paper.abstract,
-            "venue": paper.venue,
-            "arxiv_id": paper.arxiv_id,
-            "doi": paper.doi,
-            "categories": paper.categories,
-            # The graph attribute records the node's role in this graph. Fall
-            # back to the Paper value for callers that provide only ``paper``.
-            "is_seed": bool(attrs.get("is_seed", paper.is_seed)),
-            "is_local_corpus": bool(paper.is_local_corpus),
-        }
-
-    return {
-        "id": node_id,
-        "title": attrs.get("title", ""),
-        "year": attrs.get("year"),
-        "authors": attrs.get("authors", []),
-        "citation_count": attrs.get("citation_count", 0),
-        "abstract": attrs.get("abstract", ""),
-        "venue": attrs.get("venue", ""),
-        "arxiv_id": attrs.get("arxiv_id", ""),
-        "doi": attrs.get("doi", ""),
-        "categories": attrs.get("categories", []),
-        "is_seed": bool(attrs.get("is_seed", False)),
-        "is_local_corpus": bool(attrs.get("is_local_corpus", False)),
-    }
 
 
 def _node_title(attrs: dict[str, Any], node_id: Hashable) -> str:

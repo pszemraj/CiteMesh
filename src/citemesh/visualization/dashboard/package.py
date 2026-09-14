@@ -648,10 +648,15 @@ def update_dashboard_package(
     :return Dict[str, Any]: Canonical package written to disk.
     :raises DashboardPackageError: If an existing package is invalid or unsupported.
     """
-    seed_title = str(graph.nodes[seed_id].get("title") or seed_id)
     result_id = f"{strategy}:{seed_id}"
     validated_payload = _validate_dashboard_graph_payload(payload, result_id=result_id)
     payload_summary = validated_payload["summary"]
+    seed_payload = next(
+        node
+        for node in validated_payload["nodes"]
+        if str(node.get("id")) == str(validated_payload["seed_id"])
+    )
+    seed_title = str(seed_payload.get("title") or seed_id)
     entry = {
         "result_id": result_id,
         "seed_id": seed_id,

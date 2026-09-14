@@ -423,6 +423,7 @@ def test_exporter_uses_paper_metadata_and_graph_seed_role(tmp_path: Path) -> Non
     exporter = GraphExporter(
         graph,
         "seed",
+        metadata={"strategy": "citation"},
         layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
     )
 
@@ -466,6 +467,17 @@ def test_exporter_uses_paper_metadata_and_graph_seed_role(tmp_path: Path) -> Non
     graphml_seed = nx.read_graphml(graphml_path).nodes["seed"]
     assert graphml_seed["title"] == "Updated seed"
     assert int(graphml_seed["citation_count"]) == 42
+
+    package = update_dashboard_package(
+        tmp_path / "dashboard.citemesh.json",
+        graph=graph,
+        seed_id="seed",
+        strategy="citation",
+        payload=payload,
+        build={},
+    )
+    assert package["results"][0]["title"] == "Updated seed"
+    assert graph.nodes["seed"]["title"] == "Stale scalar title"
 
 
 def test_paper_only_export_styling_matches_equivalent_scalar_graph() -> None:
@@ -616,6 +628,10 @@ def test_exporter_interactive_html_contracts(
         loaders_module, "_load_pyvis_network_class", lambda: FakeNetwork
     )
 
+    seed_paper = graph.nodes[seed_id]["paper"]
+    assert isinstance(seed_paper, Paper)
+    seed_paper.authors = [Author(name="   ")]
+
     out_path = tmp_path / "graph.html"
     out_path.write_text("previous", encoding="utf-8")
     out_path.chmod(0o640)
@@ -630,6 +646,8 @@ def test_exporter_interactive_html_contracts(
     assert len(instance.nodes) == 2
     assert len(instance.edges) == 1
     assert [node_id for node_id, _ in instance.nodes] == ["related", "seed"]
+    node_payloads = dict(instance.nodes)
+    assert "Unknown et al., 2020" in node_payloads[seed_id]["title"]
 
 
 def test_interactive_html_is_self_contained(
@@ -839,6 +857,25 @@ def test_output_path_reuses_existing_seed_directory(
     assert output_path == artifact
     assert output_path.read_bytes() == b"previous export"
     assert list(tmp_path.iterdir()) == [paper_dir]
+
+
+def test_output_path_uses_paper_title_without_mutating_graph(tmp_path: Path) -> None:
+    """Auto-naming should use live Paper metadata and preserve caller attributes.
+
+    :param Path tmp_path: Isolated output directory.
+    :return None: Checks canonical naming and caller graph immutability.
+    """
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        paper=Paper(paper_id="seed", title="Current Paper Title", year=2025),
+        title="Stale Scalar Title",
+    )
+
+    output_path = render_module.generate_output_path(graph, "seed", tmp_path)
+
+    assert output_path.parent.name.startswith("current-paper-title-")
+    assert graph.nodes["seed"]["title"] == "Stale Scalar Title"
 
 
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
@@ -3007,18 +3044,32 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     seed_title = "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents"
     graph.add_node(
         "seed",
-        title=seed_title,
-        year=2025,
-        authors=["Hanyu Lai"],
-        citation_count=15,
+        paper=Paper(
+            paper_id="seed",
+            title=seed_title,
+            year=2025,
+            authors=[Author(name="Hanyu Lai")],
+            citation_count=15,
+        ),
+        title="Stale scalar title",
+        year=1999,
+        authors=["Stale Author"],
+        citation_count=999,
         is_seed=True,
     )
     graph.add_node(
         "related",
-        title="Related Paper",
-        year=2024,
-        authors=["Example Author"],
-        citation_count=3,
+        paper=Paper(
+            paper_id="related",
+            title="Related Paper",
+            year=2024,
+            authors=[Author(name="   ")],
+            citation_count=3,
+        ),
+        title="Stale related title",
+        year=1998,
+        authors=["Stale Author"],
+        citation_count=998,
         is_seed=False,
     )
     graph.add_edge("seed", "related", weight=0.8)
@@ -3027,12 +3078,22 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     import matplotlib.axes
 
     original_set_title = matplotlib.axes.Axes.set_title
+    compute_sizes_spy = MagicMock(wraps=render_module.compute_node_sizes)
 
     def capture_title(self: Any, label: str, *args: Any, **kwargs: Any) -> Any:
+        """Capture the rendered title while preserving Matplotlib behavior.
+
+        :param Any self: Matplotlib axes instance.
+        :param str label: Title passed by the renderer.
+        :param Any args: Additional positional title arguments.
+        :param Any kwargs: Additional keyword title arguments.
+        :return Any: Matplotlib title object.
+        """
         captured["title"] = label
         return original_set_title(self, label, *args, **kwargs)
 
     monkeypatch.setattr(matplotlib.axes.Axes, "set_title", capture_title)
+    monkeypatch.setattr(render_module, "compute_node_sizes", compute_sizes_spy)
 
     visualize_graph(
         graph,
@@ -3043,6 +3104,17 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
 
     assert "..." not in captured["title"]
     assert seed_title in captured["title"].replace("\n", " ")
+    effective_seed = compute_sizes_spy.call_args.args[0].nodes["seed"]
+    assert effective_seed["title"] == seed_title
+    assert effective_seed["year"] == 2025
+    assert effective_seed["authors"] == ["Hanyu Lai"]
+    assert effective_seed["citation_count"] == 15
+    assert effective_seed["is_seed"] is True
+    effective_related = compute_sizes_spy.call_args.args[0].nodes["related"]
+    assert effective_related["authors"] == ["   "]
+    assert effective_related["is_seed"] is False
+    assert graph.nodes["seed"]["title"] == "Stale scalar title"
+    assert graph.nodes["related"]["authors"] == ["Stale Author"]
 
 
 def test_visualize_graph_metadata_overlay_is_compact(

@@ -3959,6 +3959,28 @@ def test_dashboard_package_rejects_mismatched_dashboard_metadata(
         )
 
 
+def test_dashboard_package_rejects_descriptor_payload_seed_mismatch(
+    tmp_path: Path,
+) -> None:
+    """The package boundary should report mismatched seed identities cleanly.
+
+    :param Path tmp_path: Isolated dashboard package directory.
+    :return None: Checks the descriptor-to-payload identity validation.
+    """
+    graph = build_seed_graph("seed")
+    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
+
+    with pytest.raises(DashboardPackageError, match="descriptor does not match"):
+        update_dashboard_package(
+            tmp_path / DASHBOARD_PACKAGE_FILENAME,
+            graph=graph,
+            seed_id="other-seed",
+            strategy="recommendation",
+            payload=payload,
+            build={"strategy": "recommendation"},
+        )
+
+
 def test_dashboard_snapshot_rereads_latest_package_under_shared_lock(
     tmp_path: Path,
 ) -> None:

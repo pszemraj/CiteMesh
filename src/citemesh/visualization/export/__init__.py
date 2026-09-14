@@ -405,8 +405,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             tooltip_lines = []
             if paper:
                 tooltip_lines.append(f"<b>{html.escape(str(serialized['title']))}</b>")
-                authors = serialized.get("authors", [])
-                first_author = str(authors[0]).split()[-1] if authors else "Unknown"
+                first_author = paper.first_author_surname
                 tooltip_lines.append(
                     f"{html.escape(first_author)} et al., {serialized['year']}"
                 )
