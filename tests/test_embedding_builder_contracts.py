@@ -5787,15 +5787,16 @@ def test_full_reconciliation_uses_alternate_identifier_columns(
             """
             raise AssertionError("reconciliation read every full record")
 
-        def __getitem__(self, column: str | int) -> list[Any] | dict[str, Any]:
+        def __getitem__(self, column: str | int) -> Iterable[Any] | dict[str, Any]:
             """Record full-row reads while serving identifier columns.
 
             :param str | int column: Requested column or row index.
-            :return list[Any] | dict[str, Any]: Requested source data.
+            :return Iterable[Any] | dict[str, Any]: Sequential columns or full rows.
             """
             if isinstance(column, int):
                 full_row_reads.append(column)
-            return super().__getitem__(column)
+            values = super().__getitem__(column)
+            return iter(values) if isinstance(column, str) else values
 
     dataset = AlternateIdDataset(rows, [identifier_field, "title", "abstract"])
 

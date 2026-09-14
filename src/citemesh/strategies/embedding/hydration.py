@@ -85,12 +85,10 @@ def _indexable_dataset_identifier_records(
     )
     if not identifier_columns:
         return None
-    identifier_values = {field: dataset[field] for field in identifier_columns}
-    row_count = len(identifier_values[identifier_columns[0]])
-    return (
-        {field: identifier_values[field][index] for field in identifier_columns}
-        for index in range(row_count)
-    )
+    # Dataset columns batch their iteration; integer indexing decodes each row
+    # separately and adds substantial overhead on a multi-million-row source.
+    identifier_values = [dataset[field] for field in identifier_columns]
+    return (dict(zip(identifier_columns, values)) for values in zip(*identifier_values))
 
 
 class _CorpusHydrationMixin:
