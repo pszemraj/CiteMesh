@@ -120,3 +120,4 @@ jobs:
           "$RUNNER_TEMP/smoke/bin/citemesh" --version
           "$RUNNER_TEMP/smoke/bin/citemesh" --help > /dev/null
           "$RUNNER_TEMP/smoke/bin/citemesh" build --help > /dev/null
+          "$RUNNER_TEMP/smoke/bin/citemesh" cache scan > /dev/null
