@@ -192,6 +192,11 @@ class _CorpusHydrationMixin:
             self._refresh_cached_corpus_metadata(cached_dataset_source, use_streaming)
             return
 
+        capped_upstream_rows = (
+            self._resolve_dataset_split_row_count(self.dataset_source)
+            if self.corpus_size is not None and ":" not in str(self.dataset_split)
+            else None
+        )
         dataset_source, dataset = self._resolve_hydration_dataset(
             cached_dataset_source, use_streaming
         )
@@ -222,7 +227,9 @@ class _CorpusHydrationMixin:
             )
             return
 
-        self._mark_hydration_complete(dataset_source)
+        self._mark_hydration_complete(
+            dataset_source, capped_upstream_rows=capped_upstream_rows
+        )
 
     def _revalidate_hydrated_cache(
         self, cached_dataset_source: str | None, use_streaming: bool
@@ -403,7 +410,12 @@ class _CorpusHydrationMixin:
             progress_label="Hydrating dataset",
         )
 
-    def _mark_hydration_complete(self, dataset_source: str | None) -> None:
+    def _mark_hydration_complete(
+        self,
+        dataset_source: str | None,
+        *,
+        capped_upstream_rows: int | None = None,
+    ) -> None:
         """Close out a successful hydration, reconciling full-corpus row counts.
 
         A full uncapped corpus is reconciled against the upstream row count,
@@ -411,6 +423,8 @@ class _CorpusHydrationMixin:
         the split; capped or sliced corpora have no such invariant to check.
 
         :param Optional[str] dataset_source: Resolved dataset source token.
+        :param Optional[int] capped_upstream_rows: Upstream row count observed
+            before a capped selection began.
         :return None: Marks the namespace hydrated and complete.
         """
         if self.corpus_size is None and ":" not in str(self.dataset_split):
@@ -440,6 +454,11 @@ class _CorpusHydrationMixin:
             corpus_size=self.corpus_size,
             complete=True,
         )
+        if self.corpus_size is not None and capped_upstream_rows is not None:
+            self.embedding_cache.set_hydration_rowcount_reconciliation(
+                upstream_rows=capped_upstream_rows,
+                cached_rows=self._cached_payload_row_count(),
+            )
 
     def _refresh_cached_corpus_metadata(
         self, source: str | None, use_streaming: bool
@@ -690,8 +709,11 @@ class _CorpusHydrationMixin:
                     corpus_size=cached_corpus_size,
                 )
         except BaseException as exc:
-            # Restore only abandoned work. A clean shrink verdict intentionally
-            # leaves the corpus incomplete until a full source scan revalidates it.
+            # A partial write can make stored and upstream counts coincide
+            # without covering the source. Retain the pre-refresh count state
+            # so restored completeness cannot suppress the unfinished scan.
+            if previous_reconciliation is None and cached_corpus_size is None:
+                previous_reconciliation = (stats.sqlite_rows, stats.sqlite_rows)
             self._restore_reused_corpus_completeness(
                 source=source, corpus_size=cached_corpus_size
             )
@@ -778,11 +800,7 @@ class _CorpusHydrationMixin:
         """
         cached_token = str(stats.hydration_corpus_size or "").strip()
         requested_token = _corpus_size_token(self.corpus_size)
-        upstream_rows = (
-            self._resolve_dataset_split_row_count(source)
-            if self.corpus_size is None
-            else None
-        )
+        upstream_rows = self._resolve_dataset_split_row_count(source)
         cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
         logger.info(
             "Extending cached corpus for %s/%s from %s to %s; reusing %d cached "
@@ -843,6 +861,11 @@ class _CorpusHydrationMixin:
                 corpus_size=self.corpus_size,
                 complete=True,
             )
+            if upstream_rows is not None:
+                self.embedding_cache.set_hydration_rowcount_reconciliation(
+                    upstream_rows=upstream_rows,
+                    cached_rows=updated_rows,
+                )
         logger.info(
             "Extended cached corpus for %s/%s from %s to %s "
             "(reused=%d, encoded=%d, cache_rows=%d).",
@@ -878,6 +901,11 @@ class _CorpusHydrationMixin:
         :return bool: ``True`` when the selection was completed in place.
         """
         resumed_corpus_size = self._effective_corpus_size(corpus_size)
+        capped_upstream_rows = (
+            self._resolve_dataset_split_row_count(source)
+            if resumed_corpus_size is not None and ":" not in str(self.dataset_split)
+            else None
+        )
         cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
         logger.info(
             "Resuming incomplete selected-corpus cache for %s/%s from cached_rows=%d.",
@@ -941,6 +969,11 @@ class _CorpusHydrationMixin:
                 corpus_size=resumed_corpus_size,
                 complete=True,
             )
+            if capped_upstream_rows is not None:
+                self.embedding_cache.set_hydration_rowcount_reconciliation(
+                    upstream_rows=capped_upstream_rows,
+                    cached_rows=updated_rows,
+                )
         logger.info(
             "Resumed incomplete selected-corpus cache for %s/%s "
             "(source_rows=%d, added=%d, cache_rows=%d).",
@@ -1063,7 +1096,11 @@ class _CorpusHydrationMixin:
             :return Iterable[Dict[str, Any]]: Tracked source records.
             """
             nonlocal source_rows_consumed, source_exhausted
-            iterator = iter(dataset)
+            iterator = iter(
+                self._iter_reconciliation_source_rows(dataset, existing_paper_ids)
+                if existing_paper_ids is not None and not use_streaming
+                else dataset
+            )
             while True:
                 try:
                     raw_record = next(iterator)
@@ -1094,6 +1131,35 @@ class _CorpusHydrationMixin:
                 and source_rows_consumed >= slice_corpus_size
             ),
         )
+
+    @staticmethod
+    def _iter_reconciliation_source_rows(
+        dataset: Iterable[dict[str, Any]], existing_paper_ids: set[str]
+    ) -> Iterable[dict[str, Any]]:
+        """Inspect indexable source IDs without reading already-cached abstracts.
+
+        Yield one record per source position so exhaustion counts and synthetic
+        ID offsets stay intact. A cached ID needs only its identifying field;
+        missing or empty IDs need the full row to preserve fallback precedence.
+
+        :param Iterable[Dict[str, Any]] dataset: Loaded source selection.
+        :param Set[str] existing_paper_ids: IDs already persisted or queued by hydration.
+        :return Iterable[Dict[str, Any]]: Full missing rows and lightweight cached IDs.
+        """
+        columns = getattr(dataset, "column_names", None)
+        if columns is None or "id" not in columns or not hasattr(dataset, "select"):
+            yield from dataset
+            return
+        for index, raw_id in enumerate(dataset["id"]):
+            identifier_record = {"id": raw_id}
+            if (
+                raw_id
+                and _dataset_record_paper_id(identifier_record, index)
+                in existing_paper_ids
+            ):
+                yield identifier_record
+            else:
+                yield dataset[index]
 
     def _finalize_full_corpus_hydration_rows(
         self,
@@ -1321,16 +1387,18 @@ class _CorpusHydrationMixin:
                     if row_cap is not None and local_idx >= row_cap:
                         break
 
-                    metadata = _extract_dataset_paper_metadata(
-                        raw_record,
-                        fallback_index_offset + local_idx,
-                    )
                     if existing_paper_ids is not None:
-                        paper_id = str(metadata.get("paper_id", "")).strip()
+                        paper_id = _dataset_record_paper_id(
+                            raw_record, fallback_index_offset + local_idx
+                        )
                         if not paper_id or paper_id in existing_paper_ids:
                             progress.update(1)
                             continue
                         existing_paper_ids.add(paper_id)
+                    metadata = _extract_dataset_paper_metadata(
+                        raw_record,
+                        fallback_index_offset + local_idx,
+                    )
 
                     selected_records += 1
                     batch.append(metadata)
@@ -1504,10 +1572,10 @@ class _CorpusHydrationMixin:
         cached_dataset_source: str | None,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
     ) -> None:
-        """Incrementally refresh hydrated full-corpus cache when source row count grows.
+        """Reconcile hydrated full-corpus IDs when the source row count changes.
 
-        This avoids clearing/re-encoding existing payload when a source only appends
-        new records.
+        Existing vectors are retained even when net growth includes removals or
+        reordering, so the stored row count cannot act as a source offset.
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Hydrated dataset source token.
@@ -1524,91 +1592,19 @@ class _CorpusHydrationMixin:
         )
         if row_counts is None:
             return
-        cached_rows, upstream_rows = row_counts
-        previous_reconciliation = (
-            self.embedding_cache.get_hydration_rowcount_reconciliation()
-        )
-
         self.embedding_cache.mark_hydrated(
             dataset_source=source,
             dataset_split=self.dataset_split,
             corpus_size=refreshed_corpus_size,
             complete=False,
         )
-        if upstream_rows < cached_rows or previous_reconciliation is not None:
-            # Historical rows and duplicate IDs invalidate the offset/count
-            # shortcut. Reuse the same full-ID reconciliation as an interrupted
-            # hydration, remembering the source count it actually consumed.
-            self._resume_full_corpus_cache(
-                use_streaming=use_streaming,
-                source=source,
-                stats=self.embedding_cache.payload_stats(),
-            )
-            return
-        self._ensure_int8_calibration_ranges(
-            use_streaming=use_streaming,
-            dataset_source=source,
-            corpus_size=refreshed_corpus_size,
-        )
-
-        delta_rows = upstream_rows - cached_rows
-        logger.info(
-            "Detected %d new dataset rows for %s/%s (cached=%d, upstream=%d). "
-            "Running incremental cache refresh.",
-            delta_rows,
-            source,
-            self.dataset_split,
-            cached_rows,
-            upstream_rows,
-        )
-        tail_refreshed_records = self._hydrate_exact_hydration_source_slice(
+        # Net growth can hide removals and backfills. Neither the old row count
+        # nor equality after a tail append establishes current source coverage.
+        self._resume_full_corpus_cache(
             use_streaming=use_streaming,
             source=source,
-            row_limit=delta_rows,
-            row_offset=cached_rows,
-            progress_total=delta_rows,
-            progress_label="Refreshing dataset",
-            operation="Incremental refresh",
-            corpus_size=refreshed_corpus_size,
-        ).hydrated_records
-        updated_rows = self._cached_payload_row_count()
-        reconciled_records, updated_rows = self._reconcile_refreshed_corpus_rows(
-            use_streaming=use_streaming,
-            source=source,
-            delta_rows=delta_rows,
-            upstream_rows=upstream_rows,
-            updated_rows=updated_rows,
-            corpus_size=refreshed_corpus_size,
+            stats=self.embedding_cache.payload_stats(),
         )
-
-        logger.info(
-            "Incremental refresh processed tail=%d head=%d full=%d rows "
-            "for %s/%s (cache_rows=%d, upstream_rows=%d).",
-            tail_refreshed_records,
-            *reconciled_records,
-            source,
-            self.dataset_split,
-            updated_rows,
-            upstream_rows,
-        )
-        rows_reconciled = self._finalize_full_corpus_hydration_rows(
-            source=source,
-            updated_rows=updated_rows,
-            upstream_rows=upstream_rows,
-            mark_complete=updated_rows > 0,
-            corpus_size=refreshed_corpus_size,
-        )
-        if not rows_reconciled:
-            logger.info(
-                "Full-split reconciliation completed for %s/%s with cache_rows=%d "
-                "and upstream_rows=%d. Remaining row-count delta likely reflects "
-                "duplicate upstream paper IDs; this state is memoized to skip "
-                "repeat full-split scans until row counts change.",
-                source,
-                self.dataset_split,
-                updated_rows,
-                upstream_rows,
-            )
 
     def _refresh_capped_corpus_recency(
         self,
@@ -1928,94 +1924,6 @@ class _CorpusHydrationMixin:
                 self.dataset_split,
             )
         return cached_rows, upstream_rows
-
-    def _reconcile_refreshed_corpus_rows(
-        self,
-        *,
-        use_streaming: bool,
-        source: str,
-        delta_rows: int,
-        upstream_rows: int,
-        updated_rows: int,
-        corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
-    ) -> tuple[list[int], int]:
-        """Chase rows a tail-only refresh missed, widening the scan as needed.
-
-        An upstream that reorders rather than purely appends leaves gaps the tail
-        slice cannot see, so this escalates from a head slice the size of the
-        delta to a full-split scan, stopping as soon as the cache reaches the
-        upstream row count.
-
-        :param bool use_streaming: Whether hydration mode is streaming.
-        :param str source: Hydrated dataset source token.
-        :param int delta_rows: Row growth the tail refresh already consumed.
-        :param int upstream_rows: Upstream split row count.
-        :param int updated_rows: Cache row count after the tail refresh.
-        :param _CorpusSizeArg corpus_size: Corpus the refresh runs at, defaulting
-            to the one this build requested.
-        :return Tuple[List[int], int]: Records added per pass (head, full), and the
-            cache row count after reconciliation.
-        """
-        reconciled_records = [0, 0]
-        if updated_rows >= upstream_rows:
-            return reconciled_records, updated_rows
-
-        cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
-        reconciliation_passes = (
-            (
-                "Head-slice reconciliation",
-                delta_rows,
-                0,
-                delta_rows,
-                "head",
-            ),
-            (
-                "Full-split reconciliation",
-                None,
-                None,
-                upstream_rows,
-                "full",
-            ),
-        )
-        previous_operation = "Tail delta refresh"
-        for pass_index, (
-            operation,
-            row_limit,
-            row_offset,
-            progress_total,
-            progress_scope,
-        ) in enumerate(reconciliation_passes):
-            if updated_rows >= upstream_rows:
-                break
-            remaining_rows = upstream_rows - updated_rows
-            logger.warning(
-                "%s left %d unresolved rows for %s/%s "
-                "(cache_rows=%d, upstream=%d). Running %s.",
-                previous_operation,
-                remaining_rows,
-                source,
-                self.dataset_split,
-                updated_rows,
-                upstream_rows,
-                operation.lower().replace(
-                    "reconciliation", "missing-ID reconciliation"
-                ),
-            )
-            reconciled_records[pass_index] = self._hydrate_exact_hydration_source_slice(
-                use_streaming=use_streaming,
-                source=source,
-                row_limit=row_limit,
-                row_offset=row_offset,
-                progress_total=progress_total,
-                progress_label=f"Reconciling {progress_scope}",
-                operation=operation,
-                existing_paper_ids=cached_paper_ids,
-                max_new_records=(remaining_rows if pass_index == 0 else None),
-                corpus_size=corpus_size,
-            ).hydrated_records
-            updated_rows = self._cached_payload_row_count()
-            previous_operation = operation
-        return reconciled_records, updated_rows
 
     def _load_dataset_for_hydration(
         self,
