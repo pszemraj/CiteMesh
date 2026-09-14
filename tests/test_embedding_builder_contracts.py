@@ -3695,11 +3695,13 @@ def test_fresh_hydration_resume_skips_metadata_backfill(
 @pytest.mark.parametrize("storage_precision", ["float32", "int8"])
 @pytest.mark.parametrize("interrupt", [False, True])
 @pytest.mark.parametrize("anonymous", [False, True])
+@pytest.mark.parametrize("restore_summary", [False, True])
 def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     monkeypatch: pytest.MonkeyPatch,
     storage_precision: str,
     interrupt: bool,
     anonymous: bool,
+    restore_summary: bool,
 ) -> None:
     """Backfill old cached metadata once, without encoding or changing corpus IDs.
 
@@ -3707,6 +3709,7 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     :param str storage_precision: Persistent vector representation.
     :param bool interrupt: Whether the first metadata scan is interrupted.
     :param bool anonymous: Whether an old anonymous row retains its positional ID.
+    :param bool restore_summary: Whether the old adapter discarded the summary text.
     :return None: Checks corrected identities, resumability and byte-identical HDF5.
     """
     from citemesh.strategies.candidates import (
@@ -3744,6 +3747,9 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     if anonymous:
         raw.pop("id")
         raw["year"] = 2012
+    if restore_summary:
+        raw["abstract"] = None
+        raw["summary"] = "Original text"
     normalized = _extract_dataset_paper_metadata(raw, 0)
     old_metadata = {
         **normalized,
@@ -3752,6 +3758,8 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
         "doi": normalized["doi"] if anonymous else "",
         "venue": "",
     }
+    if restore_summary:
+        old_metadata["abstract"] = ""
     builder._cache_metadata_batch([old_metadata])
     cache.mark_hydrated(
         dataset_source=source, dataset_split="train", corpus_size=1, complete=True
@@ -3771,7 +3779,11 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
         """
         yield {
             **raw,
-            "abstract": raw["abstract"] if anonymous else "Changed upstream text",
+            "abstract": (
+                raw["abstract"]
+                if anonymous or restore_summary
+                else "Changed upstream text"
+            ),
         }
         if interrupt:
             raise RuntimeError("metadata read interrupted")
@@ -3797,8 +3809,11 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     )
     assert cache.has_current_corpus_metadata()
     assert cache.get_cached_paper_ids() == {old_metadata["paper_id"]}
-    assert cache.h5_path.read_bytes() == original_h5
-    model.encode.assert_not_called()
+    if restore_summary:
+        _assert_encoded_corpus_records(builder, model, [raw])
+    else:
+        assert cache.h5_path.read_bytes() == original_h5
+        model.encode.assert_not_called()
     result = cache.search(
         np.array([1.0, 0.0], dtype=np.float32),
         top_k=1,
@@ -6798,7 +6813,9 @@ def test_exact_hydration_slice_preserves_content_identity_across_offsets(
 
 @pytest.mark.parametrize("corpus_size", [2, None])
 @pytest.mark.parametrize("use_streaming", [False, True])
-@pytest.mark.parametrize("legacy_ids", [False, True])
+@pytest.mark.parametrize(
+    ("legacy_ids", "restore_summary"), [(False, False), (True, False), (True, True)]
+)
 @pytest.mark.parametrize("complete", [False, True])
 @pytest.mark.parametrize("source_ids", [False, True])
 def test_anonymous_corpus_rows_survive_source_reordering(
@@ -6806,6 +6823,7 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     corpus_size: int | None,
     use_streaming: bool,
     legacy_ids: bool,
+    restore_summary: bool,
     complete: bool,
     source_ids: bool,
 ) -> None:
@@ -6815,6 +6833,7 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     :param Optional[int] corpus_size: Full or capped source selection.
     :param bool use_streaming: Whether the source yields one-shot records.
     :param bool legacy_ids: Whether existing rows still use positional identities.
+    :param bool restore_summary: Whether the old adapter discarded usable summaries.
     :param bool complete: Completed cache or interrupted hydration to resume.
     :param bool source_ids: Source supplies actual IDs resembling the old convention.
     :return None: Checks exact new encoding, persistent reuse and unchanged old vectors.
@@ -6838,12 +6857,18 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     if source_ids:
         for index, record in enumerate(records):
             record["id"] = f"arxiv_{index}"
+    if restore_summary and not source_ids:
+        for record in records:
+            record["summary"] = record["abstract"]
+            record["abstract"] = None
     initial_metadata = [
         _extract_dataset_paper_metadata(row, index) for index, row in enumerate(records)
     ]
     if legacy_ids:
         for index, metadata in enumerate(initial_metadata):
             metadata["paper_id"] = f"arxiv_{index}"
+            if restore_summary and not source_ids:
+                metadata["abstract"] = ""
     builder._cache_metadata_batch(initial_metadata)
     cache = builder.embedding_cache
     cache.mark_hydrated(
@@ -6855,6 +6880,8 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     cache.mark_corpus_metadata_current()
     if legacy_ids:
         cache._write_cache_metadata({"corpus_identity_version": ""})
+    if restore_summary and not source_ids:
+        cache._write_cache_metadata({"corpus_metadata_version": "2"})
     cache.set_hydration_rowcount_reconciliation(upstream_rows=2, cached_rows=2)
     with h5py.File(cache.h5_path, "r") as handle:
         original_vectors = handle["embeddings"][:].copy()
@@ -6879,11 +6906,24 @@ def test_anonymous_corpus_rows_survive_source_reordering(
 
     builder._ensure_cache_hydrated(use_streaming=use_streaming)
 
-    _assert_encoded_corpus_records(builder, model, source_rows[:1])
+    expected_encoded = (
+        [*records, source_rows[0]]
+        if restore_summary and not source_ids
+        else source_rows[:1]
+    )
+    _assert_encoded_corpus_records(builder, model, expected_encoded)
     assert cache.embedding_count() == 3
     assert len(cache.get_cached_paper_ids()) == 3
     original_ids = {metadata["paper_id"] for metadata in initial_metadata}
     assert original_ids < cache.get_cached_paper_ids()
+    if restore_summary and not source_ids:
+        restored = cache.get_paper_metadata_batch(sorted(original_ids))
+        assert [
+            restored[paper_id]["abstract"] for paper_id in sorted(original_ids)
+        ] == [
+            "A",
+            "B",
+        ]
     assert next(iter(cache.get_cached_paper_ids() - original_ids)).startswith(
         "content:"
     )
@@ -6898,6 +6938,68 @@ def test_anonymous_corpus_rows_survive_source_reordering(
     model.encode.assert_not_called()
     load.assert_not_called()
     clear.assert_not_called()
+
+
+@pytest.mark.parametrize("unchanged_source_row", [False, True])
+def test_legacy_summary_upgrade_does_not_guess_between_distinct_works(
+    monkeypatch: pytest.MonkeyPatch, unchanged_source_row: bool
+) -> None:
+    """Only unambiguous historical adapter matches can replace a legacy row.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated source and encoder fixtures.
+    :param bool unchanged_source_row: Whether one current row still matches exactly.
+    :return None: Checks preserved identity or actionable ambiguity without duplicates.
+    """
+    source = "fixture/anonymous"
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        dataset_source=source,
+        corpus_size=None,
+        storage_precision="float32",
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    model = ConstantEncodeModel()
+    model.encode = MagicMock(wraps=model.encode)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    common = {"title": "Editorial", "authors": ["Ada Example"], "year": 2024}
+    old_metadata = {
+        **_extract_dataset_paper_metadata(common, 0),
+        "paper_id": "arxiv_7",
+    }
+    builder._cache_metadata_batch([old_metadata])
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source=source, dataset_split="train", corpus_size=None, complete=True
+    )
+    cache._write_cache_metadata(
+        {"corpus_metadata_version": "2", "corpus_identity_version": ""}
+    )
+    records = [
+        {**common, "abstract": None, "summary": "" if unchanged_source_row else "A"},
+        {**common, "abstract": None, "summary": "B"},
+    ]
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=lambda *args, **kwargs: records),
+    )
+    model.encode.reset_mock()
+    if unchanged_source_row:
+        builder._ensure_cache_hydrated(use_streaming=False)
+        assert cache.get_cached_paper_ids() == {
+            "arxiv_7",
+            _extract_dataset_paper_metadata(records[1], 1)["paper_id"],
+        }
+        _assert_encoded_corpus_records(builder, model, records[1:])
+    else:
+        with pytest.raises(RuntimeError, match="--force-rebuild-cache"):
+            builder._ensure_cache_hydrated(use_streaming=False)
+        assert not cache.has_current_corpus_metadata()
+        assert cache.get_cached_paper_ids() == {"arxiv_7"}
+        model.encode.assert_not_called()
+    assert cache.get_paper_metadata_batch(["arxiv_7"])["arxiv_7"]["abstract"] == ""
 
 
 def test_full_corpus_hydrated_cache_skips_incremental_refresh_without_growth(

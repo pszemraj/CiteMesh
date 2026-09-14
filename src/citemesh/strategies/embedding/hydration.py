@@ -214,6 +214,17 @@ class _CorpusHydrationMixin:
                     "Rechecking legacy corpus membership by stable content "
                     "identity while preserving existing paper IDs and vectors."
                 )
+            if (
+                not self.embedding_cache.has_current_corpus_metadata()
+                and self._cached_corpus_rows_are_reusable(
+                    cached_dataset_source, self.embedding_cache.payload_stats()
+                )
+            ):
+                # Restore text discarded by old adapters before content aliases
+                # decide which source rows still need an embedding.
+                self._refresh_cached_corpus_metadata(
+                    cached_dataset_source, use_streaming
+                )
         cache_is_current, cached_dataset_source = self._revalidate_hydrated_cache(
             cached_dataset_source, use_streaming
         )
@@ -505,7 +516,7 @@ class _CorpusHydrationMixin:
     def _refresh_cached_corpus_metadata(
         self, source: str | None, use_streaming: bool
     ) -> None:
-        """Backfill corpus years, DOIs and venues without changing vectors.
+        """Backfill bibliographic fields and restore previously discarded summaries.
 
         :param Optional[str] source: Dataset recorded on the matching cache.
         :param bool use_streaming: Whether source rows should be streamed.
@@ -519,9 +530,7 @@ class _CorpusHydrationMixin:
         ):
             return
 
-        logger.info(
-            "Refreshing cached publication years, DOIs and venues from %s.", source
-        )
+        logger.info("Refreshing cached corpus metadata from %s.", source)
         # A capped cache retains its original paper selection. Inspect the full
         # selected split so older cached papers can still receive metadata fixes.
         dataset = deps._import_datasets_module().load_dataset(
@@ -533,9 +542,31 @@ class _CorpusHydrationMixin:
         legacy_aliases = cache.get_legacy_corpus_identity_aliases(
             _anonymous_dataset_paper_id
         )
+        summary_candidates: dict[str, dict[str, dict]] = {}
+        identified_summaries: dict[str, dict] = {}
         batch: list[dict] = []
         for index, record in enumerate(dataset):
             metadata = _extract_dataset_paper_metadata(record, index)
+            old_abstract = record.get("abstract", record.get("summary", ""))
+            if (
+                _dataset_record_raw_paper_id(record)
+                and metadata["abstract"].strip()
+                and (not isinstance(old_abstract, str) or not old_abstract.strip())
+            ):
+                identified_summaries[metadata["paper_id"]] = metadata
+            if legacy_aliases and not _dataset_record_raw_paper_id(record):
+                # The old adapter let an empty abstract hide a usable summary.
+                # Reproduce that exact loss; a title-only fuzzy match could
+                # wrongly merge different works with a generic title.
+                old_metadata = {
+                    **metadata,
+                    "abstract": old_abstract if isinstance(old_abstract, str) else "",
+                }
+                old_identity = _anonymous_dataset_paper_id(old_metadata)
+                if old_identity in legacy_aliases:
+                    summary_candidates.setdefault(old_identity, {})[
+                        metadata["paper_id"]
+                    ] = metadata
             batch.append(metadata)
             # Legacy IDs remain valid lookup keys. Metadata fixes must reach
             # those rows even when their source now resolves to a content ID.
@@ -546,6 +577,36 @@ class _CorpusHydrationMixin:
                 batch = []
         if batch:
             cache.update_corpus_metadata(batch)
+        replacements: list[dict] = []
+        cached_summaries = cache.get_paper_metadata_batch(list(identified_summaries))
+        replacements.extend(
+            metadata
+            for paper_id, metadata in identified_summaries.items()
+            if paper_id in cached_summaries
+            and not cached_summaries[paper_id].get("abstract", "").strip()
+        )
+        for old_identity, candidates in summary_candidates.items():
+            if old_identity in candidates:
+                # An unchanged source row still accounts for this stored row;
+                # distinct summary-bearing rows must hydrate separately.
+                continue
+            if len(candidates) != 1:
+                raise RuntimeError(
+                    "The old corpus adapter discarded summaries from multiple "
+                    "anonymous papers with identical bibliographic metadata. "
+                    "Their original identities cannot be recovered reliably. "
+                    "Rebuild this corpus with --force-rebuild-cache "
+                    "--overwrite-cache, or provide stable source IDs."
+                )
+            metadata = next(iter(candidates.values()))
+            replacements.extend(
+                {**metadata, "paper_id": paper_id}
+                for paper_id in legacy_aliases[old_identity]
+            )
+        for start in range(0, len(replacements), HYDRATION_FLUSH_SIZE):
+            self._cache_metadata_batch(
+                replacements[start : start + HYDRATION_FLUSH_SIZE]
+            )
         # Older resume code could memoize a deficit without reconciling IDs.
         cache.clear_hydration_rowcount_reconciliation()
         cache.mark_corpus_metadata_current()
