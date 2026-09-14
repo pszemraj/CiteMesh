@@ -79,6 +79,7 @@ def _serialize_node(node_id: Hashable, attrs: dict[str, Any]) -> dict[str, Any]:
         "arxiv_id": attrs.get("arxiv_id", ""),
         "doi": attrs.get("doi", ""),
         "is_seed": bool(attrs.get("is_seed", False)),
+        "is_local_corpus": bool(attrs.get("is_local_corpus", False)),
     }
 
     if paper:
@@ -92,6 +93,10 @@ def _serialize_node(node_id: Hashable, attrs: dict[str, Any]) -> dict[str, Any]:
                 ),
                 "doi": getattr(paper, "doi", "") or attrs.get("doi", ""),
                 "categories": paper.categories,
+                "is_local_corpus": bool(
+                    getattr(paper, "is_local_corpus", False)
+                    or attrs.get("is_local_corpus", False)
+                ),
             }
         )
     else:

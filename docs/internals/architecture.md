@@ -6,7 +6,7 @@ Where code lives and how to extend it. For what the pipeline *does* at each stag
 
 `cli/` parses arguments, applies `config.toml` defaults, resolves export targets, and calls `build_graph` on the selected `GraphBuilderStrategy`. The strategy collects papers through `strategies/candidates.py` (source fetch, availability policy, identity reconciliation, pool budgets), builds its scoring space in `prepare_graph_scoring`, scores pairs in `compute_similarity`, and returns a `networkx.Graph`. `visualization/` computes one shared layout for `render.visualize_graph`, `export.GraphExporter`, and `dashboard/package.py`.
 
-Every node carries the same attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `venue`, `arxiv_id`, `doi`, `is_seed`), which is what keeps visualization and export strategy-agnostic.
+Every node carries the same attribute payload (`paper`, `title`, `year`, `authors`, `citation_count`, `venue`, `arxiv_id`, `doi`, `is_seed`, `is_local_corpus`), which is what keeps visualization and export strategy-agnostic.
 
 ## Package map
 

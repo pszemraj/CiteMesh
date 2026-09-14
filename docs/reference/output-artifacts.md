@@ -68,7 +68,7 @@ The graph payload for downstream graph and data work:
 
 Each node carries:
 
-- core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
+- core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`, `is_local_corpus`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
 - analysis fields `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), `seed_relevance` (personalized PageRank over the final graph - a topology metric computed at export time, not the candidate-selection score used in hybrid reranking)
 - `links` (arXiv abs/pdf, DOI, Semantic Scholar URLs) and a deterministic `bibtex` entry
 

@@ -2714,6 +2714,26 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
         "content:abc123": {"doi": "10.1109/5.771073"},
         "arxiv_7": {"arxiv_id": "2501.00001"},
         "query:abc123": {},
+        "local-source-42": {
+            "doi": "10.5555/local.42",
+            "arxiv_id": "2502.00042",
+            "paper": Paper(
+                paper_id="local-source-42",
+                title="Local paper",
+                year=2025,
+                doi="10.5555/local.42",
+                arxiv_id="2502.00042",
+                is_local_corpus=True,
+            ),
+        },
+        "a" * 40: {
+            "paper": Paper(
+                paper_id="a" * 40,
+                title="Corpus row with S2 ID",
+                year=2025,
+                is_local_corpus=True,
+            ),
+        },
     }
     for local_id, external_ids in local_nodes.items():
         graph.add_node(local_id, title="Local paper", **external_ids)
@@ -2769,10 +2789,21 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     assert s2_doi_links["doi"] == "https://doi.org/10.1109/5.771073"
     assert s2_doi_links["arxiv_abs"] is None
 
-    for local_id in local_nodes:
+    for local_id in ("content:abc123", "arxiv_7", "query:abc123", "local-source-42"):
         assert nodes[local_id]["links"]["semantic_scholar"] is None
     assert nodes["content:abc123"]["links"]["doi"] == "https://doi.org/10.1109/5.771073"
     assert nodes["arxiv_7"]["links"]["arxiv_abs"] == "https://arxiv.org/abs/2501.00001"
+    assert (
+        nodes["local-source-42"]["links"]["doi"] == "https://doi.org/10.5555/local.42"
+    )
+    assert (
+        nodes["local-source-42"]["links"]["arxiv_abs"]
+        == "https://arxiv.org/abs/2502.00042"
+    )
+    assert nodes["local-source-42"]["is_local_corpus"] is True
+    assert nodes["a" * 40]["links"]["semantic_scholar"] == (
+        "https://www.semanticscholar.org/paper/" + "a" * 40
+    )
     assert not any(nodes["query:abc123"]["links"].values())
 
 
