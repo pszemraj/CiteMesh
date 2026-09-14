@@ -126,31 +126,11 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: dict[str, int] = {
     "max_citations": HYBRID_DEFAULT_MAX_CITATIONS,
     "max_references": HYBRID_DEFAULT_MAX_REFERENCES,
 }
-_HYBRID_EMBEDDING_OPTION_DESTS: set[str] = {
-    "model",
-    "model_profile",
-    "model_revision",
-    "dataset_source",
-    "dataset_split",
-    "corpus_size",
-    "all_corpus",
-    "truncate_dim",
-    "min_semantic_similarity",
-    "streaming",
-    "force_rebuild_cache",
-    "overwrite_cache",
-    "cache_overwrite_reason",
-    "storage_precision",
-    "binary_prefilter",
-    "binary_rescore_multiplier",
-    "calibration_sample_size",
-    "cache_compression",
-    "cache_compression_level",
-    "encode_batch_size",
-    "torch_compile",
-    "device",
-    "semantic_source",
-    "candidate_pool_size",
+# These options belong exclusively to the two embedding-aware strategies.
+_HYBRID_EMBEDDING_OPTION_DESTS = {
+    dest
+    for dest, strategies in _BUILD_STRATEGY_OPTION_SUPPORT.items()
+    if strategies == {"embedding", "hybrid"}
 }
 
 
