@@ -396,23 +396,27 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
 
         for node, attrs in _sorted_nodes(self.graph):
             paper: Paper | None = attrs.get("paper")
+            serialized = _serialize_node(node, attrs)
             size = self._node_size(node)
             color = self._node_color_hex(node, theme_obj)
 
-            label = paper.label if paper else attrs.get("title", node)
+            label = _node_short_label(attrs, node)
 
             tooltip_lines = []
             if paper:
-                tooltip_lines.append(f"<b>{html.escape(paper.title)}</b>")
+                tooltip_lines.append(f"<b>{html.escape(str(serialized['title']))}</b>")
+                authors = serialized.get("authors", [])
+                first_author = str(authors[0]).split()[-1] if authors else "Unknown"
                 tooltip_lines.append(
-                    f"{html.escape(paper.first_author_surname)} et al., {paper.year}"
+                    f"{html.escape(first_author)} et al., {serialized['year']}"
                 )
-                tooltip_lines.append(f"Citations: {paper.citation_count}")
-                if paper.categories:
-                    cats = ", ".join(html.escape(cat) for cat in paper.categories[:3])
+                tooltip_lines.append(f"Citations: {serialized['citation_count']}")
+                categories = serialized.get("categories", [])
+                if categories:
+                    cats = ", ".join(html.escape(str(cat)) for cat in categories[:3])
                     tooltip_lines.append(f"Categories: {cats}")
             else:
-                tooltip_lines.append(html.escape(attrs.get("title", "")))
+                tooltip_lines.append(html.escape(str(serialized.get("title", ""))))
 
             net.add_node(
                 node,
@@ -420,7 +424,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 title="<br>".join(tooltip_lines),
                 size=max(6, size / 30),
                 color=color,
-                borderWidth=3 if attrs.get("is_seed") else 1,
+                borderWidth=3 if serialized.get("is_seed") else 1,
             )
 
         for u, v, data in _sorted_edges(self.graph):

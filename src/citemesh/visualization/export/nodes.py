@@ -70,41 +70,38 @@ def _serialize_node(node_id: Hashable, attrs: dict[str, Any]) -> dict[str, Any]:
     """
     paper: Paper | None = attrs.get("paper")
 
-    node_data = {
+    if paper:
+        return {
+            "id": node_id,
+            "title": paper.title,
+            "year": paper.year,
+            "authors": [author.name for author in paper.authors],
+            "citation_count": paper.citation_count,
+            "abstract": paper.abstract,
+            "venue": paper.venue,
+            "arxiv_id": paper.arxiv_id,
+            "doi": paper.doi,
+            "categories": paper.categories,
+            # The graph attribute records the node's role in this graph. Fall
+            # back to the Paper value for callers that provide only ``paper``.
+            "is_seed": bool(attrs.get("is_seed", paper.is_seed)),
+            "is_local_corpus": bool(paper.is_local_corpus),
+        }
+
+    return {
         "id": node_id,
         "title": attrs.get("title", ""),
         "year": attrs.get("year"),
+        "authors": attrs.get("authors", []),
         "citation_count": attrs.get("citation_count", 0),
+        "abstract": attrs.get("abstract", ""),
         "venue": attrs.get("venue", ""),
         "arxiv_id": attrs.get("arxiv_id", ""),
         "doi": attrs.get("doi", ""),
+        "categories": attrs.get("categories", []),
         "is_seed": bool(attrs.get("is_seed", False)),
         "is_local_corpus": bool(attrs.get("is_local_corpus", False)),
     }
-
-    if paper:
-        node_data.update(
-            {
-                "authors": [author.name for author in paper.authors],
-                "abstract": paper.abstract,
-                "venue": getattr(paper, "venue", "") or attrs.get("venue", ""),
-                "arxiv_id": (
-                    getattr(paper, "arxiv_id", "") or attrs.get("arxiv_id", "")
-                ),
-                "doi": getattr(paper, "doi", "") or attrs.get("doi", ""),
-                "categories": paper.categories,
-                "is_local_corpus": bool(
-                    getattr(paper, "is_local_corpus", False)
-                    or attrs.get("is_local_corpus", False)
-                ),
-            }
-        )
-    else:
-        node_data.setdefault("authors", attrs.get("authors", []))
-        node_data.setdefault("abstract", attrs.get("abstract", ""))
-        node_data.setdefault("categories", attrs.get("categories", []))
-
-    return node_data
 
 
 def _node_title(attrs: dict[str, Any], node_id: Hashable) -> str:
@@ -114,7 +111,8 @@ def _node_title(attrs: dict[str, Any], node_id: Hashable) -> str:
     :param Hashable node_id: Node identifier fallback.
     :return str: Human-readable title fallback.
     """
-    title = str(attrs.get("title") or "").strip()
+    serialized = _serialize_node(node_id, attrs)
+    title = str(serialized.get("title") or "").strip()
     if title:
         return title
     return str(node_id)
@@ -127,14 +125,15 @@ def _node_short_label(attrs: dict[str, Any], node_id: Hashable) -> str:
     :param Hashable node_id: Node identifier fallback.
     :return str: Compact label (author/year or title fallback).
     """
-    title = _node_title(attrs, node_id)
-    raw_authors = attrs.get("authors", [])
+    serialized = _serialize_node(node_id, attrs)
+    title = str(serialized.get("title") or "").strip() or str(node_id)
+    raw_authors = serialized.get("authors", [])
     surname = ""
     if isinstance(raw_authors, list) and raw_authors:
         first_author = str(raw_authors[0]).strip()
         surname = first_author.split()[-1] if first_author else ""
 
-    year = coerce_publication_year(attrs.get("year"))
+    year = coerce_publication_year(serialized.get("year"))
     if surname and year > 0:
         return f"{surname}, {year}"
     if year > 0:
@@ -148,9 +147,11 @@ def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, dict[str, Any]]]:
     :param nx.Graph graph: Graph whose nodes should be ordered.
     :return list[tuple[Hashable, Dict[str, Any]]]: Sorted ``(node_id, attrs)``
         pairs.
-    :raises ValueError: If an ID is empty or has surrounding whitespace.
+    :raises ValueError: If an ID is empty, has surrounding whitespace, or collides
+        with another ID after string conversion.
     """
     nodes = [(node_id, graph.nodes[node_id]) for node_id in ordered_nodes(graph)]
+    serialized_owners: dict[str, Hashable] = {}
     for node_id, _ in nodes:
         identifier = str(node_id)
         if not identifier or identifier != identifier.strip():
@@ -158,6 +159,13 @@ def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, dict[str, Any]]]:
                 f"Cannot export non-canonical node ID {node_id!r}: "
                 "IDs must be non-empty and have no surrounding whitespace."
             )
+        if identifier in serialized_owners:
+            existing = serialized_owners[identifier]
+            raise ValueError(
+                f"Cannot export node IDs {existing!r} and {node_id!r}: "
+                f"both serialize as {identifier!r}."
+            )
+        serialized_owners[identifier] = node_id
     return nodes
 
 
@@ -267,6 +275,17 @@ def _seed_relation_map(graph: nx.Graph) -> dict[str, str]:
 
 class NodesMixin:
     """Exporter-state node helpers: enrichment, layout, size, and color caches."""
+
+    def _serialized_graph(self) -> nx.Graph:
+        """Copy the graph with effective exported metadata on every node.
+
+        :return nx.Graph: Shallow graph copy whose scalar node fields follow
+            :func:`_serialize_node` without mutating the caller's graph.
+        """
+        serialized_graph = self.graph.copy()
+        for node_id, attrs in _sorted_nodes(self.graph):
+            serialized_graph.nodes[node_id].update(_serialize_node(node_id, attrs))
+        return serialized_graph
 
     def _enriched_nodes(self) -> list[dict[str, Any]]:
         """Build enriched node payloads with provenance, relevance, links, and BibTeX.
@@ -389,7 +408,7 @@ class NodesMixin:
         :return float: Cached node size.
         """
         if self._size_map is None:
-            sizes = compute_node_sizes(self.graph)
+            sizes = compute_node_sizes(self._serialized_graph())
             ordered_nodes = [node_id for node_id, _ in _sorted_nodes(self.graph)]
             self._size_map = {
                 graph_node: size for graph_node, size in zip(ordered_nodes, sizes)
@@ -405,7 +424,9 @@ class NodesMixin:
         """
         cache_key = theme.name
         if cache_key not in self._color_map_cache:
-            colors, _, _ = compute_node_colors(self.graph, self.seed_id, theme)
+            colors, _, _ = compute_node_colors(
+                self._serialized_graph(), self.seed_id, theme
+            )
             ordered_nodes = [node_id for node_id, _ in _sorted_nodes(self.graph)]
             self._color_map_cache[cache_key] = {
                 graph_node: color for graph_node, color in zip(ordered_nodes, colors)

@@ -377,6 +377,144 @@ def test_exporter_serialization_contracts_and_determinism(
     assert edge_x[4] == pytest.approx(float(normalized_layout["z"][0]))
 
 
+def test_exporter_uses_paper_metadata_and_graph_seed_role(tmp_path: Path) -> None:
+    """Paper payloads should own metadata while graph attrs own an explicit role.
+
+    :param Path tmp_path: Isolated GraphML destination.
+    :return None: Checks Paper-only fallback, live metadata, and role precedence.
+    """
+    seed = Paper(
+        paper_id="seed",
+        title="Original seed",
+        year=2020,
+        authors=[Author(name="Alice Original")],
+        citation_count=1,
+        abstract="Original abstract",
+        venue="Original venue",
+        arxiv_id="2001.00001",
+        doi="10.1000/original",
+        categories=["cs.AI"],
+        is_seed=True,
+        is_local_corpus=True,
+    )
+    related = Paper(
+        paper_id="related",
+        title="Related",
+        year=2021,
+        is_seed=True,
+    )
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        paper=seed,
+        title="Stale scalar title",
+        year=1999,
+        authors=["Stale Author"],
+        citation_count=999,
+        abstract="Stale scalar abstract",
+        venue="Stale scalar venue",
+        arxiv_id="1999.99999",
+        doi="10.1000/stale",
+        categories=["stale.category"],
+        is_local_corpus=False,
+    )
+    graph.add_node("related", paper=related, is_seed=False)
+    graph.add_edge("seed", "related", weight=0.5)
+    exporter = GraphExporter(
+        graph,
+        "seed",
+        layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
+    )
+
+    seed.title = "Updated seed"
+    seed.year = 2025
+    seed.authors = [Author(name="Alice Updated")]
+    seed.citation_count = 42
+    seed.abstract = "Updated abstract"
+    seed.venue = "Updated venue"
+    seed.arxiv_id = "2501.00001"
+    seed.doi = "10.1000/updated"
+    seed.categories = ["cs.IR"]
+
+    payload = exporter.graph_payload()
+    payload_nodes = {node["id"]: node for node in payload["nodes"]}
+    seed_payload = payload_nodes["seed"]
+    assert seed_payload["title"] == "Updated seed"
+    assert seed_payload["year"] == 2025
+    assert seed_payload["authors"] == ["Alice Updated"]
+    assert seed_payload["citation_count"] == 42
+    assert seed_payload["abstract"] == "Updated abstract"
+    assert seed_payload["venue"] == "Updated venue"
+    assert seed_payload["arxiv_id"] == "2501.00001"
+    assert seed_payload["doi"] == "10.1000/updated"
+    assert seed_payload["categories"] == ["cs.IR"]
+    assert seed_payload["is_seed"] is True
+    assert seed_payload["is_local_corpus"] is True
+    assert payload_nodes["related"]["is_seed"] is False
+    edge = payload["edges"][0]
+    assert {edge["source_title"], edge["target_title"]} == {
+        "Updated seed",
+        "Related",
+    }
+    assert {edge["source_label"], edge["target_label"]} == {
+        "Updated, 2025",
+        "Related (2021)",
+    }
+
+    graphml_path = tmp_path / "paper-metadata.graphml"
+    exporter.to_graphml(graphml_path)
+    graphml_seed = nx.read_graphml(graphml_path).nodes["seed"]
+    assert graphml_seed["title"] == "Updated seed"
+    assert int(graphml_seed["citation_count"]) == 42
+
+
+def test_paper_only_export_styling_matches_equivalent_scalar_graph() -> None:
+    """Exporter geometry should use the same effective Paper metadata as payloads.
+
+    :return None: Compares sizes and colors without mutating either source graph.
+    """
+    papers = {
+        "seed": Paper(
+            paper_id="seed",
+            title="Seed",
+            year=2024,
+            citation_count=50,
+            is_seed=True,
+        ),
+        "related": Paper(
+            paper_id="related",
+            title="Related",
+            year=2020,
+            citation_count=5,
+        ),
+    }
+    paper_graph = nx.Graph()
+    scalar_graph = nx.Graph()
+    for paper_id, paper in papers.items():
+        paper_graph.add_node(paper_id, paper=paper)
+        scalar_graph.add_node(
+            paper_id,
+            title=paper.title,
+            year=paper.year,
+            authors=[],
+            citation_count=paper.citation_count,
+            is_seed=paper.is_seed,
+        )
+    paper_graph.add_edge("seed", "related", weight=0.5)
+    scalar_graph.add_edge("seed", "related", weight=0.5)
+    paper_exporter = GraphExporter(paper_graph, "seed")
+    scalar_exporter = GraphExporter(scalar_graph, "seed")
+    theme = get_theme("dark")
+
+    for node_id in papers:
+        assert paper_exporter._node_size(node_id) == scalar_exporter._node_size(node_id)
+        assert paper_exporter._node_color_hex(
+            node_id, theme
+        ) == scalar_exporter._node_color_hex(node_id, theme)
+
+    assert set(paper_graph.nodes["seed"]) == {"paper"}
+
+
 def test_json_export_embeds_geometry_computing_layout_lazily(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -807,6 +945,60 @@ def test_export_rejects_whitespace_ids_before_writing(
     with pytest.raises(ValueError, match="non-canonical node ID"):
         exporter.to_json(path)
     assert path.read_text() == "previous valid output"
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "graph_payload",
+        "to_json",
+        "to_dashboard_html",
+        "to_csv",
+        "to_bibtex",
+        "to_graphml",
+        "to_plotly_html",
+        "to_interactive_html",
+    ],
+)
+def test_exports_reject_node_ids_that_collide_after_stringification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """Every exporter must reject distinct graph IDs that serialize identically.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs optional dependency stubs.
+    :param str method: Export entry point under test.
+    :return None: Checks a clear failure before an existing output is replaced.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
+    monkeypatch.setattr(
+        loaders_module,
+        "_load_pyvis_network_class",
+        lambda: (
+            lambda **kwargs: types.SimpleNamespace(
+                set_options=lambda *_args: None,
+            )
+        ),
+    )
+    graph = nx.Graph()
+    graph.add_node(1, title="Integer ID", is_seed=True)
+    graph.add_node("1", title="String ID", is_seed=False)
+    graph.add_edge(1, "1", weight=0.5)
+    exporter = GraphExporter(
+        graph,
+        "1",
+        layout={1: (0.0, 0.0), "1": (1.0, 0.0)},
+    )
+    path = tmp_path / "existing-output"
+    path.write_text("previous valid output", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="both serialize as '1'"):
+        if method == "graph_payload":
+            exporter.graph_payload()
+        else:
+            getattr(exporter, method)(path)
+
+    assert path.read_text(encoding="utf-8") == "previous valid output"
 
 
 @pytest.mark.parametrize("for_dashboard", [False, True])
