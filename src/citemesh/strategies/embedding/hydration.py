@@ -40,6 +40,7 @@ from .config import (
 )
 from .records import (
     _arxiv_id_chronology_key,
+    _CappedCorpusRecencyProbe,
     _extract_dataset_paper_metadata,
     _HydrationSourceSliceResult,
     _newest_records_by_arxiv_id,
@@ -1104,6 +1105,7 @@ class _CorpusHydrationMixin:
         existing_paper_ids: set[str] | None = None,
         max_new_records: int | None = None,
         corpus_size: _CorpusSizeArg = _REQUESTED_CORPUS_SIZE,
+        dataset: Iterable[dict[str, Any]] | None = None,
     ) -> _HydrationSourceSliceResult:
         """Load an exact-source slice and report cache and source progress.
 
@@ -1121,17 +1123,23 @@ class _CorpusHydrationMixin:
         :param Optional[int] max_new_records: Optional cap on newly hydrated records.
         :param _CorpusSizeArg corpus_size: Cap this pass selects and hydrates at,
             defaulting to the cap this build requested.
+        :param Optional[Iterable[Dict[str, Any]]] dataset: Rows a caller already
+            loaded for this exact slice, hydrated instead of loading the source
+            again. The caller owns both guarantees the load would have given:
+            that these are the rows this pass would select, and that they came
+            from the recorded source.
         :return _HydrationSourceSliceResult: Cache writes and source-consumption state.
         """
         slice_corpus_size = self._effective_corpus_size(corpus_size)
-        dataset = self._load_exact_hydration_source_slice(
-            use_streaming=use_streaming,
-            source=source,
-            operation=operation,
-            row_limit=row_limit,
-            row_offset=row_offset,
-            corpus_size=slice_corpus_size,
-        )
+        if dataset is None:
+            dataset = self._load_exact_hydration_source_slice(
+                use_streaming=use_streaming,
+                source=source,
+                operation=operation,
+                row_limit=row_limit,
+                row_offset=row_offset,
+                corpus_size=slice_corpus_size,
+            )
         source_rows_consumed = 0
         source_exhausted = False
 
@@ -1708,11 +1716,12 @@ class _CorpusHydrationMixin:
             )
             return
 
-        newest_upstream_key = self._upstream_newest_chronology_key(
+        probe = self._probe_upstream_capped_selection(
             use_streaming=use_streaming,
             source=source,
             corpus_size=refreshed_corpus_size,
         )
+        newest_upstream_key = probe.newest_key
         if newest_upstream_key is None or newest_upstream_key <= watermark:
             logger.info(
                 "Capped corpus for %s/%s is still the newest %d submissions "
@@ -1736,23 +1745,31 @@ class _CorpusHydrationMixin:
             cached_rows=cached_rows,
             upstream_rows=upstream_rows,
             corpus_size=refreshed_corpus_size,
+            selection=probe.selection,
         )
 
-    def _upstream_newest_chronology_key(
+    def _probe_upstream_capped_selection(
         self, *, use_streaming: bool, source: str, corpus_size: int
-    ) -> int | None:
-        """Return the newest submission key the upstream newest-N selection holds.
+    ) -> _CappedCorpusRecencyProbe:
+        """Rank the upstream newest-N selection and read its newest submission.
 
         The loaded slice is already ranked by submission chronology, so its
         maximum key is also the upstream maximum; reading it from the selection
         avoids a second recency policy that could disagree with the one
         hydration itself applies.
 
+        Ranking it costs a full pass over the source, and under ``--streaming``
+        that is a full drain of the stream, so the slice is returned alongside
+        the key: the pass that admits the missing rows wants exactly these rows
+        and would otherwise pay for the same selection twice. A slice that
+        cannot be traversed again is dropped instead.
+
         :param bool use_streaming: Whether hydration mode is streaming.
         :param str source: Hydrated dataset source token.
         :param int corpus_size: Capped corpus the selection is ranked for.
-        :return Optional[int]: Newest packed chronology key, or ``None`` when no
-            selected row carries a parseable arXiv ID.
+        :return _CappedCorpusRecencyProbe: Newest packed chronology key, ``None``
+            when no selected row carries a parseable arXiv ID, and the selected
+            rows when they can be handed on.
         """
         dataset = self._load_exact_hydration_source_slice(
             use_streaming=use_streaming,
@@ -1771,7 +1788,10 @@ class _CorpusHydrationMixin:
             key = encode_arxiv_id_chronology_key(raw_id)
             if key is not None and (newest_key is None or key > newest_key):
                 newest_key = key
-        return newest_key
+        # Reading the keys drained a bare iterator, but not a materialized
+        # newest-N list or an indexable dataset view; sizedness tells them apart.
+        selection = dataset if hasattr(dataset, "__len__") else None
+        return _CappedCorpusRecencyProbe(newest_key=newest_key, selection=selection)
 
     def _admit_newer_capped_corpus_rows(
         self,
@@ -1781,6 +1801,7 @@ class _CorpusHydrationMixin:
         cached_rows: int,
         upstream_rows: int,
         corpus_size: int,
+        selection: Iterable[dict[str, Any]] | None = None,
     ) -> None:
         """Encode the newest-N rows the capped cache is missing, in place.
 
@@ -1793,14 +1814,18 @@ class _CorpusHydrationMixin:
         :param int cached_rows: Cached payload row count before this pass.
         :param int upstream_rows: Upstream split row count.
         :param int corpus_size: Capped corpus the selection is re-run at.
+        :param Optional[Iterable[Dict[str, Any]]] selection: Newest-N rows the
+            recency probe already selected from this source, hydrated as-is so
+            the pass does not rank the whole source a second time.
         :return None: Mutates cache rows and the reconciliation marker in-place.
         """
         logger.info(
             "Upstream %s/%s holds submissions newer than the capped corpus; "
-            "re-running the newest-%d selection over %d cached rows and encoding "
+            "%s the newest-%d selection over %d cached rows and encoding "
             "only the papers the cache is missing.",
             source,
             self.dataset_split,
+            "reusing" if selection is not None else "re-running",
             corpus_size,
             cached_rows,
         )
@@ -1816,6 +1841,7 @@ class _CorpusHydrationMixin:
             operation="Capped corpus recency refresh",
             existing_paper_ids=self.embedding_cache.get_cached_paper_ids(),
             corpus_size=corpus_size,
+            dataset=selection,
         )
         updated_rows = self._cached_payload_row_count()
         if not refresh.source_exhausted:

@@ -5097,6 +5097,97 @@ def test_capped_cache_admits_upstream_papers_newer_than_its_watermark(
     clear_cache_mock.assert_not_called()
 
 
+def test_capped_recency_refresh_ranks_the_source_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admitting newer papers must reuse the selection the recency probe ranked.
+
+    Ranking a capped corpus costs a full pass over the source, and under
+    ``--streaming`` that is a full drain of the stream, so paying for it twice
+    to hydrate the very rows the probe already holds is pure waste.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :return None: Asserts one source drain and the same admitted rows.
+    """
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=2,
+        cached_corpus_size=2,
+        cached_ids=("2601.00001", "2601.00002"),
+    )
+    cache = builder.embedding_cache
+    records = [
+        {"id": "2601.00001", "title": "First", "abstract": "A"},
+        {"id": "2601.00002", "title": "Second", "abstract": "A"},
+        {"id": "2602.00003", "title": "Newer", "abstract": "A"},
+    ]
+    drains = {"loads": 0, "rows": 0}
+
+    def counting_stream(*_args: Any, **_kwargs: Any) -> Iterator[dict[str, str]]:
+        """Serve the split as a stream while counting drains and rows.
+
+        :param Any _args: Dataset loader positional arguments.
+        :param Any _kwargs: Dataset loader keyword arguments.
+        :return Iterator[dict[str, str]]: Source records.
+        """
+        drains["loads"] += 1
+
+        def generate() -> Iterator[dict[str, str]]:
+            """Yield each source row, counting it.
+
+            :return Iterator[dict[str, str]]: Source records.
+            """
+            for record in records:
+                drains["rows"] += 1
+                yield record
+
+        return generate()
+
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=counting_stream),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=True)
+
+    assert drains == {"loads": 1, "rows": len(records)}
+    assert cache.get_cached_paper_ids() == {
+        "arxiv:2601.00001",
+        "arxiv:2601.00002",
+        "arxiv:2602.00003",
+    }
+    assert model.encode.call_count == 1
+    clear_cache_mock.assert_not_called()
+
+
+def test_capped_recency_probe_drops_a_selection_it_cannot_reread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A slice the probe drained to rank must not be handed on as hydration rows.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :return None: Asserts the newest key is still read and the slice is dropped.
+    """
+    builder = EmbeddingGraphBuilder(corpus_size=2, client=MagicMock())
+    rows = [{"id": "2601.00001"}, {"id": "2602.00002"}]
+    monkeypatch.setattr(
+        builder,
+        "_load_exact_hydration_source_slice",
+        lambda **_kwargs: iter(rows),
+    )
+
+    probe = builder._probe_upstream_capped_selection(
+        use_streaming=True, source="fixture/source", corpus_size=2
+    )
+
+    assert probe.newest_key == paper_ids_module.encode_arxiv_id_chronology_key(
+        "2602.00002"
+    )
+    assert probe.selection is None
+
+
 def test_capped_cache_without_newer_upstream_papers_stops_rescanning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

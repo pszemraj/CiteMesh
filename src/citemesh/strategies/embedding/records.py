@@ -48,6 +48,25 @@ class _HydrationSourceSliceResult:
     source_exhausted: bool
 
 
+@dataclass(frozen=True)
+class _CappedCorpusRecencyProbe:
+    """Outcome of asking upstream whether a capped corpus is still the newest.
+
+    ``selection`` is the newest-first slice the probe had to load and rank to
+    answer that. Ranking costs a full pass over the source — a full drain under
+    ``--streaming`` — and the pass that admits the missing rows needs exactly
+    this slice, so it is handed over rather than selected a second time. It is
+    ``None`` when the loaded slice cannot be traversed again, leaving that
+    caller to reload as before.
+
+    :ivar Optional[int] newest_key: Newest packed chronology key upstream holds.
+    :ivar Optional[Iterable[Dict[str, Any]]] selection: Re-iterable selected rows.
+    """
+
+    newest_key: int | None
+    selection: Iterable[dict[str, Any]] | None
+
+
 def _canonicalize_embedding_paper_id(raw_id: Any) -> str:
     """Canonicalize arXiv-like identifiers for downstream lookups.
 
