@@ -412,7 +412,7 @@ def _add_build_graph_arguments(
     export_group.add_argument(
         "--output",
         "-o",
-        type=str,
+        type=_non_empty_str,
         default=None,
         help=(
             "File or directory (default: out/ with automatic names). Dashboard collections share "
@@ -581,7 +581,7 @@ def _add_build_corpus_arguments(
     )
     embedding_group.add_argument(
         "--model-revision",
-        type=str,
+        type=_non_empty_str,
         default=None,
         help=(
             "Optional model revision token (branch/tag/commit) for hub-backed "

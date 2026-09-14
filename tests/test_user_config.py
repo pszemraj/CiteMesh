@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -339,6 +340,101 @@ def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> Non
         set_config_value("defaults.theme", "dark", path=config_path)
     # Corrupt content must remain untouched for manual repair.
     assert config_path.read_bytes() == payload
+
+
+def test_config_write_wraps_parent_directory_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config write preparation failures should use the public error type.
+
+    :param Path tmp_path: Temporary directory supplying the target path.
+    :param pytest.MonkeyPatch monkeypatch: Filesystem failure injector.
+    :return None: Assertions verify the stable configuration error boundary.
+    """
+    config_path = tmp_path / "blocked" / "config.toml"
+    original_mkdir = Path.mkdir
+
+    def denied_mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+        """Reject creation of the target config directory only.
+
+        :param Path path: Directory being created.
+        :param Any args: Forwarded positional arguments.
+        :param Any kwargs: Forwarded keyword arguments.
+        :return None: Creates unrelated directories normally.
+        """
+        if path == config_path.parent:
+            raise PermissionError("config directory denied")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+
+    with pytest.raises(ConfigFileError, match="Failed to prepare config directory"):
+        user_config_module._write_document(config_path, {"defaults": {"theme": "dark"}})
+
+
+@pytest.mark.parametrize("operation", ["set", "unset"])
+@pytest.mark.parametrize("failure_site", ["parent", "lock"])
+def test_config_cli_wraps_mutation_filesystem_errors(
+    monkeypatch: pytest.MonkeyPatch, operation: str, failure_site: str
+) -> None:
+    """Config mutations should report filesystem failures without a traceback.
+
+    :param pytest.MonkeyPatch monkeypatch: Lock failure injector.
+    :param str operation: Config mutation subcommand under test.
+    :param str failure_site: Parent-directory or lock-acquisition failure to inject.
+    :return None: Assertions verify the CLI returns its ordinary failure status.
+    """
+    lock: MagicMock | None = None
+    if failure_site == "parent":
+        config_parent = user_config_path().parent
+        original_mkdir = Path.mkdir
+
+        def denied_mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+            """Reject preparation of the active config directory only.
+
+            :param Path path: Directory being created.
+            :param Any args: Forwarded positional arguments.
+            :param Any kwargs: Forwarded keyword arguments.
+            :return None: Creates unrelated directories normally.
+            """
+            if path == config_parent:
+                raise PermissionError("config directory denied")
+            original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+    else:
+        lock = MagicMock()
+        lock.acquire.side_effect = PermissionError("config lock denied")
+        monkeypatch.setattr(
+            user_config_module, "FileLock", MagicMock(return_value=lock)
+        )
+
+    command = ["config", operation, "defaults.theme"]
+    if operation == "set":
+        command.append("dark")
+    result = _run_cli(command)
+
+    assert result.returncode == 1
+    if lock is not None:
+        lock.release.assert_not_called()
+
+
+def test_config_lock_wraps_release_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lock release filesystem failures should retain the config error contract.
+
+    :param Path tmp_path: Temporary directory supplying the lock path.
+    :param pytest.MonkeyPatch monkeypatch: Lock failure injector.
+    :return None: Assertions verify release errors use ``ConfigFileError``.
+    """
+    lock = MagicMock()
+    lock.release.side_effect = PermissionError("config unlock denied")
+    monkeypatch.setattr(user_config_module, "FileLock", MagicMock(return_value=lock))
+
+    with pytest.raises(ConfigFileError, match="Failed to release config file lock"):
+        with user_config_module.config_lock(tmp_path / "config.toml"):
+            pass
 
 
 @pytest.mark.parametrize("is_file_false", [False, True])

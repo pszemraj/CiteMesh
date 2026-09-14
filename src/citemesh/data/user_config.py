@@ -386,6 +386,21 @@ def _read_raw_document(config_path: Path) -> dict[str, Any]:
         ) from exc
 
 
+def _prepare_config_parent(config_path: Path) -> None:
+    """Create the configuration parent directory with a stable error boundary.
+
+    :param Path config_path: Configuration file whose parent must exist.
+    :return None: Creates the directory when needed.
+    :raises ConfigFileError: If the directory cannot be created or inspected.
+    """
+    try:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ConfigFileError(
+            f"Failed to prepare config directory {config_path.parent}: {exc}"
+        ) from exc
+
+
 def _write_document(config_path: Path, document: dict[str, Any]) -> None:
     """Atomically persist a TOML document (temp file + rename).
 
@@ -393,7 +408,7 @@ def _write_document(config_path: Path, document: dict[str, Any]) -> None:
     :param Dict[str, Any] document: TOML-serializable document.
     :return None: Writes the config file in place.
     """
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_config_parent(config_path)
     try:
         payload = tomli_w.dumps(document)
     except (TypeError, ValueError) as exc:
@@ -419,9 +434,10 @@ def config_lock(config_path: Path) -> Iterator[Path]:
 
     :param Path config_path: Target config file path.
     :return Iterator[Path]: Held lock's path, which cache clearing must preserve.
-    :raises ConfigFileError: If lock acquisition times out.
+    :raises ConfigFileError: If the lock directory cannot be prepared or the
+        lock cannot be acquired or released.
     """
-    config_path.parent.mkdir(parents=True, exist_ok=True)
+    _prepare_config_parent(config_path)
     lock_path = Path(f"{config_path}.lock")
     lock = FileLock(
         lock_path,
@@ -434,10 +450,19 @@ def config_lock(config_path: Path) -> Iterator[Path]:
             f"Timed out waiting for config file lock on {config_path}; "
             "another citemesh process is using the config."
         ) from exc
+    except OSError as exc:
+        raise ConfigFileError(
+            f"Failed to acquire config file lock on {config_path}: {exc}"
+        ) from exc
     try:
         yield lock_path
     finally:
-        lock.release()
+        try:
+            lock.release()
+        except OSError as exc:
+            raise ConfigFileError(
+                f"Failed to release config file lock on {config_path}: {exc}"
+            ) from exc
 
 
 def set_config_value(

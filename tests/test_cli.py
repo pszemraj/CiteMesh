@@ -1077,6 +1077,27 @@ def test_search_rejects_empty_model_override() -> None:
     assert "must be a non-empty string" in result.stderr
 
 
+@pytest.mark.parametrize(
+    ("option", "prefix"),
+    [
+        ("--model-revision", ["--strategy", "embedding"]),
+        ("--output", []),
+    ],
+)
+def test_build_rejects_empty_option_values(option: str, prefix: list[str]) -> None:
+    """Build options with required text values should reject an empty token.
+
+    :param str option: Build option receiving the empty value.
+    :param list[str] prefix: Arguments needed to put the option in scope.
+    :return None: Assertions verify an argparse usage failure before execution.
+    """
+    result = run_cli_command(["build", "seed", *prefix, option, ""])
+
+    assert result.returncode == 2
+    assert option in result.stderr
+    assert "must be a non-empty string" in result.stderr
+
+
 def test_search_mode_local_prints_cached_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
