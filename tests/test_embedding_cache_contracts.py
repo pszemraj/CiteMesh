@@ -3319,26 +3319,44 @@ def test_embedding_cache_reopen_rebuilds_datasetless_file_with_schema_attrs(
 
 
 @pytest.mark.parametrize("interrupt", [False, True])
-def test_positional_corpus_identity_migration_preserves_vector_rows(
+def test_positional_corpus_identity_reconciliation_preserves_physical_rows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     interrupt: bool,
 ) -> None:
-    """Identity migration must be atomic and retain duplicate historical vectors.
+    """Identity preparation must be atomic and retain every ambiguous physical ID.
 
     :param Path tmp_path: Isolated cache namespace.
-    :param pytest.MonkeyPatch monkeypatch: Forces one-row migration read batches.
-    :param bool interrupt: Whether identity resolution fails before commit.
-    :return None: Checks rollback, duplicate retention and one-time migration.
+    :param pytest.MonkeyPatch monkeypatch: Forces one-row reads and metadata interruption.
+    :param bool interrupt: Whether the first preparation fails before commit.
+    :return None: Checks rollback, aliases, preserved vectors and one-time preparation.
     """
     monkeypatch.setattr(embedding_cache_module.store, "SQLITE_QUERY_BATCH_SIZE", 1)
     cache = EmbeddingCache(
         cache_dir=tmp_path, model_name="anonymous-identity", storage_precision="float32"
     )
     papers = {
-        "arxiv_0": {"title": "First", "abstract": "A"},
-        "arxiv_1": {"title": "First", "abstract": "A"},
-        "arxiv_2": {"title": "Second", "abstract": "B"},
+        "arxiv_0": {
+            "title": "First",
+            "abstract": "A",
+            "authors": ["Alice"],
+            "year": "2020",
+            "doi": "10.1/first",
+        },
+        "arxiv_1": {
+            "title": "First",
+            "abstract": "A",
+            "authors": ["Alice"],
+            "year": 2020,
+            "doi": "10.1/first",
+        },
+        "arxiv_2": {
+            "title": "Second",
+            "abstract": "B",
+            "authors": ["Bob"],
+            "year": 2021,
+            "doi": "10.1/second",
+        },
     }
     model = LookupEncodeModel(
         {
@@ -3355,38 +3373,107 @@ def test_positional_corpus_identity_migration_preserves_vector_rows(
     )
     original_h5 = cache.h5_path.read_bytes()
 
-    def identify(metadata: dict[str, Any]) -> str:
-        """Resolve deterministic IDs, optionally interrupting the transaction.
+    original_set_metadata = cache._set_cache_metadata
 
-        :param Dict[str, Any] metadata: Cached title and abstract.
-        :return str: Content identity shared by duplicate historical rows.
-        :raises RuntimeError: On the second distinct paper when interruption is enabled.
+    def interrupt_metadata_write(
+        conn: sqlite3.Connection, values: dict[str, object]
+    ) -> None:
+        """Fail after the transactional metadata write to exercise rollback.
+
+        :param sqlite3.Connection conn: Active cache transaction.
+        :param Dict[str, object] values: Version and hydration values to persist.
+        :return None: Always raises after writing through to SQLite.
+        :raises RuntimeError: Always, to simulate interrupted preparation.
         """
-        if interrupt and metadata["title"] == "Second":
-            raise RuntimeError("migration interrupted")
-        return "content:" + metadata["title"].lower()
+        original_set_metadata(conn, values)
+        raise RuntimeError("identity preparation interrupted")
 
     if interrupt:
-        with pytest.raises(RuntimeError, match="migration interrupted"):
-            cache.migrate_positional_corpus_ids(identify)
+        monkeypatch.setattr(cache, "_set_cache_metadata", interrupt_metadata_write)
+        with pytest.raises(RuntimeError, match="identity preparation interrupted"):
+            cache.prepare_corpus_identity_reconciliation()
         assert cache.get_cached_paper_ids() == set(papers)
         assert cache.payload_stats().hydration_complete
-        interrupt = False
-    assert cache.migrate_positional_corpus_ids(identify) == 2
-    assert cache.get_cached_paper_ids() == {
-        "content:first",
-        "arxiv_1",
-        "content:second",
-    }
+        assert cache._read_cache_metadata().get("corpus_identity_version") is None
+        monkeypatch.setattr(cache, "_set_cache_metadata", original_set_metadata)
+
+    assert cache.prepare_corpus_identity_reconciliation()
+    assert cache.get_cached_paper_ids() == set(papers)
     assert cache.h5_path.read_bytes() == original_h5
     assert cache.embedding_count() == 3
     assert not cache.payload_stats().hydration_complete
-    assert cache.migrate_positional_corpus_ids(identify) == 0
-    # A real source ID can happen to resemble the old generated convention.
-    # Once the migration is stamped, future source-provided IDs stay untouched.
+    assert cache._read_cache_metadata()["corpus_identity_version"] == "1"
+    assert not cache.prepare_corpus_identity_reconciliation()
+
+    seen_metadata: dict[str, dict[str, Any]] = {}
+
+    def identify(metadata: dict[str, Any]) -> str:
+        """Build an alias while retaining the normalized input for assertions.
+
+        :param Dict[str, Any] metadata: Full normalized cached paper metadata.
+        :return str: Content identity shared by duplicate historical rows.
+        """
+        seen_metadata[metadata["paper_id"]] = metadata
+        return "content:" + metadata["title"].lower()
+
+    assert cache.get_legacy_corpus_identity_aliases(identify) == {
+        "content:first": {"arxiv_0", "arxiv_1"},
+        "content:second": {"arxiv_2"},
+    }
+    assert seen_metadata["arxiv_0"]["authors"] == ["Alice"]
+    assert seen_metadata["arxiv_0"]["year"] == 2020
+    assert seen_metadata["arxiv_0"]["doi"] == "10.1/first"
+    selected = cache.get_paper_metadata_batch(["arxiv_0", "missing"])
+    assert set(selected) == {"arxiv_0"}
+    assert selected["arxiv_0"]["authors"] == ["Alice"]
+
+    # A real source ID can happen to resemble the old generated convention;
+    # aliases continue to cover it without changing that physical identity.
     cache.get_embeddings({"arxiv_99": papers["arxiv_2"]}, model, show_progress=False)
-    assert cache.migrate_positional_corpus_ids(identify) == 0
     assert "arxiv_99" in cache.get_cached_paper_ids()
+    assert cache.get_legacy_corpus_identity_aliases(identify)["content:second"] == {
+        "arxiv_2",
+        "arxiv_99",
+    }
+
+
+def test_identity_preparation_ignores_nonpositional_corpus_ids(tmp_path: Path) -> None:
+    """A missing marker alone must not invalidate an unambiguous hydrated cache.
+
+    :param Path tmp_path: Isolated cache namespace.
+    :return None: Checks exact positional matching and one-time marker stamping.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="nonpositional-identity",
+        storage_precision="float32",
+    )
+    papers = {
+        "content:stable": {"title": "Anonymous", "abstract": "A"},
+        "arxiv_dataset-key": {"title": "Source ID", "abstract": "B"},
+    }
+    cache.get_embeddings(
+        papers,
+        LookupEncodeModel(
+            {
+                "Anonymous. A": np.array([1.0, 0.0], dtype=np.float32),
+                "Source ID. B": np.array([0.0, 1.0], dtype=np.float32),
+            }
+        ),
+        show_progress=False,
+    )
+    cache.mark_hydrated(
+        dataset_source="fixture/source",
+        dataset_split="train",
+        corpus_size=None,
+        complete=True,
+    )
+
+    assert not cache.prepare_corpus_identity_reconciliation()
+    assert cache.payload_stats().hydration_complete
+    assert cache.get_cached_paper_ids() == set(papers)
+    assert cache.get_legacy_corpus_identity_aliases(lambda _: "unused") == {}
+    assert not cache.prepare_corpus_identity_reconciliation()
 
 
 @pytest.mark.parametrize("binary_rows", [1, 3])

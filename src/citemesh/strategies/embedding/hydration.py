@@ -209,14 +209,10 @@ class _CorpusHydrationMixin:
         """
         cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
         if cached_dataset_source == self.dataset_source:
-            renamed = self.embedding_cache.migrate_positional_corpus_ids(
-                _anonymous_dataset_paper_id
-            )
-            if renamed:
+            if self.embedding_cache.prepare_corpus_identity_reconciliation():
                 logger.info(
-                    "Assigned stable content IDs to %d cached corpus rows "
-                    "without re-encoding their vectors.",
-                    renamed,
+                    "Rechecking legacy corpus membership by stable content "
+                    "identity while preserving existing paper IDs and vectors."
                 )
         cache_is_current, cached_dataset_source = self._revalidate_hydrated_cache(
             cached_dataset_source, use_streaming
@@ -534,9 +530,17 @@ class _CorpusHydrationMixin:
             streaming=use_streaming,
             num_proc=None if use_streaming else max(1, (os.cpu_count() or 1) // 2),
         )
+        legacy_aliases = cache.get_legacy_corpus_identity_aliases(
+            _anonymous_dataset_paper_id
+        )
         batch: list[dict] = []
         for index, record in enumerate(dataset):
-            batch.append(_extract_dataset_paper_metadata(record, index))
+            metadata = _extract_dataset_paper_metadata(record, index)
+            batch.append(metadata)
+            # Legacy IDs remain valid lookup keys. Metadata fixes must reach
+            # those rows even when their source now resolves to a content ID.
+            for paper_id in legacy_aliases.get(metadata["paper_id"], ()):
+                batch.append({**metadata, "paper_id": paper_id})
             if len(batch) >= HYDRATION_FLUSH_SIZE:
                 cache.update_corpus_metadata(batch)
                 batch = []
@@ -849,7 +853,7 @@ class _CorpusHydrationMixin:
         cached_token = str(stats.hydration_corpus_size or "").strip()
         requested_token = _corpus_size_token(self.corpus_size)
         upstream_rows = self._resolve_dataset_split_row_count(source)
-        cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
+        cached_paper_ids = self._cached_corpus_paper_ids()
         logger.info(
             "Extending cached corpus for %s/%s from %s to %s; reusing %d cached "
             "rows and encoding only the newly selected papers.",
@@ -954,7 +958,7 @@ class _CorpusHydrationMixin:
             if resumed_corpus_size is not None and ":" not in str(self.dataset_split)
             else None
         )
-        cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
+        cached_paper_ids = self._cached_corpus_paper_ids()
         logger.info(
             "Resuming incomplete selected-corpus cache for %s/%s from cached_rows=%d.",
             source,
@@ -1480,6 +1484,22 @@ class _CorpusHydrationMixin:
 
         return hydrated_records
 
+    def _cached_corpus_paper_ids(self) -> set[str]:
+        """Return persisted IDs plus content equivalents of old positional IDs.
+
+        The old spelling can also be a legitimate source ID. Aliasing its
+        matching bibliographic content avoids renaming or duplicating that row.
+
+        :return Set[str]: Identities safe to skip during source reconciliation.
+        """
+        paper_ids = self.embedding_cache.get_cached_paper_ids()
+        paper_ids.update(
+            self.embedding_cache.get_legacy_corpus_identity_aliases(
+                _anonymous_dataset_paper_id
+            )
+        )
+        return paper_ids
+
     def _cached_payload_row_count(self) -> int:
         """Return the inspected hydrated payload row count for this namespace.
 
@@ -1887,7 +1907,7 @@ class _CorpusHydrationMixin:
             # Exhausting a one-shot selection proves nothing about membership;
             # reloading it is preferable to memoizing a potentially stale cache.
             return False
-        cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
+        cached_paper_ids = self._cached_corpus_paper_ids()
         return all(
             _dataset_record_paper_id(record or {}, index) in cached_paper_ids
             for index, record in enumerate(islice(probe.selection, corpus_size))
@@ -1943,7 +1963,7 @@ class _CorpusHydrationMixin:
             progress_total=corpus_size,
             progress_label="Refreshing dataset",
             operation="Capped corpus recency refresh",
-            existing_paper_ids=self.embedding_cache.get_cached_paper_ids(),
+            existing_paper_ids=self._cached_corpus_paper_ids(),
             corpus_size=corpus_size,
             dataset=selection,
         )
