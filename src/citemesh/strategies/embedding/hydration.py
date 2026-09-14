@@ -1902,13 +1902,13 @@ class _CorpusHydrationMixin:
         :return None: Mutates cache rows and the reconciliation marker in-place.
         """
         logger.info(
-            "Upstream %s/%s holds submissions newer than the capped corpus; "
-            "%s the newest-%d selection over %d cached rows and encoding "
-            "only the papers the cache is missing.",
+            "Capped corpus for %s/%s is missing rows from the newest-%d "
+            "selection upstream holds; %s that selection over %d cached rows "
+            "and encoding only the papers the cache does not have.",
             source,
             self.dataset_split,
-            "reusing" if selection is not None else "re-running",
             corpus_size,
+            "reusing" if selection is not None else "re-running",
             cached_rows,
         )
         self._ensure_int8_calibration_ranges(
