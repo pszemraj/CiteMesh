@@ -39,6 +39,8 @@ Caching does not make a build offline: citation, reference, recommendation, and 
 
 A namespace combines model, artifact identity, representation, dimension, formatter, and storage settings. The artifact identity is a resolved commit SHA or a digest of the inference-artifact manifest, so changing a checkpoint selects a different cache. SQLite and HDF5 store each namespace as a pair; [physical layout](../internals/embedding-cache.md#physical-layout) describes the files.
 
+Local custom model fingerprints include declared Python modules, their package initializers, and transitive relative imports. Changing those files selects a new namespace. Fingerprinting parses the code without executing it.
+
 - The [retrieval-document and graph-similarity roles](../reference/embedding-runtime.md#task-specific-vector-spaces) have separate namespaces. Candidate mode additionally tags its retrieval namespace `mode=candidates` so S2 candidates never mix with corpus hydration.
 - No device or compute-dtype token in the namespace: CPU, CUDA, and MPS resolve the same one whenever the other contracts match, so a corpus built on a bf16 GPU is read directly by an fp32 host rather than re-encoded. An auto-resolved compute dtype is provenance rather than identity - like the attention backend, TF32, and `--torch-compile`, it shifts numerics slightly without changing what a vector means. The dtype that created a namespace is still recorded, but it does not decide compatibility on reopen.
 - Changing model, revision, profile, dimension, storage precision, or int8 calibration size selects a different namespace. Switching back to the earlier settings reopens the original vectors.

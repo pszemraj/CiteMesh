@@ -8,6 +8,7 @@ the cache fingerprint check that forces a rebuild when any of them changes.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -277,13 +278,14 @@ class _FingerprintMixin:
     ) -> set[Path]:
         """Resolve locally referenced custom Python model code.
 
-        SentenceTransformers loads repository-local module classes through the
-        Transformers dynamic-module loader, which recursively copies relative
-        imports. This follows that same bounded dependency graph.
+        Follow relative imports and package initializers without executing custom
+        code. Every dependency is resolved from its importing package, bounded by
+        the model root; unrelated Python files do not participate in identity.
 
         :param Path root: Complete local model root.
         :param object raw_reference: Dotted module class reference.
         :return Set[Path]: Existing referenced Python artifacts below ``root``.
+        :raises RuntimeError: If custom code is invalid or imports above the root.
         """
         if not isinstance(raw_reference, str) or "--" in raw_reference:
             return set()
@@ -296,27 +298,66 @@ class _FingerprintMixin:
         ):
             return set()
 
-        module_path = root.joinpath(*module_parts).with_suffix(".py")
-        if not module_path.is_file():
-            return set()
+        paths: set[Path] = set()
+        pending: list[Path] = []
 
-        paths = {module_path}
-        pending = [module_path]
-        dependency_root = module_path.parent
+        def add_module(module_path: Path) -> bool:
+            """Queue a local module and its package initializers once.
+
+            :param Path module_path: Logical module path without a file suffix.
+            :return bool: Whether the module can contain imported submodules.
+            """
+            initializer = module_path / "__init__.py"
+            source_path = module_path.with_suffix(".py")
+            is_package = (
+                module_path == root
+                or initializer.is_file()
+                or (module_path.is_dir() and not source_path.is_file())
+            )
+            if is_package:
+                source_path = initializer
+            elif not source_path.is_file():
+                return False
+
+            candidates = [source_path]
+            parent = module_path.parent
+            while parent.is_relative_to(root):
+                candidates.append(parent / "__init__.py")
+                if parent == root:
+                    break
+                parent = parent.parent
+            for candidate in candidates:
+                if candidate.is_file() and candidate not in paths:
+                    paths.add(candidate)
+                    pending.append(candidate)
+            return is_package
+
+        add_module(root.joinpath(*module_parts))
         while pending:
             current_path = pending.pop()
-            source = current_path.read_text(encoding="utf-8")
-            relative_imports = re.findall(
-                r"^\s*import\s+\.(\S+)\s*$", source, flags=re.MULTILINE
-            )
-            relative_imports.extend(
-                re.findall(r"^\s*from\s+\.(\S+)\s+import", source, flags=re.MULTILINE)
-            )
-            for relative_import in relative_imports:
-                dependency_path = dependency_root / f"{relative_import}.py"
-                if dependency_path.is_file() and dependency_path not in paths:
-                    paths.add(dependency_path)
-                    pending.append(dependency_path)
+            try:
+                syntax = ast.parse(
+                    current_path.read_bytes(), filename=str(current_path)
+                )
+            except SyntaxError as exc:
+                raise RuntimeError(
+                    f"Invalid custom model code in {current_path}: {exc}"
+                ) from exc
+            for node in ast.walk(syntax):
+                if not isinstance(node, ast.ImportFrom) or node.level == 0:
+                    continue
+                import_root = current_path.parent
+                for _ in range(node.level - 1):
+                    import_root = import_root.parent
+                if not import_root.is_relative_to(root):
+                    raise RuntimeError(
+                        f"Relative import in {current_path} escapes model root {root}."
+                    )
+                target = import_root.joinpath(*(node.module or "").split("."))
+                if add_module(target):
+                    for alias in node.names:
+                        if alias.name != "*":
+                            add_module(target / alias.name)
         return paths
 
     @classmethod

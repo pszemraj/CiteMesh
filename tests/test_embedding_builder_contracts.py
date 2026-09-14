@@ -3039,10 +3039,73 @@ def test_embedding_fingerprint_resolution_contracts(
     )
 
 
+@pytest.mark.parametrize(
+    ("module_reference", "python_sources"),
+    [
+        (
+            "modeling_test.TestModel",
+            {
+                "modeling_test.py": (
+                    '"""Example only:\nfrom .unreferenced import VALUE\n"""\n'
+                    "from .helper import VALUE\n"
+                ),
+                "helper.py": "VALUE = 'a'\n",
+            },
+        ),
+        (
+            "modeling_test.TestModel",
+            {
+                "modeling_test.py": "from . import (helper as implementation,)\n",
+                "helper.py": "from . import modeling_test\nVALUE = 'a'\n",
+            },
+        ),
+        (
+            "modeling_test.TestModel",
+            {
+                "modeling_test.py": "from .sub.helper import VALUE\n",
+                "sub/__init__.py": "from . import initializer\n",
+                "sub/initializer.py": "INITIALIZED = True\n",
+                "sub/helper.py": "from .peer import VALUE\nfrom ..helper import VALUE\n",
+                "sub/peer.py": "from . import helper\nVALUE = 'a'\n",
+                "helper.py": "VALUE = 'a'\n",
+            },
+        ),
+        (
+            "package.sub.modeling_test.TestModel",
+            {
+                "package/__init__.py": "PACKAGE = True\n",
+                "package/sub/__init__.py": "SUBPACKAGE = True\n",
+                "package/sub/modeling_test.py": "from ... import helper\n",
+                "helper.py": "VALUE = 'a'\n",
+            },
+        ),
+        (
+            "modeling_test.TestModel",
+            {
+                "modeling_test/__init__.py": "from .helper import VALUE\n",
+                "modeling_test/helper.py": "VALUE = 'a'\n",
+            },
+        ),
+        (
+            "modeling_test.TestModel",
+            {
+                "modeling_test.py": "from .namespace import helper\n",
+                "namespace/helper.py": "VALUE = 'a'\n",
+            },
+        ),
+    ],
+    ids=["named", "alias-cycle", "nested-transitive", "parent", "package", "namespace"],
+)
 def test_local_model_fingerprint_covers_inference_artifact_manifest(
-    tmp_path: Path,
+    tmp_path: Path, module_reference: str, python_sources: dict[str, str]
 ) -> None:
-    """Selected inference artifacts, including custom code, define identity."""
+    """Selected inference artifacts, including custom code, define identity.
+
+    :param Path tmp_path: Isolated local checkpoint directory.
+    :param str module_reference: Declared custom model class.
+    :param dict[str, str] python_sources: Reachable Python files and relative imports.
+    :return None: Checks artifact changes select new fingerprints and namespaces.
+    """
     model_path = tmp_path / "local-model"
     pooling_path = model_path / "1_Pooling"
     pooling_path.mkdir(parents=True)
@@ -3054,7 +3117,7 @@ def test_local_model_fingerprint_covers_inference_artifact_manifest(
                     "idx": 0,
                     "name": "transformer",
                     "path": "",
-                    "type": "modeling_test.TestModel",
+                    "type": module_reference,
                 },
                 {
                     "idx": 1,
@@ -3065,10 +3128,10 @@ def test_local_model_fingerprint_covers_inference_artifact_manifest(
             ]
         )
     )
-    (model_path / "modeling_test.py").write_text(
-        "from .helper import VALUE\nclass TestModel: pass\n"
-    )
-    (model_path / "helper.py").write_text("VALUE = 'a'\n")
+    for relative_path, source in python_sources.items():
+        python_path = model_path / relative_path
+        python_path.parent.mkdir(parents=True, exist_ok=True)
+        python_path.write_text(source)
     (model_path / "model.safetensors").write_bytes(b"weights-a")
     (model_path / "tokenizer.json").write_text('{"version":"a"}')
     (model_path / "tokenizer_config.json").write_text(
@@ -3095,6 +3158,7 @@ def test_local_model_fingerprint_covers_inference_artifact_manifest(
 
     initial, initial_cache_path = _identity()
     (model_path / "README.md").write_text("documentation b")
+    (model_path / "unreferenced.py").write_text("raise RuntimeError('unused')\n")
     (model_path / "metrics.json").write_text('{"loss":0.1}')
     (model_path / "pytorch_model.bin.index.json").write_text("not valid json")
     assert _identity() == (initial, initial_cache_path)
@@ -3119,17 +3183,47 @@ def test_local_model_fingerprint_covers_inference_artifact_manifest(
     assert weights_changed != metadata_tokenizer_changed
     assert weights_cache_path != metadata_tokenizer_cache_path
 
-    (model_path / "helper.py").write_text("VALUE = 'b'\n")
-    code_changed, code_cache_path = _identity()
-    assert code_changed != weights_changed
-    assert code_cache_path != weights_cache_path
+    for relative_path, source in python_sources.items():
+        python_path = model_path / relative_path
+        python_path.write_text(source + "CHANGED = True\n")
+        code_changed, code_cache_path = _identity()
+        assert code_changed != weights_changed, relative_path
+        assert code_cache_path != weights_cache_path, relative_path
+        python_path.write_text(source)
 
     (model_path / "model.safetensors").write_bytes(b"weights-a")
     (model_path / "tokenizer.json").write_text('{"version":"a"}')
     versioned_tokenizer_path.write_text('{"version":"a"}')
     (pooling_path / "config.json").write_text('{"pooling_mode_mean_tokens":true}')
-    (model_path / "helper.py").write_text("VALUE = 'a'\n")
     assert _identity() == (initial, initial_cache_path)
+
+
+@pytest.mark.parametrize(
+    ("source", "error"),
+    [
+        ("from . import (", "Invalid custom model code"),
+        ("from .. import outside", "escapes model root"),
+    ],
+)
+def test_local_model_fingerprint_rejects_invalid_custom_imports(
+    tmp_path: Path, source: str, error: str
+) -> None:
+    """Unresolvable custom imports must not produce a partial artifact identity.
+
+    :param Path tmp_path: Isolated model directory.
+    :param str source: Malformed or out-of-root relative import.
+    :param str error: Expected actionable failure.
+    :return None: Checks fingerprinting stops before returning an incomplete digest.
+    """
+    (tmp_path / "modules.json").write_text(
+        json.dumps([{"path": "", "type": "modeling_test.TestModel"}])
+    )
+    (tmp_path / "modeling_test.py").write_text(source)
+    builder = EmbeddingGraphBuilder(
+        max_papers=1, model_name=str(tmp_path), client=MagicMock()
+    )
+    with pytest.raises(RuntimeError, match=error):
+        builder._resolve_model_fingerprint()
 
 
 def test_local_model_fingerprint_validates_sharded_weight_indexes(
