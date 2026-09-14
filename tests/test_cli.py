@@ -1713,6 +1713,35 @@ def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
     fake_builder.search_local.assert_not_called()
 
 
+def test_search_explicit_auto_with_namespace_flag_falls_back_for_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated namespace flag must not claim a config device failure.
+
+    :param pytest.MonkeyPatch monkeypatch: Device resolver and S2 fallback stubs.
+    :return None: Assertions verify config attribution preserves auto fallback.
+    """
+    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    args = parser.parse_args(
+        ["search", "anything", "--mode", "auto", "--model", "custom/model"]
+    )
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
+    )
+    monkeypatch.setattr(
+        build_contract_module,
+        "resolve_embedding_device",
+        MagicMock(side_effect=ValueError("Configured cuda unavailable")),
+    )
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+
+    result = cli_module._run_search_command(args, build_parser, config)
+
+    assert result == 0
+    s2_search.assert_called_once_with(args)
+
+
 def test_search_namespace_flag_empty_cache_error_names_the_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

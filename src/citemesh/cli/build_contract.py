@@ -49,6 +49,22 @@ class _ParserErrorSink(Protocol):
         ...
 
 
+class _BuildContractValueError(ValueError):
+    """Catchable build-contract failure with its contributing destinations."""
+
+    def __init__(
+        self, message: str, *, related_dests: set[str] | frozenset[str] = frozenset()
+    ) -> None:
+        """Record the option destinations associated with one validation error.
+
+        :param str message: User-facing validation failure message.
+        :param Set[str] related_dests: Option destinations relevant to the failure.
+        :return None: Initializes the exception and immutable destination set.
+        """
+        super().__init__(message)
+        self.related_dests = frozenset(related_dests)
+
+
 class _ValueErrorParserErrorSink:
     """Translate parser-style validation failures into catchable exceptions."""
 
@@ -59,7 +75,18 @@ class _ValueErrorParserErrorSink:
         :param str message: Validation failure message.
         :raises ValueError: Always raised with ``message``.
         """
-        raise ValueError(message)
+        raise _BuildContractValueError(message)
+
+    @staticmethod
+    def error_for_dests(message: str, related_dests: set[str]) -> NoReturn:
+        """Raise a validation error retaining its contributing destinations.
+
+        :param str message: Validation failure message.
+        :param Set[str] related_dests: Option destinations relevant to the failure.
+        :return NoReturn: Always raises a catchable validation error.
+        :raises _BuildContractValueError: Always raised with ``message``.
+        """
+        raise _BuildContractValueError(message, related_dests=related_dests)
 
 
 def _config_error_context(
@@ -89,7 +116,7 @@ def _build_contract_error(
     error_sink: _ParserErrorSink,
     message: str,
     *,
-    related_dests: set[str] = frozenset(),
+    related_dests: set[str] | frozenset[str] = frozenset(),
     config_defaults: set[str] = frozenset(),
     config_path: Path | None = None,
 ) -> NoReturn:
@@ -108,7 +135,10 @@ def _build_contract_error(
         config_defaults=config_defaults,
         config_path=config_path,
     )
-    error_sink.error(f"{message}{context}")
+    resolved_message = f"{message}{context}"
+    if isinstance(error_sink, _ValueErrorParserErrorSink):
+        error_sink.error_for_dests(resolved_message, related_dests)
+    error_sink.error(resolved_message)
 
 
 @dataclass(frozen=True)
@@ -160,7 +190,11 @@ class _BuildContractContext:
         :raises SystemExit: When the sink is an argparse parser.
         :raises ValueError: When the sink raises catchable validation errors.
         """
-        self.error_sink.error(message)
+        _build_contract_error(
+            self.error_sink,
+            message,
+            related_dests=set(self.contract_provided),
+        )
 
     def provided_labels(self, dests: set[str]) -> list[str]:
         """List sorted CLI labels for the explicitly provided destinations.

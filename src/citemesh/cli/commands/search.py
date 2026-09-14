@@ -16,7 +16,11 @@ from citemesh.strategies.embedding import (
 )
 
 from .. import console
-from ..build_contract import _validate_build_cli_contract, _ValueErrorParserErrorSink
+from ..build_contract import (
+    _BuildContractValueError,
+    _validate_build_cli_contract,
+    _ValueErrorParserErrorSink,
+)
 from ..build_options import (
     _apply_user_config_defaults,
     _configured_client_kwargs,
@@ -151,11 +155,11 @@ def _prepare_local_search_builder(
             config_defaults=config_default_dests,
             config_path=user_config.path,
         )
-    except ValueError as exc:
-        if not provided_dests:
-            # Nothing on this command line produced it, so it stays what it has
-            # always been: a config-sourced reason local search is unavailable,
-            # which auto mode may answer from Semantic Scholar instead.
+    except _BuildContractValueError as exc:
+        if not provided_dests.intersection(exc.related_dests):
+            # This command line did not produce the failing value, so it stays
+            # what it has always been: a config-sourced reason local search is
+            # unavailable, which auto mode may answer from Semantic Scholar.
             raise
         raise _LocalSearchOptionError(str(exc)) from exc
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
