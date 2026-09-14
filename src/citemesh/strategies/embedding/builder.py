@@ -24,6 +24,9 @@ import numpy as np
 
 from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
+from citemesh.core.paper_ids import (
+    is_local_corpus_paper_id as _is_local_corpus_paper_id,
+)
 from citemesh.core.paper_ids import normalize_paper_id
 from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import (
@@ -853,10 +856,12 @@ class EmbeddingGraphBuilder(
         return papers
 
     def _resolve_seed_paper(self, seed_id: str, seed_paper: Paper | None) -> Paper:
-        """Resolve the seed node from caller metadata, Semantic Scholar, or query text.
+        """Resolve a seed from caller metadata, the corpus cache, S2, or query text.
 
-        An identifier Semantic Scholar cannot resolve is treated as a free-text
-        query, which gets a synthetic seed node so the graph still has a root.
+        Generated corpus identifiers have no meaning to Semantic Scholar, so a
+        matching cached metadata row is reopened before external resolution. An
+        unresolved identifier is treated as a free-text query, which gets a
+        synthetic seed node so the graph still has a root.
 
         :param str seed_id: Seed paper identifier or free-text query.
         :param Optional[Paper] seed_paper: Pre-fetched seed metadata to reuse.
@@ -865,6 +870,27 @@ class EmbeddingGraphBuilder(
         # Reuse caller-provided seed metadata when available to avoid redundant
         # Semantic Scholar fetches in hybrid mode.
         resolved_seed_paper = seed_paper
+        if resolved_seed_paper is None and _is_local_corpus_paper_id(seed_id):
+            if self.semantic_source != "arxiv-corpus":
+                raise ValueError(
+                    f"Local corpus seed ID '{seed_id}' requires "
+                    "semantic_source='arxiv-corpus'. Re-run the build with "
+                    "--semantic-source arxiv-corpus and the same embedding settings "
+                    "used for local search."
+                )
+            cache = self.embedding_cache
+            with cache.hydration_operation_lock():
+                self._validate_cached_corpus_source(cache)
+                cached_metadata = cache.get_paper_metadata_batch([seed_id])
+                metadata = cached_metadata.get(seed_id)
+            if metadata is None:
+                raise ValueError(
+                    f"Local corpus seed ID '{seed_id}' was not found in the selected "
+                    "embedding cache namespace. Re-run local search with the same "
+                    "model, profile, revision, dimensions, and cache settings, then "
+                    "build that result again."
+                )
+            resolved_seed_paper = self._paper_from_cached_metadata(seed_id, metadata)
         if resolved_seed_paper is None:
             resolved_seed_paper = self.client.get_paper(
                 seed_id, raise_on_unavailable=True
@@ -884,6 +910,22 @@ class EmbeddingGraphBuilder(
             year=None,
             is_seed=True,
         )
+
+    def _validate_cached_corpus_source(self, cache: EmbeddingCache) -> None:
+        """Require cached corpus provenance to match the requested dataset.
+
+        :param EmbeddingCache cache: Selected embedding cache namespace.
+        :return None: Returns after matching or absent provenance.
+        :raises RuntimeError: If the cache records another dataset source.
+        """
+        cached_source = cache.get_hydrated_dataset_source()
+        if cached_source and cached_source != self.dataset_source:
+            raise RuntimeError(
+                f"Local corpus cache contains {cached_source!r}, but the "
+                f"configured dataset source is {self.dataset_source!r}. "
+                "Run an embedding or hybrid build with "
+                f"--dataset-source {self.dataset_source!r} first."
+            )
 
     def _encode_seed_embedding(self, seed_paper: Paper) -> np.ndarray:
         """Encode the seed in the model's query prompt space and record it.
@@ -1180,14 +1222,7 @@ class EmbeddingGraphBuilder(
                 # Split and cap describe the rows a build contributed. Searching
                 # every cached row keeps sliced builds reachable with default
                 # query settings; only dataset provenance must agree here.
-                cached_source = cache.get_hydrated_dataset_source()
-                if cached_source and cached_source != self.dataset_source:
-                    raise RuntimeError(
-                        f"Local corpus cache contains {cached_source!r}, but the "
-                        f"configured dataset source is {self.dataset_source!r}. "
-                        "Run an embedding or hybrid build with "
-                        f"--dataset-source {self.dataset_source!r} first."
-                    )
+                self._validate_cached_corpus_source(cache)
             return cache.search(
                 query_embedding=np.asarray(query_embedding, dtype=np.float32),
                 top_k=int(top_k),
@@ -1262,7 +1297,7 @@ class EmbeddingGraphBuilder(
             for pid, paper in papers.items()
             if not paper.is_seed
             and not (isinstance(pid, str) and pid.startswith("query:"))
-            and not (isinstance(pid, str) and pid.startswith("arxiv_"))
+            and not _is_local_corpus_paper_id(pid)
         ][:CITATION_COUNT_ENRICHMENT_LIMIT]
 
         if not targets:

@@ -7689,6 +7689,125 @@ def test_embedding_citation_enrichment_skips_invalid_batch_rows(
     assert "Skipping malformed batch paper for invalid." in caplog.text
 
 
+@pytest.mark.parametrize("seed_id", ["content:abc123", "arxiv_7"])
+def test_generated_corpus_seed_reopens_cached_paper(seed_id: str) -> None:
+    """A local-search result should reopen its cached bibliographic metadata.
+
+    :param str seed_id: Current or legacy generated corpus identifier.
+    :return None: Checks cache-first resolution without an external API request.
+    """
+    client = MagicMock()
+    cache = MagicMock()
+    cache.hydration_operation_lock.return_value = nullcontext()
+    cache.get_paper_metadata_batch.return_value = {
+        seed_id: {
+            "title": "Cached seed",
+            "abstract": "Cached abstract",
+            "authors": ["Ada Example"],
+            "year": 2024,
+            "venue": "Cached Venue",
+            "arxiv_id": "",
+            "doi": "10.1234/cached",
+            "categories": ["cs.IR"],
+        }
+    }
+    builder = EmbeddingGraphBuilder(semantic_source="arxiv-corpus", client=client)
+    cache.get_hydrated_dataset_source.return_value = builder.dataset_source
+    builder.embedding_cache = cache
+
+    resolved = builder._resolve_seed_paper(seed_id, None)
+
+    cache.get_paper_metadata_batch.assert_called_once_with([seed_id])
+    client.get_paper.assert_not_called()
+    assert resolved.paper_id == seed_id
+    assert resolved.title == "Cached seed"
+    assert resolved.abstract == "Cached abstract"
+    assert [author.name for author in resolved.authors] == ["Ada Example"]
+    assert resolved.year == 2024
+    assert resolved.doi == "10.1234/cached"
+    assert resolved.is_seed is True
+
+
+def test_missing_local_corpus_seed_reports_cache_namespace_mismatch() -> None:
+    """A local-only ID must not be sent to S2 or treated as query text.
+
+    :return None: Checks an actionable selected-cache mismatch error.
+    """
+    seed_id = "arxiv_7"
+    client = MagicMock()
+    cache = MagicMock()
+    cache.hydration_operation_lock.return_value = nullcontext()
+    cache.get_paper_metadata_batch.return_value = {}
+    builder = EmbeddingGraphBuilder(semantic_source="arxiv-corpus", client=client)
+    cache.get_hydrated_dataset_source.return_value = builder.dataset_source
+    builder.embedding_cache = cache
+
+    with pytest.raises(ValueError, match="not found in the selected embedding cache"):
+        builder._resolve_seed_paper(seed_id, None)
+
+    cache.get_paper_metadata_batch.assert_called_once_with([seed_id])
+    client.get_paper.assert_not_called()
+
+
+def test_local_corpus_seed_rejects_cached_dataset_source_mismatch() -> None:
+    """Seed metadata must come from the requested corpus dataset source.
+
+    :return None: Checks provenance before cache lookup or external resolution.
+    """
+    client = MagicMock()
+    cache = MagicMock()
+    cache.hydration_operation_lock.return_value = nullcontext()
+    cache.get_hydrated_dataset_source.return_value = "source/a"
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        dataset_source="source/b",
+        client=client,
+    )
+    builder.embedding_cache = cache
+
+    with pytest.raises(RuntimeError, match="--dataset-source 'source/b'"):
+        builder._resolve_seed_paper("content:abc123", None)
+
+    cache.get_paper_metadata_batch.assert_not_called()
+    client.get_paper.assert_not_called()
+
+
+def test_local_corpus_seed_requires_corpus_semantic_source() -> None:
+    """Candidate mode should reject a local ID without opening its own cache.
+
+    :return None: Checks source guidance and avoids creating an irrelevant namespace.
+    """
+    client = MagicMock()
+    builder = EmbeddingGraphBuilder(semantic_source="candidates", client=client)
+
+    with pytest.raises(ValueError, match="requires semantic_source='arxiv-corpus'"):
+        builder._resolve_seed_paper("content:abc123", None)
+
+    assert builder._embedding_cache is None
+    client.get_paper.assert_not_called()
+
+
+def test_raw_source_seed_keeps_external_resolution_path() -> None:
+    """Other raw source IDs remain eligible for external paper resolution.
+
+    :return None: Checks an ``arxiv_`` prefix alone is not treated as local-only.
+    """
+    seed_id = "arxiv_dataset-key"
+    client = MagicMock()
+    client.get_paper.return_value = Paper(
+        paper_id=seed_id, title="Raw source paper", year=2024
+    )
+    builder = EmbeddingGraphBuilder(semantic_source="arxiv-corpus", client=client)
+
+    resolved = builder._resolve_seed_paper(seed_id, None)
+
+    assert builder._embedding_cache is None
+    client.get_paper.assert_called_once_with(seed_id, raise_on_unavailable=True)
+    assert resolved.paper_id == seed_id
+    assert resolved.title == "Raw source paper"
+    assert resolved.is_seed is True
+
+
 def test_citation_enrichment_limit_excludes_seed_and_keeps_partial_batch_counts() -> (
     None
 ):
@@ -7701,6 +7820,12 @@ def test_citation_enrichment_limit_excludes_seed_and_keeps_partial_batch_counts(
     papers = {
         "seed": Paper(paper_id="seed", title="Seed", year=2024, is_seed=True),
         "arxiv_0": Paper(paper_id="arxiv_0", title="Unresolved", year=2024),
+        "content:abc": Paper(
+            paper_id="content:abc", title="Anonymous corpus row", year=2024
+        ),
+        "arxiv_dataset-key": Paper(
+            paper_id="arxiv_dataset-key", title="Real raw source ID", year=2024
+        ),
     }
     papers.update(
         {
@@ -7719,7 +7844,7 @@ def test_citation_enrichment_limit_excludes_seed_and_keeps_partial_batch_counts(
     builder._update_citation_counts(papers)
 
     client.get_papers.assert_called_once_with(
-        [f"arxiv:2401.{idx:05d}" for idx in range(20)]
+        ["arxiv_dataset-key"] + [f"arxiv:2401.{idx:05d}" for idx in range(19)]
     )
     client.get_paper.assert_not_called()
     assert papers["arxiv:2401.00000"].citation_count == 77

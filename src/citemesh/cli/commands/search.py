@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shlex
 
 from rich.text import Text
 
+from citemesh.data.embedding_cache import EmbeddingCache, _corpus_size_from_token
 from citemesh.data.user_config import UserConfig
 from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.embedding import (
@@ -190,6 +192,55 @@ def _prepare_local_search_builder(
     return builder, defaults
 
 
+def _local_result_build_command(
+    defaults: argparse.Namespace, cache: EmbeddingCache
+) -> str:
+    """Build a shell-safe command targeting the local search namespace.
+
+    :param argparse.Namespace defaults: Effective build-equivalent defaults.
+    :param EmbeddingCache cache: Cache whose recorded corpus scope was searched.
+    :return str: Copyable embedding build command with namespace selectors.
+    """
+    command = [
+        "citemesh",
+        "build",
+        "<ID>",
+        "--strategy",
+        "embedding",
+        "--model",
+        str(defaults.model),
+        "--model-profile",
+        str(defaults.model_profile),
+        "--semantic-source",
+        str(defaults.semantic_source),
+        "--storage-precision",
+        str(defaults.storage_precision),
+    ]
+    if defaults.model_revision is not None:
+        command.extend(["--model-revision", str(defaults.model_revision)])
+    if defaults.truncate_dim is not None:
+        command.extend(["--truncate-dim", str(defaults.truncate_dim)])
+    if defaults.semantic_source == "arxiv-corpus":
+        with cache.hydration_operation_lock():
+            stats = cache.payload_stats()
+        if stats.hydration_split is None:
+            raise RuntimeError(
+                "Local corpus cache is missing its recorded dataset split."
+            )
+        command.extend(["--dataset-source", str(defaults.dataset_source)])
+        command.extend(["--dataset-split", stats.hydration_split])
+        recorded_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
+        if recorded_corpus_size is None:
+            command.append("--all-corpus")
+        else:
+            command.extend(["--corpus-size", str(recorded_corpus_size)])
+    if defaults.storage_precision == "int8":
+        command.extend(
+            ["--calibration-sample-size", str(defaults.calibration_sample_size)]
+        )
+    return shlex.join(command)
+
+
 def _render_local_search(
     args: argparse.Namespace,
     builder: EmbeddingGraphBuilder,
@@ -262,7 +313,11 @@ def _render_local_search(
             soft_wrap=True,
         )
     console.output_console.print(
-        '\nUse a paper ID with: citemesh build "<ID>"', style="dim"
+        Text(
+            f"\nUse a paper ID with: {_local_result_build_command(defaults, cache)}",
+            style="dim",
+        ),
+        soft_wrap=True,
     )
     return 0
 

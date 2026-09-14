@@ -20,6 +20,24 @@ _ARXIV_IDENTIFIER_PATTERN = re.compile(
     r"^(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[a-z\-]+)?/\d{7})(?:v\d+)?$",
     re.IGNORECASE,
 )
+_LEGACY_POSITIONAL_CORPUS_ID = re.compile(r"arxiv_\d+")
+
+
+def is_local_corpus_paper_id(paper_id: Any) -> bool:
+    """Return whether an identifier uses a local-only corpus ID form.
+
+    ``content:`` hashes identify anonymous bibliographic records. Older caches
+    used positional ``arxiv_<number>`` identifiers before content hashing. S2
+    cannot resolve either spelling. The exact positional pattern still permits
+    other raw source identifiers that happen to begin with ``arxiv_``.
+
+    :param Any paper_id: Candidate paper identifier.
+    :return bool: Whether the ID must be resolved from a local corpus cache.
+    """
+    return isinstance(paper_id, str) and (
+        paper_id.startswith("content:")
+        or _LEGACY_POSITIONAL_CORPUS_ID.fullmatch(paper_id) is not None
+    )
 
 
 def recognize_arxiv_identifier(

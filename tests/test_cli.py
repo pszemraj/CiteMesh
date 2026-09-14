@@ -15,7 +15,7 @@ import threading
 import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -952,6 +952,10 @@ def _fake_local_search_builder(
         embedding_count=lambda: cached_count,
         last_search_total_embeddings=cached_count,
         h5_path=Path("namespace.h5"),
+        hydration_operation_lock=nullcontext,
+        payload_stats=lambda: SimpleNamespace(
+            hydration_split="train", hydration_corpus_size="all"
+        ),
     )
     return fake_builder
 
@@ -1162,6 +1166,83 @@ def test_search_local_uses_configured_corpus_dataset_source(
     assert builder_kwargs["storage_precision"] == "int8"
     assert builder_kwargs["calibration_sample_size"] == 200
     assert builder_kwargs["binary_prefilter"] is binary_prefilter
+
+
+@pytest.mark.parametrize(
+    ("corpus_token", "expected_corpus_size", "expected_all_corpus"),
+    [("newest:7", 7, False), ("all", None, True)],
+)
+def test_search_local_build_footer_preserves_effective_namespace_and_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    corpus_token: str,
+    expected_corpus_size: int | None,
+    expected_all_corpus: bool,
+) -> None:
+    """The copyable result command must reopen the searched namespace and scope.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing local search runtime.
+    :param str corpus_token: Corpus scope recorded on the searched cache.
+    :param Optional[int] expected_corpus_size: Expected generated finite cap.
+    :param bool expected_all_corpus: Whether the command should request all rows.
+    :return None: Parses the footer and compares selectors plus recorded scope.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    fake_builder.embedding_cache.payload_stats = lambda: SimpleNamespace(
+        hydration_split="train[:5%]", hydration_corpus_size=corpus_token
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+    search_args = [
+        "search",
+        "cached topic",
+        "--mode",
+        "local",
+        "--model",
+        "custom/model",
+        "--model-profile",
+        "default",
+        "--model-revision",
+        "release candidate",
+        "--semantic-source",
+        "arxiv-corpus",
+        "--dataset-source",
+        "research/arxiv-snapshot",
+        "--truncate-dim",
+        "256",
+        "--storage-precision",
+        "int8",
+        "--calibration-sample-size",
+        "100",
+    ]
+
+    result = run_cli_command(search_args)
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    footer = next(
+        line for line in result.stdout.splitlines() if line.startswith("Use a paper ID")
+    )
+    command = footer.removeprefix("Use a paper ID with: ")
+    command_args = shlex.split(command)
+    assert command_args[:3] == ["citemesh", "build", "<ID>"]
+    _parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    generated = build_parser.parse_args(command_args[2:])
+    searched = builder_factory.call_args.kwargs
+
+    assert generated.strategy == "embedding"
+    assert generated.model == searched["model_name"]
+    assert generated.model_profile == searched["model_profile"]
+    assert generated.model_revision == searched["model_revision"]
+    assert generated.semantic_source == searched["semantic_source"]
+    assert generated.dataset_source == searched["dataset_source"]
+    assert generated.truncate_dim == searched["truncate_dim"]
+    assert generated.storage_precision == searched["storage_precision"]
+    assert generated.calibration_sample_size == searched["calibration_sample_size"]
+    assert generated.dataset_split == "train[:5%]"
+    assert generated.all_corpus is expected_all_corpus
+    if expected_corpus_size is not None:
+        assert generated.corpus_size == expected_corpus_size
 
 
 def test_search_semantic_source_flag_selects_corpus_namespace(
