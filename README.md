@@ -35,9 +35,9 @@ Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly expor
 
 Python >= 3.10. Only the `embeddings` extra needs torch: `>=2.9` on Linux and Windows, `>=2.13` on macOS (the release verified for MPS bfloat16; float32 is the fallback wherever bf16 is unavailable). Details: [Embedding Runtime](docs/reference/embedding-runtime.md).
 
-### Semantic Scholar API key (recommended)
+### Semantic Scholar API key (optional)
 
-CiteMesh runs without credentials on Semantic Scholar's shared anonymous pool, but an unkeyed first run can spend most of its time waiting out 429 retries. A free key from <https://www.semanticscholar.org/product/api> buys a dedicated 1 request/second budget — pass it as `export S2_API_KEY=...`, or persist it:
+CiteMesh runs without credentials on Semantic Scholar's shared anonymous pool, though an unkeyed run can spend much of its time waiting out 429 retries. A dedicated 1 request/second budget needs a key from <https://www.semanticscholar.org/product/api>, which is a reviewed application rather than an instant signup, so plan on running without one. If you have a key, pass it as `export S2_API_KEY=...`, or persist it:
 
 ```bash
 citemesh config set api.s2_api_key YOUR_KEY

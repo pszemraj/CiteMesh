@@ -42,9 +42,6 @@ DEFAULT_PAPER_FIELDS = (
 )
 
 
-S2_API_KEY_SIGNUP_URL = "https://www.semanticscholar.org/product/api"
-
-
 def _is_sdk_null_relation_page(error: TypeError) -> bool:
     """Identify the SDK failure used for a valid empty relation page.
 
@@ -390,5 +387,5 @@ def _unavailable_error(
         f"Semantic Scholar API {flavor} while {context} "
         f"(after {API_CONFIG.max_retries} attempts{detail}). "
         f"{issue_hint} - retry shortly, or set "
-        f"S2_API_KEY for a dedicated rate limit (free keys: {S2_API_KEY_SIGNUP_URL})."
+        f"S2_API_KEY for a dedicated rate limit."
     )

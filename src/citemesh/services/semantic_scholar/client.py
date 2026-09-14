@@ -120,9 +120,7 @@ class SemanticScholarClient(_EndpointsMixin):
                 _anonymous_pool_announced = True
                 logger.info(
                     "No S2_API_KEY set; using the shared anonymous Semantic "
-                    "Scholar pool (slower rate limit, higher 429 likelihood). "
-                    "Free keys: %s",
-                    payloads.S2_API_KEY_SIGNUP_URL,
+                    "Scholar pool (slower rate limit, higher 429 likelihood)."
                 )
 
     @contextlib.contextmanager

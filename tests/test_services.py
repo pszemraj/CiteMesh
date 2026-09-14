@@ -1790,7 +1790,7 @@ def test_anonymous_pool_notice_logged_once(
         if "shared anonymous Semantic" in record.getMessage()
     ]
     assert len(notices) == 1
-    assert semantic_module.payloads.S2_API_KEY_SIGNUP_URL in notices[0].getMessage()
+    assert "429" in notices[0].getMessage()
 
 
 def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
