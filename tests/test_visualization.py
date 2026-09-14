@@ -2710,6 +2710,14 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     graph.add_edge("arxiv:2411.03884", "abcdef123456", weight=0.7)
     graph.add_edge("arxiv:2411.03884", "s2-candidate-arxiv", weight=0.8)
     graph.add_edge("arxiv:2411.03884", "s2-candidate-doi", weight=0.75)
+    local_nodes = {
+        "content:abc123": {"doi": "10.1109/5.771073"},
+        "arxiv_7": {"arxiv_id": "2501.00001"},
+        "query:abc123": {},
+    }
+    for local_id, external_ids in local_nodes.items():
+        graph.add_node(local_id, title="Local paper", **external_ids)
+        graph.add_edge("arxiv:2411.03884", local_id, weight=0.6)
 
     exporter = GraphExporter(
         graph,
@@ -2721,6 +2729,10 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
             "abcdef123456": (0.0, 1.0),
             "s2-candidate-arxiv": (-1.0, 0.0),
             "s2-candidate-doi": (0.0, -1.0),
+            **{
+                local_id: (2.0, float(index))
+                for index, local_id in enumerate(local_nodes)
+            },
         },
     )
     out_path = tmp_path / "links.dashboard.html"
@@ -2756,6 +2768,12 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     s2_doi_links = nodes["s2-candidate-doi"]["links"]
     assert s2_doi_links["doi"] == "https://doi.org/10.1109/5.771073"
     assert s2_doi_links["arxiv_abs"] is None
+
+    for local_id in local_nodes:
+        assert nodes[local_id]["links"]["semantic_scholar"] is None
+    assert nodes["content:abc123"]["links"]["doi"] == "https://doi.org/10.1109/5.771073"
+    assert nodes["arxiv_7"]["links"]["arxiv_abs"] == "https://arxiv.org/abs/2501.00001"
+    assert not any(nodes["query:abc123"]["links"].values())
 
 
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(

@@ -7,6 +7,8 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from citemesh.core.paper_ids import is_local_corpus_paper_id
+
 
 def _safe_script_content(raw: str) -> str:
     """Escape script-closing tokens in trusted inline script bodies.
@@ -83,7 +85,9 @@ def _derive_links(
         "arxiv_pdf": None,
         "doi": None,
         "semantic_scholar": (
-            f"https://www.semanticscholar.org/paper/{quote(node_id, safe='')}"
+            None
+            if is_local_corpus_paper_id(node_id) or node_id.startswith("query:")
+            else f"https://www.semanticscholar.org/paper/{quote(node_id, safe='')}"
         ),
     }
 
