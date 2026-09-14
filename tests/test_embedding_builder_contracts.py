@@ -310,13 +310,13 @@ def _install_deterministic_builder_runtime(
     builder: EmbeddingGraphBuilder,
     *,
     fingerprint: str,
-) -> ConstantEncodeModel:
+) -> None:
     """Install a tiny encoder while preserving lazy artifact binding.
 
     :param pytest.MonkeyPatch monkeypatch: Runtime boundary patch fixture.
     :param EmbeddingGraphBuilder builder: Fresh builder receiving the fake runtime.
     :param str fingerprint: Artifact identity shared by lifecycle operations.
-    :return ConstantEncodeModel: Deterministic two-dimensional encoder.
+    :return None: Installs the deterministic runtime in-place.
     """
     model = ConstantEncodeModel()
 
@@ -333,7 +333,6 @@ def _install_deterministic_builder_runtime(
 
     monkeypatch.setattr(builder, "_load_model", load_model)
     monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
-    return model
 
 
 def _put_concurrent_hydration_record(cache: EmbeddingCache, paper_id: str) -> None:
