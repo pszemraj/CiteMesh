@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -40,6 +41,8 @@ from .constants import (
     _STORAGE_PRECISIONS,
     BINARY_INDEX_DATASET_NAME,
     CALIBRATION_RANGES_DATASET_NAME,
+    CORPUS_IDENTITY_VERSION,
+    CORPUS_IDENTITY_VERSION_KEY,
     CORPUS_METADATA_VERSION,
     CORPUS_METADATA_VERSION_KEY,
     EMBEDDINGS_DATASET_NAME,
@@ -451,6 +454,46 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                         paper_ids.add(paper_id)
         return paper_ids
 
+    def migrate_positional_corpus_ids(
+        self, identity_builder: Callable[[dict[str, Any]], str | None]
+    ) -> int:
+        """Relabel old positional corpus IDs without moving or encoding vectors.
+
+        Identical historical rows may share a content identity. Keep any such
+        duplicate under its old ID instead of deleting a persisted vector.
+
+        :param Callable identity_builder: Stable ID from cached title/abstract.
+        :return int: Number of rows relabeled in this transaction.
+        """
+        renamed = 0
+        with self._locked_connection() as conn:
+            metadata = self._load_cache_metadata(conn)
+            if metadata.get(CORPUS_IDENTITY_VERSION_KEY) == CORPUS_IDENTITY_VERSION:
+                return 0
+            self._recover_pending_replacements_with_connection_locked(conn)
+            cursor = conn.execute(
+                "SELECT paper_id, title, abstract FROM papers "
+                "WHERE paper_id GLOB 'arxiv_[0-9]*'"
+            )
+            while rows := cursor.fetchmany(SQLITE_QUERY_BATCH_SIZE):
+                for old_id, title, abstract in rows:
+                    if re.fullmatch(r"arxiv_\d+", old_id) is None:
+                        continue
+                    new_id = identity_builder({"title": title, "abstract": abstract})
+                    if new_id is None:
+                        continue
+                    renamed += conn.execute(
+                        "UPDATE OR IGNORE papers SET paper_id = ? WHERE paper_id = ?",
+                        (new_id, old_id),
+                    ).rowcount
+            values = {CORPUS_IDENTITY_VERSION_KEY: CORPUS_IDENTITY_VERSION}
+            if renamed:
+                # Previous position-based membership checks may have skipped
+                # source rows. Resume by stable ID before claiming coverage.
+                values[HYDRATION_COMPLETE_KEY] = "0"
+            self._set_cache_metadata(conn, values)
+        return renamed
+
     def has_calibration_ranges(self) -> bool:
         """Return whether int8 calibration ranges exist in cache.
 
@@ -699,7 +742,10 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         :return None: Persists the completed metadata adapter version.
         """
         self._write_cache_metadata(
-            {CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION}
+            {
+                CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION,
+                CORPUS_IDENTITY_VERSION_KEY: CORPUS_IDENTITY_VERSION,
+            }
         )
 
     def update_corpus_metadata(self, papers: Sequence[dict]) -> None:

@@ -10,10 +10,11 @@ shared coercers in :mod:`citemesh.core.paper_fields`.
 from __future__ import annotations
 
 import heapq
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from hashlib import sha1
+from hashlib import sha1, sha256
 from typing import (
     Any,
 )
@@ -27,6 +28,8 @@ from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
     recognize_arxiv_identifier,
 )
+
+from .text import _embedding_text_metadata
 
 _DATASET_PAPER_ID_FIELDS = ("id", "paper_id", "paperId")
 
@@ -156,10 +159,14 @@ def _dataset_record_raw_paper_id(paper: dict[str, Any]) -> Any:
     :param Dict[str, Any] paper: Raw dataset record.
     :return Any: Raw identifier value, or ``None`` when every supported field is empty.
     """
-    return next(
-        (paper.get(field) for field in _DATASET_PAPER_ID_FIELDS if paper.get(field)),
-        None,
-    )
+    for field in _DATASET_PAPER_ID_FIELDS:
+        value = paper.get(field)
+        if isinstance(value, str):
+            if value.strip():
+                return value
+        elif value:
+            return value
+    return None
 
 
 def _parse_authors(authors_data: Any, authors_parsed_data: Any = None) -> list[str]:
@@ -224,6 +231,27 @@ def _parse_venue(paper: dict[str, Any]) -> str:
     return ""
 
 
+def _anonymous_dataset_paper_id(paper: dict[str, Any]) -> str | None:
+    """Identify a row without a source ID by its normalized embedding content.
+
+    Source positions change on insertion, ranking and slicing. Content identity
+    preserves unchanged rows across those operations without aliasing new papers.
+
+    :param Dict[str, Any] paper: Source or cached title/abstract metadata.
+    :return Optional[str]: Stable content identifier, or ``None`` for empty text.
+    """
+    title = paper.get("title")
+    abstract = paper.get("abstract", paper.get("summary", ""))
+    text = _embedding_text_metadata(
+        title if isinstance(title, str) else "",
+        abstract if isinstance(abstract, str) else "",
+    )
+    if not any(text.values()):
+        return None
+    content = json.dumps(text, sort_keys=True, ensure_ascii=False)
+    return f"content:{sha256(content.encode('utf-8')).hexdigest()}"
+
+
 def _dataset_record_paper_id(paper: dict[str, Any], fallback_index: int) -> str:
     """Resolve the cache identifier a raw dataset record hydrates under.
 
@@ -232,18 +260,28 @@ def _dataset_record_paper_id(paper: dict[str, Any], fallback_index: int) -> str:
     drift from the identifier hydration would actually write.
 
     :param Dict[str, Any] paper: Raw dataset record.
-    :param int fallback_index: Index used for synthetic IDs when missing.
+    :param int fallback_index: Source row index reported for unusable records.
     :return str: Canonicalized paper identifier.
+    :raises ValueError: If neither an identifier nor usable document text exists.
     """
-    raw_paper_id = _dataset_record_raw_paper_id(paper) or f"arxiv_{fallback_index}"
-    return _canonicalize_embedding_paper_id(raw_paper_id)
+    raw_paper_id = _dataset_record_raw_paper_id(paper)
+    canonical_id = _canonicalize_embedding_paper_id(raw_paper_id)
+    if canonical_id:
+        return canonical_id
+    content_id = _anonymous_dataset_paper_id(paper)
+    if content_id is None:
+        raise ValueError(
+            f"Dataset row {fallback_index} has no paper identifier or usable "
+            "title/abstract; supply a stable identifier or document text."
+        )
+    return content_id
 
 
 def _extract_dataset_paper_metadata(paper: dict[str, Any], fallback_index: int) -> dict:
     """Normalize a raw dataset record to embedding metadata fields.
 
     :param Dict[str, Any] paper: Raw dataset record.
-    :param int fallback_index: Index used for synthetic IDs when missing.
+    :param int fallback_index: Source row index reported for unusable records.
     :return Dict: Normalized metadata used by embedding selection.
     """
     paper_id = _dataset_record_paper_id(paper, fallback_index)

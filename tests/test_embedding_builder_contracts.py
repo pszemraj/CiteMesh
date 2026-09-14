@@ -6717,10 +6717,14 @@ def test_exact_hydration_slice_fails_closed_on_source_mismatch(
     hydrate_mock.assert_not_called()
 
 
-def test_exact_hydration_slice_offsets_synthetic_paper_ids(
+def test_exact_hydration_slice_preserves_content_identity_across_offsets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Offset hydration should preserve source positions in synthetic paper IDs."""
+    """Anonymous paper identity must be independent of the loaded source offset.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated dataset and cache writer.
+    :return None: Checks identities against the same records at source offset zero.
+    """
     source = "librarian-bots/arxiv-metadata-snapshot"
     builder = EmbeddingGraphBuilder(
         max_papers=2,
@@ -6766,12 +6770,108 @@ def test_exact_hydration_slice_offsets_synthetic_paper_ids(
     )
 
     assert [record["paper_id"] for record in cached_records] == [
-        "arxiv_100",
-        "arxiv_101",
+        _extract_dataset_paper_metadata({"title": "First offset row"}, 0)["paper_id"],
+        _extract_dataset_paper_metadata({"title": "Second offset row"}, 1)["paper_id"],
     ]
+    assert cached_records[0]["paper_id"] != cached_records[1]["paper_id"]
     assert result.hydrated_records == 2
     assert result.source_rows_consumed == 2
     assert result.source_exhausted is True
+
+
+@pytest.mark.parametrize("corpus_size", [2, None])
+@pytest.mark.parametrize("use_streaming", [False, True])
+@pytest.mark.parametrize("legacy_ids", [False, True])
+@pytest.mark.parametrize("complete", [False, True])
+def test_anonymous_corpus_rows_survive_source_reordering(
+    monkeypatch: pytest.MonkeyPatch,
+    corpus_size: int | None,
+    use_streaming: bool,
+    legacy_ids: bool,
+    complete: bool,
+) -> None:
+    """Front insertion must admit the new paper and retain every existing vector.
+
+    :param pytest.MonkeyPatch monkeypatch: Isolated source and encoding fixtures.
+    :param Optional[int] corpus_size: Full or capped source selection.
+    :param bool use_streaming: Whether the source yields one-shot records.
+    :param bool legacy_ids: Whether existing rows still use positional identities.
+    :param bool complete: Completed cache or interrupted hydration to resume.
+    :return None: Checks exact new encoding, persistent reuse and unchanged old vectors.
+    """
+    source = "fixture/anonymous"
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        storage_precision="float32",
+        corpus_size=corpus_size,
+        dataset_source=source,
+        client=MagicMock(),
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    model = ConstantEncodeModel()
+    model.encode = MagicMock(wraps=model.encode)
+    monkeypatch.setattr(builder, "_get_model_for_encoding", lambda: model)
+    records = [
+        {"title": "First paper", "abstract": "A"},
+        {"title": "Second paper", "abstract": "B"},
+    ]
+    initial_metadata = [
+        _extract_dataset_paper_metadata(row, index) for index, row in enumerate(records)
+    ]
+    if legacy_ids:
+        for index, metadata in enumerate(initial_metadata):
+            metadata["paper_id"] = f"arxiv_{index}"
+    builder._cache_metadata_batch(initial_metadata)
+    cache = builder.embedding_cache
+    cache.mark_hydrated(
+        dataset_source=source,
+        dataset_split="train",
+        corpus_size=corpus_size,
+        complete=complete,
+    )
+    cache.mark_corpus_metadata_current()
+    if legacy_ids:
+        cache._write_cache_metadata({"corpus_identity_version": ""})
+    cache.set_hydration_rowcount_reconciliation(upstream_rows=2, cached_rows=2)
+    with h5py.File(cache.h5_path, "r") as handle:
+        original_vectors = handle["embeddings"][:].copy()
+    source_rows = [{"title": "Inserted paper", "abstract": "NEW"}, *records]
+    load = MagicMock(
+        side_effect=lambda *args, **kwargs: (
+            iter(source_rows)
+            if use_streaming
+            else _FakeIndexableDataset(source_rows, ["title", "abstract"])
+        )
+    )
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 3)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load),
+    )
+    clear = MagicMock(wraps=builder._clear_embedding_cache)
+    monkeypatch.setattr(builder, "_clear_embedding_cache", clear)
+    model.encode.reset_mock()
+
+    builder._ensure_cache_hydrated(use_streaming=use_streaming)
+
+    _assert_encoded_corpus_records(builder, model, source_rows[:1])
+    assert cache.embedding_count() == 3
+    assert len(cache.get_cached_paper_ids()) == 3
+    assert all(
+        paper_id.startswith("content:") for paper_id in cache.get_cached_paper_ids()
+    )
+    with h5py.File(cache.h5_path, "r") as handle:
+        np.testing.assert_array_equal(handle["embeddings"][:2], original_vectors)
+    assert cache.get_hydration_rowcount_reconciliation() == (3, 3)
+    model.encode.reset_mock()
+    load.reset_mock()
+
+    builder._ensure_cache_hydrated(use_streaming=use_streaming)
+
+    model.encode.assert_not_called()
+    load.assert_not_called()
+    clear.assert_not_called()
 
 
 def test_full_corpus_hydrated_cache_skips_incremental_refresh_without_growth(

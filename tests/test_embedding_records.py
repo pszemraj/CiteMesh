@@ -40,14 +40,18 @@ def test_newest_record_ranking_uses_supported_identifier_fields(
     assert _newest_records_by_arxiv_id(records, 1) == [records[1]]
 
 
-def test_dataset_record_identifier_follows_hydration_precedence() -> None:
+@pytest.mark.parametrize("empty_id", [None, "", "   "])
+def test_dataset_record_identifier_follows_hydration_precedence(
+    empty_id: str | None,
+) -> None:
     """Blank preferred fields must fall through to the next supported identifier.
 
+    :param Optional[str] empty_id: Missing or whitespace-only preferred identifier.
     :return None: Resolves ``paper_id`` ahead of ``paperId`` when ``id`` is blank.
     """
     assert (
         _dataset_record_raw_paper_id(
-            {"id": "", "paper_id": "2601.00001", "paperId": "2602.00002"}
+            {"id": empty_id, "paper_id": "2601.00001", "paperId": "2602.00002"}
         )
         == "2601.00001"
     )
@@ -173,15 +177,9 @@ def test_extract_dataset_paper_metadata_normalizes_an_arxiv_row() -> None:
 
 
 def test_extract_dataset_paper_metadata_falls_back_for_empty_rows() -> None:
-    """Missing identity and text fall back to synthetic, non-empty values.
+    """Unidentifiable empty rows must not generate meaningless corpus embeddings.
 
-    :return None: Checks the synthetic ID and ``Unknown`` title defaults.
+    :return None: Checks the actionable source-row error.
     """
-    metadata = _extract_dataset_paper_metadata({"title": "   "}, 7)
-
-    assert metadata["paper_id"] == "arxiv_7"
-    assert metadata["title"] == "Unknown"
-    assert metadata["abstract"] == ""
-    assert metadata["authors"] == []
-    assert metadata["categories"] == []
-    assert metadata["venue"] == ""
+    with pytest.raises(ValueError, match="Dataset row 7 has no paper identifier"):
+        _extract_dataset_paper_metadata({"title": "   "}, 7)

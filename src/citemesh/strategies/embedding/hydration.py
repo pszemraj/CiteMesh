@@ -40,6 +40,7 @@ from .config import (
 )
 from .records import (
     _DATASET_PAPER_ID_FIELDS,
+    _anonymous_dataset_paper_id,
     _arxiv_id_chronology_key,
     _CappedCorpusRecencyProbe,
     _dataset_record_paper_id,
@@ -209,6 +210,16 @@ class _CorpusHydrationMixin:
         :return None: Mutates cache state in-place when hydration is required.
         """
         cached_dataset_source = self.embedding_cache.get_hydrated_dataset_source()
+        if cached_dataset_source == self.dataset_source:
+            renamed = self.embedding_cache.migrate_positional_corpus_ids(
+                _anonymous_dataset_paper_id
+            )
+            if renamed:
+                logger.info(
+                    "Assigned stable content IDs to %d cached corpus rows "
+                    "without re-encoding their vectors.",
+                    renamed,
+                )
         cache_is_current, cached_dataset_source = self._revalidate_hydrated_cache(
             cached_dataset_source, use_streaming
         )
@@ -1177,8 +1188,8 @@ class _CorpusHydrationMixin:
     ) -> Iterable[dict[str, Any]]:
         """Inspect indexable source IDs without reading already-cached abstracts.
 
-        Yield one record per source position so exhaustion counts and synthetic
-        ID offsets stay intact. A cached ID needs only its identifying field;
+        Yield one record per source position so exhaustion counts stay intact.
+        A cached ID needs only its identifying field;
         missing or empty IDs need the full row to preserve fallback precedence.
 
         :param Iterable[Dict[str, Any]] dataset: Loaded source selection.
@@ -1399,7 +1410,7 @@ class _CorpusHydrationMixin:
         :param Optional[Set[str]] existing_paper_ids: Optional set used to skip
             already-cached paper IDs while hydrating.
         :param Optional[int] max_new_records: Optional cap on newly selected records.
-        :param int fallback_index_offset: Source offset for synthetic paper IDs.
+        :param int fallback_index_offset: Source offset for row error messages.
         :param _CorpusSizeArg corpus_size: Cap on rows taken from the slice,
             defaulting to the cap this build requested. A refresh of a reused
             cache passes the larger cap that cache holds, so its already-selected

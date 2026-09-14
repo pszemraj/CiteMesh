@@ -3318,6 +3318,77 @@ def test_embedding_cache_reopen_rebuilds_datasetless_file_with_schema_attrs(
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_positional_corpus_identity_migration_preserves_vector_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt: bool,
+) -> None:
+    """Identity migration must be atomic and retain duplicate historical vectors.
+
+    :param Path tmp_path: Isolated cache namespace.
+    :param pytest.MonkeyPatch monkeypatch: Forces one-row migration read batches.
+    :param bool interrupt: Whether identity resolution fails before commit.
+    :return None: Checks rollback, duplicate retention and one-time migration.
+    """
+    monkeypatch.setattr(embedding_cache_module.store, "SQLITE_QUERY_BATCH_SIZE", 1)
+    cache = EmbeddingCache(
+        cache_dir=tmp_path, model_name="anonymous-identity", storage_precision="float32"
+    )
+    papers = {
+        "arxiv_0": {"title": "First", "abstract": "A"},
+        "arxiv_1": {"title": "First", "abstract": "A"},
+        "arxiv_2": {"title": "Second", "abstract": "B"},
+    }
+    model = LookupEncodeModel(
+        {
+            "First. A": np.array([1.0, 0.0], dtype=np.float32),
+            "Second. B": np.array([0.0, 1.0], dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(papers, model, show_progress=False)
+    cache.mark_hydrated(
+        dataset_source="fixture/source",
+        dataset_split="train",
+        corpus_size=None,
+        complete=True,
+    )
+    original_h5 = cache.h5_path.read_bytes()
+
+    def identify(metadata: dict[str, Any]) -> str:
+        """Resolve deterministic IDs, optionally interrupting the transaction.
+
+        :param Dict[str, Any] metadata: Cached title and abstract.
+        :return str: Content identity shared by duplicate historical rows.
+        :raises RuntimeError: On the second distinct paper when interruption is enabled.
+        """
+        if interrupt and metadata["title"] == "Second":
+            raise RuntimeError("migration interrupted")
+        return "content:" + metadata["title"].lower()
+
+    if interrupt:
+        with pytest.raises(RuntimeError, match="migration interrupted"):
+            cache.migrate_positional_corpus_ids(identify)
+        assert cache.get_cached_paper_ids() == set(papers)
+        assert cache.payload_stats().hydration_complete
+        interrupt = False
+    assert cache.migrate_positional_corpus_ids(identify) == 2
+    assert cache.get_cached_paper_ids() == {
+        "content:first",
+        "arxiv_1",
+        "content:second",
+    }
+    assert cache.h5_path.read_bytes() == original_h5
+    assert cache.embedding_count() == 3
+    assert not cache.payload_stats().hydration_complete
+    assert cache.migrate_positional_corpus_ids(identify) == 0
+    # A real source ID can happen to resemble the old generated convention.
+    # Once the migration is stamped, future source-provided IDs stay untouched.
+    cache.get_embeddings({"arxiv_99": papers["arxiv_2"]}, model, show_progress=False)
+    assert cache.migrate_positional_corpus_ids(identify) == 0
+    assert "arxiv_99" in cache.get_cached_paper_ids()
+
+
 @pytest.mark.parametrize("binary_rows", [1, 3])
 def test_embedding_cache_search_falls_back_when_binary_index_rows_mismatch(
     binary_rows: int,
