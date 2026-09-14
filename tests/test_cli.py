@@ -31,7 +31,6 @@ from citemesh.cli import (
     DASHBOARD_COLLECTION_SCHEMA_VERSION,
     DASHBOARD_PACKAGE_FILENAME,
     DashboardPackageError,
-    _is_standalone_dashboard_output,
     canonicalize_paper_id_for_metadata,
     load_dashboard_package,
     render_dashboard_collection_snapshot,
@@ -44,9 +43,12 @@ from citemesh.cli import build_contract as build_contract_module
 from citemesh.cli import build_options as build_options_module
 from citemesh.cli import cache_ops as cache_ops_module
 from citemesh.cli import console as console_module
+from citemesh.cli import graph_config as graph_config_module
+from citemesh.cli import outputs as outputs_module
 from citemesh.cli import parser as parser_module
 from citemesh.cli.commands import build as build_module
 from citemesh.cli.commands import search as search_module
+from citemesh.cli.outputs import _is_standalone_dashboard_output
 from citemesh.core import Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
@@ -163,7 +165,7 @@ def _make_exporter_stub(
     captured_data: dict[str, object], *, methods: tuple[str, ...] | None = None
 ) -> Any:
     """Create a lightweight exporter stub for CLI artifact tests."""
-    requested_methods = set(methods or tuple(cli_module._EXPORTER_METHOD.values()))
+    requested_methods = set(methods or tuple(outputs_module._EXPORTER_METHOD.values()))
     payloads = {
         "to_json": "{}",
         "to_interactive_html": "<html/>",
@@ -471,8 +473,8 @@ def test_cache_commands_contracts(
     ]
     for link, target in links:
         link.symlink_to(target, target_is_directory=target == external)
-        assert cli_module._scan_path_stats(link) == (1, link.lstat().st_size)
-    assert cli_module._scan_path_stats(cache_root) == (
+        assert cache_ops_module._scan_path_stats(link) == (1, link.lstat().st_size)
+    assert cache_ops_module._scan_path_stats(cache_root) == (
         2 + len(links),
         2050 + sum(link.lstat().st_size for link, _target in links),
     )
@@ -560,13 +562,16 @@ def test_cache_clear_refuses_active_embedding_encode() -> None:
         )
         assert encode_started.wait(timeout=5), "embedding encode never started"
         assert (
-            cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
+            cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None)
+            == 1
         )
         assert cache.h5_path.is_file()
         release_encode.set()
         write.result(timeout=5)
 
-    assert cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    assert (
+        cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    )
     assert cache.cache_dir.parent.joinpath(CACHE_COORDINATION_DIRNAME).is_dir()
     assert not cache.cache_dir.exists()
 
@@ -616,7 +621,9 @@ def test_cache_clear_reports_config_inspection_failure(
         cache_ops_module, "_confirmed_cache_clear", lambda *_args, **_kwargs: True
     )
 
-    assert cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
+    assert (
+        cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
+    )
     assert (cache_root / "embeddings" / "vectors.bin").is_file()
 
 
@@ -761,7 +768,7 @@ def test_force_rebuild_cache_confirmation_contracts(
 
 def test_cli_logging_flags_are_position_agnostic() -> None:
     """Logging options should parse identically before/after subcommands."""
-    parser, _, _, _ = cli_module._create_parser()
+    parser, _, _, _ = parser_module._create_parser()
     cases = [
         ["--log-level", "debug", "build", "arxiv:1706.03762"],
         ["build", "arxiv:1706.03762", "--log-level", "debug"],
@@ -789,26 +796,26 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
             for token in argv
             if token.startswith("--")
         }
-        assert cli_module._pop_tracked_option_dests(parsed) == expected_provided
+        assert parser_module._pop_tracked_option_dests(parsed) == expected_provided
 
     assert (
-        cli_module._pop_tracked_option_dests(parser.parse_args(["cache", "scan"]))
+        parser_module._pop_tracked_option_dests(parser.parse_args(["cache", "scan"]))
         == set()
     )
 
 
 def test_resolve_console_width_uses_auto_width_for_tty_streams() -> None:
     """TTY streams should default Rich consoles to auto width."""
-    assert cli_module._resolve_console_width(0, interactive=True) is None
+    assert console_module._resolve_console_width(0, interactive=True) is None
 
 
 def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None:
     """Redirected streams should keep a stable fallback width by default."""
     assert (
-        cli_module._resolve_console_width(0, interactive=False)
+        console_module._resolve_console_width(0, interactive=False)
         == cli_module.REDIRECTED_LOG_WIDTH
     )
-    assert cli_module._resolve_console_width(96, interactive=True) == 96
+    assert console_module._resolve_console_width(96, interactive=True) == 96
 
 
 @pytest.mark.parametrize("preconfigured", [False, True])
@@ -834,7 +841,7 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
         if preconfigured:
             logging.getLogger().addHandler(logging.NullHandler())
         with redirect_stderr(stderr):
-            cli_module._configure_logging(
+            console_module._configure_logging(
                 log_level="debug",
                 log_width=0,
                 log_file=str(log_path),
@@ -877,7 +884,7 @@ def test_rich_logging_preserves_unknown_config_table_name(tmp_path: Path) -> Non
 
     try:
         with redirect_stderr(stderr):
-            cli_module._configure_logging(log_level="info", log_width=0)
+            console_module._configure_logging(log_level="info", log_width=0)
             cli_module.load_user_config(config_path)
             for handler in logging.getLogger().handlers:
                 handler.flush()
@@ -1249,7 +1256,9 @@ def test_search_local_build_footer_preserves_effective_namespace_and_scope(
     command = footer.removeprefix("Use a paper ID with: ")
     command_args = shlex.split(command)
     assert command_args[:3] == ["citemesh", "build", "<ID>"]
-    _parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    _parser, build_parser, _cache_parser, _config_parser = (
+        parser_module._create_parser()
+    )
     generated = build_parser.parse_args(command_args[2:])
     searched = builder_factory.call_args.kwargs
 
@@ -1347,7 +1356,9 @@ def test_search_local_build_footer_uses_active_fallback_model(
     )
     command_args = shlex.split(footer.removeprefix("Use a paper ID with: "))
     assert command_args[:3] == ["citemesh", "build", "<ID>"]
-    _parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    _parser, build_parser, _cache_parser, _config_parser = (
+        parser_module._create_parser()
+    )
     generated = build_parser.parse_args(command_args[2:])
     searched = builder_factory.call_args.kwargs
 
@@ -1855,10 +1866,10 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
     s2_search = MagicMock(return_value=0)
     monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
 
-    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(["search", "attention"])
     with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
-        result = cli_module._run_search_command(
+        result = search_module._run_search_command(
             args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
         )
 
@@ -1892,9 +1903,9 @@ def test_search_auto_refuses_corpus_fingerprint_mismatch(
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
 
-    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(["search", "attention"])
-    result = cli_module._run_search_command(
+    result = search_module._run_search_command(
         args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
     )
 
@@ -1925,7 +1936,7 @@ def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
     info_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "info", info_mock)
 
-    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(["search", "attention"])
     config = UserConfig(
         path=Path("config.toml"),
@@ -1934,7 +1945,7 @@ def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
             "dataset_source": dataset_source,
         },
     )
-    result = cli_module._run_search_command(args, build_parser, config)
+    result = search_module._run_search_command(args, build_parser, config)
 
     assert result == 0
     assert "semantic-source=%s" in info_mock.call_args.args[0]
@@ -2024,7 +2035,7 @@ def test_search_explicit_auto_with_namespace_flag_falls_back_for_config_error(
     :param pytest.MonkeyPatch monkeypatch: Device resolver and S2 fallback stubs.
     :return None: Assertions verify config attribution preserves auto fallback.
     """
-    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(
         ["search", "anything", "--mode", "auto", "--model", "custom/model"]
     )
@@ -2039,7 +2050,7 @@ def test_search_explicit_auto_with_namespace_flag_falls_back_for_config_error(
     s2_search = MagicMock(return_value=0)
     monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
 
-    result = cli_module._run_search_command(args, build_parser, config)
+    result = search_module._run_search_command(args, build_parser, config)
 
     assert result == 0
     s2_search.assert_called_once_with(args)
@@ -2607,11 +2618,11 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
 
 def test_embedding_lzf_compression_level_normalization_contract() -> None:
     """Embedding validation should normalize implicit lzf compression level to 0."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
     )
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided={"cache_compression"}
     )
     assert args.cache_compression == "lzf"
@@ -2620,15 +2631,15 @@ def test_embedding_lzf_compression_level_normalization_contract() -> None:
 
 def test_hybrid_implicit_budget_defaults_contract() -> None:
     """Hybrid should apply tuned defaults only when budget knobs are omitted."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     hybrid_defaults = build_parser.parse_args(["seed", "--strategy", "hybrid"])
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         hybrid_defaults, build_parser, provided=set()
     )
     assert hybrid_defaults.max_papers == HYBRID_DEFAULT_MAX_PAPERS
     assert hybrid_defaults.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
     assert hybrid_defaults.max_references == HYBRID_DEFAULT_MAX_REFERENCES
-    assert cli_module._resolved_hybrid_max_semantic(hybrid_defaults) == min(
+    assert build_options_module._resolved_hybrid_max_semantic(hybrid_defaults) == min(
         DEFAULT_MAX_SEMANTIC, HYBRID_DEFAULT_MAX_PAPERS - 1
     )
 
@@ -2647,7 +2658,7 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
             "5",
         ]
     )
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         explicit_hybrid,
         build_parser,
         provided={"max_papers", "max_citations", "max_references", "max_semantic"},
@@ -2655,7 +2666,7 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
     assert explicit_hybrid.max_papers == 40
     assert explicit_hybrid.max_citations == 6
     assert explicit_hybrid.max_references == 7
-    assert cli_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
+    assert build_options_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
 
 
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4441,7 +4452,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> None:
     """Recommendation sidecars should only record settings that affect the run."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     cli_args = build_parser.parse_args(
         [
             "seed",
@@ -4452,7 +4463,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
         ]
     )
 
-    payload = cli_module._build_graph_config_payload(
+    payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
         seed_id="seed",
         metadata={"strategy": "recommendation"},
@@ -4875,7 +4886,7 @@ def test_cli_help_survives_unusable_terminal_width(
             "get_terminal_size",
             lambda: SimpleNamespace(columns=1),
         )
-        help_text = cli_module._create_parser()[0].format_help()
+        help_text = parser_module._create_parser()[0].format_help()
 
     assert "usage: citemesh COMMAND [options]" in help_text
     assert "CiteMesh" in help_text
@@ -5065,7 +5076,7 @@ def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
 
 def test_documented_cli_examples_are_parseable() -> None:
     """Every documented bash command should remain parseable."""
-    parser, _, _, _ = cli_module._create_parser()
+    parser, _, _, _ = parser_module._create_parser()
     docs = [Path("README.md"), *sorted(Path("docs").rglob("*.md"))]
 
     commands: list[list[str]] = []
@@ -5171,7 +5182,7 @@ def test_multi_export_deduplicates_repeated_formats(
 
 def test_export_dispatch_table_covers_all_declared_formats() -> None:
     """Every EXPORT_FORMATS entry must have a dispatch mapping or be 'png'."""
-    covered = set(cli_module._EXPORTER_METHOD) | {"png"}
+    covered = set(outputs_module._EXPORTER_METHOD) | {"png"}
     assert covered == set(cli_module.EXPORT_FORMATS), (
         f"Dispatch gap: covered={sorted(covered)}, "
         f"declared={sorted(cli_module.EXPORT_FORMATS)}"
@@ -5183,7 +5194,7 @@ def test_builder_defaults_match_cli_defaults() -> None:
     from citemesh.strategies.citation import CitationGraphBuilder
     from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     defaults = build_parser.parse_args(["seed", "--strategy", "citation"])
 
     assert CitationGraphBuilder.__init__.__defaults__ is not None
@@ -5242,12 +5253,12 @@ def test_build_rejects_unavailable_explicit_device(
 
 def test_graph_config_payload_records_device() -> None:
     """Embedding sidecar config should persist the requested device token."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     cli_args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--device", "cpu"]
     )
 
-    payload = cli_module._build_graph_config_payload(
+    payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
         seed_id="seed",
         metadata={"strategy": "embedding"},
@@ -5260,12 +5271,12 @@ def test_graph_config_payload_records_device() -> None:
 
 def test_export_metadata_records_effective_embedding_runtime() -> None:
     """Export metadata should surface the active model, dimension, and device."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     namespace = build_parser.parse_args(["seed", "--strategy", "embedding"])
     active_model = "google/embeddinggemma-300m"
     resolved_revision = "0123456789abcdef0123456789abcdef01234567"
     fingerprint = f"hf::{active_model}::{resolved_revision}"
-    metadata = cli_module._embedding_export_metadata(
+    metadata = build_options_module._embedding_export_metadata(
         namespace,
         runtime_metadata={
             "binary_prefilter_used": True,
@@ -5284,7 +5295,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
     assert metadata["effective_device"] == "mps"
     assert metadata["effective_compute_dtype"] == "bfloat16"
 
-    sidecar = cli_module._build_graph_config_payload(
+    sidecar = graph_config_module._build_graph_config_payload(
         cli_args=namespace,
         seed_id="seed",
         metadata={"strategy": "embedding", "embedding": metadata},
@@ -5318,7 +5329,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         ["seed", "--strategy", "embedding", "--model-revision", "main"]
     )
     selector_fingerprint = f"hf::{selector_namespace.model}::{resolved_revision}"
-    selector_metadata = cli_module._embedding_export_metadata(
+    selector_metadata = build_options_module._embedding_export_metadata(
         selector_namespace,
         runtime_metadata={
             "active_model": selector_namespace.model,
@@ -5326,7 +5337,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
             "resolved_model_revision": resolved_revision,
         },
     )
-    selector_sidecar = cli_module._build_graph_config_payload(
+    selector_sidecar = graph_config_module._build_graph_config_payload(
         cli_args=selector_namespace,
         seed_id="seed",
         metadata={"strategy": "embedding", "embedding": selector_metadata},
@@ -5342,10 +5353,10 @@ def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:
 
     :return None: Assertions align export metadata with the config sidecar.
     """
-    corpus_metadata = cli_module._embedding_export_metadata(
+    corpus_metadata = build_options_module._embedding_export_metadata(
         _dispatch_namespace(semantic_source="arxiv-corpus")
     )
-    candidates_metadata = cli_module._embedding_export_metadata(
+    candidates_metadata = build_options_module._embedding_export_metadata(
         _dispatch_namespace(semantic_source="candidates", candidate_pool_size=400)
     )
 
@@ -5355,17 +5366,17 @@ def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:
 
 def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:
     """Corpus-only flags without --semantic-source should imply arxiv-corpus."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--corpus-size", "1234"]
     )
-    provided = cli_module._pop_tracked_option_dests(args)
-    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    provided = parser_module._pop_tracked_option_dests(args)
+    build_contract_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "arxiv-corpus"
 
     args = build_parser.parse_args(["seed", "--strategy", "embedding"])
-    provided = cli_module._pop_tracked_option_dests(args)
-    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    provided = parser_module._pop_tracked_option_dests(args)
+    build_contract_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "candidates"
     assert args.storage_precision == "float32"
     assert args.corpus_size is None
@@ -5377,16 +5388,16 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
 
     :return None: Assertions validate corpus routing and sidecar provenance.
     """
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     dataset_source = "research/arxiv-snapshot"
     args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--dataset-source", dataset_source]
     )
-    provided = cli_module._pop_tracked_option_dests(args)
-    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    provided = parser_module._pop_tracked_option_dests(args)
+    build_contract_module._validate_build_cli_contract(args, build_parser, provided)
 
     assert args.semantic_source == "arxiv-corpus"
-    payload = cli_module._build_graph_config_payload(
+    payload = graph_config_module._build_graph_config_payload(
         cli_args=args,
         seed_id="seed",
         metadata={"strategy": "embedding"},
@@ -5396,11 +5407,11 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
     assert payload["build"]["embedding"]["dataset_source"] == dataset_source
 
     candidate_args = build_parser.parse_args(["seed", "--strategy", "embedding"])
-    candidate_provided = cli_module._pop_tracked_option_dests(candidate_args)
-    cli_module._validate_build_cli_contract(
+    candidate_provided = parser_module._pop_tracked_option_dests(candidate_args)
+    build_contract_module._validate_build_cli_contract(
         candidate_args, build_parser, candidate_provided
     )
-    candidate_payload = cli_module._build_graph_config_payload(
+    candidate_payload = graph_config_module._build_graph_config_payload(
         cli_args=candidate_args,
         seed_id="seed",
         metadata={"strategy": "embedding"},

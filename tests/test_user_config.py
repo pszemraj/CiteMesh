@@ -19,6 +19,9 @@ import pytest
 from citemesh import cli as cli_module
 from citemesh.cli import build_contract as build_contract_module
 from citemesh.cli import build_options as build_options_module
+from citemesh.cli import cache_ops as cache_ops_module
+from citemesh.cli import graph_config as graph_config_module
+from citemesh.cli import parser as parser_module
 from citemesh.core.config import EmbeddingStorageConfig
 from citemesh.data import cache as cache_module
 from citemesh.data import user_config as user_config_module
@@ -76,9 +79,9 @@ def _parsed_build_args(argv: list[str]) -> tuple:
     :param list[str] argv: Build arguments beginning with the paper identifier.
     :return tuple: Parsed namespace, explicit option names, and parser.
     """
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     args = build_parser.parse_args(argv)
-    provided = cli_module._pop_tracked_option_dests(args)
+    provided = parser_module._pop_tracked_option_dests(args)
     return args, provided, build_parser
 
 
@@ -506,7 +509,7 @@ def test_config_choice_specs_match_build_parser_choices() -> None:
 
     :return None: Assertions validate every duplicated choice set.
     """
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     parser_choices = {
         action.dest: action.choices
         for action in build_parser._actions
@@ -548,7 +551,7 @@ def test_search_mode_choices_match_search_parser() -> None:
 
     :return None: Assertions validate the duplicated search choices.
     """
-    parser, _, _, _ = cli_module._create_parser()
+    parser, _, _, _ = parser_module._create_parser()
     subparsers_action = next(
         action
         for action in parser._actions
@@ -590,7 +593,7 @@ def test_config_default_applied_when_flag_omitted() -> None:
     config = UserConfig(
         path=Path("unused"), defaults={"theme": "dark", "max_papers": 22}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     assert applied == {"theme", "max_papers"}
     assert args.theme == "dark"
     assert args.max_papers == 22
@@ -615,7 +618,7 @@ def test_explicit_cli_flag_wins_over_config_default() -> None:
     config = UserConfig(
         path=Path("unused"), defaults={"theme": "dark", "max_papers": 22}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     assert applied == {"max_papers"}
     assert args.theme == "solarized"
 
@@ -637,8 +640,8 @@ def test_semantic_threshold_config_reaches_builder_kwargs(
     args, provided, _ = _parsed_build_args(
         ["paper-id", "--strategy", "embedding", *flags]
     )
-    cli_module._apply_user_config_defaults(args, provided, config)
-    kwargs = cli_module._shared_embedding_builder_kwargs(args)
+    build_options_module._apply_user_config_defaults(args, provided, config)
+    kwargs = build_options_module._shared_embedding_builder_kwargs(args)
     assert kwargs["min_semantic_similarity"] == (0.75 if explicit else 0.68)
 
 
@@ -657,19 +660,19 @@ def test_configured_dataset_source_is_ignored_in_candidate_mode(
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "embedding"]
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied, config_path=config.path
     )
 
     assert args.semantic_source == "candidates"
     assert (
         args.dataset_source
-        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+        == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
     )
     assert (
-        cli_module._shared_embedding_builder_kwargs(args)["dataset_source"]
-        == (cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"])
+        build_options_module._shared_embedding_builder_kwargs(args)["dataset_source"]
+        == (build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"])
     )
 
 
@@ -701,8 +704,8 @@ def test_explicit_no_streaming_wins_over_enabled_config_default() -> None:
     )
     config = UserConfig(path=Path("unused"), defaults={"streaming": True})
 
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
 
@@ -728,7 +731,7 @@ def test_no_streaming_does_not_imply_or_conflict_with_candidate_mode() -> None:
         ]
     )
 
-    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    build_contract_module._validate_build_cli_contract(args, build_parser, provided)
 
     assert "streaming" in provided
     assert args.streaming is False
@@ -745,8 +748,8 @@ def test_config_default_outranks_hybrid_implicit_defaults() -> None:
         ["paper-id", "--strategy", "hybrid"]
     )
     config = UserConfig(path=Path("unused"), defaults={"max_citations": 7})
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     assert args.max_citations == 7
@@ -762,8 +765,8 @@ def test_cli_corpus_flag_overrides_config_semantic_source() -> None:
         ["paper-id", "--strategy", "embedding", "--corpus-size", "1000"]
     )
     config = UserConfig(path=Path("unused"), defaults={"semantic_source": "candidates"})
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     assert args.semantic_source == "arxiv-corpus"
@@ -785,8 +788,8 @@ def test_cli_dataset_source_overrides_config_default() -> None:
             "dataset_source": "config/arxiv-snapshot",
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
 
@@ -819,8 +822,8 @@ def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
             "dataset_split": "train[:5%]",
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
 
@@ -830,7 +833,7 @@ def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
     assert args.streaming is False
     assert (
         args.dataset_source
-        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+        == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
     )
     assert args.dataset_split == "train"
 
@@ -851,15 +854,15 @@ def test_config_semantic_source_corpus_applies_without_flags() -> None:
             "dataset_source": dataset_source,
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     assert args.semantic_source == "arxiv-corpus"
     assert args.dataset_source == dataset_source
-    assert cli_module._shared_embedding_builder_kwargs(args)["dataset_source"] == (
-        dataset_source
-    )
+    assert build_options_module._shared_embedding_builder_kwargs(args)[
+        "dataset_source"
+    ] == (dataset_source)
     # Corpus mode keeps the int8 storage default (no candidate-mode downgrade).
     assert args.storage_precision == "int8"
 
@@ -892,16 +895,16 @@ def test_configured_corpus_cap_and_full_split_override(
         defaults={"semantic_source": "arxiv-corpus", "corpus_size": 1234},
     )
 
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied, config_path=config.path
     )
 
     assert args.semantic_source == "arxiv-corpus"
-    assert cli_module._shared_embedding_builder_kwargs(args)["corpus_size"] == (
-        expected_corpus_size
-    )
-    payload = cli_module._build_graph_config_payload(
+    assert build_options_module._shared_embedding_builder_kwargs(args)[
+        "corpus_size"
+    ] == (expected_corpus_size)
+    payload = graph_config_module._build_graph_config_payload(
         args, "seed", {}, ["json"], {"json": Path("graph.json")}
     )
     embedding = payload["build"]["embedding"]
@@ -959,12 +962,12 @@ def test_config_calibration_defaults_follow_effective_storage(
             "calibration_sample_size": 100,
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     builder = cli_module.EmbeddingGraphBuilder(
-        **cli_module._shared_embedding_builder_kwargs(args)
+        **build_options_module._shared_embedding_builder_kwargs(args)
     )
     assert builder.semantic_source == semantic_source
     assert builder.storage_precision == expected_precision
@@ -987,9 +990,9 @@ def test_config_embedding_defaults_do_not_gate_citation_strategy() -> None:
         path=Path("unused"),
         defaults={"device": "cuda", "semantic_source": "arxiv-corpus"},
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     # Must not raise SystemExit: config defaults never count as explicit flags.
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
 
@@ -1006,11 +1009,11 @@ def test_config_device_is_inert_when_hybrid_semantic_branch_is_disabled(
         ["paper-id", "--strategy", "hybrid", "--max-semantic", "0"]
     )
     config = UserConfig(path=Path("config.toml"), defaults={"device": "cuda"})
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     resolver = MagicMock(side_effect=ValueError("CUDA is unavailable"))
     monkeypatch.setattr(build_contract_module, "resolve_embedding_device", resolver)
 
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         args,
         build_parser,
         provided,
@@ -1035,7 +1038,7 @@ def test_config_device_validation_names_the_config_source(
     config = UserConfig(
         path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     monkeypatch.setattr(
         build_contract_module,
         "resolve_embedding_device",
@@ -1043,9 +1046,9 @@ def test_config_device_validation_names_the_config_source(
     )
 
     with pytest.raises(ValueError) as error:
-        cli_module._validate_build_cli_contract(
+        build_contract_module._validate_build_cli_contract(
             args,
-            cli_module._ValueErrorParserErrorSink(),
+            build_contract_module._ValueErrorParserErrorSink(),
             provided,
             config_defaults=applied,
             config_path=config.path,
@@ -1068,12 +1071,12 @@ def test_config_strategy_gating_names_the_config_source() -> None:
     config = UserConfig(
         path=Path("cfg-home") / "config.toml", defaults={"strategy": "citation"}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
 
     with pytest.raises(ValueError) as error:
-        cli_module._validate_build_cli_contract(
+        build_contract_module._validate_build_cli_contract(
             args,
-            cli_module._ValueErrorParserErrorSink(),
+            build_contract_module._ValueErrorParserErrorSink(),
             provided,
             config_defaults=applied,
             config_path=config.path,
@@ -1103,12 +1106,12 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
             "corpus_size": 123,
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     assert args.streaming is True
 
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         args,
-        cli_module._ValueErrorParserErrorSink(),
+        build_contract_module._ValueErrorParserErrorSink(),
         provided,
         config_defaults=applied,
         config_path=config.path,
@@ -1118,11 +1121,14 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
     assert args.streaming is False
     assert (
         args.dataset_source
-        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+        == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
     )
     assert args.dataset_split == "train"
     assert args.corpus_size is None
-    for dest, expected in cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS.items():
+    for (
+        dest,
+        expected,
+    ) in build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS.items():
         assert build_parser.get_default(dest) == expected
 
 
@@ -1150,12 +1156,12 @@ def test_config_max_semantic_validation_names_the_config_source(
     config = UserConfig(
         path=Path("cfg-home") / "config.toml", defaults={"max_semantic": max_semantic}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
 
     with pytest.raises(ValueError) as error:
-        cli_module._validate_build_cli_contract(
+        build_contract_module._validate_build_cli_contract(
             args,
-            cli_module._ValueErrorParserErrorSink(),
+            build_contract_module._ValueErrorParserErrorSink(),
             provided,
             config_defaults=applied,
             config_path=config.path,
@@ -1191,8 +1197,8 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     monkeypatch.setattr(cli_module.logger, "debug", debug)
     monkeypatch.setattr(cli_module.logger, "info", info)
 
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args,
         build_parser,
         provided,
@@ -1207,13 +1213,13 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     assert "defaults.dataset_source" in messages
     assert "defaults.streaming" in messages
     assert "defaults.semantic_source='arxiv-corpus'" in messages
-    payload = cli_module._build_graph_config_payload(
+    payload = graph_config_module._build_graph_config_payload(
         args, "seed", {}, ["json"], {"json": Path("graph.json")}
     )
     embedding = payload["build"]["embedding"]
     assert embedding["semantic_source"] == "candidates"
     assert embedding["candidate_pool_size"] == args.candidate_pool_size
-    assert not set(embedding) & cli_module._CORPUS_ONLY_OPTION_DESTS
+    assert not set(embedding) & build_options_module._CORPUS_ONLY_OPTION_DESTS
     assert "calibration_sample_size" not in embedding
 
 
@@ -1232,12 +1238,12 @@ def test_config_api_key_resolved_without_environment_export(
     """
     monkeypatch.delenv("S2_API_KEY", raising=False)
     config = UserConfig(path=Path("unused"), s2_api_key="config-key")
-    key = cli_module._resolve_user_config_api_key(config)
+    key = build_options_module._resolve_user_config_api_key(config)
     assert key == "config-key"
     assert "S2_API_KEY" not in os.environ
     factory = MagicMock()
     monkeypatch.setattr(build_options_module, "SemanticScholarClient", factory)
-    kwargs = cli_module._configured_client_kwargs(
+    kwargs = build_options_module._configured_client_kwargs(
         argparse.Namespace(_s2_api_key=key, refresh_paper_cache=True)
     )
     factory.assert_called_once_with(api_key="config-key", refresh_paper_cache=True)
@@ -1253,7 +1259,7 @@ def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> No
     """
     monkeypatch.setenv("S2_API_KEY", "")
     config = UserConfig(path=Path("unused"), s2_api_key="config-key")
-    assert cli_module._resolve_user_config_api_key(config) == ""
+    assert build_options_module._resolve_user_config_api_key(config) == ""
     assert os.environ["S2_API_KEY"] == ""
 
 
@@ -1416,7 +1422,9 @@ def test_cache_clear_waits_for_pending_config_write(
         """
         clear_started.set()
         try:
-            return cli_module._clear_cache_directory(assume_yes=True, clear_reason=None)
+            return cache_ops_module._clear_cache_directory(
+                assume_yes=True, clear_reason=None
+            )
         finally:
             clear_finished.set()
 

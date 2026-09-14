@@ -40,39 +40,17 @@ from citemesh.visualization.dashboard.package import (
     update_dashboard_package,
 )
 
-from .build_contract import _build_strategy_graph as _build_strategy_graph
-from .build_contract import _validate_build_cli_contract as _validate_build_cli_contract
-from .build_contract import _ValueErrorParserErrorSink as _ValueErrorParserErrorSink
-from .build_options import (
-    _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS as _CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS,
-)
-from .build_options import _CORPUS_ONLY_OPTION_DESTS as _CORPUS_ONLY_OPTION_DESTS
-from .build_options import _apply_user_config_defaults as _apply_user_config_defaults
-from .build_options import _configured_client_kwargs as _configured_client_kwargs
-from .build_options import _embedding_export_metadata as _embedding_export_metadata
 from .build_options import _resolve_user_config_api_key
-from .build_options import (
-    _resolved_hybrid_max_semantic as _resolved_hybrid_max_semantic,
-)
-from .build_options import (
-    _shared_embedding_builder_kwargs as _shared_embedding_builder_kwargs,
-)
-from .cache_ops import _clear_cache_directory as _clear_cache_directory
-from .cache_ops import _scan_path_stats as _scan_path_stats
 from .console import REDIRECTED_LOG_WIDTH as REDIRECTED_LOG_WIDTH
 from .console import _configure_logging
-from .console import _resolve_console_width as _resolve_console_width
 from .console import logger as logger
-from .graph_config import _build_graph_config_payload as _build_graph_config_payload
 from .graph_config import canonicalize_paper_id_for_metadata
-from .outputs import _EXPORTER_METHOD as _EXPORTER_METHOD
 from .outputs import (
     EXPORT_FORMATS,
     resolve_dashboard_collection_outputs,
     resolve_graph_config_path,
     resolve_output_paths,
 )
-from .outputs import _is_standalone_dashboard_output as _is_standalone_dashboard_output
 from .parser import _create_parser, _pop_tracked_option_dests
 
 __all__ = [
@@ -101,7 +79,6 @@ __getattr__, __dir__ = install_lazy_exports(
             "citemesh.strategies.embedding",
             "EmbeddingGraphBuilder",
         ),
-        "_run_search_command": (".commands.search", "_run_search_command"),
     },
 )
 
