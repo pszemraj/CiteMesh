@@ -340,6 +340,8 @@ def _embedding_namespace_status(db_path: Path | None) -> str:
 
     current_schema = str(EMBEDDING_CACHE_SCHEMA_VERSION)
     if schema_version == current_schema:
+        # This table reports schema reachability, not vector health or readiness;
+        # full cache opening owns HDF5 and row-mapping integrity checks.
         return "Current schema"
     if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
         return "Legacy dtype-keyed namespace (reclaim after replacement is ready)"

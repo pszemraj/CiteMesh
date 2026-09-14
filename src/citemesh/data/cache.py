@@ -120,6 +120,30 @@ def read_embedding_namespace_schema(db_path: Path) -> str | None:
     return str(row[0]).strip() or None
 
 
+def embedding_namespace_has_papers(db_path: Path) -> bool | None:
+    """Probe whether a namespace database contains searchable paper metadata.
+
+    ``None`` preserves the distinction between an empty namespace and metadata
+    that could not be inspected. Callers may skip the former cheaply while still
+    opening the latter through the full cache path so corruption remains visible.
+
+    :param Path db_path: Metadata database belonging to one embedding namespace.
+    :return bool | None: ``True`` when at least one paper row exists, ``False``
+        when the table is readable and empty, or ``None`` when inspection fails.
+    """
+    connection: sqlite3.Connection | None = None
+    try:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(database_uri, uri=True)
+        row = connection.execute("SELECT 1 FROM papers LIMIT 1").fetchone()
+    except (OSError, ValueError, sqlite3.DatabaseError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+    return row is not None
+
+
 @contextmanager
 def cache_operation_lock(
     cache_root: Path,

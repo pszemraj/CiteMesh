@@ -37,6 +37,28 @@ def test_cache_operation_lock_blocks_nonblocking_clear(tmp_path: Path) -> None:
         pass
 
 
+def test_embedding_namespace_paper_probe_distinguishes_empty_and_unreadable(
+    tmp_path: Path,
+) -> None:
+    """The cheap namespace probe should preserve unknown metadata failures.
+
+    :param Path tmp_path: Temporary directory holding metadata fixtures.
+    :return None: Verifies populated, empty, and corrupt tri-state results.
+    """
+    metadata_path = tmp_path / "metadata.db"
+    with sqlite3.connect(metadata_path) as connection:
+        connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+
+    assert cache_module.embedding_namespace_has_papers(metadata_path) is False
+    with sqlite3.connect(metadata_path) as connection:
+        connection.execute("INSERT INTO papers (paper_id) VALUES ('paper')")
+    assert cache_module.embedding_namespace_has_papers(metadata_path) is True
+
+    corrupt_path = tmp_path / "corrupt.db"
+    corrupt_path.write_bytes(b"not SQLite")
+    assert cache_module.embedding_namespace_has_papers(corrupt_path) is None
+
+
 def test_default_cache_root_honors_override_before_platform(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

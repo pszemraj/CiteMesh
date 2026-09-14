@@ -33,7 +33,11 @@ from citemesh.data import (
     resolve_embedding_model_profile,
     validate_compression_filter,
 )
-from citemesh.data.cache import read_embedding_namespace_schema
+from citemesh.data.cache import (
+    embedding_namespace_has_papers,
+    path_exists,
+    read_embedding_namespace_schema,
+)
 from citemesh.data.embedding_cache import (
     EMBEDDING_CACHE_SCHEMA_VERSION,
     CacheSearchResult,
@@ -1198,13 +1202,14 @@ class EmbeddingGraphBuilder(
         return self.embedding_cache
 
     def has_persistent_embedding_artifacts(self) -> bool:
-        """Return whether any physical vector cache exists under this cache root.
+        """Return whether a potentially searchable vector cache exists.
 
         This cheap probe lets auto local-search avoid loading a model when the
         user has never built an embedding cache. Exact namespace selection still
         occurs before any vector is searched.
 
-        :return bool: Whether at least one HDF5 embedding payload exists.
+        :return bool: Whether at least one non-empty HDF5/metadata pair may
+            contain searchable papers.
         """
         cache_directory = (
             self._embedding_cache.h5_path.parent
@@ -1212,12 +1217,20 @@ class EmbeddingGraphBuilder(
             else get_cache_dir("embeddings", create=False)
         )
         for h5_path in cache_directory.glob("embeddings_*.h5"):
+            if not path_exists(h5_path) or h5_path.stat().st_size == 0:
+                continue
             namespace_id = h5_path.name.removeprefix("embeddings_").removesuffix(".h5")
-            schema_version = read_embedding_namespace_schema(
-                cache_directory / f"metadata_{namespace_id}.db"
-            )
+            db_path = cache_directory / f"metadata_{namespace_id}.db"
+            if not path_exists(db_path):
+                continue
+            has_papers = embedding_namespace_has_papers(db_path)
+            if has_papers is False:
+                continue
+            schema_version = read_embedding_namespace_schema(db_path)
             if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
                 continue
+            # Unreadable metadata or a non-empty malformed HDF5 file is not an
+            # empty-cache signal. Let full cache preparation surface that error.
             return True
         return False
 

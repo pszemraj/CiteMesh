@@ -2271,13 +2271,51 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
     assert not cache_dir.exists()
 
     cache_dir.mkdir(parents=True)
-    payload = cache_dir / "embeddings_existing.h5"
-    payload.touch()
-    assert builder.has_persistent_embedding_artifacts()
+    orphaned_payload = cache_dir / "embeddings_aaaaaaaaaaaa.h5"
+    orphaned_payload.write_bytes(b"not an HDF5 file")
+    assert not builder.has_persistent_embedding_artifacts()
     assert builder._embedding_cache is None
-    assert list(cache_dir.iterdir()) == [payload]
+    assert list(cache_dir.iterdir()) == [orphaned_payload]
 
-    payload.unlink()
+    orphaned_payload.unlink()
+    current_namespace = "abcdefabcdef"
+    current_db = cache_dir / f"metadata_{current_namespace}.db"
+    with sqlite3.connect(current_db) as connection:
+        connection.execute(
+            "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+            ("schema_version", "4"),
+        )
+        connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO papers (paper_id) VALUES ('paper')")
+    current_h5 = cache_dir / f"embeddings_{current_namespace}.h5"
+    current_h5.write_bytes(b"not an HDF5 file")
+    assert builder.has_persistent_embedding_artifacts()
+
+    current_h5.write_bytes(b"")
+    assert not builder.has_persistent_embedding_artifacts()
+    current_h5.unlink()
+    current_db.unlink()
+
+    empty_namespace = "bbbbbbbbbbbb"
+    empty_db = cache_dir / f"metadata_{empty_namespace}.db"
+    with sqlite3.connect(empty_db) as connection:
+        connection.execute(
+            "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+            ("schema_version", "4"),
+        )
+        connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+    empty_h5 = cache_dir / f"embeddings_{empty_namespace}.h5"
+    empty_h5.write_bytes(b"not an HDF5 file")
+    assert not builder.has_persistent_embedding_artifacts()
+    empty_h5.unlink()
+    empty_db.unlink()
+
     legacy_namespace = "0123456789ab"
     legacy_db = cache_dir / f"metadata_{legacy_namespace}.db"
     with sqlite3.connect(legacy_db) as connection:
@@ -2288,8 +2326,10 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
             "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
             ("schema_version", "3"),
         )
+        connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO papers (paper_id) VALUES ('legacy-paper')")
     legacy_h5 = cache_dir / f"embeddings_{legacy_namespace}.h5"
-    legacy_h5.touch()
+    legacy_h5.write_bytes(b"not an HDF5 file")
 
     assert not builder.has_persistent_embedding_artifacts()
     assert builder._embedding_cache is None
