@@ -622,16 +622,19 @@ def test_related_paper_retry_discards_partial_attempt_results() -> None:
         SimpleNamespace(paper=SimpleNamespace(paperId="second")),
     ]
     client.client.get_paper_references = MagicMock(return_value=records)
-    client._convert_api_paper = MagicMock(
-        side_effect=[
-            Paper(paper_id="first", title="First", year=None),
-            RuntimeError("temporary conversion failure"),
-            Paper(paper_id="first", title="First", year=None),
-            Paper(paper_id="second", title="Second", year=None),
-        ]
-    )
-
-    with patch("time.sleep"):
+    with (
+        patch.object(
+            s2.payloads,
+            "_convert_api_paper",
+            side_effect=[
+                Paper(paper_id="first", title="First", year=None),
+                RuntimeError("temporary conversion failure"),
+                Paper(paper_id="first", title="First", year=None),
+                Paper(paper_id="second", title="Second", year=None),
+            ],
+        ),
+        patch("time.sleep"),
+    ):
         papers = client.get_paper_references("seed", limit=2)
 
     assert [paper.paper_id for paper in papers] == ["first", "second"]
@@ -1069,7 +1072,7 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         ],
         "fieldsOfStudy": ["cs.AI", "cs.LG"],
     }
-    paper = client._convert_recommendation(payload)
+    paper = s2.payloads._convert_recommendation(payload)
 
     assert paper is not None
     assert paper.paper_id == "p1"
@@ -1356,8 +1359,6 @@ def test_partial_discovery_fields_do_not_replace_cached_paper_metadata(
 
 def test_external_id_fallback_from_paper_id_contracts() -> None:
     """Paper-ID fallback should populate arXiv/DOI fields when external IDs are absent."""
-    client = SemanticScholarClient(timeout=1)
-
     arxiv_payload = {
         "paperId": "arxiv:2411.03884v2",
         "title": "ArXiv Paper",
@@ -1377,8 +1378,8 @@ def test_external_id_fallback_from_paper_id_contracts() -> None:
         "fieldsOfStudy": [],
     }
 
-    arxiv = client._convert_recommendation(arxiv_payload)
-    doi = client._convert_recommendation(doi_payload)
+    arxiv = s2.payloads._convert_recommendation(arxiv_payload)
+    doi = s2.payloads._convert_recommendation(doi_payload)
 
     assert arxiv is not None
     assert arxiv.arxiv_id == "2411.03884"
@@ -1617,14 +1618,14 @@ def test_reference_payload_normalization_keeps_cache_and_live_contracts() -> Non
         "r3",
         "r4",
     ]
-    assert SemanticScholarClient._extract_reference_ids(mixed_payload) == [
+    assert s2.payloads._extract_reference_ids(mixed_payload) == [
         "r1",
         "r2",
         "r3",
         "r4",
     ]
     assert s2.payloads._coerce_cached_reference_ids(malformed_payload) is None
-    assert SemanticScholarClient._extract_reference_ids(malformed_payload) == []
+    assert s2.payloads._extract_reference_ids(malformed_payload) == []
 
 
 @pytest.mark.parametrize(
@@ -2453,24 +2454,22 @@ def test_rate_limit_detection_uses_status_or_sdk_exception_contract() -> None:
 
     :return None: Checks HTTP status evidence and the SDK's exact exception shape.
     """
-    assert SemanticScholarClient._is_rate_limit_error(
+    assert s2.retry._is_rate_limit_error(
         requests.HTTPError(response=_MockResponse(429))
     )
-    assert SemanticScholarClient._is_rate_limit_error(
+    assert s2.retry._is_rate_limit_error(
         ConnectionRefusedError("HTTP status 429 Too Many Requests.")
     )
-    assert SemanticScholarClient._is_rate_limit_error(
+    assert s2.retry._is_rate_limit_error(
         semantic_module.errors._RetryableRequestError("HTTP 429", rate_limited=True)
     )
-    assert not SemanticScholarClient._is_rate_limit_error(
+    assert not s2.retry._is_rate_limit_error(
         semantic_module.errors._RetryableRequestError("pagination HTTP 404")
     )
-    assert not SemanticScholarClient._is_rate_limit_error(
+    assert not s2.retry._is_rate_limit_error(
         requests.HTTPError("https://example/paper/42901", response=_MockResponse(503))
     )
-    assert not SemanticScholarClient._is_rate_limit_error(
-        ValueError("invalid ID 42901")
-    )
+    assert not s2.retry._is_rate_limit_error(ValueError("invalid ID 42901"))
 
 
 @pytest.mark.parametrize("batch", [False, True])

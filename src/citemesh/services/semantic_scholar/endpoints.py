@@ -13,8 +13,6 @@ retrying, and the shared HTTP/SDK plumbing stay on the host client.
 - ``_request_json`` / ``_request_json_once``: REST transport, with and without
   its own retry budget.
 - ``_call_with_retries``: SDK transport retry orchestration.
-- ``_is_rate_limit_error``: HTTP 429 classification for failure messages.
-- ``_convert_api_paper`` / ``_convert_recommendation``: payload conversion.
 - ``_persist_reference_cache_entry``: reference-cache writes.
 """
 
@@ -35,7 +33,7 @@ from semanticscholar.SemanticScholarException import (
 from citemesh.core import API_CONFIG, Paper
 from citemesh.core.paper_ids import normalize_paper_id
 
-from . import disk_cache, payloads
+from . import disk_cache, payloads, retry
 from .errors import (
     SemanticScholarRequestError,
     SemanticScholarUnavailableError,
@@ -194,7 +192,7 @@ class _EndpointsMixin:
             for requested_id, api_paper in zip(normalized_ids, api_papers):
                 if api_paper is None:
                     continue
-                paper = self._convert_api_paper(api_paper)
+                paper = payloads._convert_api_paper(api_paper)
                 if paper is None:
                     logger.warning(
                         "Skipping malformed batch paper for %s.", requested_id
@@ -225,7 +223,7 @@ class _EndpointsMixin:
                 raise payloads._unavailable_error(
                     "batch fetching papers",
                     f": {exc}",
-                    rate_limited=self._is_rate_limit_error(exc),
+                    rate_limited=retry._is_rate_limit_error(exc),
                 ) from exc
             logger.warning(
                 "Failed to batch fetch %s papers after %s attempts: %s",
@@ -356,7 +354,7 @@ class _EndpointsMixin:
                 return attempt_papers
 
             for record in relation_records:
-                paper = self._convert_api_paper(getattr(record, "paper", None))
+                paper = payloads._convert_api_paper(getattr(record, "paper", None))
                 if paper:
                     attempt_papers.append(paper)
                     disk_cache._persist_paper(paper, paper.paper_id)
@@ -388,7 +386,7 @@ class _EndpointsMixin:
                 raise payloads._unavailable_error(
                     f"fetching {relation_label} for {normalized_paper_id}",
                     f": {exc}",
-                    rate_limited=self._is_rate_limit_error(exc),
+                    rate_limited=retry._is_rate_limit_error(exc),
                 ) from exc
             logger.warning(
                 "Failed to fetch %s for %s after %s attempts: %s",
@@ -570,7 +568,7 @@ class _EndpointsMixin:
             raise payloads._unavailable_error(
                 f"fetching reference IDs for {normalized_paper_id}",
                 f": {exc}",
-                rate_limited=self._is_rate_limit_error(exc),
+                rate_limited=retry._is_rate_limit_error(exc),
             ) from exc
 
         paper_not_found = False
@@ -674,7 +672,7 @@ class _EndpointsMixin:
         """
         papers: list[Paper] = []
         for record in records:
-            paper = self._convert_recommendation(record)
+            paper = payloads._convert_recommendation(record)
             if paper:
                 papers.append(paper)
                 if cache_full_metadata:

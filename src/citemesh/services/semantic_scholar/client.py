@@ -32,7 +32,7 @@ from tenacity import (
 )
 from tenacity.retry import retry_base
 
-from citemesh.core import API_CONFIG, Paper
+from citemesh.core import API_CONFIG
 from citemesh.data.cache import atomic_write_json
 
 from . import disk_cache, payloads, retry
@@ -267,15 +267,6 @@ class SemanticScholarClient(_EndpointsMixin):
             time.sleep(min_interval - elapsed)
         self.last_request_time = time.time()
 
-    @staticmethod
-    def _is_rate_limit_error(error: Exception) -> bool:
-        """Detect rate-limit exceptions.
-
-        :param Exception error: Exception from request/client layer.
-        :return bool: ``True`` when the error indicates HTTP 429.
-        """
-        return retry._is_rate_limit_error(error)
-
     def _run_with_retries(
         self,
         operation: Callable[[], Any],
@@ -363,7 +354,7 @@ class SemanticScholarClient(_EndpointsMixin):
             calls to the same capability.
         :return SemanticScholarUnavailableError: Availability error to raise or log.
         """
-        rate_limited = self._is_rate_limit_error(exc)
+        rate_limited = retry._is_rate_limit_error(exc)
         detail = "" if rate_limited and omit_rate_limited_detail else f": {exc}"
         unavailable = payloads._unavailable_error(
             context, detail, rate_limited=rate_limited
@@ -446,34 +437,6 @@ class SemanticScholarClient(_EndpointsMixin):
             ),
             on_exhausted=_on_exhausted,
         )
-
-    @staticmethod
-    def _convert_api_paper(api_paper: Any) -> Paper | None:
-        """
-        Convert Semantic Scholar API response to Paper model.
-
-        :param Any api_paper: Raw paper object from S2 API
-        :return Paper | None: Paper object or None if conversion fails
-        """
-        return payloads._convert_api_paper(api_paper)
-
-    @staticmethod
-    def _convert_recommendation(rec: dict[str, Any]) -> Paper | None:
-        """Convert recommendation/search record dict to a Paper model.
-
-        :param dict[str, Any] rec: Record returned by recommendation/search APIs.
-        :return Paper | None: Parsed Paper model or ``None`` on malformed payload.
-        """
-        return payloads._convert_recommendation(rec)
-
-    @staticmethod
-    def _extract_reference_ids(raw_references: Any) -> list[str]:
-        """Extract reference IDs from recommendation/search payload shapes.
-
-        :param Any raw_references: Raw ``references`` payload from API response.
-        :return list[str]: Parsed reference ID list (order-preserving, deduplicated).
-        """
-        return payloads._extract_reference_ids(raw_references)
 
     async def _request_sdk_json(
         self,
@@ -643,7 +606,7 @@ class SemanticScholarClient(_EndpointsMixin):
             :param float wait_seconds: Upcoming sleep duration in seconds.
             :return None: Emits one DEBUG line.
             """
-            if exc is not None and self._is_rate_limit_error(exc):
+            if exc is not None and retry._is_rate_limit_error(exc):
                 logger.debug(
                     "Rate limited by Semantic Scholar. Waiting %.1fs before retry.",
                     wait_seconds,
