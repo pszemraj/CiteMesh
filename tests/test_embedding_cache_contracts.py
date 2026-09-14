@@ -11,9 +11,9 @@ import sys
 import tempfile
 import threading
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from queue import Empty
 from typing import Any
@@ -54,6 +54,40 @@ from citemesh.data.embedding_cache import (
 )
 from citemesh.data.model_profiles import get_embedding_model_profile
 from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
+
+
+def _fail_second_connection_commit(
+    cache: EmbeddingCache,
+) -> Callable[[], AbstractContextManager[sqlite3.Connection]]:
+    """Return a connection factory that fails its second final SQLite commit.
+
+    :param EmbeddingCache cache: Cache whose metadata database is opened.
+    :return Callable[[], AbstractContextManager[sqlite3.Connection]]: Factory that
+        commits the first connection and rolls back the second final commit.
+    """
+    connection_count = 0
+
+    @contextmanager
+    def fail_final_commit() -> Iterator[sqlite3.Connection]:
+        """Open one SQLite connection and fail its second final commit.
+
+        :return Iterator[sqlite3.Connection]: SQLite connection used by one cache phase.
+        """
+        nonlocal connection_count
+        conn = sqlite3.connect(cache.db_path)
+        connection_count += 1
+        try:
+            yield conn
+            if connection_count == 2:
+                raise sqlite3.OperationalError("forced final commit failure")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return fail_final_commit
 
 
 class _FakeInferenceTensor:
@@ -442,27 +476,7 @@ def test_embedding_cache_replacement_journal_recovers_failed_sqlite_commit(
             else None
         )
 
-    connection_count = 0
-
-    @contextmanager
-    def fail_final_commit() -> Iterator[sqlite3.Connection]:
-        """Fail the metadata transaction after its undo journal has committed.
-
-        :return Iterator[sqlite3.Connection]: SQLite connection used by one cache phase.
-        """
-        nonlocal connection_count
-        conn = sqlite3.connect(cache.db_path)
-        connection_count += 1
-        try:
-            yield conn
-            if connection_count == 2:
-                raise sqlite3.OperationalError("forced final commit failure")
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+    fail_final_commit = _fail_second_connection_commit(cache)
 
     with monkeypatch.context() as patch:
         patch.setattr(cache, "_connect_db", fail_final_commit)
@@ -560,27 +574,7 @@ def test_embedding_cache_recovers_failed_append_on_same_instance(
             else None
         )
 
-    connection_count = 0
-
-    @contextmanager
-    def fail_final_commit() -> Iterator[sqlite3.Connection]:
-        """Fail the metadata transaction after the appended vector is durable.
-
-        :return Iterator[sqlite3.Connection]: SQLite connection used by one cache phase.
-        """
-        nonlocal connection_count
-        conn = sqlite3.connect(cache.db_path)
-        connection_count += 1
-        try:
-            yield conn
-            if connection_count == 2:
-                raise sqlite3.OperationalError("forced final commit failure")
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+    fail_final_commit = _fail_second_connection_commit(cache)
 
     with monkeypatch.context() as patch:
         patch.setattr(cache, "_connect_db", fail_final_commit)

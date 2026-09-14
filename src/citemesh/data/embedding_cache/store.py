@@ -165,11 +165,9 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         self._int8_saturation_warning_emitted = False
         self._progress = progress
 
-        with self._cache_operation_lock():
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            with self._cache_lock():
-                self._init_db()
-                self._ensure_h5_layout()
+        with self._cache_lock():
+            self._init_db()
+            self._ensure_h5_layout()
 
     # ------------------------------------------------------------------
     # Public API
