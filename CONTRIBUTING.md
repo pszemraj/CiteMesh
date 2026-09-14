@@ -24,7 +24,7 @@ ruff check .
 ruff format --check .
 ```
 
-CI runs those three on Python 3.10-3.13 (`ubuntu-latest`, CPU torch) plus a build job — `python -m build`, `twine check dist/*`, and a wheel check for `citemesh/py.typed` and the dashboard JS ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Real CUDA embedding checks stay opt-in; they may download the EmbeddingGemma checkpoint and need a GPU: `python -m pytest -m "slow and cuda"`.
+CI runs the test suite on Python 3.10-3.13 (`ubuntu-latest`, CPU torch), runs Ruff once on Python 3.12, and adds a build job — `python -m build`, `twine check --strict dist/*`, wheel package-data checks, and a base-install CLI smoke test ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Real CUDA embedding checks stay opt-in; they may download the EmbeddingGemma checkpoint and need a GPU: `python -m pytest -m "slow and cuda"`.
 
 Clear stale output before building locally (`rm -rf build dist && python -m build`): setuptools reuses `build/lib`, so a wheel built over an old tree can silently ship modules you deleted.
 
