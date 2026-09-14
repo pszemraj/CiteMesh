@@ -34,6 +34,7 @@ from citemesh.data.embedding_cache import (
 )
 from citemesh.services.semantic_scholar import (
     SemanticScholarClient,
+    SemanticScholarRequestError,
     SemanticScholarUnavailableError,
 )
 from citemesh.strategies import embedding as embedding_module
@@ -8274,6 +8275,370 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
         build_builder.client.get_reference_ids.assert_not_called()
         build_builder.client.get_paper_references.assert_not_called()
         build_builder.client.get_paper_citations.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("strategy", "fetch_references"),
+    [("embedding", False), ("hybrid", False), ("hybrid", True)],
+)
+def test_reopened_corpus_seed_preserves_provider_evidence_and_graph_score(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strategy: str,
+    fetch_references: bool,
+) -> None:
+    """Cold and warm corpus builds must score the same provider-backed seed.
+
+    :param pytest.MonkeyPatch monkeypatch: Cache and runtime isolation fixture.
+    :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
+    :param str strategy: Direct embedding or hybrid public build path.
+    :param bool fetch_references: Whether hybrid bibliographic evidence is enabled.
+    :return None: Verifies citation count, provenance, identity, and edge-score parity.
+    """
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    fingerprint = "artifact-seed-evidence-lifecycle"
+    dataset_source = "fixture/seed-evidence-corpus"
+    seed_id = "arxiv:2508.12345"
+    related_id = "arxiv:2508.12346"
+    source_rows = [
+        {
+            "id": seed_id,
+            "title": "Seed title",
+            "abstract": "Seed abstract",
+            "year": 2024,
+        },
+        {
+            "id": related_id,
+            "title": "Related title",
+            "abstract": "Related abstract",
+            "year": 2024,
+        },
+    ]
+
+    def provider_paper(paper_id: str) -> Paper:
+        """Return stable provider evidence for one fixture paper.
+
+        :param str paper_id: Seed or related canonical arXiv identifier.
+        :return Paper: Fresh provider record with its controlled citation count.
+        """
+        is_seed = paper_id == seed_id
+        return Paper(
+            paper_id=paper_id,
+            title="Seed title" if is_seed else "Related title",
+            abstract="Seed abstract" if is_seed else "Related abstract",
+            year=2024,
+            citation_count=1000 if is_seed else 500,
+        )
+
+    client = MagicMock()
+    client.get_paper.side_effect = lambda paper_id, **_kwargs: provider_paper(paper_id)
+    client.get_papers.side_effect = lambda paper_ids: {
+        paper_ids_module.normalize_paper_id(paper_id): provider_paper(
+            paper_ids_module.normalize_paper_id(paper_id)
+        )
+        for paper_id in paper_ids
+    }
+    client.get_reference_ids.side_effect = (
+        (lambda _paper_id, **_kwargs: ["shared-reference"])
+        if fetch_references
+        else AssertionError("reference IDs are disabled for this fixture")
+    )
+    client.get_paper_references.return_value = [provider_paper(related_id)]
+    client.get_paper_citations.return_value = []
+
+    def make_builder() -> EmbeddingGraphBuilder | HybridGraphBuilder:
+        """Create a fresh public builder sharing cache and provider fixtures.
+
+        :return EmbeddingGraphBuilder | HybridGraphBuilder: Configured build strategy.
+        """
+        common_options: dict[str, Any] = {
+            "max_papers": 2,
+            "semantic_source": "arxiv-corpus",
+            "dataset_source": dataset_source,
+            "dataset_split": "train[:2]",
+            "corpus_size": 2,
+            "storage_precision": "float32",
+            "client": client,
+        }
+        if strategy == "embedding":
+            builder: EmbeddingGraphBuilder | HybridGraphBuilder = EmbeddingGraphBuilder(
+                **common_options
+            )
+            active_embedding = builder
+        else:
+            builder = HybridGraphBuilder(
+                **common_options,
+                max_references=1,
+                max_citations=0,
+                max_semantic=1,
+                fetch_references=fetch_references,
+            )
+            assert builder.embedding_builder is not None
+            active_embedding = builder.embedding_builder
+        _install_deterministic_builder_runtime(
+            monkeypatch,
+            active_embedding,
+            fingerprint=fingerprint,
+        )
+        monkeypatch.setattr(
+            active_embedding,
+            "_load_dataset_for_hydration",
+            lambda **_kwargs: (dataset_source, [dict(row) for row in source_rows]),
+        )
+        return builder
+
+    cold_builder = make_builder()
+    cold_graph, cold_seed_id = cold_builder.build_graph(seed_id)
+    client.get_paper.reset_mock()
+
+    warm_builder = make_builder()
+    warm_graph, warm_seed_id = warm_builder.build_graph(seed_id)
+
+    assert cold_seed_id == warm_seed_id == seed_id
+    assert cold_graph.nodes[seed_id]["citation_count"] == 1000
+    assert warm_graph.nodes[seed_id]["citation_count"] == 1000
+    assert cold_graph[seed_id][related_id]["weight"] == pytest.approx(
+        warm_graph[seed_id][related_id]["weight"]
+    )
+    client.get_paper.assert_not_called()
+    if strategy == "hybrid":
+        assert cold_builder.paper_sources[seed_id] == "citation"
+        assert warm_builder.paper_sources[seed_id] == "citation"
+
+
+def test_cached_corpus_seed_enrichment_preserves_local_primary_id() -> None:
+    """Provider evidence must supplement rather than replace corpus identity."""
+    client = MagicMock()
+    client.get_papers.return_value = {
+        "arxiv:2508.12345": Paper(
+            paper_id="arxiv:2508.12345",
+            title="Provider title",
+            year=2024,
+            citation_count=1000,
+        )
+    }
+    builder = EmbeddingGraphBuilder(client=client)
+    seed = Paper(
+        paper_id="content:local-seed",
+        title="Cached title",
+        abstract="Cached abstract",
+        year=2024,
+        arxiv_id="2508.12345",
+        is_seed=True,
+        is_local_corpus=True,
+    )
+
+    builder.enrich_cached_corpus_seed(seed)
+
+    assert seed.paper_id == "content:local-seed"
+    assert seed.title == "Cached title"
+    assert seed.citation_count == 1000
+    assert seed.is_seed is True
+    assert seed.is_local_corpus is True
+    client.get_papers.assert_called_once_with(["arxiv:2508.12345"])
+
+
+def test_cached_corpus_seed_rejected_enrichment_keeps_local_metadata(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A rejected optional provider lookup must leave the cached seed usable."""
+    client = MagicMock()
+    client.get_papers.side_effect = SemanticScholarRequestError("invalid upstream ID")
+    builder = EmbeddingGraphBuilder(client=client)
+    seed = Paper(
+        paper_id="content:local-seed",
+        title="Cached title",
+        abstract="Cached abstract",
+        year=2024,
+        arxiv_id="2508.12345",
+        is_seed=True,
+        is_local_corpus=True,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder.enrich_cached_corpus_seed(seed)
+
+    assert seed.paper_id == "content:local-seed"
+    assert seed.title == "Cached title"
+    assert seed.citation_count == 0
+    assert seed.is_local_corpus is True
+    assert "keeping corpus metadata" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "seed_id", ["content:resume-seed", "arxiv_7", "local-source-42"]
+)
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+@pytest.mark.parametrize("fresh_retry", [False, True], ids=["same", "fresh"])
+def test_interrupted_force_rebuild_resumes_before_local_seed_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    seed_id: str,
+    storage_precision: str,
+    strategy: str,
+    fresh_retry: bool,
+) -> None:
+    """A restarted build must resume persisted hydration before seed resolution.
+
+    :param pytest.MonkeyPatch monkeypatch: Cache, batching, and runtime isolation.
+    :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
+    :param str seed_id: Current, legacy, or opaque source-primary seed identifier.
+    :param str storage_precision: Persistent float32 or calibrated int8 vectors.
+    :param str strategy: Direct embedding or hybrid public build path.
+    :param bool fresh_retry: Whether retry discards the interrupted builder object.
+    :return None: Verifies prefix retention, missing-row resume, and seed identity.
+    """
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    monkeypatch.setattr(hydration_module, "HYDRATION_FLUSH_SIZE", 1)
+    fingerprint = "artifact-interrupted-rebuild-lifecycle"
+    dataset_source = "fixture/interrupted-rebuild-corpus"
+    source_rows = [
+        {"id": "first-record", "title": "First", "abstract": "First abstract"},
+        {
+            "id": "second-record",
+            "title": "Second",
+            "abstract": "Second abstract",
+        },
+        {"id": seed_id, "title": "Resume seed", "abstract": "Seed abstract"},
+    ]
+
+    def make_builder(
+        *, force_rebuild: bool = False
+    ) -> tuple[
+        EmbeddingGraphBuilder | HybridGraphBuilder,
+        EmbeddingGraphBuilder,
+        MagicMock,
+    ]:
+        """Create one public builder sharing only durable cache state.
+
+        :param bool force_rebuild: Whether this builder clears the selected namespace.
+        :return tuple: Public builder, its embedding child, and isolated provider mock.
+        """
+        client = MagicMock()
+        client.get_paper.return_value = None
+        client.get_paper_references.return_value = []
+        client.get_paper_citations.return_value = []
+        common_options: dict[str, Any] = {
+            "max_papers": 2,
+            "semantic_source": "arxiv-corpus",
+            "dataset_source": dataset_source,
+            "dataset_split": "train",
+            "corpus_size": None,
+            "storage_precision": storage_precision,
+            "force_rebuild_cache": force_rebuild,
+            "force_rebuild_reason": "interrupted rebuild regression",
+            "client": client,
+        }
+        if storage_precision == "int8":
+            common_options["calibration_sample_size"] = 2
+        if strategy == "embedding":
+            public_builder: EmbeddingGraphBuilder | HybridGraphBuilder = (
+                EmbeddingGraphBuilder(**common_options)
+            )
+            embedding_builder = public_builder
+        else:
+            public_builder = HybridGraphBuilder(
+                **common_options,
+                max_references=1,
+                max_citations=1,
+                max_semantic=1,
+                fetch_references=False,
+            )
+            assert public_builder.embedding_builder is not None
+            embedding_builder = public_builder.embedding_builder
+        _install_deterministic_builder_runtime(
+            monkeypatch,
+            embedding_builder,
+            fingerprint=fingerprint,
+        )
+        monkeypatch.setattr(
+            embedding_builder,
+            "_load_dataset_for_hydration",
+            lambda **_kwargs: (dataset_source, [dict(row) for row in source_rows]),
+        )
+        return public_builder, embedding_builder, client
+
+    _initial_builder, initial_embedding, _initial_client = make_builder()
+    initial_embedding.prepare_embedding_cache()
+    initial_embedding._ensure_cache_hydrated(use_streaming=False)
+    search_result = next(
+        result
+        for result in initial_embedding.search_local("resume seed", top_k=3)
+        if result.paper_id == seed_id
+    )
+
+    interrupted_builder, interrupted_embedding, interrupted_client = make_builder(
+        force_rebuild=True
+    )
+    original_write = interrupted_embedding._cache_metadata_batch
+    committed_batches = 0
+
+    def interrupt_second_batch(batch: list[dict[str, Any]]) -> int:
+        """Commit the first rebuilt row, then simulate process interruption.
+
+        :param list[dict[str, Any]] batch: One-row hydration write batch.
+        :return int: Number of records committed by the first batch.
+        :raises RuntimeError: Before the second batch can commit.
+        """
+        nonlocal committed_batches
+        if committed_batches:
+            raise RuntimeError("interrupted rebuild after first committed batch")
+        committed_batches += 1
+        return original_write(batch)
+
+    with monkeypatch.context() as interruption:
+        interruption.setattr(
+            interrupted_embedding,
+            "_cache_metadata_batch",
+            interrupt_second_batch,
+        )
+        with pytest.raises(RuntimeError, match="interrupted rebuild"):
+            interrupted_builder.build_graph(search_result.paper_id)
+
+    interrupted_stats = interrupted_embedding.embedding_cache.payload_stats()
+    assert interrupted_stats.hydration_complete is False
+    assert interrupted_embedding.embedding_cache.get_cached_paper_ids() == {
+        "first-record"
+    }
+    if storage_precision == "int8":
+        assert interrupted_embedding.embedding_cache.has_calibration_ranges()
+    interrupted_client.get_paper.assert_not_called()
+
+    if fresh_retry:
+        retry_builder, retry_embedding, retry_client = make_builder()
+    else:
+        retry_builder = interrupted_builder
+        retry_embedding = interrupted_embedding
+        retry_client = interrupted_client
+
+    resumed_ids: list[str] = []
+    resume_write = retry_embedding._cache_metadata_batch
+
+    def capture_resume_batch(batch: list[dict[str, Any]]) -> int:
+        """Record exactly which missing source rows resume writes.
+
+        :param list[dict[str, Any]] batch: Hydration write batch being committed.
+        :return int: Number of records committed by the real cache writer.
+        """
+        resumed_ids.extend(str(record["paper_id"]) for record in batch)
+        return resume_write(batch)
+
+    monkeypatch.setattr(retry_embedding, "_cache_metadata_batch", capture_resume_batch)
+    graph, actual_seed_id = retry_builder.build_graph(search_result.paper_id)
+
+    assert actual_seed_id == seed_id
+    assert seed_id in graph
+    assert resumed_ids == ["second-record", seed_id]
+    assert retry_embedding.embedding_cache.get_cached_paper_ids() == {
+        "first-record",
+        "second-record",
+        seed_id,
+    }
+    assert retry_embedding.embedding_cache.is_hydrated(
+        "train", None, dataset_source=dataset_source
+    )
+    retry_client.get_paper.assert_not_called()
 
 
 def test_missing_local_corpus_seed_reports_cache_namespace_mismatch() -> None:

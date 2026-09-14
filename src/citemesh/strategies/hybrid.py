@@ -37,6 +37,7 @@ from citemesh.strategies.candidates import (
     IdentityRegistry,
     fetch_candidate_source,
     merge_seed_relation,
+    provider_lookup_identifier,
     reconcile_paper_identity,
     register_aliases,
     require_available_candidate_source,
@@ -606,6 +607,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 cached_corpus_seed = self.embedding_builder.resolve_cached_corpus_seed(
                     seed_id
                 )
+                if cached_corpus_seed is not None:
+                    self.embedding_builder.enrich_cached_corpus_seed(cached_corpus_seed)
             except Exception as exc:
                 raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
@@ -632,8 +635,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 "Hybrid collection failed: citation branch returned no seed"
             )
         papers[seed_paper.paper_id] = seed_paper
+        cached_seed_has_provider_identity = (
+            cached_corpus_seed is not None
+            and provider_lookup_identifier(
+                cached_corpus_seed.paper_id, cached_corpus_seed
+            )
+            is not None
+        )
         self.paper_sources[seed_paper.paper_id] = (
-            "semantic" if cached_corpus_seed is not None else "citation"
+            "semantic"
+            if cached_corpus_seed is not None and not cached_seed_has_provider_identity
+            else "citation"
         )
         self.seed_relations[seed_paper.paper_id] = "seed"
         register_aliases(alias_map, seed_paper.paper_id, seed_paper)

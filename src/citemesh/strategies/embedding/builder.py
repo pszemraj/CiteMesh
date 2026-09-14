@@ -60,6 +60,7 @@ from citemesh.strategies.candidates import (
     SEMANTIC_SOURCE_CHOICES,
     IdentityRegistry,
     fetch_candidate_pool,
+    merge_paper_metadata,
     paper_embedding_metadata,
     provider_lookup_identifier,
     reconcile_paper_identity,
@@ -893,12 +894,15 @@ class EmbeddingGraphBuilder(
         :return Paper: Resolved seed carrying the seed role for this build.
         """
         if self.semantic_source == "arxiv-corpus":
-            self.prepare_embedding_cache()
-            if self._force_rebuild_seed_hydration_pending and seed_paper is None:
-                self._ensure_cache_hydrated(use_streaming=self.use_streaming)
+            cache = self.prepare_embedding_cache()
+            if seed_paper is None:
+                self._restore_corpus_before_seed_lookup(cache)
         else:
             self._load_model()
-        return self._resolve_seed_paper(seed_id, seed_paper)
+        resolved_seed = self._resolve_seed_paper(seed_id, seed_paper)
+        if seed_paper is None and resolved_seed.is_local_corpus:
+            self.enrich_cached_corpus_seed(resolved_seed)
+        return resolved_seed
 
     def resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:
         """Resolve a seed from the selected corpus cache without provider calls.
@@ -913,10 +917,60 @@ class EmbeddingGraphBuilder(
         """
         if self.semantic_source != "arxiv-corpus":
             return None
-        self.prepare_embedding_cache()
-        if self._force_rebuild_seed_hydration_pending:
-            self._ensure_cache_hydrated(use_streaming=self.use_streaming)
+        cache = self.prepare_embedding_cache()
+        self._restore_corpus_before_seed_lookup(cache)
         return self._resolve_cached_corpus_seed(seed_id)
+
+    def _restore_corpus_before_seed_lookup(self, cache: EmbeddingCache) -> None:
+        """Restore a compatible non-current corpus before resolving its seed.
+
+        The in-memory force-rebuild flag covers a clear performed by this builder.
+        Persisted incomplete hydration metadata covers the same recovery boundary
+        after a process restart. The established hydration path owns the detailed
+        compatibility checks and resumes only missing rows when safe.
+
+        :param EmbeddingCache cache: Prepared artifact-bound corpus namespace.
+        :return None: Hydrates or resumes the cache when its persisted state requires it.
+        """
+        cached_source = cache.get_hydrated_dataset_source()
+        persisted_state_needs_hydration = (
+            cached_source == self.dataset_source
+            and not cache.is_hydrated(
+                self.dataset_split,
+                self.corpus_size,
+                dataset_source=self.dataset_source,
+            )
+        )
+        if (
+            self._force_rebuild_seed_hydration_pending
+            or persisted_state_needs_hydration
+        ):
+            self._ensure_cache_hydrated(use_streaming=self.use_streaming)
+
+    def enrich_cached_corpus_seed(self, seed: Paper) -> None:
+        """Merge optional provider evidence without replacing a local seed ID.
+
+        :param Paper seed: Cache-primary seed record to enrich in place.
+        :return None: Preserves local metadata when no safe alias or provider row exists.
+        """
+        lookup_id = provider_lookup_identifier(seed.paper_id, seed)
+        if lookup_id is None:
+            return
+
+        from citemesh.services import SemanticScholarRequestError
+
+        try:
+            provider_papers = self.client.get_papers([lookup_id])
+        except SemanticScholarRequestError as exc:
+            logger.warning(
+                "Seed citation enrichment was rejected; keeping corpus metadata: %s",
+                exc,
+            )
+            return
+
+        provider_seed = provider_papers.get(normalize_paper_id(lookup_id))
+        if provider_seed is not None:
+            merge_paper_metadata(seed, provider_seed)
 
     def _resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:
         """Read one seed from the prepared corpus namespace.
