@@ -946,6 +946,7 @@ def _fake_local_search_builder(
     fake_builder = MagicMock()
     fake_builder.device = "cpu"
     fake_builder.compute_dtype = "float32"
+    fake_builder._active_model_name = None
     fake_builder.search_local.return_value = list(results or [])
     fake_builder.has_persistent_embedding_artifacts.return_value = cached_count > 0
     fake_builder.embedding_cache = SimpleNamespace(
@@ -1243,6 +1244,97 @@ def test_search_local_build_footer_preserves_effective_namespace_and_scope(
     assert generated.all_corpus is expected_all_corpus
     if expected_corpus_size is not None:
         assert generated.corpus_size == expected_corpus_size
+
+
+def test_search_local_keeps_results_when_corpus_scope_was_not_hydrated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python-populated corpus cache rows should remain searchable without a footer.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing local search runtime.
+    :return None: Checks usable results and focused missing-scope guidance.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    fake_builder.embedding_cache.payload_stats = lambda: SimpleNamespace(
+        hydration_split=None, hydration_corpus_size=None
+    )
+    monkeypatch.setattr(
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    warning = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "warning", warning)
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--mode",
+            "local",
+            "--semantic-source",
+            "arxiv-corpus",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    plain_stdout = flatten_console_text(result.stdout)
+    assert _FAKE_LOCAL_RESULT.paper_id in plain_stdout
+    assert "Use a paper ID with:" not in plain_stdout
+    assert "no recorded dataset split" in str(warning.call_args)
+    assert "Search results remain usable" in str(warning.call_args)
+
+
+def test_search_local_build_footer_uses_active_fallback_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local-search footer must reopen the active fallback cache namespace.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing local search runtime.
+    :return None: Parses the footer and checks active model plus stable selectors.
+    """
+    active_model = "google/embeddinggemma-300m"
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    fake_builder._active_model_name = active_model
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--mode",
+            "local",
+            "--model-profile",
+            "embeddinggemma",
+            "--truncate-dim",
+            "256",
+            "--storage-precision",
+            "float32",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    plain_stdout = flatten_console_text(result.stdout)
+    assert f"model={active_model}" in plain_stdout
+    assert f"model={DEFAULT_EMBEDDING_MODEL_NAME}" not in plain_stdout
+    footer = next(
+        line for line in result.stdout.splitlines() if line.startswith("Use a paper ID")
+    )
+    command_args = shlex.split(footer.removeprefix("Use a paper ID with: "))
+    assert command_args[:3] == ["citemesh", "build", "<ID>"]
+    _parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    generated = build_parser.parse_args(command_args[2:])
+    searched = builder_factory.call_args.kwargs
+
+    assert generated.model == active_model
+    assert generated.model_profile == searched["model_profile"]
+    assert generated.model_revision == searched["model_revision"]
+    assert generated.truncate_dim == searched["truncate_dim"]
+    assert generated.storage_precision == searched["storage_precision"]
+    assert generated.calibration_sample_size == searched["calibration_sample_size"]
 
 
 def test_search_semantic_source_flag_selects_corpus_namespace(

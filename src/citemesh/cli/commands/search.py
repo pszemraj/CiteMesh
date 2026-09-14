@@ -192,14 +192,37 @@ def _prepare_local_search_builder(
     return builder, defaults
 
 
+def _apply_active_model_identity(
+    defaults: argparse.Namespace, builder: EmbeddingGraphBuilder
+) -> None:
+    """Record the checkpoint that local search actually opened.
+
+    Model loading may replace the requested default checkpoint with its configured
+    fallback. The active model name must then drive result labels and the generated
+    build command because cache fingerprinting already binds the namespace to that
+    fallback. The remaining selectors stay as validated: an explicit revision
+    disables fallback, while the profile token, truncation, storage precision, and
+    calibration size reproduce the active builder contract without changing its
+    compute or storage policy.
+
+    :param argparse.Namespace defaults: Effective build-equivalent namespace.
+    :param EmbeddingGraphBuilder builder: Prepared builder with an active model.
+    :return None: Updates the namespace model selector in place when resolved.
+    """
+    active_model_name = str(getattr(builder, "_active_model_name", "") or "").strip()
+    if active_model_name:
+        defaults.model = active_model_name
+
+
 def _local_result_build_command(
     defaults: argparse.Namespace, cache: EmbeddingCache
-) -> str:
+) -> str | None:
     """Build a shell-safe command targeting the local search namespace.
 
     :param argparse.Namespace defaults: Effective build-equivalent defaults.
     :param EmbeddingCache cache: Cache whose recorded corpus scope was searched.
-    :return str: Copyable embedding build command with namespace selectors.
+    :return str | None: Copyable embedding build command with namespace selectors,
+        or ``None`` when the cache lacks the corpus scope needed to reproduce it.
     """
     command = [
         "citemesh",
@@ -224,9 +247,7 @@ def _local_result_build_command(
         with cache.hydration_operation_lock():
             stats = cache.payload_stats()
         if stats.hydration_split is None:
-            raise RuntimeError(
-                "Local corpus cache is missing its recorded dataset split."
-            )
+            return None
         command.extend(["--dataset-source", str(defaults.dataset_source)])
         command.extend(["--dataset-split", stats.hydration_split])
         recorded_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
@@ -312,13 +333,18 @@ def _render_local_search(
             Text.assemble((f"{i}. ", "dim"), (str(result.paper_id), "cyan")),
             soft_wrap=True,
         )
-    console.output_console.print(
-        Text(
-            f"\nUse a paper ID with: {_local_result_build_command(defaults, cache)}",
-            style="dim",
-        ),
-        soft_wrap=True,
-    )
+    build_command = _local_result_build_command(defaults, cache)
+    if build_command is None:
+        logger.warning(
+            "Build command omitted because the local corpus cache has no recorded "
+            "dataset split. Search results remain usable; build a returned paper "
+            "ID with the same embedding settings and an explicit --dataset-split."
+        )
+    else:
+        console.output_console.print(
+            Text(f"\nUse a paper ID with: {build_command}", style="dim"),
+            soft_wrap=True,
+        )
     return 0
 
 
@@ -441,6 +467,7 @@ def _run_search_command(
         # cache just to count rows leaves unused metadata and lock files behind.
         if builder.has_persistent_embedding_artifacts():
             builder.prepare_embedding_cache()
+            _apply_active_model_identity(defaults, builder)
             cached_count = builder.embedding_cache.embedding_count()
         else:
             cached_count = 0
