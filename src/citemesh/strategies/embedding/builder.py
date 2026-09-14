@@ -15,6 +15,7 @@ import logging
 import re
 from collections.abc import Iterable, Sequence
 from contextlib import nullcontext
+from dataclasses import replace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -938,9 +939,8 @@ class EmbeddingGraphBuilder(
             )
 
         if resolved_seed_paper:
-            # Found via S2 API
-            resolved_seed_paper.is_seed = True
-            return resolved_seed_paper
+            # Seed role belongs to this build, including caller-provided metadata.
+            return replace(resolved_seed_paper, is_seed=True)
 
         # Treat as text query
         logger.info(f"Using '{seed_id}' as text query")

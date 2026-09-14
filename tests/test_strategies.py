@@ -196,6 +196,88 @@ def test_citation_and_recommendation_should_create_edge_thresholds() -> None:
 
 
 @pytest.mark.parametrize(
+    "builder_type",
+    [
+        CitationGraphBuilder,
+        RecommendationGraphBuilder,
+        EmbeddingGraphBuilder,
+        HybridGraphBuilder,
+    ],
+)
+def test_repeated_collection_preserves_client_owned_seed_role(
+    builder_type: type[GraphBuilderStrategy], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reusing a seed's metadata as a later candidate must retain that candidate.
+
+    :param type[GraphBuilderStrategy] builder_type: Public builder constructor.
+    :param pytest.MonkeyPatch monkeypatch: Offline semantic inference stubs.
+    :return None: Both collections have exactly one seed and preserve input roles.
+    """
+    first = _paper("first")
+    second = _paper("second")
+    client = MagicMock()
+    client.get_paper.side_effect = [first, second]
+    client.get_paper_references.return_value = [first]
+    client.get_paper_citations.return_value = []
+    client.get_recommended_papers.return_value = [first]
+    client.get_reference_ids.return_value = []
+    builder = builder_type(max_papers=2, client=client)
+    if isinstance(builder, HybridGraphBuilder):
+        monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
+        monkeypatch.setattr(
+            builder,
+            "_rank_candidates",
+            lambda _seed, candidates, _sources: list(candidates),
+        )
+    elif isinstance(builder, EmbeddingGraphBuilder):
+        monkeypatch.setattr(builder, "_load_model", lambda: None)
+        monkeypatch.setattr(
+            builder,
+            "_encode_texts",
+            lambda *_args, **_kwargs: np.asarray([[1.0, 0.0]], dtype=np.float32),
+        )
+        monkeypatch.setattr(
+            builder,
+            "embed_papers",
+            lambda papers: {
+                paper_id: np.asarray([1.0, 0.0], dtype=np.float32)
+                for paper_id in papers
+            },
+        )
+
+    first_collection = builder.collect_papers("first")
+    second_collection = builder.collect_papers("second")
+
+    assert first.is_seed is False
+    assert second.is_seed is False
+    assert first_collection["first"] is not first
+    assert first_collection["first"].is_seed is True
+    assert set(second_collection) == {"first", "second"}
+    assert [p.paper_id for p in second_collection.values() if p.is_seed] == ["second"]
+
+
+@pytest.mark.parametrize("provided_seed", [False, True])
+def test_embedding_seed_resolution_preserves_input_role(provided_seed: bool) -> None:
+    """Prefetched and client-returned seeds are bound to the build by copying.
+
+    :param bool provided_seed: Whether the caller supplies the metadata directly.
+    :return None: Seed resolution leaves the supplied metadata reusable.
+    """
+    paper = _paper("seed")
+    client = MagicMock()
+    client.get_paper.return_value = paper
+    builder = EmbeddingGraphBuilder(client=client)
+
+    resolved = builder._resolve_seed_paper("seed", paper if provided_seed else None)
+
+    assert resolved is not paper
+    assert resolved.is_seed is True
+    assert paper.is_seed is False
+    if provided_seed:
+        client.get_paper.assert_not_called()
+
+
+@pytest.mark.parametrize(
     "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
 )
 @pytest.mark.parametrize("references", [[], ["unshared"]])

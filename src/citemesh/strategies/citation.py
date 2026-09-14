@@ -8,6 +8,7 @@ bibliographic coupling (shared references), and topical similarity.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import networkx as nx
@@ -298,7 +299,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 "know this identifier; check the DOI/arXiv/S2 ID)."
             )
 
-        seed.is_seed = True
+        # Seed role belongs to this build, not the client-owned metadata record.
+        seed = replace(seed, is_seed=True)
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
         register_aliases(self._identity_aliases, seed.paper_id, seed)
