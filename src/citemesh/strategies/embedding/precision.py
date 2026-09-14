@@ -18,7 +18,7 @@ from typing import (
 
 import numpy as np
 
-from citemesh.core.text_batching import l2_normalize_embeddings
+from citemesh.core.text_batching import l2_normalize_embeddings, warn_on_truncated_count
 
 from . import deps
 
@@ -240,13 +240,8 @@ class _PrecisionEncodeProxy:
 
         self._call_with_precision(run_batches)
         if truncated_count:
-            logger.warning(
-                "Embedding encoder will truncate %d of %d inputs to its %d-token "
-                "window (including prompts and special tokens); embeddings will "
-                "represent only part of those inputs.",
-                truncated_count,
-                len(texts),
-                model.max_seq_length,
+            warn_on_truncated_count(
+                logger, truncated_count, len(texts), model.max_seq_length
             )
 
         embeddings = np.asarray(

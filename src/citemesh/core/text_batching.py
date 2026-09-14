@@ -35,13 +35,29 @@ def warn_on_truncated_inputs(model: Any, texts: Sequence[str]) -> None:
         verbose=False,
     )["length"]
     truncated_count = sum(length > max_length for length in lengths)
+    warn_on_truncated_count(
+        logging.getLogger(__name__), truncated_count, len(texts), max_length
+    )
+
+
+def warn_on_truncated_count(
+    logger: logging.Logger, truncated_count: int, total: int, max_length: int
+) -> None:
+    """Report truncation using counts from the caller's tokenization pass.
+
+    :param logging.Logger logger: Logger identifying the encoding path.
+    :param int truncated_count: Number of inputs exceeding the token window.
+    :param int total: Total number of inputs.
+    :param int max_length: Encoder token window, including prompts and special tokens.
+    :return None: Logs only when at least one input is truncated.
+    """
     if truncated_count:
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "Embedding encoder will truncate %d of %d inputs to its %d-token "
             "window (including prompts and special tokens); embeddings will "
             "represent only part of those inputs.",
             truncated_count,
-            len(texts),
+            total,
             max_length,
         )
 

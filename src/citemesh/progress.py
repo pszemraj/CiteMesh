@@ -52,13 +52,12 @@ def _resolve_console() -> Console:
     return Console(stderr=True)
 
 
-def _columns(unit: str) -> Sequence[ProgressColumn]:
+def _columns() -> Sequence[ProgressColumn]:
     """Build the shared column layout for a progress display.
 
     ``unit`` is passed as a task field rather than interpolated into a column
     template so a caller-supplied label can never be parsed as console markup.
 
-    :param str unit: Noun describing the counted items.
     :return Sequence[ProgressColumn]: Ordered progress columns.
     """
     return (
@@ -149,7 +148,7 @@ def progress_task(
     """
     show = stderr_isatty() if enabled is None else bool(enabled)
     progress = Progress(
-        *_columns(unit),
+        *_columns(),
         console=_resolve_console(),
         disable=not show,
         expand=True,
