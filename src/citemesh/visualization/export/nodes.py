@@ -12,6 +12,7 @@ import networkx as nx
 from citemesh.core.values import coerce_float
 
 from ..node_data import effective_node_metadata as _serialize_node
+from ..node_data import validate_canonical_node_ids
 from ..ordering import ordered_edges_with_data, ordered_nodes
 from ..render import (
     compute_layout,
@@ -108,21 +109,7 @@ def _sorted_nodes(graph: nx.Graph) -> list[tuple[Hashable, dict[str, Any]]]:
         with another ID after string conversion.
     """
     nodes = [(node_id, graph.nodes[node_id]) for node_id in ordered_nodes(graph)]
-    serialized_owners: dict[str, Hashable] = {}
-    for node_id, _ in nodes:
-        identifier = str(node_id)
-        if not identifier or identifier != identifier.strip():
-            raise ValueError(
-                f"Cannot export non-canonical node ID {node_id!r}: "
-                "IDs must be non-empty and have no surrounding whitespace."
-            )
-        if identifier in serialized_owners:
-            existing = serialized_owners[identifier]
-            raise ValueError(
-                f"Cannot export node IDs {existing!r} and {node_id!r}: "
-                f"both serialize as {identifier!r}."
-            )
-        serialized_owners[identifier] = node_id
+    validate_canonical_node_ids(node_id for node_id, _ in nodes)
     return nodes
 
 

@@ -24,7 +24,7 @@ from citemesh.core import VIZ_CONFIG
 from citemesh.core.values import coerce_citation_count, coerce_float
 from citemesh.data.cache import atomic_output_path
 
-from .node_data import effective_node_metadata
+from .node_data import effective_node_metadata, validate_canonical_node_ids
 from .ordering import (
     canonicalize_graph_for_layout,
     ordered_edges_with_data,
@@ -952,8 +952,10 @@ def visualize_graph(
         reuse.
     :param Optional[int] layout_seed: Optional seed used when computing layout internally.
     :return None: Writes output image to the given path.
-    :raises ValueError: If an edge weight is null or non-finite.
+    :raises ValueError: If a node ID is non-canonical or an edge weight is null
+        or non-finite.
     """
+    validate_canonical_node_ids(ordered_nodes(graph))
     for left, right, attrs in ordered_edges_with_data(graph):
         weight = attrs.get("weight", 0.0)
         if weight is None or not math.isfinite(float(weight)):

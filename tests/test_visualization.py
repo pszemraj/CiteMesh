@@ -591,6 +591,28 @@ def test_json_payload_without_layout_passes_dashboard_import_contract() -> None:
         assert geometry_key in dashboard_meta
 
 
+def test_graph_payload_rejects_absent_seed_before_replacing_json(
+    tmp_path: Path,
+) -> None:
+    """Schema-stamped graph payloads must identify an included seed node.
+
+    :param Path tmp_path: Isolated output directory.
+    :return None: Checks direct payload validation and atomic JSON preservation.
+    """
+    graph = nx.Graph()
+    graph.add_node("other", title="Other paper")
+    exporter = GraphExporter(graph, "missing", layout={"other": (0.0, 0.0)})
+
+    with pytest.raises(ValueError, match="seed node 'missing'.*not present"):
+        exporter.graph_payload()
+
+    json_path = tmp_path / "existing.json"
+    json_path.write_text("previous valid output", encoding="utf-8")
+    with pytest.raises(ValueError, match="seed node 'missing'.*not present"):
+        exporter.to_json(json_path)
+    assert json_path.read_text(encoding="utf-8") == "previous valid output"
+
+
 def test_exporter_interactive_html_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -631,6 +653,7 @@ def test_exporter_interactive_html_contracts(
     seed_paper = graph.nodes[seed_id]["paper"]
     assert isinstance(seed_paper, Paper)
     seed_paper.authors = [Author(name="   ")]
+    seed_paper.year = None
 
     out_path = tmp_path / "graph.html"
     out_path.write_text("previous", encoding="utf-8")
@@ -647,7 +670,7 @@ def test_exporter_interactive_html_contracts(
     assert len(instance.edges) == 1
     assert [node_id for node_id, _ in instance.nodes] == ["related", "seed"]
     node_payloads = dict(instance.nodes)
-    assert "Unknown et al., 2020" in node_payloads[seed_id]["title"]
+    assert "Unknown et al., n.d." in node_payloads[seed_id]["title"]
 
 
 def test_interactive_html_is_self_contained(
@@ -878,6 +901,44 @@ def test_output_path_uses_paper_title_without_mutating_graph(tmp_path: Path) -> 
     assert graph.nodes["seed"]["title"] == "Stale Scalar Title"
 
 
+def test_nullable_scalar_collections_export_as_empty_lists(tmp_path: Path) -> None:
+    """Missing scalar author/category collections should not break any data writer.
+
+    :param Path tmp_path: Isolated artifact directory.
+    :return None: Checks canonical payload values and representative writer outputs.
+    """
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="Seed",
+        year=None,
+        authors=None,
+        categories=None,
+        is_seed=True,
+    )
+    exporter = GraphExporter(graph, "seed", layout={"seed": (0.0, 0.0)})
+
+    payload = exporter.graph_payload()
+    assert payload["nodes"][0]["authors"] == []
+    assert payload["nodes"][0]["categories"] == []
+
+    json_path = tmp_path / "nullable.json"
+    csv_path = tmp_path / "nullable.csv"
+    bibtex_path = tmp_path / "nullable.bib"
+    graphml_path = tmp_path / "nullable.graphml"
+    exporter.to_json(json_path)
+    exporter.to_csv(csv_path)
+    exporter.to_bibtex(bibtex_path)
+    exporter.to_graphml(graphml_path)
+
+    with csv_path.open(newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["authors"] == ""
+    assert row["categories"] == ""
+    assert "@article" in bibtex_path.read_text(encoding="utf-8")
+    assert ET.parse(graphml_path) is not None
+
+
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
     """GraphML should round-trip nullable metadata and XML-invalid text."""
     graph, seed_id = _build_graph()
@@ -965,13 +1026,15 @@ def test_json_export_rejects_nonfinite_payload_without_replacing_output(
 
 
 @pytest.mark.parametrize("node_id", ["", " ", " seed", "seed\t"])
+@pytest.mark.parametrize("method", ["to_json", "png"])
 def test_export_rejects_whitespace_ids_before_writing(
-    tmp_path: Path, node_id: str
+    tmp_path: Path, node_id: str, method: str
 ) -> None:
     """Exports must not emit IDs that their own dashboard importer rejects.
 
     :param Path tmp_path: Isolated artifact directory.
     :param str node_id: Empty or non-canonical graph node identifier.
+    :param str method: Structured or static export entry point.
     :return None: Checks a clear error preserves the prior artifact.
     """
     graph = nx.Graph()
@@ -980,7 +1043,10 @@ def test_export_rejects_whitespace_ids_before_writing(
     path = tmp_path / "existing.json"
     path.write_text("previous valid output")
     with pytest.raises(ValueError, match="non-canonical node ID"):
-        exporter.to_json(path)
+        if method == "png":
+            visualize_graph(graph, node_id, path, layout={node_id: (0.0, 0.0)})
+        else:
+            exporter.to_json(path)
     assert path.read_text() == "previous valid output"
 
 
@@ -995,6 +1061,7 @@ def test_export_rejects_whitespace_ids_before_writing(
         "to_graphml",
         "to_plotly_html",
         "to_interactive_html",
+        "png",
     ],
 )
 def test_exports_reject_node_ids_that_collide_after_stringification(
@@ -1032,6 +1099,13 @@ def test_exports_reject_node_ids_that_collide_after_stringification(
     with pytest.raises(ValueError, match="both serialize as '1'"):
         if method == "graph_payload":
             exporter.graph_payload()
+        elif method == "png":
+            visualize_graph(
+                graph,
+                "1",
+                path,
+                layout={1: (0.0, 0.0), "1": (1.0, 0.0)},
+            )
         else:
             getattr(exporter, method)(path)
 

@@ -165,10 +165,18 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         which export formats were requested or in which order exporters ran.
 
         :return Dict[str, Any]: Portable CiteMesh graph payload with dashboard data.
+        :raises ValueError: If the seed identifier is not present among graph nodes.
         """
+        sorted_nodes = _sorted_nodes(self.graph)
+        serialized_node_ids = {str(node_id) for node_id, _ in sorted_nodes}
+        if str(self.seed_id) not in serialized_node_ids:
+            raise ValueError(
+                f"Cannot export graph payload: seed node {self.seed_id!r} "
+                "is not present in the graph."
+            )
         enriched = self._enriched_nodes()
         sorted_edges = _sorted_edges(self.graph)
-        dashboard_node_ids = [node_id for node_id, _ in _sorted_nodes(self.graph)]
+        dashboard_node_ids = [node_id for node_id, _ in sorted_nodes]
         dashboard_meta = self._dashboard_meta(
             theme_obj=self.theme,
             node_ids=dashboard_node_ids,
@@ -406,8 +414,10 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
             if paper:
                 tooltip_lines.append(f"<b>{html.escape(str(serialized['title']))}</b>")
                 first_author = paper.first_author_surname
+                year = coerce_publication_year(serialized.get("year"))
+                year_label = str(year) if year > 0 else "n.d."
                 tooltip_lines.append(
-                    f"{html.escape(first_author)} et al., {serialized['year']}"
+                    f"{html.escape(first_author)} et al., {year_label}"
                 )
                 tooltip_lines.append(f"Citations: {serialized['citation_count']}")
                 categories = serialized.get("categories", [])
