@@ -55,7 +55,7 @@ A malformed, unsupported, or inaccessible existing package stops the build befor
 
 ## Graph JSON (`<strategy>.json`)
 
-The graph payload for downstream graph and data work:
+The graph payload requires its `seed_id` to identify a node present in the graph. It contains:
 
 - `kind` (`"citemesh-graph"`), `schema_version` (`1`), `seed_id`
 - `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` when the build queried Semantic Scholar sources
@@ -131,7 +131,7 @@ The run contract for reproducibility and audit trails: `schema_version`, `build`
 
 When a node carries a `Paper` under its `paper` attribute, exports, PNG rendering, and artifact filenames use that record for bibliographic metadata, including empty values that clear stale mirrored fields. A node-level `is_seed` overrides `Paper.is_seed`; nodes without a `Paper` use their scalar attributes.
 
-Node IDs must be non-empty, have no surrounding whitespace, and remain unique after conversion to strings. Integral numeric years (including `2017.0`) are accepted; fractional or non-finite years are missing. Null or non-finite edge weights raise before exports replace existing files.
+Node IDs must be non-empty, have no surrounding whitespace, and remain unique after conversion to strings. Enriched citation counts use the shared non-negative integer normalizer: booleans, nulls, nonnumeric text, and NaN become zero. Integral numeric years (including `2017.0`) are accepted; fractional or non-finite years are missing. Null or non-finite edge weights raise before exports replace existing files.
 
 ## Determinism notes
 

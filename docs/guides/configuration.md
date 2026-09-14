@@ -16,7 +16,7 @@ citemesh config path
 
 ## Precedence
 
-An explicit CLI flag beats the environment, which beats `config.toml`, which beats the built-in default. `S2_API_KEY` is the only variable in play; its presence wins even when empty, and an empty value selects anonymous access.
+Build defaults resolve as explicit CLI flag, then `config.toml`, then the built-in value. Credentials use the separate [API-key precedence](#api-key).
 
 Configured values behave like *your* built-in defaults rather than like flags you typed:
 
@@ -41,7 +41,13 @@ Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size`
 
 ## API key
 
-`[api]` holds one key, `s2_api_key`, used only when `S2_API_KEY` is absent. `config list` masks it; `config get` prints it in full. It goes straight to the API client, never into subprocess environments.
+For the CLI, `S2_API_KEY` takes precedence over `[api].s2_api_key`, including an explicitly empty environment value, which selects anonymous access. `config list` masks the saved key; `config get api.s2_api_key` prints it in full. The CLI passes the key directly to its API client without adding it to subprocess environments.
+
+```bash
+citemesh config set api.s2_api_key YOUR_KEY
+```
+
+Request a key through [Semantic Scholar](https://www.semanticscholar.org/product/api). [Direct Python builders](python-api.md#before-you-build-on-this) do not apply saved CLI configuration.
 
 ```toml
 [defaults]

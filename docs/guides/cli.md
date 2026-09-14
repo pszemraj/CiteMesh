@@ -40,9 +40,15 @@ citemesh build "<paper-id-from-search>" --strategy recommendation
 citemesh search "long-context attention" --semantic-source arxiv-corpus
 ```
 
-`--mode local` searches the vectors already in your cache — the query encoded in the model's query prompt space and ranked against every cached retrieval-document vector, offline once the model is downloaded, returning cosine scores and IDs ready for `build`. Every embedding or hybrid build grows that library. `--mode s2` is Semantic Scholar keyword search, convenient from a cold start, but it shares the anonymous rate-limit pool unless `S2_API_KEY` or `api.s2_api_key` is set, and reports a 429 honestly rather than as "no results". CiteMesh paginates S2 relevance searches above 100 results; S2 exposes at most 1,000 relevance-ranked results per query, while local search has no S2 result ceiling.
+Search modes:
 
-The default `auto` picks local when the cache has vectors and S2 otherwise, logging which and why. `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, and `--calibration-sample-size` imply local mode and are rejected alongside `--mode s2`; local against an empty cache is an error naming whatever asked for it, reported with the model and semantic source whose namespace came up empty. Otherwise local search reads the namespace a flagless build writes to, honoring `config.toml`, never the graph-similarity cache — so match any non-default build settings here or in config ([Caching & Data](caching.md)). An arXiv-corpus build lives in its own namespace: reach it with `--semantic-source arxiv-corpus`, adding `--dataset-source` when the build hydrated a non-default dataset — that flag implies `arxiv-corpus` by itself, exactly as it does on `build`. An int8 cache with a non-default calibration size needs both `--storage-precision int8` and the matching `--calibration-sample-size`. These values can also be saved under `[defaults]`.
+- `local` encodes the query and ranks it against cached retrieval-document vectors, returning cosine scores and full paper IDs. It fetches no paper metadata and fails if the selected cache is empty.
+- `s2` performs Semantic Scholar keyword search and returns citation counts. Requests above 100 results are paginated, up to the service's 1,000-result relevance limit. Local search accepts any positive limit.
+- `auto` tries local search first and falls back to S2 when the cache is empty or unavailable, logging the reason.
+
+Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
+
+Match the [namespace used by the build](caching.md#embedding-namespaces). `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; the command is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#appendix-b-troubleshooting) apply whenever search uses S2.
 
 ### View a saved dashboard
 
@@ -60,7 +66,6 @@ citemesh view out/report.dashboard.html --browser google-chrome
 ```bash
 citemesh config set defaults.semantic_source arxiv-corpus
 citemesh cache scan
-citemesh cache clear [--yes|-y] [--reason "<text>"]
 ```
 
 See [User Configuration](configuration.md) for saved defaults and [cache maintenance](caching.md#inspecting-and-clearing) for scan and reset behavior.
@@ -93,7 +98,7 @@ Build options are strategy-scoped: an explicit flag unsupported by the selected 
 | `--log-width` | Console wrap width in columns; `0` means terminal width on a TTY, a stable fallback when redirected | `0` |
 | `--log-file` | Plain-text log file path, overwriting an existing file | disabled |
 
-The logging flags work on `build`, `search`, `cache`, and `config`, subcommands included. Pyvis `html` exports run vis.js physics and ignore the precomputed `--seed` layout.
+The logging flags work on every command, including nested `cache` and `config` subcommands. Pyvis `html` exports run vis.js physics and ignore the precomputed `--seed` layout.
 
 ### Cross-strategy behavior
 
@@ -121,7 +126,7 @@ The logging flags work on `build`, `search`, `cache`, and `config`, subcommands 
 
 - `--semantic-source {candidates,arxiv-corpus}`: default `candidates`, an S2-derived pool with no corpus download. With the source omitted, the corpus-only flags below imply `arxiv-corpus` and `--candidate-pool-size` implies `candidates`; mixing the two families, or naming a source that conflicts with a mode-only flag, is rejected.
 - `--candidate-pool-size`: S2 fetch budget in candidates mode (default `400`); allocation is described under [candidate acquisition](how-it-works.md#2-candidate-acquisition).
-- `--dataset-source`: HuggingFace arXiv metadata repository (default `librarian-bots/arxiv-metadata-snapshot`). It must supply `id` (or `paper_id` / `paperId`), `title`, and `abstract` (or `summary`); `authors`, `categories`, `year`, `doi`, and `venue` / `journal_ref` / `journal` are used when present.
+- `--dataset-source`: Hugging Face metadata repository (default `librarian-bots/arxiv-metadata-snapshot`), using the [supported corpus fields](caching.md#corpus-records).
 - `--dataset-split`: split within that source (default `train`). Non-streaming slices such as `train[:5%]` bound the rows exposed to CiteMesh after dataset preparation.
 - `--corpus-size`: cap the selected corpus at N papers; omitted means the full split. [Hydration and resume](caching.md#corpus-hydration-and-resume) explain selection order, scanning, and later growth.
 - `--all-corpus`: use the full selected split, overriding a configured cap; rejects an explicit `--corpus-size`.
@@ -143,7 +148,7 @@ The prefilter, rescore-multiplier, and calibration flags are int8-only: passing 
 ### Hybrid strategy
 
 - Inherits the citation collection flags and every embedding control except `--top-k`.
-- `--max-semantic`: non-seed semantic neighbors added after reranking, from `0` through `max-papers - 1`, defaulting to `min(20, max-papers - 1)`. At an effective `0` — explicit, or implied by `--max-papers 1` — semantic enrichment is off and embedding-only flags are rejected.
+- `--max-semantic`: semantic-only non-seed additions after reranking, from `0` through `max-papers - 1`, defaulting to `min(20, max-papers - 1)`. At an effective `0` — explicit, or implied by `--max-papers 1` — semantic enrichment is off and embedding-only flags are rejected.
 
 ### Export formats
 
@@ -169,6 +174,6 @@ Semantic Scholar calls retry with exponential full jitter: up to 30 attempts per
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Partial outage**: a build continues while at least one requested source completes or returns a valid empty result, skipping an exhausted capability for the rest of that collection and starting fresh on the next. Reference-ID and full-reference lookups share a `references` budget; citations, recommendations, search, and metadata each have their own. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a seed-only graph.
 - **Slow first embedding run**: the cold path downloads the checkpoint and encodes every candidate or corpus paper; later runs read the cache.
-- **A full-split run still mentions `50000`**: it is replacing an older capped namespace, not capping the new one; check the config log line for `split=...` and `corpus=all`.
+- **A full-split run mentions an older corpus cap**: it extends the existing namespace; check the effective configuration for `split=...` and `corpus=all`.
 - **Missing exports**: unknown `--export` values are rejected.
 - **Rate limits**: configure `S2_API_KEY` ([Environment Variables](../reference/environment.md)). Retry detail appears at `--log-level debug`.

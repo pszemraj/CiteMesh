@@ -11,7 +11,7 @@ A build resolves its seed, collects candidates, scores papers and edges, compute
   8. Export ← 7. Layout ← 6. Edge scoring ← 5. Ranking & selection ◄──┘
 ```
 
-Stages 3 and 4 run only for `--strategy embedding` and `--strategy hybrid`; the other two strategies never load the model and score edges from TF-IDF instead of embeddings.
+The embedding and vector-cache stages run for `--strategy embedding` and for hybrid with semantic enrichment enabled. Recommendation, citation, and hybrid with enrichment disabled use TF-IDF scoring. All strategies can reuse paper metadata.
 
 ## 1. Seed resolution
 
@@ -19,17 +19,19 @@ Stages 3 and 4 run only for `--strategy embedding` and `--strategy hybrid`; the 
 
 The embedding strategy is the only one with a free-text path. A genuine HTTP 404 means S2 has no such paper, so the builder synthesizes a seed whose ID is `query:` plus the first 8 hex of `sha1(query_text)`. An *unavailable* endpoint (retries exhausted) raises instead — an outage is never silently reinterpreted as a search.
 
-**Read the code:** `src/citemesh/core/paper_ids.py`.
+Implementation: [paper_ids.py](../../src/citemesh/core/paper_ids.py).
 
 ## 2. Candidate acquisition
 
-Every strategy fetches through `strategies/candidates.py`, so identity reconciliation and outage policy are identical across builders; the budgets are not. For `--strategy embedding` in candidates mode the pool (`--candidate-pool-size`, default `400`) splits roughly 1:2:1: recommendations `100`, references `100`, citations `200`. Recommendations and references each receive at most 100 candidates under this allocation policy; the remainder goes to citations, where newer follow-up work lives. Hybrid never reads that pool — it fetches `12` references, `45` citations, and up to `44` recommendations, so `--candidate-pool-size` binds there only if you set it below `44`. A free-text `query:` seed instead runs one keyword search capped at 20 hits, within the total source budget, and applies the recommendation budget to the top hit only while candidate slots remain. Bootstrap search results count toward the total; a one-paper pool requests one search hit and skips recommendation expansion.
+S2 candidate acquisition shares availability and identity handling in `strategies/candidates.py`. An embedding candidate pool allocates roughly a quarter to recommendations and a quarter to references, each capped at 100; citations receive the remainder. Hybrid's citation branch uses its own fetch budgets, while its semantic branch adds recommendations up to the smallest of 100, `max(max_semantic, min(max_papers - 1, 3 * max_semantic))`, and `--candidate-pool-size`.
 
-S2, arXiv, and Crossref disagree about identity constantly, and S2 sometimes issues two records for one work, so `IdentityRegistry` collapses duplicates as they arrive across `arxiv`, `doi`, `s2`, and a weak title/year/author key. Two records conflict when a namespace on *both* sides has disjoint values — except when the sole disagreement is `s2` and the DOI or arXiv ID agree, which is the duplicate-record case. On a merge the seed wins.
+A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
+
+`IdentityRegistry` reconciles duplicate records across `arxiv`, `doi`, `s2`, and a weak title/year/author key. Two records conflict when a namespace on *both* sides has disjoint values — except when the sole disagreement is `s2` and the DOI or arXiv ID agree, which is the duplicate-record case. On a merge the seed wins.
 
 Acquisition follows the [source-failure and retry policy](cli.md#appendix-b-troubleshooting), recording availability in exported metadata.
 
-**Read the code:** `src/citemesh/strategies/candidates.py`.
+Implementation: [candidates.py](../../src/citemesh/strategies/candidates.py).
 
 ## 3. Embedding
 
@@ -37,13 +39,13 @@ Prompt-conditioned embeddings answer different questions in different task space
 
 The [runtime policy](../reference/embedding-runtime.md) defines the model, task prompts, dimensions, precision, device selection, and compilation.
 
-**Read the code:** `src/citemesh/strategies/embedding/precision.py` and `model_runtime.py`.
+Implementation: [precision.py](../../src/citemesh/strategies/embedding/precision.py) and [model_runtime.py](../../src/citemesh/strategies/embedding/model_runtime.py).
 
 ## 4. The cache
 
 Encoding results are persisted in separate [embedding namespaces](caching.md#embedding-namespaces). A hit reuses the vector while updating bibliographic metadata; a new or changed input is encoded. [Corpus hydration](caching.md#corpus-hydration-and-resume) fills and extends the retrieval cache before ranking.
 
-**Read the code:** `src/citemesh/data/embedding_cache/` and `src/citemesh/strategies/embedding/fingerprint.py`.
+Implementation: [embedding_cache](../../src/citemesh/data/embedding_cache/) and [fingerprint.py](../../src/citemesh/strategies/embedding/fingerprint.py).
 
 ## 5. Ranking and selection
 
@@ -61,7 +63,7 @@ where `semantic = 0.5 · (cosine + 1)` maps cosine into `[0, 1]` and `citation =
 
 Recommendation and citation instead build a TF-IDF index over the selected papers (unigrams and bigrams, `max_features=5000`, sublinear tf) and use its cosine as the topical component alongside temporal, citation-impact, and bibliographic-coupling signals.
 
-**Read the code:** `src/citemesh/strategies/hybrid.py` (`_rank_candidates`, `_seed_relevance_score`).
+Implementation: [hybrid.py](../../src/citemesh/strategies/hybrid.py), `_rank_candidates` and `_seed_relevance_score`.
 
 ## 6. Edge scoring
 
@@ -78,23 +80,23 @@ author_factor = 1.5 if the papers share an author, else 1.0
 
 The weights stop at 0.9 to leave headroom for the multiplier; temporal similarity decays linearly to five years (`1.0 - (Δyears / 5) × 0.8`), then flattens at `0.1`. Note the ordering: dates, categories, and shared authorship only *modify* a score that already cleared the gate — they never create an edge.
 
-Hybrid has provenance the embedding strategy lacks, so it gates on a disjunction — cosine over the threshold **or** non-zero bibliographic coupling — letting papers that share a reference list connect even when the model does not see them as similar. Weights adapt over `(embedding, temporal, citation, bibliographic)` — `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed — then asymmetric floors: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
+Hybrid has provenance the embedding strategy lacks, so it gates on a disjunction — cosine at or above the threshold **or** non-zero bibliographic coupling — letting papers that share a reference list connect even when the model does not see them as similar. Weights adapt over `(embedding, temporal, citation, bibliographic)` — `(0.6, 0.2, 0.1, 0.1)` semantic-only, `(0.3, 0.3, 0.2, 0.2)` citation-derived, `(0.4, 0.3, 0.2, 0.1)` mixed — then asymmetric floors: below `0.2` rejected, a seed-incident pair needs `> 0.4`, everything else `> 0.5`. The seed gets the lower bar because an isolated seed is useless, while a weak peripheral edge is noise.
 
 Degree is capped last: `3` for recommendation and citation, `--top-k` for embedding, `5` for hybrid — a 40-paper citation graph holds at most 60 edges. `select_capped_undirected_edges` sorts seed-incident edges ahead of everything else regardless of weight, so the seed's strongest neighbors are locked in before other nodes compete; an edge survives only when *both* endpoints are under the cap. Capping only removes edges.
 
-**Read the code:** `src/citemesh/strategies/base.py` (`select_capped_undirected_edges`) and `src/citemesh/core/config.py`.
+Implementation: [base.py](../../src/citemesh/strategies/base.py), `select_capped_undirected_edges`, and [config.py](../../src/citemesh/core/config.py).
 
 ## 7. Layout and rendering
 
 One layout is computed in Python and shared by every layout-based export, so the PNG, Plotly page, dashboard, and JSON geometry all agree.
 
-`compute_layout` rebuilds the graph in sorted insertion order, detects communities with weighted greedy modularity (Clauset-Newman-Moore, not Louvain), and converts similarity to the path lengths Kamada-Kawai wants: `1 / (1e-6 + max(weight, 0))`, scaled `1.05` within a community and `1.42` across one — that asymmetry is the anti-hairball term. The layout is `networkx.kamada_kawai_layout` at `scale=0.9`: stress majorization, no RNG. `nx.spring_layout` runs **only if** it raises, the one place `--spring-iterations` is read; on the normal path that flag does nothing.
+`compute_layout` rebuilds the graph in sorted insertion order, detects communities with weighted greedy modularity (Clauset-Newman-Moore, not Louvain), and converts similarity to the path lengths Kamada-Kawai wants: `1 / (1e-6 + max(weight, 0))`, scaled `1.05` within a community and `1.42` across one — that asymmetry is the anti-hairball term. The layout is `networkx.kamada_kawai_layout` at `scale=0.9`, minimizing path-length error without a random seed. `nx.spring_layout` runs **only if** it raises, the one place `--spring-iterations` is read; on the normal path that flag does nothing.
 
 Communities are then spread by anchors from a spring layout over a community meta-graph, every node gets a σ `0.02` Gaussian jitter, disconnected components are shelf-packed, a taller-than-wide result is rotated 90°, and the whole is centered and uniformly scaled. The static PNG viewport *expands* whichever axis is too tight rather than cropping.
 
-Three stages consume randomness, each with a default so an unseeded run still reproduces: the community-anchor layout (`17`), the perturbation (`0`), and the spring fallback (`42`). `--seed` overrides all three and does change the picture, since the first two run on every graph. The Pyvis `html` export ships no coordinates and settles under browser physics, so `--seed` does not reach it.
+Three stages consume randomness, each with a default so an unseeded run still reproduces: the community-anchor layout (`17`), the perturbation (`0`), and the spring fallback (`42`). `--seed` overrides all three and does change the picture, when the relevant stages run. A single-community graph needs no community-anchor layout. The Pyvis `html` export ships no coordinates and settles under browser physics, so `--seed` does not reach it.
 
-**Read the code:** `src/citemesh/visualization/render.py`; node and edge sizing live in `VisualizationConfig`.
+Implementation: [render.py](../../src/citemesh/visualization/render.py); node and edge sizing use `VisualizationConfig`.
 
 ## 8. Exports and the dashboard collection
 
@@ -102,4 +104,4 @@ Exports enrich nodes with external links, provenance, seed relation, and persona
 
 The dashboard embeds graph data and rebuilds its figure in the browser, so selection, filtering, and imports work offline. The [Python/JavaScript boundary](../internals/architecture.md#python--javascript-duplication) explains how both implementations are tested. [Output Artifacts](../reference/output-artifacts.md) describes formats, schemas, naming, and collection updates.
 
-**Read the code:** `src/citemesh/visualization/export/` and `src/citemesh/visualization/dashboard/`.
+Implementation: [export](../../src/citemesh/visualization/export/) and [dashboard](../../src/citemesh/visualization/dashboard/).

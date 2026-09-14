@@ -19,8 +19,8 @@ With no override, Linux and macOS use `~/.cache/citemesh`; Windows uses the firs
 | Variable | Platform | Effect |
 | --- | --- | --- |
 | `XDG_CACHE_HOME` | Linux/macOS | Base for default cache root (`$XDG_CACHE_HOME/citemesh`). |
-| `LOCALAPPDATA` | Windows | Primary base for default cache root (`%LOCALAPPDATA%\\CiteMesh`). |
-| `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset (`%APPDATA%\\CiteMesh`). With both unset, the root falls back to `%USERPROFILE%\\AppData\\Local\\CiteMesh`. |
+| `LOCALAPPDATA` | Windows | Primary base for default cache root (`%LOCALAPPDATA%\CiteMesh`). |
+| `APPDATA` | Windows | Fallback base when `LOCALAPPDATA` is unset (`%APPDATA%\CiteMesh`). With both unset, the root falls back to `%USERPROFILE%\AppData\Local\CiteMesh`. |
 
 Cache-root behavior is covered in [Caching & Data](../guides/caching.md). An explicit `CITEMESH_CACHE_DIR` or `XDG_CACHE_HOME` suppresses the legacy macOS cache-location hint.
 
