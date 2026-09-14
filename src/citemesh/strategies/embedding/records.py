@@ -211,12 +211,16 @@ def _parse_venue(paper: dict[str, Any]) -> str:
     return ""
 
 
-def _extract_dataset_paper_metadata(paper: dict[str, Any], fallback_index: int) -> dict:
-    """Normalize a raw dataset record to embedding metadata fields.
+def _dataset_record_paper_id(paper: dict[str, Any], fallback_index: int) -> str:
+    """Resolve the cache identifier a raw dataset record hydrates under.
+
+    Split out so a caller that only needs to ask whether a source row is already
+    cached can answer it without normalizing the rest of the record, and cannot
+    drift from the identifier hydration would actually write.
 
     :param Dict[str, Any] paper: Raw dataset record.
     :param int fallback_index: Index used for synthetic IDs when missing.
-    :return Dict: Normalized metadata used by embedding selection.
+    :return str: Canonicalized paper identifier.
     """
     raw_paper_id = (
         paper.get("id")
@@ -224,7 +228,17 @@ def _extract_dataset_paper_metadata(paper: dict[str, Any], fallback_index: int) 
         or paper.get("paperId")
         or f"arxiv_{fallback_index}"
     )
-    paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
+    return _canonicalize_embedding_paper_id(raw_paper_id)
+
+
+def _extract_dataset_paper_metadata(paper: dict[str, Any], fallback_index: int) -> dict:
+    """Normalize a raw dataset record to embedding metadata fields.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :param int fallback_index: Index used for synthetic IDs when missing.
+    :return Dict: Normalized metadata used by embedding selection.
+    """
+    paper_id = _dataset_record_paper_id(paper, fallback_index)
     arxiv_id, doi = external_ids_from_canonical_paper_id(paper_id)
     source_doi = re.split(r"[\s,;]+", str(paper.get("doi") or "").strip())[0]
     canonical_source_doi = canonicalize_or_none(source_doi) if source_doi else None

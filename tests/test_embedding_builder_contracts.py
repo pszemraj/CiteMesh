@@ -5341,6 +5341,79 @@ def test_capped_cache_without_newer_upstream_papers_stops_rescanning(
     clear_cache_mock.assert_not_called()
 
 
+def test_under_cap_capped_cache_refills_when_the_max_key_does_not_move(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A corpus completed below its cap must keep filling it, not freeze there.
+
+    The newest chronology key only decides the question for a cache that is
+    actually at its cap. One completed while upstream held fewer rows has room
+    the key cannot see: the selection fills a shortfall from rows without
+    parseable arXiv IDs, so a newly published row that ranks below the newest
+    cached one still belongs in the corpus while leaving the maximum key
+    untouched. Memoizing on the key alone leaves the cache under its cap for
+    good. Once it is at the cap the key is the whole answer again, and that
+    cheap path is what keeps repeat builds from rescanning the source.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :return None: Asserts the refill, then the at-cap short-circuit.
+    """
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=3,
+        cached_corpus_size=3,
+        cached_ids=("2601.00001", "2601.00002"),
+    )
+    cache = builder.embedding_cache
+    records: list[dict[str, str]] = [
+        {"id": "2601.00001", "title": "First", "abstract": "A"},
+        {"id": "2601.00002", "title": "Second", "abstract": "A"},
+        {"id": "not-an-id", "title": "Unrankable", "abstract": "A"},
+    ]
+    upstream = {"rows": 3}
+    load_calls: list[int] = []
+
+    def load_dataset(*_args: Any, **_kwargs: Any) -> Iterator[dict[str, str]]:
+        """Serve the current split, recording each upstream scan.
+
+        :param Any _args: Dataset loader positional arguments.
+        :param Any _kwargs: Dataset loader keyword arguments.
+        :return Iterator[dict[str, str]]: Source records.
+        """
+        load_calls.append(len(records))
+        return iter(list(records))
+
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _: upstream["rows"]
+    )
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load_dataset),
+    )
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    filled_ids = {"arxiv:2601.00001", "arxiv:2601.00002", "not-an-id"}
+    assert cache.get_cached_paper_ids() == filled_ids
+    assert cache.get_hydration_rowcount_reconciliation() == (3, 3)
+    assert model.encode.call_count == 1
+    assert len(load_calls) == 1
+
+    # Now at the cap: another unrankable upstream row is scanned once, memoized,
+    # and never admitted, because the selection cannot have room for it.
+    records.append({"id": "also-not-an-id", "title": "Fourth", "abstract": "A"})
+    upstream["rows"] = 4
+
+    builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == filled_ids
+    assert cache.get_hydration_rowcount_reconciliation() == (4, 3)
+    assert model.encode.call_count == 1
+    assert len(load_calls) == 2
+    clear_cache_mock.assert_not_called()
+
+
 def test_reused_larger_capped_cache_still_admits_newer_upstream_papers(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

@@ -41,6 +41,7 @@ from .config import (
 from .records import (
     _arxiv_id_chronology_key,
     _CappedCorpusRecencyProbe,
+    _dataset_record_paper_id,
     _extract_dataset_paper_metadata,
     _HydrationSourceSliceResult,
     _newest_records_by_arxiv_id,
@@ -1700,7 +1701,9 @@ class _CorpusHydrationMixin:
         The upstream row count gates how often that is asked at all. An
         unchanged split is answered from the memoized marker without touching
         the source, exactly as the uncapped path memoizes a verified row-count
-        delta.
+        delta. Whether the watermark alone can answer the question once the
+        source is scanned depends on the cache being at its cap; see
+        :meth:`_capped_corpus_selection_is_cached`.
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param Optional[str] cached_dataset_source: Hydrated dataset source token.
@@ -1747,10 +1750,14 @@ class _CorpusHydrationMixin:
             source=source,
             corpus_size=refreshed_corpus_size,
         )
-        newest_upstream_key = probe.newest_key
-        if newest_upstream_key is None or newest_upstream_key <= watermark:
+        if self._capped_corpus_selection_is_cached(
+            probe=probe,
+            watermark=watermark,
+            cached_rows=cached_rows,
+            corpus_size=refreshed_corpus_size,
+        ):
             logger.info(
-                "Capped corpus for %s/%s is still the newest %d submissions "
+                "Capped corpus for %s/%s already holds the newest %d submissions "
                 "upstream (cache_rows=%d, upstream_rows=%d); memoizing this "
                 "state so the next build skips the source scan.",
                 source,
@@ -1818,6 +1825,52 @@ class _CorpusHydrationMixin:
         # newest-N list or an indexable dataset view; sizedness tells them apart.
         selection = dataset if hasattr(dataset, "__len__") else None
         return _CappedCorpusRecencyProbe(newest_key=newest_key, selection=selection)
+
+    def _capped_corpus_selection_is_cached(
+        self,
+        *,
+        probe: _CappedCorpusRecencyProbe,
+        watermark: int,
+        cached_rows: int,
+        corpus_size: int,
+    ) -> bool:
+        """Decide whether upstream's newest-N selection is already in the cache.
+
+        At the cap the watermark settles it: the cache holds ``corpus_size``
+        rows, so the only way upstream can change the selection is by publishing
+        something newer than the newest row cached, and the chronology key
+        answers that in one comparison. That is the cheap path repeat builds
+        depend on, and it stays.
+
+        Under the cap it does not settle anything. A corpus completed while
+        upstream held fewer rows than the requested cap has room the watermark
+        cannot see: the selection fills a shortfall from rows without parseable
+        arXiv IDs in source order, so a newly published row that is older than
+        the newest cached one — or carries no parseable ID at all — belongs in
+        the selection while leaving the maximum key exactly where it was. Asking
+        the key alone would memoize that state and freeze the corpus below its
+        cap for good. The probe already ranked the selection, so the shortfall is
+        settled against it directly rather than by scanning the source again.
+
+        :param _CappedCorpusRecencyProbe probe: Newest upstream key and the
+            selection it was read from, when that slice can be traversed again.
+        :param int watermark: Newest packed chronology key the cache holds.
+        :param int cached_rows: Cached payload row count.
+        :param int corpus_size: Capped corpus the selection is ranked for.
+        :return bool: ``True`` when upstream holds nothing the cache is missing.
+        """
+        newest_upstream_key = probe.newest_key
+        if newest_upstream_key is not None and newest_upstream_key > watermark:
+            return False
+        if cached_rows >= corpus_size or probe.selection is None:
+            # A slice the probe had to drain to rank cannot be reconciled
+            # without the second source scan this refresh exists to avoid.
+            return True
+        cached_paper_ids = self.embedding_cache.get_cached_paper_ids()
+        return all(
+            _dataset_record_paper_id(record or {}, index) in cached_paper_ids
+            for index, record in enumerate(islice(probe.selection, corpus_size))
+        )
 
     def _admit_newer_capped_corpus_rows(
         self,
