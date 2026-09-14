@@ -28,7 +28,7 @@ Applied config defaults are logged at DEBUG with the keys and the file path. Ine
 
 ## Supported keys
 
-Each `[defaults]` key sets the default for the `--flag` of the same name unless noted. `search_mode` applies to `citemesh search` rather than `build`, and local-mode search reads `model`, `model_profile`, `semantic_source`, `truncate_dim`, and the rest of this table to pick which embedding-cache namespace it queries (`device` is read too, but only to encode the query — it is not part of the namespace). `citemesh search` takes `--model`, `--model-profile`, `--device`, `--semantic-source`, and `--dataset-source` directly, so reaching an arXiv-corpus namespace is a flag rather than a saved default; configure the keys when you want it every run.
+Each `[defaults]` key sets the default for the `--flag` of the same name unless noted. `search_mode` applies to `citemesh search` rather than `build`, and local-mode search reads `model`, `model_profile`, `model_revision`, `semantic_source`, `truncate_dim`, `storage_precision`, `calibration_sample_size`, and the rest of this table to pick which embedding-cache namespace it queries (`device` is read too, but only to encode the query — it is not part of the namespace). `citemesh search` takes those identity selectors plus `--device` and `--dataset-source` directly, so reaching a one-off build's namespace does not require editing saved defaults; configure the keys when you want them every run.
 
 | Key | Notes |
 | --- | --- |

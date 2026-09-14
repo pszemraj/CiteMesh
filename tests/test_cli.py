@@ -946,9 +946,22 @@ _FAKE_LOCAL_RESULT = SimpleNamespace(
 @pytest.mark.parametrize(
     "local_flags",
     [
+        ["--model", "custom/model"],
         ["--model-profile", "embeddinggemma"],
+        ["--model-revision", "frozen-release"],
+        ["--device", "cpu"],
         ["--semantic-source", "arxiv-corpus"],
         ["--dataset-source", "research/arxiv-snapshot"],
+        ["--truncate-dim", "256"],
+        ["--storage-precision", "float32"],
+        [
+            "--semantic-source",
+            "arxiv-corpus",
+            "--storage-precision",
+            "int8",
+            "--calibration-sample-size",
+            "100",
+        ],
     ],
 )
 def test_search_mode_s2_rejects_local_flags(
@@ -974,9 +987,8 @@ def test_search_mode_s2_rejects_local_flags(
     assert result.returncode == 2
     message = str(error_mock.call_args)
     assert "only apply to local semantic search" in message
-    for flag in ("--model", "--model-profile", "--device", "--semantic-source"):
+    for flag in local_flags[::2]:
         assert flag in message
-    assert "--dataset-source" in message
 
 
 @pytest.mark.parametrize("mode_args", [[], ["--mode", "local"], ["--mode", "auto"]])
@@ -1136,6 +1148,46 @@ def test_search_semantic_source_flag_selects_corpus_namespace(
     assert builder_kwargs["semantic_source"] == "arxiv-corpus"
     assert builder_kwargs["storage_precision"] == "int8"
     assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
+
+
+def test_search_identity_flags_select_one_off_build_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local search should accept every user-selectable cache identity field.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
+    :return None: Assertions verify one-off build selectors reach the builder.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--model-revision",
+            "frozen-release",
+            "--semantic-source",
+            "arxiv-corpus",
+            "--truncate-dim",
+            "256",
+            "--storage-precision",
+            "int8",
+            "--calibration-sample-size",
+            "4000",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["model_revision"] == "frozen-release"
+    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
+    assert builder_kwargs["truncate_dim"] == 256
+    assert builder_kwargs["storage_precision"] == "int8"
+    assert builder_kwargs["calibration_sample_size"] == 4000
 
 
 def test_search_dataset_source_flag_implies_corpus_source(
@@ -1762,6 +1814,9 @@ def test_search_namespace_flag_empty_cache_error_names_the_flags(
     message = str(error_mock.call_args)
     assert "these flags imply local search" in message
     assert "--mode local" not in message
+    assert "--model" in message
+    assert "--model-profile" not in message
+    assert "--model-revision" not in message
     fake_builder.search_local.assert_not_called()
 
 

@@ -324,7 +324,7 @@ def _validate_semantic_source_options(
                 "--storage-precision int8 requires --semantic-source "
                 "arxiv-corpus (int8 calibration ranges are computed during "
                 "corpus hydration).",
-                related_dests={"semantic_source"},
+                related_dests={"semantic_source", "storage_precision"},
             )
         if args.storage_precision == "int8":
             # Normalize the implicit int8 default to candidate-mode storage.
@@ -431,17 +431,17 @@ def _validate_storage_precision_options(context: _BuildContractContext) -> None:
     if "binary_prefilter" in context.contract_provided and bool(args.binary_prefilter):
         context.fail(
             "--binary-prefilter requires --storage-precision int8.",
-            related_dests={"storage_precision"},
+            related_dests={"binary_prefilter", "storage_precision"},
         )
     if "binary_rescore_multiplier" in context.contract_provided:
         context.fail(
             "--binary-rescore-multiplier requires --storage-precision int8.",
-            related_dests={"storage_precision"},
+            related_dests={"binary_rescore_multiplier", "storage_precision"},
         )
     if "calibration_sample_size" in context.contract_provided:
         context.fail(
             "--calibration-sample-size requires --storage-precision int8.",
-            related_dests={"storage_precision"},
+            related_dests={"calibration_sample_size", "storage_precision"},
         )
     # Normalize implicit non-int8 defaults to effective values to avoid
     # strategy-level runtime warnings about ignored options.

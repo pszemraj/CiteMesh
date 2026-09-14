@@ -34,8 +34,43 @@ from ..parser import _output_table, _pop_tracked_option_dests
 #: their destinations with the build parser and all default to ``None``, so a
 #: set value is exactly the set of options this invocation supplied.
 _NAMESPACE_OVERRIDE_DESTS: frozenset[str] = frozenset(
-    {"model", "model_profile", "device", "semantic_source", "dataset_source"}
+    {
+        "model",
+        "model_profile",
+        "model_revision",
+        "device",
+        "semantic_source",
+        "dataset_source",
+        "truncate_dim",
+        "storage_precision",
+        "calibration_sample_size",
+    }
 )
+
+
+def _namespace_overrides(args: argparse.Namespace) -> dict[str, object]:
+    """Return cache-selection values supplied directly to ``search``.
+
+    Every search selector defaults to ``None``, including integer selectors, so
+    this single presence test stays aligned with the parser contracts.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :return dict[str, object]: Supplied selector destinations and their values.
+    """
+    return {
+        dest: value
+        for dest in _NAMESPACE_OVERRIDE_DESTS
+        if (value := getattr(args, dest, None)) is not None
+    }
+
+
+def _namespace_override_labels(overrides: dict[str, object]) -> list[str]:
+    """Return stable CLI labels for supplied search namespace selectors.
+
+    :param dict[str, object] overrides: Supplied selector destinations and values.
+    :return list[str]: Sorted long-option labels.
+    """
+    return sorted(f"--{dest.replace('_', '-')}" for dest in overrides)
 
 
 class _LocalSearchOptionError(ValueError):
@@ -99,7 +134,9 @@ def _prepare_local_search_builder(
     Mirrors a flagless build's defaults pipeline (config.toml defaults plus
     candidate-mode storage normalization) so the search targets the same cache
     namespace a default build writes to; ``--model``, ``--model-profile``,
-    ``--device``, ``--semantic-source``, and ``--dataset-source`` override.
+    ``--model-revision``, ``--device``, ``--semantic-source``,
+    ``--dataset-source``, ``--truncate-dim``, ``--storage-precision``, and
+    ``--calibration-sample-size`` override.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
@@ -117,21 +154,10 @@ def _prepare_local_search_builder(
         defaults, {"strategy"}, user_config
     )
     defaults.strategy = "embedding"
-    if args.model:
-        defaults.model = args.model
-        config_default_dests.discard("model")
-    if args.model_profile:
-        defaults.model_profile = args.model_profile
-        config_default_dests.discard("model_profile")
-    if args.device:
-        defaults.device = args.device
-        config_default_dests.discard("device")
-    if args.dataset_source:
-        defaults.dataset_source = args.dataset_source
-        config_default_dests.discard("dataset_source")
-    if args.semantic_source:
-        defaults.semantic_source = args.semantic_source
-        config_default_dests.discard("semantic_source")
+    overrides = _namespace_overrides(args)
+    for dest, value in overrides.items():
+        setattr(defaults, dest, value)
+        config_default_dests.discard(dest)
     # The overrides must land before contract validation: it coerces int8
     # storage to float32 outside arxiv-corpus mode, and storage precision is
     # part of the cache namespace, so a late override would compute a
@@ -144,9 +170,7 @@ def _prepare_local_search_builder(
     # Passed an empty set, the contract can only see the resolved values, and a
     # contradiction reads as a plain candidates search that silently discards
     # the dataset the user named.
-    provided_dests = {
-        dest for dest in _NAMESPACE_OVERRIDE_DESTS if getattr(args, dest, None)
-    }
+    provided_dests = set(overrides)
     try:
         _validate_build_cli_contract(
             defaults,
@@ -320,18 +344,14 @@ def _run_search_command(
     :return int: Process-style exit code.
     """
     mode, origin = _resolve_search_mode(args, user_config)
-    if (
-        args.model
-        or args.model_profile
-        or args.device
-        or args.semantic_source
-        or args.dataset_source
-    ):
+    overrides = _namespace_overrides(args)
+    override_labels = _namespace_override_labels(overrides)
+    if overrides:
         if args.mode == "s2":
             logger.error(
-                "--model, --model-profile, --device, --semantic-source, and "
-                "--dataset-source only apply to local semantic search; drop "
-                "them or use --mode local."
+                "%s only apply to local semantic search; drop them or use "
+                "--mode local.",
+                ", ".join(override_labels),
             )
             return 2
         if origin != "flag" and mode != "local":
@@ -411,10 +431,11 @@ def _run_search_command(
         logger.info(
             "Local embedding cache is empty for model=%s semantic-source=%s "
             "dataset-source=%s; searching the Semantic Scholar API instead. The "
-            "namespace is keyed by model, profile, semantic source, dataset "
-            "source, truncate dim, storage precision, and formatter (never the "
-            "device), so run `citemesh build` with this configuration to populate "
-            "it. %s",
+            "namespace is keyed by model, revision, profile, semantic source, "
+            "truncate dim, storage precision, int8 calibration size, and formatter "
+            "(never the device); corpus dataset source is validated against its "
+            "hydration metadata. Run `citemesh build` with this configuration to "
+            "populate it. %s",
             defaults.model,
             defaults.semantic_source,
             defaults.dataset_source,
@@ -428,18 +449,18 @@ def _run_search_command(
             requested_via = "--mode local"
         elif origin == "namespace-flag":
             requested_via = (
-                "--model/--model-profile/--device/--semantic-source/"
-                "--dataset-source (these flags imply local search)"
+                f"{', '.join(override_labels)} (these flags imply local search)"
             )
         else:
             requested_via = f"defaults.search_mode in {user_config.path}"
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
             "has no vectors for model=%s semantic-source=%s dataset-source=%s. "
-            "The namespace is keyed by model, profile, semantic source, dataset "
-            "source, truncate dim, storage precision, and formatter (never the "
-            "device), so run `citemesh build` with this configuration to populate "
-            "it. %s",
+            "The namespace is keyed by model, revision, profile, semantic source, "
+            "truncate dim, storage precision, int8 calibration size, and formatter "
+            "(never the device); corpus dataset source is validated against its "
+            "hydration metadata. Run `citemesh build` with this configuration to "
+            "populate it. %s",
             requested_via,
             defaults.model,
             defaults.semantic_source,

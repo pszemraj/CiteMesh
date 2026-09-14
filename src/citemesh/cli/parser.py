@@ -1059,6 +1059,15 @@ def _add_search_arguments(
         ),
     )
     search_parser.add_argument(
+        "--model-revision",
+        type=_non_empty_str,
+        default=None,
+        help=(
+            "Model branch, tag, or commit used by the cached build "
+            "(implies --mode local)"
+        ),
+    )
+    search_parser.add_argument(
         "--device",
         metavar="DEVICE",
         choices=list(EMBEDDING_DEVICE_CHOICES),
@@ -1084,6 +1093,32 @@ def _add_search_arguments(
         help=(
             "Corpus dataset the build hydrated, when it was not the default "
             "(implies --mode local and --semantic-source arxiv-corpus)"
+        ),
+    )
+    search_parser.add_argument(
+        "--truncate-dim",
+        type=_positive_int,
+        metavar="N",
+        default=None,
+        help="Embedding dimension used by the cached build (implies --mode local)",
+    )
+    search_parser.add_argument(
+        "--storage-precision",
+        metavar="PRECISION",
+        choices=["int8", "float32"],
+        default=None,
+        help=(
+            "int8 or float32 storage used by the cached build (implies --mode local)"
+        ),
+    )
+    search_parser.add_argument(
+        "--calibration-sample-size",
+        type=_positive_int,
+        metavar="N",
+        default=None,
+        help=(
+            "Calibration size used by an int8 corpus cache; requires "
+            "--storage-precision int8 (implies --mode local)"
         ),
     )
 
