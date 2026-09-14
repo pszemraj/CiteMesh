@@ -61,7 +61,7 @@ Top-level: `__main__.py` (`python -m citemesh`), `_lazy.py` (the shared PEP 562 
 
 **Duplicated choice lists are pinned by tests.** `data/user_config.py` declares its own `*_CHOICES` tuples instead of importing the parser's, so loading configuration never drags in strategy or visualization modules; `tests/test_user_config.py` keeps the two in sync — change both together.
 
-**Tests are white-box and network-free**, patching the binding in the module under test; see [Contributing](../../CONTRIBUTING.md#before-you-open-a-pr).
+Test and code conventions are in [Contributing](../../CONTRIBUTING.md#code-conventions).
 
 ## Python ↔ JavaScript duplication
 

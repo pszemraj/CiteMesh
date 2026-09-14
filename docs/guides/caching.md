@@ -1,10 +1,10 @@
 # Caching & Data
 
-CiteMesh caches paper metadata, reference lists, and embeddings on disk so a rerun costs a fraction of the first run. This page is the map: where those files live, what makes CiteMesh reuse or re-encode them, and how to reset the lot.
+CiteMesh stores paper metadata, reference lists, and embeddings on disk for reuse between runs.
 
 ## Where it lives
 
-The default cache root is `${XDG_CACHE_HOME:-~/.cache}/citemesh` on Linux and macOS, `%LOCALAPPDATA%\CiteMesh` on Windows (falling back to `%APPDATA%`, then `%USERPROFILE%\AppData\Local`). `CITEMESH_CACHE_DIR` overrides it — one root per user or project on a shared machine. macOS used `~/Library/Caches/citemesh` before the root was unified with Linux, and `citemesh cache scan` hints at migration while it exists.
+The [environment settings](../reference/environment.md#platform-variables-used-for-cache-root-resolution) determine the cache root. `citemesh cache scan` prints its path and usage, including a migration hint if the older macOS cache still exists.
 
 ```text
 citemesh cache root
@@ -37,9 +37,9 @@ Caching does not make a build offline: citation, reference, recommendation, and 
 
 ## Embedding namespaces
 
-Vectors are stored once per namespace in a resizable HDF5 matrix, with SQLite tracking metadata and row mappings; filenames carry the first 12 characters of `sha256(<namespace>)`. The namespace binds everything that could change what a vector means, from the resolved model artifact down to the text formatter — [How CiteMesh builds a graph](how-it-works.md) walks through that fingerprint. What it buys you here:
+A namespace combines model, artifact identity, representation, dimension, formatter, and storage settings. The artifact identity is a resolved commit SHA or a digest of the inference-artifact manifest, so changing a checkpoint selects a different cache. SQLite and HDF5 store each namespace as a pair; [physical layout](../internals/embedding-cache.md#physical-layout) describes the files.
 
-- Two namespaces per model contract: a retrieval-document cache (candidate or corpus papers, what local `citemesh search` reads) and a graph-similarity cache (selected graph papers, always float32, the only source for paper-to-paper edges). Matching dimensions do not make their vectors interchangeable, and candidate mode further tags its retrieval namespace `mode=candidates` so S2 candidates never mix with a corpus hydration.
+- The [retrieval-document and graph-similarity roles](../reference/embedding-runtime.md#task-specific-vector-spaces) have separate namespaces. Candidate mode additionally tags its retrieval namespace `mode=candidates` so S2 candidates never mix with corpus hydration.
 - No device or compute-dtype token in the namespace: CPU, CUDA, and MPS resolve the same one whenever the other contracts match, so a corpus built on a bf16 GPU is read directly by an fp32 host rather than re-encoded. An auto-resolved compute dtype is provenance rather than identity — like the attention backend, TF32, and `--torch-compile`, it shifts numerics slightly without changing what a vector means. The dtype that created a namespace is still recorded, but it does not decide compatibility on reopen.
 - Changing model, revision, profile, dimension, precision, or int8 calibration size selects a *different* namespace rather than invalidating the old one, so switching back reopens the original vectors. EmbeddingGemma now defaults to 512 dimensions; 256-dimensional caches survive, and `citemesh search --truncate-dim 256 ...` still selects them.
 - The binary prefilter is not part of the namespace: toggling it reuses the same vectors, ranges, and hydration state, rebuilding or dropping only the derived index.
@@ -53,7 +53,7 @@ Crash safety, the replacement journal, flush ordering, and locking are in [Embed
 
 arXiv-corpus mode hydrates the full selected `--dataset-split` by default — "all of `train`", not every split the dataset publishes. `--corpus-size N` opts into the N newest submissions by arXiv ID; on a cold build the cap bounds what gets embedded, not how many rows are scanned to establish that order. Under `--streaming` that ranking must drain the whole stream before hydration starts, and CiteMesh warns about it; `--no-streaming` skips the drain but still reads the supported identifier columns of every row, and a slice such as `train[:2%]` shrinks the population ranked rather than skipping the ranking.
 
-Hydration is resumable across cap changes: a smaller request finishes the recorded selection, and a larger request expands it. An interrupted run scans the selected source IDs and encodes only missing papers, provided the recorded source and split match, the recorded cap is compatible, and the namespace is self-consistent — equal SQLite and embedding row counts, at least one row, and persisted calibration ranges under `--storage-precision int8`. Anything else falls through to a full rebuild.
+An interrupted run scans the selected source IDs and encodes only missing papers, provided the recorded source and split match, the recorded cap is compatible, and the namespace is self-consistent — equal SQLite and embedding row counts, at least one row, and persisted calibration ranges under `--storage-precision int8`. Anything else falls through to a full rebuild.
 
 Versioned metadata migrations rescan the selected source split and update cached publication years, DOIs, and venues in place while preserving vectors and corpus membership. The summary adapter upgrade also restores usable `summary` text that an empty `abstract` previously hid, re-encoding only affected rows. Rows without a source ID use stable identifiers derived from their normalized document text and bibliographic metadata, so insertion and reordering cannot disguise new papers as cached ones. Older positional IDs remain unchanged and also match their equivalent content identity; source membership is reconciled once without rewriting unchanged vectors. Summary restoration matches the old adapter's exact output before assigning an updated identity; if discarded summaries made several distinct anonymous papers indistinguishable, the upgrade reports that a rebuild or stable source IDs are required. Rows with neither an identifier nor usable text fail with their source-row index.
 
@@ -65,9 +65,14 @@ Of the corpus flags, only a changed `--dataset-source` or `--dataset-split` stil
 
 A model-fingerprint mismatch is not one of those conditions. When a hydrated corpus was built under a different fingerprint than the active model's, CiteMesh stops and names both fingerprints, the rows and on-disk size at stake, and the remedy — `--force-rebuild-cache`, plus `--overwrite-cache` for scripts, or `citemesh cache clear`. Candidate-pool and graph-similarity namespaces re-encode in seconds and still clear silently; corpus hydration metadata is what earns a namespace the protection.
 
-An int8 write whose coordinates fall outside the persisted calibration ranges warns once per run; persistent warnings are the one signal worth acting on. Ranges cannot be replaced in place, since they also decode existing rows, so recalibrating means `--force-rebuild-cache` — and a larger `--calibration-sample-size` starts a fresh namespace.
-
 One caveat worth internalizing: hydration compatibility is keyed to dataset source, split, and cap rather than an immutable upstream revision, and a capped corpus deliberately chases upstream growth even when the alias never changes. Treat cache reuse as a performance optimization, not a reproducibility guarantee; a sliced `--dataset-split` opts out of both growth checks when you need a fixed population.
+
+### Quantization
+
+Corpus storage uses per-dimension affine int8 values. The optional Hamming prefilter keeps `top_k * binary_rescore_multiplier` rows for exact vector rescoring. Calibration ranges come from a reservoir sample and are persisted before the first int8 write.
+
+An int8 write outside those ranges warns once per run. Existing rows need the original ranges for decoding, so recalibration requires a forced rebuild; changing the calibration sample size selects a new namespace. Candidates use float32 without calibration. Flag defaults are in the [CLI storage options](cli.md#graph-edges-and-cache-storage).
+
 
 ## Inspecting and clearing
 

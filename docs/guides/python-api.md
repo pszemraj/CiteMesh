@@ -22,7 +22,7 @@ collect_papers(seed_id: str, **kwargs) -> dict[str, Paper]
 
 `GraphExporter(graph, seed_id, metadata=None, theme_name="dark", layout=None)` exposes `graph_payload()`, the canonical dict every format derives from, plus `to_json`, `to_csv`, `to_bibtex`, `to_graphml`, `to_plotly_html`, `to_dashboard_html`, and `to_interactive_html`. Each writer takes a `pathlib.Path` and creates missing parent directories before publishing the artifact by atomic replacement. `layout` is optional: omit it and the exporter computes one lazily, or pass one to make several exporters or runs share identical geometry. `to_interactive_html` is Pyvis and ignores `layout`. Format contents are in [Output Artifacts](../reference/output-artifacts.md).
 
-When a node carries a `Paper` under its `paper` attribute, exporters, static PNG rendering, and generated artifact filenames use that record as the authoritative source for bibliographic metadata, including empty values that clear stale mirrored node fields. An explicit node-level `is_seed` attribute remains authoritative for that graph role; when it is absent, exporters and rendering use `Paper.is_seed`. Nodes without a `Paper` use their scalar attributes. Node IDs must be non-empty, have no surrounding whitespace, and remain unique after conversion to strings.
+Graphs supplied by callers must follow the [graph-input contract](../reference/output-artifacts.md#graph-input).
 
 Because graph JSON is designed for dashboard import, `graph_payload()` and `to_json()` require `seed_id` to identify a node present in the graph. Empty graphs remain valid for the tabular `to_csv()` and bibliography `to_bibtex()` writers.
 

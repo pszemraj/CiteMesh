@@ -6,7 +6,7 @@ Every environment variable CiteMesh reads, plus the platform and library variabl
 
 | Variable | Default | Accepted values | Runtime effect |
 | --- | --- | --- | --- |
-| `S2_API_KEY` | unset | string | A non-empty value authenticates requests and paces them at 1 request/second. Presence overrides configured `api.s2_api_key`; an empty value intentionally selects the anonymous 0.5 request/second pool. |
+| `S2_API_KEY` | unset | string | CiteMesh paces authenticated requests at 1 request/second and anonymous requests at 0.5. Credential selection follows [API-key precedence](../guides/configuration.md#api-key). |
 | `CITEMESH_CACHE_DIR` | platform default cache root | filesystem path (`~` expanded) | Overrides CiteMesh cache root used for embedding/reference caches and the `config.toml` location. |
 | `CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS` | `900` | positive finite number | Overrides embedding-cache inter-process lock timeout; invalid values fall back to default. |
 
@@ -14,7 +14,7 @@ Implementation: API-key lookup in `services/semantic_scholar/client.py`, cache-r
 
 ## Platform variables used for cache-root resolution
 
-Not CiteMesh-specific, but honored when `CITEMESH_CACHE_DIR` is unset:
+With no override, Linux and macOS use `~/.cache/citemesh`; Windows uses the first available base below. `CITEMESH_CACHE_DIR` overrides all of them.
 
 | Variable | Platform | Effect |
 | --- | --- | --- |

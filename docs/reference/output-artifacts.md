@@ -9,8 +9,6 @@ A dashboard run writes two shared files at the collection root, and sharing a fi
 - `dashboard.html` - reusable tri-pane viewer with an embedded snapshot, so it opens from the local filesystem
 - `dashboard.citemesh.json` - authoritative, portable package holding one or more graph results and their build settings
 
-The repository includes a ready-to-open [Megalodon dashboard](../../assets/examples/megalodon/dashboard.html) and its [collection package](../../assets/examples/megalodon/dashboard.citemesh.json) under `assets/examples/megalodon/` (45 papers, 108 links). Open the HTML locally to explore the saved graph without running a build, or use **Add Results** in any CiteMesh dashboard to load the package.
-
 A hidden `.dashboard.citemesh.json.lock` beside the package serializes collection updates and viewer refreshes, including builds using different `CITEMESH_CACHE_DIR` roots (60-second timeout).
 
 Every collection build also writes a per-seed directory `<title-slug>-<hash>/` holding `<strategy>.json` and `<strategy>.config.json`, even under `--export dashboard` alone. Other formats are written when selected; `png` is the default when `--export` is omitted.
@@ -43,7 +41,7 @@ Omit `--output` to use `out/` under the current working directory; a source chec
 - `-o out/report.dashboard.html` selects standalone mode: that one self-contained file, no collection package. In a multi-export run it also disables collection mode and gives siblings the stripped base plus their own suffixes (`out/report.json`, `out/report.csv`, `out/report.config.json`).
 - Any other `--output` is a directory base, a known export suffix stripped first. Under collection mode the viewer and package sit at that root, every other format under `<base>/<title-slug>-<hash>/`. A single non-dashboard export to a non-directory target keeps a matching suffix, replaces a different known one, and appends a missing one.
 
-The sidecar follows the resolved output: `<strategy>.config.json` beside strategy-named outputs, or the output stem otherwise (`out/report.json` -> `out/report.config.json`). `citemesh view [PATH]` opens a saved collection or standalone file without rebuilding.
+The sidecar follows the resolved output: `<strategy>.config.json` beside strategy-named outputs, or the output stem otherwise (`out/report.json` -> `out/report.config.json`). Open the result with [citemesh view](../guides/cli.md#view-a-saved-dashboard).
 
 ## Collection package (`dashboard.citemesh.json`)
 
@@ -129,7 +127,11 @@ The run contract for reproducibility and audit trails: `schema_version`, `build`
 - `candidate_source_status` - per attempted Semantic Scholar source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure). Partial results stay usable and preserve the unavailable source; if every source is unavailable the build fails and writes no artifacts.
 - embedding/hybrid runtime metadata when available - runtime-active `effective_model`, immutable `effective_model_revision` and `model_fingerprint`, `effective_truncate_dim`, `effective_device`, `effective_compute_dtype`, resolved `model_profile`, and `retrieval_representation` / `graph_representation` (terms defined in [Embedding Runtime](embedding-runtime.md))
 
-Shared by every export: integral numeric years (including `2017.0`) are accepted and fractional or non-finite ones treated as missing; null or non-finite edge weights raise before exports replace existing files; empty node IDs and IDs with surrounding whitespace are rejected, matching the dashboard's import contract.
+## Graph input
+
+When a node carries a `Paper` under its `paper` attribute, exports, PNG rendering, and artifact filenames use that record for bibliographic metadata, including empty values that clear stale mirrored fields. A node-level `is_seed` overrides `Paper.is_seed`; nodes without a `Paper` use their scalar attributes.
+
+Node IDs must be non-empty, have no surrounding whitespace, and remain unique after conversion to strings. Integral numeric years (including `2017.0`) are accepted; fractional or non-finite years are missing. Null or non-finite edge weights raise before exports replace existing files.
 
 ## Determinism notes
 

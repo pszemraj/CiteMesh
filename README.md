@@ -8,20 +8,9 @@ It runs locally from a single CLI with four switchable strategies — recommenda
 
 _A hybrid graph seeded by “Megalodon” over a full arXiv corpus index, with “LM-Infinite” selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
 
-Try the same graph without running the pipeline: after cloning this repository, open [assets/examples/megalodon/dashboard.html](assets/examples/megalodon/dashboard.html) in your browser. The saved example works offline with no installation, API key, or model download. To practice importing results, click **Add Results** and select [dashboard.citemesh.json](assets/examples/megalodon/dashboard.citemesh.json) from the same folder; importing this example into its own dashboard refreshes the existing result rather than adding a duplicate. Use **Export Collection** to save results imported into your browser session.
+After cloning, open the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) to explore a graph offline without installing CiteMesh. Its [collection package](assets/examples/megalodon/dashboard.citemesh.json) can be imported through the dashboard's [Add Results control](docs/reference/output-artifacts.md#dashboard-html).
 
-## What you get
-
-| | CiteMesh | Typical hosted graph tool |
-| --- | --- | --- |
-| Licensing | MIT, self-hosted CLI | Closed, web-only |
-| Graph quota | None | Limited free graphs |
-| Strategies | Four, switchable per run | One fixed algorithm |
-| Semantic similarity | Local embeddings (CUDA / MPS / CPU) | Server-side, opaque |
-| Outputs | PNG, HTML/Plotly, dashboard collections, JSON, CSV, BibTeX, GraphML | Screenshot or share link |
-| Automation | Scriptable CLI, deterministic exports, JSON sidecars | Manual browsing |
-
-Public beta, pre-1.0: export formats, cache layouts, and defaults may change between revisions unless documented otherwise. Runs on macOS (Apple Silicon, MPS), Linux, and Windows.
+Public beta, pre-1.0: export formats, cache layouts, and defaults may change between revisions. Runs on macOS, Linux, and Windows.
 
 ## Quick Start
 
@@ -33,15 +22,9 @@ pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.gi
 
 Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly exports), `recommended` (both), `all` (adds dev tooling). Omit the extra for the citation/recommendation-only CLI. Editable installs: [Contributing](CONTRIBUTING.md).
 
-Python >= 3.10. Only the `embeddings` extra needs torch: `>=2.9` on Linux and Windows, `>=2.13` on macOS (the release verified for MPS bfloat16; float32 is the fallback wherever bf16 is unavailable). Details: [Embedding Runtime](docs/reference/embedding-runtime.md).
+Python >= 3.10. For embedding dependencies and device requirements, see [Embedding Runtime](docs/reference/embedding-runtime.md#dependency-floor).
 
-### Semantic Scholar API key (optional)
-
-CiteMesh runs without credentials on Semantic Scholar's shared anonymous pool, though an unkeyed run can spend much of its time waiting out 429 retries. A dedicated 1 request/second budget needs a key from <https://www.semanticscholar.org/product/api>, which is a reviewed application rather than an instant signup, so plan on running without one. If you have a key, pass it as `export S2_API_KEY=...`, or persist it:
-
-```bash
-citemesh config set api.s2_api_key YOUR_KEY
-```
+For authenticated Semantic Scholar requests, [configure an API key](docs/guides/configuration.md#api-key). Anonymous access also works, subject to the [retry policy](docs/guides/cli.md#appendix-b-troubleshooting).
 
 ### Run one graph
 
@@ -58,21 +41,13 @@ citemesh build "arxiv:1706.03762" --strategy hybrid --export all
 citemesh build "arxiv:1706.03762" --strategy embedding --semantic-source arxiv-corpus
 ```
 
-The first embedding or hybrid run downloads `unsloth/embeddinggemma-300m` and encodes what it collected — about 100 abstracts for a default hybrid build, or up to `--candidate-pool-size` (default 400) with `--strategy embedding`; `arxiv-corpus` mode hydrates the full selected split unless capped with `--corpus-size N` ([CLI guide](docs/guides/cli.md)).
-
-Omit `--output` and each build saves under `out/<title-slug>-<hash>/`, while repeated dashboard builds accumulate into a shared `out/dashboard.html` collection. Open it with `citemesh view`, or name a collection or file (`citemesh view out/my-collection`) — see [Output Artifacts](docs/reference/output-artifacts.md).
+The first semantic build downloads the [embedding model](docs/reference/embedding-runtime.md#model-selection-and-fallback) and fills its cache. Later runs [reuse the stored vectors](docs/guides/caching.md). Output naming and collection behavior are described in [Output Artifacts](docs/reference/output-artifacts.md#output-location).
 
 ## How it works
 
-Every strategy runs the same eight-stage pipeline; they differ only in where candidates come from and how pairs are scored.
-
 ![The eight stages of a CiteMesh build: seed resolution, candidate acquisition, embedding, caching, ranking, edge scoring, layout, and export](assets/how-it-works.png)
 
-_Defaults for a `--strategy embedding` build. Hybrid uses its own 12-reference, 45-citation, and 45-paper budgets. Recommendation and citation builds skip stages 3 and 4: they never load the model and score pairs from TF-IDF instead._
-
-Five flags move most of the outcome. `--max-references` and `--max-citations` (12 and 45 for hybrid) set the fetch budget, `--max-semantic` (20) caps recommendation-sourced additions, `--max-papers` (45) caps how many survive ranking, and `--min-semantic-similarity` (0.74) is the cosine floor a pair must clear — unless it shares a reference, where bibliographic coupling, recency, and citation counts can still earn the edge. Layouts are already deterministic; `--seed` picks a different one.
-
-The full walkthrough, with the numbers that matter at each stage: [How CiteMesh builds a graph](docs/guides/how-it-works.md). For syntax and operational detail: [CLI guide](docs/guides/cli.md), [Strategy guide](docs/guides/strategies.md), [Caching & Data](docs/guides/caching.md), [User configuration](docs/guides/configuration.md), and the [documentation index](docs/README.md).
+Follow the pipeline in [How CiteMesh builds a graph](docs/guides/how-it-works.md), choose a [strategy](docs/guides/strategies.md), or browse the [documentation index](docs/README.md).
 
 ## Contributing
 

@@ -12,7 +12,7 @@ citemesh config unset defaults.semantic_source
 citemesh config path
 ```
 
-`set` validates against the same whitelist the CLI uses and rejects a bad key or value with the valid options. Booleans accept `true`/`false` (also `1/0`, `yes/no`, `on/off`); `export` takes a comma-separated list (`json,dashboard`); thresholds are decimals in `[0.0, 1.0]`; integer counts must be at least `1`, except `max_semantic`, `max_citations`, and `max_references`, which also accept `0`.
+`set` rejects unknown keys and invalid values. Booleans accept `true`/`false`, `1/0`, `yes/no`, or `on/off`; `export` takes a comma-separated list such as `json,dashboard`. Other accepted values follow the [CLI flag contracts](cli.md#flag-reference).
 
 ## Precedence
 
@@ -28,30 +28,18 @@ Applied config defaults are logged at DEBUG with the keys and the file path. Ine
 
 ## Supported keys
 
-Each `[defaults]` key sets the default for the `--flag` of the same name unless noted. `search_mode` applies to `citemesh search` rather than `build`, and local-mode search reads `model`, `model_profile`, `model_revision`, `semantic_source`, `truncate_dim`, `storage_precision`, `calibration_sample_size`, and the rest of this table to pick which embedding-cache namespace it queries (`device` is read too, but only to encode the query — it is not part of the namespace). `citemesh search` takes those identity selectors plus `--device` and `--dataset-source` directly, so reaching a one-off build's namespace does not require editing saved defaults; configure the keys when you want them every run.
+Each `[defaults]` key supplies the corresponding CLI option. `encode_batch_size` maps to `--batch-size`; `search_mode` maps to `search --mode`. [Local search](cli.md#find-a-seed-paper) also uses applicable saved embedding settings.
 
-| Key | Notes |
+| Group | Keys |
 | --- | --- |
-| `strategy` | `recommendation`, `citation`, `embedding`, `hybrid` |
-| `export` | format list |
-| `theme` | `light`, `dark`, `solarized`, `auto` |
-| `model` | checkpoint or local path |
-| `model_profile` | `auto`, `default`, `embeddinggemma` |
-| `model_revision` | branch, tag, or commit |
-| `device` | `auto`, `cuda`, `mps`, `cpu` |
-| `semantic_source` | `candidates`, `arxiv-corpus` |
-| `candidate_pool_size` | |
-| `encode_batch_size` | sets `--batch-size` / `-bs` |
-| `storage_precision` | `int8`, `float32` |
-| `binary_prefilter` | int8 corpus caches only |
-| `calibration_sample_size` | int8 only; must match the build for local search to reuse its namespace |
-| `max_papers`, `max_semantic`, `max_citations`, `max_references`, `top_k` | |
-| `truncate_dim` | unset uses the model profile (`512` for EmbeddingGemma) |
-| `min_semantic_similarity` | embedding/hybrid edge eligibility |
-| `corpus_size` | unset hydrates the full selected split |
-| `dataset_source`, `dataset_split` | HuggingFace arXiv metadata repository and split |
-| `streaming`, `torch_compile` | booleans |
-| `search_mode` | `auto`, `local`, `s2` for `citemesh search`; `auto` uses the local embedding cache when it has vectors, else Semantic Scholar keyword search |
+| Graph | `strategy`, `max_papers`, `max_semantic`, `max_citations`, `max_references`, `top_k` |
+| Model and runtime | `model`, `model_profile`, `model_revision`, `device`, `truncate_dim`, `encode_batch_size`, `torch_compile` |
+| Semantic source | `semantic_source`, `candidate_pool_size`, `min_semantic_similarity` |
+| Corpus and storage | `dataset_source`, `dataset_split`, `corpus_size`, `streaming`, `storage_precision`, `binary_prefilter`, `calibration_sample_size` |
+| Output | `export`, `theme` |
+| Search | `search_mode` |
+
+## API key
 
 `[api]` holds one key, `s2_api_key`, used only when `S2_API_KEY` is absent. `config list` masks it; `config get` prints it in full. It goes straight to the API client, never into subprocess environments.
 
@@ -68,7 +56,7 @@ s2_api_key = "your-key-here"
 
 ## The file itself
 
-- It lives at the cache root, so `CITEMESH_CACHE_DIR` moves it, and it survives `citemesh cache clear` along with its lock ([Caching & Data](caching.md)).
+- [Cache-root settings](../reference/environment.md#platform-variables-used-for-cache-root-resolution) determine its location. [Cache clearing](caching.md#inspecting-and-clearing) preserves it.
 - CiteMesh rewrites it with mode `0600` because it can hold `api.s2_api_key`; broader pre-existing permission bits are narrowed on every write.
 - Mutations serialize on a file lock, fail after 10 seconds rather than overwrite, and refuse to clobber an unreadable file. Ordinary reads ignore invalid entries, malformed TOML, and non-UTF-8 with a warning, so a broken config never blocks other commands.
 - Unknown keys survive a rewrite; comments do not, since the TOML round-trip is value-level.

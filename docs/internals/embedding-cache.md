@@ -1,6 +1,6 @@
 # Embedding Cache Internals
 
-Crash-safety invariants and the internal structure of `src/citemesh/data/embedding_cache/`. You do not need this page to use CiteMesh: the on-disk contract, namespace identity, hydration policy, and the flags that control them are in [Caching & Data](../guides/caching.md).
+`EmbeddingCache` coordinates SQLite metadata and HDF5 vectors so interrupted writes can be recovered. For normal operation, see [cache reuse and hydration](../guides/caching.md).
 
 ## Store composition
 
@@ -45,7 +45,7 @@ Schema **4** requires one-time re-encoding of older namespaces when they are nex
 
 ## Locking
 
-Three locks share one timeout (`CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS`, default 900 seconds):
+Three locks use the [embedding-cache timeout](../reference/environment.md#citemesh-variables):
 
 - the per-namespace `cache_<hash>.lock`, wrapping only the short scan and commit phases
 - the reentrant `hydration_<hash>.lock`, held across the complete-check, resume or rebuild, and the search that consumes hydrated rows

@@ -37,9 +37,7 @@ python -m pytest -m slow tests/test_semantic_quality.py
 
 Use **512 dimensions** by default for EmbeddingGemma. The previous 256-dimensional default reduced vector storage, but the paired corpus study below found a substantial loss of the full model's nearest neighbors. Moving to 512 recovered more of those neighbors with essentially the same GPU corpus encoding time and an 11.4% increase in complete cache size. Local search became slower.
 
-The shared profile applies this choice to embedding and hybrid builds, candidate and arXiv corpus sourcing, local search, and symmetric graph-similarity encoding on CUDA, MPS, and CPU. It covers the default Unsloth model, the Google fallback, and recognized local EmbeddingGemma checkpoints. This is one consistent default; the experiment directly measured CUDA corpus retrieval, not each of those paths.
-
-EmbeddingGemma supports `768`, `512`, `256`, and `128` dimensions. An explicit `--truncate-dim` or `defaults.truncate_dim` configuration still takes precedence; other model profiles retain their own dimension policies. Existing 256d caches remain separate and reusable with matching settings; see [Caching & Data](../guides/caching.md).
+The [EmbeddingGemma profile](embedding-runtime.md#embeddinggemma-profile) applies the dimension default. This experiment directly measured CUDA corpus retrieval; it did not measure every build or runtime path.
 
 ### Paired corpus and runtime
 
@@ -192,10 +190,6 @@ This was the deciding signal within the initial sweep matrix.
 
 Per-run elapsed time has heavy-tail behavior driven by network-bound citation-count enrichment. Use median and upper-quantile runtime when comparing configs; means alone are noisy.
 
-### Retry Policy
-
-Citation-count enrichment is batched and visible in progress output. Long retries deliberately favor completing resumable builds over predictable tail latency; the current policy allows 30 attempts per operation without an elapsed-time deadline. An exhausted batch does not restart per-paper retry budgets. See [CLI Usage](../guides/cli.md) for backoff and interruption behavior.
-
 ### Default Decision
 
 The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-match and abstract-review study favored a more citation-heavy, reference-light allocation. The active values are listed in [CLI Usage](../guides/cli.md).
@@ -203,5 +197,4 @@ The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-mat
 Why:
 
 - The broad multi-seed sweep established a stable baseline but over-selected off-goal papers in manual relevance checks.
-- Follow-up fuzzy-match and abstract review favored a citation-heavy, reference-light allocation for the discovery goal.
 - The updated defaults improve practical triage for "recent follow-up + foundational prior work" without forcing users to set branch-specific knobs each run.
