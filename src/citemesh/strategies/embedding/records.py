@@ -28,6 +28,8 @@ from citemesh.core.paper_ids import (
     recognize_arxiv_identifier,
 )
 
+_DATASET_PAPER_ID_FIELDS = ("id", "paper_id", "paperId")
+
 
 @dataclass(frozen=True)
 class _HydrationSourceSliceResult:
@@ -115,8 +117,7 @@ def _parse_year(paper: dict[str, Any]) -> int | None:
         except (TypeError, ValueError):
             pass
 
-    raw_id = paper.get("id") or paper.get("paper_id") or paper.get("paperId")
-    chronology = _arxiv_id_chronology_key(raw_id)
+    chronology = _arxiv_id_chronology_key(_dataset_record_raw_paper_id(paper))
     return chronology[0] if chronology is not None else None
 
 
@@ -135,7 +136,7 @@ def _newest_records_by_arxiv_id(
     heap: list[tuple[tuple[int, int, int], int, dict[str, Any]]] = []
     head_fallback: list[dict[str, Any]] = []
     for order, record in enumerate(records):
-        key = _arxiv_id_chronology_key((record or {}).get("id"))
+        key = _arxiv_id_chronology_key(_dataset_record_raw_paper_id(record or {}))
         if key is None:
             if len(head_fallback) < limit:
                 head_fallback.append(record)
@@ -147,6 +148,18 @@ def _newest_records_by_arxiv_id(
             heapq.heapreplace(heap, entry)
     selected = [record for _, _, record in sorted(heap, key=lambda entry: entry[:2])]
     return selected + head_fallback[: limit - len(selected)]
+
+
+def _dataset_record_raw_paper_id(paper: dict[str, Any]) -> Any:
+    """Return the first populated identifier field from a dataset record.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :return Any: Raw identifier value, or ``None`` when every supported field is empty.
+    """
+    return next(
+        (paper.get(field) for field in _DATASET_PAPER_ID_FIELDS if paper.get(field)),
+        None,
+    )
 
 
 def _parse_authors(authors_data: Any, authors_parsed_data: Any = None) -> list[str]:
@@ -222,12 +235,7 @@ def _dataset_record_paper_id(paper: dict[str, Any], fallback_index: int) -> str:
     :param int fallback_index: Index used for synthetic IDs when missing.
     :return str: Canonicalized paper identifier.
     """
-    raw_paper_id = (
-        paper.get("id")
-        or paper.get("paper_id")
-        or paper.get("paperId")
-        or f"arxiv_{fallback_index}"
-    )
+    raw_paper_id = _dataset_record_raw_paper_id(paper) or f"arxiv_{fallback_index}"
     return _canonicalize_embedding_paper_id(raw_paper_id)
 
 

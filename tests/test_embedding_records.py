@@ -14,11 +14,43 @@ from typing import Any
 import pytest
 
 from citemesh.strategies.embedding.records import (
+    _dataset_record_raw_paper_id,
     _extract_dataset_paper_metadata,
+    _newest_records_by_arxiv_id,
     _parse_authors,
     _parse_categories,
     _parse_venue,
 )
+
+
+@pytest.mark.parametrize("identifier_field", ["id", "paper_id", "paperId"])
+def test_newest_record_ranking_uses_supported_identifier_fields(
+    identifier_field: str,
+) -> None:
+    """Newest-first ranking must use every identifier hydration accepts.
+
+    :param str identifier_field: Dataset identifier field under test.
+    :return None: Selects the chronologically newest paper through that field.
+    """
+    records = [
+        {identifier_field: "2401.00001", "title": "Older"},
+        {identifier_field: "2601.00001", "title": "Newer"},
+    ]
+
+    assert _newest_records_by_arxiv_id(records, 1) == [records[1]]
+
+
+def test_dataset_record_identifier_follows_hydration_precedence() -> None:
+    """Blank preferred fields must fall through to the next supported identifier.
+
+    :return None: Resolves ``paper_id`` ahead of ``paperId`` when ``id`` is blank.
+    """
+    assert (
+        _dataset_record_raw_paper_id(
+            {"id": "", "paper_id": "2601.00001", "paperId": "2602.00002"}
+        )
+        == "2601.00001"
+    )
 
 
 @pytest.mark.parametrize(
