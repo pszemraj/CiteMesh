@@ -3734,12 +3734,20 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
         "abstract": "Original text",
         "update_date": "2026-08-28",
         "doi": "https://doi.org/10.1039/c3sm27410a",
+        "journal-ref": "Soft Matter 2013",
     }
-    old_metadata = {**_extract_dataset_paper_metadata(raw, 0), "year": 2026, "doi": ""}
+    old_metadata = {
+        **_extract_dataset_paper_metadata(raw, 0),
+        "year": 2026,
+        "doi": "",
+        "venue": "",
+    }
     builder._cache_metadata_batch([old_metadata])
     cache.mark_hydrated(
         dataset_source=source, dataset_split="train", corpus_size=1, complete=True
     )
+    cache._write_cache_metadata({"corpus_metadata_version": "1"})
+    assert not cache.has_current_corpus_metadata()
     original_h5 = cache.h5_path.read_bytes()
     model.encode.reset_mock()
 
@@ -3783,6 +3791,7 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     )[0]
     assert result.metadata["year"] == 2012
     assert result.metadata["doi"] == "10.1039/c3sm27410a"
+    assert result.metadata["venue"] == "Soft Matter 2013"
     assert result.metadata["abstract"] == "Original text"
     seed = Paper("a" * 40, "Confined polymers", 2013, doi="10.1039/c3sm27410a")
     aliases = IdentityRegistry()

@@ -686,7 +686,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         return cached_source if cached_source else None
 
     def has_current_corpus_metadata(self) -> bool:
-        """Return whether corpus years and DOIs use the current source adapter.
+        """Return whether corpus years, DOIs and venues use the current adapter.
 
         :return bool: Whether a full metadata pass completed with this adapter.
         """
@@ -703,15 +703,18 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         )
 
     def update_corpus_metadata(self, papers: Sequence[dict]) -> None:
-        """Correct years and DOIs on existing corpus rows without touching vectors.
+        """Correct years, DOIs and venues without touching cached vectors.
 
-        :param Sequence[Dict] papers: Source metadata with paper IDs, years and DOIs.
+        :param Sequence[Dict] papers: Source metadata with IDs, years, DOIs and venues.
         :return None: Updates only matching SQLite records.
         """
         with self._locked_connection() as conn:
             conn.executemany(
-                "UPDATE papers SET year = ?, doi = ? WHERE paper_id = ?",
-                [(paper["year"], paper["doi"], paper["paper_id"]) for paper in papers],
+                "UPDATE papers SET year = ?, doi = ?, venue = ? WHERE paper_id = ?",
+                [
+                    (paper["year"], paper["doi"], paper["venue"], paper["paper_id"])
+                    for paper in papers
+                ],
             )
 
     def get_max_chronology_key(self) -> int | None:

@@ -500,7 +500,7 @@ class _CorpusHydrationMixin:
     def _refresh_cached_corpus_metadata(
         self, source: str | None, use_streaming: bool
     ) -> None:
-        """Backfill corpus years and DOIs without changing persisted vectors.
+        """Backfill corpus years, DOIs and venues without changing vectors.
 
         :param Optional[str] source: Dataset recorded on the matching cache.
         :param bool use_streaming: Whether source rows should be streamed.
@@ -514,7 +514,9 @@ class _CorpusHydrationMixin:
         ):
             return
 
-        logger.info("Refreshing cached publication years and DOIs from %s.", source)
+        logger.info(
+            "Refreshing cached publication years, DOIs and venues from %s.", source
+        )
         # A capped cache retains its original paper selection. Inspect the full
         # selected split so older cached papers can still receive metadata fixes.
         dataset = deps._import_datasets_module().load_dataset(
