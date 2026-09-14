@@ -3113,7 +3113,12 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Static render title should retain full seed title text."""
+    """Static rendering should preserve metadata and create its output parents.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Observes title and sizing inputs.
+    :return None: Checks current metadata, parent creation, and caller preservation.
+    """
     graph = nx.Graph()
     seed_title = "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents"
     graph.add_node(
@@ -3169,13 +3174,16 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     monkeypatch.setattr(matplotlib.axes.Axes, "set_title", capture_title)
     monkeypatch.setattr(render_module, "compute_node_sizes", compute_sizes_spy)
 
+    output_path = tmp_path / "missing" / "nested" / "graph.png"
+    assert not output_path.parent.exists()
     visualize_graph(
         graph,
         "seed",
-        tmp_path / "graph.png",
+        output_path,
         layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
     )
 
+    assert output_path.is_file()
     assert "..." not in captured["title"]
     assert seed_title in captured["title"].replace("\n", " ")
     effective_seed = compute_sizes_spy.call_args.args[0].nodes["seed"]

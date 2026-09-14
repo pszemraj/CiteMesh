@@ -184,7 +184,7 @@ def test_atomic_write_text_uses_binary_temp_descriptor(
 
     :param Path tmp_path: Temporary directory for the atomic-write target.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to observe descriptor mode.
-    :return None: Validates descriptor and persisted newline bytes.
+    :return None: Validates parent creation, descriptor mode, and persisted bytes.
     """
     original_mkstemp = cache_module.tempfile.mkstemp
     observed_text_modes: list[bool] = []
@@ -200,7 +200,8 @@ def test_atomic_write_text_uses_binary_temp_descriptor(
         return original_mkstemp(*args, **kwargs)
 
     monkeypatch.setattr(cache_module.tempfile, "mkstemp", _recording_mkstemp)
-    destination = tmp_path / "payload.txt"
+    destination = tmp_path / "missing" / "nested" / "payload.txt"
+    assert not destination.parent.exists()
 
     cache_module.atomic_write_text(destination, "first\nsecond\n")
 
