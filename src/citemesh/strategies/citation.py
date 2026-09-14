@@ -309,13 +309,18 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         # Step 2: Fetch references (older papers)
         progress_enabled = stderr_isatty()
-        if self.max_references > 0:
-            logger.info(f"Fetching up to {self.max_references} references...")
+        remaining = self.max_papers - len(papers)
+        reference_limit = min(
+            remaining,
+            self.max_references,
+        )
+        if reference_limit > 0:
+            logger.info(f"Fetching up to {reference_limit} references...")
             reference_result = fetch_candidate_source(
                 "references",
                 lambda: self.client.get_paper_references(
                     seed.paper_id,
-                    limit=self.max_references,
+                    limit=reference_limit,
                     raise_on_unavailable=True,
                 ),
             )
@@ -331,15 +336,17 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         # Step 3: Fetch citations (newer papers)
         remaining = self.max_papers - len(papers)
-        if remaining > 0 and self.max_citations > 0:
-            logger.info(
-                f"Fetching up to {min(remaining, self.max_citations)} citations..."
-            )
+        citation_limit = min(
+            remaining,
+            self.max_citations,
+        )
+        if citation_limit > 0:
+            logger.info(f"Fetching up to {citation_limit} citations...")
             citation_result = fetch_candidate_source(
                 "citations",
                 lambda: self.client.get_paper_citations(
                     seed.paper_id,
-                    limit=min(remaining, self.max_citations),
+                    limit=citation_limit,
                     raise_on_unavailable=True,
                 ),
             )

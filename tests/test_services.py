@@ -1164,6 +1164,15 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     with pytest.raises(ValueError, match="limit must be an integer"):
         client.get_recommended_papers("seed", limit=True)  # type: ignore[arg-type]
 
+    client._request_json = MagicMock(
+        side_effect=AssertionError("invalid limits must fail before transport")
+    )
+    with pytest.raises(ValueError, match="limit must be at most 500"):
+        client.get_recommended_papers("seed", limit=501)
+    with pytest.raises(ValueError, match="limit must be at most 1000"):
+        client.search_papers("attention", limit=1001)
+    client._request_json.assert_not_called()
+
     encoding_cases = [
         ("10.1145/3133956.3134029", "10.1145%2F3133956.3134029"),
         ("arxiv:math/0301234v1", "arxiv%3Amath%2F0301234"),
@@ -1174,6 +1183,50 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         client.get_recommended_papers(raw_id, limit=1)
         url = client._request_json.call_args.args[0]
         assert url.endswith(expected_suffix)
+
+
+def test_search_papers_paginates_above_graph_request_limit() -> None:
+    """Search should split a 101-result request into endpoint-safe pages.
+
+    :return None: Checks page sizes, offsets, and ordered result accumulation.
+    """
+    first_page = [_paper_payload(paper_id=f"p{i}") for i in range(100)]
+    second_page = [_paper_payload(paper_id="p100")]
+    client = SemanticScholarClient(timeout=1)
+    client._request_json = MagicMock(
+        side_effect=[
+            {"offset": 0, "next": 100, "data": first_page},
+            {"offset": 100, "data": second_page},
+        ]
+    )
+
+    results = client.search_papers("attention", limit=101)
+
+    assert [paper.paper_id for paper in results] == [f"p{i}" for i in range(101)]
+    assert client._request_json.call_count == 2
+    first_params = client._request_json.call_args_list[0].args[1]
+    second_params = client._request_json.call_args_list[1].args[1]
+    assert (first_params["limit"], first_params["offset"]) == (100, 0)
+    assert (second_params["limit"], second_params["offset"]) == (1, 100)
+
+
+def test_related_papers_use_sdk_page_size_without_capping_total() -> None:
+    """Relation totals above 1,000 should consume the SDK's paginated iterator.
+
+    :return None: Checks a 1,001-result total uses the 1,000-row SDK page size.
+    """
+    records = [_make_reference_record(f"r{i}") for i in range(1001)]
+    client = SemanticScholarClient(timeout=1)
+    client.client.get_paper_references = MagicMock(return_value=records)
+
+    papers = client.get_paper_references("seed", limit=1001)
+
+    assert [paper.paper_id for paper in papers] == [f"r{i}" for i in range(1001)]
+    client.client.get_paper_references.assert_called_once_with(
+        "seed",
+        fields=s2.payloads._default_paper_fields(),
+        limit=1000,
+    )
 
 
 @pytest.mark.parametrize(

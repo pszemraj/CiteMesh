@@ -52,6 +52,10 @@ RECOMMENDATION_BASE_URL = (
 )
 PAPER_BASE_URL = "https://api.semanticscholar.org/graph/v1/paper"
 SEARCH_BASE_URL = f"{PAPER_BASE_URL}/search"
+GRAPH_RELATION_PAGE_SIZE = 1000
+RECOMMENDATION_MAX_RESULTS = 500
+SEARCH_MAX_RESULTS = 1000
+SEARCH_PAGE_SIZE = 100
 
 
 class _EndpointsMixin:
@@ -337,7 +341,7 @@ class _EndpointsMixin:
                 relation_records = fetch_method(
                     normalized_paper_id,
                     fields=payloads._default_paper_fields(),
-                    limit=limit,
+                    limit=min(limit, GRAPH_RELATION_PAGE_SIZE),
                 )
             except TypeError as exc:
                 if not payloads._is_sdk_null_relation_page(exc):
@@ -705,7 +709,11 @@ class _EndpointsMixin:
         # reference-ID methods when needed.
         if "references" in fields:
             fields = [field for field in fields if field != "references"]
-        parsed_limit = payloads._validate_integer_limit(limit, "limit")
+        parsed_limit = payloads._validate_integer_limit(
+            limit,
+            "limit",
+            maximum=RECOMMENDATION_MAX_RESULTS,
+        )
 
         normalized_paper_id = normalize_paper_id(paper_id)
         encoded_paper_id = quote(normalized_paper_id, safe="")
@@ -776,7 +784,11 @@ class _EndpointsMixin:
             empty list, so callers can distinguish "no matches" from "API down".
         :return list[Paper]: Search results.
         """
-        parsed_limit = payloads._validate_integer_limit(limit, "limit")
+        parsed_limit = payloads._validate_integer_limit(
+            limit,
+            "limit",
+            maximum=SEARCH_MAX_RESULTS,
+        )
         if not isinstance(query, str):
             raise ValueError("query must be a string")
         normalized_query = query.strip()
@@ -785,20 +797,39 @@ class _EndpointsMixin:
 
         fields, cache_full_metadata = self._resolve_paper_fields(fields)
 
-        payload = self._request_json(
-            SEARCH_BASE_URL,
-            {
-                "query": normalized_query,
-                "fields": ",".join(fields),
-                "limit": parsed_limit,
-            },
-            failure_domain=_FailureDomain.SEARCH,
-            raise_on_unavailable=raise_on_unavailable,
-            context=f"searching for {normalized_query!r}",
-        )
-        if not payload:
-            return []
+        raw_results: list[Any] = []
+        offset = 0
+        while len(raw_results) < parsed_limit:
+            page_limit = min(SEARCH_PAGE_SIZE, parsed_limit - len(raw_results))
+            payload = self._request_json(
+                SEARCH_BASE_URL,
+                {
+                    "query": normalized_query,
+                    "fields": ",".join(fields),
+                    "limit": page_limit,
+                    "offset": offset,
+                },
+                failure_domain=_FailureDomain.SEARCH,
+                raise_on_unavailable=raise_on_unavailable,
+                context=f"searching for {normalized_query!r}",
+            )
+            if not payload:
+                return []
+
+            page_records = payload.get("data", [])
+            if not page_records:
+                break
+            raw_results.extend(page_records)
+
+            next_offset = payload.get("next")
+            if (
+                isinstance(next_offset, bool)
+                or not isinstance(next_offset, int)
+                or next_offset <= offset
+            ):
+                break
+            offset = next_offset
 
         return self._papers_from_records(
-            payload.get("data", []), cache_full_metadata=cache_full_metadata
+            raw_results[:parsed_limit], cache_full_metadata=cache_full_metadata
         )

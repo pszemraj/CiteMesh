@@ -1025,7 +1025,7 @@ def _add_search_arguments(
         type=_positive_int,
         metavar="N",
         default=10,
-        help="Maximum results (default: 10)",
+        help="Maximum results (default: 10; S2 relevance search supports up to 1000)",
     )
     search_parser.add_argument(
         "--mode",

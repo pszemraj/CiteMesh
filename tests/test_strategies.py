@@ -671,6 +671,28 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
     mock_client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
 
 
+def test_recommendation_collect_clamps_endpoint_request_limit() -> None:
+    """Large recommendation graphs should stay within the endpoint's hard limit.
+
+    :return None: Checks the oversampled request is capped at 500 results.
+    """
+    client = MagicMock()
+    client.get_paper.return_value = _seed_paper()
+    client.get_recommended_papers.return_value = []
+
+    RecommendationGraphBuilder(
+        max_papers=300,
+        fetch_references=False,
+        client=client,
+    ).collect_papers("seed")
+
+    client.get_recommended_papers.assert_called_once_with(
+        "seed",
+        limit=500,
+        raise_on_unavailable=True,
+    )
+
+
 def test_citation_collect_populates_reference_cache_and_summary() -> None:
     """Citation collection should hydrate references and expose summary."""
     seed = _paper("seed", refs=["seed-ref"])
@@ -705,6 +727,55 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
         call("ref1", force_refresh=False),
         call("cit1", force_refresh=False),
     ]
+
+
+def test_citation_collect_sizes_relation_requests_to_open_graph_slots() -> None:
+    """Relation requests should honor capacity and let citations fill duplicate gaps.
+
+    :return None: Checks remaining-slot limits and a full graph after a seed alias.
+    """
+    seed = _seed_paper("seed")
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [
+        _paper("seed"),
+        _paper("ref1"),
+    ]
+    client.get_paper_citations.return_value = [_paper("cit1")]
+
+    papers = CitationGraphBuilder(
+        max_papers=3,
+        max_references=25,
+        max_citations=25,
+        fetch_references=False,
+        client=client,
+    ).collect_papers("seed")
+
+    assert set(papers) == {"seed", "ref1", "cit1"}
+    client.get_paper_references.assert_called_once_with(
+        "seed",
+        limit=2,
+        raise_on_unavailable=True,
+    )
+    client.get_paper_citations.assert_called_once_with(
+        "seed",
+        limit=1,
+        raise_on_unavailable=True,
+    )
+
+    seed_only_client = MagicMock()
+    seed_only_client.get_paper.return_value = _seed_paper("seed-only")
+    seed_only_papers = CitationGraphBuilder(
+        max_papers=1,
+        max_references=25,
+        max_citations=25,
+        fetch_references=False,
+        client=seed_only_client,
+    ).collect_papers("seed-only")
+
+    assert set(seed_only_papers) == {"seed-only"}
+    seed_only_client.get_paper_references.assert_not_called()
+    seed_only_client.get_paper_citations.assert_not_called()
 
 
 def test_citation_collect_preserves_seed_when_relation_reuses_seed_id() -> None:

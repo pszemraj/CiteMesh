@@ -915,6 +915,30 @@ def test_search_command_prints_results_to_stdout(
     assert "[Attention] Is All You Need [/bold]" in result.stdout
 
 
+def test_s2_search_forwards_paginated_result_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI should allow service-level paging beyond one S2 request.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to inject the API client.
+    :return None: Checks ``-n 101`` reaches the paginating service unchanged.
+    """
+    mock_client = MagicMock()
+    mock_client.search_papers.return_value = [
+        Paper(paper_id="result", title="Result", year=None, abstract="Abstract")
+    ]
+    monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
+
+    result = run_cli_command(["search", "attention", "--mode", "s2", "-n", "101"])
+
+    assert result.returncode == 0
+    mock_client.search_papers.assert_called_once_with(
+        "attention",
+        limit=101,
+        raise_on_unavailable=True,
+    )
+
+
 def _fake_local_search_builder(
     *, cached_count: int, results: list[Any] | None = None
 ) -> MagicMock:
@@ -1076,6 +1100,32 @@ def test_search_mode_local_prints_cached_results(
     assert builder_kwargs["semantic_source"] == "candidates"
     assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
     assert builder_kwargs["storage_precision"] == "float32"
+
+
+def test_search_mode_local_has_no_s2_result_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local search should accept counts beyond S2's relevance-search window.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to inject the local builder.
+    :return None: Checks a large positive count reaches local search unchanged.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=1500,
+        results=[_FAKE_LOCAL_RESULT],
+    )
+    monkeypatch.setattr(
+        search_module,
+        "EmbeddingGraphBuilder",
+        MagicMock(return_value=fake_builder),
+    )
+
+    result = run_cli_command(
+        ["search", "cached topic", "--mode", "local", "-n", "1001"]
+    )
+
+    assert result.returncode == 0
+    fake_builder.search_local.assert_called_once_with("cached topic", top_k=1001)
 
 
 @pytest.mark.parametrize("binary_prefilter", [False, True])
