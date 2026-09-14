@@ -57,6 +57,7 @@ from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
     ENCODE_BATCH_SIZE,
     EmbeddingCacheFingerprintMismatchError,
+    EmbeddingGraphBuilder,
 )
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
@@ -4343,6 +4344,10 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert metadata["embedding"] == {
         "effective_vector_dtype": "float32",
+        "effective_model": DEFAULT_EMBEDDING_MODEL_NAME,
+        "effective_model_revision": None,
+        "model_fingerprint": None,
+        "effective_truncate_dim": None,
         "effective_device": None,
         "effective_compute_dtype": None,
         "model_profile": "auto",
@@ -5334,19 +5339,83 @@ def test_graph_config_payload_records_device() -> None:
     assert payload["build"]["embedding"]["device"] == "cpu"
 
 
-def test_export_metadata_records_effective_device() -> None:
-    """Export metadata should surface effective device/dtype from runtime."""
-    namespace = _dispatch_namespace()
+def test_export_metadata_records_effective_embedding_runtime() -> None:
+    """Export metadata should surface the active model, dimension, and device."""
+    _, build_parser, _, _ = cli_module._create_parser()
+    namespace = build_parser.parse_args(["seed", "--strategy", "embedding"])
+    active_model = "google/embeddinggemma-300m"
+    resolved_revision = "0123456789abcdef0123456789abcdef01234567"
+    fingerprint = f"hf::{active_model}::{resolved_revision}"
     metadata = cli_module._embedding_export_metadata(
         namespace,
         runtime_metadata={
             "binary_prefilter_used": True,
+            "active_model": active_model,
+            "model_fingerprint": fingerprint,
+            "resolved_model_revision": resolved_revision,
+            "truncate_dim": 512,
             "device": "mps",
             "compute_dtype": "bfloat16",
         },
     )
+    assert metadata["effective_model"] == active_model
+    assert metadata["effective_model_revision"] == resolved_revision
+    assert metadata["model_fingerprint"] == fingerprint
+    assert metadata["effective_truncate_dim"] == 512
     assert metadata["effective_device"] == "mps"
     assert metadata["effective_compute_dtype"] == "bfloat16"
+
+    sidecar = cli_module._build_graph_config_payload(
+        cli_args=namespace,
+        seed_id="seed",
+        metadata={"strategy": "embedding", "embedding": metadata},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/embedding.json")},
+    )
+    replay = sidecar["build"]["embedding"]
+    assert replay["model"] == active_model
+    assert "model_revision" not in replay
+    assert replay["truncate_dim"] == 512
+
+    original_builder = EmbeddingGraphBuilder(
+        model_name=namespace.model,
+        model_revision=namespace.model_revision,
+        client=MagicMock(),
+    )
+    original_builder._active_model_name = active_model
+    original_builder._resolved_model_fingerprint = fingerprint
+    replay_builder = EmbeddingGraphBuilder(
+        model_name=replay["model"],
+        model_revision=replay.get("model_revision"),
+        truncate_dim=replay["truncate_dim"],
+        client=MagicMock(),
+    )
+    replay_builder._resolved_model_fingerprint = fingerprint
+    assert original_builder._embedding_cache_namespace(
+        artifact_identity=fingerprint
+    ) == replay_builder._embedding_cache_namespace(artifact_identity=fingerprint)
+
+    selector_namespace = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--model-revision", "main"]
+    )
+    selector_fingerprint = f"hf::{selector_namespace.model}::{resolved_revision}"
+    selector_metadata = cli_module._embedding_export_metadata(
+        selector_namespace,
+        runtime_metadata={
+            "active_model": selector_namespace.model,
+            "model_fingerprint": selector_fingerprint,
+            "resolved_model_revision": resolved_revision,
+        },
+    )
+    selector_sidecar = cli_module._build_graph_config_payload(
+        cli_args=selector_namespace,
+        seed_id="seed",
+        metadata={"strategy": "embedding", "embedding": selector_metadata},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/embedding.json")},
+    )
+    assert selector_metadata["effective_model_revision"] == resolved_revision
+    assert selector_sidecar["build"]["embedding"]["model_revision"] == "main"
 
 
 def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:

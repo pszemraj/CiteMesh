@@ -234,16 +234,32 @@ def _embedding_export_metadata(
 
     effective_device: str | None = None
     effective_compute_dtype: str | None = None
+    effective_model = str(cli_args.model)
+    effective_model_revision: str | None = None
+    model_fingerprint: str | None = None
+    effective_truncate_dim = cli_args.truncate_dim
     effective_model_profile = str(cli_args.model_profile)
     retrieval_representation = "retrieval-query/retrieval-document"
     graph_representation = "graph-similarity"
     if isinstance(runtime_metadata, dict):
         raw_device = runtime_metadata.get("device")
         raw_compute_dtype = runtime_metadata.get("compute_dtype")
+        raw_active_model = runtime_metadata.get("active_model")
+        raw_model_fingerprint = runtime_metadata.get("model_fingerprint")
+        raw_resolved_model_revision = runtime_metadata.get("resolved_model_revision")
+        raw_truncate_dim = runtime_metadata.get("truncate_dim")
         if isinstance(raw_device, str) and raw_device:
             effective_device = raw_device
         if isinstance(raw_compute_dtype, str) and raw_compute_dtype:
             effective_compute_dtype = raw_compute_dtype
+        if isinstance(raw_active_model, str) and raw_active_model:
+            effective_model = raw_active_model
+        if isinstance(raw_model_fingerprint, str) and raw_model_fingerprint:
+            model_fingerprint = raw_model_fingerprint
+        if isinstance(raw_resolved_model_revision, str) and raw_resolved_model_revision:
+            effective_model_revision = raw_resolved_model_revision
+        if isinstance(raw_truncate_dim, int) and not isinstance(raw_truncate_dim, bool):
+            effective_truncate_dim = raw_truncate_dim
         raw_model_profile = runtime_metadata.get("model_profile")
         if isinstance(raw_model_profile, str) and raw_model_profile:
             effective_model_profile = raw_model_profile
@@ -259,6 +275,10 @@ def _embedding_export_metadata(
 
     payload: dict[str, object] = {
         "effective_vector_dtype": "float32",
+        "effective_model": effective_model,
+        "effective_model_revision": effective_model_revision,
+        "model_fingerprint": model_fingerprint,
+        "effective_truncate_dim": effective_truncate_dim,
         "effective_device": effective_device,
         "effective_compute_dtype": effective_compute_dtype,
         "model_profile": effective_model_profile,

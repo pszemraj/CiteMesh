@@ -122,6 +122,16 @@ def _build_graph_config_payload(
                 getattr(cli_args, "cache_overwrite_reason", None)
             ),
         }
+        runtime_embedding = metadata.get("embedding")
+        if isinstance(runtime_embedding, dict):
+            effective_model = runtime_embedding.get("effective_model")
+            if isinstance(effective_model, str) and effective_model:
+                embedding_config["model"] = effective_model
+            effective_truncate_dim = runtime_embedding.get("effective_truncate_dim")
+            if isinstance(effective_truncate_dim, int) and not isinstance(
+                effective_truncate_dim, bool
+            ):
+                embedding_config["truncate_dim"] = effective_truncate_dim
         if strategy == "embedding":
             embedding_config["top_k"] = int(cli_args.top_k)
         if cli_args.semantic_source != "arxiv-corpus":

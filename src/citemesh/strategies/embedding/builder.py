@@ -717,8 +717,21 @@ class EmbeddingGraphBuilder(
 
         :return Dict[str, object]: Runtime metadata payload for downstream export.
         """
+        active_model = self._cache_model_identity()
+        model_fingerprint = self._resolved_model_fingerprint
+        resolved_model_revision: str | None = None
+        fingerprint_prefix = f"hf::{active_model}::"
+        if model_fingerprint and model_fingerprint.startswith(fingerprint_prefix):
+            revision = model_fingerprint.removeprefix(fingerprint_prefix)
+            if re.fullmatch(r"[0-9a-f]{40}", revision, flags=re.IGNORECASE):
+                resolved_model_revision = revision.lower()
+
         return {
             "binary_prefilter_used": self._last_search_used_binary_prefilter,
+            "active_model": active_model,
+            "model_fingerprint": model_fingerprint,
+            "resolved_model_revision": resolved_model_revision,
+            "truncate_dim": self.truncate_dim,
             "device": self.device,
             "requested_device": self.requested_device,
             "compute_dtype": self._source_dtype_hint,

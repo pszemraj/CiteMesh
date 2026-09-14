@@ -2252,6 +2252,14 @@ def test_embedding_fingerprint_uses_active_fallback_model_identity(
     assert builder.embedding_cache.h5_path != requested_cache_path
     assert f"model={fallback_model}" in builder.embedding_cache.model_name
     assert f"artifact={fingerprint}" in builder.embedding_cache.model_name
+    runtime_metadata = builder._embedding_runtime_metadata()
+    assert runtime_metadata["active_model"] == fallback_model
+    assert runtime_metadata["model_fingerprint"] == fingerprint
+    assert (
+        runtime_metadata["resolved_model_revision"]
+        == "0123456789abcdef0123456789abcdef01234567"
+    )
+    assert runtime_metadata["truncate_dim"] == 512
 
 
 def test_embedding_artifact_probe_does_not_create_provisional_cache(
@@ -7643,6 +7651,10 @@ def test_embedding_runtime_metadata_tracks_prefilter_usage(
     assert candidates == []
     assert builder._embedding_runtime_metadata() == {
         "binary_prefilter_used": False,
+        "active_model": DEFAULT_EMBEDDING_MODEL_NAME,
+        "model_fingerprint": "test-fingerprint",
+        "resolved_model_revision": None,
+        "truncate_dim": 512,
         "device": builder.device,
         "requested_device": "auto",
         "compute_dtype": builder._source_dtype_hint,
@@ -8065,6 +8077,10 @@ def test_embedding_build_graph_persists_runtime_metadata(
     assert seed_id == "seed"
     assert graph.graph["embedding_runtime"] == {
         "binary_prefilter_used": True,
+        "active_model": DEFAULT_EMBEDDING_MODEL_NAME,
+        "model_fingerprint": None,
+        "resolved_model_revision": None,
+        "truncate_dim": 512,
         "device": builder.device,
         "requested_device": "auto",
         "compute_dtype": builder._source_dtype_hint,
