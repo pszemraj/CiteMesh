@@ -4972,6 +4972,109 @@ def test_complete_capped_cache_extends_to_larger_corpus_size(
     clear_cache_mock.assert_not_called()
 
 
+class _FakeIndexableDataset:
+    """Minimal Arrow-style dataset stand-in the selection policy can index.
+
+    :ivar list[dict[str, Any]] rows: Backing source records.
+    :ivar list[str] column_names: Columns the newest-first selection inspects.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]], column_names: list[str]) -> None:
+        """Store the rows and the columns the selection policy sees.
+
+        :param list[dict[str, Any]] rows: Backing source records.
+        :param list[str] column_names: Columns to advertise.
+        :return None: Initializes the stand-in.
+        """
+        self.rows = rows
+        self.column_names = list(column_names)
+
+    def __len__(self) -> int:
+        """Report the row count that makes this slice re-iterable.
+
+        :return int: Number of backing rows.
+        """
+        return len(self.rows)
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        """Iterate the backing rows from the start on every pass.
+
+        :return Iterator[dict[str, Any]]: Source records.
+        """
+        return iter(self.rows)
+
+    def __getitem__(self, column: str) -> list[Any]:
+        """Return one column, as an Arrow-backed dataset does.
+
+        :param str column: Column name to read.
+        :return list[Any]: Column values in row order.
+        """
+        return [row[column] for row in self.rows]
+
+    def select(self, indices: list[int]) -> list[dict[str, Any]]:
+        """Return the rows at ``indices``, as ``Dataset.select`` does.
+
+        :param list[int] indices: Source row indices to keep.
+        :return list[dict[str, Any]]: Selected records.
+        """
+        return [self.rows[index] for index in indices]
+
+
+@pytest.mark.parametrize("id_column", ["missing", "unparseable"])
+def test_capped_extension_over_an_unrankable_dataset_records_its_new_size(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    id_column: str,
+) -> None:
+    """An extension that consumed its whole cap must record the size it holds.
+
+    Neither newest-first fallback can rank these rows, so both hand back the
+    whole dataset and leave hydration to stop at the cap: the rows are selected
+    and cached, but the source iterator never reports EOF. Reading that as a
+    short read freezes the token at the old size forever — every later run then
+    searches more rows than the token claims, without the larger-cache
+    disclosure, and any larger request retries the extension on every build.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param pytest.LogCaptureFixture caplog: Captured extension warnings.
+    :param str id_column: Whether the dataset lacks ``id`` or cannot parse it.
+    :return None: Asserts the new rows, the new token, and no retain warning.
+    """
+    source = "fixture/source"
+    id_key = "paper_id" if id_column == "missing" else "id"
+    rows: list[dict[str, Any]] = [
+        {id_key: f"arxiv:unknown-{index}", "title": f"Paper {index}", "abstract": "A"}
+        for index in range(5)
+    ]
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=3,
+        cached_corpus_size=1,
+        cached_ids=("unknown-0",),
+    )
+    cache = builder.embedding_cache
+    dataset = _FakeIndexableDataset(rows, [id_key, "title", "abstract"])
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=lambda *args, **kwargs: dataset),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    assert cache.get_cached_paper_ids() == {
+        "arxiv:unknown-0",
+        "arxiv:unknown-1",
+        "arxiv:unknown-2",
+    }
+    assert cache.payload_stats().hydration_corpus_size == "newest:3"
+    assert cache.is_hydrated("train", 3, dataset_source=source)
+    assert "did not exhaust its source" not in caplog.text
+    assert model.encode.call_count == 1
+    clear_cache_mock.assert_not_called()
+
+
 def test_complete_cache_reused_for_smaller_corpus_size(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

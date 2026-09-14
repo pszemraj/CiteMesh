@@ -38,14 +38,24 @@ class _HydrationSourceSliceResult:
     Keeping those concepts separate prevents duplicate/invalid source rows from
     being mistaken for an interrupted resume.
 
+    A capped pass has two ways to see everything it was asked to select, and
+    ``source_exhausted`` only reports one of them. Where the selection is exactly
+    cap-sized, draining it is reaching the cap; where the selection is wider than
+    the cap — the fallbacks that hand back the whole dataset when no arXiv ID is
+    parseable — hydration stops at the cap and the iterator never reports EOF.
+    ``row_cap_reached`` is the other half, so a caller asking "did this pass
+    finish?" does not mistake the second shape for a short read.
+
     :ivar int hydrated_records: Records routed into cache batching.
     :ivar int source_rows_consumed: Raw source rows yielded to hydration.
     :ivar bool source_exhausted: Whether the selected source slice reached clean EOF.
+    :ivar bool row_cap_reached: Whether the pass consumed its whole corpus cap.
     """
 
     hydrated_records: int
     source_rows_consumed: int
     source_exhausted: bool
+    row_cap_reached: bool = False
 
 
 @dataclass(frozen=True)

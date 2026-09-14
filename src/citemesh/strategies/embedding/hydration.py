@@ -745,6 +745,15 @@ class _CorpusHydrationMixin:
         moved upstream selection already produces — rather than an incomplete one
         the rebuild path would clear.
 
+        Success is seeing the whole selection, which for a capped request is
+        reaching the cap rather than draining the source. A newest-first
+        selection is normally exactly cap-sized, making the two the same thing,
+        but the fallbacks for a dataset with no ``id`` column or no parseable
+        arXiv IDs hand back the whole dataset and leave hydration to stop at the
+        cap: the rows are selected and cached, yet the iterator never reports
+        EOF, and treating that as a short read would keep the token frozen at
+        the old size forever while the namespace holds the larger corpus.
+
         :param bool use_streaming: Whether hydration mode is streaming.
         :param str source: Dataset source recorded on the complete cache.
         :param CacheNamespacePayloadStats stats: Current namespace payload stats.
@@ -782,7 +791,7 @@ class _CorpusHydrationMixin:
             existing_paper_ids=cached_paper_ids,
         )
         updated_rows = self._cached_payload_row_count()
-        if not extension.source_exhausted:
+        if not (extension.source_exhausted or extension.row_cap_reached):
             logger.warning(
                 "Corpus extension for %s/%s did not exhaust its source; the cache "
                 "is retained at %s with %d rows instead of being rebuilt. Re-run "
@@ -1182,6 +1191,13 @@ class _CorpusHydrationMixin:
             hydrated_records=hydrated_records,
             source_rows_consumed=source_rows_consumed,
             source_exhausted=source_exhausted,
+            # Hydration takes the first ``slice_corpus_size`` rows of the slice,
+            # so consuming that many is consuming the whole selection even when
+            # the slice runs on past it and never reports EOF.
+            row_cap_reached=(
+                slice_corpus_size is not None
+                and source_rows_consumed >= slice_corpus_size
+            ),
         )
 
     def _finalize_full_corpus_hydration_rows(
@@ -1817,7 +1833,10 @@ class _CorpusHydrationMixin:
 
         The namespace keeps its complete metadata throughout, so an interrupted
         pass leaves a cache that is still usable at its recorded size rather than
-        an incomplete one the rebuild path would clear.
+        an incomplete one the rebuild path would clear. As in the extension, a
+        pass that consumed its whole cap saw the whole selection even when the
+        slice it was handed runs on past the cap without reporting EOF, so the
+        reconciliation marker is written and the next run is spared the scan.
 
         :param bool use_streaming: Whether hydration mode is streaming.
         :param str source: Hydrated dataset source token.
@@ -1854,7 +1873,7 @@ class _CorpusHydrationMixin:
             dataset=selection,
         )
         updated_rows = self._cached_payload_row_count()
-        if not refresh.source_exhausted:
+        if not (refresh.source_exhausted or refresh.row_cap_reached):
             logger.warning(
                 "Capped corpus recency refresh for %s/%s did not exhaust its "
                 "source; the cache is retained with %d rows. Re-run to finish "
