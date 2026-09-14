@@ -1082,6 +1082,84 @@ def test_embedding_cache_reencodes_legacy_schema_before_reusing_vectors(
     )
 
 
+def test_embedding_cache_migrates_chronology_column_before_legacy_schema_rebuild(
+    tmp_path: Path,
+) -> None:
+    """Schema repair must retain a papers table that current upserts can use.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks the column migration survives vector-layout repair.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="chronology-column-schema-repair",
+        storage_precision="float32",
+    )
+    paper = {"p1": {"title": "Original", "abstract": "Abstract"}}
+    cache.get_embeddings(
+        paper,
+        LookupEncodeModel(
+            {"Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}
+        ),
+        show_progress=False,
+    )
+    with cache._connect_db() as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_papers_chronology_key")
+        conn.execute("DROP INDEX IF EXISTS idx_papers_row_idx")
+        conn.execute("DROP TABLE papers")
+        conn.execute(
+            """
+            CREATE TABLE papers (
+                paper_id TEXT PRIMARY KEY,
+                title TEXT,
+                abstract TEXT,
+                year INTEGER,
+                text_hash TEXT,
+                embedding_dim INTEGER,
+                row_idx INTEGER,
+                authors_json TEXT,
+                categories_json TEXT,
+                venue TEXT,
+                arxiv_id TEXT,
+                doi TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "UPDATE cache_metadata SET value = ? WHERE key = ?",
+            ("3", SCHEMA_VERSION_KEY),
+        )
+    with h5py.File(cache.h5_path, "a") as h5:
+        h5.attrs.modify(SCHEMA_VERSION_KEY, 3)
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="chronology-column-schema-repair",
+        storage_precision="float32",
+    )
+    with reopened._connect_db() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(papers)")}
+        assert "chronology_key" in columns
+        assert (
+            conn.execute(
+                "SELECT value FROM cache_metadata WHERE key = ?", (SCHEMA_VERSION_KEY,)
+            ).fetchone()[0]
+            == "4"
+        )
+
+    reencoded = reopened.get_embeddings(
+        paper,
+        LookupEncodeModel(
+            {"Original. Abstract": np.asarray([0.0, 1.0], dtype=np.float32)}
+        ),
+        show_progress=False,
+    )
+    np.testing.assert_array_equal(
+        reencoded["p1"], np.asarray([0.0, 1.0], dtype=np.float32)
+    )
+
+
 def test_embedding_cache_rejects_float16_persistent_storage() -> None:
     """Persistent cache vectors must use int8 or float32 storage."""
     with tempfile.TemporaryDirectory() as tmpdir:

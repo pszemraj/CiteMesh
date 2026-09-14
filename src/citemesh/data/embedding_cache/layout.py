@@ -96,6 +96,9 @@ class _H5LayoutMixin:
             if "doi" not in columns:
                 conn.execute("ALTER TABLE papers ADD COLUMN doi TEXT")
             if "chronology_key" not in columns:
+                # Layout repair retains this SQLite table while replacing only
+                # vector payloads, so columns must be current before it stamps
+                # the repaired namespace with the current schema version.
                 conn.execute("ALTER TABLE papers ADD COLUMN chronology_key INTEGER")
 
             conn.execute("DROP INDEX IF EXISTS idx_papers_text_hash")
