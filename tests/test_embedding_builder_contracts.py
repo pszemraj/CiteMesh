@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import multiprocessing as mp
+import sqlite3
 import sys
 import threading
 import types
@@ -2275,6 +2276,23 @@ def test_embedding_artifact_probe_does_not_create_provisional_cache(
     assert builder.has_persistent_embedding_artifacts()
     assert builder._embedding_cache is None
     assert list(cache_dir.iterdir()) == [payload]
+
+    payload.unlink()
+    legacy_namespace = "0123456789ab"
+    legacy_db = cache_dir / f"metadata_{legacy_namespace}.db"
+    with sqlite3.connect(legacy_db) as connection:
+        connection.execute(
+            "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+            ("schema_version", "3"),
+        )
+    legacy_h5 = cache_dir / f"embeddings_{legacy_namespace}.h5"
+    legacy_h5.touch()
+
+    assert not builder.has_persistent_embedding_artifacts()
+    assert builder._embedding_cache is None
 
 
 def test_embedding_cache_namespace_partition_contracts(

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import sqlite3
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -92,6 +93,31 @@ def get_cache_dir(*parts: str, create: bool = True) -> Path:
     if create:
         path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def read_embedding_namespace_schema(db_path: Path) -> str | None:
+    """Read an embedding namespace schema without mutating its SQLite database.
+
+    :param Path db_path: Metadata database belonging to one embedding namespace.
+    :return Optional[str]: Persisted schema token, or ``None`` when metadata is
+        unavailable or unreadable.
+    """
+    connection: sqlite3.Connection | None = None
+    try:
+        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        connection = sqlite3.connect(database_uri, uri=True)
+        row = connection.execute(
+            "SELECT value FROM cache_metadata WHERE key = ?",
+            ("schema_version",),
+        ).fetchone()
+    except (OSError, ValueError, sqlite3.DatabaseError):
+        return None
+    finally:
+        if connection is not None:
+            connection.close()
+    if row is None:
+        return None
+    return str(row[0]).strip() or None
 
 
 @contextmanager

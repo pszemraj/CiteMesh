@@ -33,7 +33,11 @@ from citemesh.data import (
     resolve_embedding_model_profile,
     validate_compression_filter,
 )
-from citemesh.data.embedding_cache import CacheSearchResult
+from citemesh.data.cache import read_embedding_namespace_schema
+from citemesh.data.embedding_cache import (
+    EMBEDDING_CACHE_SCHEMA_VERSION,
+    CacheSearchResult,
+)
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
@@ -1207,7 +1211,15 @@ class EmbeddingGraphBuilder(
             if self._embedding_cache is not None
             else get_cache_dir("embeddings", create=False)
         )
-        return any(cache_directory.glob("embeddings_*.h5"))
+        for h5_path in cache_directory.glob("embeddings_*.h5"):
+            namespace_id = h5_path.name.removeprefix("embeddings_").removesuffix(".h5")
+            schema_version = read_embedding_namespace_schema(
+                cache_directory / f"metadata_{namespace_id}.db"
+            )
+            if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
+                continue
+            return True
+        return False
 
     def _select_candidates(
         self, seed_embedding: np.ndarray, use_streaming: bool

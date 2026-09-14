@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +23,7 @@ from citemesh.data.cache import (
     cache_operation_lock,
     legacy_macos_cache_root,
     path_exists,
+    read_embedding_namespace_schema,
 )
 from citemesh.data.user_config import (
     USER_CONFIG_FILENAME,
@@ -319,30 +319,6 @@ def _scan_path_stats(path: Path) -> tuple[int, int]:
     return file_count, size_bytes
 
 
-def _read_embedding_namespace_schema(db_path: Path) -> str | None:
-    """Read a namespace schema token without mutating its SQLite database.
-
-    :param Path db_path: Metadata database belonging to one namespace.
-    :return Optional[str]: Persisted schema token, or ``None`` when metadata is
-        unavailable or unreadable.
-    """
-    # Cache commands are otherwise usable without importing the embedding stack.
-    from citemesh.data.embedding_cache.constants import SCHEMA_VERSION_KEY
-
-    try:
-        database_uri = f"{db_path.resolve().as_uri()}?mode=ro"
-        with sqlite3.connect(database_uri, uri=True) as connection:
-            row = connection.execute(
-                "SELECT value FROM cache_metadata WHERE key = ?",
-                (SCHEMA_VERSION_KEY,),
-            ).fetchone()
-    except (OSError, ValueError, sqlite3.DatabaseError):
-        return None
-    if row is None:
-        return None
-    return str(row[0]).strip() or None
-
-
 def _embedding_namespace_status(db_path: Path | None) -> str:
     """Describe whether a scanned namespace is usable by the current cache layout.
 
@@ -358,7 +334,7 @@ def _embedding_namespace_status(db_path: Path | None) -> str:
 
     from citemesh.data.embedding_cache.constants import EMBEDDING_CACHE_SCHEMA_VERSION
 
-    schema_version = _read_embedding_namespace_schema(db_path)
+    schema_version = read_embedding_namespace_schema(db_path)
     if schema_version is None:
         return "Metadata unavailable (inspect before removing)"
 
@@ -399,6 +375,10 @@ def _scan_embedding_namespaces(
 
     rows: list[_EmbeddingNamespaceScan] = []
     for namespace_id, artifact_paths in sorted(namespace_files.items()):
+        if all(
+            artifact_path.name.endswith(".lock") for artifact_path in artifact_paths
+        ):
+            continue
         size_bytes = 0
         for artifact_path in artifact_paths:
             try:

@@ -356,6 +356,7 @@ def test_embedding_namespace_scan_groups_artifacts_and_flags_dtype_upgrade_cache
     current_namespace = "0123456789ab"
     legacy_namespace = "fedcba987654"
     orphaned_namespace = "a1b2c3d4e5f6"
+    cleaned_namespace = "123456789abc"
 
     current_db = tmp_path / f"metadata_{current_namespace}.db"
     legacy_db = tmp_path / f"metadata_{legacy_namespace}.db"
@@ -375,8 +376,16 @@ def test_embedding_namespace_scan_groups_artifacts_and_flags_dtype_upgrade_cache
         tmp_path / f"hydration_{legacy_namespace}.lock",
     ]
     orphaned_artifact = tmp_path / f"embeddings_{orphaned_namespace}.h5"
+    cleaned_locks = [
+        tmp_path / f"cache_{cleaned_namespace}.lock",
+        tmp_path / f"hydration_{cleaned_namespace}.lock",
+    ]
     for index, artifact_path in enumerate(
-        current_artifacts[1:] + legacy_artifacts[1:] + [orphaned_artifact], start=1
+        current_artifacts[1:]
+        + legacy_artifacts[1:]
+        + [orphaned_artifact]
+        + cleaned_locks,
+        start=1,
     ):
         artifact_path.write_bytes(bytes(index))
 
@@ -399,3 +408,4 @@ def test_embedding_namespace_scan_groups_artifacts_and_flags_dtype_upgrade_cache
     assert rows[orphaned_namespace].status == (
         "Orphaned artifact (metadata database missing)"
     )
+    assert cleaned_namespace not in rows
