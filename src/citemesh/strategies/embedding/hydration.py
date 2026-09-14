@@ -683,7 +683,13 @@ class _CorpusHydrationMixin:
                 exc,
                 stats.hydration_corpus_size,
             )
-        finally:
+            # Only a raised refresh leaves metadata nobody decided on: the
+            # full-corpus pass marks the namespace incomplete on entry and
+            # restamps it when it finishes, so an exception in between is the
+            # one way an unowned incomplete marker survives. A clean return is
+            # the refresh's own verdict — a shrunk upstream deliberately leaves
+            # the namespace incomplete so the next run revalidates it against
+            # the source — and restoring that would discard the invalidation.
             self._restore_reused_corpus_completeness(
                 source=source, corpus_size=cached_corpus_size
             )
@@ -700,6 +706,10 @@ class _CorpusHydrationMixin:
         to the destructive rebuild — a refresh failure costing the very cache
         this branch just decided to reuse. These passes only ever add rows, so
         the namespace is still complete at its recorded cap either way.
+
+        Reserved for a refresh that raised: an incomplete marker a refresh left
+        behind on purpose records a decision about the cached rows, and undoing
+        it here would strand the cache in a state nothing revalidates.
 
         :param str source: Dataset source recorded on the complete cache.
         :param Optional[int] corpus_size: Cap the cached rows were recorded at.

@@ -5393,21 +5393,18 @@ def test_reused_corpus_refresh_routes_on_the_cached_corpus_shape(
     clear_cache_mock.assert_not_called()
 
 
-@pytest.mark.parametrize("failure", ["raises", "leaves-incomplete"])
-def test_failed_reused_corpus_refresh_keeps_the_covering_cache(
+def test_raised_reused_corpus_refresh_keeps_the_covering_cache(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    failure: str,
 ) -> None:
-    """A failed top-up must not cost the cache the reuse just decided to serve.
+    """A raised top-up must not cost the cache the reuse just decided to serve.
 
     A namespace left marked incomplete under a token the request cannot match
-    would fail the next run's resume check and be handed to the rebuild, so the
-    reuse restores its recorded completeness whichever way the refresh ended.
+    would fail the next run's resume check and be handed to the rebuild, so a
+    refresh that abandoned its pass mid-flight has its completeness restored.
 
     :param pytest.MonkeyPatch monkeypatch: Patching fixture.
     :param pytest.LogCaptureFixture caplog: Captured disclosure warnings.
-    :param str failure: Whether the refresh raises or only marks the cache incomplete.
     :return None: Asserts retained rows, restored metadata, and no rebuild.
     """
     source = "fixture/source"
@@ -5423,8 +5420,8 @@ def test_failed_reused_corpus_refresh_keeps_the_covering_cache(
         """Abandon the refresh the way an interrupted source read would.
 
         :param Any _kwargs: Capped-recency refresh options.
-        :return None: Leaves the namespace marked incomplete.
-        :raises RuntimeError: When the parametrized failure is a raised error.
+        :return None: Never returns; leaves the namespace marked incomplete.
+        :raises RuntimeError: Always, standing in for a failed source read.
         """
         cache.mark_hydrated(
             dataset_source=source,
@@ -5432,8 +5429,7 @@ def test_failed_reused_corpus_refresh_keeps_the_covering_cache(
             corpus_size=2,
             complete=False,
         )
-        if failure == "raises":
-            raise RuntimeError("recency source failed")
+        raise RuntimeError("recency source failed")
 
     monkeypatch.setattr(builder, "_refresh_capped_corpus_recency", refresh)
 
@@ -5447,8 +5443,58 @@ def test_failed_reused_corpus_refresh_keeps_the_covering_cache(
     assert cache.is_hydrated("train", 2, dataset_source=source)
     model.encode.assert_not_called()
     clear_cache_mock.assert_not_called()
-    if failure == "raises":
-        assert "recency source failed" in caplog.text
+    assert "recency source failed" in caplog.text
+
+
+def test_reused_uncapped_cache_keeps_a_shrunk_upstream_invalidation(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A refresh that invalidated the cache must not be undone by the reuse.
+
+    An upstream holding fewer rows than the cache means the cached rows no
+    longer describe the source, so the full-corpus refresh marks the namespace
+    incomplete to force a full revalidation on the next run. Restoring
+    completeness because the reuse branch ran would keep every later capped run
+    searching rows upstream no longer has.
+
+    :param pytest.MonkeyPatch monkeypatch: Patching fixture.
+    :param pytest.LogCaptureFixture caplog: Captured invalidation warning.
+    :return None: Asserts the namespace stays incomplete after the reuse.
+    """
+    builder, clear_cache_mock, model = _complete_corpus_cache_builder(
+        monkeypatch,
+        corpus_size=1,
+        cached_corpus_size=None,
+        cached_ids=("2601.00001", "2601.00002", "2601.00003"),
+    )
+    cache = builder.embedding_cache
+    load = MagicMock()
+    monkeypatch.setattr(builder, "_resolve_dataset_split_row_count", lambda _: 2)
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(load_dataset=load),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        builder._ensure_cache_hydrated(use_streaming=False)
+
+    stats = cache.payload_stats()
+    assert stats.hydration_complete is False
+    assert stats.hydration_corpus_size == "all"
+    assert "marking hydration incomplete for full source revalidation" in caplog.text
+    assert "Restoring the reused corpus" not in caplog.text
+    # The rows themselves are kept: the next run revalidates them against the
+    # source rather than paying for a rebuild here.
+    assert cache.get_cached_paper_ids() == {
+        "arxiv:2601.00001",
+        "arxiv:2601.00002",
+        "arxiv:2601.00003",
+    }
+    model.encode.assert_not_called()
+    load.assert_not_called()
+    clear_cache_mock.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["raises", "short-read"])
