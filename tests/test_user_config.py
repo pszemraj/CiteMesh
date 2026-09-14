@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import io
 import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -39,6 +37,7 @@ from citemesh.data.user_config import (
 )
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.hybrid import HYBRID_DEFAULT_MAX_REFERENCES
+from tests._helpers import PausedFirstWrite, run_captured_cli
 
 
 def _run_cli(args: list[str]) -> SimpleNamespace:
@@ -47,22 +46,7 @@ def _run_cli(args: list[str]) -> SimpleNamespace:
     :param list[str] args: CLI arguments excluding the program name.
     :return SimpleNamespace: Return code and captured output streams.
     """
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        try:
-            returncode = cli_module.main(args)
-        except SystemExit as exc:
-            code = exc.code
-            if isinstance(code, int):
-                returncode = code
-            elif code is None:
-                returncode = 0
-            else:
-                returncode = 1
-    return SimpleNamespace(
-        returncode=returncode, stdout=stdout.getvalue(), stderr=stderr.getvalue()
-    )
+    return run_captured_cli(lambda: cli_module.main(args))
 
 
 def _parsed_build_args(argv: list[str]) -> tuple:
@@ -160,31 +144,7 @@ def test_config_set_serializes_concurrent_writes(
     """
     config_path = tmp_path / "config.toml"
 
-    first_write_started = threading.Event()
-    allow_first_write = threading.Event()
-    second_write_started = threading.Event()
-    write_counter = 0
-    write_counter_lock = threading.Lock()
-    original_atomic_write = user_config_module.atomic_write_text
-
-    def delayed_atomic_write(path: Path, payload: str, **kwargs: object) -> None:
-        """Stall the first write so the second set call races the config lock.
-
-        :param Path path: Config file path under write.
-        :param str payload: Serialized TOML payload.
-        :param object kwargs: Pass-through keyword arguments for the writer.
-        :return None: Delegates to the real atomic writer after coordination.
-        """
-        nonlocal write_counter
-        with write_counter_lock:
-            write_counter += 1
-            call_number = write_counter
-        if call_number == 1:
-            first_write_started.set()
-            assert allow_first_write.wait(timeout=5), "first write never released"
-        else:
-            second_write_started.set()
-        original_atomic_write(path, payload, **kwargs)
+    delayed_atomic_write = PausedFirstWrite(user_config_module.atomic_write_text)
 
     monkeypatch.setattr(user_config_module, "atomic_write_text", delayed_atomic_write)
 
@@ -206,19 +166,22 @@ def test_config_set_serializes_concurrent_writes(
     second_thread = threading.Thread(target=worker, args=("defaults.streaming", "true"))
 
     first_thread.start()
-    assert first_write_started.wait(timeout=5), "first write never started"
-    second_thread.start()
-    assert not second_write_started.wait(timeout=0.25), (
-        "second config set reached write path before first released config lock"
+    assert delayed_atomic_write.first_started.wait(timeout=5), (
+        "first write never started"
     )
+    second_thread.start()
+    second_wrote_early = delayed_atomic_write.second_started.wait(timeout=0.25)
 
-    allow_first_write.set()
+    delayed_atomic_write.release_first.set()
     first_thread.join(timeout=5)
     second_thread.join(timeout=5)
 
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
     assert not errors
+    assert not second_wrote_early, (
+        "second config set reached write path before first released config lock"
+    )
 
     config = load_user_config(config_path)
     assert config.defaults["max_papers"] == 25

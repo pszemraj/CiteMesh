@@ -15,7 +15,7 @@ import threading
 import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext, redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -71,8 +71,10 @@ from citemesh.visualization import GraphExporter as ProductionGraphExporter
 from citemesh.visualization import generate_output_path
 from citemesh.visualization.dashboard import package as dashboard_package_module
 from tests._helpers import (
+    PausedFirstWrite,
     build_seed_graph,
     get_paper_id_normalization_cases,
+    run_captured_cli,
 )
 
 
@@ -82,7 +84,7 @@ def run_cli_command(args: list[str]) -> SimpleNamespace:
     :param list[str] args: CLI arguments.
     :return SimpleNamespace: Return code and captured streams.
     """
-    return _run_captured_cli(lambda: cli_module.main(args))
+    return run_captured_cli(lambda: cli_module.main(args))
 
 
 def run_cli_command_via_sys_argv(
@@ -90,31 +92,7 @@ def run_cli_command_via_sys_argv(
 ) -> SimpleNamespace:
     """Run CLI through ``sys.argv`` to exercise ``main(argv=None)``."""
     monkeypatch.setattr("sys.argv", ["citemesh", *args])
-    return _run_captured_cli(cli_module.main)
-
-
-def _run_captured_cli(entrypoint: Any) -> SimpleNamespace:
-    """Run a CLI entrypoint and capture stdout/stderr."""
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        try:
-            returncode = entrypoint()
-        except SystemExit as exc:
-            code = exc.code
-            if isinstance(code, int):
-                returncode = code
-            elif code is None:
-                returncode = 0
-            else:
-                returncode = 1
-
-    return SimpleNamespace(
-        returncode=returncode,
-        stdout=stdout.getvalue(),
-        stderr=stderr.getvalue(),
-    )
+    return run_captured_cli(cli_module.main)
 
 
 def flatten_console_text(text: str) -> str:
@@ -3517,33 +3495,7 @@ def test_dashboard_package_serializes_concurrent_updates(
     first_graph.nodes["seed-a"]["title"] = "First Seed"
     second_graph.nodes["seed-b"]["title"] = "Second Seed"
 
-    first_write_started = threading.Event()
-    allow_first_write = threading.Event()
-    second_write_started = threading.Event()
-    write_counter = 0
-    write_counter_lock = threading.Lock()
-    original_atomic_write = dashboard_package_module.atomic_write_json
-
-    def delayed_atomic_write(
-        path: Path, payload: dict[str, object], **kwargs: object
-    ) -> None:
-        """Hold the first writer inside its locked package update.
-
-        :param Path path: JSON destination.
-        :param dict[str, object] payload: Package contents to persist.
-        :param object kwargs: Original JSON writer options.
-        :return None: Writes after the test releases the first writer.
-        """
-        nonlocal write_counter
-        with write_counter_lock:
-            write_counter += 1
-            call_number = write_counter
-        if call_number == 1:
-            first_write_started.set()
-            assert allow_first_write.wait(timeout=5), "first write never released"
-        else:
-            second_write_started.set()
-        original_atomic_write(path, payload, **kwargs)
+    delayed_atomic_write = PausedFirstWrite(dashboard_package_module.atomic_write_json)
 
     monkeypatch.setattr(
         dashboard_package_module, "atomic_write_json", delayed_atomic_write
@@ -3574,14 +3526,16 @@ def test_dashboard_package_serializes_concurrent_updates(
     second_thread = threading.Thread(target=worker, args=(second_graph, "seed-b"))
 
     first_thread.start()
-    assert first_write_started.wait(timeout=5), "first write never started"
+    assert delayed_atomic_write.first_started.wait(timeout=5), (
+        "first write never started"
+    )
     # The first writer already holds its lock, so each writer observes one root.
     if separate_cache_roots:
         monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-b"))
     second_thread.start()
-    second_wrote_early = second_write_started.wait(timeout=0.25)
+    second_wrote_early = delayed_atomic_write.second_started.wait(timeout=0.25)
 
-    allow_first_write.set()
+    delayed_atomic_write.release_first.set()
     first_thread.join(timeout=5)
     second_thread.join(timeout=5)
 
