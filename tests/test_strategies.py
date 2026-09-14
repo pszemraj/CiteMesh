@@ -2112,6 +2112,7 @@ def test_max_papers_is_total_node_cap_including_seed(
         )
         builder.client.get_paper.return_value = _seed_paper()
         builder._load_model = lambda: None
+        builder._resolve_model_fingerprint = lambda: "test-fingerprint"
         builder._update_citation_counts = lambda _: None
         builder._select_candidates = lambda _seed_embedding, *, use_streaming: [
             (
@@ -2267,6 +2268,9 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
     )
     vector = np.asarray([1.0, 0.0], dtype=np.float32)
     monkeypatch.setattr(builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder, "_resolve_model_fingerprint", lambda: "test-fingerprint"
+    )
     monkeypatch.setattr(builder, "_encode_texts", lambda *_args, **_kwargs: [vector])
     monkeypatch.setattr(
         builder,

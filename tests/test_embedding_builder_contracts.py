@@ -305,6 +305,37 @@ def _pin_model_fingerprint(
     builder._bind_embedding_cache_to_active_model()
 
 
+def _install_deterministic_builder_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    builder: EmbeddingGraphBuilder,
+    *,
+    fingerprint: str,
+) -> ConstantEncodeModel:
+    """Install a tiny encoder while preserving lazy artifact binding.
+
+    :param pytest.MonkeyPatch monkeypatch: Runtime boundary patch fixture.
+    :param EmbeddingGraphBuilder builder: Fresh builder receiving the fake runtime.
+    :param str fingerprint: Artifact identity shared by lifecycle operations.
+    :return ConstantEncodeModel: Deterministic two-dimensional encoder.
+    """
+    model = ConstantEncodeModel()
+
+    def load_model() -> None:
+        """Mimic a fresh load whose immutable artifact is not resolved yet.
+
+        :return None: Binds the fake model and clears provisional cache handles.
+        """
+        if builder.model is not None:
+            return
+        builder.model = model
+        builder._active_model_name = builder.model_name
+        builder._bind_embedding_cache_to_active_model()
+
+    monkeypatch.setattr(builder, "_load_model", load_model)
+    monkeypatch.setattr(builder, "_resolve_model_fingerprint", lambda: fingerprint)
+    return model
+
+
 def _put_concurrent_hydration_record(cache: EmbeddingCache, paper_id: str) -> None:
     """Persist one deterministic row for the concurrent hydration regression.
 
@@ -4201,6 +4232,7 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
         semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     builder.client.get_paper.return_value = seed
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
@@ -4271,6 +4303,7 @@ def test_collect_papers_deduplicates_corpus_candidates_by_strong_identity(
         semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     builder.client.get_paper.return_value = seed
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
@@ -4339,6 +4372,7 @@ def test_collect_papers_corpus_bridge_collapses_prior_alias_classes(
         semantic_source="arxiv-corpus",
         client=MagicMock(),
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     builder.client.get_paper.return_value = seed
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
@@ -4423,6 +4457,7 @@ def test_corpus_collection_preserves_all_candidate_authors(
     builder = EmbeddingGraphBuilder(
         max_papers=2, semantic_source="arxiv-corpus", client=MagicMock()
     )
+    _pin_model_fingerprint(monkeypatch, builder)
     builder.client.get_paper.return_value = seed
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
@@ -8093,6 +8128,91 @@ def test_generated_corpus_seed_reopens_cached_paper(seed_id: str) -> None:
     assert resolved.doi == "10.1234/cached"
     assert resolved.is_seed is True
     assert resolved.is_local_corpus is True
+
+
+@pytest.mark.parametrize(
+    "seed_id", ["content:local-paper", "arxiv_7", "local-source-42"]
+)
+@pytest.mark.parametrize("force_rebuild_cache", [False, True])
+def test_fresh_build_reopens_local_search_result_from_artifact_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    seed_id: str,
+    force_rebuild_cache: bool,
+) -> None:
+    """A fresh corpus build must reopen a local result from the selected namespace.
+
+    :param pytest.MonkeyPatch monkeypatch: Cache and runtime isolation fixture.
+    :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
+    :param str seed_id: Cached current, legacy, or opaque source identifier.
+    :param bool force_rebuild_cache: Whether the build clears and rehydrates first.
+    :return None: Verifies search-to-build identity across fresh builder instances.
+    """
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    fingerprint = "artifact-local-seed-lifecycle"
+    dataset_source = "fixture/local-seed-corpus"
+    source_row = {
+        "id": seed_id,
+        "title": "Cached seed title",
+        "abstract": "Cached seed abstract",
+        "authors": ["Ada Example"],
+        "year": 2024,
+        "categories": ["cs.IR"],
+    }
+
+    def make_builder(*, force_rebuild: bool = False) -> EmbeddingGraphBuilder:
+        """Create one independently initialized builder with shared settings.
+
+        :param bool force_rebuild: Whether this operation requests a cache rebuild.
+        :return EmbeddingGraphBuilder: Fresh builder bound to deterministic fixtures.
+        """
+        client = MagicMock()
+        client.get_paper.side_effect = AssertionError(
+            "cached local seed must not be sent to Semantic Scholar"
+        )
+        builder = EmbeddingGraphBuilder(
+            max_papers=1,
+            semantic_source="arxiv-corpus",
+            dataset_source=dataset_source,
+            dataset_split="train[:1]",
+            corpus_size=1,
+            storage_precision="float32",
+            force_rebuild_cache=force_rebuild,
+            force_rebuild_reason="fresh-build lifecycle regression",
+            client=client,
+        )
+        _install_deterministic_builder_runtime(
+            monkeypatch,
+            builder,
+            fingerprint=fingerprint,
+        )
+        monkeypatch.setattr(
+            builder,
+            "_load_dataset_for_hydration",
+            lambda **_kwargs: (dataset_source, [dict(source_row)]),
+        )
+        return builder
+
+    hydration_builder = make_builder()
+    hydration_builder.prepare_embedding_cache()
+    hydration_builder._ensure_cache_hydrated(use_streaming=False)
+
+    search_builder = make_builder()
+    search_result = search_builder.search_local("cached seed", top_k=1)[0]
+    assert search_result.paper_id == seed_id
+
+    build_builder = make_builder(force_rebuild=force_rebuild_cache)
+    graph, actual_seed_id = build_builder.build_graph(search_result.paper_id)
+
+    assert actual_seed_id == seed_id
+    assert set(graph) == {seed_id}
+    assert graph.nodes[seed_id]["title"] == "Cached seed title"
+    assert graph.nodes[seed_id]["paper"].abstract == "Cached seed abstract"
+    assert graph.nodes[seed_id]["is_local_corpus"] is True
+    assert (
+        build_builder.embedding_cache.db_path == search_builder.embedding_cache.db_path
+    )
+    build_builder.client.get_paper.assert_not_called()
 
 
 def test_missing_local_corpus_seed_reports_cache_namespace_mismatch() -> None:

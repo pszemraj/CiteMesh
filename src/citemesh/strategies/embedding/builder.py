@@ -853,8 +853,18 @@ class EmbeddingGraphBuilder(
         self.embeddings = {}
         self.candidate_source_status = {}
 
-        # Load model lazily.
-        self._load_model()
+        # Corpus metadata belongs to the artifact-bound namespace. Preparing it
+        # before seed resolution keeps fresh builders from consulting the
+        # provisional ``artifact=unresolved`` discovery handle. An explicit
+        # rebuild clears that selected namespace during preparation, so restore
+        # its corpus rows before looking up an ID that only the cache can resolve.
+        rebuild_requested = self._pending_force_rebuild_reason is not None
+        if self.semantic_source == "arxiv-corpus":
+            self.prepare_embedding_cache()
+            if rebuild_requested and seed_paper is None:
+                self._ensure_cache_hydrated(use_streaming=self.use_streaming)
+        else:
+            self._load_model()
 
         resolved_seed_paper = self._resolve_seed_paper(seed_id, seed_paper)
         papers[resolved_seed_paper.paper_id] = resolved_seed_paper
