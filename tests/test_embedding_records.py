@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from citemesh.strategies.embedding.records import (
+    _anonymous_dataset_paper_id,
     _dataset_record_raw_paper_id,
     _extract_dataset_paper_metadata,
     _newest_records_by_arxiv_id,
@@ -174,6 +175,105 @@ def test_extract_dataset_paper_metadata_normalizes_an_arxiv_row() -> None:
     assert metadata["categories"] == ["cs.CL", "cs.LG"]
     assert metadata["venue"] == "NeurIPS 2017"
     assert metadata["year"] == 2017
+
+
+@pytest.mark.parametrize("abstract", [None, "", "   "])
+def test_extract_dataset_paper_metadata_uses_summary_when_abstract_is_blank(
+    abstract: str | None,
+) -> None:
+    """A populated summary remains usable when abstract is present but blank.
+
+    :param Optional[str] abstract: Unusable abstract representation under test.
+    :return None: Checks that normalized metadata retains the summary text.
+    """
+    metadata = _extract_dataset_paper_metadata(
+        {
+            "title": "Summary-only paper",
+            "abstract": abstract,
+            "summary": "Usable summary",
+        },
+        0,
+    )
+
+    assert metadata["abstract"] == "Usable summary"
+
+
+def test_anonymous_identity_distinguishes_bibliographically_distinct_works() -> None:
+    """Generic shared text must not collapse works with distinct metadata.
+
+    :return None: Checks authors, year, and DOI all participate in identity.
+    """
+    common = {"title": "Editorial", "abstract": "An editorial note."}
+    base_id = _anonymous_dataset_paper_id(
+        {
+            **common,
+            "authors": ["Alice Example"],
+            "year": 2024,
+            "doi": "10.1234/alpha",
+        }
+    )
+
+    assert base_id is not None
+    assert base_id != _anonymous_dataset_paper_id(
+        {
+            **common,
+            "authors": ["Bob Example"],
+            "year": 2024,
+            "doi": "10.1234/alpha",
+        }
+    )
+    assert base_id != _anonymous_dataset_paper_id(
+        {
+            **common,
+            "authors": ["Alice Example"],
+            "year": 2025,
+            "doi": "10.1234/alpha",
+        }
+    )
+    assert base_id != _anonymous_dataset_paper_id(
+        {
+            **common,
+            "authors": ["Alice Example"],
+            "year": 2024,
+            "doi": "10.1234/beta",
+        }
+    )
+
+
+def test_anonymous_identity_is_stable_across_raw_and_cached_metadata() -> None:
+    """Normalization must give one identity before and after cache persistence.
+
+    :return None: Checks structured authors, DOI URLs, and summary normalization.
+    """
+    raw = {
+        "title": "  Stable work  ",
+        "abstract": None,
+        "summary": "  Stable summary  ",
+        "authors": "ignored",
+        "authors_parsed": [["Example", "Ada", ""]],
+        "year": "2024",
+        "doi": "https://doi.org/10.1234/EXAMPLE",
+    }
+    cached = _extract_dataset_paper_metadata(raw, 0)
+
+    assert _anonymous_dataset_paper_id(raw) == _anonymous_dataset_paper_id(cached)
+
+
+def test_anonymous_identity_uses_distinct_summary_when_abstract_is_blank() -> None:
+    """Fallback summaries must contribute to anonymous content identity.
+
+    :return None: Checks blank abstracts cannot collapse distinct summaries.
+    """
+    first = _anonymous_dataset_paper_id(
+        {"title": "Editorial", "abstract": "", "summary": "First summary"}
+    )
+    second = _anonymous_dataset_paper_id(
+        {"title": "Editorial", "abstract": None, "summary": "Second summary"}
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first != second
 
 
 def test_extract_dataset_paper_metadata_falls_back_for_empty_rows() -> None:

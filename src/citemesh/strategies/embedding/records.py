@@ -231,24 +231,63 @@ def _parse_venue(paper: dict[str, Any]) -> str:
     return ""
 
 
+def _parse_abstract(paper: dict[str, Any]) -> str:
+    """Return the first usable abstract-like field from a dataset record.
+
+    Some dataset adapters populate ``abstract`` with ``None`` or whitespace
+    while retaining usable text in ``summary``. Treating the mere presence of
+    ``abstract`` as authoritative would discard that document text.
+
+    :param Dict[str, Any] paper: Source or cached paper metadata.
+    :return str: First nonblank ``abstract`` or ``summary`` string, else empty.
+    """
+    for field in ("abstract", "summary"):
+        value = paper.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _parse_doi(doi_data: Any) -> str:
+    """Normalize the first usable DOI token in dataset metadata.
+
+    :param Any doi_data: Raw DOI field from source or cached metadata.
+    :return str: Canonical bare DOI, or an empty string when unavailable.
+    """
+    source_doi = re.split(r"[\s,;]+", str(doi_data or "").strip())[0]
+    canonical_source_doi = canonicalize_or_none(source_doi) if source_doi else None
+    if canonical_source_doi is None:
+        return ""
+    _, normalized_doi = external_ids_from_canonical_paper_id(canonical_source_doi)
+    return normalized_doi if normalized_doi and normalized_doi.startswith("10.") else ""
+
+
 def _anonymous_dataset_paper_id(paper: dict[str, Any]) -> str | None:
-    """Identify a row without a source ID by its normalized embedding content.
+    """Identify a row without a source ID by normalized bibliographic metadata.
 
     Source positions change on insertion, ranking and slicing. Content identity
-    preserves unchanged rows across those operations without aliasing new papers.
+    preserves unchanged rows across those operations. Authors, year, and DOI
+    keep distinct works from aliasing when they share generic title/abstract text.
 
-    :param Dict[str, Any] paper: Source or cached title/abstract metadata.
+    :param Dict[str, Any] paper: Source or cached bibliographic metadata.
     :return Optional[str]: Stable content identifier, or ``None`` for empty text.
     """
     title = paper.get("title")
-    abstract = paper.get("abstract", paper.get("summary", ""))
     text = _embedding_text_metadata(
         title if isinstance(title, str) else "",
-        abstract if isinstance(abstract, str) else "",
+        _parse_abstract(paper),
     )
     if not any(text.values()):
         return None
-    content = json.dumps(text, sort_keys=True, ensure_ascii=False)
+    identity = {
+        "text": text,
+        "authors": _parse_authors(
+            paper.get("authors", []), paper.get("authors_parsed")
+        ),
+        "year": _parse_year(paper),
+        "doi": _parse_doi(paper.get("doi")),
+    }
+    content = json.dumps(identity, sort_keys=True, ensure_ascii=False)
     return f"content:{sha256(content.encode('utf-8')).hexdigest()}"
 
 
@@ -286,18 +325,11 @@ def _extract_dataset_paper_metadata(paper: dict[str, Any], fallback_index: int) 
     """
     paper_id = _dataset_record_paper_id(paper, fallback_index)
     arxiv_id, doi = external_ids_from_canonical_paper_id(paper_id)
-    source_doi = re.split(r"[\s,;]+", str(paper.get("doi") or "").strip())[0]
-    canonical_source_doi = canonicalize_or_none(source_doi) if source_doi else None
-    if canonical_source_doi is not None:
-        _, normalized_doi = external_ids_from_canonical_paper_id(canonical_source_doi)
-        if normalized_doi and normalized_doi.startswith("10."):
-            doi = normalized_doi
+    doi = _parse_doi(paper.get("doi")) or doi
     title = paper.get("title", "Unknown")
     if not isinstance(title, str) or not title.strip():
         title = "Unknown"
-    abstract = paper.get("abstract", paper.get("summary", ""))
-    if not isinstance(abstract, str):
-        abstract = ""
+    abstract = _parse_abstract(paper)
 
     return {
         "paper_id": paper_id,
