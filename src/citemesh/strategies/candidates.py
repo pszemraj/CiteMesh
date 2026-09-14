@@ -22,6 +22,7 @@ from typing import (
 )
 
 from citemesh.core import Paper
+from citemesh.core.choices import SEMANTIC_SOURCE_CHOICES as SEMANTIC_SOURCE_CHOICES
 from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
     normalize_paper_id,
@@ -34,7 +35,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SEMANTIC_SOURCE_CHOICES = ("candidates", "arxiv-corpus")
 DEFAULT_CANDIDATE_POOL_SIZE = 400
 QUERY_SEED_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)

@@ -21,20 +21,25 @@ from rich_argparse import RichHelpFormatter
 
 from citemesh import __version__
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG
+from citemesh.core.choices import (
+    DEVICE_CHOICES,
+    EXPORT_CHOICES,
+    MODEL_PROFILE_CHOICES,
+    SEARCH_MODE_CHOICES,
+    SEMANTIC_SOURCE_CHOICES,
+    STORAGE_PRECISION_CHOICES,
+    STRATEGY_CHOICES,
+    THEME_CHOICES,
+)
 from citemesh.core.validation import (
     ValueValidationError,
     parse_bounded_int,
     parse_unit_interval_float,
 )
-from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME, EMBEDDING_MODEL_PROFILE_CHOICES
-from citemesh.data.user_config import SEARCH_MODE_CHOICES
-from citemesh.strategies.candidates import (
-    DEFAULT_CANDIDATE_POOL_SIZE,
-    SEMANTIC_SOURCE_CHOICES,
-)
+from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
+from citemesh.strategies.candidates import DEFAULT_CANDIDATE_POOL_SIZE
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
-    EMBEDDING_DEVICE_CHOICES,
     ENCODE_BATCH_SIZE,
 )
 from citemesh.strategies.hybrid import (
@@ -48,7 +53,6 @@ from citemesh.visualization.dashboard.package import DASHBOARD_COLLECTION_FILENA
 from . import console
 from .build_options import _CACHE_COMPRESSION_CHOICES
 from .console import DEFAULT_LOG_WIDTH, LOG_LEVEL_CHOICES
-from .outputs import EXPORT_FORMATS
 
 _TRACKED_OPTION_DESTS_ATTR = "_citemesh_provided_option_dests"
 _TRACKED_ACTION_CACHE: dict[type[argparse.Action], type[argparse.Action]] = {}
@@ -403,7 +407,7 @@ def _add_build_graph_arguments(
         "-s",
         metavar="NAME",
         type=str,
-        choices=["recommendation", "citation", "embedding", "hybrid"],
+        choices=list(STRATEGY_CHOICES),
         default="recommendation",
         help="recommendation, citation, embedding, hybrid (default: recommendation)",
     )
@@ -425,7 +429,7 @@ def _add_build_graph_arguments(
         "--export",
         "-e",
         metavar="FORMAT",
-        choices=[*EXPORT_FORMATS, "all"],
+        choices=list(EXPORT_CHOICES),
         action="append",
         default=None,
         help=(
@@ -437,7 +441,7 @@ def _add_build_graph_arguments(
     export_group.add_argument(
         "--theme",
         metavar="THEME",
-        choices=["light", "dark", "solarized", "auto"],
+        choices=list(THEME_CHOICES),
         default="dark",
         help="light, dark, solarized, auto (default: %(default)s)",
     )
@@ -572,7 +576,7 @@ def _add_build_corpus_arguments(
     embedding_group.add_argument(
         "--model-profile",
         metavar="PROFILE",
-        choices=list(EMBEDDING_MODEL_PROFILE_CHOICES),
+        choices=list(MODEL_PROFILE_CHOICES),
         default="auto",
         help=(
             "auto, default, embeddinggemma (default: auto). "
@@ -710,7 +714,7 @@ def _add_build_cache_arguments(
     storage_group.add_argument(
         "--storage-precision",
         metavar="PRECISION",
-        choices=["int8", "float32"],
+        choices=list(STORAGE_PRECISION_CHOICES),
         default=EMBEDDING_STORAGE_CONFIG.storage_precision,
         help="Persistent vectors (default: int8 for corpus, float32 for candidates)",
     )
@@ -844,7 +848,7 @@ def _add_build_runtime_arguments(
         "--device",
         metavar="DEVICE",
         dest="device",
-        choices=list(EMBEDDING_DEVICE_CHOICES),
+        choices=list(DEVICE_CHOICES),
         default="auto",
         help=(
             "auto, cuda, mps, cpu (default: auto). Auto prefers CUDA, "
@@ -1051,7 +1055,7 @@ def _add_search_arguments(
     search_parser.add_argument(
         "--model-profile",
         metavar="PROFILE",
-        choices=list(EMBEDDING_MODEL_PROFILE_CHOICES),
+        choices=list(MODEL_PROFILE_CHOICES),
         default=None,
         help=(
             "auto, default, embeddinggemma; match the build profile "
@@ -1070,7 +1074,7 @@ def _add_search_arguments(
     search_parser.add_argument(
         "--device",
         metavar="DEVICE",
-        choices=list(EMBEDDING_DEVICE_CHOICES),
+        choices=list(DEVICE_CHOICES),
         default=None,
         help="auto, cuda, mps, cpu for query encoding (implies --mode local)",
     )
@@ -1105,7 +1109,7 @@ def _add_search_arguments(
     search_parser.add_argument(
         "--storage-precision",
         metavar="PRECISION",
-        choices=["int8", "float32"],
+        choices=list(STORAGE_PRECISION_CHOICES),
         default=None,
         help=(
             "int8 or float32 storage used by the cached build (implies --mode local)"

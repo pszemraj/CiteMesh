@@ -46,7 +46,7 @@ conda run -n inf python -m pytest -m slow      # real-model smokes (needs escala
 - Comments state constraints the code can't, not narration of the change.
 - Optional dependencies (torch, sentence-transformers, datasets, plotly, pyvis) stay lazily imported so the core CLI works with no extras.
 - The test suite is white-box: patch the name where it is used, in the module under test.
-- Argparse choices duplicated in `data/user_config.py` are guarded by `tests/test_user_config.py` — update both together.
+- Shared CLI/config choice vocabularies live in `core/choices.py`; import them instead of maintaining duplicate literals.
 - Never hard-wrap Markdown; editors soft-wrap.
 - Changed a CLI flag, default, cache layout, or env var? Update the matching page under `docs/`; stale docs are bugs.
 - Release notes are the sole change history. Do not create or maintain a separate changelog.

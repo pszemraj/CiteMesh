@@ -6,9 +6,8 @@ The config file lives at ``<cache_root>/config.toml`` (HuggingFace-style,
 defaults for build flags plus optional API credentials. Effective precedence
 is: explicit CLI flag > environment variable > config.toml > built-in default.
 
-The module is deliberately dependency-light: choice tuples are declared as
-literals here and kept in sync with the CLI parser by contract tests, so
-loading configuration never imports strategy or visualization modules.
+Option vocabularies come from dependency-free core constants, so loading
+configuration never imports strategy or visualization modules.
 """
 
 from __future__ import annotations
@@ -28,6 +27,16 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
 import tomli_w
 from filelock import FileLock, Timeout
 
+from citemesh.core.choices import (
+    DEVICE_CHOICES,
+    EXPORT_CHOICES,
+    MODEL_PROFILE_CHOICES,
+    SEARCH_MODE_CHOICES,
+    SEMANTIC_SOURCE_CHOICES,
+    STORAGE_PRECISION_CHOICES,
+    STRATEGY_CHOICES,
+    THEME_CHOICES,
+)
 from citemesh.core.validation import (
     ValueValidationError,
     parse_bounded_int,
@@ -41,31 +50,6 @@ USER_CONFIG_FILENAME = "config.toml"
 _CONFIG_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULTS_TABLE = "defaults"
 API_TABLE = "api"
-
-# Kept in sync with the CLI parser by tests/test_user_config.py contract tests.
-STRATEGY_CHOICES: tuple[str, ...] = (
-    "recommendation",
-    "citation",
-    "embedding",
-    "hybrid",
-)
-THEME_CHOICES: tuple[str, ...] = ("light", "dark", "solarized", "auto")
-DEVICE_CHOICES: tuple[str, ...] = ("auto", "cuda", "mps", "cpu")
-MODEL_PROFILE_CHOICES: tuple[str, ...] = ("auto", "default", "embeddinggemma")
-SEMANTIC_SOURCE_CHOICES: tuple[str, ...] = ("candidates", "arxiv-corpus")
-STORAGE_PRECISION_CHOICES: tuple[str, ...] = ("int8", "float32")
-SEARCH_MODE_CHOICES: tuple[str, ...] = ("auto", "local", "s2")
-EXPORT_CHOICES: tuple[str, ...] = (
-    "png",
-    "html",
-    "plotly",
-    "dashboard",
-    "json",
-    "csv",
-    "bibtex",
-    "graphml",
-    "all",
-)
 
 _TRUTHY_STRINGS = frozenset({"true", "1", "yes", "on"})
 _FALSEY_STRINGS = frozenset({"false", "0", "no", "off"})

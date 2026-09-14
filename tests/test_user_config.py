@@ -27,14 +27,6 @@ from citemesh.data import cache as cache_module
 from citemesh.data import user_config as user_config_module
 from citemesh.data.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
-    DEVICE_CHOICES,
-    EXPORT_CHOICES,
-    MODEL_PROFILE_CHOICES,
-    SEARCH_MODE_CHOICES,
-    SEMANTIC_SOURCE_CHOICES,
-    STORAGE_PRECISION_CHOICES,
-    STRATEGY_CHOICES,
-    THEME_CHOICES,
     ConfigFileError,
     ConfigKeyError,
     ConfigValueError,
@@ -504,27 +496,6 @@ def test_format_config_value_round_trips_cli_forms() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_config_choice_specs_match_build_parser_choices() -> None:
-    """Persisted config choices should match the build parser choices.
-
-    :return None: Assertions validate every duplicated choice set.
-    """
-    _, build_parser, _, _ = parser_module._create_parser()
-    parser_choices = {
-        action.dest: action.choices
-        for action in build_parser._actions
-        if action.choices is not None
-    }
-    assert set(parser_choices["strategy"]) == set(STRATEGY_CHOICES)
-    assert set(parser_choices["theme"]) == set(THEME_CHOICES)
-    assert set(parser_choices["device"]) == set(DEVICE_CHOICES)
-    assert set(parser_choices["model_profile"]) == set(MODEL_PROFILE_CHOICES)
-    assert set(parser_choices["semantic_source"]) == set(SEMANTIC_SOURCE_CHOICES)
-    assert set(parser_choices["storage_precision"]) == set(STORAGE_PRECISION_CHOICES)
-    assert STORAGE_PRECISION_CHOICES == ("int8", "float32")
-    assert set(parser_choices["export"]) == set(EXPORT_CHOICES)
-
-
 # Config defaults consumed by non-build commands; `_apply_user_config_defaults`
 # skips them for build args because the build namespace lacks the attribute.
 _NON_BUILD_CONFIG_KEYS = frozenset({"search_mode"})
@@ -544,24 +515,6 @@ def test_config_default_keys_exist_as_build_dests() -> None:
             )
             continue
         assert hasattr(args, dest), f"config key '{dest}' is not a build parser dest"
-
-
-def test_search_mode_choices_match_search_parser() -> None:
-    """Persisted search modes should match the search parser choices.
-
-    :return None: Assertions validate the duplicated search choices.
-    """
-    parser, _, _, _ = parser_module._create_parser()
-    subparsers_action = next(
-        action
-        for action in parser._actions
-        if isinstance(action, argparse._SubParsersAction)
-    )
-    search_parser = subparsers_action.choices["search"]
-    mode_action = next(
-        action for action in search_parser._actions if action.dest == "mode"
-    )
-    assert set(mode_action.choices) == set(SEARCH_MODE_CHOICES)
 
 
 def test_search_mode_round_trip_and_validation(tmp_path: Path) -> None:
