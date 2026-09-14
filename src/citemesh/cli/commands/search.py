@@ -25,6 +25,25 @@ from ..build_options import (
 from ..console import logger
 from ..parser import _output_table, _pop_tracked_option_dests
 
+#: Search flags that override a build-equivalent namespace selector. They share
+#: their destinations with the build parser and all default to ``None``, so a
+#: set value is exactly the set of options this invocation supplied.
+_NAMESPACE_OVERRIDE_DESTS: frozenset[str] = frozenset(
+    {"model", "model_profile", "device", "semantic_source", "dataset_source"}
+)
+
+
+class _LocalSearchOptionError(ValueError):
+    """A namespace-flag combination on this command line the contract refuses.
+
+    Distinguished from every other local-search failure because it is a usage
+    error, not an unavailable cache: ``auto`` mode must report the bad flags
+    rather than treat them as a reason to quietly search Semantic Scholar. A
+    contract failure this invocation did not cause — a device in config.toml
+    that does not resolve, say — stays an availability failure and keeps the
+    fallback it has always had.
+    """
+
 
 def _resolve_search_mode(
     args: argparse.Namespace, user_config: UserConfig
@@ -65,6 +84,8 @@ def _prepare_local_search_builder(
     :param UserConfig user_config: Loaded user configuration snapshot.
     :return Tuple[EmbeddingGraphBuilder, argparse.Namespace]: Builder and the
         effective build-equivalent defaults namespace.
+    :raises _LocalSearchOptionError: If the supplied namespace flags do not form
+        a build configuration the contract accepts.
     """
     defaults = build_parser.parse_args(["local-search-placeholder-seed"])
     defaults._s2_api_key = _resolve_user_config_api_key(user_config)
@@ -85,24 +106,39 @@ def _prepare_local_search_builder(
     if args.dataset_source:
         defaults.dataset_source = args.dataset_source
         config_default_dests.discard("dataset_source")
-    # Mirrors the build contract: a corpus-only flag implies the corpus source.
-    semantic_source = args.semantic_source or (
-        "arxiv-corpus" if args.dataset_source else None
-    )
-    if semantic_source:
-        defaults.semantic_source = semantic_source
+    if args.semantic_source:
+        defaults.semantic_source = args.semantic_source
         config_default_dests.discard("semantic_source")
     # The overrides must land before contract validation: it coerces int8
     # storage to float32 outside arxiv-corpus mode, and storage precision is
     # part of the cache namespace, so a late override would compute a
     # float32 namespace that no corpus build ever wrote.
-    _validate_build_cli_contract(
-        defaults,
-        _ValueErrorParserErrorSink(),
-        frozenset(),
-        config_defaults=config_default_dests,
-        config_path=user_config.path,
-    )
+    #
+    # The destinations this invocation actually supplied go with them, so the
+    # build contract applies its own rules to them instead of search restating
+    # a subset: --dataset-source alone implies arxiv-corpus, and pairing it with
+    # --semantic-source candidates is the contradiction the contract rejects.
+    # Passed an empty set, the contract can only see the resolved values, and a
+    # contradiction reads as a plain candidates search that silently discards
+    # the dataset the user named.
+    provided_dests = {
+        dest for dest in _NAMESPACE_OVERRIDE_DESTS if getattr(args, dest, None)
+    }
+    try:
+        _validate_build_cli_contract(
+            defaults,
+            _ValueErrorParserErrorSink(),
+            provided_dests,
+            config_defaults=config_default_dests,
+            config_path=user_config.path,
+        )
+    except ValueError as exc:
+        if not provided_dests:
+            # Nothing on this command line produced it, so it stays what it has
+            # always been: a config-sourced reason local search is unavailable,
+            # which auto mode may answer from Semantic Scholar instead.
+            raise
+        raise _LocalSearchOptionError(str(exc)) from exc
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
     return builder, defaults
 
@@ -308,6 +344,11 @@ def _run_search_command(
             cached_count = builder.embedding_cache.embedding_count()
         else:
             cached_count = 0
+    except _LocalSearchOptionError as exc:
+        # A usage error, so it is reported in every mode: falling back to S2
+        # would answer a question the flags say was not asked.
+        logger.error("%s", exc)
+        return 2
     except Exception as exc:
         runtime_selectors = ""
         if builder is not None:

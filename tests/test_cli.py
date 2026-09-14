@@ -958,6 +958,50 @@ def test_search_mode_s2_rejects_local_flags(
     assert "--dataset-source" in message
 
 
+@pytest.mark.parametrize("mode_args", [[], ["--mode", "local"], ["--mode", "auto"]])
+def test_search_rejects_a_dataset_source_against_the_candidates_namespace(
+    monkeypatch: pytest.MonkeyPatch, mode_args: list[str]
+) -> None:
+    """Contradictory namespace flags must fail rather than quietly pick one.
+
+    ``--dataset-source`` names a corpus the build hydrated, so it only means
+    anything in ``arxiv-corpus`` mode. Paired with ``--semantic-source
+    candidates`` it used to be accepted and then discarded: the search read the
+    candidates namespace while the dataset the user named never reached it, in
+    every mode. The build contract already refuses this pairing, so it is the
+    contract that has to see which options this command line supplied.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :param list[str] mode_args: Implicit, explicit-local, or explicit-auto mode.
+    :return None: Asserts the usage exit code, both flag names, and no search.
+    """
+    builder_factory = MagicMock()
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+    client_factory = MagicMock()
+    monkeypatch.setattr(search_module, "get_client", client_factory)
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+
+    result = run_cli_command(
+        [
+            "search",
+            "attention",
+            *mode_args,
+            "--semantic-source",
+            "candidates",
+            "--dataset-source",
+            "research/arxiv-snapshot",
+        ]
+    )
+
+    assert result.returncode == 2
+    message = str(error_mock.call_args)
+    assert "--dataset-source" in message
+    assert "--semantic-source" in message
+    builder_factory.assert_not_called()
+    client_factory.assert_not_called()
+
+
 def test_search_rejects_empty_model_override() -> None:
     """An empty model token should fail parsing instead of silently no-oping.
 
