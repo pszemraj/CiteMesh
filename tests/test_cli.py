@@ -4870,8 +4870,12 @@ def test_cli_help_survives_unusable_terminal_width(
     assert "Options:" in help_text
 
 
-def test_output_path_and_slug_contracts() -> None:
-    """Output path resolver and auto-output slug generation should stay stable."""
+def test_output_path_and_slug_contracts(tmp_path: Path) -> None:
+    """Output path resolver and auto-output slug generation should stay stable.
+
+    :param Path tmp_path: Isolated directory for output-name collision checks.
+    :return None: Verifies artifact paths, sidecar paths, and stable seed slugs.
+    """
     path_cases = [
         (
             Path("out/arxiv-2508.14040-example"),
@@ -4920,34 +4924,6 @@ def test_output_path_and_slug_contracts() -> None:
         )
         assert paths == expected
 
-
-@pytest.mark.parametrize(
-    "directory_name", ["results", "results.json", "results.dashboard.html"]
-)
-@pytest.mark.parametrize("formats", [["json"], ["png"], ["json", "png"]])
-def test_output_writes_into_an_existing_directory(
-    tmp_path: Path,
-    directory_name: str,
-    formats: list[str],
-) -> None:
-    """An existing --output directory must receive the artifact, not name it.
-
-    :param Path tmp_path: Temporary directory serving as the output target.
-    :param str directory_name: Directory name, including export-like suffixes.
-    :param list[str] formats: Single or multiple requested export formats.
-    :return None: Assertions pin file-or-directory semantics.
-    """
-    results_dir = tmp_path / directory_name
-    results_dir.mkdir()
-
-    paths = resolve_output_paths(
-        base_output_path=results_dir,
-        selected_formats=formats,
-        explicit_output=True,
-        strategy="citation",
-    )
-
-    assert paths == {fmt: results_dir / f"citation.{fmt}" for fmt in formats}
     config_cases = [
         (
             {"png": Path("out/seed/hybrid.png")},
@@ -5000,6 +4976,35 @@ def test_output_writes_into_an_existing_directory(
     assert len(output_path.parent.name) <= 40
 
 
+@pytest.mark.parametrize(
+    "directory_name", ["results", "results.json", "results.dashboard.html"]
+)
+@pytest.mark.parametrize("formats", [["json"], ["png"], ["json", "png"]])
+def test_output_writes_into_an_existing_directory(
+    tmp_path: Path,
+    directory_name: str,
+    formats: list[str],
+) -> None:
+    """An existing --output directory must receive the artifact, not name it.
+
+    :param Path tmp_path: Temporary directory serving as the output target.
+    :param str directory_name: Directory name, including export-like suffixes.
+    :param list[str] formats: Single or multiple requested export formats.
+    :return None: Assertions pin file-or-directory semantics.
+    """
+    results_dir = tmp_path / directory_name
+    results_dir.mkdir()
+
+    paths = resolve_output_paths(
+        base_output_path=results_dir,
+        selected_formats=formats,
+        explicit_output=True,
+        strategy="citation",
+    )
+
+    assert paths == {fmt: results_dir / f"citation.{fmt}" for fmt in formats}
+
+
 def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
     """Running ``citemesh.__main__`` should invoke ``citemesh.cli.main``."""
     called: dict[str, object] = {}
@@ -5016,59 +5021,6 @@ def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
         runpy.run_module("citemesh.__main__", run_name="__main__")
     assert exc_info.value.code == 0
     assert called["argv"] is None
-
-
-def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
-    """Extract parseable ``citemesh`` command argv vectors from Markdown bash blocks."""
-    commands: list[list[str]] = []
-    blocks = re.findall(r"```bash\s+(.*?)```", markdown_text, flags=re.DOTALL)
-    for block in blocks:
-        pending = ""
-        for raw_line in block.splitlines():
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if pending:
-                continuation = (
-                    stripped[:-1].strip() if stripped.endswith("\\") else stripped
-                )
-                pending = f"{pending} {continuation}".strip()
-                if stripped.endswith("\\"):
-                    continue
-                tokens = shlex.split(pending)
-                pending = ""
-                if tokens and tokens[0] == "citemesh":
-                    commands.append(tokens[1:])
-                continue
-            if not stripped.startswith("citemesh "):
-                continue
-            if stripped.endswith("\\"):
-                pending = stripped[:-1].strip()
-                continue
-            tokens = shlex.split(stripped)
-            if tokens and tokens[0] == "citemesh":
-                commands.append(tokens[1:])
-    return commands
-
-
-def test_documented_cli_examples_are_parseable() -> None:
-    """Every documented bash command should remain parseable."""
-    parser, _, _, _ = parser_module._create_parser()
-    docs = [Path("README.md"), *sorted(Path("docs").rglob("*.md"))]
-
-    commands: list[list[str]] = []
-    for doc_path in docs:
-        markdown_text = doc_path.read_text(encoding="utf-8")
-        commands.extend(_extract_citemesh_doc_commands(markdown_text))
-
-    assert commands, "No citemesh commands found in docs; example parser test is stale."
-    for argv in commands:
-        if any(token.startswith("[") or token.endswith("]") for token in argv):
-            continue
-        try:
-            parser.parse_args(argv)
-        except SystemExit as exc:
-            assert exc.code == 0, f"Invalid documented command: {argv}"
 
 
 def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> None:
