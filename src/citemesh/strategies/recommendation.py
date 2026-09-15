@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 
 from citemesh.core import Paper
 from citemesh.services import get_client
+from citemesh.services.semantic_scholar.endpoints import RECOMMENDATION_MAX_RESULTS
 from citemesh.strategies.base import (
     GraphBuilderStrategy,
     build_capped_undirected_graph,
@@ -117,7 +119,8 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
                 "know this identifier; check the DOI/arXiv/S2 ID)."
             )
 
-        seed.is_seed = True
+        # Seed role belongs to this build, not the client-owned metadata record.
+        seed = replace(seed, is_seed=True)
         papers[seed.paper_id] = seed
         identity_aliases = IdentityRegistry()
         register_aliases(identity_aliases, seed.paper_id, seed)
@@ -128,7 +131,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             "recommendations",
             lambda: self.client.get_recommended_papers(
                 seed.paper_id,
-                limit=self.max_papers * 2,
+                limit=min(RECOMMENDATION_MAX_RESULTS, self.max_papers * 2),
                 raise_on_unavailable=True,
             ),
         )
@@ -153,6 +156,8 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             canonical_id = reconciliation.canonical_id
             if canonical_id is not None:
                 existing = papers[canonical_id]
+                # Identity reconciliation already merged the incoming metadata.
+                # Only newly fetched reference enrichment needs another merge.
                 if not existing.references:
                     self._hydrate_references(paper)
                     merge_paper_metadata(existing, paper)

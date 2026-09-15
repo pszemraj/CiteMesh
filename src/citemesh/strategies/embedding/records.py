@@ -1,29 +1,37 @@
 """Normalization of raw arXiv dataset records into embedding metadata.
 
-Owns identifier canonicalization, the arXiv-id chronology ordering used to keep
-the newest revision of each paper, and the field coercion that turns a raw
-dataset row into the metadata dict the embedding cache stores. The ``_parse_*``
-helpers layer arXiv-specific behavior over the shared coercers in
-:mod:`citemesh.core.paper_fields`.
+Owns identifier canonicalization, the newest-first record ranking built on the
+arXiv-id chronology keys derived in :mod:`citemesh.core.paper_ids`, and the
+field coercion that turns a raw dataset row into the metadata dict the embedding
+cache stores. The ``_parse_*`` helpers layer arXiv-specific behavior over the
+shared coercers in :mod:`citemesh.core.paper_fields`.
 """
 
 from __future__ import annotations
 
 import heapq
+import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from hashlib import sha1
+from hashlib import sha1, sha256
 from typing import (
     Any,
 )
 
 from citemesh.core.paper_fields import coerce_authors, coerce_categories, coerce_venue
 from citemesh.core.paper_ids import (
+    arxiv_id_chronology_key as _arxiv_id_chronology_key,
+)
+from citemesh.core.paper_ids import (
     canonicalize_or_none,
     external_ids_from_canonical_paper_id,
     recognize_arxiv_identifier,
 )
+
+from .text import _embedding_text_metadata
+
+_DATASET_PAPER_ID_FIELDS = ("id", "paper_id", "paperId")
 
 
 @dataclass(frozen=True)
@@ -35,14 +43,43 @@ class _HydrationSourceSliceResult:
     Keeping those concepts separate prevents duplicate/invalid source rows from
     being mistaken for an interrupted resume.
 
+    A capped pass has two ways to see everything it was asked to select, and
+    ``source_exhausted`` only reports one of them. Where the selection is exactly
+    cap-sized, draining it is reaching the cap; where the selection is wider than
+    the cap — the fallbacks that hand back the whole dataset when no arXiv ID is
+    parseable — hydration stops at the cap and the iterator never reports EOF.
+    ``row_cap_reached`` is the other half, so a caller asking "did this pass
+    finish?" does not mistake the second shape for a short read.
+
     :ivar int hydrated_records: Records routed into cache batching.
     :ivar int source_rows_consumed: Raw source rows yielded to hydration.
     :ivar bool source_exhausted: Whether the selected source slice reached clean EOF.
+    :ivar bool row_cap_reached: Whether the pass consumed its whole corpus cap.
     """
 
     hydrated_records: int
     source_rows_consumed: int
     source_exhausted: bool
+    row_cap_reached: bool = False
+
+
+@dataclass(frozen=True)
+class _CappedCorpusRecencyProbe:
+    """Outcome of asking upstream whether a capped corpus is still the newest.
+
+    ``selection`` is the newest-first slice the probe had to load and rank to
+    answer that. Ranking costs a full pass over the source — a full drain under
+    ``--streaming`` — and the pass that admits the missing rows needs exactly
+    this slice, so it is handed over rather than selected a second time. It is
+    ``None`` when the loaded slice cannot be traversed again, leaving that
+    caller to reload as before.
+
+    :ivar Optional[int] newest_key: Newest packed chronology key upstream holds.
+    :ivar Optional[Iterable[Dict[str, Any]]] selection: Re-iterable selected rows.
+    """
+
+    newest_key: int | None
+    selection: Iterable[dict[str, Any]] | None
 
 
 def _canonicalize_embedding_paper_id(raw_id: Any) -> str:
@@ -83,39 +120,8 @@ def _parse_year(paper: dict[str, Any]) -> int | None:
         except (TypeError, ValueError):
             pass
 
-    raw_id = paper.get("id") or paper.get("paper_id") or paper.get("paperId")
-    chronology = _arxiv_id_chronology_key(raw_id)
+    chronology = _arxiv_id_chronology_key(_dataset_record_raw_paper_id(paper))
     return chronology[0] if chronology is not None else None
-
-
-_NEW_STYLE_ARXIV_ID_RE = re.compile(r"^(\d{2})(\d{2})\.(\d{4,5})(?:v\d+)?$")
-_OLD_STYLE_ARXIV_ID_RE = re.compile(
-    r"^[a-z][a-z-]*(?:\.[a-z-]+)?/(\d{2})(\d{2})(\d{3})(?:v\d+)?$"
-)
-
-
-def _arxiv_id_chronology_key(raw_id: Any) -> tuple[int, int, int] | None:
-    """Return a sortable submission-chronology key for an arXiv identifier.
-
-    Both identifier styles encode the submission year/month: new-style
-    ``YYMM.NNNNN`` and old-style ``archive/YYMMNNN``. Snapshot row order and
-    ``update_date`` do not track submission time (revisions bump old papers),
-    so this key is the only reliable "newest papers" ordering.
-
-    :param Any raw_id: Raw identifier value from a dataset record.
-    :return Optional[Tuple[int, int, int]]: ``(year, month, sequence)`` or
-        ``None`` when the identifier is not a parseable arXiv ID.
-    """
-    text = str(raw_id or "").strip().lower()
-    if text.startswith("arxiv:"):
-        text = text[len("arxiv:") :]
-    match = _NEW_STYLE_ARXIV_ID_RE.match(text) or _OLD_STYLE_ARXIV_ID_RE.match(text)
-    if match is None:
-        return None
-    year_token, month, sequence = (int(group) for group in match.groups())
-    # arXiv started in 1991; two-digit years wrap at the century boundary.
-    year = 1900 + year_token if year_token >= 91 else 2000 + year_token
-    return (year, month, sequence)
 
 
 def _newest_records_by_arxiv_id(
@@ -133,7 +139,7 @@ def _newest_records_by_arxiv_id(
     heap: list[tuple[tuple[int, int, int], int, dict[str, Any]]] = []
     head_fallback: list[dict[str, Any]] = []
     for order, record in enumerate(records):
-        key = _arxiv_id_chronology_key((record or {}).get("id"))
+        key = _arxiv_id_chronology_key(_dataset_record_raw_paper_id(record or {}))
         if key is None:
             if len(head_fallback) < limit:
                 head_fallback.append(record)
@@ -145,6 +151,22 @@ def _newest_records_by_arxiv_id(
             heapq.heapreplace(heap, entry)
     selected = [record for _, _, record in sorted(heap, key=lambda entry: entry[:2])]
     return selected + head_fallback[: limit - len(selected)]
+
+
+def _dataset_record_raw_paper_id(paper: dict[str, Any]) -> Any:
+    """Return the first populated identifier field from a dataset record.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :return Any: Raw identifier value, or ``None`` when every supported field is empty.
+    """
+    for field in _DATASET_PAPER_ID_FIELDS:
+        value = paper.get(field)
+        if isinstance(value, str):
+            if value.strip():
+                return value
+        elif value:
+            return value
+    return None
 
 
 def _parse_authors(authors_data: Any, authors_parsed_data: Any = None) -> list[str]:
@@ -196,43 +218,118 @@ def _parse_categories(categories_data: Any) -> list[str]:
 def _parse_venue(paper: dict[str, Any]) -> str:
     """Normalize venue/journal metadata from dataset records.
 
+    The arXiv metadata snapshots ship this column as ``journal-ref``; other
+    sources spell it ``journal_ref`` or nest it under ``journal``.
+
     :param Dict[str, Any] paper: Raw dataset record.
     :return str: Best-effort venue string (empty when unavailable).
     """
-    for key in ("venue", "journal_ref", "journal"):
+    for key in ("venue", "journal_ref", "journal-ref", "journal"):
         venue = coerce_venue(paper.get(key))
         if venue:
             return venue
     return ""
 
 
+def _parse_abstract(paper: dict[str, Any]) -> str:
+    """Return the first usable abstract-like field from a dataset record.
+
+    Some dataset adapters populate ``abstract`` with ``None`` or whitespace
+    while retaining usable text in ``summary``. Treating the mere presence of
+    ``abstract`` as authoritative would discard that document text.
+
+    :param Dict[str, Any] paper: Source or cached paper metadata.
+    :return str: First nonblank ``abstract`` or ``summary`` string, else empty.
+    """
+    for field in ("abstract", "summary"):
+        value = paper.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _parse_doi(doi_data: Any) -> str:
+    """Normalize the first usable DOI token in dataset metadata.
+
+    :param Any doi_data: Raw DOI field from source or cached metadata.
+    :return str: Canonical bare DOI, or an empty string when unavailable.
+    """
+    source_doi = re.split(r"[\s,;]+", str(doi_data or "").strip())[0]
+    canonical_source_doi = canonicalize_or_none(source_doi) if source_doi else None
+    if canonical_source_doi is None:
+        return ""
+    _, normalized_doi = external_ids_from_canonical_paper_id(canonical_source_doi)
+    return normalized_doi if normalized_doi and normalized_doi.startswith("10.") else ""
+
+
+def _anonymous_dataset_paper_id(paper: dict[str, Any]) -> str | None:
+    """Identify a row without a source ID by normalized bibliographic metadata.
+
+    Source positions change on insertion, ranking and slicing. Content identity
+    preserves unchanged rows across those operations. Authors, year, and DOI
+    keep distinct works from aliasing when they share generic title/abstract text.
+
+    :param Dict[str, Any] paper: Source or cached bibliographic metadata.
+    :return Optional[str]: Stable content identifier, or ``None`` for empty text.
+    """
+    title = paper.get("title")
+    text = _embedding_text_metadata(
+        title if isinstance(title, str) else "",
+        _parse_abstract(paper),
+    )
+    if not any(text.values()):
+        return None
+    identity = {
+        "text": text,
+        "authors": _parse_authors(
+            paper.get("authors", []), paper.get("authors_parsed")
+        ),
+        "year": _parse_year(paper),
+        "doi": _parse_doi(paper.get("doi")),
+    }
+    content = json.dumps(identity, sort_keys=True, ensure_ascii=False)
+    return f"content:{sha256(content.encode('utf-8')).hexdigest()}"
+
+
+def _dataset_record_paper_id(paper: dict[str, Any], fallback_index: int) -> str:
+    """Resolve the cache identifier a raw dataset record hydrates under.
+
+    Split out so a caller that only needs to ask whether a source row is already
+    cached can answer it without normalizing the rest of the record, and cannot
+    drift from the identifier hydration would actually write.
+
+    :param Dict[str, Any] paper: Raw dataset record.
+    :param int fallback_index: Source row index reported for unusable records.
+    :return str: Canonicalized paper identifier.
+    :raises ValueError: If neither an identifier nor usable document text exists.
+    """
+    raw_paper_id = _dataset_record_raw_paper_id(paper)
+    canonical_id = _canonicalize_embedding_paper_id(raw_paper_id)
+    if canonical_id:
+        return canonical_id
+    content_id = _anonymous_dataset_paper_id(paper)
+    if content_id is None:
+        raise ValueError(
+            f"Dataset row {fallback_index} has no paper identifier or usable "
+            "title/abstract; supply a stable identifier or document text."
+        )
+    return content_id
+
+
 def _extract_dataset_paper_metadata(paper: dict[str, Any], fallback_index: int) -> dict:
     """Normalize a raw dataset record to embedding metadata fields.
 
     :param Dict[str, Any] paper: Raw dataset record.
-    :param int fallback_index: Index used for synthetic IDs when missing.
+    :param int fallback_index: Source row index reported for unusable records.
     :return Dict: Normalized metadata used by embedding selection.
     """
-    raw_paper_id = (
-        paper.get("id")
-        or paper.get("paper_id")
-        or paper.get("paperId")
-        or f"arxiv_{fallback_index}"
-    )
-    paper_id = _canonicalize_embedding_paper_id(raw_paper_id)
+    paper_id = _dataset_record_paper_id(paper, fallback_index)
     arxiv_id, doi = external_ids_from_canonical_paper_id(paper_id)
-    source_doi = re.split(r"[\s,;]+", str(paper.get("doi") or "").strip())[0]
-    canonical_source_doi = canonicalize_or_none(source_doi) if source_doi else None
-    if canonical_source_doi is not None:
-        _, normalized_doi = external_ids_from_canonical_paper_id(canonical_source_doi)
-        if normalized_doi and normalized_doi.startswith("10."):
-            doi = normalized_doi
+    doi = _parse_doi(paper.get("doi")) or doi
     title = paper.get("title", "Unknown")
     if not isinstance(title, str) or not title.strip():
         title = "Unknown"
-    abstract = paper.get("abstract", paper.get("summary", ""))
-    if not isinstance(abstract, str):
-        abstract = ""
+    abstract = _parse_abstract(paper)
 
     return {
         "paper_id": paper_id,

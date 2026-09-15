@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import io
 import logging
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,19 +17,14 @@ import pytest
 from citemesh import cli as cli_module
 from citemesh.cli import build_contract as build_contract_module
 from citemesh.cli import build_options as build_options_module
+from citemesh.cli import cache_ops as cache_ops_module
+from citemesh.cli import graph_config as graph_config_module
+from citemesh.cli import parser as parser_module
 from citemesh.core.config import EmbeddingStorageConfig
 from citemesh.data import cache as cache_module
 from citemesh.data import user_config as user_config_module
 from citemesh.data.user_config import (
     CONFIG_DEFAULT_KEY_SPECS,
-    DEVICE_CHOICES,
-    EXPORT_CHOICES,
-    MODEL_PROFILE_CHOICES,
-    SEARCH_MODE_CHOICES,
-    SEMANTIC_SOURCE_CHOICES,
-    STORAGE_PRECISION_CHOICES,
-    STRATEGY_CHOICES,
-    THEME_CHOICES,
     ConfigFileError,
     ConfigKeyError,
     ConfigValueError,
@@ -43,6 +37,7 @@ from citemesh.data.user_config import (
 )
 from citemesh.strategies import embedding as embedding_module
 from citemesh.strategies.hybrid import HYBRID_DEFAULT_MAX_REFERENCES
+from tests._helpers import PausedFirstWrite, run_captured_cli
 
 
 def _run_cli(args: list[str]) -> SimpleNamespace:
@@ -51,22 +46,7 @@ def _run_cli(args: list[str]) -> SimpleNamespace:
     :param list[str] args: CLI arguments excluding the program name.
     :return SimpleNamespace: Return code and captured output streams.
     """
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        try:
-            returncode = cli_module.main(args)
-        except SystemExit as exc:
-            code = exc.code
-            if isinstance(code, int):
-                returncode = code
-            elif code is None:
-                returncode = 0
-            else:
-                returncode = 1
-    return SimpleNamespace(
-        returncode=returncode, stdout=stdout.getvalue(), stderr=stderr.getvalue()
-    )
+    return run_captured_cli(lambda: cli_module.main(args))
 
 
 def _parsed_build_args(argv: list[str]) -> tuple:
@@ -75,9 +55,9 @@ def _parsed_build_args(argv: list[str]) -> tuple:
     :param list[str] argv: Build arguments beginning with the paper identifier.
     :return tuple: Parsed namespace, explicit option names, and parser.
     """
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     args = build_parser.parse_args(argv)
-    provided = cli_module._pop_tracked_option_dests(args)
+    provided = parser_module._pop_tracked_option_dests(args)
     return args, provided, build_parser
 
 
@@ -164,31 +144,7 @@ def test_config_set_serializes_concurrent_writes(
     """
     config_path = tmp_path / "config.toml"
 
-    first_write_started = threading.Event()
-    allow_first_write = threading.Event()
-    second_write_started = threading.Event()
-    write_counter = 0
-    write_counter_lock = threading.Lock()
-    original_atomic_write = user_config_module.atomic_write_text
-
-    def delayed_atomic_write(path: Path, payload: str, **kwargs: object) -> None:
-        """Stall the first write so the second set call races the config lock.
-
-        :param Path path: Config file path under write.
-        :param str payload: Serialized TOML payload.
-        :param object kwargs: Pass-through keyword arguments for the writer.
-        :return None: Delegates to the real atomic writer after coordination.
-        """
-        nonlocal write_counter
-        with write_counter_lock:
-            write_counter += 1
-            call_number = write_counter
-        if call_number == 1:
-            first_write_started.set()
-            assert allow_first_write.wait(timeout=5), "first write never released"
-        else:
-            second_write_started.set()
-        original_atomic_write(path, payload, **kwargs)
+    delayed_atomic_write = PausedFirstWrite(user_config_module.atomic_write_text)
 
     monkeypatch.setattr(user_config_module, "atomic_write_text", delayed_atomic_write)
 
@@ -210,19 +166,22 @@ def test_config_set_serializes_concurrent_writes(
     second_thread = threading.Thread(target=worker, args=("defaults.streaming", "true"))
 
     first_thread.start()
-    assert first_write_started.wait(timeout=5), "first write never started"
-    second_thread.start()
-    assert not second_write_started.wait(timeout=0.25), (
-        "second config set reached write path before first released config lock"
+    assert delayed_atomic_write.first_started.wait(timeout=5), (
+        "first write never started"
     )
+    second_thread.start()
+    second_wrote_early = delayed_atomic_write.second_started.wait(timeout=0.25)
 
-    allow_first_write.set()
+    delayed_atomic_write.release_first.set()
     first_thread.join(timeout=5)
     second_thread.join(timeout=5)
 
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
     assert not errors
+    assert not second_wrote_early, (
+        "second config set reached write path before first released config lock"
+    )
 
     config = load_user_config(config_path)
     assert config.defaults["max_papers"] == 25
@@ -341,6 +300,101 @@ def test_set_on_corrupt_file_fails_loudly(tmp_path: Path, payload: bytes) -> Non
     assert config_path.read_bytes() == payload
 
 
+def test_config_write_wraps_parent_directory_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config write preparation failures should use the public error type.
+
+    :param Path tmp_path: Temporary directory supplying the target path.
+    :param pytest.MonkeyPatch monkeypatch: Filesystem failure injector.
+    :return None: Assertions verify the stable configuration error boundary.
+    """
+    config_path = tmp_path / "blocked" / "config.toml"
+    original_mkdir = Path.mkdir
+
+    def denied_mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+        """Reject creation of the target config directory only.
+
+        :param Path path: Directory being created.
+        :param Any args: Forwarded positional arguments.
+        :param Any kwargs: Forwarded keyword arguments.
+        :return None: Creates unrelated directories normally.
+        """
+        if path == config_path.parent:
+            raise PermissionError("config directory denied")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+
+    with pytest.raises(ConfigFileError, match="Failed to prepare config directory"):
+        user_config_module._write_document(config_path, {"defaults": {"theme": "dark"}})
+
+
+@pytest.mark.parametrize("operation", ["set", "unset"])
+@pytest.mark.parametrize("failure_site", ["parent", "lock"])
+def test_config_cli_wraps_mutation_filesystem_errors(
+    monkeypatch: pytest.MonkeyPatch, operation: str, failure_site: str
+) -> None:
+    """Config mutations should report filesystem failures without a traceback.
+
+    :param pytest.MonkeyPatch monkeypatch: Lock failure injector.
+    :param str operation: Config mutation subcommand under test.
+    :param str failure_site: Parent-directory or lock-acquisition failure to inject.
+    :return None: Assertions verify the CLI returns its ordinary failure status.
+    """
+    lock: MagicMock | None = None
+    if failure_site == "parent":
+        config_parent = user_config_path().parent
+        original_mkdir = Path.mkdir
+
+        def denied_mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+            """Reject preparation of the active config directory only.
+
+            :param Path path: Directory being created.
+            :param Any args: Forwarded positional arguments.
+            :param Any kwargs: Forwarded keyword arguments.
+            :return None: Creates unrelated directories normally.
+            """
+            if path == config_parent:
+                raise PermissionError("config directory denied")
+            original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", denied_mkdir)
+    else:
+        lock = MagicMock()
+        lock.acquire.side_effect = PermissionError("config lock denied")
+        monkeypatch.setattr(
+            user_config_module, "FileLock", MagicMock(return_value=lock)
+        )
+
+    command = ["config", operation, "defaults.theme"]
+    if operation == "set":
+        command.append("dark")
+    result = _run_cli(command)
+
+    assert result.returncode == 1
+    if lock is not None:
+        lock.release.assert_not_called()
+
+
+def test_config_lock_wraps_release_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lock release filesystem failures should retain the config error contract.
+
+    :param Path tmp_path: Temporary directory supplying the lock path.
+    :param pytest.MonkeyPatch monkeypatch: Lock failure injector.
+    :return None: Assertions verify release errors use ``ConfigFileError``.
+    """
+    lock = MagicMock()
+    lock.release.side_effect = PermissionError("config unlock denied")
+    monkeypatch.setattr(user_config_module, "FileLock", MagicMock(return_value=lock))
+
+    with pytest.raises(ConfigFileError, match="Failed to release config file lock"):
+        with user_config_module.config_lock(tmp_path / "config.toml"):
+            pass
+
+
 @pytest.mark.parametrize("is_file_false", [False, True])
 def test_set_preserves_unrecognized_raw_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, is_file_false: bool
@@ -405,27 +459,6 @@ def test_format_config_value_round_trips_cli_forms() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_config_choice_specs_match_build_parser_choices() -> None:
-    """Persisted config choices should match the build parser choices.
-
-    :return None: Assertions validate every duplicated choice set.
-    """
-    _, build_parser, _, _ = cli_module._create_parser()
-    parser_choices = {
-        action.dest: action.choices
-        for action in build_parser._actions
-        if action.choices is not None
-    }
-    assert set(parser_choices["strategy"]) == set(STRATEGY_CHOICES)
-    assert set(parser_choices["theme"]) == set(THEME_CHOICES)
-    assert set(parser_choices["device"]) == set(DEVICE_CHOICES)
-    assert set(parser_choices["model_profile"]) == set(MODEL_PROFILE_CHOICES)
-    assert set(parser_choices["semantic_source"]) == set(SEMANTIC_SOURCE_CHOICES)
-    assert set(parser_choices["storage_precision"]) == set(STORAGE_PRECISION_CHOICES)
-    assert STORAGE_PRECISION_CHOICES == ("int8", "float32")
-    assert set(parser_choices["export"]) == set(EXPORT_CHOICES)
-
-
 # Config defaults consumed by non-build commands; `_apply_user_config_defaults`
 # skips them for build args because the build namespace lacks the attribute.
 _NON_BUILD_CONFIG_KEYS = frozenset({"search_mode"})
@@ -445,24 +478,6 @@ def test_config_default_keys_exist_as_build_dests() -> None:
             )
             continue
         assert hasattr(args, dest), f"config key '{dest}' is not a build parser dest"
-
-
-def test_search_mode_choices_match_search_parser() -> None:
-    """Persisted search modes should match the search parser choices.
-
-    :return None: Assertions validate the duplicated search choices.
-    """
-    parser, _, _, _ = cli_module._create_parser()
-    subparsers_action = next(
-        action
-        for action in parser._actions
-        if isinstance(action, argparse._SubParsersAction)
-    )
-    search_parser = subparsers_action.choices["search"]
-    mode_action = next(
-        action for action in search_parser._actions if action.dest == "mode"
-    )
-    assert set(mode_action.choices) == set(SEARCH_MODE_CHOICES)
 
 
 def test_search_mode_round_trip_and_validation(tmp_path: Path) -> None:
@@ -494,7 +509,7 @@ def test_config_default_applied_when_flag_omitted() -> None:
     config = UserConfig(
         path=Path("unused"), defaults={"theme": "dark", "max_papers": 22}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     assert applied == {"theme", "max_papers"}
     assert args.theme == "dark"
     assert args.max_papers == 22
@@ -519,7 +534,7 @@ def test_explicit_cli_flag_wins_over_config_default() -> None:
     config = UserConfig(
         path=Path("unused"), defaults={"theme": "dark", "max_papers": 22}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     assert applied == {"max_papers"}
     assert args.theme == "solarized"
 
@@ -541,8 +556,8 @@ def test_semantic_threshold_config_reaches_builder_kwargs(
     args, provided, _ = _parsed_build_args(
         ["paper-id", "--strategy", "embedding", *flags]
     )
-    cli_module._apply_user_config_defaults(args, provided, config)
-    kwargs = cli_module._shared_embedding_builder_kwargs(args)
+    build_options_module._apply_user_config_defaults(args, provided, config)
+    kwargs = build_options_module._shared_embedding_builder_kwargs(args)
     assert kwargs["min_semantic_similarity"] == (0.75 if explicit else 0.68)
 
 
@@ -561,19 +576,19 @@ def test_configured_dataset_source_is_ignored_in_candidate_mode(
     args, provided, build_parser = _parsed_build_args(
         ["paper-id", "--strategy", "embedding"]
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied, config_path=config.path
     )
 
     assert args.semantic_source == "candidates"
     assert (
         args.dataset_source
-        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+        == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
     )
     assert (
-        cli_module._shared_embedding_builder_kwargs(args)["dataset_source"]
-        == (cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"])
+        build_options_module._shared_embedding_builder_kwargs(args)["dataset_source"]
+        == (build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"])
     )
 
 
@@ -605,8 +620,8 @@ def test_explicit_no_streaming_wins_over_enabled_config_default() -> None:
     )
     config = UserConfig(path=Path("unused"), defaults={"streaming": True})
 
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
 
@@ -632,7 +647,7 @@ def test_no_streaming_does_not_imply_or_conflict_with_candidate_mode() -> None:
         ]
     )
 
-    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    build_contract_module._validate_build_cli_contract(args, build_parser, provided)
 
     assert "streaming" in provided
     assert args.streaming is False
@@ -649,8 +664,8 @@ def test_config_default_outranks_hybrid_implicit_defaults() -> None:
         ["paper-id", "--strategy", "hybrid"]
     )
     config = UserConfig(path=Path("unused"), defaults={"max_citations": 7})
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     assert args.max_citations == 7
@@ -666,8 +681,8 @@ def test_cli_corpus_flag_overrides_config_semantic_source() -> None:
         ["paper-id", "--strategy", "embedding", "--corpus-size", "1000"]
     )
     config = UserConfig(path=Path("unused"), defaults={"semantic_source": "candidates"})
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     assert args.semantic_source == "arxiv-corpus"
@@ -689,8 +704,8 @@ def test_cli_dataset_source_overrides_config_default() -> None:
             "dataset_source": "config/arxiv-snapshot",
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
 
@@ -723,8 +738,8 @@ def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
             "dataset_split": "train[:5%]",
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
 
@@ -734,7 +749,7 @@ def test_cli_candidate_flag_overrides_corpus_config_defaults() -> None:
     assert args.streaming is False
     assert (
         args.dataset_source
-        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+        == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
     )
     assert args.dataset_split == "train"
 
@@ -755,15 +770,15 @@ def test_config_semantic_source_corpus_applies_without_flags() -> None:
             "dataset_source": dataset_source,
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     assert args.semantic_source == "arxiv-corpus"
     assert args.dataset_source == dataset_source
-    assert cli_module._shared_embedding_builder_kwargs(args)["dataset_source"] == (
-        dataset_source
-    )
+    assert build_options_module._shared_embedding_builder_kwargs(args)[
+        "dataset_source"
+    ] == (dataset_source)
     # Corpus mode keeps the int8 storage default (no candidate-mode downgrade).
     assert args.storage_precision == "int8"
 
@@ -796,16 +811,16 @@ def test_configured_corpus_cap_and_full_split_override(
         defaults={"semantic_source": "arxiv-corpus", "corpus_size": 1234},
     )
 
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied, config_path=config.path
     )
 
     assert args.semantic_source == "arxiv-corpus"
-    assert cli_module._shared_embedding_builder_kwargs(args)["corpus_size"] == (
-        expected_corpus_size
-    )
-    payload = cli_module._build_graph_config_payload(
+    assert build_options_module._shared_embedding_builder_kwargs(args)[
+        "corpus_size"
+    ] == (expected_corpus_size)
+    payload = graph_config_module._build_graph_config_payload(
         args, "seed", {}, ["json"], {"json": Path("graph.json")}
     )
     embedding = payload["build"]["embedding"]
@@ -863,12 +878,12 @@ def test_config_calibration_defaults_follow_effective_storage(
             "calibration_sample_size": 100,
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
     builder = cli_module.EmbeddingGraphBuilder(
-        **cli_module._shared_embedding_builder_kwargs(args)
+        **build_options_module._shared_embedding_builder_kwargs(args)
     )
     assert builder.semantic_source == semantic_source
     assert builder.storage_precision == expected_precision
@@ -891,9 +906,9 @@ def test_config_embedding_defaults_do_not_gate_citation_strategy() -> None:
         path=Path("unused"),
         defaults={"device": "cuda", "semantic_source": "arxiv-corpus"},
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     # Must not raise SystemExit: config defaults never count as explicit flags.
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided, config_defaults=applied
     )
 
@@ -910,11 +925,11 @@ def test_config_device_is_inert_when_hybrid_semantic_branch_is_disabled(
         ["paper-id", "--strategy", "hybrid", "--max-semantic", "0"]
     )
     config = UserConfig(path=Path("config.toml"), defaults={"device": "cuda"})
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     resolver = MagicMock(side_effect=ValueError("CUDA is unavailable"))
     monkeypatch.setattr(build_contract_module, "resolve_embedding_device", resolver)
 
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         args,
         build_parser,
         provided,
@@ -939,7 +954,7 @@ def test_config_device_validation_names_the_config_source(
     config = UserConfig(
         path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     monkeypatch.setattr(
         build_contract_module,
         "resolve_embedding_device",
@@ -947,9 +962,9 @@ def test_config_device_validation_names_the_config_source(
     )
 
     with pytest.raises(ValueError) as error:
-        cli_module._validate_build_cli_contract(
+        build_contract_module._validate_build_cli_contract(
             args,
-            cli_module._ValueErrorParserErrorSink(),
+            build_contract_module._ValueErrorParserErrorSink(),
             provided,
             config_defaults=applied,
             config_path=config.path,
@@ -972,12 +987,12 @@ def test_config_strategy_gating_names_the_config_source() -> None:
     config = UserConfig(
         path=Path("cfg-home") / "config.toml", defaults={"strategy": "citation"}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
 
     with pytest.raises(ValueError) as error:
-        cli_module._validate_build_cli_contract(
+        build_contract_module._validate_build_cli_contract(
             args,
-            cli_module._ValueErrorParserErrorSink(),
+            build_contract_module._ValueErrorParserErrorSink(),
             provided,
             config_defaults=applied,
             config_path=config.path,
@@ -1007,12 +1022,12 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
             "corpus_size": 123,
         },
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
     assert args.streaming is True
 
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         args,
-        cli_module._ValueErrorParserErrorSink(),
+        build_contract_module._ValueErrorParserErrorSink(),
         provided,
         config_defaults=applied,
         config_path=config.path,
@@ -1022,11 +1037,14 @@ def test_ignored_corpus_config_defaults_are_reset_before_the_builder() -> None:
     assert args.streaming is False
     assert (
         args.dataset_source
-        == cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
+        == build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS["dataset_source"]
     )
     assert args.dataset_split == "train"
     assert args.corpus_size is None
-    for dest, expected in cli_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS.items():
+    for (
+        dest,
+        expected,
+    ) in build_options_module._CORPUS_ONLY_OPTION_BUILTIN_DEFAULTS.items():
         assert build_parser.get_default(dest) == expected
 
 
@@ -1054,12 +1072,12 @@ def test_config_max_semantic_validation_names_the_config_source(
     config = UserConfig(
         path=Path("cfg-home") / "config.toml", defaults={"max_semantic": max_semantic}
     )
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
 
     with pytest.raises(ValueError) as error:
-        cli_module._validate_build_cli_contract(
+        build_contract_module._validate_build_cli_contract(
             args,
-            cli_module._ValueErrorParserErrorSink(),
+            build_contract_module._ValueErrorParserErrorSink(),
             provided,
             config_defaults=applied,
             config_path=config.path,
@@ -1095,8 +1113,8 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     monkeypatch.setattr(cli_module.logger, "debug", debug)
     monkeypatch.setattr(cli_module.logger, "info", info)
 
-    applied = cli_module._apply_user_config_defaults(args, provided, config)
-    cli_module._validate_build_cli_contract(
+    applied = build_options_module._apply_user_config_defaults(args, provided, config)
+    build_contract_module._validate_build_cli_contract(
         args,
         build_parser,
         provided,
@@ -1111,13 +1129,13 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     assert "defaults.dataset_source" in messages
     assert "defaults.streaming" in messages
     assert "defaults.semantic_source='arxiv-corpus'" in messages
-    payload = cli_module._build_graph_config_payload(
+    payload = graph_config_module._build_graph_config_payload(
         args, "seed", {}, ["json"], {"json": Path("graph.json")}
     )
     embedding = payload["build"]["embedding"]
     assert embedding["semantic_source"] == "candidates"
     assert embedding["candidate_pool_size"] == args.candidate_pool_size
-    assert not set(embedding) & cli_module._CORPUS_ONLY_OPTION_DESTS
+    assert not set(embedding) & build_options_module._CORPUS_ONLY_OPTION_DESTS
     assert "calibration_sample_size" not in embedding
 
 
@@ -1136,12 +1154,12 @@ def test_config_api_key_resolved_without_environment_export(
     """
     monkeypatch.delenv("S2_API_KEY", raising=False)
     config = UserConfig(path=Path("unused"), s2_api_key="config-key")
-    key = cli_module._resolve_user_config_api_key(config)
+    key = build_options_module._resolve_user_config_api_key(config)
     assert key == "config-key"
     assert "S2_API_KEY" not in os.environ
     factory = MagicMock()
     monkeypatch.setattr(build_options_module, "SemanticScholarClient", factory)
-    kwargs = cli_module._configured_client_kwargs(
+    kwargs = build_options_module._configured_client_kwargs(
         argparse.Namespace(_s2_api_key=key, refresh_paper_cache=True)
     )
     factory.assert_called_once_with(api_key="config-key", refresh_paper_cache=True)
@@ -1157,7 +1175,7 @@ def test_env_api_key_wins_even_when_empty(monkeypatch: pytest.MonkeyPatch) -> No
     """
     monkeypatch.setenv("S2_API_KEY", "")
     config = UserConfig(path=Path("unused"), s2_api_key="config-key")
-    assert cli_module._resolve_user_config_api_key(config) == ""
+    assert build_options_module._resolve_user_config_api_key(config) == ""
     assert os.environ["S2_API_KEY"] == ""
 
 
@@ -1320,7 +1338,9 @@ def test_cache_clear_waits_for_pending_config_write(
         """
         clear_started.set()
         try:
-            return cli_module._clear_cache_directory(assume_yes=True, clear_reason=None)
+            return cache_ops_module._clear_cache_directory(
+                assume_yes=True, clear_reason=None
+            )
         finally:
             clear_finished.set()
 

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import io
+import threading
+from collections.abc import Callable, Sequence
+from contextlib import redirect_stderr, redirect_stdout
+from types import SimpleNamespace
 from typing import Any
 
 import networkx as nx
@@ -135,3 +139,65 @@ def disable_embedding_dep_checks(monkeypatch: pytest.MonkeyPatch) -> None:
 def raise_import_error(*_args: object, **_kwargs: object) -> Any:
     """Raise ``ImportError`` for optional dependency contract tests."""
     raise ImportError("optional dependency unavailable")
+
+
+def run_captured_cli(entrypoint: Callable[[], int | None]) -> SimpleNamespace:
+    """Run a CLI entrypoint and capture stdout/stderr.
+
+    :param Callable[[], int | None] entrypoint: In-process command invocation.
+    :return SimpleNamespace: Exit status and captured output streams.
+    """
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        try:
+            returncode = entrypoint()
+        except SystemExit as exc:
+            code = exc.code
+            if isinstance(code, int):
+                returncode = code
+            elif code is None:
+                returncode = 0
+            else:
+                returncode = 1
+
+    return SimpleNamespace(
+        returncode=returncode,
+        stdout=stdout.getvalue(),
+        stderr=stderr.getvalue(),
+    )
+
+
+class PausedFirstWrite:
+    """Coordinate overlapping callers while retaining the real writer behavior."""
+
+    def __init__(self, writer: Callable[..., None]) -> None:
+        """Wrap a writer and expose events used by concurrent-update tests.
+
+        :param Callable[..., None] writer: Real file writer to call after release.
+        :return None: Initializes independent coordination state.
+        """
+        self.first_started = threading.Event()
+        self.release_first = threading.Event()
+        self.second_started = threading.Event()
+        self._lock = threading.Lock()
+        self._calls = 0
+        self._writer = writer
+
+    def __call__(self, *args: Any, **kwargs: Any) -> None:
+        """Pause the first write and signal any later write attempts.
+
+        :param Any args: Original writer arguments.
+        :param Any kwargs: Original writer keyword arguments.
+        :return None: Calls the real writer when allowed to proceed.
+        """
+        with self._lock:
+            self._calls += 1
+            call_number = self._calls
+        if call_number == 1:
+            self.first_started.set()
+            assert self.release_first.wait(timeout=5), "first write never released"
+        else:
+            self.second_started.set()
+        self._writer(*args, **kwargs)

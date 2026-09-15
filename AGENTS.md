@@ -11,20 +11,16 @@ Rules for working on CiteMesh, for humans and coding agents. Setup, the pre-PR c
 
 ## Git workflow
 
-- Commit as you go, at logical increments — never one batch commit of unrelated changes at the end.
+- Commit at logical increments; keep unrelated changes in separate commits.
 - Assume squash-merge; raise it if that seems wrong for the change at hand.
-- Never commit generated outputs, comparison JSONs, or caches.
+- Never commit generated outputs, comparison JSONs, or caches. Curated screenshots and the example dashboard under `assets/` are the exception: refresh these deliberately, not on every build.
 - Ask before destructive git operations. NEVER `git push` without explicit instruction or approval in the prior turn.
 
 ## Model and dtype policy (non-negotiable)
 
-> [!IMPORTANT]
-> Never use FP16/float16/half precision anywhere in CiteMesh: not for model compute, autocast, embedding output, persistent storage, calibration, tests, benchmarks, or fallbacks. If a selected checkpoint or runtime resolves to FP16, stop and choose a compatible current model instead of proceeding.
+Apply the [model-loading and precision rules](docs/reference/embedding-runtime.md) to implementation, tests, calibration, validation, benchmarks, and fallbacks. Persistent embeddings follow the [storage contract](docs/guides/cli.md#graph-edges-and-cache-storage).
 
-- Load weights with the library's automatic dtype selection (`dtype="auto"`, or the supported equivalent): do not force all weights to FP32, and never request FP16 weights.
-- The only compute modes are verified BF16 autocast and FP32; if BF16 is unavailable or unverified, fall back to FP32.
-- Embedding outputs are FP32. Persistent embedding storage is INT8 or FP32 only.
-- No obsolete or legacy embedding models for real inference, validation, benchmarks, or defaults; MiniLM is explicitly disallowed. Use the project-designated model — presently `unsloth/embeddinggemma-300m` — or a newer suitable one, never an older or smaller substitute without user approval.
+For real inference, use the [designated model](docs/reference/embedding-runtime.md#model-selection-and-fallback) or a newer suitable one. Never substitute an older or smaller model without user approval; MiniLM is explicitly disallowed.
 
 ## Sandboxed execution caveat (macOS)
 
@@ -32,24 +28,11 @@ Inside sandboxed agent shells Metal is not visible: `torch.backends.mps.is_avail
 
 ## Environment and commands
 
-The maintainer's dev environment is the conda env `inf` (Python 3.12, torch 2.13+); run every project command through it. Install and setup live once in [CONTRIBUTING.md](CONTRIBUTING.md#getting-set-up), the pre-PR triple once in [its PR section](CONTRIBUTING.md#before-you-open-a-pr) — do not restate either here. Keep the suite green and lint-clean before committing.
-
-```bash
-conda run -n inf python -m pytest              # unit suite (slow tests excluded by default)
-conda run -n inf python -m pytest -m slow      # real-model smokes (needs escalation on macOS)
-```
+Run every project command through the maintainer's `inf` conda environment (Python 3.12, torch 2.13+). Follow the [setup steps](CONTRIBUTING.md#getting-set-up) and [pre-PR checks](CONTRIBUTING.md#before-you-open-a-pr). Keep the suite green and lint-clean before committing.
 
 ## Code conventions
 
-- Explicit over clever.
-- Docstrings: reST field style (`:param type name:`, `:return type:`) on every function, test helpers included.
-- Comments state constraints the code can't, not narration of the change.
-- Optional dependencies (torch, sentence-transformers, datasets, plotly, pyvis) stay lazily imported so the core CLI works with no extras.
-- The test suite is white-box: patch the name where it is used, in the module under test.
-- Argparse choices duplicated in `data/user_config.py` are guarded by `tests/test_user_config.py` — update both together.
-- Never hard-wrap Markdown; editors soft-wrap.
-- Changed a CLI flag, default, cache layout, or env var? Update the matching page under `docs/`; stale docs are bugs.
-- Release notes are the sole change history. Do not create or maintain a separate changelog.
+Follow the [contributor conventions](CONTRIBUTING.md#code-conventions).
 
 ## Runtime data
 

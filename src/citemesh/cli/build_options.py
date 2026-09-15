@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any, Protocol
 
 import networkx as nx
@@ -127,44 +126,12 @@ _HYBRID_BEST_PRACTICE_DEFAULTS: dict[str, int] = {
     "max_citations": HYBRID_DEFAULT_MAX_CITATIONS,
     "max_references": HYBRID_DEFAULT_MAX_REFERENCES,
 }
-_PROGRAMMATIC_BUILD_VALUE_DESTS: set[str] = set(_BUILD_STRATEGY_OPTION_SUPPORT) | {
-    "paper_id",
-    "max_papers",
-    "refresh_paper_cache",
+# These options belong exclusively to the two embedding-aware strategies.
+_HYBRID_EMBEDDING_OPTION_DESTS = {
+    dest
+    for dest, strategies in _BUILD_STRATEGY_OPTION_SUPPORT.items()
+    if strategies == {"embedding", "hybrid"}
 }
-_HYBRID_EMBEDDING_OPTION_DESTS: set[str] = {
-    "model",
-    "model_profile",
-    "model_revision",
-    "dataset_source",
-    "dataset_split",
-    "corpus_size",
-    "all_corpus",
-    "truncate_dim",
-    "min_semantic_similarity",
-    "streaming",
-    "force_rebuild_cache",
-    "overwrite_cache",
-    "cache_overwrite_reason",
-    "storage_precision",
-    "binary_prefilter",
-    "binary_rescore_multiplier",
-    "calibration_sample_size",
-    "cache_compression",
-    "cache_compression_level",
-    "encode_batch_size",
-    "torch_compile",
-    "device",
-    "semantic_source",
-    "candidate_pool_size",
-}
-
-
-@dataclass(frozen=True)
-class _StrategyDispatchSpec:
-    """Strategy dispatch metadata for CLI construction."""
-
-    factory: StrategyFactory
 
 
 def _shared_embedding_builder_kwargs(cli_args: argparse.Namespace) -> dict[str, object]:
@@ -234,16 +201,32 @@ def _embedding_export_metadata(
 
     effective_device: str | None = None
     effective_compute_dtype: str | None = None
+    effective_model = str(cli_args.model)
+    effective_model_revision: str | None = None
+    model_fingerprint: str | None = None
+    effective_truncate_dim = cli_args.truncate_dim
     effective_model_profile = str(cli_args.model_profile)
     retrieval_representation = "retrieval-query/retrieval-document"
     graph_representation = "graph-similarity"
     if isinstance(runtime_metadata, dict):
         raw_device = runtime_metadata.get("device")
         raw_compute_dtype = runtime_metadata.get("compute_dtype")
+        raw_active_model = runtime_metadata.get("active_model")
+        raw_model_fingerprint = runtime_metadata.get("model_fingerprint")
+        raw_resolved_model_revision = runtime_metadata.get("resolved_model_revision")
+        raw_truncate_dim = runtime_metadata.get("truncate_dim")
         if isinstance(raw_device, str) and raw_device:
             effective_device = raw_device
         if isinstance(raw_compute_dtype, str) and raw_compute_dtype:
             effective_compute_dtype = raw_compute_dtype
+        if isinstance(raw_active_model, str) and raw_active_model:
+            effective_model = raw_active_model
+        if isinstance(raw_model_fingerprint, str) and raw_model_fingerprint:
+            model_fingerprint = raw_model_fingerprint
+        if isinstance(raw_resolved_model_revision, str) and raw_resolved_model_revision:
+            effective_model_revision = raw_resolved_model_revision
+        if isinstance(raw_truncate_dim, int) and not isinstance(raw_truncate_dim, bool):
+            effective_truncate_dim = raw_truncate_dim
         raw_model_profile = runtime_metadata.get("model_profile")
         if isinstance(raw_model_profile, str) and raw_model_profile:
             effective_model_profile = raw_model_profile
@@ -259,6 +242,10 @@ def _embedding_export_metadata(
 
     payload: dict[str, object] = {
         "effective_vector_dtype": "float32",
+        "effective_model": effective_model,
+        "effective_model_revision": effective_model_revision,
+        "model_fingerprint": model_fingerprint,
+        "effective_truncate_dim": effective_truncate_dim,
         "effective_device": effective_device,
         "effective_compute_dtype": effective_compute_dtype,
         "model_profile": effective_model_profile,
@@ -451,43 +438,35 @@ def _strategy_score_contract(strategy: str) -> dict[str, object]:
     }
 
 
-_STRATEGY_DISPATCH: dict[str, _StrategyDispatchSpec] = {
-    "citation": _StrategyDispatchSpec(
-        factory=lambda cli_args: CitationGraphBuilder(
-            **_configured_client_kwargs(cli_args),
-            max_papers=cli_args.max_papers,
-            max_citations=cli_args.max_citations,
-            max_references=cli_args.max_references,
-            similarity_threshold=cli_args.similarity_threshold,
-            fetch_references=not cli_args.no_references,
-            refresh_reference_cache=cli_args.refresh_reference_cache,
-        ),
+_STRATEGY_DISPATCH: dict[str, StrategyFactory] = {
+    "citation": lambda cli_args: CitationGraphBuilder(
+        **_configured_client_kwargs(cli_args),
+        max_papers=cli_args.max_papers,
+        max_citations=cli_args.max_citations,
+        max_references=cli_args.max_references,
+        similarity_threshold=cli_args.similarity_threshold,
+        fetch_references=not cli_args.no_references,
+        refresh_reference_cache=cli_args.refresh_reference_cache,
     ),
-    "recommendation": _StrategyDispatchSpec(
-        factory=lambda cli_args: RecommendationGraphBuilder(
-            **_configured_client_kwargs(cli_args),
-            max_papers=cli_args.max_papers,
-            fetch_references=not cli_args.no_references,
-            refresh_reference_cache=cli_args.refresh_reference_cache,
-            similarity_threshold=cli_args.similarity_threshold,
-        ),
+    "recommendation": lambda cli_args: RecommendationGraphBuilder(
+        **_configured_client_kwargs(cli_args),
+        max_papers=cli_args.max_papers,
+        fetch_references=not cli_args.no_references,
+        refresh_reference_cache=cli_args.refresh_reference_cache,
+        similarity_threshold=cli_args.similarity_threshold,
     ),
-    "embedding": _StrategyDispatchSpec(
-        factory=lambda cli_args: EmbeddingGraphBuilder(
-            max_papers=cli_args.max_papers,
-            top_k=cli_args.top_k,
-            **_shared_embedding_builder_kwargs(cli_args),
-        ),
+    "embedding": lambda cli_args: EmbeddingGraphBuilder(
+        max_papers=cli_args.max_papers,
+        top_k=cli_args.top_k,
+        **_shared_embedding_builder_kwargs(cli_args),
     ),
-    "hybrid": _StrategyDispatchSpec(
-        factory=lambda cli_args: HybridGraphBuilder(
-            max_papers=cli_args.max_papers,
-            max_citations=cli_args.max_citations,
-            max_references=cli_args.max_references,
-            fetch_references=not cli_args.no_references,
-            refresh_reference_cache=cli_args.refresh_reference_cache,
-            max_semantic=cli_args.max_semantic,
-            **_shared_embedding_builder_kwargs(cli_args),
-        ),
+    "hybrid": lambda cli_args: HybridGraphBuilder(
+        max_papers=cli_args.max_papers,
+        max_citations=cli_args.max_citations,
+        max_references=cli_args.max_references,
+        fetch_references=not cli_args.no_references,
+        refresh_reference_cache=cli_args.refresh_reference_cache,
+        max_semantic=cli_args.max_semantic,
+        **_shared_embedding_builder_kwargs(cli_args),
     ),
 }

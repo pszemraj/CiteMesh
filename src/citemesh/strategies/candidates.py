@@ -22,8 +22,10 @@ from typing import (
 )
 
 from citemesh.core import Paper
+from citemesh.core.choices import SEMANTIC_SOURCE_CHOICES as SEMANTIC_SOURCE_CHOICES
 from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
+    is_local_corpus_paper_id,
     normalize_paper_id,
     paper_identifier_aliases,
     recognize_arxiv_identifier,
@@ -34,7 +36,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SEMANTIC_SOURCE_CHOICES = ("candidates", "arxiv-corpus")
 DEFAULT_CANDIDATE_POOL_SIZE = 400
 QUERY_SEED_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
@@ -121,6 +122,40 @@ def _normalized_doi(raw_identifier: object) -> str:
     return normalized.lower() if _DOI_PATTERN.fullmatch(normalized) else ""
 
 
+def provider_lookup_identifier(paper_id: str, paper: Paper) -> str | None:
+    """Return an identifier that is safe to send to Semantic Scholar.
+
+    Locally hydrated corpus rows may use arbitrary source-primary keys. Explicit
+    arXiv/DOI metadata remains a valid provider lookup route, while opaque local
+    keys and synthetic query IDs must remain inside CiteMesh.
+
+    :param str paper_id: Graph/cache primary identifier.
+    :param Paper paper: Paper metadata carrying local provenance and aliases.
+    :return Optional[str]: Provider-compatible identifier, or ``None``.
+    """
+    normalized_id = str(paper_id).strip()
+    if normalized_id.startswith("query:"):
+        return None
+    if not paper.is_local_corpus:
+        if is_local_corpus_paper_id(normalized_id):
+            return None
+        return normalized_id or None
+
+    arxiv_id = recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)
+    if arxiv_id:
+        return arxiv_id
+    doi = _normalized_doi(paper.doi)
+    if doi:
+        return doi
+    primary_arxiv = recognize_arxiv_identifier(normalized_id, allow_bare=True)
+    if primary_arxiv:
+        return primary_arxiv
+    if _S2_PATTERN.fullmatch(normalized_id):
+        return normalized_id
+    primary_doi = _normalized_doi(normalized_id)
+    return primary_doi or None
+
+
 def _strong_identifier_evidence(paper: Paper) -> dict[str, frozenset[str]]:
     """Build namespaced strong identifier evidence for one paper.
 
@@ -140,9 +175,11 @@ def _strong_identifier_evidence(paper: Paper) -> dict[str, frozenset[str]]:
         # Semantic Scholar IDs are normally 40 hexadecimal characters. Treat
         # opaque primary IDs as the same authoritative namespace too: exact
         # equality may reconcile, but metadata must not override disagreement.
-        normalized_primary = primary.lower()
-        if _S2_PATTERN.fullmatch(normalized_primary):
-            normalized_primary = normalized_primary.removeprefix("s2:")
+        # Only recognized S2 IDs are case-insensitive. Dataset-local opaque
+        # IDs may differ solely in case and must retain their source identity.
+        normalized_primary = primary
+        if _S2_PATTERN.fullmatch(primary):
+            normalized_primary = primary.lower().removeprefix("s2:")
         identifiers.setdefault("s2", set()).add(normalized_primary)
 
     arxiv_identifier = recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)
@@ -832,21 +869,31 @@ def _fetch_candidate_pool(
     source_results: list[CandidateSourceResult] = []
     seed_id = str(seed_paper.paper_id)
     is_query_seed = seed_id.startswith("query:")
+    query_candidate_budget = (
+        max_references + max_citations + max_recommendations if is_query_seed else 0
+    )
+    recommendation_limit = max_recommendations
 
     if is_query_seed:
         query_text = (seed_paper.title or "").strip() or seed_id
-        search_result = fetch_candidate_source(
-            "search",
-            lambda: client.search_papers(
-                query_text,
-                limit=QUERY_SEED_SEARCH_LIMIT,
-                raise_on_unavailable=True,
-            ),
-        )
-        source_results.append(search_result)
-        for paper in search_result.papers:
-            pool.add(paper, source="recommendation", relation="semantic_only")
+        search_limit = min(QUERY_SEED_SEARCH_LIMIT, query_candidate_budget)
+        if search_limit > 0:
+            search_result = fetch_candidate_source(
+                "search",
+                lambda: client.search_papers(
+                    query_text,
+                    limit=search_limit,
+                    raise_on_unavailable=True,
+                ),
+            )
+            source_results.append(search_result)
+            for paper in search_result.papers:
+                pool.add(paper, source="recommendation", relation="semantic_only")
         anchor_ids = list(pool.papers)[:1]
+        recommendation_limit = min(
+            max_recommendations,
+            max(0, query_candidate_budget - len(pool.papers)),
+        )
     else:
         anchor_ids = [seed_id]
         if max_references > 0:
@@ -874,12 +921,12 @@ def _fetch_candidate_pool(
             for paper in citation_result.papers:
                 pool.add(paper, source="citation", relation="cites_seed")
 
-    if max_recommendations > 0 and anchor_ids:
+    if recommendation_limit > 0 and anchor_ids:
         recommendation_result = fetch_candidate_source(
             "recommendations",
             lambda: client.get_recommended_papers(
                 anchor_ids[0],
-                limit=max_recommendations,
+                limit=recommendation_limit,
                 raise_on_unavailable=True,
             ),
         )

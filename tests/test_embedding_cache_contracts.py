@@ -11,9 +11,9 @@ import sys
 import tempfile
 import threading
 import types
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from queue import Empty
 from typing import Any
@@ -48,11 +48,46 @@ from citemesh.data.embedding_cache import (
     SOURCE_TORCH_DTYPE_KEY,
     TEXT_FORMATTER_FINGERPRINT_KEY,
     EmbeddingCache,
+    _corpus_size_coverage,
     _corpus_size_token,
     _resolve_cache_lock_timeout_seconds,
 )
 from citemesh.data.model_profiles import get_embedding_model_profile
 from tests._helpers import LookupEncodeModel, SeededRandomEncodeModel
+
+
+def _fail_second_connection_commit(
+    cache: EmbeddingCache,
+) -> Callable[[], AbstractContextManager[sqlite3.Connection]]:
+    """Return a connection factory that fails its second final SQLite commit.
+
+    :param EmbeddingCache cache: Cache whose metadata database is opened.
+    :return Callable[[], AbstractContextManager[sqlite3.Connection]]: Factory that
+        commits the first connection and rolls back the second final commit.
+    """
+    connection_count = 0
+
+    @contextmanager
+    def fail_final_commit() -> Iterator[sqlite3.Connection]:
+        """Open one SQLite connection and fail its second final commit.
+
+        :return Iterator[sqlite3.Connection]: SQLite connection used by one cache phase.
+        """
+        nonlocal connection_count
+        conn = sqlite3.connect(cache.db_path)
+        connection_count += 1
+        try:
+            yield conn
+            if connection_count == 2:
+                raise sqlite3.OperationalError("forced final commit failure")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    return fail_final_commit
 
 
 class _FakeInferenceTensor:
@@ -441,27 +476,7 @@ def test_embedding_cache_replacement_journal_recovers_failed_sqlite_commit(
             else None
         )
 
-    connection_count = 0
-
-    @contextmanager
-    def fail_final_commit() -> Iterator[sqlite3.Connection]:
-        """Fail the metadata transaction after its undo journal has committed.
-
-        :return Iterator[sqlite3.Connection]: SQLite connection used by one cache phase.
-        """
-        nonlocal connection_count
-        conn = sqlite3.connect(cache.db_path)
-        connection_count += 1
-        try:
-            yield conn
-            if connection_count == 2:
-                raise sqlite3.OperationalError("forced final commit failure")
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+    fail_final_commit = _fail_second_connection_commit(cache)
 
     with monkeypatch.context() as patch:
         patch.setattr(cache, "_connect_db", fail_final_commit)
@@ -559,27 +574,7 @@ def test_embedding_cache_recovers_failed_append_on_same_instance(
             else None
         )
 
-    connection_count = 0
-
-    @contextmanager
-    def fail_final_commit() -> Iterator[sqlite3.Connection]:
-        """Fail the metadata transaction after the appended vector is durable.
-
-        :return Iterator[sqlite3.Connection]: SQLite connection used by one cache phase.
-        """
-        nonlocal connection_count
-        conn = sqlite3.connect(cache.db_path)
-        connection_count += 1
-        try:
-            yield conn
-            if connection_count == 2:
-                raise sqlite3.OperationalError("forced final commit failure")
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+    fail_final_commit = _fail_second_connection_commit(cache)
 
     with monkeypatch.context() as patch:
         patch.setattr(cache, "_connect_db", fail_final_commit)
@@ -1071,6 +1066,84 @@ def test_embedding_cache_reencodes_legacy_schema_before_reusing_vectors(
 
     reencoded = reopened.get_embeddings(
         original,
+        LookupEncodeModel(
+            {"Original. Abstract": np.asarray([0.0, 1.0], dtype=np.float32)}
+        ),
+        show_progress=False,
+    )
+    np.testing.assert_array_equal(
+        reencoded["p1"], np.asarray([0.0, 1.0], dtype=np.float32)
+    )
+
+
+def test_embedding_cache_migrates_chronology_column_before_legacy_schema_rebuild(
+    tmp_path: Path,
+) -> None:
+    """Schema repair must retain a papers table that current upserts can use.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks the column migration survives vector-layout repair.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="chronology-column-schema-repair",
+        storage_precision="float32",
+    )
+    paper = {"p1": {"title": "Original", "abstract": "Abstract"}}
+    cache.get_embeddings(
+        paper,
+        LookupEncodeModel(
+            {"Original. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}
+        ),
+        show_progress=False,
+    )
+    with cache._connect_db() as conn:
+        conn.execute("DROP INDEX IF EXISTS idx_papers_chronology_key")
+        conn.execute("DROP INDEX IF EXISTS idx_papers_row_idx")
+        conn.execute("DROP TABLE papers")
+        conn.execute(
+            """
+            CREATE TABLE papers (
+                paper_id TEXT PRIMARY KEY,
+                title TEXT,
+                abstract TEXT,
+                year INTEGER,
+                text_hash TEXT,
+                embedding_dim INTEGER,
+                row_idx INTEGER,
+                authors_json TEXT,
+                categories_json TEXT,
+                venue TEXT,
+                arxiv_id TEXT,
+                doi TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            "UPDATE cache_metadata SET value = ? WHERE key = ?",
+            ("3", SCHEMA_VERSION_KEY),
+        )
+    with h5py.File(cache.h5_path, "a") as h5:
+        h5.attrs.modify(SCHEMA_VERSION_KEY, 3)
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="chronology-column-schema-repair",
+        storage_precision="float32",
+    )
+    with reopened._connect_db() as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(papers)")}
+        assert "chronology_key" in columns
+        assert (
+            conn.execute(
+                "SELECT value FROM cache_metadata WHERE key = ?", (SCHEMA_VERSION_KEY,)
+            ).fetchone()[0]
+            == "4"
+        )
+
+    reencoded = reopened.get_embeddings(
+        paper,
         LookupEncodeModel(
             {"Original. Abstract": np.asarray([0.0, 1.0], dtype=np.float32)}
         ),
@@ -2160,6 +2233,34 @@ def test_corpus_size_token_encodes_newest_slice_policy() -> None:
     assert _corpus_size_token(1000) == "newest:1000"
 
 
+@pytest.mark.parametrize(
+    ("cached_token", "requested_corpus_size", "expected"),
+    [
+        ("newest:100", 100, "exact"),
+        ("all", None, "exact"),
+        ("all", 100, "covers"),
+        ("newest:200", 100, "covers"),
+        ("newest:100", 200, "extends"),
+        ("newest:100", None, "extends"),
+        ("100", 200, "incompatible"),
+        ("newest:oldest", 200, "incompatible"),
+        ("", 200, "incompatible"),
+        (None, 200, "incompatible"),
+    ],
+)
+def test_corpus_size_coverage_routes_resizes_away_from_rebuilds(
+    cached_token: str | None, requested_corpus_size: int | None, expected: str
+) -> None:
+    """Coverage compares what is cached to what is asked for, not raw equality.
+
+    :param str | None cached_token: Corpus token recorded on the cache.
+    :param int | None requested_corpus_size: Newly requested corpus-size cap.
+    :param str expected: Coverage verdict the hydration router must receive.
+    :return None: Asserts only unreadable tokens force a destructive rebuild.
+    """
+    assert _corpus_size_coverage(cached_token, requested_corpus_size) == expected
+
+
 def test_legacy_head_slice_hydration_metadata_fails_is_hydrated() -> None:
     """Caches hydrated under the head-slice policy must not pass is_hydrated."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -2322,14 +2423,6 @@ def test_embedding_cache_search_rejects_non_vector_queries() -> None:
             id="storage_precision",
         ),
         pytest.param(
-            "search-source-dtype-mismatch",
-            {"source_torch_dtype": "float32"},
-            SOURCE_TORCH_DTYPE_KEY,
-            "bfloat16",
-            "metadata key 'source_torch_dtype' mismatch",
-            id="source_torch_dtype",
-        ),
-        pytest.param(
             "search-calibration-sample-mismatch",
             {"storage_precision": "int8", "calibration_sample_size": 8},
             CALIBRATION_SAMPLE_SIZE_KEY,
@@ -2425,10 +2518,10 @@ def test_embedding_cache_recovery_checks_provenance_before_truncation(
     with cache._connect_db() as conn:
         conn.execute(
             "UPDATE cache_metadata SET value = ? WHERE key = ?",
-            ("corrupt-dtype", SOURCE_TORCH_DTYPE_KEY),
+            ("corrupt-formatter", TEXT_FORMATTER_FINGERPRINT_KEY),
         )
 
-    with pytest.raises(RuntimeError, match="source_torch_dtype"):
+    with pytest.raises(RuntimeError, match="text_formatter_fingerprint"):
         if operation == "count":
             cache.embedding_count()
         else:
@@ -2690,8 +2783,8 @@ def test_embedding_cache_adopts_existing_gzip_level_without_masking_corruption()
             assert h5[EMBEDDINGS_DATASET_NAME].compression_opts == 9
 
         with h5py.File(reopened.h5_path, "a") as h5:
-            h5.attrs[SOURCE_TORCH_DTYPE_KEY] = "corrupt-dtype"
-        with pytest.raises(RuntimeError, match="source_torch_dtype"):
+            h5.attrs[TEXT_FORMATTER_FINGERPRINT_KEY] = "corrupt-formatter"
+        with pytest.raises(RuntimeError, match="text_formatter_fingerprint"):
             reopened.search(
                 query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
                 top_k=1,
@@ -2811,6 +2904,124 @@ def test_embedding_cache_get_cached_paper_ids_contract() -> None:
         assert cache.get_cached_paper_ids() == {"p1", "p2"}
 
 
+def test_embedding_cache_persists_chronology_key_only_for_arxiv_ids() -> None:
+    """Ingest must store a submission key per arXiv row and ``NULL`` elsewhere.
+
+    :return None: Checks the derived column, the ``NULL`` rows, and that
+        unparseable identifiers do not break ingestion.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="chronology-column")
+        _set_test_int8_calibration(cache)
+        cache.get_embeddings(
+            {
+                "arxiv:2508.01234": {"title": "New style", "abstract": "A"},
+                "arxiv:hep-th/9901001": {"title": "Old style", "abstract": "B"},
+                "arxiv_7": {"title": "Synthetic", "abstract": "C"},
+                "10.1234/example.doi": {"title": "DOI canonical", "abstract": "D"},
+                "S2:opaque-id": {"title": "Unparseable", "abstract": "E"},
+            },
+            SeededRandomEncodeModel(),
+            show_progress=False,
+        )
+
+        with cache._connect_db() as conn:
+            stored = dict(
+                conn.execute("SELECT paper_id, chronology_key FROM papers").fetchall()
+            )
+
+        assert len(stored) == 5
+        assert stored["arxiv:2508.01234"] == 2025 * 10_000_000 + 8 * 100_000 + 1234
+        assert stored["arxiv:hep-th/9901001"] == 1999 * 10_000_000 + 1 * 100_000 + 1
+        assert stored["arxiv_7"] is None
+        assert stored["10.1234/example.doi"] is None
+        assert stored["S2:opaque-id"] is None
+
+        # A cache hit whose non-vector metadata drifted takes the refresh write
+        # path, which must stay aligned with the same column. The empty lookup
+        # model proves nothing was re-encoded, so the refresh SQL really ran.
+        cache.get_embeddings(
+            {
+                "arxiv:2508.01234": {
+                    "title": "New style",
+                    "abstract": "A",
+                    "venue": "Refreshed venue",
+                }
+            },
+            LookupEncodeModel({}),
+            show_progress=False,
+        )
+        with cache._connect_db() as conn:
+            refreshed = conn.execute(
+                "SELECT venue, chronology_key FROM papers WHERE paper_id = ?",
+                ("arxiv:2508.01234",),
+            ).fetchone()
+        assert refreshed == ("Refreshed venue", 2025 * 10_000_000 + 8 * 100_000 + 1234)
+
+
+def test_embedding_cache_chronology_watermark_contract() -> None:
+    """The watermark must report the newest stored key, or ``None`` without one.
+
+    :return None: Checks the maximum aggregate and the keyless-namespace case.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cache = EmbeddingCache(cache_dir=tmpdir, model_name="chronology-watermark")
+        assert cache.get_max_chronology_key() is None
+
+        _set_test_int8_calibration(cache)
+        cache.get_embeddings(
+            {
+                "arxiv:2401.00001": {"title": "Older", "abstract": "A"},
+                "arxiv:2508.01234": {"title": "Newest", "abstract": "B"},
+                "arxiv_3": {"title": "Keyless", "abstract": "C"},
+            },
+            SeededRandomEncodeModel(),
+            show_progress=False,
+        )
+        assert cache.get_max_chronology_key() == (
+            2025 * 10_000_000 + 8 * 100_000 + 1234
+        )
+
+        keyless = EmbeddingCache(cache_dir=tmpdir, model_name="chronology-keyless")
+        _set_test_int8_calibration(keyless)
+        keyless.get_embeddings(
+            {"arxiv_1": {"title": "Synthetic", "abstract": "A"}},
+            SeededRandomEncodeModel(),
+            show_progress=False,
+        )
+        assert keyless.get_cached_paper_ids() == {"arxiv_1"}
+        assert keyless.get_max_chronology_key() is None
+
+
+def test_embedding_cache_schema_bump_rebuilds_chronology_free_namespace(
+    tmp_path: Path,
+) -> None:
+    """A namespace stamped at the previous schema must be rebuilt, not reused.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks that schema 3 payload is cleared before re-encoding.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="chronology-schema-bump",
+        storage_precision="float32",
+    )
+    cache.get_embeddings(
+        {"arxiv:2508.01234": {"title": "Seed", "abstract": "Abstract"}},
+        LookupEncodeModel({"Seed. Abstract": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    with h5py.File(cache.h5_path, "a") as h5:
+        h5.attrs.modify(SCHEMA_VERSION_KEY, 3)
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="chronology-schema-bump",
+        storage_precision="float32",
+    )
+    assert reopened.get_cached_paper_ids() == set()
+
+
 def test_embedding_cache_hydration_rowcount_reconciliation_marker_contract() -> None:
     """Row-count reconciliation marker metadata should persist and reset cleanly."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -2822,6 +3033,9 @@ def test_embedding_cache_hydration_rowcount_reconciliation_marker_contract() -> 
 
         cache.clear_hydration_rowcount_reconciliation()
         assert cache.get_hydration_rowcount_reconciliation() is None
+
+        cache.set_hydration_rowcount_reconciliation(upstream_rows=0, cached_rows=100)
+        assert cache.get_hydration_rowcount_reconciliation() == (0, 100)
 
         cache.set_hydration_rowcount_reconciliation(upstream_rows=111, cached_rows=101)
         cache.mark_hydrated(
@@ -2919,16 +3133,29 @@ def test_embedding_cache_hydration_validation_contracts() -> None:
                 assert not cache.is_hydrated(**hydrated_kwargs), case["label"]
 
 
-def test_embedding_cache_mark_hydrated_rejects_empty_source_when_complete() -> None:
-    """Complete hydration markers should reject empty dataset source tokens."""
+@pytest.mark.parametrize("complete", [True, False])
+@pytest.mark.parametrize("dataset_source", ["  ", "", None])
+def test_embedding_cache_mark_hydrated_rejects_empty_source(
+    dataset_source: str | None, complete: bool
+) -> None:
+    """Hydration markers should reject blank sources, complete or not.
+
+    The recorded source is what identifies a namespace as corpus-scale when a
+    fingerprint mismatch decides whether deleting it needs operator approval, so
+    an interrupted attempt that recorded nothing would silently drop that guard.
+
+    :param Optional[str] dataset_source: Blank source token under test.
+    :param bool complete: Whether the marker claims hydration finished.
+    :return None: Asserts every blank source is refused.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         cache = EmbeddingCache(cache_dir=tmpdir, model_name="hydration-empty-source")
         with pytest.raises(ValueError, match="dataset_source must be non-empty"):
             cache.mark_hydrated(
-                dataset_source="  ",
+                dataset_source=dataset_source,
                 dataset_split="train",
                 corpus_size=16,
-                complete=True,
+                complete=complete,
             )
 
 
@@ -3083,6 +3310,164 @@ def test_embedding_cache_reopen_rebuilds_datasetless_file_with_schema_attrs(
     assert not reopened.has_current_corpus_metadata()
     with reopened._connect_db() as conn:
         assert conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_positional_corpus_identity_reconciliation_preserves_physical_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interrupt: bool,
+) -> None:
+    """Identity preparation must be atomic and retain every ambiguous physical ID.
+
+    :param Path tmp_path: Isolated cache namespace.
+    :param pytest.MonkeyPatch monkeypatch: Forces one-row reads and metadata interruption.
+    :param bool interrupt: Whether the first preparation fails before commit.
+    :return None: Checks rollback, aliases, preserved vectors and one-time preparation.
+    """
+    monkeypatch.setattr(embedding_cache_module.store, "SQLITE_QUERY_BATCH_SIZE", 1)
+    cache = EmbeddingCache(
+        cache_dir=tmp_path, model_name="anonymous-identity", storage_precision="float32"
+    )
+    papers = {
+        "arxiv_0": {
+            "title": "First",
+            "abstract": "A",
+            "authors": ["Alice"],
+            "year": "2020",
+            "doi": "10.1/first",
+        },
+        "arxiv_1": {
+            "title": "First",
+            "abstract": "A",
+            "authors": ["Alice"],
+            "year": 2020,
+            "doi": "10.1/first",
+        },
+        "arxiv_2": {
+            "title": "Second",
+            "abstract": "B",
+            "authors": ["Bob"],
+            "year": 2021,
+            "doi": "10.1/second",
+        },
+    }
+    model = LookupEncodeModel(
+        {
+            "First. A": np.array([1.0, 0.0], dtype=np.float32),
+            "Second. B": np.array([0.0, 1.0], dtype=np.float32),
+        }
+    )
+    cache.get_embeddings(papers, model, show_progress=False)
+    cache.mark_hydrated(
+        dataset_source="fixture/source",
+        dataset_split="train",
+        corpus_size=None,
+        complete=True,
+    )
+    original_h5 = cache.h5_path.read_bytes()
+
+    original_set_metadata = cache._set_cache_metadata
+
+    def interrupt_metadata_write(
+        conn: sqlite3.Connection, values: dict[str, object]
+    ) -> None:
+        """Fail after the transactional metadata write to exercise rollback.
+
+        :param sqlite3.Connection conn: Active cache transaction.
+        :param Dict[str, object] values: Version and hydration values to persist.
+        :return None: Always raises after writing through to SQLite.
+        :raises RuntimeError: Always, to simulate interrupted preparation.
+        """
+        original_set_metadata(conn, values)
+        raise RuntimeError("identity preparation interrupted")
+
+    if interrupt:
+        monkeypatch.setattr(cache, "_set_cache_metadata", interrupt_metadata_write)
+        with pytest.raises(RuntimeError, match="identity preparation interrupted"):
+            cache.prepare_corpus_identity_reconciliation()
+        assert cache.get_cached_paper_ids() == set(papers)
+        assert cache.payload_stats().hydration_complete
+        assert cache._read_cache_metadata().get("corpus_identity_version") is None
+        monkeypatch.setattr(cache, "_set_cache_metadata", original_set_metadata)
+
+    assert cache.prepare_corpus_identity_reconciliation()
+    assert cache.get_cached_paper_ids() == set(papers)
+    assert cache.h5_path.read_bytes() == original_h5
+    assert cache.embedding_count() == 3
+    assert not cache.payload_stats().hydration_complete
+    assert cache._read_cache_metadata()["corpus_identity_version"] == "1"
+    assert not cache.prepare_corpus_identity_reconciliation()
+
+    seen_metadata: dict[str, dict[str, Any]] = {}
+
+    def identify(metadata: dict[str, Any]) -> str:
+        """Build an alias while retaining the normalized input for assertions.
+
+        :param Dict[str, Any] metadata: Full normalized cached paper metadata.
+        :return str: Content identity shared by duplicate historical rows.
+        """
+        seen_metadata[metadata["paper_id"]] = metadata
+        return "content:" + metadata["title"].lower()
+
+    assert cache.get_legacy_corpus_identity_aliases(identify) == {
+        "content:first": {"arxiv_0", "arxiv_1"},
+        "content:second": {"arxiv_2"},
+    }
+    assert seen_metadata["arxiv_0"]["authors"] == ["Alice"]
+    assert seen_metadata["arxiv_0"]["year"] == 2020
+    assert seen_metadata["arxiv_0"]["doi"] == "10.1/first"
+    selected = cache.get_paper_metadata_batch(["arxiv_0", "missing"])
+    assert set(selected) == {"arxiv_0"}
+    assert selected["arxiv_0"]["authors"] == ["Alice"]
+
+    # A real source ID can happen to resemble the old generated convention;
+    # aliases continue to cover it without changing that physical identity.
+    cache.get_embeddings({"arxiv_99": papers["arxiv_2"]}, model, show_progress=False)
+    assert "arxiv_99" in cache.get_cached_paper_ids()
+    assert cache.get_legacy_corpus_identity_aliases(identify)["content:second"] == {
+        "arxiv_2",
+        "arxiv_99",
+    }
+
+
+def test_identity_preparation_ignores_nonpositional_corpus_ids(tmp_path: Path) -> None:
+    """A missing marker alone must not invalidate an unambiguous hydrated cache.
+
+    :param Path tmp_path: Isolated cache namespace.
+    :return None: Checks exact positional matching and one-time marker stamping.
+    """
+    cache = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="nonpositional-identity",
+        storage_precision="float32",
+    )
+    papers = {
+        "content:stable": {"title": "Anonymous", "abstract": "A"},
+        "arxiv_dataset-key": {"title": "Source ID", "abstract": "B"},
+    }
+    cache.get_embeddings(
+        papers,
+        LookupEncodeModel(
+            {
+                "Anonymous. A": np.array([1.0, 0.0], dtype=np.float32),
+                "Source ID. B": np.array([0.0, 1.0], dtype=np.float32),
+            }
+        ),
+        show_progress=False,
+    )
+    cache.mark_hydrated(
+        dataset_source="fixture/source",
+        dataset_split="train",
+        corpus_size=None,
+        complete=True,
+    )
+
+    assert not cache.prepare_corpus_identity_reconciliation()
+    assert cache.payload_stats().hydration_complete
+    assert cache.get_cached_paper_ids() == set(papers)
+    assert cache.get_legacy_corpus_identity_aliases(lambda _: "unused") == {}
+    assert not cache.prepare_corpus_identity_reconciliation()
 
 
 @pytest.mark.parametrize("binary_rows", [1, 3])
@@ -3739,7 +4124,6 @@ def test_embedding_cache_reload_preserves_calibration_before_first_write(
     [
         ("text_formatter_fingerprint", "new"),
         ("calibration_sample_size", 2000),
-        ("source_torch_dtype", "bfloat16"),
     ],
 )
 def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
@@ -3780,6 +4164,158 @@ def test_embedding_cache_calibration_only_rejects_changed_runtime_contract(
             SeededRandomEncodeModel(),
             show_progress=False,
         )
+
+
+def test_embedding_cache_reopens_across_source_dtype_without_discarding_rows(
+    tmp_path: Path,
+) -> None:
+    """A host resolving a different compute dtype must reuse, not wipe, the cache.
+
+    Compute dtype is auto-resolved from the active device and is deliberately
+    absent from the namespace, so a bf16 GPU and an fp32 host land on the same
+    files. If it were still compared as a runtime contract they would each
+    destroy the other's vectors on open, which is worse than partitioning.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks cached rows survive a reopen under a different dtype.
+    """
+    built = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="shared-dtype-namespace",
+        storage_precision="float32",
+        source_torch_dtype="bfloat16",
+    )
+    built.get_embeddings(
+        {"p1": {"title": "Alpha", "abstract": "First"}},
+        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    assert built.embedding_count() == 1
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="shared-dtype-namespace",
+        storage_precision="float32",
+        source_torch_dtype="float32",
+    )
+
+    assert reopened.h5_path == built.h5_path
+    assert reopened.embedding_count() == 1
+    results = reopened.search(
+        query_embedding=np.asarray([1.0, 0.0], dtype=np.float32),
+        top_k=1,
+        binary_prefilter=False,
+        binary_rescore_multiplier=2,
+    )
+    assert [result.paper_id for result in results] == ["p1"]
+
+
+def _recorded_source_dtypes(cache: EmbeddingCache) -> tuple[str, str]:
+    """Return the source dtype recorded by the SQLite and HDF5 witnesses.
+
+    :param EmbeddingCache cache: Cache whose namespace is inspected.
+    :return Tuple[str, str]: ``(sqlite_value, hdf5_attr_value)`` provenance pair.
+    """
+    with cache._connect_db() as conn:
+        sqlite_value = cache._load_cache_metadata(conn).get(SOURCE_TORCH_DTYPE_KEY, "")
+    with h5py.File(cache.h5_path, "r") as h5:
+        h5_value = cache._metadata_value_from_h5_attr(
+            h5.attrs.get(SOURCE_TORCH_DTYPE_KEY)
+        )
+    return str(sqlite_value), h5_value
+
+
+def test_embedding_cache_records_the_creating_source_dtype_not_the_last_opener(
+    tmp_path: Path,
+) -> None:
+    """The stored source dtype must survive a reopen under a different dtype.
+
+    The dtype is provenance, not identity, so it is never compared on open. That
+    only makes it a usable record if the opener leaves it alone: restamping it
+    would erase what produced the vectors, including from a run that reads
+    nothing.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks both witnesses and the row count after an fp32 reopen.
+    """
+    built = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="source-dtype-provenance",
+        storage_precision="float32",
+        source_torch_dtype="bfloat16",
+    )
+    built.get_embeddings(
+        {"p1": {"title": "Alpha", "abstract": "First"}},
+        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    assert _recorded_source_dtypes(built) == ("bfloat16", "bfloat16")
+
+    reopened = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="source-dtype-provenance",
+        storage_precision="float32",
+        source_torch_dtype="float32",
+    )
+    assert reopened.embedding_count() == 1
+    # Appending rewrites the HDF5 contract attrs, so the fp32 host gets the one
+    # chance it has to overwrite the other witness too.
+    reopened.get_embeddings(
+        {"p2": {"title": "Beta", "abstract": "Second"}},
+        LookupEncodeModel({"Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+
+    assert reopened.embedding_count() == 2
+    assert _recorded_source_dtypes(reopened) == ("bfloat16", "bfloat16")
+
+
+def test_embedding_cache_rebuild_records_the_rebuilding_source_dtype(
+    tmp_path: Path,
+) -> None:
+    """Discarding the vectors must hand the provenance record to the rebuilder.
+
+    Preserving the creating dtype is only honest while its vectors are still
+    there. A rebuild keeps none of them, so a stale record would attribute the
+    new vectors to a runtime that never produced them.
+
+    :param Path tmp_path: Isolated cache directory.
+    :return None: Checks both witnesses name the rebuilding runtime.
+    """
+    built = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="source-dtype-rebuild",
+        storage_precision="float32",
+        source_torch_dtype="bfloat16",
+        text_formatter_fingerprint="old",
+    )
+    built.get_embeddings(
+        {"p1": {"title": "Alpha", "abstract": "First"}},
+        LookupEncodeModel({"Alpha. First": np.asarray([1.0, 0.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+    assert _recorded_source_dtypes(built) == ("bfloat16", "bfloat16")
+
+    # A changed formatter fingerprint is a proven incompatibility: the namespace
+    # is rebuilt from empty rather than reused.
+    rebuilt = EmbeddingCache(
+        cache_dir=tmp_path,
+        model_name="source-dtype-rebuild",
+        storage_precision="float32",
+        source_torch_dtype="float32",
+        text_formatter_fingerprint="new",
+    )
+    assert not rebuilt.h5_path.exists()
+    assert rebuilt.embedding_count() == 0
+
+    rebuilt.get_embeddings(
+        {"p2": {"title": "Beta", "abstract": "Second"}},
+        LookupEncodeModel({"Beta. Second": np.asarray([0.0, 1.0], dtype=np.float32)}),
+        show_progress=False,
+    )
+
+    assert rebuilt.embedding_count() == 1
+    assert _recorded_source_dtypes(rebuilt) == ("float32", "float32")
 
 
 def test_embedding_cache_detects_diverged_sqlite_contract_value(

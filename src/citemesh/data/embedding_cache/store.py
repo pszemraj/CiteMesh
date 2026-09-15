@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
@@ -24,7 +25,7 @@ import h5py
 import numpy as np
 from filelock import FileLock
 
-from citemesh.text_batching import (
+from citemesh.core.text_batching import (
     l2_normalize_embeddings,
 )
 
@@ -37,9 +38,12 @@ from ..model_profiles import (
     DEFAULT_EMBEDDING_MODEL_NAME,
 )
 from .constants import (
+    _PAPER_ROW_COLUMNS,
     _STORAGE_PRECISIONS,
     BINARY_INDEX_DATASET_NAME,
     CALIBRATION_RANGES_DATASET_NAME,
+    CORPUS_IDENTITY_VERSION,
+    CORPUS_IDENTITY_VERSION_KEY,
     CORPUS_METADATA_VERSION,
     CORPUS_METADATA_VERSION_KEY,
     EMBEDDINGS_DATASET_NAME,
@@ -68,6 +72,7 @@ from .quantization import (
 )
 from .recovery import _RecoveryMixin
 from .search import _SearchMixin
+from .sql import _decode_paper_row
 
 logger = logging.getLogger(__name__)
 
@@ -160,11 +165,9 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         self._int8_saturation_warning_emitted = False
         self._progress = progress
 
-        with self._cache_operation_lock():
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
-            with self._cache_lock():
-                self._init_db()
-                self._ensure_h5_layout()
+        with self._cache_lock():
+            self._init_db()
+            self._ensure_h5_layout()
 
     # ------------------------------------------------------------------
     # Public API
@@ -451,6 +454,95 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
                         paper_ids.add(paper_id)
         return paper_ids
 
+    def get_paper_metadata_batch(
+        self, paper_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Return normalized cached metadata for selected paper IDs.
+
+        :param Sequence[str] paper_ids: Paper IDs to look up.
+        :return Dict[str, Dict[str, Any]]: Metadata keyed by each cached paper ID.
+        """
+        if not paper_ids or not path_exists(self.db_path):
+            return {}
+
+        output: dict[str, dict[str, Any]] = {}
+        with self._locked_connection() as conn:
+            self._recover_pending_replacements_with_connection_locked(conn)
+            for row in self._query_paper_rows(
+                conn, list(paper_ids), lookup_column="paper_id"
+            ):
+                decoded = _decode_paper_row(row, parse_json_lists=True)
+                paper_id = str(decoded.pop("paper_id"))
+                decoded.pop("text_hash")
+                decoded.pop("row_idx")
+                output[paper_id] = decoded
+        return output
+
+    def prepare_corpus_identity_reconciliation(self) -> bool:
+        """Prepare one source reconciliation for caches with positional-looking IDs.
+
+        Historical generated IDs and real source IDs may both use the
+        ``arxiv_<number>`` spelling. Preserve every stored ID and vector, but
+        make a pre-marker cache incomplete when any such row exists so the
+        hydration layer reconciles it once against current source identities.
+
+        :return bool: Whether positional-looking rows require reconciliation.
+        """
+        with self._locked_connection() as conn:
+            metadata = self._load_cache_metadata(conn)
+            if metadata.get(CORPUS_IDENTITY_VERSION_KEY) == CORPUS_IDENTITY_VERSION:
+                return False
+            self._recover_pending_replacements_with_connection_locked(conn)
+            cursor = conn.execute(
+                "SELECT paper_id FROM papers WHERE paper_id GLOB 'arxiv_[0-9]*'"
+            )
+            requires_reconciliation = False
+            while rows := cursor.fetchmany(SQLITE_QUERY_BATCH_SIZE):
+                if any(re.fullmatch(r"arxiv_\d+", str(row[0])) for row in rows):
+                    requires_reconciliation = True
+                    break
+            values = {CORPUS_IDENTITY_VERSION_KEY: CORPUS_IDENTITY_VERSION}
+            if requires_reconciliation:
+                values[HYDRATION_COMPLETE_KEY] = "0"
+            self._set_cache_metadata(conn, values)
+        return requires_reconciliation
+
+    def get_legacy_corpus_identity_aliases(
+        self, identity_builder: Callable[[dict[str, Any]], str | None]
+    ) -> dict[str, set[str]]:
+        """Map content identities to positional-looking physical cache IDs.
+
+        The physical primary keys remain unchanged because ``arxiv_<number>``
+        can also be a legitimate source-provided ID. Callers use these aliases
+        only for source membership reconciliation.
+
+        :param Callable identity_builder: Stable ID from normalized cached metadata.
+        :return Dict[str, Set[str]]: Physical legacy-looking IDs by content identity.
+        """
+        if not path_exists(self.db_path):
+            return {}
+
+        aliases: dict[str, set[str]] = {}
+        with self._locked_connection() as conn:
+            self._recover_pending_replacements_with_connection_locked(conn)
+            cursor = conn.execute(
+                f"SELECT {_PAPER_ROW_COLUMNS} FROM papers "
+                "WHERE paper_id GLOB 'arxiv_[0-9]*'"
+            )
+            while rows := cursor.fetchmany(SQLITE_QUERY_BATCH_SIZE):
+                for row in rows:
+                    decoded = _decode_paper_row(row, parse_json_lists=True)
+                    if re.fullmatch(r"arxiv_\d+", decoded["paper_id"]) is None:
+                        continue
+                    alias = identity_builder(decoded)
+                    if alias is not None:
+                        normalized_alias = str(alias).strip()
+                        if normalized_alias:
+                            aliases.setdefault(normalized_alias, set()).add(
+                                decoded["paper_id"]
+                            )
+        return aliases
+
     def has_calibration_ranges(self) -> bool:
         """Return whether int8 calibration ranges exist in cache.
 
@@ -686,7 +778,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         return cached_source if cached_source else None
 
     def has_current_corpus_metadata(self) -> bool:
-        """Return whether corpus years and DOIs use the current source adapter.
+        """Return whether corpus years, DOIs and venues use the current adapter.
 
         :return bool: Whether a full metadata pass completed with this adapter.
         """
@@ -699,20 +791,45 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         :return None: Persists the completed metadata adapter version.
         """
         self._write_cache_metadata(
-            {CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION}
+            {
+                CORPUS_METADATA_VERSION_KEY: CORPUS_METADATA_VERSION,
+                CORPUS_IDENTITY_VERSION_KEY: CORPUS_IDENTITY_VERSION,
+            }
         )
 
     def update_corpus_metadata(self, papers: Sequence[dict]) -> None:
-        """Correct years and DOIs on existing corpus rows without touching vectors.
+        """Correct years, DOIs and venues without touching cached vectors.
 
-        :param Sequence[Dict] papers: Source metadata with paper IDs, years and DOIs.
+        :param Sequence[Dict] papers: Source metadata with IDs, years, DOIs and venues.
         :return None: Updates only matching SQLite records.
         """
         with self._locked_connection() as conn:
             conn.executemany(
-                "UPDATE papers SET year = ?, doi = ? WHERE paper_id = ?",
-                [(paper["year"], paper["doi"], paper["paper_id"]) for paper in papers],
+                "UPDATE papers SET year = ?, doi = ?, venue = ? WHERE paper_id = ?",
+                [
+                    (paper["year"], paper["doi"], paper["venue"], paper["paper_id"])
+                    for paper in papers
+                ],
             )
+
+    def get_max_chronology_key(self) -> int | None:
+        """Return the newest arXiv submission key persisted in this namespace.
+
+        This is the recency watermark of the cached corpus: rows whose paper ID
+        carries no submission date store ``NULL`` and are ignored, so a namespace
+        built entirely from synthetic or DOI-canonical IDs reports ``None``.
+
+        :return Optional[int]: Maximum stored ``chronology_key``, or ``None``
+            when the namespace has no row carrying one.
+        """
+        if not path_exists(self.db_path):
+            return None
+
+        with self._locked_connection() as conn:
+            row = conn.execute("SELECT MAX(chronology_key) FROM papers").fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
 
     def get_model_fingerprint(self) -> str | None:
         """Return model fingerprint captured for this cache namespace.
@@ -742,7 +859,7 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
             cached_rows = int(raw_cached)
         except ValueError:
             return None
-        if upstream_rows < 1 or cached_rows < 0:
+        if upstream_rows < 0 or cached_rows < 0:
             return None
         return upstream_rows, cached_rows
 
@@ -757,8 +874,8 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         """
         resolved_upstream = int(upstream_rows)
         resolved_cached = int(cached_rows)
-        if resolved_upstream < 1:
-            raise ValueError("upstream_rows must be at least 1")
+        if resolved_upstream < 0:
+            raise ValueError("upstream_rows must be non-negative")
         if resolved_cached < 0:
             raise ValueError("cached_rows must be non-negative")
         self._write_cache_metadata(
@@ -822,12 +939,17 @@ class EmbeddingCache(_IngestMixin, _H5LayoutMixin, _RecoveryMixin, _SearchMixin)
         :param Optional[int] corpus_size: Corpus-size cap used for hydration.
         :param bool complete: Whether hydration completed successfully.
         :return None: Mutates SQLite metadata in-place.
+        :raises ValueError: If ``dataset_source`` is missing or blank.
         """
-        normalized_source = str(dataset_source).strip()
-        if complete and not normalized_source:
-            raise ValueError(
-                "dataset_source must be non-empty when complete=True for hydration."
-            )
+        normalized_source = (
+            "" if dataset_source is None else str(dataset_source).strip()
+        )
+        # A recorded source is how a corpus namespace is told apart from a cheap
+        # candidate one when a fingerprint mismatch decides whether deleting the
+        # payload needs operator approval, so an incomplete attempt must carry it
+        # too. ``None`` is rejected rather than coerced, which would store "None".
+        if not normalized_source:
+            raise ValueError("dataset_source must be non-empty for hydration metadata.")
         self._write_cache_metadata(
             {
                 HYDRATION_DATASET_SOURCE_KEY: normalized_source,

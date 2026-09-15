@@ -11,6 +11,7 @@ from pathlib import Path
 
 import networkx as nx
 
+from citemesh.core.choices import EXPORT_FORMATS as EXPORT_FORMATS
 from citemesh.visualization.dashboard.package import (
     DASHBOARD_COLLECTION_FILENAME,
     DASHBOARD_PACKAGE_FILENAME,
@@ -31,16 +32,6 @@ __all__ = [
 ]
 
 
-EXPORT_FORMATS = (
-    "png",
-    "html",
-    "plotly",
-    "dashboard",
-    "json",
-    "csv",
-    "bibtex",
-    "graphml",
-)
 EXPORT_EXTENSIONS: dict[str, str] = {
     "png": ".png",
     "html": ".html",

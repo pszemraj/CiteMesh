@@ -31,6 +31,7 @@ from .config import (
     ENCODE_BATCH_SIZE,
 )
 from .deps import _check_embedding_deps
+from .fingerprint import EmbeddingCacheFingerprintMismatchError
 from .hydration import HYDRATION_FLUSH_SIZE
 from .precision import _PrecisionEncodeProxy
 from .records import _extract_dataset_paper_metadata, _query_seed_id
@@ -51,6 +52,7 @@ __all__ = [
     "ENCODE_BATCH_SIZE",
     "HYDRATION_FLUSH_SIZE",
     "EmbeddingBackendCompatibilityError",
+    "EmbeddingCacheFingerprintMismatchError",
     "EmbeddingGraphBuilder",
     "EmbeddingPrecisionCompatibilityError",
     "EmbeddingTask",

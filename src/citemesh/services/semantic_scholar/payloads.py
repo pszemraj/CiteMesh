@@ -42,9 +42,6 @@ DEFAULT_PAPER_FIELDS = (
 )
 
 
-S2_API_KEY_SIGNUP_URL = "https://www.semanticscholar.org/product/api"
-
-
 def _is_sdk_null_relation_page(error: TypeError) -> bool:
     """Identify the SDK failure used for a valid empty relation page.
 
@@ -163,15 +160,19 @@ def _extract_reference_ids(raw_references: Any) -> list[str]:
 
 
 def _validate_integer_limit(
-    limit: int, field_name: str, allow_zero: bool = False
+    limit: int,
+    field_name: str,
+    allow_zero: bool = False,
+    maximum: int | None = None,
 ) -> int:
     """Validate API limit argument values and return normalized int.
 
     :param int limit: Raw limit value supplied by caller.
     :param str field_name: Parameter name used in error messages.
     :param bool allow_zero: Whether zero is accepted as a disable switch.
+    :param int | None maximum: Optional inclusive upper bound.
     :return int: Parsed integer limit value.
-    :raises ValueError: If value is non-integer or below the accepted minimum.
+    :raises ValueError: If value is non-integer or outside the accepted range.
     """
     if isinstance(limit, bool) or not isinstance(limit, numbers.Integral):
         raise ValueError(f"{field_name} must be an integer, got {limit!r}")
@@ -180,6 +181,8 @@ def _validate_integer_limit(
     minimum = 0 if allow_zero else 1
     if parsed_limit < minimum:
         raise ValueError(f"{field_name} must be at least {minimum}, got {parsed_limit}")
+    if maximum is not None and parsed_limit > maximum:
+        raise ValueError(f"{field_name} must be at most {maximum}, got {parsed_limit}")
     return parsed_limit
 
 
@@ -390,5 +393,5 @@ def _unavailable_error(
         f"Semantic Scholar API {flavor} while {context} "
         f"(after {API_CONFIG.max_retries} attempts{detail}). "
         f"{issue_hint} - retry shortly, or set "
-        f"S2_API_KEY for a dedicated rate limit (free keys: {S2_API_KEY_SIGNUP_URL})."
+        f"S2_API_KEY for a dedicated rate limit."
     )

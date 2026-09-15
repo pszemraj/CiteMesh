@@ -1,4 +1,4 @@
-# Output Artifacts
+# Output artifacts
 
 File names, path resolution, and the schema of every format CiteMesh writes. Dashboard runs maintain one reusable viewer plus one versioned data package per collection, not a dashboard per seed.
 
@@ -41,7 +41,7 @@ Omit `--output` to use `out/` under the current working directory; a source chec
 - `-o out/report.dashboard.html` selects standalone mode: that one self-contained file, no collection package. In a multi-export run it also disables collection mode and gives siblings the stripped base plus their own suffixes (`out/report.json`, `out/report.csv`, `out/report.config.json`).
 - Any other `--output` is a directory base, a known export suffix stripped first. Under collection mode the viewer and package sit at that root, every other format under `<base>/<title-slug>-<hash>/`. A single non-dashboard export to a non-directory target keeps a matching suffix, replaces a different known one, and appends a missing one.
 
-The sidecar follows the resolved output: `<strategy>.config.json` beside strategy-named outputs, or the output stem otherwise (`out/report.json` -> `out/report.config.json`). `citemesh view [PATH]` opens a saved collection or standalone file without rebuilding.
+The sidecar follows the resolved output: `<strategy>.config.json` beside strategy-named outputs, or the output stem otherwise (`out/report.json` -> `out/report.config.json`). Open the result with [citemesh view](../guides/cli.md#view-a-saved-dashboard).
 
 ## Collection package (`dashboard.citemesh.json`)
 
@@ -55,7 +55,7 @@ A malformed, unsupported, or inaccessible existing package stops the build befor
 
 ## Graph JSON (`<strategy>.json`)
 
-The graph payload for downstream graph and data work:
+The graph payload requires its `seed_id` to identify a node present in the graph. It contains:
 
 - `kind` (`"citemesh-graph"`), `schema_version` (`1`), `seed_id`
 - `meta` - `strategy`, `year_range` (`{"min": ..., "max": ...}` over papers with a known year, `null` when none has one), and `candidate_source_status` when the build queried Semantic Scholar sources
@@ -66,7 +66,7 @@ The graph payload for downstream graph and data work:
 
 Each node carries:
 
-- core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
+- core fields `id`, `title`, `year`, `authors`, `abstract`, `citation_count`, `venue`, `arxiv_id`, `doi`, `categories`, `is_seed`, `is_local_corpus`; `year` is `0` when unknown, and those papers drop out of `meta.year_range`
 - analysis fields `provenance` (seed/citation/semantic/both), `provenance_base`, `seed_relation` (cites_seed/referenced_by_seed/semantic_only/overlap/seed), `seed_relevance` (personalized PageRank over the final graph - a topology metric computed at export time, not the candidate-selection score used in hybrid reranking)
 - `links` (arXiv abs/pdf, DOI, Semantic Scholar URLs) and a deterministic `bibtex` entry
 
@@ -118,16 +118,20 @@ Node color is a publication-year gradient shared with the legend and year timeli
 
 The run contract for reproducibility and audit trails: `schema_version`, `build`, `outputs` (resolved artifact paths), and `metadata`.
 
-`build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record citation-expansion budgets), `hybrid` for the resolved `max_semantic`, `embedding` for semantic settings including the requested `device` and `model_profile` tokens plus `top_k`, the per-node edge cap. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. `build.refresh_paper_cache` records whether fresh metadata was requested.
+`build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record citation-expansion budgets), `hybrid` for the resolved `max_semantic`, `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. `build.refresh_paper_cache` records whether fresh metadata was requested.
 
 `metadata` carries:
 
 - run metadata `paper_id`, `seed_id`, `nodes`, `edges`, `theme`, `strategy`
 - `score_contract` - `strategy`, `comparable_across_strategies` (always `false`), `range_hint`, `score_type` (`<strategy>_similarity_composite`); hybrid adds an `adjudication_policy` sentence
 - `candidate_source_status` - per attempted Semantic Scholar source: `complete` (papers returned), `empty` (response with no papers), or `unavailable` (operational failure). Partial results stay usable and preserve the unavailable source; if every source is unavailable the build fails and writes no artifacts.
-- embedding/hybrid runtime metadata when available - `effective_device`, `effective_compute_dtype`, resolved `model_profile`, and `retrieval_representation` / `graph_representation` (terms defined in [Embedding Runtime](embedding-runtime.md))
+- embedding/hybrid runtime metadata when available - runtime-active `effective_model`, immutable `effective_model_revision` and `model_fingerprint`, `effective_truncate_dim`, `effective_device`, `effective_compute_dtype`, resolved `model_profile`, and `retrieval_representation` / `graph_representation` (terms defined in [Embedding Runtime](embedding-runtime.md))
 
-Shared by every export: integral numeric years (including `2017.0`) are accepted and fractional or non-finite ones treated as missing; null or non-finite edge weights raise before exports replace existing files; empty node IDs and IDs with surrounding whitespace are rejected, matching the dashboard's import contract.
+## Graph input
+
+When a node carries a `Paper` under its `paper` attribute, exports, PNG rendering, and artifact filenames use that record for bibliographic metadata, including empty values that clear stale mirrored fields. A node-level `is_seed` overrides `Paper.is_seed`; nodes without a `Paper` use their scalar attributes.
+
+Node IDs must be non-empty, have no surrounding whitespace, and remain unique after conversion to strings. Enriched citation counts use the shared non-negative integer normalizer: booleans, nulls, nonnumeric text, and NaN become zero. Integral numeric years (including `2017.0`) are accepted; fractional or non-finite years are missing. Null or non-finite edge weights raise before exports replace existing files.
 
 ## Determinism notes
 

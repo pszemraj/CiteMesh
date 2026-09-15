@@ -31,7 +31,7 @@ from typing import Any
 import h5py
 import numpy as np
 
-from citemesh.text_batching import encode_texts, l2_normalize_embeddings
+from citemesh.core.text_batching import encode_texts, l2_normalize_embeddings
 
 from ..model_profiles import compose_title_abstract_text
 from .models import (

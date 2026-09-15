@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .choices import STORAGE_PRECISION_CHOICES
+
 
 @dataclass
 class TemporalConfig:
@@ -66,7 +68,7 @@ class EmbeddingStorageConfig:
 
     def validate(self) -> None:
         """Ensure storage settings are valid."""
-        if self.storage_precision not in {"float32", "int8"}:
+        if self.storage_precision not in STORAGE_PRECISION_CHOICES:
             raise ValueError(
                 "Embedding storage_precision must be one of {'float32', 'int8'}"
             )

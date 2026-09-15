@@ -551,9 +551,7 @@ def run_build_command(
         _log_build_side_effect_contract(args)
         # Build graph based on strategy
         logger.info(f"Building graph using {args.strategy} strategy...")
-        graph, seed_id = _build_strategy_graph(
-            args, args.strategy, validate_contract=False
-        )
+        graph, seed_id = _build_strategy_graph(args, args.strategy)
 
         output_paths, dashboard_package_path = _resolve_run_output_paths(
             args, plan, graph, seed_id

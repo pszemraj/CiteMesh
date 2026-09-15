@@ -165,10 +165,18 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
         which export formats were requested or in which order exporters ran.
 
         :return Dict[str, Any]: Portable CiteMesh graph payload with dashboard data.
+        :raises ValueError: If the seed identifier is not present among graph nodes.
         """
+        sorted_nodes = _sorted_nodes(self.graph)
+        serialized_node_ids = {str(node_id) for node_id, _ in sorted_nodes}
+        if str(self.seed_id) not in serialized_node_ids:
+            raise ValueError(
+                f"Cannot export graph payload: seed node {self.seed_id!r} "
+                "is not present in the graph."
+            )
         enriched = self._enriched_nodes()
         sorted_edges = _sorted_edges(self.graph)
-        dashboard_node_ids = [node_id for node_id, _ in _sorted_nodes(self.graph)]
+        dashboard_node_ids = [node_id for node_id, _ in sorted_nodes]
         dashboard_meta = self._dashboard_meta(
             theme_obj=self.theme,
             node_ids=dashboard_node_ids,
@@ -396,23 +404,28 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
 
         for node, attrs in _sorted_nodes(self.graph):
             paper: Paper | None = attrs.get("paper")
+            serialized = _serialize_node(node, attrs)
             size = self._node_size(node)
             color = self._node_color_hex(node, theme_obj)
 
-            label = paper.label if paper else attrs.get("title", node)
+            label = _node_short_label(attrs, node)
 
             tooltip_lines = []
             if paper:
-                tooltip_lines.append(f"<b>{html.escape(paper.title)}</b>")
+                tooltip_lines.append(f"<b>{html.escape(str(serialized['title']))}</b>")
+                first_author = paper.first_author_surname
+                year = coerce_publication_year(serialized.get("year"))
+                year_label = str(year) if year > 0 else "n.d."
                 tooltip_lines.append(
-                    f"{html.escape(paper.first_author_surname)} et al., {paper.year}"
+                    f"{html.escape(first_author)} et al., {year_label}"
                 )
-                tooltip_lines.append(f"Citations: {paper.citation_count}")
-                if paper.categories:
-                    cats = ", ".join(html.escape(cat) for cat in paper.categories[:3])
+                tooltip_lines.append(f"Citations: {serialized['citation_count']}")
+                categories = serialized.get("categories", [])
+                if categories:
+                    cats = ", ".join(html.escape(str(cat)) for cat in categories[:3])
                     tooltip_lines.append(f"Categories: {cats}")
             else:
-                tooltip_lines.append(html.escape(attrs.get("title", "")))
+                tooltip_lines.append(html.escape(str(serialized.get("title", ""))))
 
             net.add_node(
                 node,
@@ -420,7 +433,7 @@ class GraphExporter(NodesMixin, PlotlyFigureMixin, DashboardPayloadMixin):
                 title="<br>".join(tooltip_lines),
                 size=max(6, size / 30),
                 color=color,
-                borderWidth=3 if attrs.get("is_seed") else 1,
+                borderWidth=3 if serialized.get("is_seed") else 1,
             )
 
         for u, v, data in _sorted_edges(self.graph):

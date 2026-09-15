@@ -50,6 +50,7 @@ def test_coerce_float_passes_through_non_finite_text() -> None:
     ("raw", "expected"),
     [
         (12, 12),
+        (1, 1),
         (0, 0),
         (-5, 0),
         (7.9, 7),
@@ -71,9 +72,3 @@ def test_coerce_float_passes_through_non_finite_text() -> None:
 def test_coerce_citation_count(raw: object, expected: int) -> None:
     """Citation counts normalize to non-negative integers or zero."""
     assert coerce_citation_count(raw) == expected
-
-
-def test_coerce_citation_count_rejects_boolean_truthiness() -> None:
-    """``True`` is metadata noise, not a citation count of one."""
-    assert coerce_citation_count(True) == 0
-    assert coerce_citation_count(1) == 1

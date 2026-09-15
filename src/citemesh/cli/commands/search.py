@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shlex
+from collections.abc import Iterable, Sequence
+from contextlib import nullcontext
 
 from rich.text import Text
 
+from citemesh.data.embedding_cache import EmbeddingCache, _corpus_size_from_token
 from citemesh.data.user_config import UserConfig
 from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.embedding import (
+    EmbeddingCacheFingerprintMismatchError,
     EmbeddingGraphBuilder,
     resolve_embedding_device,
 )
 
 from .. import console
-from ..build_contract import _validate_build_cli_contract, _ValueErrorParserErrorSink
+from ..build_contract import (
+    _BuildContractValueError,
+    _validate_build_cli_contract,
+    _ValueErrorParserErrorSink,
+)
 from ..build_options import (
     _apply_user_config_defaults,
     _configured_client_kwargs,
@@ -24,6 +33,78 @@ from ..build_options import (
 )
 from ..console import logger
 from ..parser import _output_table, _pop_tracked_option_dests
+
+#: Search flags that override a build-equivalent namespace selector. They share
+#: their destinations with the build parser and all default to ``None``, so a
+#: set value is exactly the set of options this invocation supplied.
+_NAMESPACE_OVERRIDE_DESTS: frozenset[str] = frozenset(
+    {
+        "model",
+        "model_profile",
+        "model_revision",
+        "device",
+        "semantic_source",
+        "dataset_source",
+        "truncate_dim",
+        "storage_precision",
+        "calibration_sample_size",
+    }
+)
+
+
+def _namespace_overrides(args: argparse.Namespace) -> dict[str, object]:
+    """Return cache-selection values supplied directly to ``search``.
+
+    Every search selector defaults to ``None``, including integer selectors, so
+    this single presence test stays aligned with the parser contracts.
+
+    :param argparse.Namespace args: Parsed search command arguments.
+    :return dict[str, object]: Supplied selector destinations and their values.
+    """
+    return {
+        dest: value
+        for dest in _NAMESPACE_OVERRIDE_DESTS
+        if (value := getattr(args, dest, None)) is not None
+    }
+
+
+def _namespace_override_labels(overrides: dict[str, object]) -> list[str]:
+    """Return stable CLI labels for supplied search namespace selectors.
+
+    :param dict[str, object] overrides: Supplied selector destinations and values.
+    :return list[str]: Sorted long-option labels.
+    """
+    return sorted(f"--{dest.replace('_', '-')}" for dest in overrides)
+
+
+class _LocalSearchOptionError(ValueError):
+    """A namespace-flag combination on this command line the contract refuses.
+
+    Distinguished from every other local-search failure because it is a usage
+    error, not an unavailable cache: ``auto`` mode must report the bad flags
+    rather than treat them as a reason to quietly search Semantic Scholar. A
+    contract failure this invocation did not cause — a device in config.toml
+    that does not resolve, say — stays an availability failure and keeps the
+    fallback it has always had.
+    """
+
+
+def _empty_cache_alternative_guidance(defaults: argparse.Namespace) -> str:
+    """Describe the next search option after an empty local namespace.
+
+    :param argparse.Namespace defaults: Effective build-equivalent namespace.
+    :return str: Guidance that does not repeat the active source selector.
+    """
+    if defaults.semantic_source == "arxiv-corpus":
+        return (
+            "This is already the arXiv-corpus namespace; use the same "
+            "--dataset-source when building it. Use --mode s2 for keyword search."
+        )
+    return (
+        "To search an existing arXiv-corpus build instead, pass "
+        "--semantic-source arxiv-corpus (plus --dataset-source when it is not "
+        "the default). Use --mode s2 for keyword search."
+    )
 
 
 def _resolve_search_mode(
@@ -56,8 +137,10 @@ def _prepare_local_search_builder(
 
     Mirrors a flagless build's defaults pipeline (config.toml defaults plus
     candidate-mode storage normalization) so the search targets the same cache
-    namespace a default build writes to; ``--model``, ``--model-profile``, and
-    ``--device`` override.
+    namespace a default build writes to; ``--model``, ``--model-profile``,
+    ``--model-revision``, ``--device``, ``--semantic-source``,
+    ``--dataset-source``, ``--truncate-dim``, ``--storage-precision``, and
+    ``--calibration-sample-size`` override.
 
     :param argparse.Namespace args: Parsed search command arguments.
     :param argparse.ArgumentParser build_parser: Build subparser used to
@@ -65,6 +148,8 @@ def _prepare_local_search_builder(
     :param UserConfig user_config: Loaded user configuration snapshot.
     :return Tuple[EmbeddingGraphBuilder, argparse.Namespace]: Builder and the
         effective build-equivalent defaults namespace.
+    :raises _LocalSearchOptionError: If the supplied namespace flags do not form
+        a build configuration the contract accepts.
     """
     defaults = build_parser.parse_args(["local-search-placeholder-seed"])
     defaults._s2_api_key = _resolve_user_config_api_key(user_config)
@@ -73,24 +158,161 @@ def _prepare_local_search_builder(
         defaults, {"strategy"}, user_config
     )
     defaults.strategy = "embedding"
-    if args.model:
-        defaults.model = args.model
-        config_default_dests.discard("model")
-    if args.model_profile:
-        defaults.model_profile = args.model_profile
-        config_default_dests.discard("model_profile")
-    if args.device:
-        defaults.device = args.device
-        config_default_dests.discard("device")
-    _validate_build_cli_contract(
-        defaults,
-        _ValueErrorParserErrorSink(),
-        frozenset(),
-        config_defaults=config_default_dests,
-        config_path=user_config.path,
-    )
+    overrides = _namespace_overrides(args)
+    for dest, value in overrides.items():
+        setattr(defaults, dest, value)
+        config_default_dests.discard(dest)
+    # The overrides must land before contract validation: it coerces int8
+    # storage to float32 outside arxiv-corpus mode, and storage precision is
+    # part of the cache namespace, so a late override would compute a
+    # float32 namespace that no corpus build ever wrote.
+    #
+    # The destinations this invocation actually supplied go with them, so the
+    # build contract applies its own rules to them instead of search restating
+    # a subset: --dataset-source alone implies arxiv-corpus, and pairing it with
+    # --semantic-source candidates is the contradiction the contract rejects.
+    # Passed an empty set, the contract can only see the resolved values, and a
+    # contradiction reads as a plain candidates search that silently discards
+    # the dataset the user named.
+    provided_dests = set(overrides)
+    try:
+        _validate_build_cli_contract(
+            defaults,
+            _ValueErrorParserErrorSink(),
+            provided_dests,
+            config_defaults=config_default_dests,
+            config_path=user_config.path,
+        )
+    except _BuildContractValueError as exc:
+        if not provided_dests.intersection(exc.related_dests):
+            # This command line did not produce the failing value, so it stays
+            # what it has always been: a config-sourced reason local search is
+            # unavailable, which auto mode may answer from Semantic Scholar.
+            raise
+        raise _LocalSearchOptionError(str(exc)) from exc
     builder = EmbeddingGraphBuilder(**_shared_embedding_builder_kwargs(defaults))
     return builder, defaults
+
+
+def _apply_active_model_identity(
+    defaults: argparse.Namespace, builder: EmbeddingGraphBuilder
+) -> None:
+    """Record the checkpoint that local search actually opened.
+
+    Model loading may replace the requested default checkpoint with its configured
+    fallback. The active model name must then drive result labels and the generated
+    build command because cache fingerprinting already binds the namespace to that
+    fallback. The remaining selectors stay as validated: an explicit revision
+    disables fallback, while the profile token, truncation, storage precision, and
+    calibration size reproduce the active builder contract without changing its
+    compute or storage policy.
+
+    :param argparse.Namespace defaults: Effective build-equivalent namespace.
+    :param EmbeddingGraphBuilder builder: Prepared builder with an active model.
+    :return None: Updates the namespace model selector in place when resolved.
+    """
+    active_model_name = str(getattr(builder, "_active_model_name", "") or "").strip()
+    if active_model_name:
+        defaults.model = active_model_name
+
+
+def _local_result_build_command(
+    defaults: argparse.Namespace, cache: EmbeddingCache
+) -> str | None:
+    """Build a shell-safe command targeting the local search namespace.
+
+    :param argparse.Namespace defaults: Effective build-equivalent defaults.
+    :param EmbeddingCache cache: Cache whose recorded corpus scope was searched.
+    :return str | None: Copyable embedding build command with namespace selectors,
+        or ``None`` when the cache lacks the corpus scope needed to reproduce it.
+    """
+    command = [
+        "citemesh",
+        "build",
+        "<ID>",
+        "--strategy",
+        "embedding",
+        "--model",
+        str(defaults.model),
+        "--model-profile",
+        str(defaults.model_profile),
+        "--semantic-source",
+        str(defaults.semantic_source),
+        "--storage-precision",
+        str(defaults.storage_precision),
+    ]
+    if defaults.model_revision is not None:
+        command.extend(["--model-revision", str(defaults.model_revision)])
+    if defaults.truncate_dim is not None:
+        command.extend(["--truncate-dim", str(defaults.truncate_dim)])
+    if defaults.semantic_source == "arxiv-corpus":
+        with cache.hydration_operation_lock():
+            stats = cache.payload_stats()
+        if stats.hydration_split is None:
+            return None
+        command.extend(["--dataset-source", str(defaults.dataset_source)])
+        command.extend(["--dataset-split", stats.hydration_split])
+        recorded_corpus_size = _corpus_size_from_token(stats.hydration_corpus_size)
+        if recorded_corpus_size is None:
+            command.append("--all-corpus")
+        else:
+            command.extend(["--corpus-size", str(recorded_corpus_size)])
+    if defaults.storage_precision == "int8":
+        command.extend(
+            ["--calibration-sample-size", str(defaults.calibration_sample_size)]
+        )
+    return shlex.join(command)
+
+
+def _print_search_results(
+    title: str,
+    rows: Iterable[tuple[str, str, Sequence[str], object, str]],
+    *,
+    metric: str,
+    metric_width: int | None = None,
+    summary: str | None = None,
+) -> None:
+    """Render ranked papers with source-specific values and copyable identifiers.
+
+    :param str title: Table heading.
+    :param Iterable rows: Paper ID, title, author names, year, and formatted metric.
+    :param str metric: Label for the source-specific final column.
+    :param int | None metric_width: Fixed metric width, or an unwrapped auto width.
+    :param str | None summary: Optional context between the table and identifiers.
+    :return None: Prints the table, optional summary, and full paper IDs.
+    """
+    table = _output_table(title)
+    table.leading = 1
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Paper / authors", ratio=1)
+    table.add_column("Year", justify="right", no_wrap=True)
+    table.add_column(
+        metric, justify="right", width=metric_width, no_wrap=metric_width is None
+    )
+    paper_ids = []
+    for i, (paper_id, paper_title, authors, year, value) in enumerate(rows, 1):
+        authors_str = ", ".join(authors[:2])
+        if len(authors) > 2:
+            authors_str += " et al."
+        table.add_row(
+            str(i),
+            Text.assemble(
+                (paper_title, "bold"),
+                ("\n" + authors_str, "dim") if authors_str else "",
+            ),
+            str(year) if year is not None else "",
+            value,
+        )
+        paper_ids.append(paper_id)
+    console.output_console.print(table)
+    if summary is not None:
+        console.output_console.print(Text(summary, style="dim"))
+    console.output_console.print("\n[dim]Full paper IDs:[/dim]")
+    for i, paper_id in enumerate(paper_ids, 1):
+        console.output_console.print(
+            Text.assemble((f"{i}. ", "dim"), (paper_id, "cyan")),
+            soft_wrap=True,
+        )
 
 
 def _render_local_search(
@@ -105,8 +327,19 @@ def _render_local_search(
     :param argparse.Namespace defaults: Effective build-equivalent defaults.
     :return int: Process-style exit code.
     """
+    cache = builder.embedding_cache
+    operation_lock = (
+        cache.hydration_operation_lock()
+        if defaults.semantic_source == "arxiv-corpus"
+        else nullcontext()
+    )
     try:
-        results = builder.search_local(args.query, top_k=args.limit)
+        with operation_lock:
+            results = builder.search_local(args.query, top_k=args.limit)
+            total = getattr(cache, "last_search_total_embeddings", None)
+            build_command = (
+                _local_result_build_command(defaults, cache) if results else None
+            )
     except Exception as exc:
         logger.error(
             "Local search failed: %s",
@@ -115,7 +348,6 @@ def _render_local_search(
         )
         return 1
 
-    cache = builder.embedding_cache
     if not results:
         logger.error(
             "Local search returned no results for model=%s (cache: %s).",
@@ -124,49 +356,41 @@ def _render_local_search(
         )
         return 1
 
-    table = _output_table(f"Local semantic search for '{args.query}'")
-    table.leading = 1
-    table.add_column("#", style="dim", width=3)
-    table.add_column("Paper / authors", ratio=1)
-    table.add_column("Year", justify="right", no_wrap=True)
-    table.add_column("Score", justify="right", width=6)
-
-    for i, result in enumerate(results, 1):
+    rows = []
+    for result in results:
         metadata = result.metadata or {}
-        authors = [str(name) for name in (metadata.get("authors") or [])]
-        authors_str = ", ".join(authors[:2])
-        if len(authors) > 2:
-            authors_str += " et al."
-        year_value = metadata.get("year")
-        table.add_row(
-            str(i),
-            Text.assemble(
-                (str(metadata.get("title") or ""), "bold"),
-                ("\n" + authors_str, "dim") if authors_str else "",
-            ),
-            str(year_value) if year_value is not None else "",
-            f"{float(result.score):.3f}",
-        )
-
-    console.output_console.print(table)
-    total = getattr(cache, "last_search_total_embeddings", None)
-    if total is not None:
-        console.output_console.print(
-            Text(
-                f"Searched {int(total):,} locally cached embeddings "
-                f"(model={defaults.model}, source={defaults.semantic_source}).",
-                style="dim",
+        rows.append(
+            (
+                str(result.paper_id),
+                str(metadata.get("title") or ""),
+                [str(name) for name in (metadata.get("authors") or [])],
+                metadata.get("year"),
+                f"{float(result.score):.3f}",
             )
         )
-    console.output_console.print("\n[dim]Full paper IDs:[/dim]")
-    for i, result in enumerate(results, 1):
+    _print_search_results(
+        f"Local semantic search for '{args.query}'",
+        rows,
+        metric="Score",
+        metric_width=6,
+        summary=(
+            f"Searched {int(total):,} locally cached embeddings "
+            f"(model={defaults.model}, source={defaults.semantic_source})."
+            if total is not None
+            else None
+        ),
+    )
+    if build_command is None:
+        logger.warning(
+            "Build command omitted because the local corpus cache has no recorded "
+            "dataset split. Search results remain usable; build a returned paper "
+            "ID with the same embedding settings and an explicit --dataset-split."
+        )
+    else:
         console.output_console.print(
-            Text.assemble((f"{i}. ", "dim"), (str(result.paper_id), "cyan")),
+            Text(f"\nUse a paper ID with: {build_command}", style="dim"),
             soft_wrap=True,
         )
-    console.output_console.print(
-        '\nUse a paper ID with: citemesh build "<ID>"', style="dim"
-    )
     return 0
 
 
@@ -187,35 +411,20 @@ def _run_s2_search(args: argparse.Namespace) -> int:
             logger.error("No results found.")
             return 1
 
-        table = _output_table(f"Search results for '{args.query}'")
-        table.leading = 1
-        table.add_column("#", style="dim", width=3)
-        table.add_column("Paper / authors", ratio=1)
-        table.add_column("Year", justify="right", no_wrap=True)
-        table.add_column("Citations", justify="right", no_wrap=True)
-
-        for i, paper in enumerate(results, 1):
-            authors_str = ", ".join(a.name for a in paper.authors[:2])
-            if len(paper.authors) > 2:
-                authors_str += " et al."
-
-            table.add_row(
-                str(i),
-                Text.assemble(
-                    (paper.title, "bold"),
-                    ("\n" + authors_str, "dim") if authors_str else "",
-                ),
-                str(paper.year) if paper.year is not None else "",
-                f"{paper.citation_count:,}",
-            )
-
-        console.output_console.print(table)
-        console.output_console.print("\n[dim]Full paper IDs:[/dim]")
-        for i, paper in enumerate(results, 1):
-            console.output_console.print(
-                Text.assemble((f"{i}. ", "dim"), (paper.paper_id, "cyan")),
-                soft_wrap=True,
-            )
+        _print_search_results(
+            f"Search results for '{args.query}'",
+            (
+                (
+                    paper.paper_id,
+                    paper.title,
+                    [author.name for author in paper.authors],
+                    paper.year,
+                    f"{paper.citation_count:,}",
+                )
+                for paper in results
+            ),
+            metric="Citations",
+        )
         console.output_console.print(
             '\nUse a paper ID with: citemesh build "<ID>"', style="dim"
         )
@@ -247,17 +456,22 @@ def _run_search_command(
     :return int: Process-style exit code.
     """
     mode, origin = _resolve_search_mode(args, user_config)
-    if args.model or args.model_profile or args.device:
+    overrides = _namespace_overrides(args)
+    override_labels = _namespace_override_labels(overrides)
+    if overrides:
         if args.mode == "s2":
             logger.error(
-                "--model, --model-profile, and --device only apply to local "
-                "semantic search; drop them or use --mode local."
+                "%s only apply to local semantic search; drop them or use "
+                "--mode local.",
+                ", ".join(override_labels),
             )
             return 2
+        # An already-local default retains its mode provenance; selectors still
+        # choose which namespace that local search reads.
         if origin != "flag" and mode != "local":
-            # Namespace-selecting flags are explicit local intent; they
-            # outrank a config-level s2/auto default but never an explicit
-            # --mode, so --mode auto keeps its S2 fallback.
+            # Local-only flags are explicit local intent; they outrank a
+            # config-level s2/auto default but never an explicit --mode, so
+            # --mode auto keeps its S2 fallback.
             mode, origin = "local", "namespace-flag"
     if args.device:
         try:
@@ -284,26 +498,37 @@ def _run_search_command(
         # cache just to count rows leaves unused metadata and lock files behind.
         if builder.has_persistent_embedding_artifacts():
             builder.prepare_embedding_cache()
+            _apply_active_model_identity(defaults, builder)
             cached_count = builder.embedding_cache.embedding_count()
         else:
             cached_count = 0
+    except _LocalSearchOptionError as exc:
+        # A usage error, so it is reported in every mode: falling back to S2
+        # would answer a question the flags say was not asked.
+        logger.error("%s", exc)
+        return 2
+    except EmbeddingCacheFingerprintMismatchError as exc:
+        # This refusal preserves a costly hydrated corpus. Returning keyword
+        # results would hide the operator action needed to resolve it.
+        logger.error("%s", exc)
+        return 1
     except Exception as exc:
-        namespace_selectors = ""
+        runtime_selectors = ""
         if builder is not None:
-            namespace_selectors = (
+            runtime_selectors = (
                 f" (device={builder.device} compute_dtype={builder.compute_dtype})"
             )
         if mode == "auto":
             logger.info(
                 "Local semantic search unavailable%s (%s); searching the "
                 "Semantic Scholar API instead.",
-                namespace_selectors,
+                runtime_selectors,
                 exc,
             )
             return _run_s2_search(args)
         logger.error(
             "Local search unavailable%s: %s",
-            namespace_selectors,
+            runtime_selectors,
             exc,
             exc_info=logging.getLogger().level == logging.DEBUG,
         )
@@ -317,16 +542,20 @@ def _run_search_command(
                 f"{cached_count:,}",
                 defaults.model,
             )
+            # Query failures stay visible once local results were selected.
             return _render_local_search(args, builder, defaults)
         logger.info(
-            "Local embedding cache is empty for device=%s compute_dtype=%s; "
-            "searching the Semantic Scholar API instead. Run `citemesh build` "
-            "with the same configuration to populate this namespace. A different "
-            "--device can resolve to a different compute dtype and cache namespace; "
-            "select the device matching an existing build, or use --mode s2 for "
-            "keyword search.",
-            builder.device,
-            builder.compute_dtype,
+            "Local embedding cache is empty for model=%s semantic-source=%s "
+            "dataset-source=%s; searching the Semantic Scholar API instead. The "
+            "namespace is keyed by model, revision, profile, semantic source, "
+            "truncate dim, storage precision, int8 calibration size, and formatter "
+            "(never the device); corpus dataset source is validated against its "
+            "hydration metadata. Run `citemesh build` with this configuration to "
+            "populate it. %s",
+            defaults.model,
+            defaults.semantic_source,
+            defaults.dataset_source,
+            _empty_cache_alternative_guidance(defaults),
         )
         return _run_s2_search(args)
 
@@ -336,22 +565,25 @@ def _run_search_command(
             requested_via = "--mode local"
         elif origin == "namespace-flag":
             requested_via = (
-                "--model/--model-profile/--device (namespace flags imply local search)"
+                f"{', '.join(override_labels)} (these flags imply local search)"
             )
         else:
             requested_via = f"defaults.search_mode in {user_config.path}"
         logger.error(
             "Local search was requested via %s, but the local embedding cache "
-            "has no vectors for model=%s semantic-source=%s device=%s "
-            "compute_dtype=%s. Run `citemesh build` with the same configuration to "
-            "populate this namespace. A different --device can resolve to a "
-            "different compute dtype and cache namespace; select the device matching "
-            "an existing build, or use --mode s2 for keyword search.",
+            "has no vectors for model=%s semantic-source=%s dataset-source=%s. "
+            "The namespace is keyed by model, revision, profile, semantic source, "
+            "truncate dim, storage precision, int8 calibration size, and formatter "
+            "(never the device); corpus dataset source is validated against its "
+            "hydration metadata. Run `citemesh build` with this configuration to "
+            "populate it. %s",
             requested_via,
             defaults.model,
             defaults.semantic_source,
-            builder.device,
-            builder.compute_dtype,
+            defaults.dataset_source,
+            _empty_cache_alternative_guidance(defaults),
         )
         return 1
+    # Local vectors are available and the search source is now selected.
+    # Query/scoring failures stay visible instead of changing result semantics.
     return _render_local_search(args, builder, defaults)

@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import Literal
 
 import h5py
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+CorpusCoverage = Literal["exact", "covers", "extends", "incompatible"]
 
 
 SQLITE_QUERY_BATCH_SIZE = 900
@@ -23,7 +26,7 @@ BINARY_INDEX_DATASET_NAME = "binary_index"
 BINARY_INDEX_ENCODING_KEY = "encoding"
 BINARY_INDEX_ENCODING = "int8-midpoint-sign-v1"
 CALIBRATION_RANGES_DATASET_NAME = "calibration_ranges"
-EMBEDDING_CACHE_SCHEMA_VERSION = 3
+EMBEDDING_CACHE_SCHEMA_VERSION = 4
 EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS = 900.0
 EMBEDDING_CACHE_LOCK_TIMEOUT_ENV_VAR = "CITEMESH_EMBEDDING_CACHE_LOCK_TIMEOUT_SECONDS"
 H5_LAYOUT_KEY = "h5_layout_version"
@@ -41,7 +44,9 @@ HYDRATION_SPLIT_KEY = "hydration_split"
 HYDRATION_CORPUS_SIZE_KEY = "hydration_corpus_size"
 HYDRATION_COMPLETE_KEY = "hydration_complete"
 CORPUS_METADATA_VERSION_KEY = "corpus_metadata_version"
-CORPUS_METADATA_VERSION = "1"
+CORPUS_METADATA_VERSION = "3"
+CORPUS_IDENTITY_VERSION_KEY = "corpus_identity_version"
+CORPUS_IDENTITY_VERSION = "1"
 HYDRATION_RECONCILED_UPSTREAM_ROWS_KEY = "hydration_reconciled_upstream_rows"
 HYDRATION_RECONCILED_CACHE_ROWS_KEY = "hydration_reconciled_cache_rows"
 MODEL_FINGERPRINT_KEY = "model_fingerprint"
@@ -107,3 +112,51 @@ def _corpus_size_token(corpus_size: int | None) -> str:
     :return str: Tokenized corpus-size value.
     """
     return "all" if corpus_size is None else f"newest:{int(corpus_size)}"
+
+
+def _corpus_size_from_token(corpus_size_token: str | None) -> int | None:
+    """Read back the cap a recorded corpus token describes.
+
+    The inverse of :func:`_corpus_size_token`, for the paths that must act on
+    the corpus a namespace actually holds rather than on the one a run asked
+    for. A token this policy did not write is refused rather than guessed at,
+    the same tokens :func:`_corpus_size_coverage` calls incompatible.
+
+    :param Optional[str] corpus_size_token: Corpus token recorded on the cache.
+    :return Optional[int]: Recorded cap, or ``None`` for an uncapped corpus.
+    :raises ValueError: If the token is not one this policy writes.
+    """
+    token = str(corpus_size_token or "").strip()
+    if token == "all":
+        return None
+    if not token.startswith("newest:"):
+        raise ValueError(f"Unreadable corpus-size token {corpus_size_token!r}.")
+    return int(token.removeprefix("newest:"))
+
+
+def _corpus_size_coverage(
+    cached_corpus_size: str | None, requested_corpus_size: int | None
+) -> CorpusCoverage:
+    """Compare what a namespace already holds against a newly requested cap.
+
+    The recorded token describes the cached rows, not the request that produced
+    them, so a smaller request is already satisfied and a larger one only needs
+    the difference encoded. Only a token this policy cannot read — a legacy bare
+    ``N`` head slice, or missing metadata — forces a rebuild.
+
+    :param Optional[str] cached_corpus_size: Corpus token recorded on the cache.
+    :param Optional[int] requested_corpus_size: Newly requested corpus-size cap.
+    :return CorpusCoverage: How the cached corpus relates to the request.
+    """
+    cached_token = str(cached_corpus_size or "").strip()
+    if cached_token == _corpus_size_token(requested_corpus_size):
+        return "exact"
+    try:
+        cached_size = _corpus_size_from_token(cached_token)
+    except ValueError:
+        return "incompatible"
+    if cached_size is None:
+        return "covers"
+    if requested_corpus_size is None:
+        return "extends"
+    return "covers" if cached_size > int(requested_corpus_size) else "extends"

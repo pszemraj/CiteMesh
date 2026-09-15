@@ -12,8 +12,10 @@ modules.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable, Sequence
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -24,7 +26,11 @@ import numpy as np
 
 from citemesh._runtime import stderr_isatty
 from citemesh.core import EMBEDDING_CONFIG, EMBEDDING_STORAGE_CONFIG, Author, Paper
+from citemesh.core.paper_ids import (
+    is_local_corpus_paper_id as _is_local_corpus_paper_id,
+)
 from citemesh.core.paper_ids import normalize_paper_id
+from citemesh.core.text_batching import l2_normalize_embeddings
 from citemesh.data import (
     DEFAULT_EMBEDDING_MODEL_NAME,
     EmbeddingCache,
@@ -32,7 +38,15 @@ from citemesh.data import (
     resolve_embedding_model_profile,
     validate_compression_filter,
 )
-from citemesh.data.embedding_cache import CacheSearchResult
+from citemesh.data.cache import (
+    embedding_namespace_has_papers,
+    path_exists,
+    read_embedding_namespace_schema,
+)
+from citemesh.data.embedding_cache import (
+    EMBEDDING_CACHE_SCHEMA_VERSION,
+    CacheSearchResult,
+)
 from citemesh.progress import progress_iterator
 from citemesh.services import get_client
 from citemesh.strategies.base import (
@@ -46,12 +60,14 @@ from citemesh.strategies.candidates import (
     SEMANTIC_SOURCE_CHOICES,
     IdentityRegistry,
     fetch_candidate_pool,
+    merge_paper_metadata,
     paper_embedding_metadata,
+    provider_lookup_identifier,
+    reconcile_paper_identity,
     register_aliases,
     resolve_aliases,
     scope_candidate_collection,
 )
-from citemesh.text_batching import l2_normalize_embeddings
 
 from . import deps
 from .config import (
@@ -700,8 +716,21 @@ class EmbeddingGraphBuilder(
 
         :return Dict[str, object]: Runtime metadata payload for downstream export.
         """
+        active_model = self._cache_model_identity()
+        model_fingerprint = self._resolved_model_fingerprint
+        resolved_model_revision: str | None = None
+        fingerprint_prefix = f"hf::{active_model}::"
+        if model_fingerprint and model_fingerprint.startswith(fingerprint_prefix):
+            revision = model_fingerprint.removeprefix(fingerprint_prefix)
+            if re.fullmatch(r"[0-9a-f]{40}", revision, flags=re.IGNORECASE):
+                resolved_model_revision = revision.lower()
+
         return {
             "binary_prefilter_used": self._last_search_used_binary_prefilter,
+            "active_model": active_model,
+            "model_fingerprint": model_fingerprint,
+            "resolved_model_revision": resolved_model_revision,
+            "truncate_dim": self.truncate_dim,
             "device": self.device,
             "requested_device": self.requested_device,
             "compute_dtype": self._source_dtype_hint,
@@ -784,7 +813,10 @@ class EmbeddingGraphBuilder(
         parts.append(f"binary_prefilter={int(resolved_storage == 'int8')}")
         if resolved_storage == "int8":
             parts.append(f"calibration_sample_size={self.calibration_sample_size}")
-        parts.append(f"source_dtype={self._source_dtype_hint}")
+        # Compute dtype is provenance, not identity. It is auto-resolved from the
+        # active device, and the contract already ignores the other execution
+        # choices that shift numerics (attention backend, TF32, torch.compile);
+        # binding it forked one corpus into a per-hardware cache for no gain.
         parts.append(f"formatter={resolved_formatter}")
         # Candidate mode gets its own namespace so incremental candidate rows
         # never mix with (and never distort row counts of) corpus hydrations.
@@ -796,12 +828,52 @@ class EmbeddingGraphBuilder(
             parts.append(f"mode={self.semantic_source}")
         return "::".join(parts)
 
+    def _corpus_operation_lock(self) -> AbstractContextManager[None]:
+        """Return the complete-operation lock for corpus consumers.
+
+        The active artifact must be bound before choosing the lock because model
+        resolution can replace a provisional cache namespace. Candidate mode has
+        no mutable corpus lifecycle and therefore needs no operation lock.
+
+        :return AbstractContextManager[None]: Corpus lock or a no-op context.
+        """
+        if self.semantic_source != "arxiv-corpus":
+            return nullcontext()
+        cache = self.prepare_embedding_cache()
+        return cache.hydration_operation_lock()
+
     @scope_candidate_collection
     def collect_papers(
         self,
         seed_id: str,
         *,
         seed_paper: Paper | None = None,
+        _corpus_prepared: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Paper]:
+        """Collect papers while excluding corpus replacement between stages.
+
+        :param str seed_id: Seed paper identifier (ArXiv ID or text query).
+        :param Optional[Paper] seed_paper: Optional pre-fetched seed metadata.
+        :param bool _corpus_prepared: Whether a parent prepared the corpus while
+            retaining this same reentrant operation lock.
+        :param Any kwargs: Strategy-specific options forwarded to collection.
+        :return Dict[str, Paper]: Dictionary of paper ID to paper metadata.
+        """
+        with self._corpus_operation_lock():
+            return self._collect_papers_under_operation_lock(
+                seed_id,
+                seed_paper=seed_paper,
+                _corpus_prepared=_corpus_prepared,
+                **kwargs,
+            )
+
+    def _collect_papers_under_operation_lock(
+        self,
+        seed_id: str,
+        *,
+        seed_paper: Paper | None = None,
+        _corpus_prepared: bool = False,
         **kwargs: Any,
     ) -> dict[str, Paper]:
         """
@@ -810,6 +882,8 @@ class EmbeddingGraphBuilder(
         :param str seed_id: Seed paper identifier (ArXiv ID or text query)
         :param Optional[Paper] seed_paper: Optional pre-fetched seed paper metadata to
             reuse instead of fetching the seed from Semantic Scholar again.
+        :param bool _corpus_prepared: Whether a hybrid parent prepared this corpus
+            under the operation lock that remains held by the caller.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -818,10 +892,16 @@ class EmbeddingGraphBuilder(
         self.embeddings = {}
         self.candidate_source_status = {}
 
-        # Load model lazily.
-        self._load_model()
+        corpus_prepared = _corpus_prepared
+        if self.semantic_source == "arxiv-corpus" and not corpus_prepared:
+            self._prepare_corpus_for_build()
+            corpus_prepared = True
 
-        resolved_seed_paper = self._resolve_seed_paper(seed_id, seed_paper)
+        resolved_seed_paper = self.resolve_seed_paper(
+            seed_id,
+            seed_paper,
+            _corpus_prepared=corpus_prepared,
+        )
         papers[resolved_seed_paper.paper_id] = resolved_seed_paper
 
         seed_identities = IdentityRegistry()
@@ -838,14 +918,134 @@ class EmbeddingGraphBuilder(
             )
             return papers
 
-        self._collect_corpus_cache_papers(papers, seed_identities, seed_embedding)
+        self._collect_corpus_cache_papers(
+            papers,
+            seed_identities,
+            seed_embedding,
+            resolved_seed_paper,
+            corpus_prepared=corpus_prepared,
+        )
         return papers
 
-    def _resolve_seed_paper(self, seed_id: str, seed_paper: Paper | None) -> Paper:
-        """Resolve the seed node from caller metadata, Semantic Scholar, or query text.
+    def resolve_seed_paper(
+        self,
+        seed_id: str,
+        seed_paper: Paper | None = None,
+        *,
+        _corpus_prepared: bool = False,
+    ) -> Paper:
+        """Resolve a build seed only after making its corpus namespace current.
 
-        An identifier Semantic Scholar cannot resolve is treated as a free-text
-        query, which gets a synthetic seed node so the graph still has a root.
+        Corpus migration, recovery, and refresh can change both the seed metadata
+        and which primary ID represents it. They must finish before final lookup.
+
+        :param str seed_id: Seed paper identifier or free-text query.
+        :param Optional[Paper] seed_paper: Caller-provided bibliographic metadata.
+        :param bool _corpus_prepared: Whether the current collection operation
+            already completed corpus preparation.
+        :return Paper: Resolved seed carrying the seed role for this build.
+        """
+        with self._corpus_operation_lock():
+            if self.semantic_source == "arxiv-corpus":
+                if not _corpus_prepared:
+                    self._prepare_corpus_for_build()
+            else:
+                self._load_model()
+            resolved_seed = self._resolve_seed_paper(seed_id, seed_paper)
+            if seed_paper is None and resolved_seed.is_local_corpus:
+                self.enrich_cached_corpus_seed(resolved_seed)
+            return resolved_seed
+
+    def resolve_cached_corpus_seed(
+        self, seed_id: str, *, _corpus_prepared: bool = False
+    ) -> Paper | None:
+        """Resolve a seed from the selected corpus cache without provider calls.
+
+        :param str seed_id: Cached current, legacy, or source-primary identifier.
+        :param bool _corpus_prepared: Whether the current hybrid operation already
+            completed corpus preparation.
+        :return Optional[Paper]: Cached seed metadata, or ``None`` for a cache miss.
+        :raises ValueError: If a recognized local-only ID is absent or incompatible.
+        """
+        with self._corpus_operation_lock():
+            if self.semantic_source != "arxiv-corpus":
+                return None
+            if not _corpus_prepared:
+                self._prepare_corpus_for_build()
+            return self._resolve_cached_corpus_seed(seed_id)
+
+    def _prepare_corpus_for_build(self) -> None:
+        """Complete corpus lifecycle work before resolving a build seed.
+
+        :return None: Makes the artifact-bound corpus current for this operation.
+        """
+        self.prepare_embedding_cache()
+        self._ensure_cache_hydrated(use_streaming=self.use_streaming)
+
+    def enrich_cached_corpus_seed(self, seed: Paper) -> None:
+        """Merge optional provider evidence without replacing a local seed ID.
+
+        :param Paper seed: Cache-primary seed record to enrich in place.
+        :return None: Preserves local metadata when no safe alias or provider row exists.
+        """
+        lookup_id = provider_lookup_identifier(seed.paper_id, seed)
+        if lookup_id is None:
+            return
+
+        from citemesh.services import SemanticScholarRequestError
+
+        try:
+            provider_papers = self.client.get_papers([lookup_id])
+        except SemanticScholarRequestError as exc:
+            logger.warning(
+                "Seed citation enrichment was rejected; keeping corpus metadata: %s",
+                exc,
+            )
+            return
+
+        provider_seed = provider_papers.get(normalize_paper_id(lookup_id))
+        if provider_seed is not None:
+            merge_paper_metadata(seed, provider_seed)
+
+    def _resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:
+        """Read one seed from the prepared corpus namespace.
+
+        :param str seed_id: Cache-primary identifier to resolve.
+        :return Optional[Paper]: Cached seed carrying the build seed role, if found.
+        :raises ValueError: If a recognized local-only ID cannot use this namespace.
+        """
+        local_only_id = _is_local_corpus_paper_id(seed_id)
+        cache = self.embedding_cache
+        with cache.hydration_operation_lock():
+            cached_source = cache.get_hydrated_dataset_source()
+            source_matches = not cached_source or cached_source == self.dataset_source
+            if local_only_id and not source_matches:
+                self._validate_cached_corpus_source(cache)
+            metadata = (
+                cache.get_paper_metadata_batch([seed_id]).get(seed_id)
+                if source_matches
+                else None
+            )
+        if metadata is not None:
+            return replace(
+                self._paper_from_cached_metadata(seed_id, metadata), is_seed=True
+            )
+        if local_only_id:
+            raise ValueError(
+                f"Local corpus seed ID '{seed_id}' was not found in the selected "
+                "embedding cache namespace. Re-run local search with the same "
+                "model, profile, revision, dimensions, and cache settings, then "
+                "build that result again."
+            )
+        return None
+
+    def _resolve_seed_paper(self, seed_id: str, seed_paper: Paper | None) -> Paper:
+        """Resolve a seed from caller metadata, the corpus cache, S2, or query text.
+
+        Generated corpus identifiers have no meaning to Semantic Scholar, so a
+        matching cached metadata row is reopened before external resolution. An
+        unresolved identifier is treated as a free-text query, which gets a
+        synthetic seed node so the graph still has a root.
 
         :param str seed_id: Seed paper identifier or free-text query.
         :param Optional[Paper] seed_paper: Pre-fetched seed metadata to reuse.
@@ -854,15 +1054,28 @@ class EmbeddingGraphBuilder(
         # Reuse caller-provided seed metadata when available to avoid redundant
         # Semantic Scholar fetches in hybrid mode.
         resolved_seed_paper = seed_paper
+        local_only_id = _is_local_corpus_paper_id(seed_id)
+        if (
+            resolved_seed_paper is None
+            and local_only_id
+            and self.semantic_source != "arxiv-corpus"
+        ):
+            raise ValueError(
+                f"Local corpus seed ID '{seed_id}' requires "
+                "semantic_source='arxiv-corpus'. Re-run the build with "
+                "--semantic-source arxiv-corpus and the same embedding settings "
+                "used for local search."
+            )
+        if resolved_seed_paper is None and self.semantic_source == "arxiv-corpus":
+            resolved_seed_paper = self._resolve_cached_corpus_seed(seed_id)
         if resolved_seed_paper is None:
             resolved_seed_paper = self.client.get_paper(
                 seed_id, raise_on_unavailable=True
             )
 
         if resolved_seed_paper:
-            # Found via S2 API
-            resolved_seed_paper.is_seed = True
-            return resolved_seed_paper
+            # Seed role belongs to this build, including caller-provided metadata.
+            return replace(resolved_seed_paper, is_seed=True)
 
         # Treat as text query
         logger.info(f"Using '{seed_id}' as text query")
@@ -873,6 +1086,22 @@ class EmbeddingGraphBuilder(
             year=None,
             is_seed=True,
         )
+
+    def _validate_cached_corpus_source(self, cache: EmbeddingCache) -> None:
+        """Require cached corpus provenance to match the requested dataset.
+
+        :param EmbeddingCache cache: Selected embedding cache namespace.
+        :return None: Returns after matching or absent provenance.
+        :raises RuntimeError: If the cache records another dataset source.
+        """
+        cached_source = cache.get_hydrated_dataset_source()
+        if cached_source and cached_source != self.dataset_source:
+            raise RuntimeError(
+                f"Local corpus cache contains {cached_source!r}, but the "
+                f"configured dataset source is {self.dataset_source!r}. "
+                "Run an embedding or hybrid build with "
+                f"--dataset-source {self.dataset_source!r} first."
+            )
 
     def _encode_seed_embedding(self, seed_paper: Paper) -> np.ndarray:
         """Encode the seed in the model's query prompt space and record it.
@@ -922,12 +1151,17 @@ class EmbeddingGraphBuilder(
         papers: dict[str, Paper],
         seed_identities: IdentityRegistry,
         seed_embedding: np.ndarray,
+        seed_paper: Paper,
+        *,
+        corpus_prepared: bool,
     ) -> None:
         """Search the hydrated corpus cache and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param IdentityRegistry seed_identities: Alias registry for the seed paper.
+        :param IdentityRegistry seed_identities: Alias registry for admitted papers.
         :param np.ndarray seed_embedding: Normalized seed embedding.
+        :param Paper seed_paper: Canonical seed paper that always survives reconciliation.
+        :param bool corpus_prepared: Whether lifecycle work finished before seed lookup.
         :return None: Extends ``papers`` in place and backfills citation counts.
         """
         use_streaming = self.use_streaming
@@ -940,21 +1174,31 @@ class EmbeddingGraphBuilder(
         candidates = self._select_candidates(
             seed_embedding,
             use_streaming=use_streaming,
+            corpus_prepared=corpus_prepared,
         )
 
-        # Convert candidates to Paper objects while respecting max_papers total.
+        # Reconcile the complete bounded ranking before applying the graph cap. A
+        # later bridge record can collapse two earlier identity classes; retaining
+        # insertion order then keeps the highest-ranked unique papers.
         for paper_id, metadata, embedding in candidates:
-            if len(papers) >= self.max_papers:
-                break
-            if paper_id in papers:
-                continue
-
             paper = self._paper_from_cached_metadata(paper_id, metadata)
-            if resolve_aliases(seed_identities, paper):
+            reconciliation = reconcile_paper_identity(
+                seed_identities,
+                seed_paper,
+                papers,
+                paper,
+            )
+            if reconciliation.canonical_id is not None:
+                for collapsed_id in reconciliation.collapsed_ids:
+                    self.retrieval_embeddings.pop(collapsed_id, None)
                 continue
-
             papers[paper_id] = paper
             self.retrieval_embeddings[paper_id] = embedding
+            register_aliases(seed_identities, paper_id, paper)
+
+        for paper_id in list(papers)[self.max_papers :]:
+            papers.pop(paper_id)
+            self.retrieval_embeddings.pop(paper_id, None)
 
         self._update_citation_counts(papers)
 
@@ -978,6 +1222,7 @@ class EmbeddingGraphBuilder(
             categories=metadata.get("categories", []),
             citation_count=0,  # ArXiv data lacks citation counts
             is_seed=False,
+            is_local_corpus=True,
         )
 
     def _candidate_pool_budgets(self) -> tuple[int, int, int]:
@@ -1166,14 +1411,10 @@ class EmbeddingGraphBuilder(
         )
         with operation_lock:
             if self.semantic_source == "arxiv-corpus":
-                cached_source = cache.get_hydrated_dataset_source()
-                if cached_source and cached_source != self.dataset_source:
-                    raise RuntimeError(
-                        f"Local corpus cache contains {cached_source!r}, but the "
-                        f"configured dataset source is {self.dataset_source!r}. "
-                        "Run an embedding or hybrid build with "
-                        f"--dataset-source {self.dataset_source!r} first."
-                    )
+                # Split and cap describe the rows a build contributed. Searching
+                # every cached row keeps sliced builds reachable with default
+                # query settings; only dataset provenance must agree here.
+                self._validate_cached_corpus_source(cache)
             return cache.search(
                 query_embedding=np.asarray(query_embedding, dtype=np.float32),
                 top_k=int(top_k),
@@ -1191,33 +1432,58 @@ class EmbeddingGraphBuilder(
         return self.embedding_cache
 
     def has_persistent_embedding_artifacts(self) -> bool:
-        """Return whether any physical vector cache exists under this cache root.
+        """Return whether a potentially searchable vector cache exists.
 
         This cheap probe lets auto local-search avoid loading a model when the
         user has never built an embedding cache. Exact namespace selection still
         occurs before any vector is searched.
 
-        :return bool: Whether at least one HDF5 embedding payload exists.
+        :return bool: Whether at least one non-empty HDF5/metadata pair may
+            contain searchable papers.
         """
         cache_directory = (
             self._embedding_cache.h5_path.parent
             if self._embedding_cache is not None
             else get_cache_dir("embeddings", create=False)
         )
-        return any(cache_directory.glob("embeddings_*.h5"))
+        for h5_path in cache_directory.glob("embeddings_*.h5"):
+            if not path_exists(h5_path) or h5_path.stat().st_size == 0:
+                continue
+            namespace_id = h5_path.name.removeprefix("embeddings_").removesuffix(".h5")
+            db_path = cache_directory / f"metadata_{namespace_id}.db"
+            if not path_exists(db_path):
+                continue
+            has_papers = embedding_namespace_has_papers(db_path)
+            if has_papers is False:
+                continue
+            schema_version = read_embedding_namespace_schema(db_path)
+            if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
+                continue
+            # Unreadable metadata or a non-empty malformed HDF5 file is not an
+            # empty-cache signal. Let full cache preparation surface that error.
+            return True
+        return False
 
     def _select_candidates(
-        self, seed_embedding: np.ndarray, use_streaming: bool
+        self,
+        seed_embedding: np.ndarray,
+        use_streaming: bool,
+        *,
+        corpus_prepared: bool = False,
     ) -> list[tuple[str, dict, np.ndarray]]:
-        """Select candidates after hydrating cache with a specific loading mode.
+        """Select candidates from a cache current for this collection operation.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
         :param bool use_streaming: Whether hydration should stream the dataset.
+        :param bool corpus_prepared: Whether the caller completed lifecycle work before
+            encoding the seed while retaining the operation lock. The default preserves
+            safe standalone helper behavior.
         :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples sorted by similarity.
         """
         self._ensure_cache_model_fingerprint()
         with self.embedding_cache.hydration_operation_lock():
-            self._ensure_cache_hydrated(use_streaming=use_streaming)
+            if not corpus_prepared:
+                self._ensure_cache_hydrated(use_streaming=use_streaming)
             return self._search_cache_candidates(seed_embedding)
 
     def _update_citation_counts(self, papers: dict[str, Paper]) -> None:
@@ -1226,13 +1492,16 @@ class EmbeddingGraphBuilder(
 
         :param Dict[str, Paper] papers: Dictionary of collected papers (including seed)
         """
-        targets = [
-            (pid, paper)
-            for pid, paper in papers.items()
-            if not paper.is_seed
-            and not (isinstance(pid, str) and pid.startswith("query:"))
-            and not (isinstance(pid, str) and pid.startswith("arxiv_"))
-        ][:CITATION_COUNT_ENRICHMENT_LIMIT]
+        targets: list[tuple[str, Paper, str]] = []
+        for paper_id, paper in papers.items():
+            if paper.is_seed:
+                continue
+            lookup_id = provider_lookup_identifier(paper_id, paper)
+            if lookup_id is None:
+                continue
+            targets.append((paper_id, paper, lookup_id))
+            if len(targets) >= CITATION_COUNT_ENRICHMENT_LIMIT:
+                break
 
         if not targets:
             return
@@ -1246,7 +1515,7 @@ class EmbeddingGraphBuilder(
 
         try:
             batch_results = self.client.get_papers(
-                [paper_id for paper_id, _paper in targets]
+                [lookup_id for _paper_id, _paper, lookup_id in targets]
             )
         except SemanticScholarRequestError as exc:
             logger.warning(
@@ -1255,8 +1524,8 @@ class EmbeddingGraphBuilder(
                 exc,
             )
             return
-        for paper_id, paper in targets:
-            batch_paper = batch_results.get(normalize_paper_id(paper_id))
+        for _paper_id, paper, lookup_id in targets:
+            batch_paper = batch_results.get(normalize_paper_id(lookup_id))
             if batch_paper is not None:
                 paper.citation_count = batch_paper.citation_count
 

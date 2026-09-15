@@ -21,6 +21,7 @@ from typing import (
 )
 
 from citemesh._runtime import stderr_isatty
+from citemesh.core.choices import DEVICE_CHOICES as EMBEDDING_DEVICE_CHOICES
 from citemesh.data.model_profiles import EmbeddingModelProfile
 
 from . import deps
@@ -40,7 +41,6 @@ _EMBEDDING_MIN_TORCH_VERSION = (2, 9)
 # bf16-on-MPS is only enabled on torch releases verified on Apple Silicon; this is
 # a policy floor, not a hard technical cliff — lower it once older wheels are vetted.
 _MPS_MIN_TORCH_VERSION = (2, 13)
-EMBEDDING_DEVICE_CHOICES = ("auto", "cuda", "mps", "cpu")
 _COMPILE_ELIGIBLE_DEVICES = frozenset({"cuda", "mps", "cpu"})
 # Legacy release-branch workaround window where Inductor conflicted with the
 # fp32_precision TF32 API; later torch releases use the modern API directly.

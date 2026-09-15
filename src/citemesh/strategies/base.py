@@ -315,6 +315,7 @@ class GraphBuilderStrategy(ABC):
                 arxiv_id=paper.arxiv_id,
                 doi=paper.doi,
                 is_seed=paper.is_seed,
+                is_local_corpus=paper.is_local_corpus,
             )
         resolved_strategy_name = self._resolved_strategy_name()
         if resolved_strategy_name:

@@ -8,6 +8,7 @@ bibliographic coupling (shared references), and topical similarity.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import networkx as nx
@@ -25,6 +26,7 @@ from citemesh.strategies.candidates import (
     IdentityRegistry,
     fetch_candidate_source,
     merge_seed_relation,
+    provider_lookup_identifier,
     reconcile_paper_identity,
     register_aliases,
     require_available_candidate_source,
@@ -87,10 +89,14 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self._abstract_index = AbstractSimilarityIndex()
         self._reference_source_unavailable = False
 
-    def _ensure_paper_references(self, paper: Paper) -> None:
+    def _ensure_paper_references(
+        self, paper: Paper, *, provider_lookup_id: str | None = None
+    ) -> None:
         """Hydrate reference IDs for a paper without clobbering existing payload.
 
         :param Paper paper: Paper record to hydrate in-place.
+        :param Optional[str] provider_lookup_id: Provider-safe request identifier;
+            defaults to the paper's primary identifier.
         :return None: Mutates ``paper.references`` when needed.
         """
         if not self.fetch_references:
@@ -110,7 +116,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             return
         if self._reference_source_unavailable:
             if not self.refresh_reference_cache:
-                cached_refs = self.client.get_cached_reference_ids(paper_id)
+                cached_refs = self.client.get_cached_reference_ids(
+                    provider_lookup_id or paper_id
+                )
                 if cached_refs is not None:
                     self.reference_cache[paper_id] = cached_refs
                     paper.references = list(cached_refs)
@@ -119,7 +127,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         from citemesh.services import SemanticScholarUnavailableError
 
         try:
-            paper.references = self._get_references(paper_id)
+            paper.references = self._get_references(
+                paper_id, provider_lookup_id=provider_lookup_id
+            )
         except SemanticScholarUnavailableError as exc:
             self._reference_source_unavailable = True
             logger.warning(
@@ -238,11 +248,15 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             if merged_relation:
                 self.seed_relations[normalized_id] = merged_relation
 
-    def _get_references(self, paper_id: str) -> list:
+    def _get_references(
+        self, paper_id: str, *, provider_lookup_id: str | None = None
+    ) -> list:
         """
         Get reference IDs for a paper with caching.
 
-        :param str paper_id: Paper identifier
+        :param str paper_id: Local cache key for the paper.
+        :param Optional[str] provider_lookup_id: Provider-safe request identifier;
+            defaults to ``paper_id``.
         :return list: List of referenced paper IDs
         """
         if not self.refresh_reference_cache and paper_id in self.reference_cache:
@@ -251,7 +265,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             self.reference_cache.pop(paper_id, None)
 
         ref_ids = self.client.get_reference_ids(
-            paper_id,
+            provider_lookup_id or paper_id,
             force_refresh=self.refresh_reference_cache,
         )
         self.reference_cache[paper_id] = ref_ids
@@ -263,6 +277,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         seed_id: str,
         *,
         validate_source_availability: bool = True,
+        seed_paper: Paper | None = None,
         **kwargs: Any,
     ) -> dict[str, Paper]:
         """
@@ -271,6 +286,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param str seed_id: Seed paper identifier
         :param bool validate_source_availability: Whether to fail when every
             requested relation source is unavailable.
+        :param Optional[Paper] seed_paper: Pre-resolved seed metadata. When its
+            primary identifier is local, only an external alias is sent upstream.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -286,11 +303,13 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         source_results: list[CandidateSourceResult] = []
 
         # Step 1: Fetch seed paper
-        logger.info(f"Fetching seed paper: {seed_id}")
-        seed = self.client.get_paper(
-            seed_id,
-            raise_on_unavailable=True,
-        )
+        seed = seed_paper
+        if seed is None:
+            logger.info(f"Fetching seed paper: {seed_id}")
+            seed = self.client.get_paper(
+                seed_id,
+                raise_on_unavailable=True,
+            )
 
         if not seed:
             raise ValueError(
@@ -298,24 +317,34 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 "know this identifier; check the DOI/arXiv/S2 ID)."
             )
 
-        seed.is_seed = True
+        # Seed role belongs to this build, not the client-owned metadata record.
+        seed = replace(seed, is_seed=True)
+        provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
         register_aliases(self._identity_aliases, seed.paper_id, seed)
 
-        self._ensure_paper_references(seed)
+        if seed.references:
+            self._ensure_paper_references(seed)
+        elif provider_seed_id is not None:
+            self._ensure_paper_references(seed, provider_lookup_id=provider_seed_id)
 
         logger.info("Seed: %s", seed.title)
 
         # Step 2: Fetch references (older papers)
         progress_enabled = stderr_isatty()
-        if self.max_references > 0:
-            logger.info(f"Fetching up to {self.max_references} references...")
+        remaining = self.max_papers - len(papers)
+        reference_limit = min(
+            remaining,
+            self.max_references,
+        )
+        if reference_limit > 0 and provider_seed_id is not None:
+            logger.info(f"Fetching up to {reference_limit} references...")
             reference_result = fetch_candidate_source(
                 "references",
                 lambda: self.client.get_paper_references(
-                    seed.paper_id,
-                    limit=self.max_references,
+                    provider_seed_id,
+                    limit=reference_limit,
                     raise_on_unavailable=True,
                 ),
             )
@@ -331,15 +360,17 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
         # Step 3: Fetch citations (newer papers)
         remaining = self.max_papers - len(papers)
-        if remaining > 0 and self.max_citations > 0:
-            logger.info(
-                f"Fetching up to {min(remaining, self.max_citations)} citations..."
-            )
+        citation_limit = min(
+            remaining,
+            self.max_citations,
+        )
+        if citation_limit > 0 and provider_seed_id is not None:
+            logger.info(f"Fetching up to {citation_limit} citations...")
             citation_result = fetch_candidate_source(
                 "citations",
                 lambda: self.client.get_paper_citations(
-                    seed.paper_id,
-                    limit=min(remaining, self.max_citations),
+                    provider_seed_id,
+                    limit=citation_limit,
                     raise_on_unavailable=True,
                 ),
             )

@@ -170,6 +170,9 @@ def test_real_cuda_int8_corpus_cache_round_trip(
         client=client,
     )
     monkeypatch.setattr(builder, "_load_dataset_for_hydration", load_local_dataset)
+    monkeypatch.setattr(
+        builder, "_resolve_dataset_split_row_count", lambda _source: len(records)
+    )
 
     builder._load_model()
     builder._ensure_cache_hydrated(use_streaming=False)

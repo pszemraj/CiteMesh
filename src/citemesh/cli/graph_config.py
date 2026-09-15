@@ -14,7 +14,7 @@ from citemesh.core.paper_ids import canonicalize_or_none
 
 from .build_options import (
     _CORPUS_ONLY_OPTION_DESTS,
-    _hybrid_semantic_branch_enabled,
+    _embedding_branch_enabled,
     _normalized_cache_reason,
     _resolved_hybrid_max_semantic,
 )
@@ -85,9 +85,7 @@ def _build_graph_config_payload(
     :return Dict[str, Any]: JSON-safe run configuration payload.
     """
     strategy = str(cli_args.strategy)
-    semantic_enabled = strategy == "embedding" or (
-        strategy == "hybrid" and _hybrid_semantic_branch_enabled(cli_args)
-    )
+    semantic_enabled = _embedding_branch_enabled(cli_args)
     embedding_config: dict[str, Any] | None = None
     if semantic_enabled:
         embedding_config = {
@@ -122,6 +120,16 @@ def _build_graph_config_payload(
                 getattr(cli_args, "cache_overwrite_reason", None)
             ),
         }
+        runtime_embedding = metadata.get("embedding")
+        if isinstance(runtime_embedding, dict):
+            effective_model = runtime_embedding.get("effective_model")
+            if isinstance(effective_model, str) and effective_model:
+                embedding_config["model"] = effective_model
+            effective_truncate_dim = runtime_embedding.get("effective_truncate_dim")
+            if isinstance(effective_truncate_dim, int) and not isinstance(
+                effective_truncate_dim, bool
+            ):
+                embedding_config["truncate_dim"] = effective_truncate_dim
         if strategy == "embedding":
             embedding_config["top_k"] = int(cli_args.top_k)
         if cli_args.semantic_source != "arxiv-corpus":

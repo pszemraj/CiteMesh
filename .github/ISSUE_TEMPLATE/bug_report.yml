@@ -2,21 +2,43 @@ name: Bug report
 description: Something in CiteMesh misbehaves or crashes
 labels: [bug]
 body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before reporting
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: I removed any API key from the command and logs I am pasting.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: CiteMesh version
+      description: Output of `citemesh --version`.
+      placeholder: citemesh 0.3.0
+    validations:
+      required: true
+
   - type: textarea
     id: command
     attributes:
       label: Command
-      description: The exact citemesh command you ran.
+      description: The exact command you ran.
       placeholder: citemesh build "arxiv:1706.03762" --strategy hybrid --export all
+      render: shell
     validations:
       required: true
+
   - type: textarea
     id: behavior
     attributes:
-      label: What happened / what did you expect?
-      description: Include log output — ideally rerun with `--log-level debug`.
+      label: What happened, and what did you expect instead?
+      description: Include the error or the wrong output. Rerunning with `--log-level debug` usually shows the cause.
     validations:
       required: true
+
   - type: input
     id: os
     attributes:
@@ -24,6 +46,7 @@ body:
       placeholder: macOS 15 (Apple Silicon), Python 3.12
     validations:
       required: true
+
   - type: input
     id: install
     attributes:
@@ -31,8 +54,10 @@ body:
       placeholder: pip install "citemesh[recommended] @ git+..." / pip install -e ".[all]"
     validations:
       required: true
+
   - type: input
     id: device
     attributes:
-      label: Compute device (embedding/hybrid bugs only)
-      placeholder: mps / cuda / cpu, torch version
+      label: Compute device
+      description: Embedding and hybrid bugs only. The first line of the run log reports the resolved device.
+      placeholder: mps / cuda / cpu, torch 2.13

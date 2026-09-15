@@ -8,7 +8,9 @@ embedding artifacts while preserving the user config.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from filelock import Timeout
@@ -21,6 +23,7 @@ from citemesh.data.cache import (
     cache_operation_lock,
     legacy_macos_cache_root,
     path_exists,
+    read_embedding_namespace_schema,
 )
 from citemesh.data.user_config import (
     USER_CONFIG_FILENAME,
@@ -34,6 +37,27 @@ from .console import logger
 from .parser import _output_table
 
 LARGE_CACHE_CLEAR_WARNING_BYTES = 1024 * 1024 * 1024
+
+_EMBEDDING_NAMESPACE_ARTIFACT_RE = re.compile(
+    r"^(?:metadata|embeddings|cache|hydration)_(?P<namespace>[0-9a-f]{12})"
+    r"(?:\.db(?:-(?:journal|wal|shm))?|\.h5|\.lock)$"
+)
+
+
+@dataclass(frozen=True)
+class _EmbeddingNamespaceScan:
+    """Storage and compatibility summary for one embedding namespace.
+
+    :ivar str namespace_id: Truncated SHA-256 namespace identifier from artifact names.
+    :ivar int file_count: Number of recognized files for this namespace.
+    :ivar int size_bytes: Total byte size across recognized namespace files.
+    :ivar str status: Human-readable reachability or inspection status.
+    """
+
+    namespace_id: str
+    file_count: int
+    size_bytes: int
+    status: str
 
 
 def _embedding_cache_directory_stats() -> tuple[Path, int, int]:
@@ -295,6 +319,85 @@ def _scan_path_stats(path: Path) -> tuple[int, int]:
     return file_count, size_bytes
 
 
+def _embedding_namespace_status(db_path: Path | None) -> str:
+    """Describe whether a scanned namespace is usable by the current cache layout.
+
+    Schema 3 paired the namespace filename with the compute dtype. Schema 4
+    deliberately removed that partition, so regular upgrades leave schema-3
+    payloads behind under filenames that the current cache identity cannot select.
+
+    :param Optional[Path] db_path: Metadata database for the namespace, if present.
+    :return str: Concise reachability or inspection status for scan output.
+    """
+    if db_path is None:
+        return "Orphaned artifact (metadata database missing)"
+
+    from citemesh.data.embedding_cache.constants import EMBEDDING_CACHE_SCHEMA_VERSION
+
+    schema_version = read_embedding_namespace_schema(db_path)
+    if schema_version is None:
+        return "Metadata unavailable (inspect before removing)"
+
+    current_schema = str(EMBEDDING_CACHE_SCHEMA_VERSION)
+    if schema_version == current_schema:
+        # This table reports schema reachability, not vector health or readiness;
+        # full cache opening owns HDF5 and row-mapping integrity checks.
+        return "Current schema"
+    if schema_version == "3" and EMBEDDING_CACHE_SCHEMA_VERSION == 4:
+        return "Legacy dtype-keyed namespace (reclaim after replacement is ready)"
+    return f"Legacy schema v{schema_version} (rebuilt on next access)"
+
+
+def _scan_embedding_namespaces(
+    embedding_cache_dir: Path,
+) -> list[_EmbeddingNamespaceScan]:
+    """Group standard embedding-cache artifacts by namespace and inspect their status.
+
+    :param Path embedding_cache_dir: Directory containing flat embedding namespace files.
+    :return List[_EmbeddingNamespaceScan]: Namespace rows ordered by namespace ID.
+    """
+    if not embedding_cache_dir.is_dir():
+        return []
+
+    namespace_files: dict[str, list[Path]] = {}
+    metadata_paths: dict[str, Path] = {}
+    for artifact_path in embedding_cache_dir.iterdir():
+        match = _EMBEDDING_NAMESPACE_ARTIFACT_RE.fullmatch(artifact_path.name)
+        if match is None:
+            continue
+        if not artifact_path.is_symlink() and not artifact_path.is_file():
+            continue
+        namespace_id = match.group("namespace")
+        namespace_files.setdefault(namespace_id, []).append(artifact_path)
+        if (
+            artifact_path.name == f"metadata_{namespace_id}.db"
+            and not artifact_path.is_symlink()
+        ):
+            metadata_paths[namespace_id] = artifact_path
+
+    rows: list[_EmbeddingNamespaceScan] = []
+    for namespace_id, artifact_paths in sorted(namespace_files.items()):
+        if all(
+            artifact_path.name.endswith(".lock") for artifact_path in artifact_paths
+        ):
+            continue
+        size_bytes = 0
+        for artifact_path in artifact_paths:
+            try:
+                size_bytes += artifact_path.lstat().st_size
+            except OSError:
+                continue
+        rows.append(
+            _EmbeddingNamespaceScan(
+                namespace_id=namespace_id,
+                file_count=len(artifact_paths),
+                size_bytes=size_bytes,
+                status=_embedding_namespace_status(metadata_paths.get(namespace_id)),
+            )
+        )
+    return rows
+
+
 def _scan_cache_directory() -> int:
     """Scan the CiteMesh cache root and print a usage summary.
 
@@ -336,6 +439,32 @@ def _scan_cache_directory() -> int:
     table.add_section()
     table.add_row("TOTAL", f"{total_files:,}", format_bytes(total_bytes), style="bold")
     console.output_console.print(table)
+
+    embedding_namespace_rows = _scan_embedding_namespaces(cache_root / "embeddings")
+    if embedding_namespace_rows:
+        namespace_table = _output_table("Embedding Namespace Details")
+        namespace_table.add_column("Namespace", style="cyan")
+        namespace_table.add_column("Files", justify="right")
+        namespace_table.add_column("Size", justify="right")
+        namespace_table.add_column("Status")
+        for row in embedding_namespace_rows:
+            namespace_table.add_row(
+                row.namespace_id,
+                f"{row.file_count:,}",
+                format_bytes(row.size_bytes),
+                row.status,
+            )
+        console.output_console.print(namespace_table)
+        if any(
+            row.status.startswith("Legacy dtype-keyed namespace")
+            for row in embedding_namespace_rows
+        ):
+            console.output_console.print(
+                "Legacy dtype-keyed namespaces are retained to protect their "
+                "vectors. After confirming the current replacement cache works, "
+                "remove the matching metadata_<namespace>.db and "
+                "embeddings_<namespace>.h5 files to reclaim their space."
+            )
     _log_legacy_macos_cache_hint(cache_root)
     return 0
 

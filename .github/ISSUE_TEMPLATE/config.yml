@@ -1,1 +1,8 @@
 blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/pszemraj/CiteMesh/tree/main/docs
+    about: CLI reference, strategy guide, caching behavior, and output formats.
+  - name: How CiteMesh builds a graph
+    url: https://github.com/pszemraj/CiteMesh/blob/main/docs/guides/how-it-works.md
+    about: The eight-stage pipeline, with the defaults and thresholds at each stage.

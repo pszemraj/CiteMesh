@@ -12,8 +12,6 @@ from typing import Any, NamedTuple
 
 import networkx as nx
 
-from citemesh.core import Paper
-
 from ..themes import Theme
 from ..years import coerce_publication_year, publication_year_scale
 from .geometry import (
@@ -32,8 +30,10 @@ from .geometry import (
     theme_label_text_alpha,
 )
 from .nodes import (
+    _node_short_label,
     _provenance_map,
     _seed_relation_map,
+    _serialize_node,
     _sorted_edges,
     _sorted_nodes,
     _strategy,
@@ -48,9 +48,10 @@ def _plotly_title_text(graph: nx.Graph, seed_id: str) -> str:
     :return str: Wrapped title string.
     """
     seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
+    serialized = _serialize_node(seed_id, seed_attrs) if seed_attrs else {}
     # Plotly renders titles as pseudo-HTML, so upstream markup must be escaped
     # before wrapping; only the "<br>" joins below stay live markup.
-    raw_title = html.escape(" ".join(str(seed_attrs.get("title", "CiteMesh")).split()))
+    raw_title = html.escape(" ".join(str(serialized.get("title", "CiteMesh")).split()))
     title_text = "<br>".join(textwrap.wrap(raw_title, width=72, break_long_words=False))
     if not title_text:
         return "CiteMesh"
@@ -232,26 +233,27 @@ def _build_hover_texts(*, graph: nx.Graph, node_ids: list[Hashable]) -> list[str
     hover_texts = []
     for node in node_ids:
         attrs = graph.nodes[node]
-        paper: Paper | None = attrs.get("paper")
-        raw_title = " ".join(
-            str(paper.title if paper else attrs.get("title", node)).split()
-        )
+        serialized = _serialize_node(node, attrs)
+        raw_title = " ".join(str(serialized.get("title", node)).split())
         title_html = "<br>".join(
             html.escape(line)
             for line in textwrap.wrap(raw_title, width=58, break_long_words=False)
         ) or html.escape(str(node))
         lines = [f"<b>{title_html}</b>"]
-        if paper:
-            authors = ", ".join(a.name for a in paper.authors[:3]) or "Unknown"
-            if len(paper.authors) > 3:
-                authors += f" +{len(paper.authors) - 3}"
+        if attrs.get("paper"):
+            serialized_authors = serialized.get("authors", [])
+            authors = (
+                ", ".join(str(author) for author in serialized_authors[:3]) or "Unknown"
+            )
+            if len(serialized_authors) > 3:
+                authors += f" +{len(serialized_authors) - 3}"
             lines.append(html.escape(authors))
-            paper_year = coerce_publication_year(paper.year)
+            paper_year = coerce_publication_year(serialized.get("year"))
             fact_bits = [
                 str(paper_year) if paper_year > 0 else "n.d.",
-                f"{paper.citation_count:,} citations",
+                f"{int(serialized.get('citation_count', 0)):,} citations",
             ]
-            venue = " ".join(str(attrs.get("venue") or "").split())
+            venue = " ".join(str(serialized.get("venue") or "").split())
             if venue:
                 fact_bits.append(venue if len(venue) <= 44 else venue[:41] + "...")
             lines.append(html.escape(" | ".join(fact_bits)))
@@ -456,6 +458,7 @@ class PlotlyFigureMixin:
         )
 
         node_ids = [node_id for node_id, _ in _sorted_nodes(self.graph)]
+        metadata_graph = self._serialized_graph()
         node_x = [float(pos[node][0]) for node in node_ids]
         node_y = [float(pos[node][1]) for node in node_ids]
         node_sizes = [max(6, self._node_size(node) / 50) for node in node_ids]
@@ -467,9 +470,9 @@ class PlotlyFigureMixin:
         )
         node_years, year_min, year_max = self._plotly_year_scale(node_ids)
         base_labels = [
-            self.graph.nodes[node].get("paper").label
+            _node_short_label(self.graph.nodes[node], node)
             if self.graph.nodes[node].get("paper")
-            else self.graph.nodes[node].get("title", node)
+            else _serialize_node(node, self.graph.nodes[node]).get("title", node)
             for node in node_ids
         ]
         (
@@ -482,7 +485,7 @@ class PlotlyFigureMixin:
             marker_showscale,
             marker_colorbar,
         ) = _build_node_style(
-            graph=self.graph,
+            graph=metadata_graph,
             node_ids=node_ids,
             pos=pos,
             base_labels=base_labels,
@@ -490,7 +493,7 @@ class PlotlyFigureMixin:
             for_dashboard=for_dashboard,
         )
 
-        hover_texts = _build_hover_texts(graph=self.graph, node_ids=node_ids)
+        hover_texts = _build_hover_texts(graph=metadata_graph, node_ids=node_ids)
 
         node_hoverlabel = theme_hover_label(theme_obj)
 
@@ -525,7 +528,7 @@ class PlotlyFigureMixin:
         if for_dashboard:
             halo_trace, neighborhood_trace = _build_dashboard_overlay_traces(
                 go=go,
-                graph=self.graph,
+                graph=metadata_graph,
                 node_ids=node_ids,
                 node_x=node_x,
                 node_y=node_y,
@@ -623,5 +626,6 @@ class PlotlyFigureMixin:
             color-scale max.
         """
         return publication_year_scale(
-            self.graph.nodes[node].get("year") for node in node_ids
+            _serialize_node(node, self.graph.nodes[node]).get("year")
+            for node in node_ids
         )

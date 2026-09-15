@@ -9,12 +9,13 @@ import logging
 import re
 import runpy
 import shlex
+import sqlite3
 import tempfile
 import threading
 import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -30,7 +31,6 @@ from citemesh.cli import (
     DASHBOARD_COLLECTION_SCHEMA_VERSION,
     DASHBOARD_PACKAGE_FILENAME,
     DashboardPackageError,
-    _is_standalone_dashboard_output,
     canonicalize_paper_id_for_metadata,
     load_dashboard_package,
     render_dashboard_collection_snapshot,
@@ -43,16 +43,24 @@ from citemesh.cli import build_contract as build_contract_module
 from citemesh.cli import build_options as build_options_module
 from citemesh.cli import cache_ops as cache_ops_module
 from citemesh.cli import console as console_module
+from citemesh.cli import graph_config as graph_config_module
+from citemesh.cli import outputs as outputs_module
 from citemesh.cli import parser as parser_module
 from citemesh.cli.commands import build as build_module
 from citemesh.cli.commands import search as search_module
+from citemesh.cli.outputs import _is_standalone_dashboard_output
 from citemesh.core import Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
 from citemesh.data.user_config import UserConfig
 from citemesh.strategies.candidates import CandidateAcquisitionError
-from citemesh.strategies.embedding import DEFAULT_DATASET_SOURCE, ENCODE_BATCH_SIZE
+from citemesh.strategies.embedding import (
+    DEFAULT_DATASET_SOURCE,
+    ENCODE_BATCH_SIZE,
+    EmbeddingCacheFingerprintMismatchError,
+    EmbeddingGraphBuilder,
+)
 from citemesh.strategies.hybrid import (
     DEFAULT_MAX_SEMANTIC,
     HYBRID_DEFAULT_MAX_CITATIONS,
@@ -63,8 +71,10 @@ from citemesh.visualization import GraphExporter as ProductionGraphExporter
 from citemesh.visualization import generate_output_path
 from citemesh.visualization.dashboard import package as dashboard_package_module
 from tests._helpers import (
+    PausedFirstWrite,
     build_seed_graph,
     get_paper_id_normalization_cases,
+    run_captured_cli,
 )
 
 
@@ -74,7 +84,7 @@ def run_cli_command(args: list[str]) -> SimpleNamespace:
     :param list[str] args: CLI arguments.
     :return SimpleNamespace: Return code and captured streams.
     """
-    return _run_captured_cli(lambda: cli_module.main(args))
+    return run_captured_cli(lambda: cli_module.main(args))
 
 
 def run_cli_command_via_sys_argv(
@@ -82,31 +92,7 @@ def run_cli_command_via_sys_argv(
 ) -> SimpleNamespace:
     """Run CLI through ``sys.argv`` to exercise ``main(argv=None)``."""
     monkeypatch.setattr("sys.argv", ["citemesh", *args])
-    return _run_captured_cli(cli_module.main)
-
-
-def _run_captured_cli(entrypoint: Any) -> SimpleNamespace:
-    """Run a CLI entrypoint and capture stdout/stderr."""
-    stdout = io.StringIO()
-    stderr = io.StringIO()
-
-    with redirect_stdout(stdout), redirect_stderr(stderr):
-        try:
-            returncode = entrypoint()
-        except SystemExit as exc:
-            code = exc.code
-            if isinstance(code, int):
-                returncode = code
-            elif code is None:
-                returncode = 0
-            else:
-                returncode = 1
-
-    return SimpleNamespace(
-        returncode=returncode,
-        stdout=stdout.getvalue(),
-        stderr=stderr.getvalue(),
-    )
+    return run_captured_cli(cli_module.main)
 
 
 def flatten_console_text(text: str) -> str:
@@ -157,7 +143,7 @@ def _make_exporter_stub(
     captured_data: dict[str, object], *, methods: tuple[str, ...] | None = None
 ) -> Any:
     """Create a lightweight exporter stub for CLI artifact tests."""
-    requested_methods = set(methods or tuple(cli_module._EXPORTER_METHOD.values()))
+    requested_methods = set(methods or tuple(outputs_module._EXPORTER_METHOD.values()))
     payloads = {
         "to_json": "{}",
         "to_interactive_html": "<html/>",
@@ -465,10 +451,24 @@ def test_cache_commands_contracts(
     ]
     for link, target in links:
         link.symlink_to(target, target_is_directory=target == external)
-        assert cli_module._scan_path_stats(link) == (1, link.lstat().st_size)
-    assert cli_module._scan_path_stats(cache_root) == (
+        assert cache_ops_module._scan_path_stats(link) == (1, link.lstat().st_size)
+    assert cache_ops_module._scan_path_stats(cache_root) == (
         2 + len(links),
         2050 + sum(link.lstat().st_size for link, _target in links),
+    )
+
+    legacy_namespace = "0123456789ab"
+    legacy_metadata = cache_root / "embeddings" / f"metadata_{legacy_namespace}.db"
+    with sqlite3.connect(legacy_metadata) as connection:
+        connection.execute(
+            "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+            ("schema_version", "3"),
+        )
+    (cache_root / "embeddings" / f"embeddings_{legacy_namespace}.h5").write_bytes(
+        b"legacy embeddings"
     )
 
     scan_result = run_cli_command(["cache", "scan"])
@@ -481,6 +481,8 @@ def test_cache_commands_contracts(
         "references",
         "TOTAL",
         "Cache root:",
+        "Embedding Namespace Details",
+        "Legacy dtype-keyed namespace",
     ]:
         assert token in flatten_console_text(scan_result.stdout)
 
@@ -538,13 +540,16 @@ def test_cache_clear_refuses_active_embedding_encode() -> None:
         )
         assert encode_started.wait(timeout=5), "embedding encode never started"
         assert (
-            cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
+            cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None)
+            == 1
         )
         assert cache.h5_path.is_file()
         release_encode.set()
         write.result(timeout=5)
 
-    assert cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    assert (
+        cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    )
     assert cache.cache_dir.parent.joinpath(CACHE_COORDINATION_DIRNAME).is_dir()
     assert not cache.cache_dir.exists()
 
@@ -594,7 +599,9 @@ def test_cache_clear_reports_config_inspection_failure(
         cache_ops_module, "_confirmed_cache_clear", lambda *_args, **_kwargs: True
     )
 
-    assert cli_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
+    assert (
+        cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 1
+    )
     assert (cache_root / "embeddings" / "vectors.bin").is_file()
 
 
@@ -739,7 +746,7 @@ def test_force_rebuild_cache_confirmation_contracts(
 
 def test_cli_logging_flags_are_position_agnostic() -> None:
     """Logging options should parse identically before/after subcommands."""
-    parser, _, _, _ = cli_module._create_parser()
+    parser, _, _, _ = parser_module._create_parser()
     cases = [
         ["--log-level", "debug", "build", "arxiv:1706.03762"],
         ["build", "arxiv:1706.03762", "--log-level", "debug"],
@@ -767,26 +774,26 @@ def test_cli_logging_flags_are_position_agnostic() -> None:
             for token in argv
             if token.startswith("--")
         }
-        assert cli_module._pop_tracked_option_dests(parsed) == expected_provided
+        assert parser_module._pop_tracked_option_dests(parsed) == expected_provided
 
     assert (
-        cli_module._pop_tracked_option_dests(parser.parse_args(["cache", "scan"]))
+        parser_module._pop_tracked_option_dests(parser.parse_args(["cache", "scan"]))
         == set()
     )
 
 
 def test_resolve_console_width_uses_auto_width_for_tty_streams() -> None:
     """TTY streams should default Rich consoles to auto width."""
-    assert cli_module._resolve_console_width(0, interactive=True) is None
+    assert console_module._resolve_console_width(0, interactive=True) is None
 
 
 def test_resolve_console_width_uses_fixed_width_for_redirected_streams() -> None:
     """Redirected streams should keep a stable fallback width by default."""
     assert (
-        cli_module._resolve_console_width(0, interactive=False)
+        console_module._resolve_console_width(0, interactive=False)
         == cli_module.REDIRECTED_LOG_WIDTH
     )
-    assert cli_module._resolve_console_width(96, interactive=True) == 96
+    assert console_module._resolve_console_width(96, interactive=True) == 96
 
 
 @pytest.mark.parametrize("preconfigured", [False, True])
@@ -812,7 +819,7 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
         if preconfigured:
             logging.getLogger().addHandler(logging.NullHandler())
         with redirect_stderr(stderr):
-            cli_module._configure_logging(
+            console_module._configure_logging(
                 log_level="debug",
                 log_width=0,
                 log_file=str(log_path),
@@ -855,7 +862,7 @@ def test_rich_logging_preserves_unknown_config_table_name(tmp_path: Path) -> Non
 
     try:
         with redirect_stderr(stderr):
-            cli_module._configure_logging(log_level="info", log_width=0)
+            console_module._configure_logging(log_level="info", log_width=0)
             cli_module.load_user_config(config_path)
             for handler in logging.getLogger().handlers:
                 handler.flush()
@@ -867,18 +874,27 @@ def test_rich_logging_preserves_unknown_config_table_name(tmp_path: Path) -> Non
     assert "[plugin_settings]" in warning
 
 
+@pytest.mark.parametrize(
+    "author_names",
+    [[], ["Ashish Vaswani"], ["Ashish Vaswani", "Noam Shazeer", "Niki Parmar"]],
+)
 def test_search_command_prints_results_to_stdout(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, author_names: list[str]
 ) -> None:
-    """Search should print table + full IDs for shell workflows."""
+    """Search should print ranked metadata and full IDs for shell workflows.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the search client.
+    :param list[str] author_names: Empty, single, or abbreviated author list.
+    :return None: Verifies safe text, citation formatting, and full identifiers.
+    """
     long_paper_id = "0123456789abcdef0123456789abcdef01234567"
     mock_client = MagicMock()
     mock_client.search_papers.return_value = [
         Paper(
             paper_id=long_paper_id,
             title="[Attention] Is All You Need [/bold]",
-            year=2017,
-            authors=[Author(name="Ashish Vaswani")],
+            year=2017 if author_names else None,
+            authors=[Author(name=name) for name in author_names],
             citation_count=12345,
             abstract="Transformer model paper",
         )
@@ -893,6 +909,41 @@ def test_search_command_prints_results_to_stdout(
     assert result.stdout.count(long_paper_id) == 1
     assert "[Attention] Is All You Need [/bold]" in result.stdout
 
+    plain_stdout = flatten_console_text(result.stdout)
+    assert "Citations" in plain_stdout
+    assert "12,345" in plain_stdout
+    assert "None" not in plain_stdout
+    for name in author_names[:2]:
+        assert name in plain_stdout
+    assert ("et al." in plain_stdout) == (len(author_names) > 2)
+    for name in author_names[2:]:
+        assert name not in plain_stdout
+    assert plain_stdout.index("12,345") < plain_stdout.index("Full paper IDs:")
+
+
+def test_s2_search_forwards_paginated_result_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI should allow service-level paging beyond one S2 request.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to inject the API client.
+    :return None: Checks ``-n 101`` reaches the paginating service unchanged.
+    """
+    mock_client = MagicMock()
+    mock_client.search_papers.return_value = [
+        Paper(paper_id="result", title="Result", year=None, abstract="Abstract")
+    ]
+    monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
+
+    result = run_cli_command(["search", "attention", "--mode", "s2", "-n", "101"])
+
+    assert result.returncode == 0
+    mock_client.search_papers.assert_called_once_with(
+        "attention",
+        limit=101,
+        raise_on_unavailable=True,
+    )
+
 
 def _fake_local_search_builder(
     *, cached_count: int, results: list[Any] | None = None
@@ -901,12 +952,17 @@ def _fake_local_search_builder(
     fake_builder = MagicMock()
     fake_builder.device = "cpu"
     fake_builder.compute_dtype = "float32"
+    fake_builder._active_model_name = None
     fake_builder.search_local.return_value = list(results or [])
     fake_builder.has_persistent_embedding_artifacts.return_value = cached_count > 0
     fake_builder.embedding_cache = SimpleNamespace(
         embedding_count=lambda: cached_count,
         last_search_total_embeddings=cached_count,
         h5_path=Path("namespace.h5"),
+        hydration_operation_lock=nullcontext,
+        payload_stats=lambda: SimpleNamespace(
+            hydration_split="train", hydration_corpus_size="all"
+        ),
     )
     return fake_builder
 
@@ -922,8 +978,36 @@ _FAKE_LOCAL_RESULT = SimpleNamespace(
 )
 
 
-def test_search_mode_s2_rejects_local_flags(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Embedding namespace flags are meaningless for explicit S2 keyword search."""
+@pytest.mark.parametrize(
+    "local_flags",
+    [
+        ["--model", "custom/model"],
+        ["--model-profile", "embeddinggemma"],
+        ["--model-revision", "frozen-release"],
+        ["--device", "cpu"],
+        ["--semantic-source", "arxiv-corpus"],
+        ["--dataset-source", "research/arxiv-snapshot"],
+        ["--truncate-dim", "256"],
+        ["--storage-precision", "float32"],
+        [
+            "--semantic-source",
+            "arxiv-corpus",
+            "--storage-precision",
+            "int8",
+            "--calibration-sample-size",
+            "100",
+        ],
+    ],
+)
+def test_search_mode_s2_rejects_local_flags(
+    monkeypatch: pytest.MonkeyPatch, local_flags: list[str]
+) -> None:
+    """Embedding namespace flags are meaningless for explicit S2 keyword search.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture capturing the CLI error.
+    :param list[str] local_flags: One local-only flag pair rejected by S2 mode.
+    :return None: Assertions verify the rejection names every local-only flag.
+    """
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
     result = run_cli_command(
@@ -932,14 +1016,58 @@ def test_search_mode_s2_rejects_local_flags(monkeypatch: pytest.MonkeyPatch) -> 
             "attention",
             "--mode",
             "s2",
-            "--model-profile",
-            "embeddinggemma",
+            *local_flags,
         ]
     )
     assert result.returncode == 2
-    assert "--model, --model-profile, and --device only apply" in str(
-        error_mock.call_args
+    message = str(error_mock.call_args)
+    assert "only apply to local semantic search" in message
+    for flag in local_flags[::2]:
+        assert flag in message
+
+
+@pytest.mark.parametrize("mode_args", [[], ["--mode", "local"], ["--mode", "auto"]])
+def test_search_rejects_a_dataset_source_against_the_candidates_namespace(
+    monkeypatch: pytest.MonkeyPatch, mode_args: list[str]
+) -> None:
+    """Contradictory namespace flags must fail rather than quietly pick one.
+
+    ``--dataset-source`` names a corpus the build hydrated, so it only means
+    anything in ``arxiv-corpus`` mode. Paired with ``--semantic-source
+    candidates`` it used to be accepted and then discarded: the search read the
+    candidates namespace while the dataset the user named never reached it, in
+    every mode. The build contract already refuses this pairing, so it is the
+    contract that has to see which options this command line supplied.
+
+    :param pytest.MonkeyPatch monkeypatch: Pytest patch helper.
+    :param list[str] mode_args: Implicit, explicit-local, or explicit-auto mode.
+    :return None: Asserts the usage exit code, both flag names, and no search.
+    """
+    builder_factory = MagicMock()
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+    client_factory = MagicMock()
+    monkeypatch.setattr(search_module, "get_client", client_factory)
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+
+    result = run_cli_command(
+        [
+            "search",
+            "attention",
+            *mode_args,
+            "--semantic-source",
+            "candidates",
+            "--dataset-source",
+            "research/arxiv-snapshot",
+        ]
     )
+
+    assert result.returncode == 2
+    message = str(error_mock.call_args)
+    assert "--dataset-source" in message
+    assert "--semantic-source" in message
+    builder_factory.assert_not_called()
+    client_factory.assert_not_called()
 
 
 def test_search_rejects_empty_model_override() -> None:
@@ -951,6 +1079,27 @@ def test_search_rejects_empty_model_override() -> None:
 
     assert result.returncode == 2
     assert "--model" in result.stderr
+    assert "must be a non-empty string" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("option", "prefix"),
+    [
+        ("--model-revision", ["--strategy", "embedding"]),
+        ("--output", []),
+    ],
+)
+def test_build_rejects_empty_option_values(option: str, prefix: list[str]) -> None:
+    """Build options with required text values should reject an empty token.
+
+    :param str option: Build option receiving the empty value.
+    :param list[str] prefix: Arguments needed to put the option in scope.
+    :return None: Assertions verify an argparse usage failure before execution.
+    """
+    result = run_cli_command(["build", "seed", *prefix, option, ""])
+
+    assert result.returncode == 2
+    assert option in result.stderr
     assert "must be a non-empty string" in result.stderr
 
 
@@ -973,6 +1122,9 @@ def test_search_mode_local_prints_cached_results(
     assert "0.876" in plain_stdout
     assert "Ada Lovelace" in plain_stdout
     assert "Searched 42 locally cached embeddings" in plain_stdout
+    assert "Score" in plain_stdout
+    assert plain_stdout.index("0.876") < plain_stdout.index("Searched 42")
+    assert plain_stdout.index("Searched 42") < plain_stdout.index("Full paper IDs:")
     fake_builder.search_local.assert_called_once_with("cached topic", top_k=1)
     fake_builder.prepare_embedding_cache.assert_called_once_with()
 
@@ -983,6 +1135,32 @@ def test_search_mode_local_prints_cached_results(
     assert builder_kwargs["semantic_source"] == "candidates"
     assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
     assert builder_kwargs["storage_precision"] == "float32"
+
+
+def test_search_mode_local_has_no_s2_result_ceiling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local search should accept counts beyond S2's relevance-search window.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture used to inject the local builder.
+    :return None: Checks a large positive count reaches local search unchanged.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=1500,
+        results=[_FAKE_LOCAL_RESULT],
+    )
+    monkeypatch.setattr(
+        search_module,
+        "EmbeddingGraphBuilder",
+        MagicMock(return_value=fake_builder),
+    )
+
+    result = run_cli_command(
+        ["search", "cached topic", "--mode", "local", "-n", "1001"]
+    )
+
+    assert result.returncode == 0
+    fake_builder.search_local.assert_called_once_with("cached topic", top_k=1001)
 
 
 @pytest.mark.parametrize("binary_prefilter", [False, True])
@@ -1019,6 +1197,406 @@ def test_search_local_uses_configured_corpus_dataset_source(
     assert builder_kwargs["storage_precision"] == "int8"
     assert builder_kwargs["calibration_sample_size"] == 200
     assert builder_kwargs["binary_prefilter"] is binary_prefilter
+
+
+@pytest.mark.parametrize(
+    ("corpus_token", "expected_corpus_size", "expected_all_corpus"),
+    [("newest:7", 7, False), ("all", None, True)],
+)
+def test_search_local_build_footer_preserves_effective_namespace_and_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    corpus_token: str,
+    expected_corpus_size: int | None,
+    expected_all_corpus: bool,
+) -> None:
+    """The copyable result command must reopen the searched namespace and scope.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing local search runtime.
+    :param str corpus_token: Corpus scope recorded on the searched cache.
+    :param Optional[int] expected_corpus_size: Expected generated finite cap.
+    :param bool expected_all_corpus: Whether the command should request all rows.
+    :return None: Parses the footer and compares selectors plus recorded scope.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    fake_builder.embedding_cache.payload_stats = lambda: SimpleNamespace(
+        hydration_split="train[:5%]", hydration_corpus_size=corpus_token
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+    search_args = [
+        "search",
+        "cached topic",
+        "--mode",
+        "local",
+        "--model",
+        "custom/model",
+        "--model-profile",
+        "default",
+        "--model-revision",
+        "release candidate",
+        "--semantic-source",
+        "arxiv-corpus",
+        "--dataset-source",
+        "research/arxiv-snapshot",
+        "--truncate-dim",
+        "256",
+        "--storage-precision",
+        "int8",
+        "--calibration-sample-size",
+        "100",
+    ]
+
+    result = run_cli_command(search_args)
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    footer = next(
+        line for line in result.stdout.splitlines() if line.startswith("Use a paper ID")
+    )
+    command = footer.removeprefix("Use a paper ID with: ")
+    command_args = shlex.split(command)
+    assert command_args[:3] == ["citemesh", "build", "<ID>"]
+    _parser, build_parser, _cache_parser, _config_parser = (
+        parser_module._create_parser()
+    )
+    generated = build_parser.parse_args(command_args[2:])
+    searched = builder_factory.call_args.kwargs
+
+    assert generated.strategy == "embedding"
+    assert generated.model == searched["model_name"]
+    assert generated.model_profile == searched["model_profile"]
+    assert generated.model_revision == searched["model_revision"]
+    assert generated.semantic_source == searched["semantic_source"]
+    assert generated.dataset_source == searched["dataset_source"]
+    assert generated.truncate_dim == searched["truncate_dim"]
+    assert generated.storage_precision == searched["storage_precision"]
+    assert generated.calibration_sample_size == searched["calibration_sample_size"]
+    assert generated.dataset_split == "train[:5%]"
+    assert generated.all_corpus is expected_all_corpus
+    if expected_corpus_size is not None:
+        assert generated.corpus_size == expected_corpus_size
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_search_local_captures_result_and_replay_scope_under_one_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_precision: str,
+) -> None:
+    """A competing rebuild must not change the footer scope after search.
+
+    :param pytest.MonkeyPatch monkeypatch: CLI and cache isolation fixture.
+    :param str storage_precision: Persistent float32 or int8 representation.
+    :return None: Parses the rendered command and verifies the searched split.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=1,
+        results=[_FAKE_LOCAL_RESULT],
+    )
+    cache = fake_builder.embedding_cache
+    depth = 0
+    search_completed = False
+    persisted_split = "train[:1]"
+    events: list[str] = []
+
+    @contextmanager
+    def operation_lock() -> Any:
+        """Replace the corpus immediately after the consuming lock is released."""
+        nonlocal depth, persisted_split
+        depth += 1
+        try:
+            yield
+        finally:
+            depth -= 1
+            if depth == 0 and search_completed and "replacement" not in events:
+                persisted_split = "validation[:1]"
+                events.append("replacement")
+
+    def search_local(_query: str, *, top_k: int) -> list[Any]:
+        """Return training results from the builder's normal nested lock."""
+        nonlocal search_completed
+        assert top_k == 1
+        with operation_lock():
+            events.append("search")
+            search_completed = True
+            return [_FAKE_LOCAL_RESULT]
+
+    def payload_stats() -> SimpleNamespace:
+        """Expose whichever corpus owns the namespace at capture time."""
+        events.append("scope")
+        return SimpleNamespace(
+            hydration_split=persisted_split,
+            hydration_corpus_size="newest:1",
+        )
+
+    cache.hydration_operation_lock = MagicMock(side_effect=operation_lock)
+    cache.payload_stats = payload_stats
+    fake_builder.search_local.side_effect = search_local
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+    args = [
+        "search",
+        "cached topic",
+        "--mode",
+        "local",
+        "--limit",
+        "1",
+        "--semantic-source",
+        "arxiv-corpus",
+        "--dataset-source",
+        "fixture/corpus",
+        "--storage-precision",
+        storage_precision,
+    ]
+    if storage_precision == "int8":
+        args.extend(["--calibration-sample-size", "2"])
+
+    result = run_cli_command(args)
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert _FAKE_LOCAL_RESULT.paper_id in flatten_console_text(result.stdout)
+    footer = next(
+        line for line in result.stdout.splitlines() if line.startswith("Use a paper ID")
+    )
+    command_args = shlex.split(footer.removeprefix("Use a paper ID with: "))
+    _parser, build_parser, _cache_parser, _config_parser = (
+        parser_module._create_parser()
+    )
+    generated = build_parser.parse_args(command_args[2:])
+    assert generated.dataset_split == "train[:1]"
+    assert generated.corpus_size == 1
+    assert events.index("scope") < events.index("replacement")
+    assert depth == 0
+
+
+def test_search_local_candidate_mode_does_not_acquire_corpus_operation_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate-cache search keeps its existing lock-free render path.
+
+    :param pytest.MonkeyPatch monkeypatch: CLI builder isolation fixture.
+    :return None: Verifies candidate mode never opens the corpus operation lock.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=1,
+        results=[_FAKE_LOCAL_RESULT],
+    )
+    operation_lock = MagicMock(
+        side_effect=AssertionError("candidate mode must not acquire the corpus lock")
+    )
+    fake_builder.embedding_cache.hydration_operation_lock = operation_lock
+    monkeypatch.setattr(
+        search_module,
+        "EmbeddingGraphBuilder",
+        MagicMock(return_value=fake_builder),
+    )
+
+    result = run_cli_command(["search", "cached topic", "--mode", "local"])
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    operation_lock.assert_not_called()
+
+
+def test_search_local_keeps_results_when_corpus_scope_was_not_hydrated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Python-populated corpus cache rows should remain searchable without a footer.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing local search runtime.
+    :return None: Checks usable results and focused missing-scope guidance.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    fake_builder.embedding_cache.payload_stats = lambda: SimpleNamespace(
+        hydration_split=None, hydration_corpus_size=None
+    )
+    monkeypatch.setattr(
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    warning = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "warning", warning)
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--mode",
+            "local",
+            "--semantic-source",
+            "arxiv-corpus",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    plain_stdout = flatten_console_text(result.stdout)
+    assert _FAKE_LOCAL_RESULT.paper_id in plain_stdout
+    assert "Use a paper ID with:" not in plain_stdout
+    assert "no recorded dataset split" in str(warning.call_args)
+    assert "Search results remain usable" in str(warning.call_args)
+
+
+def test_search_local_build_footer_uses_active_fallback_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The local-search footer must reopen the active fallback cache namespace.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing local search runtime.
+    :return None: Parses the footer and checks active model plus stable selectors.
+    """
+    active_model = "google/embeddinggemma-300m"
+    fake_builder = _fake_local_search_builder(
+        cached_count=42, results=[_FAKE_LOCAL_RESULT]
+    )
+    fake_builder._active_model_name = active_model
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--mode",
+            "local",
+            "--model-profile",
+            "embeddinggemma",
+            "--truncate-dim",
+            "256",
+            "--storage-precision",
+            "float32",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    plain_stdout = flatten_console_text(result.stdout)
+    assert f"model={active_model}" in plain_stdout
+    assert f"model={DEFAULT_EMBEDDING_MODEL_NAME}" not in plain_stdout
+    footer = next(
+        line for line in result.stdout.splitlines() if line.startswith("Use a paper ID")
+    )
+    command_args = shlex.split(footer.removeprefix("Use a paper ID with: "))
+    assert command_args[:3] == ["citemesh", "build", "<ID>"]
+    _parser, build_parser, _cache_parser, _config_parser = (
+        parser_module._create_parser()
+    )
+    generated = build_parser.parse_args(command_args[2:])
+    searched = builder_factory.call_args.kwargs
+
+    assert generated.model == active_model
+    assert generated.model_profile == searched["model_profile"]
+    assert generated.model_revision == searched["model_revision"]
+    assert generated.truncate_dim == searched["truncate_dim"]
+    assert generated.storage_precision == searched["storage_precision"]
+    assert generated.calibration_sample_size == searched["calibration_sample_size"]
+
+
+def test_search_semantic_source_flag_selects_corpus_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--semantic-source arxiv-corpus must reach the corpus cache namespace.
+
+    Storage precision is part of the namespace and the build contract coerces
+    ``int8`` to ``float32`` outside corpus mode, so the override has to land
+    before validation or the search targets a namespace no corpus build wrote.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
+    :return None: Assertions pin the corpus namespace the builder receives.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--mode",
+            "local",
+            "--semantic-source",
+            "arxiv-corpus",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
+    assert builder_kwargs["storage_precision"] == "int8"
+    assert builder_kwargs["dataset_source"] == DEFAULT_DATASET_SOURCE
+
+
+def test_search_identity_flags_select_one_off_build_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Local search should accept every user-selectable cache identity field.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
+    :return None: Assertions verify one-off build selectors reach the builder.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--model-revision",
+            "frozen-release",
+            "--semantic-source",
+            "arxiv-corpus",
+            "--truncate-dim",
+            "256",
+            "--storage-precision",
+            "int8",
+            "--calibration-sample-size",
+            "4000",
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["model_revision"] == "frozen-release"
+    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
+    assert builder_kwargs["truncate_dim"] == 256
+    assert builder_kwargs["storage_precision"] == "int8"
+    assert builder_kwargs["calibration_sample_size"] == 4000
+
+
+def test_search_dataset_source_flag_implies_corpus_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--dataset-source alone implies arxiv-corpus, mirroring the build contract.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the local builder.
+    :return None: Assertions verify the implied corpus namespace.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=5999, results=[_FAKE_LOCAL_RESULT]
+    )
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+    dataset_source = "research/arxiv-snapshot"
+
+    result = run_cli_command(
+        [
+            "search",
+            "cached topic",
+            "--mode",
+            "local",
+            "--dataset-source",
+            dataset_source,
+        ]
+    )
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    builder_kwargs = builder_factory.call_args.kwargs
+    assert builder_kwargs["semantic_source"] == "arxiv-corpus"
+    assert builder_kwargs["dataset_source"] == dataset_source
+    assert builder_kwargs["storage_precision"] == "int8"
 
 
 def test_configured_local_corpus_hybrid_build_uses_full_split(
@@ -1232,6 +1810,12 @@ def test_search_device_flag_overrides_config_before_local_validation(
     [
         (["--model", "custom/model"], "model_name", "custom/model"),
         (["--model-profile", "embeddinggemma"], "model_profile", "embeddinggemma"),
+        (["--semantic-source", "arxiv-corpus"], "semantic_source", "arxiv-corpus"),
+        (
+            ["--dataset-source", "research/arxiv-snapshot"],
+            "dataset_source",
+            "research/arxiv-snapshot",
+        ),
     ],
 )
 def test_search_namespace_flag_implies_local_mode(
@@ -1341,7 +1925,15 @@ def test_search_auto_falls_back_to_s2_when_cache_empty(
     assert any(
         "searching the Semantic Scholar API instead" in notice for notice in notices
     )
-    assert any("device=cpu compute_dtype=float32" in notice for notice in notices)
+    empty_notice = next(
+        notice for notice in notices if "Local embedding cache is empty" in notice
+    )
+    assert "semantic-source=candidates" in empty_notice
+    assert f"dataset-source={DEFAULT_DATASET_SOURCE}" in empty_notice
+    assert "pass --semantic-source arxiv-corpus" in empty_notice
+    # The namespace has no device or compute-dtype token; guidance must not imply one.
+    assert "device=" not in empty_notice
+    assert "compute dtype" not in empty_notice
     fake_builder.search_local.assert_not_called()
     fake_builder.prepare_embedding_cache.assert_not_called()
 
@@ -1363,8 +1955,13 @@ def test_search_mode_local_empty_cache_fails_with_guidance(
     assert "Local search was requested via" in message
     assert "--mode local" in message
     assert "has no vectors" in message
-    assert "device=%s compute_dtype=%s" in message
-    assert error_mock.call_args.args[-2:] == ("cpu", "float32")
+    assert "pass --semantic-source arxiv-corpus" in message
+    # Device and compute dtype are absent from the namespace contract.
+    assert "device=" not in message
+    assert "compute_dtype" not in message
+    assert "semantic-source=%s" in error_mock.call_args.args[0]
+    assert error_mock.call_args.args[3] == "candidates"
+    assert error_mock.call_args.args[4] == DEFAULT_DATASET_SOURCE
     fake_builder.prepare_embedding_cache.assert_not_called()
     fake_builder.search_local.assert_not_called()
 
@@ -1389,10 +1986,10 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
     s2_search = MagicMock(return_value=0)
     monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
 
-    parser, build_parser, _cache_parser, _config_parser = cli_module._create_parser()
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
     args = parser.parse_args(["search", "attention"])
     with caplog.at_level(logging.INFO, logger=cli_module.logger.name):
-        result = cli_module._run_search_command(
+        result = search_module._run_search_command(
             args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
         )
 
@@ -1402,6 +1999,118 @@ def test_search_auto_reports_selectors_when_cache_prepare_fails(
         for record in caplog.records
     )
     s2_search.assert_called_once_with(args)
+
+
+def test_search_auto_refuses_corpus_fingerprint_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto search must surface a protected corpus fingerprint mismatch.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the local cache and S2 path.
+    :return None: Asserts the mismatch exits non-zero without a keyword fallback.
+    """
+    fake_builder = _fake_local_search_builder(cached_count=1)
+    fake_builder.prepare_embedding_cache.side_effect = EmbeddingCacheFingerprintMismatchError(
+        "protected corpus cache; run `citemesh build <paper-id> --strategy embedding "
+        "--semantic-source arxiv-corpus --force-rebuild-cache --overwrite-cache` "
+        "with the same model and corpus options"
+    )
+    monkeypatch.setattr(
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
+    args = parser.parse_args(["search", "attention"])
+    result = search_module._run_search_command(
+        args, build_parser, UserConfig(path=Path("config.toml"), defaults={})
+    )
+
+    assert result == 1
+    message = str(error_mock.call_args)
+    assert "protected corpus cache" in message
+    assert "citemesh build <paper-id>" in message
+    assert "--strategy embedding" in message
+    assert "--force-rebuild-cache --overwrite-cache" in message
+    s2_search.assert_not_called()
+
+
+def test_search_auto_empty_corpus_cache_names_the_selected_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto fallback must name a corpus selector without recommending it again.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the local cache and S2 path.
+    :return None: Asserts the fallback notices both effective source selectors.
+    """
+    dataset_source = "research/arxiv-snapshot"
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+    info_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "info", info_mock)
+
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
+    args = parser.parse_args(["search", "attention"])
+    config = UserConfig(
+        path=Path("config.toml"),
+        defaults={
+            "semantic_source": "arxiv-corpus",
+            "dataset_source": dataset_source,
+        },
+    )
+    result = search_module._run_search_command(args, build_parser, config)
+
+    assert result == 0
+    assert "semantic-source=%s" in info_mock.call_args.args[0]
+    assert info_mock.call_args.args[2] == "arxiv-corpus"
+    assert info_mock.call_args.args[3] == dataset_source
+    assert "already the arXiv-corpus namespace" in info_mock.call_args.args[4]
+    assert "pass --semantic-source arxiv-corpus" not in info_mock.call_args.args[4]
+    s2_search.assert_called_once_with(args)
+
+
+def test_search_local_empty_corpus_cache_names_the_selected_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit local search must not recommend its active corpus source.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the local cache and logger.
+    :return None: Asserts the empty-cache error names both source selectors.
+    """
+    dataset_source = "research/arxiv-snapshot"
+    fake_builder = _fake_local_search_builder(cached_count=0)
+    monkeypatch.setattr(
+        search_module, "EmbeddingGraphBuilder", MagicMock(return_value=fake_builder)
+    )
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+
+    result = run_cli_command(
+        [
+            "search",
+            "attention",
+            "--mode",
+            "local",
+            "--semantic-source",
+            "arxiv-corpus",
+            "--dataset-source",
+            dataset_source,
+        ]
+    )
+
+    assert result.returncode == 1
+    assert "semantic-source=%s" in error_mock.call_args.args[0]
+    assert error_mock.call_args.args[3] == "arxiv-corpus"
+    assert error_mock.call_args.args[4] == dataset_source
+    assert "already the arXiv-corpus namespace" in error_mock.call_args.args[5]
+    assert "pass --semantic-source arxiv-corpus" not in error_mock.call_args.args[5]
 
 
 def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
@@ -1438,13 +2147,42 @@ def test_search_explicit_auto_with_namespace_flag_keeps_s2_fallback(
     fake_builder.search_local.assert_not_called()
 
 
+def test_search_explicit_auto_with_namespace_flag_falls_back_for_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unrelated namespace flag must not claim a config device failure.
+
+    :param pytest.MonkeyPatch monkeypatch: Device resolver and S2 fallback stubs.
+    :return None: Assertions verify config attribution preserves auto fallback.
+    """
+    parser, build_parser, _cache_parser, _config_parser = parser_module._create_parser()
+    args = parser.parse_args(
+        ["search", "anything", "--mode", "auto", "--model", "custom/model"]
+    )
+    config = UserConfig(
+        path=Path("cfg-home") / "config.toml", defaults={"device": "cuda"}
+    )
+    monkeypatch.setattr(
+        build_contract_module,
+        "resolve_embedding_device",
+        MagicMock(side_effect=ValueError("Configured cuda unavailable")),
+    )
+    s2_search = MagicMock(return_value=0)
+    monkeypatch.setattr(search_module, "_run_s2_search", s2_search)
+
+    result = search_module._run_search_command(args, build_parser, config)
+
+    assert result == 0
+    s2_search.assert_called_once_with(args)
+
+
 def test_search_namespace_flag_empty_cache_error_names_the_flags(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The implied-local error must not claim the user passed --mode local.
 
     :param pytest.MonkeyPatch monkeypatch: Builder stub and error capture.
-    :return None: Assertions pin the namespace-flag attribution text.
+    :return None: Assertions pin the implied-local attribution text.
     """
     error_mock = MagicMock()
     monkeypatch.setattr(cli_module.logger, "error", error_mock)
@@ -1456,8 +2194,11 @@ def test_search_namespace_flag_empty_cache_error_names_the_flags(
     result = run_cli_command(["search", "anything", "--model", "custom/model"])
     assert result.returncode == 1
     message = str(error_mock.call_args)
-    assert "namespace flags imply" in message
+    assert "these flags imply local search" in message
     assert "--mode local" not in message
+    assert "--model" in message
+    assert "--model-profile" not in message
+    assert "--model-revision" not in message
     fake_builder.search_local.assert_not_called()
 
 
@@ -1548,6 +2289,9 @@ def test_cli_argument_validation_contracts() -> None:
             ["build", "arxiv:1706.03762", "--similarity-threshold", "nan"],
             "must be a finite float",
         ),
+        (["build", "seed", "--similarity-threshold", "banana"], "must be a float"),
+        (["build", "   "], "must be a non-empty string"),
+        (["build", "seed", "--strategy", "unknown"], "invalid choice"),
         (["search", "attention", "--limit", "0"], "must be at least 1"),
         (["search", ""], "must be a non-empty string"),
         (["build", "", "--strategy", "citation"], "must be a non-empty string"),
@@ -1994,11 +2738,11 @@ def test_hybrid_allows_embedding_options_when_max_semantic_is_unset(
 
 def test_embedding_lzf_compression_level_normalization_contract() -> None:
     """Embedding validation should normalize implicit lzf compression level to 0."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
     )
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         args, build_parser, provided={"cache_compression"}
     )
     assert args.cache_compression == "lzf"
@@ -2007,15 +2751,15 @@ def test_embedding_lzf_compression_level_normalization_contract() -> None:
 
 def test_hybrid_implicit_budget_defaults_contract() -> None:
     """Hybrid should apply tuned defaults only when budget knobs are omitted."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     hybrid_defaults = build_parser.parse_args(["seed", "--strategy", "hybrid"])
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         hybrid_defaults, build_parser, provided=set()
     )
     assert hybrid_defaults.max_papers == HYBRID_DEFAULT_MAX_PAPERS
     assert hybrid_defaults.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
     assert hybrid_defaults.max_references == HYBRID_DEFAULT_MAX_REFERENCES
-    assert cli_module._resolved_hybrid_max_semantic(hybrid_defaults) == min(
+    assert build_options_module._resolved_hybrid_max_semantic(hybrid_defaults) == min(
         DEFAULT_MAX_SEMANTIC, HYBRID_DEFAULT_MAX_PAPERS - 1
     )
 
@@ -2025,7 +2769,7 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
             "--strategy",
             "hybrid",
             "--max-papers",
-            "30",
+            "40",
             "--max-citations",
             "6",
             "--max-references",
@@ -2034,15 +2778,15 @@ def test_hybrid_implicit_budget_defaults_contract() -> None:
             "5",
         ]
     )
-    cli_module._validate_build_cli_contract(
+    build_contract_module._validate_build_cli_contract(
         explicit_hybrid,
         build_parser,
         provided={"max_papers", "max_citations", "max_references", "max_semantic"},
     )
-    assert explicit_hybrid.max_papers == 30
+    assert explicit_hybrid.max_papers == 40
     assert explicit_hybrid.max_citations == 6
     assert explicit_hybrid.max_references == 7
-    assert cli_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
+    assert build_options_module._resolved_hybrid_max_semantic(explicit_hybrid) == 5
 
 
 def test_layout_and_json_export_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2893,33 +3637,7 @@ def test_dashboard_package_serializes_concurrent_updates(
     first_graph.nodes["seed-a"]["title"] = "First Seed"
     second_graph.nodes["seed-b"]["title"] = "Second Seed"
 
-    first_write_started = threading.Event()
-    allow_first_write = threading.Event()
-    second_write_started = threading.Event()
-    write_counter = 0
-    write_counter_lock = threading.Lock()
-    original_atomic_write = dashboard_package_module.atomic_write_json
-
-    def delayed_atomic_write(
-        path: Path, payload: dict[str, object], **kwargs: object
-    ) -> None:
-        """Hold the first writer inside its locked package update.
-
-        :param Path path: JSON destination.
-        :param dict[str, object] payload: Package contents to persist.
-        :param object kwargs: Original JSON writer options.
-        :return None: Writes after the test releases the first writer.
-        """
-        nonlocal write_counter
-        with write_counter_lock:
-            write_counter += 1
-            call_number = write_counter
-        if call_number == 1:
-            first_write_started.set()
-            assert allow_first_write.wait(timeout=5), "first write never released"
-        else:
-            second_write_started.set()
-        original_atomic_write(path, payload, **kwargs)
+    delayed_atomic_write = PausedFirstWrite(dashboard_package_module.atomic_write_json)
 
     monkeypatch.setattr(
         dashboard_package_module, "atomic_write_json", delayed_atomic_write
@@ -2950,14 +3668,16 @@ def test_dashboard_package_serializes_concurrent_updates(
     second_thread = threading.Thread(target=worker, args=(second_graph, "seed-b"))
 
     first_thread.start()
-    assert first_write_started.wait(timeout=5), "first write never started"
+    assert delayed_atomic_write.first_started.wait(timeout=5), (
+        "first write never started"
+    )
     # The first writer already holds its lock, so each writer observes one root.
     if separate_cache_roots:
         monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-b"))
     second_thread.start()
-    second_wrote_early = second_write_started.wait(timeout=0.25)
+    second_wrote_early = delayed_atomic_write.second_started.wait(timeout=0.25)
 
-    allow_first_write.set()
+    delayed_atomic_write.release_first.set()
     first_thread.join(timeout=5)
     second_thread.join(timeout=5)
 
@@ -3343,6 +4063,28 @@ def test_dashboard_package_rejects_mismatched_dashboard_metadata(
             tmp_path / DASHBOARD_PACKAGE_FILENAME,
             graph=graph,
             seed_id="seed",
+            strategy="recommendation",
+            payload=payload,
+            build={"strategy": "recommendation"},
+        )
+
+
+def test_dashboard_package_rejects_descriptor_payload_seed_mismatch(
+    tmp_path: Path,
+) -> None:
+    """The package boundary should report mismatched seed identities cleanly.
+
+    :param Path tmp_path: Isolated dashboard package directory.
+    :return None: Checks the descriptor-to-payload identity validation.
+    """
+    graph = build_seed_graph("seed")
+    payload = _dashboard_graph_payload(graph, "seed", "recommendation")
+
+    with pytest.raises(DashboardPackageError, match="descriptor does not match"):
+        update_dashboard_package(
+            tmp_path / DASHBOARD_PACKAGE_FILENAME,
+            graph=graph,
+            seed_id="other-seed",
             strategy="recommendation",
             payload=payload,
             build={"strategy": "recommendation"},
@@ -3755,6 +4497,10 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert metadata["embedding"] == {
         "effective_vector_dtype": "float32",
+        "effective_model": DEFAULT_EMBEDDING_MODEL_NAME,
+        "effective_model_revision": None,
+        "model_fingerprint": None,
+        "effective_truncate_dim": None,
         "effective_device": None,
         "effective_compute_dtype": None,
         "model_profile": "auto",
@@ -3802,7 +4548,7 @@ def test_export_metadata_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> None:
     """Recommendation sidecars should only record settings that affect the run."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     cli_args = build_parser.parse_args(
         [
             "seed",
@@ -3813,7 +4559,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
         ]
     )
 
-    payload = cli_module._build_graph_config_payload(
+    payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
         seed_id="seed",
         metadata={"strategy": "recommendation"},
@@ -3947,12 +4693,15 @@ def test_hybrid_disabled_semantic_branch_skips_embedding_side_effect_logs(
 
 def test_strategy_dispatches_to_matching_builder_kwargs(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Dispatch and sidecars should retain the same graph-shaping settings.
 
     :param pytest.MonkeyPatch monkeypatch: Replaces builders with recording stubs.
+    :param Path tmp_path: Isolated export directory.
     :return None: Checks builder arguments and strategy-specific sidecar values.
     """
+    monkeypatch.delenv("S2_API_KEY", raising=False)
     cases = [
         (
             "citation",
@@ -4002,6 +4751,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "binary_rescore_multiplier": 9,
                 "calibration_sample_size": 123,
                 "encode_batch_size": 48,
+                "cache_compression": "lzf",
             },
             {
                 "max_papers": 11,
@@ -4021,8 +4771,8 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
                 "binary_prefilter": True,
                 "binary_rescore_multiplier": 9,
                 "calibration_sample_size": 123,
-                "cache_compression": "gzip",
-                "cache_compression_level": 1,
+                "cache_compression": "lzf",
+                "cache_compression_level": 0,
                 "encode_batch_size": 48,
                 "enable_torch_compile": False,
                 "device": "auto",
@@ -4084,23 +4834,41 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
     ]
     for strategy, builder_name, namespace_overrides, expected_kwargs in cases:
         captured: dict[str, object] = {}
-        namespace = _dispatch_namespace(**namespace_overrides)
+        output = tmp_path / f"{strategy}.json"
+        argv = [
+            "build",
+            "seed",
+            "--strategy",
+            strategy,
+            "--max-papers",
+            "11",
+            "--export",
+            "json",
+            "--output",
+            str(output),
+        ]
+        for dest, value in namespace_overrides.items():
+            flag = (
+                "--batch-size"
+                if dest == "encode_batch_size"
+                else "--" + dest.replace("_", "-")
+            )
+            if isinstance(value, bool):
+                if value:
+                    argv.append(flag)
+            else:
+                argv.extend([flag, str(value)])
         monkeypatch.setattr(
             build_options_module,
             builder_name,
             _make_builder_stub(captured, graph=build_seed_graph("seed")),
         )
-        graph, seed_id = cli_module._build_strategy_graph(namespace, strategy)
-        assert seed_id == "seed"
-        assert graph.number_of_nodes() == 1
+        result = run_cli_command(argv)
+        assert result.returncode == 0, result.stderr
         assert captured == expected_kwargs
-        build_config = cli_module._build_graph_config_payload(
-            namespace,
-            seed_id,
-            {},
-            ["json"],
-            {"json": Path(f"out/{strategy}.json")},
-        )["build"]
+        build_config = json.loads(output.with_suffix(".config.json").read_text())[
+            "build"
+        ]
         if "similarity_threshold" in captured:
             assert (
                 build_config["citation"]["similarity_threshold"]
@@ -4116,141 +4884,14 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         monkeypatch.setattr(
             build_options_module, "SemanticScholarClient", client_factory
         )
-        namespace.refresh_paper_cache = True
-        namespace._s2_api_key = "configured-key"
-        cli_module._build_strategy_graph(namespace, strategy, validate_contract=False)
+        monkeypatch.setenv("S2_API_KEY", "configured-key")
+        result = run_cli_command([*argv, "--refresh-paper-cache"])
+        assert result.returncode == 0, result.stderr
         client_factory.assert_called_once_with(
             api_key="configured-key", refresh_paper_cache=True
         )
         assert captured == {**expected_kwargs, "client": client_factory.return_value}
-
-
-def test_programmatic_hybrid_implicit_defaults_flow_into_builder(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic hybrid dispatch should carry normalized implicit defaults."""
-    _, build_parser, _, _ = cli_module._create_parser()
-    namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "HybridGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    graph, seed_id = cli_module._build_strategy_graph(namespace, "hybrid")
-    assert seed_id == "seed"
-    assert graph.number_of_nodes() == 1
-    assert captured["max_papers"] == HYBRID_DEFAULT_MAX_PAPERS
-    assert captured["max_citations"] == HYBRID_DEFAULT_MAX_CITATIONS
-    assert captured["max_references"] == HYBRID_DEFAULT_MAX_REFERENCES
-    assert namespace.max_papers == HYBRID_DEFAULT_MAX_PAPERS
-    assert namespace.max_citations == HYBRID_DEFAULT_MAX_CITATIONS
-    assert namespace.max_references == HYBRID_DEFAULT_MAX_REFERENCES
-
-
-def test_programmatic_embedding_dispatch_normalizes_lzf_level(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic embedding dispatch should pass normalized lzf level to builder."""
-    _, build_parser, _, _ = cli_module._create_parser()
-    namespace = build_parser.parse_args(
-        ["seed", "--strategy", "embedding", "--cache-compression", "lzf"]
-    )
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "EmbeddingGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
-    assert seed_id == "seed"
-    assert graph.number_of_nodes() == 1
-    assert captured["cache_compression"] == "lzf"
-    assert captured["cache_compression_level"] == 0
-    assert namespace.cache_compression_level == 0
-
-
-def test_programmatic_embedding_dispatch_propagates_normalized_scalars(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic embedding dispatch should pass normalized scalar values to builders."""
-    namespace = _dispatch_namespace(
-        top_k="4",
-        encode_batch_size="32",
-        cache_compression="lzf",
-    )
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "EmbeddingGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    graph, seed_id = cli_module._build_strategy_graph(namespace, "embedding")
-    assert seed_id == "seed"
-    assert graph.number_of_nodes() == 1
-    assert captured["top_k"] == 4
-    assert captured["encode_batch_size"] == 32
-    assert captured["cache_compression_level"] == 0
-    assert namespace.top_k == 4
-    assert namespace.encode_batch_size == 32
-    assert namespace.cache_compression_level == 0
-
-
-def test_programmatic_strategy_dispatch_contracts() -> None:
-    """Programmatic dispatch should enforce strategy validation."""
-    namespace = _dispatch_namespace()
-    with pytest.raises(ValueError, match="Unsupported strategy: unknown"):
-        cli_module._build_strategy_graph(namespace, "unknown")
-
-    invalid_namespace = _dispatch_namespace(
-        similarity_threshold=0.21,
-        model="org/generic-embedding-model",
-    )
-    with pytest.raises(ValueError, match="Unsupported option\\(s\\).*--model"):
-        cli_module._build_strategy_graph(invalid_namespace, "recommendation")
-
-    invalid_embedding_namespace = _dispatch_namespace(
-        storage_precision="float32",
-        calibration_sample_size=512,
-    )
-    with pytest.raises(
-        ValueError,
-        match="--calibration-sample-size requires --storage-precision int8",
-    ):
-        cli_module._build_strategy_graph(invalid_embedding_namespace, "embedding")
-
-
-def test_programmatic_strategy_dispatch_validates_scalar_contracts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Programmatic dispatch should enforce parser-equivalent scalar validation."""
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "CitationGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    with pytest.raises(ValueError, match="must be at least 1"):
-        cli_module._build_strategy_graph(_dispatch_namespace(max_papers=0), "citation")
-    assert captured == {}
-
-    with pytest.raises(ValueError, match="must be a float"):
-        cli_module._build_strategy_graph(
-            _dispatch_namespace(similarity_threshold="banana"),
-            "citation",
-        )
-    assert captured == {}
-
-    with pytest.raises(ValueError, match="must be a non-empty string"):
-        cli_module._build_strategy_graph(
-            _dispatch_namespace(paper_id="   "),
-            "citation",
-        )
-    assert captured == {}
+        monkeypatch.delenv("S2_API_KEY")
 
 
 @pytest.mark.parametrize("width", [60, 80, 120])
@@ -4341,15 +4982,19 @@ def test_cli_help_survives_unusable_terminal_width(
             "get_terminal_size",
             lambda: SimpleNamespace(columns=1),
         )
-        help_text = cli_module._create_parser()[0].format_help()
+        help_text = parser_module._create_parser()[0].format_help()
 
     assert "usage: citemesh COMMAND [options]" in help_text
     assert "CiteMesh" in help_text
     assert "Options:" in help_text
 
 
-def test_output_path_and_slug_contracts() -> None:
-    """Output path resolver and auto-output slug generation should stay stable."""
+def test_output_path_and_slug_contracts(tmp_path: Path) -> None:
+    """Output path resolver and auto-output slug generation should stay stable.
+
+    :param Path tmp_path: Isolated directory for output-name collision checks.
+    :return None: Verifies artifact paths, sidecar paths, and stable seed slugs.
+    """
     path_cases = [
         (
             Path("out/arxiv-2508.14040-example"),
@@ -4398,34 +5043,6 @@ def test_output_path_and_slug_contracts() -> None:
         )
         assert paths == expected
 
-
-@pytest.mark.parametrize(
-    "directory_name", ["results", "results.json", "results.dashboard.html"]
-)
-@pytest.mark.parametrize("formats", [["json"], ["png"], ["json", "png"]])
-def test_output_writes_into_an_existing_directory(
-    tmp_path: Path,
-    directory_name: str,
-    formats: list[str],
-) -> None:
-    """An existing --output directory must receive the artifact, not name it.
-
-    :param Path tmp_path: Temporary directory serving as the output target.
-    :param str directory_name: Directory name, including export-like suffixes.
-    :param list[str] formats: Single or multiple requested export formats.
-    :return None: Assertions pin file-or-directory semantics.
-    """
-    results_dir = tmp_path / directory_name
-    results_dir.mkdir()
-
-    paths = resolve_output_paths(
-        base_output_path=results_dir,
-        selected_formats=formats,
-        explicit_output=True,
-        strategy="citation",
-    )
-
-    assert paths == {fmt: results_dir / f"citation.{fmt}" for fmt in formats}
     config_cases = [
         (
             {"png": Path("out/seed/hybrid.png")},
@@ -4478,6 +5095,35 @@ def test_output_writes_into_an_existing_directory(
     assert len(output_path.parent.name) <= 40
 
 
+@pytest.mark.parametrize(
+    "directory_name", ["results", "results.json", "results.dashboard.html"]
+)
+@pytest.mark.parametrize("formats", [["json"], ["png"], ["json", "png"]])
+def test_output_writes_into_an_existing_directory(
+    tmp_path: Path,
+    directory_name: str,
+    formats: list[str],
+) -> None:
+    """An existing --output directory must receive the artifact, not name it.
+
+    :param Path tmp_path: Temporary directory serving as the output target.
+    :param str directory_name: Directory name, including export-like suffixes.
+    :param list[str] formats: Single or multiple requested export formats.
+    :return None: Assertions pin file-or-directory semantics.
+    """
+    results_dir = tmp_path / directory_name
+    results_dir.mkdir()
+
+    paths = resolve_output_paths(
+        base_output_path=results_dir,
+        selected_formats=formats,
+        explicit_output=True,
+        strategy="citation",
+    )
+
+    assert paths == {fmt: results_dir / f"citation.{fmt}" for fmt in formats}
+
+
 def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
     """Running ``citemesh.__main__`` should invoke ``citemesh.cli.main``."""
     called: dict[str, object] = {}
@@ -4494,59 +5140,6 @@ def test_main_module_invokes_cli_main(monkeypatch: pytest.MonkeyPatch) -> None:
         runpy.run_module("citemesh.__main__", run_name="__main__")
     assert exc_info.value.code == 0
     assert called["argv"] is None
-
-
-def _extract_citemesh_doc_commands(markdown_text: str) -> list[list[str]]:
-    """Extract parseable ``citemesh`` command argv vectors from Markdown bash blocks."""
-    commands: list[list[str]] = []
-    blocks = re.findall(r"```bash\s+(.*?)```", markdown_text, flags=re.DOTALL)
-    for block in blocks:
-        pending = ""
-        for raw_line in block.splitlines():
-            stripped = raw_line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if pending:
-                continuation = (
-                    stripped[:-1].strip() if stripped.endswith("\\") else stripped
-                )
-                pending = f"{pending} {continuation}".strip()
-                if stripped.endswith("\\"):
-                    continue
-                tokens = shlex.split(pending)
-                pending = ""
-                if tokens and tokens[0] == "citemesh":
-                    commands.append(tokens[1:])
-                continue
-            if not stripped.startswith("citemesh "):
-                continue
-            if stripped.endswith("\\"):
-                pending = stripped[:-1].strip()
-                continue
-            tokens = shlex.split(stripped)
-            if tokens and tokens[0] == "citemesh":
-                commands.append(tokens[1:])
-    return commands
-
-
-def test_documented_cli_examples_are_parseable() -> None:
-    """README and CLI guide command examples should remain parseable."""
-    parser, _, _, _ = cli_module._create_parser()
-    docs = [Path("README.md"), Path("docs/guides/cli.md")]
-
-    commands: list[list[str]] = []
-    for doc_path in docs:
-        markdown_text = doc_path.read_text(encoding="utf-8")
-        commands.extend(_extract_citemesh_doc_commands(markdown_text))
-
-    assert commands, "No citemesh commands found in docs; example parser test is stale."
-    for argv in commands:
-        if any(token.startswith("[") or token.endswith("]") for token in argv):
-            continue
-        try:
-            parser.parse_args(argv)
-        except SystemExit as exc:
-            assert exc.code == 0, f"Invalid documented command: {argv}"
 
 
 def test_multi_export_flag_selects_subset(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4637,33 +5230,11 @@ def test_multi_export_deduplicates_repeated_formats(
 
 def test_export_dispatch_table_covers_all_declared_formats() -> None:
     """Every EXPORT_FORMATS entry must have a dispatch mapping or be 'png'."""
-    covered = set(cli_module._EXPORTER_METHOD) | {"png"}
+    covered = set(outputs_module._EXPORTER_METHOD) | {"png"}
     assert covered == set(cli_module.EXPORT_FORMATS), (
         f"Dispatch gap: covered={sorted(covered)}, "
         f"declared={sorted(cli_module.EXPORT_FORMATS)}"
     )
-
-
-def test_programmatic_dispatch_respects_explicit_provided_set(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """_build_strategy_graph with explicit provided set should bypass inference."""
-    _, build_parser, _, _ = cli_module._create_parser()
-    namespace = build_parser.parse_args(["seed", "--strategy", "hybrid"])
-    captured: dict[str, object] = {}
-    monkeypatch.setattr(
-        build_options_module,
-        "HybridGraphBuilder",
-        _make_builder_stub(captured, graph=build_seed_graph("seed")),
-    )
-
-    # Explicitly mark max_papers as provided → hybrid override should NOT apply
-    graph, seed_id = cli_module._build_strategy_graph(
-        namespace, "hybrid", provided={"max_papers"}
-    )
-    assert seed_id == "seed"
-    # max_papers should remain the parser default (40), not the hybrid override (45)
-    assert captured["max_papers"] == 40
 
 
 def test_builder_defaults_match_cli_defaults() -> None:
@@ -4671,7 +5242,7 @@ def test_builder_defaults_match_cli_defaults() -> None:
     from citemesh.strategies.citation import CitationGraphBuilder
     from citemesh.strategies.recommendation import RecommendationGraphBuilder
 
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     defaults = build_parser.parse_args(["seed", "--strategy", "citation"])
 
     assert CitationGraphBuilder.__init__.__defaults__ is not None
@@ -4730,12 +5301,12 @@ def test_build_rejects_unavailable_explicit_device(
 
 def test_graph_config_payload_records_device() -> None:
     """Embedding sidecar config should persist the requested device token."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     cli_args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--device", "cpu"]
     )
 
-    payload = cli_module._build_graph_config_payload(
+    payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
         seed_id="seed",
         metadata={"strategy": "embedding"},
@@ -4746,19 +5317,83 @@ def test_graph_config_payload_records_device() -> None:
     assert payload["build"]["embedding"]["device"] == "cpu"
 
 
-def test_export_metadata_records_effective_device() -> None:
-    """Export metadata should surface effective device/dtype from runtime."""
-    namespace = _dispatch_namespace()
-    metadata = cli_module._embedding_export_metadata(
+def test_export_metadata_records_effective_embedding_runtime() -> None:
+    """Export metadata should surface the active model, dimension, and device."""
+    _, build_parser, _, _ = parser_module._create_parser()
+    namespace = build_parser.parse_args(["seed", "--strategy", "embedding"])
+    active_model = "google/embeddinggemma-300m"
+    resolved_revision = "0123456789abcdef0123456789abcdef01234567"
+    fingerprint = f"hf::{active_model}::{resolved_revision}"
+    metadata = build_options_module._embedding_export_metadata(
         namespace,
         runtime_metadata={
             "binary_prefilter_used": True,
+            "active_model": active_model,
+            "model_fingerprint": fingerprint,
+            "resolved_model_revision": resolved_revision,
+            "truncate_dim": 512,
             "device": "mps",
             "compute_dtype": "bfloat16",
         },
     )
+    assert metadata["effective_model"] == active_model
+    assert metadata["effective_model_revision"] == resolved_revision
+    assert metadata["model_fingerprint"] == fingerprint
+    assert metadata["effective_truncate_dim"] == 512
     assert metadata["effective_device"] == "mps"
     assert metadata["effective_compute_dtype"] == "bfloat16"
+
+    sidecar = graph_config_module._build_graph_config_payload(
+        cli_args=namespace,
+        seed_id="seed",
+        metadata={"strategy": "embedding", "embedding": metadata},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/embedding.json")},
+    )
+    replay = sidecar["build"]["embedding"]
+    assert replay["model"] == active_model
+    assert "model_revision" not in replay
+    assert replay["truncate_dim"] == 512
+
+    original_builder = EmbeddingGraphBuilder(
+        model_name=namespace.model,
+        model_revision=namespace.model_revision,
+        client=MagicMock(),
+    )
+    original_builder._active_model_name = active_model
+    original_builder._resolved_model_fingerprint = fingerprint
+    replay_builder = EmbeddingGraphBuilder(
+        model_name=replay["model"],
+        model_revision=replay.get("model_revision"),
+        truncate_dim=replay["truncate_dim"],
+        client=MagicMock(),
+    )
+    replay_builder._resolved_model_fingerprint = fingerprint
+    assert original_builder._embedding_cache_namespace(
+        artifact_identity=fingerprint
+    ) == replay_builder._embedding_cache_namespace(artifact_identity=fingerprint)
+
+    selector_namespace = build_parser.parse_args(
+        ["seed", "--strategy", "embedding", "--model-revision", "main"]
+    )
+    selector_fingerprint = f"hf::{selector_namespace.model}::{resolved_revision}"
+    selector_metadata = build_options_module._embedding_export_metadata(
+        selector_namespace,
+        runtime_metadata={
+            "active_model": selector_namespace.model,
+            "model_fingerprint": selector_fingerprint,
+            "resolved_model_revision": resolved_revision,
+        },
+    )
+    selector_sidecar = graph_config_module._build_graph_config_payload(
+        cli_args=selector_namespace,
+        seed_id="seed",
+        metadata={"strategy": "embedding", "embedding": selector_metadata},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/embedding.json")},
+    )
+    assert selector_metadata["effective_model_revision"] == resolved_revision
+    assert selector_sidecar["build"]["embedding"]["model_revision"] == "main"
 
 
 def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:
@@ -4766,10 +5401,10 @@ def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:
 
     :return None: Assertions align export metadata with the config sidecar.
     """
-    corpus_metadata = cli_module._embedding_export_metadata(
+    corpus_metadata = build_options_module._embedding_export_metadata(
         _dispatch_namespace(semantic_source="arxiv-corpus")
     )
-    candidates_metadata = cli_module._embedding_export_metadata(
+    candidates_metadata = build_options_module._embedding_export_metadata(
         _dispatch_namespace(semantic_source="candidates", candidate_pool_size=400)
     )
 
@@ -4779,17 +5414,17 @@ def test_export_metadata_omits_candidate_pool_size_in_corpus_mode() -> None:
 
 def test_build_corpus_flags_imply_arxiv_corpus_source() -> None:
     """Corpus-only flags without --semantic-source should imply arxiv-corpus."""
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--corpus-size", "1234"]
     )
-    provided = cli_module._pop_tracked_option_dests(args)
-    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    provided = parser_module._pop_tracked_option_dests(args)
+    build_contract_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "arxiv-corpus"
 
     args = build_parser.parse_args(["seed", "--strategy", "embedding"])
-    provided = cli_module._pop_tracked_option_dests(args)
-    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    provided = parser_module._pop_tracked_option_dests(args)
+    build_contract_module._validate_build_cli_contract(args, build_parser, provided)
     assert args.semantic_source == "candidates"
     assert args.storage_precision == "float32"
     assert args.corpus_size is None
@@ -4801,16 +5436,16 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
 
     :return None: Assertions validate corpus routing and sidecar provenance.
     """
-    _, build_parser, _, _ = cli_module._create_parser()
+    _, build_parser, _, _ = parser_module._create_parser()
     dataset_source = "research/arxiv-snapshot"
     args = build_parser.parse_args(
         ["seed", "--strategy", "embedding", "--dataset-source", dataset_source]
     )
-    provided = cli_module._pop_tracked_option_dests(args)
-    cli_module._validate_build_cli_contract(args, build_parser, provided)
+    provided = parser_module._pop_tracked_option_dests(args)
+    build_contract_module._validate_build_cli_contract(args, build_parser, provided)
 
     assert args.semantic_source == "arxiv-corpus"
-    payload = cli_module._build_graph_config_payload(
+    payload = graph_config_module._build_graph_config_payload(
         cli_args=args,
         seed_id="seed",
         metadata={"strategy": "embedding"},
@@ -4820,11 +5455,11 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
     assert payload["build"]["embedding"]["dataset_source"] == dataset_source
 
     candidate_args = build_parser.parse_args(["seed", "--strategy", "embedding"])
-    candidate_provided = cli_module._pop_tracked_option_dests(candidate_args)
-    cli_module._validate_build_cli_contract(
+    candidate_provided = parser_module._pop_tracked_option_dests(candidate_args)
+    build_contract_module._validate_build_cli_contract(
         candidate_args, build_parser, candidate_provided
     )
-    candidate_payload = cli_module._build_graph_config_payload(
+    candidate_payload = graph_config_module._build_graph_config_payload(
         cli_args=candidate_args,
         seed_id="seed",
         metadata={"strategy": "embedding"},

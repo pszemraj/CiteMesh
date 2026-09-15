@@ -12,6 +12,8 @@ import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .node_data import effective_node_metadata
+
 if TYPE_CHECKING:
     import networkx as nx
 
@@ -76,7 +78,7 @@ def generate_output_path(
         paper_dir = existing_dirs[0]
     else:
         seed_attrs = graph.nodes[seed_id] if seed_id in graph else {}
-        title = seed_attrs.get("title") or seed_id
+        title = effective_node_metadata(seed_id, seed_attrs).get("title") or seed_id
         paper_dir = output_dir / _output_dir_name(label=title, seed_id=seed_id)
     paper_dir.mkdir(parents=True, exist_ok=True)
 

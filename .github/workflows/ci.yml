@@ -9,15 +9,43 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Supersede in-flight PR runs, but let every push to main finish so each
+  # commit on the release branch has its own verified result.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: 1
   MPLBACKEND: Agg
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Ruff is a static linter configured entirely by pyproject.toml, so it
+      # needs neither the package nor the test matrix. One run covers them all.
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -44,17 +72,12 @@ jobs:
       - name: Install package
         run: pip install -e ".[dev,viz]"
 
-      - name: Lint
-        run: ruff check .
-
-      - name: Format check
-        run: ruff format --check .
-
       - name: Test
         run: python -m pytest
 
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v7
@@ -74,10 +97,27 @@ jobs:
         run: python -m build
 
       - name: Check distributions
-        run: twine check dist/*
+        run: twine check --strict dist/*
 
       - name: Verify wheel package data
         run: |
-          unzip -l dist/*.whl
-          unzip -l dist/*.whl | grep -q 'citemesh/py.typed'
-          unzip -l dist/*.whl | grep -q 'citemesh/visualization/dashboard/assets/dashboard.js'
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          if [ ${#wheels[@]} -ne 1 ]; then
+            echo "expected exactly one wheel, found: ${wheels[*]}" >&2
+            exit 1
+          fi
+          unzip -l "${wheels[0]}"
+          unzip -l "${wheels[0]}" | grep -q 'citemesh/py.typed'
+          unzip -l "${wheels[0]}" | grep -q 'citemesh/visualization/dashboard/assets/dashboard.js'
+
+      - name: Smoke-test the wheel without optional extras
+        # The base install carries no torch, plotly, or pyvis. Optional imports
+        # are lazy by design, so the CLI must still start and parse arguments.
+        run: |
+          python -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install --quiet dist/*.whl
+          "$RUNNER_TEMP/smoke/bin/citemesh" --version
+          "$RUNNER_TEMP/smoke/bin/citemesh" --help > /dev/null
+          "$RUNNER_TEMP/smoke/bin/citemesh" build --help > /dev/null
+          "$RUNNER_TEMP/smoke/bin/citemesh" cache scan > /dev/null

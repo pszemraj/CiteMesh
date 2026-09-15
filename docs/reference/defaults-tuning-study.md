@@ -1,10 +1,10 @@
-# Defaults Tuning Studies
+# Defaults tuning studies
 
 Measurements and tradeoffs behind CiteMesh's semantic threshold, embedding dimension, and hybrid discovery defaults.
 
-## Semantic Edge Threshold (September 2026)
+## Semantic edge threshold (September 2026)
 
-Use **0.74** as the default semantic eligibility threshold for EmbeddingGemma's symmetric STS embeddings at 512 dimensions. The development set selects it by maximum F1 on a fixed 0.65–0.80 grid in 0.01 increments, breaking ties by precision and then higher threshold. A separate validation set assesses the selected value.
+Use **0.74** as the default semantic eligibility threshold for EmbeddingGemma's symmetric STS embeddings at 512 dimensions. The development set selects it by maximum F1 on a fixed 0.65-0.80 grid in 0.01 increments, breaking ties by precision and then higher threshold. A separate validation set assesses the selected value.
 
 Two independent fixture evaluations used full primary-source arXiv abstracts, with pair labels fixed before inspecting scores. Development has 14 papers from translation, pretrained language models, dense retrieval, graph learning, diffusion, and residual vision networks. Its 81 included pairs contain 13 positives and 68 negatives; 16 negatives deliberately share a nearby ML topic. Ten ambiguous attention/efficiency/representation-lineage pairs are excluded and listed explicitly in the fixture. Transformer/BERT and Transformer/RoBERTa are positives because architectural lineage matters for discovery even across tasks.
 
@@ -31,22 +31,20 @@ With the designated model cached locally:
 python -m pytest -m slow tests/test_semantic_quality.py
 ```
 
-## Embedding Dimensions (September 2026)
+## Embedding dimensions (September 2026)
 
 ### Decision
 
 Use **512 dimensions** by default for EmbeddingGemma. The previous 256-dimensional default reduced vector storage, but the paired corpus study below found a substantial loss of the full model's nearest neighbors. Moving to 512 recovered more of those neighbors with essentially the same GPU corpus encoding time and an 11.4% increase in complete cache size. Local search became slower.
 
-The shared profile applies this choice to embedding and hybrid builds, candidate and arXiv corpus sourcing, local search, and symmetric graph-similarity encoding on CUDA, MPS, and CPU. It covers the default Unsloth model, the Google fallback, and recognized local EmbeddingGemma checkpoints. This is one consistent default; the experiment directly measured CUDA corpus retrieval, not each of those paths.
-
-EmbeddingGemma supports `768`, `512`, `256`, and `128` dimensions. An explicit `--truncate-dim` or `defaults.truncate_dim` configuration still takes precedence; other model profiles retain their own dimension policies. Existing 256d caches remain separate and reusable with matching settings; see [Caching & Data](../guides/caching.md).
+The [EmbeddingGemma profile](embedding-runtime.md#embeddinggemma-profile) applies the dimension default. This experiment directly measured CUDA corpus retrieval; it did not measure every build or runtime path.
 
 ### Paired corpus and runtime
 
 The study completed on September 5, 2026 (UTC), using separate temporary CiteMesh caches containing the **same 100,000 papers in the same order**. The main user cache was not modified.
 
 - Dataset: `librarian-bots/arxiv-metadata-snapshot/train`, revision `47141d6fd17f52b65424d246665334914cac3011`, last updated August 31, 2026.
-- Selection: scan all 3,148,882 records and select the newest 100,000 submissions by arXiv ID, from `2605.20790` through `2608.27458`, preserving source order. This covers May–August 2026 in that snapshot, not a live September feed or recently revised older submissions.
+- Selection: scan all 3,148,882 records and select the newest 100,000 submissions by arXiv ID, from `2605.20790` through `2608.27458`, preserving source order. This covers May-August 2026 in that snapshot, not a live September feed or recently revised older submissions.
 - Model: `unsloth/embeddinggemma-300m`, artifact `bfa3c846ac738e62aa61806ef9112d34acb1dc5a`.
 - Runtime: RTX 5090, torch `2.13.0+cu130`, sentence-transformers `6.0.0`, transformers `5.2.0`; BF16 autocast, Flash Attention 2, `torch.compile`, batch size 128, and eight CPU threads. Checkpoint weights used automatic dtype selection, embedding outputs were FP32, and no FP16 was used.
 - Storage: INT8 with gzip level 1 and a binary sign index, using the same deterministic 2,000-record reservoir sample for per-dimension min/max calibration in each run.
@@ -122,7 +120,7 @@ Both saved caches reopened with 100,000 rows and reused hydration without loadin
 
 The decision favors retention of the full model's retrieval behavior over the lowest storage and search cost. The measured gain supports 512d as the common default, while explicit 256d remains available when those costs matter more.
 
-## Hybrid Defaults (February 2026)
+## Hybrid defaults (February 2026)
 
 The earlier hybrid-default sweep below tuned citation/reference/semantic budgets; it did not compare embedding dimensions.
 
@@ -147,7 +145,7 @@ The earlier hybrid-default sweep below tuned citation/reference/semantic budgets
 - `--theme dark`
 - isolated temp cache root (`CITEMESH_CACHE_DIR=/tmp/citemesh-agent-cache...`)
 
-### Hybrid Sweep Matrix
+### Hybrid sweep matrix
 
 Configs tested end-to-end with full CLI execution:
 
@@ -192,16 +190,11 @@ This was the deciding signal within the initial sweep matrix.
 
 Per-run elapsed time has heavy-tail behavior driven by network-bound citation-count enrichment. Use median and upper-quantile runtime when comparing configs; means alone are noisy.
 
-### Retry Policy
-
-Citation-count enrichment is batched and visible in progress output. Long retries deliberately favor completing resumable builds over predictable tail latency; the current policy allows 30 attempts per operation without an elapsed-time deadline. An exhausted batch does not restart per-paper retry budgets. See [CLI Usage](../guides/cli.md) for backoff and interruption behavior.
-
-### Default Decision
+### Default decision
 
 The initial sweep favored `h25_25_25` for legacy connectivity. A later fuzzy-match and abstract-review study favored a more citation-heavy, reference-light allocation. The active values are listed in [CLI Usage](../guides/cli.md).
 
 Why:
 
 - The broad multi-seed sweep established a stable baseline but over-selected off-goal papers in manual relevance checks.
-- Follow-up fuzzy-match and abstract review favored a citation-heavy, reference-light allocation for the discovery goal.
 - The updated defaults improve practical triage for "recent follow-up + foundational prior work" without forcing users to set branch-specific knobs each run.

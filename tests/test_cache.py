@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import json
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,11 @@ import pytest
 from filelock import Timeout
 
 import citemesh.data.cache as cache_module
+from citemesh.cli import cache_ops as cache_ops_module
+from citemesh.data.embedding_cache.constants import (
+    EMBEDDING_CACHE_SCHEMA_VERSION,
+    SCHEMA_VERSION_KEY,
+)
 
 
 def test_cache_operation_lock_blocks_nonblocking_clear(tmp_path: Path) -> None:
@@ -29,6 +35,28 @@ def test_cache_operation_lock_blocks_nonblocking_clear(tmp_path: Path) -> None:
 
     with cache_module.cache_operation_lock(tmp_path, exclusive=True, blocking=False):
         pass
+
+
+def test_embedding_namespace_paper_probe_distinguishes_empty_and_unreadable(
+    tmp_path: Path,
+) -> None:
+    """The cheap namespace probe should preserve unknown metadata failures.
+
+    :param Path tmp_path: Temporary directory holding metadata fixtures.
+    :return None: Verifies populated, empty, and corrupt tri-state results.
+    """
+    metadata_path = tmp_path / "metadata.db"
+    with sqlite3.connect(metadata_path) as connection:
+        connection.execute("CREATE TABLE papers (paper_id TEXT PRIMARY KEY)")
+
+    assert cache_module.embedding_namespace_has_papers(metadata_path) is False
+    with sqlite3.connect(metadata_path) as connection:
+        connection.execute("INSERT INTO papers (paper_id) VALUES ('paper')")
+    assert cache_module.embedding_namespace_has_papers(metadata_path) is True
+
+    corrupt_path = tmp_path / "corrupt.db"
+    corrupt_path.write_bytes(b"not SQLite")
+    assert cache_module.embedding_namespace_has_papers(corrupt_path) is None
 
 
 def test_default_cache_root_honors_override_before_platform(
@@ -156,7 +184,7 @@ def test_atomic_write_text_uses_binary_temp_descriptor(
 
     :param Path tmp_path: Temporary directory for the atomic-write target.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to observe descriptor mode.
-    :return None: Validates descriptor and persisted newline bytes.
+    :return None: Validates parent creation, descriptor mode, and persisted bytes.
     """
     original_mkstemp = cache_module.tempfile.mkstemp
     observed_text_modes: list[bool] = []
@@ -172,7 +200,8 @@ def test_atomic_write_text_uses_binary_temp_descriptor(
         return original_mkstemp(*args, **kwargs)
 
     monkeypatch.setattr(cache_module.tempfile, "mkstemp", _recording_mkstemp)
-    destination = tmp_path / "payload.txt"
+    destination = tmp_path / "missing" / "nested" / "payload.txt"
+    assert not destination.parent.exists()
 
     cache_module.atomic_write_text(destination, "first\nsecond\n")
 
@@ -320,3 +349,86 @@ def test_atomic_write_text_preserves_target_permissions(
     secret.chmod(0o644)
     cache_module.atomic_write_text(secret, "new", mode=0o600)
     assert secret.stat().st_mode & 0o7777 == 0o600
+
+
+def _write_embedding_namespace_schema(db_path: Path, schema_version: int) -> None:
+    """Create the minimal read-only metadata shape used by the cache scanner.
+
+    :param Path db_path: SQLite metadata database to create.
+    :param int schema_version: Embedding cache schema token to persist.
+    :return None: Writes the metadata database.
+    """
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "CREATE TABLE cache_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO cache_metadata (key, value) VALUES (?, ?)",
+            (SCHEMA_VERSION_KEY, str(schema_version)),
+        )
+
+
+def test_embedding_namespace_scan_groups_artifacts_and_flags_dtype_upgrade_cache(
+    tmp_path: Path,
+) -> None:
+    """The scanner must expose reclaimable dtype-keyed namespaces individually.
+
+    :param Path tmp_path: Temporary embedding-cache directory.
+    :return None: Checks grouping, byte accounting, and legacy upgrade status.
+    """
+    current_namespace = "0123456789ab"
+    legacy_namespace = "fedcba987654"
+    orphaned_namespace = "a1b2c3d4e5f6"
+    cleaned_namespace = "123456789abc"
+
+    current_db = tmp_path / f"metadata_{current_namespace}.db"
+    legacy_db = tmp_path / f"metadata_{legacy_namespace}.db"
+    _write_embedding_namespace_schema(current_db, EMBEDDING_CACHE_SCHEMA_VERSION)
+    _write_embedding_namespace_schema(legacy_db, 3)
+
+    current_artifacts = [
+        current_db,
+        tmp_path / f"embeddings_{current_namespace}.h5",
+        tmp_path / f"cache_{current_namespace}.lock",
+    ]
+    legacy_artifacts = [
+        legacy_db,
+        tmp_path / f"embeddings_{legacy_namespace}.h5",
+        tmp_path / f"metadata_{legacy_namespace}.db-journal",
+        tmp_path / f"metadata_{legacy_namespace}.db-wal",
+        tmp_path / f"hydration_{legacy_namespace}.lock",
+    ]
+    orphaned_artifact = tmp_path / f"embeddings_{orphaned_namespace}.h5"
+    cleaned_locks = [
+        tmp_path / f"cache_{cleaned_namespace}.lock",
+        tmp_path / f"hydration_{cleaned_namespace}.lock",
+    ]
+    for index, artifact_path in enumerate(
+        current_artifacts[1:]
+        + legacy_artifacts[1:]
+        + [orphaned_artifact]
+        + cleaned_locks,
+        start=1,
+    ):
+        artifact_path.write_bytes(bytes(index))
+
+    rows = {
+        row.namespace_id: row
+        for row in cache_ops_module._scan_embedding_namespaces(tmp_path)
+    }
+
+    assert set(rows) == {current_namespace, legacy_namespace, orphaned_namespace}
+    assert rows[current_namespace].file_count == len(current_artifacts)
+    assert rows[current_namespace].size_bytes == sum(
+        path.stat().st_size for path in current_artifacts
+    )
+    assert rows[current_namespace].status == "Current schema"
+    assert rows[legacy_namespace].file_count == len(legacy_artifacts)
+    assert rows[legacy_namespace].size_bytes == sum(
+        path.stat().st_size for path in legacy_artifacts
+    )
+    assert rows[legacy_namespace].status.startswith("Legacy dtype-keyed namespace")
+    assert rows[orphaned_namespace].status == (
+        "Orphaned artifact (metadata database missing)"
+    )
+    assert cleaned_namespace not in rows

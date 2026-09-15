@@ -13,6 +13,10 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from citemesh.core.choices import (
+    MODEL_PROFILE_CHOICES as EMBEDDING_MODEL_PROFILE_CHOICES,
+)
+
 QueryFormatter = Callable[[str, dict[str, str] | None], str]
 DocumentFormatter = Callable[[dict[str, str]], str]
 SimilarityFormatter = Callable[[str, dict[str, str] | None], str]
@@ -23,11 +27,6 @@ DEFAULT_EMBEDDING_MODEL_NAME = "unsloth/embeddinggemma-300m"
 DEFAULT_EMBEDDING_MODEL_FALLBACKS: Mapping[str, tuple[str, ...]] = {
     "unsloth/embeddinggemma-300m": ("google/embeddinggemma-300m",),
 }
-EMBEDDING_MODEL_PROFILE_CHOICES: tuple[str, ...] = (
-    "auto",
-    "default",
-    "embeddinggemma",
-)
 
 
 def compose_title_abstract_text(metadata: Mapping[str, object]) -> str:

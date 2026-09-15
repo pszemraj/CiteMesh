@@ -1,4 +1,4 @@
-# Embedding Runtime Policy
+# Embedding runtime policy
 
 How CiteMesh resolves an embedding checkpoint, device, precision, attention backend, and compile mode at run time.
 
@@ -31,7 +31,7 @@ For EmbeddingGemma the symmetric formatter is exactly `task: sentence similarity
 
 The roles keep independent cache namespaces, fingerprints, and storage contracts, and the graph namespace is always float32 with no binary prefilter, so a matching dimension cannot make asymmetric vectors eligible for symmetric scoring. Namespace identity, cross-device reuse, storage precision, and calibration are in [Caching & Data](../guides/caching.md).
 
-Text over the model's token window (prompts and special tokens included) warns before encoding; the encoder truncates anyway, so those embeddings cover only part of the text. Reused cached vectors do not repeat it.
+Inputs exceeding the token window, including prompts and special tokens, are truncated and counted in a warning. The ordinary path reports before encoding; CUDA prefetch reports the completed batch counts after encoding and resets partial counts on a compile retry. Reused cached vectors do not repeat the warning.
 
 ## Device selection
 
@@ -43,9 +43,9 @@ CiteMesh resolves an explicit compute device before loading any model - it never
 
 ## Precision
 
-EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support is reported, bfloat16 on `mps` when torch >= 2.13 and the autocast context is accepted, float32 otherwise. Profiles that do not opt into bf16 autocast run float32 everywhere.
+EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support is reported, bfloat16 on `mps` when torch >= 2.13, and on every device only once a live `torch.autocast` context is entered without raising; float32 otherwise. Profiles that do not opt into bf16 autocast run float32 everywhere.
 
-- Weights load with `dtype="auto"`, preserving the checkpoint dtype. CiteMesh then inspects live parameter and buffer dtypes before binding a cache namespace: float16 is rejected everywhere, bfloat16 unless the device and profile selected the verified bf16 path, anything else outright - so no log line or cache namespace claims float32 for bf16 execution.
+- Weights load with `dtype="auto"`. Floating-point parameters and buffers must be float32, or bfloat16 on a verified BF16 runtime. Float16 and other floating dtypes are rejected; inability to inspect them is also an error. CiteMesh does not silently recast an incompatible checkpoint.
 - Reduced precision is bfloat16 only, through `torch.autocast` around encode calls; a rejected capability, API, version, or context probe falls back to float32. CUDA asks for native support (`is_bf16_supported(including_emulation=False)`), so emulation does not qualify; MPS requires torch >= 2.13; CPU probes native x86/ARM instructions. Final normalization after dimension truncation then runs once in float32 outside autocast, with SentenceTransformers' own encode-time normalization disabled.
 - Attention is profile-driven: EmbeddingGemma prefers `flash_attention_2` on CUDA when `flash_attn` is installed and BF16 is available, while missing FA2, FP32 compute, or an FA2 load failure selects SDPA. MPS uses SDPA, CPU leaves attention automatic. FP32 weights stay FA2-compatible under BF16 autocast, so CiteMesh filters the upstream FP32-weight warning on that verified path only.
 - On Ampere+ CUDA in eager mode, TF32 is scoped to the CUDA matmul and cuDNN convolution backends per encode call, then restored; non-CUDA devices skip it entirely, including `--device cpu` on a CUDA host. CiteMesh selects no OpenVINO or ONNX backend.
@@ -64,7 +64,7 @@ EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support i
 
 The `embeddings` extra provides `torch>=2.9.0` (`>=2.13.0` on macOS, the release verified for MPS bf16), `transformers>=5.2.0`, `sentence-transformers>=5.7.0`, `datasets>=2.14.0`, and `huggingface_hub>=0.24.0`. The automatic-dtype contract comes from Transformers - Sentence Transformers only forwards it, so its floor is the oldest release verified against this stack.
 
-The default suite pins prompt routing, cache separation, and fail-closed vector completeness; real-model MPS and CUDA smokes stay opt-in (`pytest -m slow`, `-m "slow and cuda"`; [Contributing](../../CONTRIBUTING.md#before-you-open-a-pr)).
+The default suite covers prompt routing, cache separation, and complete vector sets. Run real-model checks as described in [Contributing](../../CONTRIBUTING.md#before-you-open-a-pr).
 
 ## Implementation references
 

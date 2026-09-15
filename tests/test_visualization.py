@@ -377,6 +377,156 @@ def test_exporter_serialization_contracts_and_determinism(
     assert edge_x[4] == pytest.approx(float(normalized_layout["z"][0]))
 
 
+def test_exporter_uses_paper_metadata_and_graph_seed_role(tmp_path: Path) -> None:
+    """Paper payloads should own metadata while graph attrs own an explicit role.
+
+    :param Path tmp_path: Isolated GraphML destination.
+    :return None: Checks Paper-only fallback, live metadata, and role precedence.
+    """
+    seed = Paper(
+        paper_id="seed",
+        title="Original seed",
+        year=2020,
+        authors=[Author(name="Alice Original")],
+        citation_count=1,
+        abstract="Original abstract",
+        venue="Original venue",
+        arxiv_id="2001.00001",
+        doi="10.1000/original",
+        categories=["cs.AI"],
+        is_seed=True,
+        is_local_corpus=True,
+    )
+    related = Paper(
+        paper_id="related",
+        title="Related",
+        year=2021,
+        is_seed=True,
+    )
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        paper=seed,
+        title="Stale scalar title",
+        year=1999,
+        authors=["Stale Author"],
+        citation_count=999,
+        abstract="Stale scalar abstract",
+        venue="Stale scalar venue",
+        arxiv_id="1999.99999",
+        doi="10.1000/stale",
+        categories=["stale.category"],
+        is_local_corpus=False,
+    )
+    graph.add_node("related", paper=related, is_seed=False)
+    graph.add_edge("seed", "related", weight=0.5)
+    exporter = GraphExporter(
+        graph,
+        "seed",
+        metadata={"strategy": "citation"},
+        layout={"seed": (0.0, 0.0), "related": (1.0, 0.0)},
+    )
+
+    seed.title = "Updated seed"
+    seed.year = 2025
+    seed.authors = [Author(name="Alice Updated")]
+    seed.citation_count = 42
+    seed.abstract = "Updated abstract"
+    seed.venue = "Updated venue"
+    seed.arxiv_id = "2501.00001"
+    seed.doi = "10.1000/updated"
+    seed.categories = ["cs.IR"]
+
+    payload = exporter.graph_payload()
+    payload_nodes = {node["id"]: node for node in payload["nodes"]}
+    seed_payload = payload_nodes["seed"]
+    assert seed_payload["title"] == "Updated seed"
+    assert seed_payload["year"] == 2025
+    assert seed_payload["authors"] == ["Alice Updated"]
+    assert seed_payload["citation_count"] == 42
+    assert seed_payload["abstract"] == "Updated abstract"
+    assert seed_payload["venue"] == "Updated venue"
+    assert seed_payload["arxiv_id"] == "2501.00001"
+    assert seed_payload["doi"] == "10.1000/updated"
+    assert seed_payload["categories"] == ["cs.IR"]
+    assert seed_payload["is_seed"] is True
+    assert seed_payload["is_local_corpus"] is True
+    assert payload_nodes["related"]["is_seed"] is False
+    edge = payload["edges"][0]
+    assert {edge["source_title"], edge["target_title"]} == {
+        "Updated seed",
+        "Related",
+    }
+    assert {edge["source_label"], edge["target_label"]} == {
+        "Updated, 2025",
+        "Related (2021)",
+    }
+
+    graphml_path = tmp_path / "paper-metadata.graphml"
+    exporter.to_graphml(graphml_path)
+    graphml_seed = nx.read_graphml(graphml_path).nodes["seed"]
+    assert graphml_seed["title"] == "Updated seed"
+    assert int(graphml_seed["citation_count"]) == 42
+
+    package = update_dashboard_package(
+        tmp_path / "dashboard.citemesh.json",
+        graph=graph,
+        seed_id="seed",
+        strategy="citation",
+        payload=payload,
+        build={},
+    )
+    assert package["results"][0]["title"] == "Updated seed"
+    assert graph.nodes["seed"]["title"] == "Stale scalar title"
+
+
+def test_paper_only_export_styling_matches_equivalent_scalar_graph() -> None:
+    """Exporter geometry should use the same effective Paper metadata as payloads.
+
+    :return None: Compares sizes and colors without mutating either source graph.
+    """
+    papers = {
+        "seed": Paper(
+            paper_id="seed",
+            title="Seed",
+            year=2024,
+            citation_count=50,
+            is_seed=True,
+        ),
+        "related": Paper(
+            paper_id="related",
+            title="Related",
+            year=2020,
+            citation_count=5,
+        ),
+    }
+    paper_graph = nx.Graph()
+    scalar_graph = nx.Graph()
+    for paper_id, paper in papers.items():
+        paper_graph.add_node(paper_id, paper=paper)
+        scalar_graph.add_node(
+            paper_id,
+            title=paper.title,
+            year=paper.year,
+            authors=[],
+            citation_count=paper.citation_count,
+            is_seed=paper.is_seed,
+        )
+    paper_graph.add_edge("seed", "related", weight=0.5)
+    scalar_graph.add_edge("seed", "related", weight=0.5)
+    paper_exporter = GraphExporter(paper_graph, "seed")
+    scalar_exporter = GraphExporter(scalar_graph, "seed")
+    theme = get_theme("dark")
+
+    for node_id in papers:
+        assert paper_exporter._node_size(node_id) == scalar_exporter._node_size(node_id)
+        assert paper_exporter._node_color_hex(
+            node_id, theme
+        ) == scalar_exporter._node_color_hex(node_id, theme)
+
+    assert set(paper_graph.nodes["seed"]) == {"paper"}
+
+
 def test_json_export_embeds_geometry_computing_layout_lazily(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -441,6 +591,28 @@ def test_json_payload_without_layout_passes_dashboard_import_contract() -> None:
         assert geometry_key in dashboard_meta
 
 
+def test_graph_payload_rejects_absent_seed_before_replacing_json(
+    tmp_path: Path,
+) -> None:
+    """Schema-stamped graph payloads must identify an included seed node.
+
+    :param Path tmp_path: Isolated output directory.
+    :return None: Checks direct payload validation and atomic JSON preservation.
+    """
+    graph = nx.Graph()
+    graph.add_node("other", title="Other paper")
+    exporter = GraphExporter(graph, "missing", layout={"other": (0.0, 0.0)})
+
+    with pytest.raises(ValueError, match="seed node 'missing'.*not present"):
+        exporter.graph_payload()
+
+    json_path = tmp_path / "existing.json"
+    json_path.write_text("previous valid output", encoding="utf-8")
+    with pytest.raises(ValueError, match="seed node 'missing'.*not present"):
+        exporter.to_json(json_path)
+    assert json_path.read_text(encoding="utf-8") == "previous valid output"
+
+
 def test_exporter_interactive_html_contracts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -478,6 +650,11 @@ def test_exporter_interactive_html_contracts(
         loaders_module, "_load_pyvis_network_class", lambda: FakeNetwork
     )
 
+    seed_paper = graph.nodes[seed_id]["paper"]
+    assert isinstance(seed_paper, Paper)
+    seed_paper.authors = [Author(name="   ")]
+    seed_paper.year = None
+
     out_path = tmp_path / "graph.html"
     out_path.write_text("previous", encoding="utf-8")
     out_path.chmod(0o640)
@@ -492,6 +669,8 @@ def test_exporter_interactive_html_contracts(
     assert len(instance.nodes) == 2
     assert len(instance.edges) == 1
     assert [node_id for node_id, _ in instance.nodes] == ["related", "seed"]
+    node_payloads = dict(instance.nodes)
+    assert "Unknown et al., n.d." in node_payloads[seed_id]["title"]
 
 
 def test_interactive_html_is_self_contained(
@@ -703,6 +882,94 @@ def test_output_path_reuses_existing_seed_directory(
     assert list(tmp_path.iterdir()) == [paper_dir]
 
 
+def test_output_path_uses_paper_title_without_mutating_graph(tmp_path: Path) -> None:
+    """Auto-naming should use live Paper metadata and preserve caller attributes.
+
+    :param Path tmp_path: Isolated output directory.
+    :return None: Checks canonical naming and caller graph immutability.
+    """
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        paper=Paper(paper_id="seed", title="Current Paper Title", year=2025),
+        title="Stale Scalar Title",
+    )
+
+    output_path = render_module.generate_output_path(graph, "seed", tmp_path)
+
+    assert output_path.parent.name.startswith("current-paper-title-")
+    assert graph.nodes["seed"]["title"] == "Stale Scalar Title"
+
+
+def test_nullable_scalar_collections_export_as_empty_lists(tmp_path: Path) -> None:
+    """Missing scalar author/category collections should not break any data writer.
+
+    :param Path tmp_path: Isolated artifact directory.
+    :return None: Checks canonical payload values and representative writer outputs.
+    """
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="Seed",
+        year=None,
+        authors=None,
+        categories=None,
+        is_seed=True,
+    )
+    exporter = GraphExporter(graph, "seed", layout={"seed": (0.0, 0.0)})
+
+    payload = exporter.graph_payload()
+    assert payload["nodes"][0]["authors"] == []
+    assert payload["nodes"][0]["categories"] == []
+
+    json_path = tmp_path / "nullable.json"
+    csv_path = tmp_path / "nullable.csv"
+    bibtex_path = tmp_path / "nullable.bib"
+    graphml_path = tmp_path / "nullable.graphml"
+    exporter.to_json(json_path)
+    exporter.to_csv(csv_path)
+    exporter.to_bibtex(bibtex_path)
+    exporter.to_graphml(graphml_path)
+
+    with csv_path.open(newline="") as handle:
+        row = next(csv.DictReader(handle))
+    assert row["authors"] == ""
+    assert row["categories"] == ""
+    assert "@article" in bibtex_path.read_text(encoding="utf-8")
+    assert ET.parse(graphml_path) is not None
+
+
+@pytest.mark.parametrize(
+    ("raw_citation_count", "expected"),
+    [
+        (True, 0),
+        (False, 0),
+        ("not-a-count", 0),
+        (float("nan"), 0),
+    ],
+)
+def test_graph_payload_normalizes_invalid_citation_metadata(
+    raw_citation_count: object, expected: int
+) -> None:
+    """Graph payloads should use the shared citation-count normalizer.
+
+    :param object raw_citation_count: Invalid source citation-count metadata.
+    :param int expected: Canonical citation count expected in the payload.
+    :return None: Checks graph payload normalization.
+    """
+    graph = nx.Graph()
+    graph.add_node(
+        "seed",
+        title="Seed",
+        citation_count=raw_citation_count,
+        is_seed=True,
+    )
+
+    payload = GraphExporter(graph, "seed", layout={"seed": (0.0, 0.0)}).graph_payload()
+
+    assert payload["nodes"][0]["citation_count"] == expected
+
+
 def test_graphml_export_strips_xml_invalid_characters(tmp_path: Path) -> None:
     """GraphML should round-trip nullable metadata and XML-invalid text."""
     graph, seed_id = _build_graph()
@@ -790,13 +1057,15 @@ def test_json_export_rejects_nonfinite_payload_without_replacing_output(
 
 
 @pytest.mark.parametrize("node_id", ["", " ", " seed", "seed\t"])
+@pytest.mark.parametrize("method", ["to_json", "png"])
 def test_export_rejects_whitespace_ids_before_writing(
-    tmp_path: Path, node_id: str
+    tmp_path: Path, node_id: str, method: str
 ) -> None:
     """Exports must not emit IDs that their own dashboard importer rejects.
 
     :param Path tmp_path: Isolated artifact directory.
     :param str node_id: Empty or non-canonical graph node identifier.
+    :param str method: Structured or static export entry point.
     :return None: Checks a clear error preserves the prior artifact.
     """
     graph = nx.Graph()
@@ -805,8 +1074,73 @@ def test_export_rejects_whitespace_ids_before_writing(
     path = tmp_path / "existing.json"
     path.write_text("previous valid output")
     with pytest.raises(ValueError, match="non-canonical node ID"):
-        exporter.to_json(path)
+        if method == "png":
+            visualize_graph(graph, node_id, path, layout={node_id: (0.0, 0.0)})
+        else:
+            exporter.to_json(path)
     assert path.read_text() == "previous valid output"
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "graph_payload",
+        "to_json",
+        "to_dashboard_html",
+        "to_csv",
+        "to_bibtex",
+        "to_graphml",
+        "to_plotly_html",
+        "to_interactive_html",
+        "png",
+    ],
+)
+def test_exports_reject_node_ids_that_collide_after_stringification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str
+) -> None:
+    """Every exporter must reject distinct graph IDs that serialize identically.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Installs optional dependency stubs.
+    :param str method: Export entry point under test.
+    :return None: Checks a clear failure before an existing output is replaced.
+    """
+    _install_fake_plotly(monkeypatch, figure_cls=_BaseFakeFigure)
+    monkeypatch.setattr(
+        loaders_module,
+        "_load_pyvis_network_class",
+        lambda: (
+            lambda **kwargs: types.SimpleNamespace(
+                set_options=lambda *_args: None,
+            )
+        ),
+    )
+    graph = nx.Graph()
+    graph.add_node(1, title="Integer ID", is_seed=True)
+    graph.add_node("1", title="String ID", is_seed=False)
+    graph.add_edge(1, "1", weight=0.5)
+    exporter = GraphExporter(
+        graph,
+        "1",
+        layout={1: (0.0, 0.0), "1": (1.0, 0.0)},
+    )
+    path = tmp_path / "existing-output"
+    path.write_text("previous valid output", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="both serialize as '1'"):
+        if method == "graph_payload":
+            exporter.graph_payload()
+        elif method == "png":
+            visualize_graph(
+                graph,
+                "1",
+                path,
+                layout={1: (0.0, 0.0), "1": (1.0, 0.0)},
+            )
+        else:
+            getattr(exporter, method)(path)
+
+    assert path.read_text(encoding="utf-8") == "previous valid output"
 
 
 @pytest.mark.parametrize("for_dashboard", [False, True])
@@ -1744,11 +2078,7 @@ def test_exporter_dashboard_runtime_script_contracts(
 ) -> None:
     """Dashboard runtime should stay intact and parse imported HTML safely."""
 
-    class FakeFigure(_BaseFakeFigure):
-        def to_plotly_json(self) -> dict[str, object]:
-            return {"data": self.data, "layout": self.layout}
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
 
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
@@ -2012,13 +2342,7 @@ def _execute_dashboard_runtime_in_node(
     :param bool expect_plotly: Whether valid initial graph data should reach Plotly.
     :return subprocess.CompletedProcess[str]: Completed Node.js process.
     """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is unavailable for dashboard runtime validation")
-
-    harness = (
-        _DASHBOARD_NODE_HARNESS_PRELUDE
-        + r"""
+    harness = r"""
 const expectedStatus = process.argv[2];
 const expectPlotly = process.argv[3] === "true";
 eval(runtime);
@@ -2031,13 +2355,45 @@ if (plotlyCalled !== expectPlotly) {
 }
 process.stdout.write(status.textContent);
 """
+    return _run_dashboard_runtime_in_node(
+        path,
+        harness,
+        [expected_status, str(expect_plotly).lower()],
     )
+
+
+def _run_dashboard_runtime_in_node(
+    path: Path,
+    harness: str,
+    arguments: list[str],
+    *,
+    saved_store: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Launch a generated dashboard runtime in the shared Node.js harness.
+
+    :param Path path: Generated dashboard artifact.
+    :param str harness: JavaScript appended to the shared runtime setup.
+    :param list[str] arguments: Additional process arguments consumed by ``harness``.
+    :param dict[str, str] | None saved_store: Optional initial ``localStorage`` values.
+    :return subprocess.CompletedProcess[str]: Completed Node.js process.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is unavailable for dashboard runtime validation")
+
+    environment = None
+    if saved_store is not None:
+        environment = {
+            **os.environ,
+            "CITEMESH_SAVED_STORE": json.dumps(sorted(saved_store.items())),
+        }
     return subprocess.run(
-        [node, "-e", harness, str(path), expected_status, str(expect_plotly).lower()],
+        [node, "-e", _DASHBOARD_NODE_HARNESS_PRELUDE + harness, str(path), *arguments],
         cwd=Path(__file__).parents[1],
         capture_output=True,
         text=True,
         check=False,
+        env=environment,
     )
 
 
@@ -2058,28 +2414,16 @@ def _probe_dashboard_runtime_in_node(
     :param dict[str, str] | None saved_store: Initial ``localStorage`` contents.
     :return Any: JSON-decoded expression result.
     """
-    node = shutil.which("node")
-    if node is None:
-        pytest.skip("Node.js is unavailable for dashboard runtime validation")
-
-    harness = (
-        _DASHBOARD_NODE_HARNESS_PRELUDE
-        + r"""
+    harness = r"""
 eval(runtime + "\n;globalThis.citemeshProbe = (source) => eval(source);");
 const probed = globalThis.citemeshProbe(process.argv[2]);
 process.stdout.write(JSON.stringify(probed === undefined ? null : probed));
 """
-    )
-    completed = subprocess.run(
-        [node, "-e", harness, str(path), expression],
-        cwd=Path(__file__).parents[1],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={
-            **os.environ,
-            "CITEMESH_SAVED_STORE": json.dumps(sorted((saved_store or {}).items())),
-        },
+    completed = _run_dashboard_runtime_in_node(
+        path,
+        harness,
+        [expression],
+        saved_store=saved_store or {},
     )
     assert completed.returncode == 0, completed.stderr
     return json.loads(completed.stdout)
@@ -2095,11 +2439,7 @@ def test_dashboard_invalid_bootstrap_surfaces_status_in_node(
     tampered payload (blanked strategy) exercises the runtime guard instead.
     """
 
-    class FakeFigure(_BaseFakeFigure):
-        def to_plotly_json(self) -> dict[str, object]:
-            return {"data": self.data, "layout": self.layout}
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
     graph, seed_id = _build_graph()
     graph.graph.clear()
     exporter = GraphExporter(
@@ -2133,11 +2473,7 @@ def test_dashboard_invalid_embedded_collection_keeps_current_graph_in_node(
 ) -> None:
     """A malformed embedded collection should warn while rendering the graph."""
 
-    class FakeFigure(_BaseFakeFigure):
-        def to_plotly_json(self) -> dict[str, object]:
-            return {"data": self.data, "layout": self.layout}
-
-    _install_fake_plotly(monkeypatch, figure_cls=FakeFigure)
+    _install_fake_plotly(monkeypatch, figure_cls=_JsonFakeFigure)
     graph, seed_id = _build_graph()
     exporter = GraphExporter(
         graph,
@@ -2710,6 +3046,34 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     graph.add_edge("arxiv:2411.03884", "abcdef123456", weight=0.7)
     graph.add_edge("arxiv:2411.03884", "s2-candidate-arxiv", weight=0.8)
     graph.add_edge("arxiv:2411.03884", "s2-candidate-doi", weight=0.75)
+    local_nodes = {
+        "content:abc123": {"doi": "10.1109/5.771073"},
+        "arxiv_7": {"arxiv_id": "2501.00001"},
+        "query:abc123": {},
+        "local-source-42": {
+            "doi": "10.5555/local.42",
+            "arxiv_id": "2502.00042",
+            "paper": Paper(
+                paper_id="local-source-42",
+                title="Local paper",
+                year=2025,
+                doi="10.5555/local.42",
+                arxiv_id="2502.00042",
+                is_local_corpus=True,
+            ),
+        },
+        "a" * 40: {
+            "paper": Paper(
+                paper_id="a" * 40,
+                title="Corpus row with S2 ID",
+                year=2025,
+                is_local_corpus=True,
+            ),
+        },
+    }
+    for local_id, external_ids in local_nodes.items():
+        graph.add_node(local_id, title="Local paper", **external_ids)
+        graph.add_edge("arxiv:2411.03884", local_id, weight=0.6)
 
     exporter = GraphExporter(
         graph,
@@ -2721,6 +3085,10 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
             "abcdef123456": (0.0, 1.0),
             "s2-candidate-arxiv": (-1.0, 0.0),
             "s2-candidate-doi": (0.0, -1.0),
+            **{
+                local_id: (2.0, float(index))
+                for index, local_id in enumerate(local_nodes)
+            },
         },
     )
     out_path = tmp_path / "links.dashboard.html"
@@ -2757,27 +3125,63 @@ def test_exporter_dashboard_link_derivation_contracts(tmp_path: Path) -> None:
     assert s2_doi_links["doi"] == "https://doi.org/10.1109/5.771073"
     assert s2_doi_links["arxiv_abs"] is None
 
+    for local_id in ("content:abc123", "arxiv_7", "query:abc123", "local-source-42"):
+        assert nodes[local_id]["links"]["semantic_scholar"] is None
+    assert nodes["content:abc123"]["links"]["doi"] == "https://doi.org/10.1109/5.771073"
+    assert nodes["arxiv_7"]["links"]["arxiv_abs"] == "https://arxiv.org/abs/2501.00001"
+    assert (
+        nodes["local-source-42"]["links"]["doi"] == "https://doi.org/10.5555/local.42"
+    )
+    assert (
+        nodes["local-source-42"]["links"]["arxiv_abs"]
+        == "https://arxiv.org/abs/2502.00042"
+    )
+    assert nodes["local-source-42"]["is_local_corpus"] is True
+    assert nodes["a" * 40]["links"]["semantic_scholar"] == (
+        "https://www.semanticscholar.org/paper/" + "a" * 40
+    )
+    assert not any(nodes["query:abc123"]["links"].values())
+
 
 def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Static render title should retain full seed title text."""
+    """Static rendering should preserve metadata and create its output parents.
+
+    :param Path tmp_path: Isolated output directory.
+    :param pytest.MonkeyPatch monkeypatch: Observes title and sizing inputs.
+    :return None: Checks current metadata, parent creation, and caller preservation.
+    """
     graph = nx.Graph()
     seed_title = "ComputerRL: Scaling End-to-End Online Reinforcement Learning for Computer Use Agents"
     graph.add_node(
         "seed",
-        title=seed_title,
-        year=2025,
-        authors=["Hanyu Lai"],
-        citation_count=15,
+        paper=Paper(
+            paper_id="seed",
+            title=seed_title,
+            year=2025,
+            authors=[Author(name="Hanyu Lai")],
+            citation_count=15,
+        ),
+        title="Stale scalar title",
+        year=1999,
+        authors=["Stale Author"],
+        citation_count=999,
         is_seed=True,
     )
     graph.add_node(
         "related",
-        title="Related Paper",
-        year=2024,
-        authors=["Example Author"],
-        citation_count=3,
+        paper=Paper(
+            paper_id="related",
+            title="Related Paper",
+            year=2024,
+            authors=[Author(name="   ")],
+            citation_count=3,
+        ),
+        title="Stale related title",
+        year=1998,
+        authors=["Stale Author"],
+        citation_count=998,
         is_seed=False,
     )
     graph.add_edge("seed", "related", weight=0.8)
@@ -2786,22 +3190,46 @@ def test_visualize_graph_uses_full_seed_title_without_ellipsis(
     import matplotlib.axes
 
     original_set_title = matplotlib.axes.Axes.set_title
+    compute_sizes_spy = MagicMock(wraps=render_module.compute_node_sizes)
 
     def capture_title(self: Any, label: str, *args: Any, **kwargs: Any) -> Any:
+        """Capture the rendered title while preserving Matplotlib behavior.
+
+        :param Any self: Matplotlib axes instance.
+        :param str label: Title passed by the renderer.
+        :param Any args: Additional positional title arguments.
+        :param Any kwargs: Additional keyword title arguments.
+        :return Any: Matplotlib title object.
+        """
         captured["title"] = label
         return original_set_title(self, label, *args, **kwargs)
 
     monkeypatch.setattr(matplotlib.axes.Axes, "set_title", capture_title)
+    monkeypatch.setattr(render_module, "compute_node_sizes", compute_sizes_spy)
 
+    output_path = tmp_path / "missing" / "nested" / "graph.png"
+    assert not output_path.parent.exists()
     visualize_graph(
         graph,
         "seed",
-        tmp_path / "graph.png",
+        output_path,
         layout={"seed": np.array([0.0, 0.0]), "related": np.array([1.0, 1.0])},
     )
 
+    assert output_path.is_file()
     assert "..." not in captured["title"]
     assert seed_title in captured["title"].replace("\n", " ")
+    effective_seed = compute_sizes_spy.call_args.args[0].nodes["seed"]
+    assert effective_seed["title"] == seed_title
+    assert effective_seed["year"] == 2025
+    assert effective_seed["authors"] == ["Hanyu Lai"]
+    assert effective_seed["citation_count"] == 15
+    assert effective_seed["is_seed"] is True
+    effective_related = compute_sizes_spy.call_args.args[0].nodes["related"]
+    assert effective_related["authors"] == ["   "]
+    assert effective_related["is_seed"] is False
+    assert graph.nodes["seed"]["title"] == "Stale scalar title"
+    assert graph.nodes["related"]["authors"] == ["Stale Author"]
 
 
 def test_visualize_graph_metadata_overlay_is_compact(

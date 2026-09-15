@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs
 
 import pytest
 import requests
@@ -622,16 +623,19 @@ def test_related_paper_retry_discards_partial_attempt_results() -> None:
         SimpleNamespace(paper=SimpleNamespace(paperId="second")),
     ]
     client.client.get_paper_references = MagicMock(return_value=records)
-    client._convert_api_paper = MagicMock(
-        side_effect=[
-            Paper(paper_id="first", title="First", year=None),
-            RuntimeError("temporary conversion failure"),
-            Paper(paper_id="first", title="First", year=None),
-            Paper(paper_id="second", title="Second", year=None),
-        ]
-    )
-
-    with patch("time.sleep"):
+    with (
+        patch.object(
+            s2.payloads,
+            "_convert_api_paper",
+            side_effect=[
+                Paper(paper_id="first", title="First", year=None),
+                RuntimeError("temporary conversion failure"),
+                Paper(paper_id="first", title="First", year=None),
+                Paper(paper_id="second", title="Second", year=None),
+            ],
+        ),
+        patch("time.sleep"),
+    ):
         papers = client.get_paper_references("seed", limit=2)
 
     assert [paper.paper_id for paper in papers] == ["first", "second"]
@@ -1069,7 +1073,7 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         ],
         "fieldsOfStudy": ["cs.AI", "cs.LG"],
     }
-    paper = client._convert_recommendation(payload)
+    paper = s2.payloads._convert_recommendation(payload)
 
     assert paper is not None
     assert paper.paper_id == "p1"
@@ -1164,6 +1168,15 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
     with pytest.raises(ValueError, match="limit must be an integer"):
         client.get_recommended_papers("seed", limit=True)  # type: ignore[arg-type]
 
+    client._request_json = MagicMock(
+        side_effect=AssertionError("invalid limits must fail before transport")
+    )
+    with pytest.raises(ValueError, match="limit must be at most 500"):
+        client.get_recommended_papers("seed", limit=501)
+    with pytest.raises(ValueError, match="limit must be at most 1000"):
+        client.search_papers("attention", limit=1001)
+    client._request_json.assert_not_called()
+
     encoding_cases = [
         ("10.1145/3133956.3134029", "10.1145%2F3133956.3134029"),
         ("arxiv:math/0301234v1", "arxiv%3Amath%2F0301234"),
@@ -1174,6 +1187,113 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         client.get_recommended_papers(raw_id, limit=1)
         url = client._request_json.call_args.args[0]
         assert url.endswith(expected_suffix)
+
+
+def test_search_papers_paginates_above_graph_request_limit() -> None:
+    """Search should split a 101-result request into endpoint-safe pages.
+
+    :return None: Checks page sizes, offsets, and ordered result accumulation.
+    """
+    first_page = [_paper_payload(paper_id=f"p{i}") for i in range(100)]
+    second_page = [_paper_payload(paper_id="p100")]
+    client = SemanticScholarClient(timeout=1)
+    client._request_json = MagicMock(
+        side_effect=[
+            {"offset": 0, "next": 100, "data": first_page},
+            {"offset": 100, "data": second_page},
+        ]
+    )
+
+    results = client.search_papers("attention", limit=101)
+
+    assert [paper.paper_id for paper in results] == [f"p{i}" for i in range(101)]
+    assert client._request_json.call_count == 2
+    first_params = client._request_json.call_args_list[0].args[1]
+    second_params = client._request_json.call_args_list[1].args[1]
+    assert (first_params["limit"], first_params["offset"]) == (100, 0)
+    assert (second_params["limit"], second_params["offset"]) == (1, 100)
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_search_papers_retries_later_page_not_found(recovers: bool) -> None:
+    """A later-page 404 should use the page retry budget instead of erasing results.
+
+    :param bool recovers: Whether the later page succeeds on its second attempt.
+    :return None: Checks per-page recovery and strict exhaustion behavior.
+    """
+    first_page = [_paper_payload(paper_id=f"p{i}") for i in range(100)]
+    final_page = [_paper_payload(paper_id="p100")]
+    responses = [
+        _MockResponse(200, {"offset": 0, "next": 100, "data": first_page}),
+        _MockResponse(404),
+    ]
+    if recovers:
+        responses.append(_MockResponse(200, {"offset": 100, "data": final_page}))
+    else:
+        responses.extend(_MockResponse(404) for _ in range(API_CONFIG.max_retries - 1))
+
+    client = SemanticScholarClient(timeout=1)
+    client._rate_limit = MagicMock()
+    client._session.get = MagicMock(side_effect=responses)
+    with patch("time.sleep") as sleep_mock:
+        if recovers:
+            results = client.search_papers(
+                "attention", limit=101, raise_on_unavailable=True
+            )
+            assert [paper.paper_id for paper in results] == [
+                *(f"p{i}" for i in range(100)),
+                "p100",
+            ]
+        else:
+            with pytest.raises(
+                semantic_module.SemanticScholarUnavailableError,
+                match="unreachable while searching for 'attention'",
+            ):
+                client.search_papers("attention", limit=101, raise_on_unavailable=True)
+
+    expected_page_attempts = 2 if recovers else API_CONFIG.max_retries
+    assert client._session.get.call_count == 1 + expected_page_attempts
+    assert sleep_mock.call_count == expected_page_attempts - 1
+
+
+@pytest.mark.parametrize(
+    ("method", "paper_key"),
+    [
+        ("get_paper_references", "citedPaper"),
+        ("get_paper_citations", "citingPaper"),
+    ],
+)
+def test_related_papers_use_sdk_page_size_without_capping_total(
+    method: str, paper_key: str
+) -> None:
+    """Relation totals above 1,000 should consume the SDK's paginated iterator.
+
+    :param str method: Public relation endpoint using the real SDK.
+    :param str paper_key: Provider field containing the related paper.
+    :return None: Checks page traversal and the caller's total with HTTP mocked.
+    """
+    records = [{paper_key: _paper_payload(paper_id=f"r{i}")} for i in range(1002)]
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(200, {"offset": 0, "next": 1000, "data": records[:1000]}),
+                _MockResponse(200, {"offset": 1000, "data": records[1000:]}),
+                AssertionError("the requested total needs only two pages"),
+            ]
+        )
+
+        papers = getattr(client, method)("seed", limit=1001)
+
+        assert [paper.paper_id for paper in papers] == [f"r{i}" for i in range(1001)]
+        assert client._session.get.call_count == 2
+        for call, offset in zip(client._session.get.call_args_list, (0, 1000)):
+            assert call.args[0].endswith(
+                f"/paper/seed/{method.removeprefix('get_paper_')}"
+            )
+            params = parse_qs(call.kwargs["params"])
+            assert params["offset"] == [str(offset)]
+            assert params["limit"] == ["1000"]
 
 
 @pytest.mark.parametrize(
@@ -1261,8 +1381,6 @@ def test_partial_discovery_fields_do_not_replace_cached_paper_metadata(
 
 def test_external_id_fallback_from_paper_id_contracts() -> None:
     """Paper-ID fallback should populate arXiv/DOI fields when external IDs are absent."""
-    client = SemanticScholarClient(timeout=1)
-
     arxiv_payload = {
         "paperId": "arxiv:2411.03884v2",
         "title": "ArXiv Paper",
@@ -1282,8 +1400,8 @@ def test_external_id_fallback_from_paper_id_contracts() -> None:
         "fieldsOfStudy": [],
     }
 
-    arxiv = client._convert_recommendation(arxiv_payload)
-    doi = client._convert_recommendation(doi_payload)
+    arxiv = s2.payloads._convert_recommendation(arxiv_payload)
+    doi = s2.payloads._convert_recommendation(doi_payload)
 
     assert arxiv is not None
     assert arxiv.arxiv_id == "2411.03884"
@@ -1522,14 +1640,14 @@ def test_reference_payload_normalization_keeps_cache_and_live_contracts() -> Non
         "r3",
         "r4",
     ]
-    assert SemanticScholarClient._extract_reference_ids(mixed_payload) == [
+    assert s2.payloads._extract_reference_ids(mixed_payload) == [
         "r1",
         "r2",
         "r3",
         "r4",
     ]
     assert s2.payloads._coerce_cached_reference_ids(malformed_payload) is None
-    assert SemanticScholarClient._extract_reference_ids(malformed_payload) == []
+    assert s2.payloads._extract_reference_ids(malformed_payload) == []
 
 
 @pytest.mark.parametrize(
@@ -1790,7 +1908,7 @@ def test_anonymous_pool_notice_logged_once(
         if "shared anonymous Semantic" in record.getMessage()
     ]
     assert len(notices) == 1
-    assert semantic_module.payloads.S2_API_KEY_SIGNUP_URL in notices[0].getMessage()
+    assert "429" in notices[0].getMessage()
 
 
 def test_get_paper_raise_on_unavailable_distinguishes_outage() -> None:
@@ -2358,24 +2476,22 @@ def test_rate_limit_detection_uses_status_or_sdk_exception_contract() -> None:
 
     :return None: Checks HTTP status evidence and the SDK's exact exception shape.
     """
-    assert SemanticScholarClient._is_rate_limit_error(
+    assert s2.retry._is_rate_limit_error(
         requests.HTTPError(response=_MockResponse(429))
     )
-    assert SemanticScholarClient._is_rate_limit_error(
+    assert s2.retry._is_rate_limit_error(
         ConnectionRefusedError("HTTP status 429 Too Many Requests.")
     )
-    assert SemanticScholarClient._is_rate_limit_error(
+    assert s2.retry._is_rate_limit_error(
         semantic_module.errors._RetryableRequestError("HTTP 429", rate_limited=True)
     )
-    assert not SemanticScholarClient._is_rate_limit_error(
+    assert not s2.retry._is_rate_limit_error(
         semantic_module.errors._RetryableRequestError("pagination HTTP 404")
     )
-    assert not SemanticScholarClient._is_rate_limit_error(
+    assert not s2.retry._is_rate_limit_error(
         requests.HTTPError("https://example/paper/42901", response=_MockResponse(503))
     )
-    assert not SemanticScholarClient._is_rate_limit_error(
-        ValueError("invalid ID 42901")
-    )
+    assert not s2.retry._is_rate_limit_error(ValueError("invalid ID 42901"))
 
 
 @pytest.mark.parametrize("batch", [False, True])

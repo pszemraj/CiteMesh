@@ -7,6 +7,29 @@ import re
 from typing import Any
 from urllib.parse import quote
 
+from citemesh.core.paper_ids import (
+    canonicalize_or_none,
+    external_ids_from_canonical_paper_id,
+    is_local_corpus_paper_id,
+    recognize_arxiv_identifier,
+)
+
+
+def _semantic_scholar_resolves_id(node_id: str) -> bool:
+    """Return whether a corpus primary ID is a supported external paper identity.
+
+    :param str node_id: Graph node identifier.
+    :return bool: Whether the ID is an arXiv, DOI, or opaque S2 paper ID.
+    """
+    canonical_id = canonicalize_or_none(node_id) or node_id
+    arxiv_id, doi = external_ids_from_canonical_paper_id(canonical_id)
+    return bool(
+        arxiv_id
+        or doi
+        or recognize_arxiv_identifier(canonical_id, allow_bare=True)
+        or re.fullmatch(r"(?:s2:)?[0-9a-f]{40}", canonical_id, flags=re.IGNORECASE)
+    )
+
 
 def _safe_script_content(raw: str) -> str:
     """Escape script-closing tokens in trusted inline script bodies.
@@ -78,12 +101,19 @@ def _derive_links(
         explicit ``arxiv_id``/``doi`` values.
     :return Dict[str, Optional[str]]: External links dictionary.
     """
+    local_corpus_record = bool(
+        isinstance(node_payload, dict) and node_payload.get("is_local_corpus", False)
+    )
     links: dict[str, str | None] = {
         "arxiv_abs": None,
         "arxiv_pdf": None,
         "doi": None,
         "semantic_scholar": (
-            f"https://www.semanticscholar.org/paper/{quote(node_id, safe='')}"
+            None
+            if is_local_corpus_paper_id(node_id)
+            or node_id.startswith("query:")
+            or (local_corpus_record and not _semantic_scholar_resolves_id(node_id))
+            else f"https://www.semanticscholar.org/paper/{quote(node_id, safe='')}"
         ),
     }
 
