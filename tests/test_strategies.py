@@ -1421,8 +1421,11 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
     assert builder.embedding_builder is not None
     assert builder.embedding_builder.dataset_source == "example/arxiv"
     assert builder.embedding_builder.corpus_size is None
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
-        builder.embedding_builder, "resolve_cached_corpus_seed", lambda _seed_id: None
+        builder.embedding_builder,
+        "resolve_cached_corpus_seed",
+        lambda _seed_id, **_kwargs: None,
     )
     collect_corpus = MagicMock(
         return_value={"seed": seed, "semantic": _paper("semantic")}
@@ -1440,7 +1443,9 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
         "references": "unavailable",
         "citations": "unavailable",
     }
-    collect_corpus.assert_called_once_with("seed", seed_paper=seed)
+    collect_corpus.assert_called_once_with(
+        "seed", seed_paper=seed, _corpus_prepared=True
+    )
     client.get_paper.assert_called_once_with("seed", raise_on_unavailable=True)
     client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
     client.get_recommended_papers.assert_not_called()
@@ -1544,6 +1549,7 @@ def test_hybrid_collection_merges_and_tracks_sources() -> None:
         "c1": "referenced_by_seed",
     }
     assert builder.embedding_builder is not None
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
 
     def _collect_semantic(*_args: object, **_kwargs: object) -> dict[str, Paper]:
@@ -1561,6 +1567,7 @@ def test_hybrid_collection_merges_and_tracks_sources() -> None:
     builder.embedding_builder.collect_papers.assert_called_once_with(
         "seed",
         seed_paper=seed,
+        _corpus_prepared=True,
     )
     assert builder.paper_sources["seed"] == "citation"
     assert builder.paper_sources["s1"] == "semantic"
@@ -1823,8 +1830,11 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
 
     builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
     assert builder.embedding_builder is not None
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
-        builder.embedding_builder, "resolve_cached_corpus_seed", lambda _seed_id: None
+        builder.embedding_builder,
+        "resolve_cached_corpus_seed",
+        lambda _seed_id, **_kwargs: None,
     )
     builder.embedding_builder.collect_papers = MagicMock(
         side_effect=RuntimeError("semantic backend unavailable")
@@ -1849,6 +1859,7 @@ def test_hybrid_collection_preserves_semantic_scholar_outage_type() -> None:
     seed = _seed_paper()
     builder.citation_builder.collect_papers = MagicMock(return_value={"seed": seed})
     assert builder.embedding_builder is not None
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
     builder.embedding_builder.collect_papers = MagicMock(
         side_effect=SemanticScholarUnavailableError("semantic service outage")
@@ -2045,8 +2056,11 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     }
     builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
     assert builder.embedding_builder is not None
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
-        builder.embedding_builder, "resolve_cached_corpus_seed", lambda _seed_id: None
+        builder.embedding_builder,
+        "resolve_cached_corpus_seed",
+        lambda _seed_id, **_kwargs: None,
     )
     builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
     monkeypatch.setattr(
@@ -2099,8 +2113,11 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
     }
     builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
     assert builder.embedding_builder is not None
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
-        builder.embedding_builder, "resolve_cached_corpus_seed", lambda _seed_id: None
+        builder.embedding_builder,
+        "resolve_cached_corpus_seed",
+        lambda _seed_id, **_kwargs: None,
     )
     builder.embedding_builder.collect_papers = MagicMock(return_value=semantic_papers)
     monkeypatch.setattr(
@@ -2232,24 +2249,42 @@ def test_max_papers_is_total_node_cap_including_seed(
         builder.client.get_paper.return_value = _seed_paper()
         builder._load_model = lambda: None
         builder._resolve_model_fingerprint = lambda: "test-fingerprint"
+        builder._prepare_corpus_for_build = lambda: None
         builder._update_citation_counts = lambda _: None
-        builder._select_candidates = lambda _seed_embedding, *, use_streaming: [
-            (
-                "c1",
-                {"title": "Paper c1", "abstract": "A", "authors": [], "categories": []},
-                np.array([1.0, 0.0], dtype=np.float32),
-            ),
-            (
-                "c2",
-                {"title": "Paper c2", "abstract": "B", "authors": [], "categories": []},
-                np.array([0.0, 1.0], dtype=np.float32),
-            ),
-            (
-                "c3",
-                {"title": "Paper c3", "abstract": "C", "authors": [], "categories": []},
-                np.array([0.5, 0.5], dtype=np.float32),
-            ),
-        ]
+        builder._select_candidates = (
+            lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
+                (
+                    "c1",
+                    {
+                        "title": "Paper c1",
+                        "abstract": "A",
+                        "authors": [],
+                        "categories": [],
+                    },
+                    np.array([1.0, 0.0], dtype=np.float32),
+                ),
+                (
+                    "c2",
+                    {
+                        "title": "Paper c2",
+                        "abstract": "B",
+                        "authors": [],
+                        "categories": [],
+                    },
+                    np.array([0.0, 1.0], dtype=np.float32),
+                ),
+                (
+                    "c3",
+                    {
+                        "title": "Paper c3",
+                        "abstract": "C",
+                        "authors": [],
+                        "categories": [],
+                    },
+                    np.array([0.5, 0.5], dtype=np.float32),
+                ),
+            ]
+        )
         builder._encode_texts = lambda texts, **kwargs: np.array(
             [[1.0, 0.0] for _ in texts], dtype=np.float32
         )
@@ -2280,6 +2315,12 @@ def test_max_papers_is_total_node_cap_including_seed(
             self.retrieval_embeddings: dict[str, np.ndarray] = {}
             self.embeddings: dict[str, np.ndarray] = {}
 
+        def _prepare_corpus_for_build(self) -> None:
+            """Represent completed preparation in this capacity-only fake.
+
+            :return None: Performs no I/O.
+            """
+
         def collect_papers(self, seed_id: str, **_: object) -> dict[str, Paper]:
             del seed_id
             self.retrieval_embeddings = {
@@ -2288,7 +2329,7 @@ def test_max_papers_is_total_node_cap_including_seed(
             }
             return {"seed": _seed_paper(), "s1": _paper("s1"), "s2": _paper("s2")}
 
-        def resolve_cached_corpus_seed(self, seed_id: str) -> None:
+        def resolve_cached_corpus_seed(self, seed_id: str, **_: object) -> None:
             """Return no pre-resolved seed for this capacity-only fake.
 
             :param str seed_id: Seed identifier unused by the fake.
@@ -2398,6 +2439,11 @@ def test_corpus_collection_preserves_results_when_citation_counts_are_rejected(
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
         builder, "_resolve_model_fingerprint", lambda: "test-fingerprint"
+    )
+    monkeypatch.setattr(
+        builder,
+        "_prepare_corpus_for_build",
+        MagicMock(),
     )
     monkeypatch.setattr(builder, "_encode_texts", lambda *_args, **_kwargs: [vector])
     monkeypatch.setattr(
@@ -3033,8 +3079,11 @@ def test_hybrid_collection_collapses_identifier_bridge_classes(
         doi_record.paper_id: "cites_seed",
     }
     assert builder.embedding_builder is not None
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
-        builder.embedding_builder, "resolve_cached_corpus_seed", lambda _seed_id: None
+        builder.embedding_builder,
+        "resolve_cached_corpus_seed",
+        lambda _seed_id, **_kwargs: None,
     )
     builder.embedding_builder.collect_papers = MagicMock(
         return_value={bridge.paper_id: bridge}
@@ -3344,6 +3393,12 @@ def test_embedding_corpus_local_search_holds_hydration_operation_lock(
     )
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(builder, "_ensure_cache_model_fingerprint", lambda: None)
+    hydrate = MagicMock(
+        side_effect=AssertionError(
+            "local search must not mutate corpus lifecycle state"
+        )
+    )
+    monkeypatch.setattr(builder, "_ensure_cache_hydrated", hydrate)
     builder.model = SeededRandomEncodeModel(embedding_dim=4)
     cache = builder.embedding_cache
     lock_held = False
@@ -3374,6 +3429,7 @@ def test_embedding_corpus_local_search_holds_hydration_operation_lock(
     cache.search = MagicMock(side_effect=search)
 
     assert builder.search_local("cached topic", top_k=2) == []
+    hydrate.assert_not_called()
     cache.hydration_operation_lock.assert_called_once_with()
     assert lock_held is False
 

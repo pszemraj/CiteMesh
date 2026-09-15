@@ -599,13 +599,17 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             )
 
         cached_corpus_seed: Paper | None = None
+        corpus_prepared = False
         if (
             self.embedding_builder is not None
             and self.semantic_source == "arxiv-corpus"
         ):
             try:
+                self.embedding_builder._prepare_corpus_for_build()
+                corpus_prepared = True
                 cached_corpus_seed = self.embedding_builder.resolve_cached_corpus_seed(
-                    seed_id
+                    seed_id,
+                    _corpus_prepared=True,
                 )
                 if cached_corpus_seed is not None:
                     self.embedding_builder.enrich_cached_corpus_seed(cached_corpus_seed)
@@ -713,6 +717,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                 semantic_papers = self.embedding_builder.collect_papers(
                     seed_id,
                     seed_paper=seed_paper,
+                    _corpus_prepared=corpus_prepared,
                 )
             else:
                 # Candidate mode: the citation branch already covers references

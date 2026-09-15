@@ -838,6 +838,7 @@ class EmbeddingGraphBuilder(
         seed_id: str,
         *,
         seed_paper: Paper | None = None,
+        _corpus_prepared: bool = False,
         **kwargs: Any,
     ) -> dict[str, Paper]:
         """
@@ -846,6 +847,8 @@ class EmbeddingGraphBuilder(
         :param str seed_id: Seed paper identifier (ArXiv ID or text query)
         :param Optional[Paper] seed_paper: Optional pre-fetched seed paper metadata to
             reuse instead of fetching the seed from Semantic Scholar again.
+        :param bool _corpus_prepared: Whether a hybrid parent prepared this corpus
+            for the current collection operation.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -854,7 +857,16 @@ class EmbeddingGraphBuilder(
         self.embeddings = {}
         self.candidate_source_status = {}
 
-        resolved_seed_paper = self.resolve_seed_paper(seed_id, seed_paper)
+        corpus_prepared = _corpus_prepared
+        if self.semantic_source == "arxiv-corpus" and not corpus_prepared:
+            self._prepare_corpus_for_build()
+            corpus_prepared = True
+
+        resolved_seed_paper = self.resolve_seed_paper(
+            seed_id,
+            seed_paper,
+            _corpus_prepared=corpus_prepared,
+        )
         papers[resolved_seed_paper.paper_id] = resolved_seed_paper
 
         seed_identities = IdentityRegistry()
@@ -876,27 +888,31 @@ class EmbeddingGraphBuilder(
             seed_identities,
             seed_embedding,
             resolved_seed_paper,
+            corpus_prepared=corpus_prepared,
         )
         return papers
 
     def resolve_seed_paper(
-        self, seed_id: str, seed_paper: Paper | None = None
+        self,
+        seed_id: str,
+        seed_paper: Paper | None = None,
+        *,
+        _corpus_prepared: bool = False,
     ) -> Paper:
-        """Resolve a build seed only after preparing its persistent namespace.
+        """Resolve a build seed only after making its corpus namespace current.
 
-        Corpus metadata belongs to the artifact-bound retrieval namespace. An
-        explicit rebuild may clear that namespace in any earlier public preflight,
-        so its durable lifecycle marker—not the one-shot clear request—controls
-        whether corpus rows must be restored before a cache-only ID lookup.
+        Corpus migration, recovery, and refresh can change both the seed metadata
+        and which primary ID represents it. They must finish before final lookup.
 
         :param str seed_id: Seed paper identifier or free-text query.
         :param Optional[Paper] seed_paper: Caller-provided bibliographic metadata.
+        :param bool _corpus_prepared: Whether the current collection operation
+            already completed corpus preparation.
         :return Paper: Resolved seed carrying the seed role for this build.
         """
         if self.semantic_source == "arxiv-corpus":
-            cache = self.prepare_embedding_cache()
-            if seed_paper is None:
-                self._restore_corpus_before_seed_lookup(cache)
+            if not _corpus_prepared:
+                self._prepare_corpus_for_build()
         else:
             self._load_model()
         resolved_seed = self._resolve_seed_paper(seed_id, seed_paper)
@@ -904,48 +920,30 @@ class EmbeddingGraphBuilder(
             self.enrich_cached_corpus_seed(resolved_seed)
         return resolved_seed
 
-    def resolve_cached_corpus_seed(self, seed_id: str) -> Paper | None:
+    def resolve_cached_corpus_seed(
+        self, seed_id: str, *, _corpus_prepared: bool = False
+    ) -> Paper | None:
         """Resolve a seed from the selected corpus cache without provider calls.
 
-        A force rebuild may have been consumed by an earlier public preflight.
-        The durable hydration marker therefore controls whether the cleared corpus
-        must be restored before this lookup.
-
         :param str seed_id: Cached current, legacy, or source-primary identifier.
+        :param bool _corpus_prepared: Whether the current hybrid operation already
+            completed corpus preparation.
         :return Optional[Paper]: Cached seed metadata, or ``None`` for a cache miss.
         :raises ValueError: If a recognized local-only ID is absent or incompatible.
         """
         if self.semantic_source != "arxiv-corpus":
             return None
-        cache = self.prepare_embedding_cache()
-        self._restore_corpus_before_seed_lookup(cache)
+        if not _corpus_prepared:
+            self._prepare_corpus_for_build()
         return self._resolve_cached_corpus_seed(seed_id)
 
-    def _restore_corpus_before_seed_lookup(self, cache: EmbeddingCache) -> None:
-        """Restore a compatible non-current corpus before resolving its seed.
+    def _prepare_corpus_for_build(self) -> None:
+        """Complete corpus lifecycle work before resolving a build seed.
 
-        The in-memory force-rebuild flag covers a clear performed by this builder.
-        Persisted incomplete hydration metadata covers the same recovery boundary
-        after a process restart. The established hydration path owns the detailed
-        compatibility checks and resumes only missing rows when safe.
-
-        :param EmbeddingCache cache: Prepared artifact-bound corpus namespace.
-        :return None: Hydrates or resumes the cache when its persisted state requires it.
+        :return None: Makes the artifact-bound corpus current for this operation.
         """
-        cached_source = cache.get_hydrated_dataset_source()
-        persisted_state_needs_hydration = (
-            cached_source == self.dataset_source
-            and not cache.is_hydrated(
-                self.dataset_split,
-                self.corpus_size,
-                dataset_source=self.dataset_source,
-            )
-        )
-        if (
-            self._force_rebuild_seed_hydration_pending
-            or persisted_state_needs_hydration
-        ):
-            self._ensure_cache_hydrated(use_streaming=self.use_streaming)
+        self.prepare_embedding_cache()
+        self._ensure_cache_hydrated(use_streaming=self.use_streaming)
 
     def enrich_cached_corpus_seed(self, seed: Paper) -> None:
         """Merge optional provider evidence without replacing a local seed ID.
@@ -1117,6 +1115,8 @@ class EmbeddingGraphBuilder(
         seed_identities: IdentityRegistry,
         seed_embedding: np.ndarray,
         seed_paper: Paper,
+        *,
+        corpus_prepared: bool,
     ) -> None:
         """Search the hydrated corpus cache and admit the closest papers.
 
@@ -1124,6 +1124,7 @@ class EmbeddingGraphBuilder(
         :param IdentityRegistry seed_identities: Alias registry for admitted papers.
         :param np.ndarray seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Canonical seed paper that always survives reconciliation.
+        :param bool corpus_prepared: Whether lifecycle work finished before seed lookup.
         :return None: Extends ``papers`` in place and backfills citation counts.
         """
         use_streaming = self.use_streaming
@@ -1136,6 +1137,7 @@ class EmbeddingGraphBuilder(
         candidates = self._select_candidates(
             seed_embedding,
             use_streaming=use_streaming,
+            corpus_prepared=corpus_prepared,
         )
 
         # Reconcile the complete bounded ranking before applying the graph cap. A
@@ -1426,17 +1428,24 @@ class EmbeddingGraphBuilder(
         return False
 
     def _select_candidates(
-        self, seed_embedding: np.ndarray, use_streaming: bool
+        self,
+        seed_embedding: np.ndarray,
+        use_streaming: bool,
+        *,
+        corpus_prepared: bool = False,
     ) -> list[tuple[str, dict, np.ndarray]]:
-        """Select candidates after hydrating cache with a specific loading mode.
+        """Select candidates from a cache current for this collection operation.
 
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
         :param bool use_streaming: Whether hydration should stream the dataset.
+        :param bool corpus_prepared: Whether the caller completed lifecycle work before
+            encoding the seed. The default preserves safe standalone helper behavior.
         :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples sorted by similarity.
         """
         self._ensure_cache_model_fingerprint()
         with self.embedding_cache.hydration_operation_lock():
-            self._ensure_cache_hydrated(use_streaming=use_streaming)
+            if not corpus_prepared:
+                self._ensure_cache_hydrated(use_streaming=use_streaming)
             return self._search_cache_candidates(seed_embedding)
 
     def _update_citation_counts(self, papers: dict[str, Paper]) -> None:

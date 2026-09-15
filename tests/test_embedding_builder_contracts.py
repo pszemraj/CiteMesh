@@ -312,15 +312,17 @@ def _install_deterministic_builder_runtime(
     builder: EmbeddingGraphBuilder,
     *,
     fingerprint: str,
+    model: Any | None = None,
 ) -> None:
     """Install a tiny encoder while preserving lazy artifact binding.
 
     :param pytest.MonkeyPatch monkeypatch: Runtime boundary patch fixture.
     :param EmbeddingGraphBuilder builder: Fresh builder receiving the fake runtime.
     :param str fingerprint: Artifact identity shared by lifecycle operations.
+    :param Optional[Any] model: Deterministic encoder override.
     :return None: Installs the deterministic runtime in-place.
     """
-    model = ConstantEncodeModel()
+    runtime_model = ConstantEncodeModel() if model is None else model
 
     def load_model() -> None:
         """Mimic a fresh load whose immutable artifact is not resolved yet.
@@ -329,7 +331,7 @@ def _install_deterministic_builder_runtime(
         """
         if builder.model is not None:
             return
-        builder.model = model
+        builder.model = runtime_model
         builder._active_model_name = builder.model_name
         builder._bind_embedding_cache_to_active_model()
 
@@ -4234,6 +4236,11 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder)
+    monkeypatch.setattr(
+        builder,
+        "_prepare_corpus_for_build",
+        MagicMock(),
+    )
     builder.client.get_paper.return_value = seed
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
@@ -4246,7 +4253,7 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming: [
+        lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
             (
                 "arxiv:2608.15411",
                 {
@@ -4305,6 +4312,11 @@ def test_collect_papers_deduplicates_corpus_candidates_by_strong_identity(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder)
+    monkeypatch.setattr(
+        builder,
+        "_prepare_corpus_for_build",
+        MagicMock(),
+    )
     builder.client.get_paper.return_value = seed
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
@@ -4326,7 +4338,7 @@ def test_collect_papers_deduplicates_corpus_candidates_by_strong_identity(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming: [
+        lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
             ("source-a", {**shared_metadata, "abstract": ""}, first_vector),
             (
                 "source-b",
@@ -4374,6 +4386,11 @@ def test_collect_papers_corpus_bridge_collapses_prior_alias_classes(
         client=MagicMock(),
     )
     _pin_model_fingerprint(monkeypatch, builder)
+    monkeypatch.setattr(
+        builder,
+        "_prepare_corpus_for_build",
+        MagicMock(),
+    )
     builder.client.get_paper.return_value = seed
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
@@ -4390,7 +4407,7 @@ def test_collect_papers_corpus_bridge_collapses_prior_alias_classes(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming: [
+        lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
             (
                 "arxiv:2608.15412",
                 {"title": "Bridge work", "year": 2024, "arxiv_id": "2608.15412"},
@@ -4459,6 +4476,11 @@ def test_corpus_collection_preserves_all_candidate_authors(
         max_papers=2, semantic_source="arxiv-corpus", client=MagicMock()
     )
     _pin_model_fingerprint(monkeypatch, builder)
+    monkeypatch.setattr(
+        builder,
+        "_prepare_corpus_for_build",
+        MagicMock(),
+    )
     builder.client.get_paper.return_value = seed
     monkeypatch.setattr(builder, "_load_model", lambda: None)
     monkeypatch.setattr(
@@ -4471,7 +4493,7 @@ def test_corpus_collection_preserves_all_candidate_authors(
     monkeypatch.setattr(
         builder,
         "_select_candidates",
-        lambda _seed_embedding, *, use_streaming: [
+        lambda _seed_embedding, *, use_streaming, corpus_prepared=False: [
             (
                 "arxiv:2501.00001",
                 {
@@ -8463,6 +8485,343 @@ def test_cached_corpus_seed_rejected_enrichment_keeps_local_metadata(
     assert seed.citation_count == 0
     assert seed.is_local_corpus is True
     assert "keeping corpus metadata" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "seed_id", ["arxiv:2508.12345", "arxiv_7"], ids=["stable", "legacy"]
+)
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+def test_corpus_migration_precedes_seed_encoding_and_first_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    seed_id: str,
+    storage_precision: str,
+    strategy: str,
+) -> None:
+    """The first post-migration build must encode the restored seed metadata.
+
+    :param pytest.MonkeyPatch monkeypatch: Cache, source, and runtime isolation.
+    :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
+    :param str seed_id: Stable source ID or preserved legacy anonymous primary ID.
+    :param str storage_precision: Persistent float32 or calibrated int8 vectors.
+    :param str strategy: Direct embedding or hybrid public build path.
+    :return None: Checks first-build selection and seed-identity preservation.
+    """
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    dataset_source = "fixture/pre-seed-migration"
+    fingerprint = "artifact-pre-seed-migration"
+    restored_term = "RESTORED_SEMANTIC_AXIS"
+    source_seed: dict[str, Any] = {
+        "title": "Migration seed",
+        "abstract": None,
+        "summary": f"{restored_term} seed abstract",
+        "year": 2024,
+    }
+    if seed_id != "arxiv_7":
+        source_seed["id"] = "2508.12345"
+    source_rows = [
+        source_seed,
+        {
+            "id": "2508.12346",
+            "title": "Restored-text neighbor",
+            "abstract": f"{restored_term} neighbor abstract",
+            "year": 2024,
+        },
+        {
+            "id": "2508.12347",
+            "title": "Title-only neighbor",
+            "abstract": "No restored semantic term",
+            "year": 2024,
+        },
+    ]
+
+    class _DirectionalModel:
+        """Separate title-only text from metadata containing the restored term."""
+
+        def encode(self, texts: list[str], **_kwargs: Any) -> np.ndarray:
+            """Map restored text to one axis and all other text to the other.
+
+            :param list[str] texts: Formatted query or document texts.
+            :param Any _kwargs: Encoder options unused by the deterministic fixture.
+            :return np.ndarray: Unit vectors exposing stale query text.
+            """
+            return np.asarray(
+                [[0.0, 1.0] if restored_term in text else [1.0, 0.0] for text in texts],
+                dtype=np.float32,
+            )
+
+    client = MagicMock()
+    client.get_paper.side_effect = AssertionError(
+        "the persisted corpus seed must resolve before provider fallback"
+    )
+    client.get_papers.return_value = {}
+    client.get_paper_references.return_value = []
+    client.get_paper_citations.return_value = []
+    common_options: dict[str, Any] = {
+        "max_papers": 2,
+        "semantic_source": "arxiv-corpus",
+        "dataset_source": dataset_source,
+        "dataset_split": "train",
+        "corpus_size": 3,
+        "storage_precision": storage_precision,
+        "client": client,
+    }
+    if storage_precision == "int8":
+        common_options["calibration_sample_size"] = 2
+    if strategy == "embedding":
+        public_builder: EmbeddingGraphBuilder | HybridGraphBuilder = (
+            EmbeddingGraphBuilder(**common_options)
+        )
+        embedding_builder = public_builder
+    else:
+        public_builder = HybridGraphBuilder(
+            **common_options,
+            max_references=0,
+            max_citations=0,
+            max_semantic=1,
+            fetch_references=False,
+        )
+        assert public_builder.embedding_builder is not None
+        embedding_builder = public_builder.embedding_builder
+    model = _DirectionalModel()
+    _install_deterministic_builder_runtime(
+        monkeypatch,
+        embedding_builder,
+        fingerprint=fingerprint,
+        model=model,
+    )
+    cache = embedding_builder.prepare_embedding_cache()
+    if storage_precision == "int8":
+        cache.set_calibration_ranges(
+            np.asarray([[-1.0, -1.0], [1.0, 1.0]], dtype=np.float32),
+            embedding_dim=2,
+        )
+    cached_metadata = [
+        _extract_dataset_paper_metadata(record, index)
+        for index, record in enumerate(source_rows)
+    ]
+    cached_metadata[0]["paper_id"] = seed_id
+    cached_metadata[0]["abstract"] = ""
+    embedding_builder._cache_metadata_batch(cached_metadata)
+    cache.mark_hydrated(
+        dataset_source=dataset_source,
+        dataset_split="train",
+        corpus_size=3,
+        complete=True,
+    )
+    cache._write_cache_metadata(
+        {
+            "corpus_metadata_version": "2",
+            "corpus_identity_version": "" if seed_id == "arxiv_7" else "1",
+        }
+    )
+    monkeypatch.setattr(
+        deps_module,
+        "_import_datasets_module",
+        lambda: types.SimpleNamespace(
+            load_dataset=lambda *_args, **_kwargs: [
+                dict(record) for record in source_rows
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        embedding_builder,
+        "_load_dataset_for_hydration",
+        lambda **_kwargs: (
+            dataset_source,
+            [dict(record) for record in source_rows],
+        ),
+    )
+    monkeypatch.setattr(
+        embedding_builder,
+        "_resolve_dataset_split_row_count",
+        lambda _source: len(source_rows),
+    )
+    prepare = MagicMock(wraps=embedding_builder._prepare_corpus_for_build)
+    ensure_hydrated = MagicMock(wraps=embedding_builder._ensure_cache_hydrated)
+    monkeypatch.setattr(embedding_builder, "_ensure_cache_hydrated", ensure_hydrated)
+    monkeypatch.setattr(embedding_builder, "_prepare_corpus_for_build", prepare)
+
+    graph, actual_seed_id = public_builder.build_graph(seed_id)
+
+    assert actual_seed_id == seed_id
+    assert set(graph) == {seed_id, "arxiv:2508.12346"}
+    assert graph.nodes[seed_id]["paper"].abstract == f"{restored_term} seed abstract"
+    prepare.assert_called_once_with()
+    ensure_hydrated.assert_called_once_with(use_streaming=False)
+    client.get_paper.assert_not_called()
+
+
+@pytest.mark.parametrize("starting_cache", ["empty", "growth"])
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+def test_corpus_preparation_stabilizes_seed_identity_on_first_build(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    starting_cache: str,
+    storage_precision: str,
+    strategy: str,
+) -> None:
+    """Initial hydration and normal growth must precede final seed identity.
+
+    :param pytest.MonkeyPatch monkeypatch: Cache, source, and runtime isolation.
+    :param Path tmp_path: Isolated real SQLite/HDF5 cache root.
+    :param str starting_cache: Empty namespace or complete namespace before growth.
+    :param str storage_precision: Persistent float32 or calibrated int8 vectors.
+    :param str strategy: Direct embedding or hybrid public build path.
+    :return None: Checks cold/warm corpus-primary ID parity and one preparation pass.
+    """
+    monkeypatch.setenv("CITEMESH_CACHE_DIR", str(tmp_path / "cache-root"))
+    dataset_source = "fixture/pre-seed-identity"
+    fingerprint = "artifact-pre-seed-identity"
+    requested_seed_id = "arxiv:2508.12345"
+    provider_seed_id = "a" * 40
+    corpus_seed = {
+        "id": "2508.12345",
+        "title": "Corpus-primary seed",
+        "abstract": "Seed abstract",
+        "year": 2024,
+    }
+    source_rows = [
+        {
+            "id": "2508.12346",
+            "title": "First neighbor",
+            "abstract": "First abstract",
+            "year": 2024,
+        },
+        {
+            "id": "2508.12347",
+            "title": "Second neighbor",
+            "abstract": "Second abstract",
+            "year": 2024,
+        },
+    ]
+    if starting_cache == "empty":
+        source_rows.append(corpus_seed)
+
+    def provider_seed() -> Paper:
+        """Return provider metadata with a different primary identifier.
+
+        :return Paper: Provider-primary record carrying the corpus arXiv alias.
+        """
+        return Paper(
+            paper_id=provider_seed_id,
+            title="Provider seed",
+            abstract="Seed abstract",
+            year=2024,
+            arxiv_id="2508.12345",
+            citation_count=100,
+        )
+
+    def make_builder() -> tuple[
+        EmbeddingGraphBuilder | HybridGraphBuilder,
+        EmbeddingGraphBuilder,
+        MagicMock,
+    ]:
+        """Create a fresh strategy sharing only source and durable cache state.
+
+        :return tuple: Public builder, embedding child, and provider mock.
+        """
+        client = MagicMock()
+        client.get_paper.return_value = provider_seed()
+
+        def get_papers(paper_ids: list[str]) -> dict[str, Paper]:
+            """Return provider evidence only for the requested seed alias.
+
+            :param list[str] paper_ids: Normalized provider lookup identifiers.
+            :return Dict[str, Paper]: Matching seed evidence when requested.
+            """
+            return {
+                paper_id: provider_seed()
+                for paper_id in paper_ids
+                if paper_id == requested_seed_id
+            }
+
+        client.get_papers.side_effect = get_papers
+        client.get_paper_references.return_value = []
+        client.get_paper_citations.return_value = []
+        common_options: dict[str, Any] = {
+            "max_papers": 2,
+            "semantic_source": "arxiv-corpus",
+            "dataset_source": dataset_source,
+            "dataset_split": "train",
+            "corpus_size": None,
+            "storage_precision": storage_precision,
+            "client": client,
+        }
+        if storage_precision == "int8":
+            common_options["calibration_sample_size"] = 2
+        if strategy == "embedding":
+            public_builder: EmbeddingGraphBuilder | HybridGraphBuilder = (
+                EmbeddingGraphBuilder(**common_options)
+            )
+            embedding_builder = public_builder
+        else:
+            public_builder = HybridGraphBuilder(
+                **common_options,
+                max_references=0,
+                max_citations=0,
+                max_semantic=1,
+                fetch_references=False,
+            )
+            assert public_builder.embedding_builder is not None
+            embedding_builder = public_builder.embedding_builder
+        _install_deterministic_builder_runtime(
+            monkeypatch,
+            embedding_builder,
+            fingerprint=fingerprint,
+        )
+        monkeypatch.setattr(
+            embedding_builder,
+            "_load_dataset_for_hydration",
+            lambda **_kwargs: (
+                dataset_source,
+                [dict(record) for record in source_rows],
+            ),
+        )
+        monkeypatch.setattr(
+            embedding_builder,
+            "_resolve_dataset_split_row_count",
+            lambda _source: len(source_rows),
+        )
+        return public_builder, embedding_builder, client
+
+    if starting_cache == "growth":
+        _initial_builder, initial_embedding, _initial_client = make_builder()
+        initial_embedding._prepare_corpus_for_build()
+        assert (
+            requested_seed_id
+            not in initial_embedding.embedding_cache.get_cached_paper_ids()
+        )
+        source_rows.append(corpus_seed)
+
+    cold_builder, cold_embedding, cold_client = make_builder()
+    cold_prepare = MagicMock(wraps=cold_embedding._prepare_corpus_for_build)
+    cold_ensure_hydrated = MagicMock(wraps=cold_embedding._ensure_cache_hydrated)
+    monkeypatch.setattr(cold_embedding, "_ensure_cache_hydrated", cold_ensure_hydrated)
+    monkeypatch.setattr(cold_embedding, "_prepare_corpus_for_build", cold_prepare)
+    cold_graph, cold_seed_id = cold_builder.build_graph(requested_seed_id)
+
+    warm_builder, warm_embedding, warm_client = make_builder()
+    warm_prepare = MagicMock(wraps=warm_embedding._prepare_corpus_for_build)
+    warm_ensure_hydrated = MagicMock(wraps=warm_embedding._ensure_cache_hydrated)
+    monkeypatch.setattr(warm_embedding, "_ensure_cache_hydrated", warm_ensure_hydrated)
+    monkeypatch.setattr(warm_embedding, "_prepare_corpus_for_build", warm_prepare)
+    warm_graph, warm_seed_id = warm_builder.build_graph(requested_seed_id)
+
+    assert cold_seed_id == warm_seed_id == requested_seed_id
+    assert requested_seed_id in cold_graph
+    assert requested_seed_id in warm_graph
+    cold_prepare.assert_called_once_with()
+    warm_prepare.assert_called_once_with()
+    cold_ensure_hydrated.assert_called_once_with(use_streaming=False)
+    warm_ensure_hydrated.assert_called_once_with(use_streaming=False)
+    cold_client.get_paper.assert_not_called()
+    warm_client.get_paper.assert_not_called()
+    if strategy == "hybrid":
+        assert cold_builder.paper_sources[requested_seed_id] == "citation"
+        assert warm_builder.paper_sources[requested_seed_id] == "citation"
 
 
 @pytest.mark.parametrize(
