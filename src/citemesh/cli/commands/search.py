@@ -6,6 +6,7 @@ import argparse
 import logging
 import shlex
 from collections.abc import Iterable, Sequence
+from contextlib import nullcontext
 
 from rich.text import Text
 
@@ -326,8 +327,19 @@ def _render_local_search(
     :param argparse.Namespace defaults: Effective build-equivalent defaults.
     :return int: Process-style exit code.
     """
+    cache = builder.embedding_cache
+    operation_lock = (
+        cache.hydration_operation_lock()
+        if defaults.semantic_source == "arxiv-corpus"
+        else nullcontext()
+    )
     try:
-        results = builder.search_local(args.query, top_k=args.limit)
+        with operation_lock:
+            results = builder.search_local(args.query, top_k=args.limit)
+            total = getattr(cache, "last_search_total_embeddings", None)
+            build_command = (
+                _local_result_build_command(defaults, cache) if results else None
+            )
     except Exception as exc:
         logger.error(
             "Local search failed: %s",
@@ -336,7 +348,6 @@ def _render_local_search(
         )
         return 1
 
-    cache = builder.embedding_cache
     if not results:
         logger.error(
             "Local search returned no results for model=%s (cache: %s).",
@@ -357,7 +368,6 @@ def _render_local_search(
                 f"{float(result.score):.3f}",
             )
         )
-    total = getattr(cache, "last_search_total_embeddings", None)
     _print_search_results(
         f"Local semantic search for '{args.query}'",
         rows,
@@ -370,7 +380,6 @@ def _render_local_search(
             else None
         ),
     )
-    build_command = _local_result_build_command(defaults, cache)
     if build_command is None:
         logger.warning(
             "Build command omitted because the local corpus cache has no recorded "

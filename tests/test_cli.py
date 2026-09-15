@@ -15,7 +15,7 @@ import threading
 import webbrowser
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext, redirect_stderr
+from contextlib import contextmanager, nullcontext, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1276,6 +1276,125 @@ def test_search_local_build_footer_preserves_effective_namespace_and_scope(
     assert generated.all_corpus is expected_all_corpus
     if expected_corpus_size is not None:
         assert generated.corpus_size == expected_corpus_size
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+def test_search_local_captures_result_and_replay_scope_under_one_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_precision: str,
+) -> None:
+    """A competing rebuild must not change the footer scope after search.
+
+    :param pytest.MonkeyPatch monkeypatch: CLI and cache isolation fixture.
+    :param str storage_precision: Persistent float32 or int8 representation.
+    :return None: Parses the rendered command and verifies the searched split.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=1,
+        results=[_FAKE_LOCAL_RESULT],
+    )
+    cache = fake_builder.embedding_cache
+    depth = 0
+    search_completed = False
+    persisted_split = "train[:1]"
+    events: list[str] = []
+
+    @contextmanager
+    def operation_lock() -> Any:
+        """Replace the corpus immediately after the consuming lock is released."""
+        nonlocal depth, persisted_split
+        depth += 1
+        try:
+            yield
+        finally:
+            depth -= 1
+            if depth == 0 and search_completed and "replacement" not in events:
+                persisted_split = "validation[:1]"
+                events.append("replacement")
+
+    def search_local(_query: str, *, top_k: int) -> list[Any]:
+        """Return training results from the builder's normal nested lock."""
+        nonlocal search_completed
+        assert top_k == 1
+        with operation_lock():
+            events.append("search")
+            search_completed = True
+            return [_FAKE_LOCAL_RESULT]
+
+    def payload_stats() -> SimpleNamespace:
+        """Expose whichever corpus owns the namespace at capture time."""
+        events.append("scope")
+        return SimpleNamespace(
+            hydration_split=persisted_split,
+            hydration_corpus_size="newest:1",
+        )
+
+    cache.hydration_operation_lock = MagicMock(side_effect=operation_lock)
+    cache.payload_stats = payload_stats
+    fake_builder.search_local.side_effect = search_local
+    builder_factory = MagicMock(return_value=fake_builder)
+    monkeypatch.setattr(search_module, "EmbeddingGraphBuilder", builder_factory)
+    args = [
+        "search",
+        "cached topic",
+        "--mode",
+        "local",
+        "--limit",
+        "1",
+        "--semantic-source",
+        "arxiv-corpus",
+        "--dataset-source",
+        "fixture/corpus",
+        "--storage-precision",
+        storage_precision,
+    ]
+    if storage_precision == "int8":
+        args.extend(["--calibration-sample-size", "2"])
+
+    result = run_cli_command(args)
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    assert _FAKE_LOCAL_RESULT.paper_id in flatten_console_text(result.stdout)
+    footer = next(
+        line for line in result.stdout.splitlines() if line.startswith("Use a paper ID")
+    )
+    command_args = shlex.split(footer.removeprefix("Use a paper ID with: "))
+    _parser, build_parser, _cache_parser, _config_parser = (
+        parser_module._create_parser()
+    )
+    generated = build_parser.parse_args(command_args[2:])
+    assert generated.dataset_split == "train[:1]"
+    assert generated.corpus_size == 1
+    assert events.index("scope") < events.index("replacement")
+    assert depth == 0
+
+
+def test_search_local_candidate_mode_does_not_acquire_corpus_operation_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Candidate-cache search keeps its existing lock-free render path.
+
+    :param pytest.MonkeyPatch monkeypatch: CLI builder isolation fixture.
+    :return None: Verifies candidate mode never opens the corpus operation lock.
+    """
+    fake_builder = _fake_local_search_builder(
+        cached_count=1,
+        results=[_FAKE_LOCAL_RESULT],
+    )
+    operation_lock = MagicMock(
+        side_effect=AssertionError("candidate mode must not acquire the corpus lock")
+    )
+    fake_builder.embedding_cache.hydration_operation_lock = operation_lock
+    monkeypatch.setattr(
+        search_module,
+        "EmbeddingGraphBuilder",
+        MagicMock(return_value=fake_builder),
+    )
+
+    result = run_cli_command(["search", "cached topic", "--mode", "local"])
+
+    assert result.returncode == 0, f"STDOUT: {result.stdout}\nSTDERR: {result.stderr}"
+    operation_lock.assert_not_called()
 
 
 def test_search_local_keeps_results_when_corpus_scope_was_not_hydrated(
