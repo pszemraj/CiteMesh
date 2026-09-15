@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterable, Sequence
-from contextlib import nullcontext
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 from typing import (
     TYPE_CHECKING,
@@ -828,8 +828,47 @@ class EmbeddingGraphBuilder(
             parts.append(f"mode={self.semantic_source}")
         return "::".join(parts)
 
+    def _corpus_operation_lock(self) -> AbstractContextManager[None]:
+        """Return the complete-operation lock for corpus consumers.
+
+        The active artifact must be bound before choosing the lock because model
+        resolution can replace a provisional cache namespace. Candidate mode has
+        no mutable corpus lifecycle and therefore needs no operation lock.
+
+        :return AbstractContextManager[None]: Corpus lock or a no-op context.
+        """
+        if self.semantic_source != "arxiv-corpus":
+            return nullcontext()
+        cache = self.prepare_embedding_cache()
+        return cache.hydration_operation_lock()
+
     @scope_candidate_collection
     def collect_papers(
+        self,
+        seed_id: str,
+        *,
+        seed_paper: Paper | None = None,
+        _corpus_prepared: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Paper]:
+        """Collect papers while excluding corpus replacement between stages.
+
+        :param str seed_id: Seed paper identifier (ArXiv ID or text query).
+        :param Optional[Paper] seed_paper: Optional pre-fetched seed metadata.
+        :param bool _corpus_prepared: Whether a parent prepared the corpus while
+            retaining this same reentrant operation lock.
+        :param Any kwargs: Strategy-specific options forwarded to collection.
+        :return Dict[str, Paper]: Dictionary of paper ID to paper metadata.
+        """
+        with self._corpus_operation_lock():
+            return self._collect_papers_under_operation_lock(
+                seed_id,
+                seed_paper=seed_paper,
+                _corpus_prepared=_corpus_prepared,
+                **kwargs,
+            )
+
+    def _collect_papers_under_operation_lock(
         self,
         seed_id: str,
         *,
@@ -844,7 +883,7 @@ class EmbeddingGraphBuilder(
         :param Optional[Paper] seed_paper: Optional pre-fetched seed paper metadata to
             reuse instead of fetching the seed from Semantic Scholar again.
         :param bool _corpus_prepared: Whether a hybrid parent prepared this corpus
-            for the current collection operation.
+            under the operation lock that remains held by the caller.
         :param Any kwargs: Strategy-specific options (currently unused).
         :return Dict[str, Paper]: Dictionary of paper_id -> Paper objects
         """
@@ -906,15 +945,16 @@ class EmbeddingGraphBuilder(
             already completed corpus preparation.
         :return Paper: Resolved seed carrying the seed role for this build.
         """
-        if self.semantic_source == "arxiv-corpus":
-            if not _corpus_prepared:
-                self._prepare_corpus_for_build()
-        else:
-            self._load_model()
-        resolved_seed = self._resolve_seed_paper(seed_id, seed_paper)
-        if seed_paper is None and resolved_seed.is_local_corpus:
-            self.enrich_cached_corpus_seed(resolved_seed)
-        return resolved_seed
+        with self._corpus_operation_lock():
+            if self.semantic_source == "arxiv-corpus":
+                if not _corpus_prepared:
+                    self._prepare_corpus_for_build()
+            else:
+                self._load_model()
+            resolved_seed = self._resolve_seed_paper(seed_id, seed_paper)
+            if seed_paper is None and resolved_seed.is_local_corpus:
+                self.enrich_cached_corpus_seed(resolved_seed)
+            return resolved_seed
 
     def resolve_cached_corpus_seed(
         self, seed_id: str, *, _corpus_prepared: bool = False
@@ -927,11 +967,12 @@ class EmbeddingGraphBuilder(
         :return Optional[Paper]: Cached seed metadata, or ``None`` for a cache miss.
         :raises ValueError: If a recognized local-only ID is absent or incompatible.
         """
-        if self.semantic_source != "arxiv-corpus":
-            return None
-        if not _corpus_prepared:
-            self._prepare_corpus_for_build()
-        return self._resolve_cached_corpus_seed(seed_id)
+        with self._corpus_operation_lock():
+            if self.semantic_source != "arxiv-corpus":
+                return None
+            if not _corpus_prepared:
+                self._prepare_corpus_for_build()
+            return self._resolve_cached_corpus_seed(seed_id)
 
     def _prepare_corpus_for_build(self) -> None:
         """Complete corpus lifecycle work before resolving a build seed.
@@ -1435,7 +1476,8 @@ class EmbeddingGraphBuilder(
         :param np.ndarray seed_embedding: Normalized seed embedding vector.
         :param bool use_streaming: Whether hydration should stream the dataset.
         :param bool corpus_prepared: Whether the caller completed lifecycle work before
-            encoding the seed. The default preserves safe standalone helper behavior.
+            encoding the seed while retaining the operation lock. The default preserves
+            safe standalone helper behavior.
         :return List[Tuple[str, Dict, np.ndarray]]: Candidate tuples sorted by similarity.
         """
         self._ensure_cache_model_fingerprint()

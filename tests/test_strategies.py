@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, call, patch
@@ -81,6 +81,18 @@ def _seed_paper(paper_id: str = "seed") -> Paper:
         abstract="seed abstract",
         is_seed=True,
     )
+
+
+def _stub_hybrid_corpus_operation_lock(builder: HybridGraphBuilder) -> None:
+    """Bind a no-I/O corpus lock for hybrid orchestration unit tests.
+
+    :param HybridGraphBuilder builder: Hybrid builder whose embedding child is active.
+    :return None: Replaces artifact binding with a reentrant no-op lock fixture.
+    """
+    assert builder.embedding_builder is not None
+    cache = MagicMock()
+    cache.hydration_operation_lock.return_value = nullcontext()
+    builder.embedding_builder.prepare_embedding_cache = MagicMock(return_value=cache)
 
 
 def _api_relation_record(paper_id: str) -> SimpleNamespace:
@@ -1419,6 +1431,7 @@ def test_hybrid_corpus_mode_survives_relation_endpoint_outage(
         client=client,
     )
     assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
     assert builder.embedding_builder.dataset_source == "example/arxiv"
     assert builder.embedding_builder.corpus_size is None
     builder.embedding_builder._prepare_corpus_for_build = MagicMock()
@@ -1549,6 +1562,7 @@ def test_hybrid_collection_merges_and_tracks_sources() -> None:
         "c1": "referenced_by_seed",
     }
     assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
     builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
 
@@ -1830,6 +1844,7 @@ def test_hybrid_collection_fails_closed_on_semantic_enrichment_errors(
 
     builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
     assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
     builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
         builder.embedding_builder,
@@ -1859,6 +1874,7 @@ def test_hybrid_collection_preserves_semantic_scholar_outage_type() -> None:
     seed = _seed_paper()
     builder.citation_builder.collect_papers = MagicMock(return_value={"seed": seed})
     assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
     builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
     builder.embedding_builder.collect_papers = MagicMock(
@@ -2056,6 +2072,7 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
     }
     builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
     assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
     builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
         builder.embedding_builder,
@@ -2113,6 +2130,7 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
     }
     builder.citation_builder.collect_papers = MagicMock(return_value=citation_papers)
     assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
     builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
         builder.embedding_builder,
@@ -2314,6 +2332,13 @@ def test_max_papers_is_total_node_cap_including_seed(
             self.max_papers = max_papers
             self.retrieval_embeddings: dict[str, np.ndarray] = {}
             self.embeddings: dict[str, np.ndarray] = {}
+
+        def _corpus_operation_lock(self) -> AbstractContextManager[None]:
+            """Return the no-I/O operation boundary used by this capacity fake.
+
+            :return Any: No-op context manager standing in for the cache lock.
+            """
+            return nullcontext()
 
         def _prepare_corpus_for_build(self) -> None:
             """Represent completed preparation in this capacity-only fake.
@@ -3079,6 +3104,7 @@ def test_hybrid_collection_collapses_identifier_bridge_classes(
         doi_record.paper_id: "cites_seed",
     }
     assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
     builder.embedding_builder._prepare_corpus_for_build = MagicMock()
     monkeypatch.setattr(
         builder.embedding_builder,

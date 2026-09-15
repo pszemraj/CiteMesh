@@ -8489,6 +8489,281 @@ def test_cached_corpus_seed_rejected_enrichment_keeps_local_metadata(
     assert "keeping corpus metadata" in caplog.text
 
 
+class _OperationLockProbe:
+    """Track reentrant operation-lock ownership in orchestration tests."""
+
+    def __init__(self) -> None:
+        self.depth = 0
+        self.entries = 0
+
+    @contextmanager
+    def acquire(self) -> Iterator[None]:
+        """Enter a reentrant lock scope and restore depth on every exit.
+
+        :return Iterator[None]: Context manager used in place of the cache lock.
+        """
+        self.depth += 1
+        self.entries += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
+
+    def record(self, events: list[str], event: str) -> None:
+        """Record an operation stage only while the outer lock is held.
+
+        :param list[str] events: Ordered stage log receiving the event.
+        :param str event: Stage name to append.
+        :return None: Raises when the stage escaped the operation boundary.
+        """
+        assert self.depth > 0, f"{event} ran outside the corpus operation lock"
+        events.append(event)
+
+
+@pytest.mark.parametrize(
+    "resolver", ["resolve_seed_paper", "resolve_cached_corpus_seed"]
+)
+def test_public_corpus_seed_resolvers_hold_preparation_and_lookup_under_one_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    resolver: str,
+) -> None:
+    """Standalone seed resolution must consume the corpus it prepared.
+
+    :param pytest.MonkeyPatch monkeypatch: Runtime and cache isolation fixture.
+    :param str resolver: Public corpus seed resolver under test.
+    :return None: Verifies preparation and lookup share one operation boundary.
+    """
+    builder = EmbeddingGraphBuilder(
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
+    )
+    cache = MagicMock()
+    probe = _OperationLockProbe()
+    events: list[str] = []
+    cache.hydration_operation_lock.side_effect = probe.acquire
+    monkeypatch.setattr(builder, "prepare_embedding_cache", lambda: cache)
+    monkeypatch.setattr(
+        builder,
+        "_prepare_corpus_for_build",
+        lambda: probe.record(events, "prepare"),
+    )
+    seed = Paper(
+        paper_id="content:seed",
+        title="Prepared seed",
+        year=2026,
+        is_seed=True,
+        is_local_corpus=True,
+    )
+    if resolver == "resolve_seed_paper":
+        monkeypatch.setattr(
+            builder,
+            "_resolve_seed_paper",
+            lambda _seed_id, _seed_paper: probe.record(events, "lookup") or seed,
+        )
+        resolved = builder.resolve_seed_paper(seed.paper_id)
+    else:
+        monkeypatch.setattr(
+            builder,
+            "_resolve_cached_corpus_seed",
+            lambda _seed_id: probe.record(events, "lookup") or seed,
+        )
+        resolved = builder.resolve_cached_corpus_seed(seed.paper_id)
+
+    assert resolved is seed
+    assert events == ["prepare", "lookup"]
+    assert probe.depth == 0
+
+
+@pytest.mark.parametrize("storage_precision", ["float32", "int8"])
+@pytest.mark.parametrize("strategy", ["embedding", "hybrid"])
+def test_corpus_collection_holds_one_lock_through_seed_and_neighbor_consumption(
+    monkeypatch: pytest.MonkeyPatch,
+    storage_precision: str,
+    strategy: str,
+) -> None:
+    """Preparation, seed use, and semantic retrieval must be one operation.
+
+    :param pytest.MonkeyPatch monkeypatch: Runtime and cache isolation fixture.
+    :param str storage_precision: Persistent float32 or int8 representation.
+    :param str strategy: Direct embedding or hybrid public collection path.
+    :return None: Verifies every corpus-dependent stage runs under one outer lock.
+    """
+    common_options: dict[str, Any] = {
+        "max_papers": 2,
+        "semantic_source": "arxiv-corpus",
+        "storage_precision": storage_precision,
+        "client": MagicMock(),
+    }
+    if storage_precision == "int8":
+        common_options["calibration_sample_size"] = 2
+    if strategy == "embedding":
+        public_builder: EmbeddingGraphBuilder | HybridGraphBuilder = (
+            EmbeddingGraphBuilder(**common_options)
+        )
+        embedding_builder = public_builder
+    else:
+        public_builder = HybridGraphBuilder(
+            **common_options,
+            max_references=0,
+            max_citations=0,
+            max_semantic=1,
+            fetch_references=False,
+        )
+        assert public_builder.embedding_builder is not None
+        embedding_builder = public_builder.embedding_builder
+
+    cache = MagicMock()
+    probe = _OperationLockProbe()
+    events: list[str] = []
+    cache.hydration_operation_lock.side_effect = probe.acquire
+    monkeypatch.setattr(embedding_builder, "prepare_embedding_cache", lambda: cache)
+    seed = Paper(
+        paper_id="content:seed",
+        title="Prepared seed",
+        year=2026,
+        is_seed=True,
+        is_local_corpus=True,
+    )
+    neighbor = Paper(
+        paper_id="content:neighbor",
+        title="Prepared neighbor",
+        year=2026,
+        is_local_corpus=True,
+    )
+    monkeypatch.setattr(
+        embedding_builder,
+        "_prepare_corpus_for_build",
+        lambda: probe.record(events, "prepare"),
+    )
+
+    if strategy == "embedding":
+        monkeypatch.setattr(
+            embedding_builder,
+            "resolve_seed_paper",
+            lambda *_args, **_kwargs: probe.record(events, "seed") or seed,
+        )
+        monkeypatch.setattr(
+            embedding_builder,
+            "_encode_seed_embedding",
+            lambda _seed: (
+                probe.record(events, "encode")
+                or np.asarray([1.0, 0.0], dtype=np.float32)
+            ),
+        )
+
+        def collect_neighbors(*_args: Any, **_kwargs: Any) -> None:
+            """Require cache-backed neighbor consumption under the same lock."""
+            probe.record(events, "neighbors")
+
+        monkeypatch.setattr(
+            embedding_builder,
+            "_collect_corpus_cache_papers",
+            collect_neighbors,
+        )
+    else:
+        hybrid_builder = public_builder
+        assert isinstance(hybrid_builder, HybridGraphBuilder)
+        monkeypatch.setattr(
+            embedding_builder,
+            "resolve_cached_corpus_seed",
+            lambda *_args, **_kwargs: probe.record(events, "seed") or seed,
+        )
+        monkeypatch.setattr(
+            embedding_builder,
+            "enrich_cached_corpus_seed",
+            lambda _seed: probe.record(events, "enrich"),
+        )
+        monkeypatch.setattr(
+            hybrid_builder.citation_builder,
+            "collect_papers",
+            lambda *_args, **_kwargs: (
+                probe.record(events, "citations") or {seed.paper_id: seed}
+            ),
+        )
+        monkeypatch.setattr(
+            embedding_builder,
+            "collect_papers",
+            lambda *_args, **_kwargs: (
+                probe.record(events, "neighbors")
+                or {seed.paper_id: seed, neighbor.paper_id: neighbor}
+            ),
+        )
+        monkeypatch.setattr(
+            hybrid_builder,
+            "_rank_candidates",
+            lambda _seed, candidates, _sources: (
+                probe.record(events, "rank") or list(candidates)
+            ),
+        )
+
+    papers = public_builder.collect_papers(seed.paper_id)
+
+    assert seed.paper_id in papers
+    assert events[0] == "prepare"
+    assert "seed" in events
+    assert "neighbors" in events
+    assert probe.depth == 0
+
+
+@pytest.mark.parametrize("failure_stage", ["prepare", "seed", "encode", "neighbors"])
+def test_corpus_collection_releases_operation_lock_after_stage_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    """Every failure point must release the complete corpus operation lock.
+
+    :param pytest.MonkeyPatch monkeypatch: Runtime and cache isolation fixture.
+    :param str failure_stage: Collection stage that raises the sentinel error.
+    :return None: Verifies the operation lock remains acquirable after failure.
+    """
+    builder = EmbeddingGraphBuilder(
+        max_papers=2,
+        semantic_source="arxiv-corpus",
+        client=MagicMock(),
+    )
+    cache = MagicMock()
+    probe = _OperationLockProbe()
+    cache.hydration_operation_lock.side_effect = probe.acquire
+    monkeypatch.setattr(builder, "prepare_embedding_cache", lambda: cache)
+    seed = Paper(
+        paper_id="content:seed",
+        title="Prepared seed",
+        year=2026,
+        is_seed=True,
+        is_local_corpus=True,
+    )
+
+    def stage(name: str, value: Any = None) -> Any:
+        """Return a stage value or raise the requested sentinel failure."""
+        if name == failure_stage:
+            raise RuntimeError(f"failed during {name}")
+        return value
+
+    monkeypatch.setattr(builder, "_prepare_corpus_for_build", lambda: stage("prepare"))
+    monkeypatch.setattr(
+        builder,
+        "resolve_seed_paper",
+        lambda *_args, **_kwargs: stage("seed", seed),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_encode_seed_embedding",
+        lambda _seed: stage("encode", np.asarray([1.0, 0.0], dtype=np.float32)),
+    )
+    monkeypatch.setattr(
+        builder,
+        "_collect_corpus_cache_papers",
+        lambda *_args, **_kwargs: stage("neighbors"),
+    )
+
+    with pytest.raises(RuntimeError, match=f"failed during {failure_stage}"):
+        builder.collect_papers(seed.paper_id)
+
+    assert probe.depth == 0
+    with probe.acquire():
+        assert probe.depth == 1
+
+
 @pytest.mark.parametrize(
     "seed_id", ["arxiv:2508.12345", "arxiv_7"], ids=["stable", "legacy"]
 )

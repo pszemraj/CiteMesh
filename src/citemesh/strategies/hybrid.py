@@ -8,6 +8,7 @@ comprehensive paper discovery.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import networkx as nx
@@ -574,6 +575,24 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     @scope_candidate_collection
     def collect_papers(self, seed_id: str, **kwargs: Any) -> dict[str, Paper]:
+        """Collect papers while retaining any corpus lifecycle operation lock.
+
+        :param str seed_id: Seed paper identifier.
+        :param Any kwargs: Strategy-specific options forwarded to collection.
+        :return Dict[str, Paper]: Combined dictionary of papers.
+        """
+        operation_lock = (
+            self.embedding_builder._corpus_operation_lock()
+            if self.embedding_builder is not None
+            and self.semantic_source == "arxiv-corpus"
+            else nullcontext()
+        )
+        with operation_lock:
+            return self._collect_papers_under_operation_lock(seed_id, **kwargs)
+
+    def _collect_papers_under_operation_lock(
+        self, seed_id: str, **kwargs: Any
+    ) -> dict[str, Paper]:
         """
         Collect papers from both citation and semantic sources.
 
