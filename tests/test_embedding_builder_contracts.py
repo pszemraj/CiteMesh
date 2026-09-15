@@ -8279,7 +8279,9 @@ def test_fresh_build_reopens_local_search_result_from_artifact_cache(
     if prepare_before_build:
         active_embedding_builder.prepare_embedding_cache()
         assert active_embedding_builder._pending_force_rebuild_reason is None
-        assert active_embedding_builder._force_rebuild_seed_hydration_pending is True
+        assert not active_embedding_builder.embedding_cache.is_hydrated(
+            "train[:1]", 1, dataset_source=dataset_source
+        )
     graph, actual_seed_id = build_builder.build_graph(search_result.paper_id)
 
     assert actual_seed_id == seed_id

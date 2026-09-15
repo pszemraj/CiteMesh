@@ -103,8 +103,7 @@ class _CorpusHydrationMixin:
     ``_cache_lock``, ``_cache_hydrated``, ``_hydrated_cache_spec``,
     ``_last_search_used_binary_prefilter``, ``_load_model``, ``_encode_texts``,
     ``_get_model_for_encoding``, ``_ensure_cache_model_fingerprint``,
-    ``_embedding_runtime_metadata``, ``_format_retrieval_document_metadata`` and
-    ``_force_rebuild_seed_hydration_pending``.
+    ``_embedding_runtime_metadata`` and ``_format_retrieval_document_metadata``.
     """
 
     def _search_cache_candidates(
@@ -197,7 +196,6 @@ class _CorpusHydrationMixin:
         self._ensure_cache_model_fingerprint()
         with self.embedding_cache.hydration_operation_lock():
             self._ensure_cache_hydrated_locked(use_streaming=use_streaming)
-        self._force_rebuild_seed_hydration_pending = False
 
     def _ensure_cache_hydrated_locked(self, use_streaming: bool) -> None:
         """Hydrate the active corpus while its operation lock is held.

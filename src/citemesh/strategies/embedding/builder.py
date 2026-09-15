@@ -279,7 +279,6 @@ class EmbeddingGraphBuilder(
         self._pending_force_rebuild_reason = self._deferred_force_rebuild_reason(
             force_rebuild_cache, force_rebuild_reason
         )
-        self._force_rebuild_seed_hydration_pending = False
         self.use_streaming = use_streaming
         self._validate_streaming_contract()
         self._reset_model_runtime_state()
@@ -702,9 +701,6 @@ class EmbeddingGraphBuilder(
                     reason=self._pending_force_rebuild_reason
                 )
                 self._pending_force_rebuild_reason = None
-                self._force_rebuild_seed_hydration_pending = (
-                    self.semantic_source == "arxiv-corpus"
-                )
 
     def _clear_embedding_cache(self, reason: str) -> None:
         """Clear embedding namespace payload with explicit reason logging.
