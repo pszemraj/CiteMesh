@@ -1,0 +1,35 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    if: ${{ !github.event.repository.private && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/configure-pages@v5
+
+      - name: Stage Megalodon demo
+        run: |
+          mkdir -p "$RUNNER_TEMP/citemesh-pages"
+          cp assets/examples/megalodon/dashboard.html "$RUNNER_TEMP/citemesh-pages/index.html"
+          cp assets/examples/megalodon/dashboard.citemesh.json "$RUNNER_TEMP/citemesh-pages/dashboard.citemesh.json"
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: ${{ runner.temp }}/citemesh-pages
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
