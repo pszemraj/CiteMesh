@@ -457,23 +457,16 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
 
 
 @pytest.mark.parametrize(
-    ("builder_type", "failure_path"),
-    [
-        (CitationGraphBuilder, "reference_ids"),
-        (CitationGraphBuilder, "reference_papers"),
-        (RecommendationGraphBuilder, "reference_ids"),
-    ],
+    "builder_type", [CitationGraphBuilder, RecommendationGraphBuilder]
 )
 def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
     builder_type: type[GraphBuilderStrategy],
-    failure_path: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A reference outage must not suppress healthy discovery capabilities.
 
     :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
-    :param str failure_path: Reference-ID or full-paper request that exhausts retries.
     :param Path tmp_path: Isolated reference-cache directory.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
     :return None: Checks domain isolation, cache reuse, and fresh top-level scopes.
@@ -484,25 +477,15 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=seed)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
-        reference_id_calls = 0
 
         def fetch_references(paper_id: str, **kwargs: object) -> list[dict]:
-            """Allow seed IDs only when full reference metadata is the failure path.
+            """Fail reference transport while leaving citations healthy.
 
             :param str paper_id: Requested Semantic Scholar paper ID.
             :param object kwargs: SDK request options, including selected fields.
-            :return list[dict]: One successful seed reference-ID record.
+            :return list[dict]: This fixture always raises before returning.
             """
-            nonlocal reference_id_calls
-            if (
-                failure_path == "reference_papers"
-                and paper_id == "scope-seed"
-                and kwargs["fields"] == ["paperId"]
-                and reference_id_calls == 0
-            ):
-                assert paper_id == "scope-seed"
-                reference_id_calls += 1
-                return [{"paperId": "seed-reference"}]
+            del paper_id, kwargs
             raise requests.ConnectionError("offline")
 
         client.client.get_paper_references = MagicMock(side_effect=fetch_references)
@@ -551,10 +534,8 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
                     ):
                         client.get_reference_ids("later-citing-paper")
                     assert client.get_reference_ids("warm") == ["cached-reference"]
-                    successful_calls = int(failure_path == "reference_papers")
                     assert (
-                        client.client.get_paper_references.call_count
-                        == expected_calls + successful_calls
+                        client.client.get_paper_references.call_count == expected_calls
                     )
 
         assert sleep_mock.call_count == 2 * (API_CONFIG.max_retries - 1)
@@ -947,6 +928,41 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
         call("ref1", force_refresh=False),
         call("cit1", force_refresh=False),
     ]
+
+
+def test_citation_collect_discovers_all_sources_before_reference_enrichment() -> None:
+    """Optional reference hydration must not preempt requested candidate sources."""
+    events: list[str] = []
+    client = MagicMock()
+    client.get_paper.return_value = _seed_paper()
+
+    def references(*_args: object, **_kwargs: object) -> list[Paper]:
+        events.append("discover references")
+        return [_paper("ref1")]
+
+    def citations(*_args: object, **_kwargs: object) -> list[Paper]:
+        events.append("discover citations")
+        return [_paper("cit1")]
+
+    def reference_ids(paper_id: str, **_kwargs: object) -> list[str]:
+        events.append(f"enrich {paper_id}")
+        return []
+
+    client.get_paper_references.side_effect = references
+    client.get_paper_citations.side_effect = citations
+    client.get_reference_ids.side_effect = reference_ids
+
+    papers = CitationGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        fetch_references=True,
+        client=client,
+    ).collect_papers("seed")
+
+    assert set(papers) == {"seed", "ref1", "cit1"}
+    assert events[:2] == ["discover references", "discover citations"]
+    assert events[2:] == ["enrich seed", "enrich ref1", "enrich cit1"]
 
 
 @pytest.mark.parametrize(
@@ -1409,6 +1425,123 @@ def test_candidate_acquisition_distinguishes_empty_partial_and_total_outages(
         "citations": "unavailable",
         "recommendations": "unavailable",
     }
+
+
+def test_hybrid_discovers_recommendations_before_reference_enrichment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Citation enrichment must not preempt hybrid recommendation discovery."""
+    events: list[str] = []
+    client = MagicMock()
+    client.get_paper.return_value = _seed_paper()
+
+    def unavailable_references(*_args: object, **_kwargs: object) -> list[Paper]:
+        events.append("discover references")
+        raise s2.SemanticScholarUnavailableError("references down")
+
+    def unavailable_citations(*_args: object, **_kwargs: object) -> list[Paper]:
+        events.append("discover citations")
+        raise s2.SemanticScholarUnavailableError("citations down")
+
+    def recommendations(*_args: object, **_kwargs: object) -> list[Paper]:
+        events.append("discover recommendations")
+        return [_paper("rec1")]
+
+    def reference_ids(paper_id: str, **_kwargs: object) -> list[str]:
+        events.append(f"enrich {paper_id}")
+        return []
+
+    client.get_paper_references.side_effect = unavailable_references
+    client.get_paper_citations.side_effect = unavailable_citations
+    client.get_recommended_papers.side_effect = recommendations
+    client.get_reference_ids.side_effect = reference_ids
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        max_semantic=1,
+        fetch_references=True,
+        client=client,
+    )
+    assert builder.embedding_builder is not None
+    monkeypatch.setattr(builder.embedding_builder, "_load_model", lambda: None)
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda _seed, candidates, _sources: list(candidates),
+    )
+
+    papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", "rec1"}
+    assert events == [
+        "discover references",
+        "discover citations",
+        "discover recommendations",
+        "enrich seed",
+    ]
+
+
+def test_hybrid_corpus_defers_optional_seed_enrichment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Corpus seed enrichment must follow citation and corpus acquisition."""
+    events: list[str] = []
+    seed = Paper(
+        paper_id="local-seed",
+        title="Local seed",
+        year=2024,
+        abstract="Local abstract",
+        arxiv_id="2501.00001",
+        is_local_corpus=True,
+        is_seed=True,
+    )
+    builder = HybridGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        max_semantic=1,
+        semantic_source="arxiv-corpus",
+        dataset_source="example/arxiv",
+        fetch_references=True,
+        client=MagicMock(),
+    )
+    assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
+    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=seed)
+    builder.citation_builder.collect_papers = MagicMock(
+        side_effect=lambda *_args, **_kwargs: (
+            events.append("citation discovery") or {seed.paper_id: seed}
+        )
+    )
+    builder.embedding_builder.collect_papers = MagicMock(
+        side_effect=lambda *_args, **_kwargs: (
+            events.append("corpus discovery")
+            or {seed.paper_id: seed, "semantic": _paper("semantic")}
+        )
+    )
+    builder.embedding_builder.enrich_cached_corpus_seed = MagicMock(
+        side_effect=lambda _seed: events.append("provider seed enrichment")
+    )
+    builder.citation_builder.hydrate_collected_references = MagicMock(
+        side_effect=lambda _papers, _seed: events.append("reference enrichment")
+    )
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda _seed, candidates, _sources: list(candidates),
+    )
+
+    papers = builder.collect_papers(seed.paper_id)
+
+    assert set(papers) == {seed.paper_id, "semantic"}
+    assert events == [
+        "citation discovery",
+        "corpus discovery",
+        "provider seed enrichment",
+        "reference enrichment",
+    ]
 
 
 def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:
@@ -2452,6 +2585,12 @@ def test_max_papers_is_total_node_cap_including_seed(
             del seed_id
             papers = {"seed": _seed_paper(), "c1": _paper("c1"), "c2": _paper("c2")}
             return dict(list(papers.items())[: self.max_papers])
+
+        def hydrate_collected_references(
+            self, papers: dict[str, Paper], seed: Paper
+        ) -> None:
+            """Match the citation child enrichment hook without external I/O."""
+            del papers, seed
 
     class FakeEmbeddingBuilder:
         def __init__(self, max_papers: int, *_args: object, **_kwargs: object) -> None:

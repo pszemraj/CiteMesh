@@ -420,6 +420,7 @@ class _EndpointsMixin:
             :return list[str]: Ordered IDs for this completed attempt.
             """
             attempt_ids: list[str] = []
+            seen_ids: set[str] = set()
             try:
                 # SDK limit is a page size (at most 1,000), not the total.
                 # Its iterator fetches later pages; our loop bounds the result.
@@ -444,7 +445,10 @@ class _EndpointsMixin:
                 paper = getattr(record, "paper", None)
                 paper_id = payloads._payload_get(paper, "paperId")
                 if isinstance(paper_id, str) and paper_id.strip():
-                    attempt_ids.append(normalize_paper_id(paper_id))
+                    normalized_id = normalize_paper_id(paper_id)
+                    if normalized_id not in seen_ids:
+                        seen_ids.add(normalized_id)
+                        attempt_ids.append(normalized_id)
                 elif not payloads._is_unresolved_reference(record):
                     raise _SemanticScholarResponseContractError(
                         f"Semantic Scholar returned malformed {relation_label} discovery."
@@ -872,7 +876,9 @@ class _EndpointsMixin:
                     raise _SemanticScholarResponseContractError(
                         "Semantic Scholar returned recommendation records without paper IDs."
                     )
-                checked_ids = [normalize_paper_id(value) for value in ids]
+                checked_ids = list(
+                    dict.fromkeys(normalize_paper_id(value) for value in ids)
+                )
                 snapshots.append((key, checked_ids))
             if checked_ids:
                 break

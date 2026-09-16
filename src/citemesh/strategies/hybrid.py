@@ -630,8 +630,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
                     seed_id,
                     _corpus_prepared=True,
                 )
-                if cached_corpus_seed is not None:
-                    self.embedding_builder.enrich_cached_corpus_seed(cached_corpus_seed)
             except Exception as exc:
                 raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
 
@@ -641,6 +639,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             citation_papers = self.citation_builder.collect_papers(
                 seed_id,
                 validate_source_availability=False,
+                hydrate_references=False,
                 seed_paper=cached_corpus_seed,
             )
         else:
@@ -775,6 +774,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             raise
         except Exception as exc:
             raise RuntimeError(f"Semantic enrichment failed: {exc}") from exc
+
+        # All required candidate sources have now been attempted. Optional
+        # reference hydration can use the remaining shared recovery budget
+        # without suppressing recommendation discovery.
+        if cached_corpus_seed is not None:
+            self.embedding_builder.enrich_cached_corpus_seed(seed_paper)
+        self.citation_builder.hydrate_collected_references(citation_papers, seed_paper)
 
         for paper in semantic_papers.values():
             if paper.is_seed:

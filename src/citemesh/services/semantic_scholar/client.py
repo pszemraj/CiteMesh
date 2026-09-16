@@ -416,7 +416,14 @@ class SemanticScholarClient(_EndpointsMixin):
                     state.current_attempt,
                 )
             else:
-                time.sleep(min_interval - elapsed)
+                started_at = monotonic()
+                try:
+                    time.sleep(min_interval - elapsed)
+                finally:
+                    if state is not None and state.current_attempt == 1:
+                        state.initial_attempt_excluded_seconds += max(
+                            0.0, monotonic() - started_at
+                        )
         self.last_request_time = time.time()
 
     def _run_with_retries(
@@ -505,7 +512,7 @@ class SemanticScholarClient(_EndpointsMixin):
             state.current_attempt = operation_attempts
             state.active_recovery_request = is_recovery_attempt
             state.current_recovery_wait_seconds = 0.0
-            state.initial_attempt_success_seconds = 0.0
+            state.initial_attempt_excluded_seconds = 0.0
             last_attempt_started_at = monotonic()
             state.recovery_request_started_at = (
                 last_attempt_started_at if is_recovery_attempt else None
@@ -544,14 +551,14 @@ class SemanticScholarClient(_EndpointsMixin):
                 - last_attempt_started_at
                 - state.current_recovery_wait_seconds
                 - (
-                    state.initial_attempt_success_seconds
+                    state.initial_attempt_excluded_seconds
                     if operation_attempts == 1
                     else 0.0
                 ),
             )
             state.recovery_seconds += elapsed
             state.current_recovery_wait_seconds = 0.0
-            state.initial_attempt_success_seconds = 0.0
+            state.initial_attempt_excluded_seconds = 0.0
             if retry_state.outcome is not None:
                 failure = retry_state.outcome.exception()
                 if isinstance(failure, Exception):
@@ -826,8 +833,8 @@ class SemanticScholarClient(_EndpointsMixin):
         kwargs: dict[str, Any] = {"params": params}
         if headers is not None:
             kwargs["headers"] = headers
-        request_started_at = monotonic()
         self._rate_limit()
+        request_started_at = monotonic()
         state = getattr(self._candidate_operation, "state", None)
         if state is not None and state.active_recovery_request:
             remaining = self._remaining_recovery_budget(state)
@@ -865,7 +872,7 @@ class SemanticScholarClient(_EndpointsMixin):
             and not state.active_recovery_request
             and state.current_attempt == 1
         ):
-            state.initial_attempt_success_seconds += max(
+            state.initial_attempt_excluded_seconds += max(
                 0.0, monotonic() - request_started_at
             )
         return data

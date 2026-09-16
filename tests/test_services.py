@@ -3243,6 +3243,71 @@ def test_discovery_rechecks_ordered_ids_and_fetches_only_missing_metadata(
     assert "reused 2 cached paper records; fetched 0 missing records" in caplog.text
 
 
+@pytest.mark.parametrize("endpoint", ["references", "citations"])
+def test_relation_discovery_deduplicates_before_applying_limit(endpoint: str) -> None:
+    """Duplicate provider IDs must not consume bounded relation result slots."""
+    for paper_id in ("a", "b"):
+        s2.disk_cache._persist_paper(
+            Paper(paper_id=paper_id, title=f"Paper {paper_id}", year=2024), paper_id
+        )
+    with SemanticScholarClient(api_key="") as client:
+        client._rate_limit = MagicMock()
+        fetch = MagicMock(
+            return_value=[
+                _make_reference_record("a"),
+                _make_reference_record("a"),
+                _make_reference_record("b"),
+            ]
+        )
+        setattr(client.client, f"get_paper_{endpoint}", fetch)
+        client._session.post = MagicMock(
+            side_effect=AssertionError("metadata already cached")
+        )
+
+        result = getattr(client, f"get_paper_{endpoint}")("seed", limit=2)
+
+    assert [paper.paper_id for paper in result] == ["a", "b"]
+    snapshot = json.loads(
+        s2.disk_cache._discovery_cache_path((endpoint, "seed", 2, "")).read_text()
+    )
+    assert snapshot["paper_ids"] == ["a", "b"]
+
+
+def test_recommendation_discovery_deduplicates_ordered_ids() -> None:
+    """Repeated recommendation IDs must appear once in results and snapshots."""
+    for paper_id in ("a", "b"):
+        s2.disk_cache._persist_paper(
+            Paper(paper_id=paper_id, title=f"Paper {paper_id}", year=2024), paper_id
+        )
+    with SemanticScholarClient(api_key="") as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            return_value=_MockResponse(
+                200,
+                {
+                    "recommendedPapers": [
+                        {"paperId": "a"},
+                        {"paperId": "a"},
+                        {"paperId": "b"},
+                    ]
+                },
+            )
+        )
+        client._session.post = MagicMock(
+            side_effect=AssertionError("metadata already cached")
+        )
+
+        result = client.get_recommended_papers("seed", limit=3)
+
+    assert [paper.paper_id for paper in result] == ["a", "b"]
+    snapshot = json.loads(
+        s2.disk_cache._discovery_cache_path(
+            ("recommendations", "seed", 3, "recent")
+        ).read_text()
+    )
+    assert snapshot["paper_ids"] == ["a", "b"]
+
+
 def test_discovery_scope_limit_and_enrichment_caches_remain_distinct() -> None:
     """In-scope reuse respects limits without truncating full references.
 
@@ -3563,6 +3628,42 @@ def test_recovery_attempt_success_is_charged_but_slow_healthy_work_is_not(
         client._session.get = MagicMock(side_effect=slow_success)
         assert client.get_paper("slow", raise_on_unavailable=True).paper_id == "slow"
         assert client._session.get.call_args.kwargs["timeout"] == 30
+
+
+def test_initial_request_pacing_does_not_consume_recovery_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal pacing before a first failure must leave time for one recovery."""
+    clock = [10.0]
+    monkeypatch.setattr(semantic_module.client.time, "time", lambda: clock[0])
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+
+    def sleep(seconds: float) -> None:
+        """Advance the shared wall and monotonic test clock."""
+        clock[0] += seconds
+
+    with SemanticScholarClient(api_key="", retry_budget_seconds=2.5) as client:
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(200, _paper_payload(paper_id="first")),
+                _MockResponse(503),
+                _MockResponse(200, _paper_payload(paper_id="second")),
+            ]
+        )
+        with (
+            patch("time.sleep", side_effect=sleep) as sleep_mock,
+            patch.object(semantic_module.retry.random, "uniform", return_value=2.0),
+            client.candidate_operation_scope(),
+        ):
+            assert (
+                client.get_paper("first", raise_on_unavailable=True).paper_id == "first"
+            )
+            assert (
+                client.get_paper("second", raise_on_unavailable=True).paper_id
+                == "second"
+            )
+        assert client._session.get.call_count == 3
+        assert [call.args[0] for call in sleep_mock.call_args_list] == [2.0, 2.0]
 
 
 def test_retry_budget_defaults_and_zero_opt_out() -> None:

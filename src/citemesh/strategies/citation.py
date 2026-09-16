@@ -147,7 +147,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         progress_enabled: bool,
         progress_description: str,
     ) -> list[str]:
-        """Add related papers and hydrate references while respecting graph limits.
+        """Add related papers while respecting graph limits.
 
         :param Dict[str, Paper] papers: Collected paper mapping updated in-place.
         :param Paper seed: Canonical seed paper in ``papers``.
@@ -210,7 +210,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                     )
                     if merged_relation:
                         self.seed_relations[canonical_id] = merged_relation
-                self._ensure_paper_references(papers[canonical_id])
                 processed_ids[:] = [
                     canonical_id if paper_id in collapsed_ids else paper_id
                     for paper_id in processed_ids
@@ -223,7 +222,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
 
             papers[raw_paper_id] = paper
             register_aliases(self._identity_aliases, raw_paper_id, paper)
-            self._ensure_paper_references(paper)
             processed_ids.append(raw_paper_id)
 
         if progress_bar is not None:
@@ -247,6 +245,24 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             )
             if merged_relation:
                 self.seed_relations[normalized_id] = merged_relation
+
+    def hydrate_collected_references(
+        self, papers: dict[str, Paper], seed: Paper
+    ) -> None:
+        """Hydrate optional reference IDs after required candidate acquisition.
+
+        :param Dict[str, Paper] papers: Collected citation papers.
+        :param Paper seed: Canonical seed paper in ``papers``.
+        :return None: Updates paper records and the in-memory reference cache.
+        """
+        provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
+        if seed.references:
+            self._ensure_paper_references(seed)
+        elif provider_seed_id is not None:
+            self._ensure_paper_references(seed, provider_lookup_id=provider_seed_id)
+        for paper_id, paper in papers.items():
+            if paper_id != seed.paper_id:
+                self._ensure_paper_references(paper)
 
     def _get_references(
         self, paper_id: str, *, provider_lookup_id: str | None = None
@@ -277,6 +293,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         seed_id: str,
         *,
         validate_source_availability: bool = True,
+        hydrate_references: bool = True,
         seed_paper: Paper | None = None,
         **kwargs: Any,
     ) -> dict[str, Paper]:
@@ -286,6 +303,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param str seed_id: Seed paper identifier
         :param bool validate_source_availability: Whether to fail when every
             requested relation source is unavailable.
+        :param bool hydrate_references: Whether to perform optional reference-ID
+            enrichment before returning.
         :param Optional[Paper] seed_paper: Pre-resolved seed metadata. When its
             primary identifier is local, only an external alias is sent upstream.
         :param Any kwargs: Strategy-specific options (currently unused).
@@ -323,11 +342,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
         register_aliases(self._identity_aliases, seed.paper_id, seed)
-
-        if seed.references:
-            self._ensure_paper_references(seed)
-        elif provider_seed_id is not None:
-            self._ensure_paper_references(seed, provider_lookup_id=provider_seed_id)
 
         logger.info("Seed: %s", seed.title)
 
@@ -393,6 +407,12 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 source_results,
                 context=f"citation acquisition for {seed.paper_id}",
             )
+
+        # Candidate discovery is required acquisition. Complete every requested
+        # source before optional reference enrichment can spend the shared S2
+        # recovery budget.
+        if hydrate_references:
+            self.hydrate_collected_references(papers, seed)
 
         reference_lists = len(self.reference_cache)
         summary = (

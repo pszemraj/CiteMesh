@@ -68,7 +68,7 @@ class _CandidateOperationState:
     current_attempt: int = 0
     recovery_request_started_at: float | None = None
     current_recovery_wait_seconds: float = 0.0
-    initial_attempt_success_seconds: float = 0.0
+    initial_attempt_excluded_seconds: float = 0.0
     last_recovery_error: Exception | None = None
     budget_failure: SemanticScholarUnavailableError | None = None
 
