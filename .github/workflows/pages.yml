@@ -8,6 +8,9 @@ on:
 jobs:
   deploy:
     if: ${{ !github.event.repository.private && github.ref == 'refs/heads/main' }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
