@@ -195,7 +195,7 @@ class _EndpointsMixin:
             raise ValueError("A batch request supports at most 500 paper IDs.")
 
         def _operation() -> dict[str, Paper]:
-            """Fetch positional batch results, preserving authoritative null entries.
+            """Fetch positional batch results, omitting unavailable records.
 
             :return dict[str, Paper]: Successful results keyed by requested ID.
             """
@@ -219,10 +219,6 @@ class _EndpointsMixin:
                     continue
                 paper = payloads._convert_api_paper(api_paper)
                 if paper is None:
-                    if raise_on_unavailable:
-                        raise _SemanticScholarResponseContractError(
-                            f"Semantic Scholar returned malformed batch metadata for {requested_id}."
-                        )
                     logger.warning(
                         "Skipping malformed batch paper for %s.", requested_id
                     )
@@ -328,9 +324,10 @@ class _EndpointsMixin:
     ) -> list[Paper]:
         """Load checked candidates from disk and batch-fetch only missing records.
 
-        :param list[str] paper_ids: Freshly checked IDs in provider order.
+        :param list[str] paper_ids: Freshly checked IDs in provider order. Updated
+            in place to omit IDs without resolvable metadata.
         :param str context: Discovery operation used in logs and failure messages.
-        :return list[Paper]: Available papers in the checked discovery order.
+        :return list[Paper]: Resolvable papers in the checked discovery order.
         :raises SemanticScholarUnavailableError: If a required metadata batch fails.
         """
         unique_ids = list(dict.fromkeys(paper_ids))
@@ -356,18 +353,21 @@ class _EndpointsMixin:
             ) from exc
         unresolved = [paper_id for paper_id in unique_ids if paper_id not in papers]
         if unresolved:
-            raise SemanticScholarUnavailableError(
-                f"Could not complete current {context}; required paper metadata "
-                f"was missing for {len(unresolved)} checked IDs. "
-                "Previous discovery snapshot retained. Retry later."
+            logger.warning(
+                "%s: skipping %d checked IDs without resolvable paper metadata.",
+                context,
+                len(unresolved),
             )
+            # Keep the successful snapshot and same-scope reuse aligned with the
+            # candidates this metadata service can actually materialize.
+            paper_ids[:] = [paper_id for paper_id in paper_ids if paper_id in papers]
         logger.info(
             "%s: reused %d cached paper records; fetched %d missing records.",
             context,
             reused_count,
             len(papers) - reused_count,
         )
-        return [papers[paper_id] for paper_id in paper_ids if paper_id in papers]
+        return [papers[paper_id] for paper_id in paper_ids]
 
     def _save_discovery(
         self, key: tuple[str, str, int, str], paper_ids: list[str]

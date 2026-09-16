@@ -255,6 +255,9 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param Paper seed: Canonical seed paper in ``papers``.
         :return None: Updates paper records and the in-memory reference cache.
         """
+        if self.fetch_references:
+            logger.info("Hydrating reference lists for %d papers...", len(papers))
+
         provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
         if seed.references:
             self._ensure_paper_references(seed)

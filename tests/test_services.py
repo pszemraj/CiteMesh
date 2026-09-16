@@ -3348,10 +3348,7 @@ def test_discovery_scope_limit_and_enrichment_caches_remain_distinct() -> None:
         assert fetch.call_count == 4
 
 
-@pytest.mark.parametrize(
-    "failure",
-    ["check", "fallback", "batch", "malformed", "malformed_batch", "missing_metadata"],
-)
+@pytest.mark.parametrize("failure", ["check", "fallback", "batch", "malformed"])
 def test_failed_discovery_preserves_previous_successful_snapshots(failure: str) -> None:
     """No acquisition failure may publish a new empty or partial discovery snapshot.
 
@@ -3376,26 +3373,162 @@ def test_failed_discovery_preserves_previous_successful_snapshots(failure: str) 
         ]
     else:
         responses = [first]
+    expected_error = (
+        TypeError if failure == "malformed" else SemanticScholarUnavailableError
+    )
     with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
         client._rate_limit = MagicMock()
         client._session.get = MagicMock(side_effect=responses)
-        client._session.post = MagicMock(
-            return_value=(
-                _MockResponse(200, [None])
-                if failure == "missing_metadata"
-                else _MockResponse(200, [{"title": "Missing ID"}])
-                if failure == "malformed_batch"
-                else unavailable
-            )
-        )
+        client._session.post = MagicMock(return_value=unavailable)
         with (
             patch("time.sleep") as sleep_mock,
-            pytest.raises((SemanticScholarUnavailableError, TypeError)),
+            pytest.raises(expected_error),
         ):
             client.get_recommended_papers("seed", limit=5, raise_on_unavailable=True)
         sleep_mock.assert_not_called()
     for key in keys:
         assert s2.disk_cache._discovery_cache_path(key).read_bytes() == previous[key]
+
+
+@pytest.mark.parametrize("endpoint", ["recommendations", "references", "citations"])
+def test_discovery_skips_unresolvable_batch_records(
+    endpoint: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Resolvable discovery records survive absent or malformed batch metadata.
+
+    :param str endpoint: Discovery endpoint that returns the candidate IDs.
+    :param pytest.LogCaptureFixture caplog: Captured skipped-record warnings.
+    :return None: Checks resolvable records persist through partial hydration.
+    """
+    paper_ids = ["resolved", "missing", "malformed"]
+    with SemanticScholarClient(api_key="") as client:
+        client._rate_limit = MagicMock()
+        client._session.post = MagicMock(
+            return_value=_MockResponse(
+                200,
+                [_paper_payload(paper_id="resolved"), None, {"title": "Missing ID"}],
+            )
+        )
+        if endpoint == "recommendations":
+            client._session.get = MagicMock(
+                return_value=_MockResponse(
+                    200,
+                    {
+                        "recommendedPapers": [
+                            {"paperId": paper_id} for paper_id in paper_ids
+                        ]
+                    },
+                )
+            )
+        else:
+            relation_fetch = MagicMock(
+                return_value=[
+                    _make_reference_record(paper_id) for paper_id in paper_ids
+                ]
+            )
+            setattr(client.client, f"get_paper_{endpoint}", relation_fetch)
+        with (
+            caplog.at_level(
+                logging.WARNING, logger="citemesh.services.semantic_scholar"
+            ),
+            client.candidate_operation_scope(),
+        ):
+            if endpoint == "recommendations":
+                papers = client.get_recommended_papers(
+                    "seed", limit=len(paper_ids), raise_on_unavailable=True
+                )
+                reused_papers = client.get_recommended_papers(
+                    "seed", limit=len(paper_ids), raise_on_unavailable=True
+                )
+                key = ("recommendations", "seed", len(paper_ids), "recent")
+            else:
+                papers = getattr(client, f"get_paper_{endpoint}")(
+                    "seed", limit=len(paper_ids), raise_on_unavailable=True
+                )
+                reused_papers = getattr(client, f"get_paper_{endpoint}")(
+                    "seed", limit=len(paper_ids), raise_on_unavailable=True
+                )
+                key = (endpoint, "seed", len(paper_ids), "")
+
+    assert [paper.paper_id for paper in papers] == ["resolved"]
+    assert [paper.paper_id for paper in reused_papers] == ["resolved"]
+    assert json.loads(s2.disk_cache._discovery_cache_path(key).read_text())[
+        "paper_ids"
+    ] == ["resolved"]
+    assert "Skipping malformed batch paper for malformed." in caplog.text
+    assert "skipping 2 checked IDs without resolvable paper metadata" in caplog.text
+
+
+def test_recommendation_fallback_snapshot_omits_unresolvable_batch_records() -> None:
+    """The all-cs fallback persists only metadata records that resolved.
+
+    :return None: Checks fallback snapshots and in-scope reuse after partial hydration.
+    """
+    with SemanticScholarClient(api_key="") as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(200, {"recommendedPapers": []}),
+                _MockResponse(
+                    200,
+                    {
+                        "recommendedPapers": [
+                            {"paperId": "resolved"},
+                            {"paperId": "missing"},
+                        ]
+                    },
+                ),
+            ]
+        )
+        client._session.post = MagicMock(
+            return_value=_MockResponse(200, [_paper_payload(paper_id="resolved"), None])
+        )
+        with client.candidate_operation_scope():
+            papers = client.get_recommended_papers(
+                "seed", limit=2, raise_on_unavailable=True
+            )
+            reused_papers = client.get_recommended_papers(
+                "seed", limit=2, raise_on_unavailable=True
+            )
+
+    assert [paper.paper_id for paper in papers] == ["resolved"]
+    assert [paper.paper_id for paper in reused_papers] == ["resolved"]
+    assert client._session.post.call_count == 1
+    assert client._session.get.call_count == 2
+    for pool, expected_ids in (("recent", []), ("all-cs", ["resolved"])):
+        snapshot = json.loads(
+            s2.disk_cache._discovery_cache_path(
+                ("recommendations", "seed", 2, pool)
+            ).read_text()
+        )
+        assert snapshot["paper_ids"] == expected_ids
+
+
+def test_recovery_request_uses_one_positive_remaining_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One recovery request must not recompute a now-exhausted timeout budget.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces budget accounting for the request.
+    :return None: Checks one lookup and a positive bounded transport timeout.
+    """
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(return_value=_MockResponse(200, {}))
+        remaining = MagicMock(return_value=1e-9)
+        monkeypatch.setattr(client, "_remaining_recovery_budget", remaining)
+        with client.candidate_operation_scope():
+            state = client._candidate_operation.state
+            state.active_recovery_request = True
+            client._request_json_once(
+                "https://example.test/page", {}, context="testing recovery timeout"
+            )
+
+    remaining.assert_called_once_with(state)
+    assert (
+        client._session.get.call_args.kwargs["timeout"]
+        == semantic_module.client._MIN_RECOVERY_REQUEST_TIMEOUT_SECONDS
+    )
 
 
 def test_successful_empty_recommendations_check_both_pools_every_collection() -> None:

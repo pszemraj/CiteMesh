@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 
 _anonymous_pool_announced = False
+_MIN_RECOVERY_REQUEST_TIMEOUT_SECONDS = 0.001
 
 
 class SemanticScholarClient(_EndpointsMixin):
@@ -307,16 +308,6 @@ class SemanticScholarClient(_EndpointsMixin):
             state.recovery_seconds += elapsed
             if state.active_recovery_request:
                 state.current_recovery_wait_seconds += elapsed
-
-    def _request_timeout(self) -> float:
-        """Return the normal timeout or the remaining recovery allowance."""
-        state = getattr(self._candidate_operation, "state", None)
-        if state is None or not state.active_recovery_request:
-            return self.timeout
-        remaining = self._remaining_recovery_budget(state)
-        if remaining is None:
-            return self.timeout
-        return min(self.timeout, remaining)
 
     @staticmethod
     def _skipped_candidate_operation_error(
@@ -836,11 +827,17 @@ class SemanticScholarClient(_EndpointsMixin):
         self._rate_limit()
         request_started_at = monotonic()
         state = getattr(self._candidate_operation, "state", None)
+        timeout = self.timeout
         if state is not None and state.active_recovery_request:
             remaining = self._remaining_recovery_budget(state)
             if remaining is not None and remaining <= 0:
                 raise self._retry_budget_error(state, state.current_attempt)
-        kwargs["timeout"] = self._request_timeout()
+            if remaining is not None:
+                timeout = max(
+                    _MIN_RECOVERY_REQUEST_TIMEOUT_SECONDS,
+                    min(self.timeout, remaining),
+                )
+        kwargs["timeout"] = timeout
         response = (
             self._session.get(url, **kwargs)
             if payload is None

@@ -894,7 +894,9 @@ def test_recommendation_collect_clamps_endpoint_request_limit() -> None:
     )
 
 
-def test_citation_collect_populates_reference_cache_and_summary() -> None:
+def test_citation_collect_populates_reference_cache_and_summary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Citation collection should hydrate references and expose summary."""
     seed = _paper("seed", refs=["seed-ref"])
     ref = _paper("ref1")
@@ -915,7 +917,8 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
         fetch_references=True,
         client=client,
     )
-    papers = builder.collect_papers("seed")
+    with caplog.at_level(logging.INFO):
+        papers = builder.collect_papers("seed")
 
     assert set(papers) == {"seed", "ref1", "cit1"}
     assert papers["ref1"].references == ["ref1-ref"]
@@ -928,6 +931,7 @@ def test_citation_collect_populates_reference_cache_and_summary() -> None:
         call("ref1", force_refresh=False),
         call("cit1", force_refresh=False),
     ]
+    assert "Hydrating reference lists for 3 papers..." in caplog.text
 
 
 def test_citation_collect_discovers_all_sources_before_reference_enrichment() -> None:
