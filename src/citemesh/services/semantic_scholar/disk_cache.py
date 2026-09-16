@@ -8,8 +8,10 @@ override consulted by every reference-cache path lookup.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from citemesh.core import Author, Paper
@@ -25,6 +27,56 @@ logger = logging.getLogger(__name__)
 REFERENCE_CACHE_DIR: Path | None = None
 REFERENCE_CACHE_VERSION = 1
 PAPER_CACHE_VERSION = 2
+DISCOVERY_CACHE_VERSION = 1
+
+
+def _discovery_cache_path(key: tuple[str, str, int, str]) -> Path:
+    """Locate a snapshot for one bounded discovery request.
+
+    :param tuple[str, str, int, str] key: Endpoint, normalized seed, limit and pool.
+    :return Path: JSON path independent of paper and reference enrichment caches.
+    """
+    digest = hashlib.sha1(json.dumps(key).encode("utf-8")).hexdigest()
+    return get_cache_dir("discovery") / f"{digest}.json"
+
+
+def _persist_discovery(key: tuple[str, str, int, str], paper_ids: list[str]) -> None:
+    """Compare and save a successfully checked ordered discovery list.
+
+    :param tuple[str, str, int, str] key: Endpoint, normalized seed, limit and pool.
+    :param list[str] paper_ids: IDs in the order returned by Semantic Scholar.
+    :return None: Saves the snapshot without making it a freshness substitute.
+    """
+    path = _discovery_cache_path(key)
+    previous = read_json_object(path)
+    unchanged = (
+        previous is not None
+        and previous.get("version") == DISCOVERY_CACHE_VERSION
+        and previous.get("paper_ids") == paper_ids
+    )
+    logger.info(
+        "Checked %s discovery upstream for %s%s: %d IDs (%s).",
+        key[0],
+        key[1],
+        f", {key[3]} pool" if key[3] else "",
+        len(paper_ids),
+        "membership and order unchanged" if unchanged else "new or changed list",
+    )
+    try:
+        atomic_write_json(
+            path,
+            {
+                "version": DISCOVERY_CACHE_VERSION,
+                "endpoint": key[0],
+                "paper_id": key[1],
+                "limit": key[2],
+                "pool": key[3],
+                "paper_ids": paper_ids,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except OSError as exc:
+        logger.debug("Failed to persist discovery cache for %s: %s", key, exc)
 
 
 def _reference_cache_dir() -> Path:

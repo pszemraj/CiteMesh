@@ -19,7 +19,7 @@ from citemesh.core.paper_fields import (
 )
 from citemesh.core.paper_ids import external_ids_from_canonical_paper_id
 
-from .errors import SemanticScholarUnavailableError
+from .errors import SemanticScholarUnavailableError, _RetryDiagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -379,6 +379,7 @@ def _unavailable_error(
     *,
     rate_limited: bool,
     issue_hint: str = "This is a service availability issue",
+    retry_diagnostics: _RetryDiagnostics | None = None,
 ) -> SemanticScholarUnavailableError:
     """Build the availability error raised when retries are exhausted.
 
@@ -386,12 +387,24 @@ def _unavailable_error(
     :param str detail: Trailing detail appended after the attempt count.
     :param bool rate_limited: Whether the final failure was an HTTP 429.
     :param str issue_hint: Explanation placed before retry guidance.
+    :param _RetryDiagnostics | None retry_diagnostics: Actual retry stop details,
+        or ``None`` to retain the configured attempt-only message.
     :return SemanticScholarUnavailableError: Flavored availability error.
     """
     flavor = "rate-limited (HTTP 429)" if rate_limited else "unreachable"
+    if retry_diagnostics is None:
+        retry_summary = f"after {API_CONFIG.max_retries} attempts{detail}"
+    else:
+        retry_summary = (
+            f"after {retry_diagnostics.attempts} attempts and "
+            f"{retry_diagnostics.recovery_seconds:.1f}s recovery time "
+            f"({retry_diagnostics.stop_reason}{detail})"
+        )
     return SemanticScholarUnavailableError(
         f"Semantic Scholar API {flavor} while {context} "
-        f"(after {API_CONFIG.max_retries} attempts{detail}). "
+        f"({retry_summary}). "
         f"{issue_hint} - retry shortly, or set "
-        f"S2_API_KEY for a dedicated rate limit."
+        "S2_API_KEY for a dedicated rate limit, or use the local-corpus strategy "
+        "(--strategy embedding --semantic-source arxiv-corpus; requires embeddings "
+        "extras and a downloaded, embedded corpus)."
     )

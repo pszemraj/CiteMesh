@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from functools import wraps
 from typing import Any
 from urllib.parse import quote
 
@@ -30,12 +31,11 @@ from semanticscholar.SemanticScholarException import (
     ObjectNotFoundException,
 )
 
-from citemesh.core import API_CONFIG, Paper
+from citemesh.core import Paper
 from citemesh.core.paper_ids import normalize_paper_id
 
-from . import disk_cache, payloads, retry
+from . import disk_cache, payloads
 from .errors import (
-    SemanticScholarRequestError,
     SemanticScholarUnavailableError,
     _CandidateOperationSkippedError,
     _FailureDomain,
@@ -56,9 +56,32 @@ SEARCH_MAX_RESULTS = 1000
 SEARCH_PAGE_SIZE = 100
 
 
+def _scoped_endpoint(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Share discovery checks and recovery time across an endpoint's subrequests.
+
+    :param Callable[..., Any] method: Client endpoint or compound endpoint helper.
+    :return Callable[..., Any]: Method sharing its enclosing collection scope.
+    """
+
+    @wraps(method)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run one endpoint inside a collection scope.
+
+        :param Any self: Semantic Scholar client.
+        :param Any args: Endpoint positional arguments.
+        :param Any kwargs: Endpoint keyword arguments.
+        :return Any: Endpoint result.
+        """
+        with self.candidate_operation_scope():
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 class _EndpointsMixin:
     """Semantic Scholar endpoint methods shared by the transport client."""
 
+    @_scoped_endpoint
     def get_paper(
         self,
         paper_id: str,
@@ -98,6 +121,7 @@ class _EndpointsMixin:
         if not self.refresh_paper_cache:
             cached_paper = disk_cache._load_cached_paper(paper_id)
             if cached_paper is not None:
+                logger.debug("Reused cached paper metadata for %s.", paper_id)
                 return cached_paper
         # The SDK silently maps unrecognized HTTP statuses to an empty paper.
         # The graph endpoint requires literal slashes in DOI and legacy arXiv IDs.
@@ -128,6 +152,7 @@ class _EndpointsMixin:
         disk_cache._persist_paper(paper, paper_id)
         return paper
 
+    @_scoped_endpoint
     def get_papers(
         self, paper_ids: Sequence[str], *, raise_on_unavailable: bool = False
     ) -> dict[str, Paper]:
@@ -194,6 +219,10 @@ class _EndpointsMixin:
                     continue
                 paper = payloads._convert_api_paper(api_paper)
                 if paper is None:
+                    if raise_on_unavailable:
+                        raise _SemanticScholarResponseContractError(
+                            f"Semantic Scholar returned malformed batch metadata for {requested_id}."
+                        )
                     logger.warning(
                         "Skipping malformed batch paper for %s.", requested_id
                     )
@@ -213,24 +242,15 @@ class _EndpointsMixin:
                 if raise_on_unavailable:
                     raise exc
                 logger.warning(
-                    "Skipped batch fetch for %s papers after an earlier paper-metadata "
+                    "Skipped batch fetch for %s papers after an earlier Semantic Scholar "
                     "outage: %s",
                     len(normalized_ids),
                     exc,
                 )
                 return None
             if raise_on_unavailable:
-                raise payloads._unavailable_error(
-                    "batch fetching papers",
-                    f": {exc}",
-                    rate_limited=retry._is_rate_limit_error(exc),
-                ) from exc
-            logger.warning(
-                "Failed to batch fetch %s papers after %s attempts: %s",
-                len(normalized_ids),
-                API_CONFIG.max_retries,
-                exc,
-            )
+                raise self._unavailable_error("batch fetching papers", exc) from exc
+            logger.warning("%s", self._unavailable_error("batch fetching papers", exc))
             return None
 
         matched = self._call_with_retries(
@@ -303,6 +323,65 @@ class _EndpointsMixin:
             raise_on_unavailable=raise_on_unavailable,
         )
 
+    def _materialize_discovery(
+        self, paper_ids: list[str], *, context: str
+    ) -> list[Paper]:
+        """Load checked candidates from disk and batch-fetch only missing records.
+
+        :param list[str] paper_ids: Freshly checked IDs in provider order.
+        :param str context: Discovery operation used in logs and failure messages.
+        :return list[Paper]: Available papers in the checked discovery order.
+        :raises SemanticScholarUnavailableError: If a required metadata batch fails.
+        """
+        unique_ids = list(dict.fromkeys(paper_ids))
+        papers = {
+            paper_id: paper
+            for paper_id in unique_ids
+            if not self.refresh_paper_cache
+            and (paper := disk_cache._load_cached_paper(paper_id)) is not None
+        }
+        reused_count = len(papers)
+        missing = [paper_id for paper_id in unique_ids if paper_id not in papers]
+        try:
+            for offset in range(0, len(missing), 500):
+                papers.update(
+                    self.get_papers(
+                        missing[offset : offset + 500], raise_on_unavailable=True
+                    )
+                )
+        except SemanticScholarUnavailableError as exc:
+            raise SemanticScholarUnavailableError(
+                f"Could not complete current {context}; required paper metadata "
+                f"was unavailable. Previous discovery snapshot retained. {exc}"
+            ) from exc
+        unresolved = [paper_id for paper_id in unique_ids if paper_id not in papers]
+        if unresolved:
+            raise SemanticScholarUnavailableError(
+                f"Could not complete current {context}; required paper metadata "
+                f"was missing for {len(unresolved)} checked IDs. "
+                "Previous discovery snapshot retained. Retry later."
+            )
+        logger.info(
+            "%s: reused %d cached paper records; fetched %d missing records.",
+            context,
+            reused_count,
+            len(papers) - reused_count,
+        )
+        return [papers[paper_id] for paper_id in paper_ids if paper_id in papers]
+
+    def _save_discovery(
+        self, key: tuple[str, str, int, str], paper_ids: list[str]
+    ) -> None:
+        """Publish a successful discovery snapshot and reuse it within this scope.
+
+        :param tuple[str, str, int, str] key: Endpoint, seed, limit and pool.
+        :param list[str] paper_ids: Successfully checked, ordered candidate IDs.
+        :return None: Saves only after required acquisition has completed.
+        """
+        self._candidate_operation.state.discovery_ids[key] = list(paper_ids)
+        disk_cache._persist_discovery(key, paper_ids)
+
+    @_scoped_endpoint
     def _get_related_papers(
         self,
         paper_id: str,
@@ -328,19 +407,25 @@ class _EndpointsMixin:
             return []
 
         normalized_paper_id = normalize_paper_id(paper_id)
+        key = (relation_label, normalized_paper_id, limit, "")
+        context = f"{relation_label} discovery for {normalized_paper_id}"
+        checked_ids = self._candidate_operation.state.discovery_ids.get(key)
+        if checked_ids is not None:
+            return self._materialize_discovery(checked_ids, context=context)
+        paper_not_found = False
 
-        def _operation() -> list[Paper]:
-            """Fetch and convert citation/reference relation records.
+        def _operation() -> list[str]:
+            """Check citation/reference IDs without downloading known paper records.
 
-            :return list[Paper]: Converted relation papers for this attempt.
+            :return list[str]: Ordered IDs for this completed attempt.
             """
-            attempt_papers: list[Paper] = []
+            attempt_ids: list[str] = []
             try:
                 # SDK limit is a page size (at most 1,000), not the total.
                 # Its iterator fetches later pages; our loop bounds the result.
                 relation_records = fetch_method(
                     normalized_paper_id,
-                    fields=payloads._default_paper_fields(),
+                    fields=["paperId"],
                     limit=min(limit, GRAPH_RELATION_PAGE_SIZE),
                 )
             except TypeError as exc:
@@ -351,55 +436,69 @@ class _EndpointsMixin:
                     relation_label,
                     normalized_paper_id,
                 )
-                return attempt_papers
+                return attempt_ids
             if not relation_records:
-                return attempt_papers
+                return attempt_ids
 
             for record in relation_records:
-                paper = payloads._convert_api_paper(getattr(record, "paper", None))
-                if paper:
-                    attempt_papers.append(paper)
-                    disk_cache._persist_paper(paper, paper.paper_id)
-
-                if len(attempt_papers) >= limit:
+                paper = getattr(record, "paper", None)
+                paper_id = payloads._payload_get(paper, "paperId")
+                if isinstance(paper_id, str) and paper_id.strip():
+                    attempt_ids.append(normalize_paper_id(paper_id))
+                elif not payloads._is_unresolved_reference(record):
+                    raise _SemanticScholarResponseContractError(
+                        f"Semantic Scholar returned malformed {relation_label} discovery."
+                    )
+                if len(attempt_ids) >= limit:
                     break
 
-            return attempt_papers
+            return attempt_ids
 
-        def _final_failure(exc: Exception) -> list[Paper]:
+        def _final_failure(exc: Exception) -> None:
             """Apply the caller-selected failure contract after retry exhaustion.
 
             :param Exception exc: Final operational failure.
-            :return list[Paper]: Empty list in tolerant mode.
+            :return None: Unavailable marker in tolerant mode, never a cached empty.
             :raises SemanticScholarUnavailableError: In strict mode.
             """
             if isinstance(exc, _CandidateOperationSkippedError):
                 if raise_on_unavailable:
                     raise exc
                 logger.warning(
-                    "Skipped %s for %s after an earlier %s outage: %s",
+                    "Skipped %s for %s after an earlier Semantic Scholar outage: %s",
                     relation_label,
                     normalized_paper_id,
-                    relation_label,
                     exc,
                 )
-                return []
+                return None
             if raise_on_unavailable:
-                raise payloads._unavailable_error(
-                    f"fetching {relation_label} for {normalized_paper_id}",
-                    f": {exc}",
-                    rate_limited=retry._is_rate_limit_error(exc),
+                raise self._unavailable_error(
+                    f"checking current {context}", exc
                 ) from exc
             logger.warning(
-                "Failed to fetch %s for %s after %s attempts: %s",
-                relation_label,
-                normalized_paper_id,
-                API_CONFIG.max_retries,
-                exc,
+                "%s", self._unavailable_error(f"checking current {context}", exc)
+            )
+            return None
+
+        def _not_found(_exc: Exception) -> list[str]:
+            """Return a missing relation without replacing a successful snapshot.
+
+            :param Exception _exc: First-page not-found response.
+            :return list[str]: Empty result that is not persisted.
+            """
+            nonlocal paper_not_found
+            paper_not_found = True
+            if raise_on_unavailable:
+                raise SemanticScholarUnavailableError(
+                    f"Could not check current {context}: HTTP 404 (paper not found). "
+                    "Previous discovery snapshot retained. Retry later or check the seed ID."
+                ) from _exc
+            logger.warning(
+                "Paper not found for %s: %s", relation_label, normalized_paper_id
             )
             return []
 
-        return self._call_with_retries(
+        checked_ids = self._call_with_retries(
             _operation,
             failure_domain=failure_domain,
             failure_context=f"fetching {relation_label} for {normalized_paper_id}",
@@ -414,14 +513,7 @@ class _EndpointsMixin:
             handled_exceptions=(
                 (
                     ObjectNotFoundException,
-                    lambda _exc: (
-                        logger.warning(
-                            "Paper not found for %s: %s",
-                            relation_label,
-                            normalized_paper_id,
-                        )
-                        or []
-                    ),
+                    _not_found,
                 ),
                 (
                     BadQueryParametersException,
@@ -437,6 +529,17 @@ class _EndpointsMixin:
                 ),
             ),
         )
+        if checked_ids is None or paper_not_found:
+            return []
+        try:
+            papers = self._materialize_discovery(checked_ids, context=context)
+        except SemanticScholarUnavailableError:
+            if raise_on_unavailable:
+                raise
+            logger.warning("Could not complete current %s; snapshot retained.", context)
+            return []
+        self._save_discovery(key, checked_ids)
+        return papers
 
     def get_cached_reference_ids(self, paper_id: str) -> list[str] | None:
         """Read a validated persisted reference entry without making an API request.
@@ -488,6 +591,7 @@ class _EndpointsMixin:
                 cache_path.unlink(missing_ok=True)
             return None
 
+    @_scoped_endpoint
     def get_reference_ids(
         self, paper_id: str, *, force_refresh: bool = False
     ) -> list[str]:
@@ -511,6 +615,7 @@ class _EndpointsMixin:
         if not force_refresh:
             cached_references = self.get_cached_reference_ids(normalized_paper_id)
             if cached_references is not None:
+                self._candidate_operation.state.reference_cache_hits += 1
                 return cached_references
 
         def _persist_empty() -> list[str]:
@@ -567,10 +672,8 @@ class _EndpointsMixin:
             """
             if isinstance(exc, _CandidateOperationSkippedError):
                 raise exc
-            raise payloads._unavailable_error(
-                f"fetching reference IDs for {normalized_paper_id}",
-                f": {exc}",
-                rate_limited=retry._is_rate_limit_error(exc),
+            raise self._unavailable_error(
+                f"fetching reference IDs for {normalized_paper_id}", exc
             ) from exc
 
         paper_not_found = False
@@ -681,6 +784,7 @@ class _EndpointsMixin:
                     disk_cache._persist_paper(paper, paper.paper_id)
         return papers
 
+    @_scoped_endpoint
     def get_recommended_papers(
         self,
         paper_id: str,
@@ -689,83 +793,106 @@ class _EndpointsMixin:
         *,
         raise_on_unavailable: bool = False,
     ) -> list[Paper]:
-        """
-        Get semantically related papers using S2 recommendations.
+        """Check recommendation IDs and reuse full paper records already on disk.
 
-        :param str paper_id: S2 paper ID
-        :param int limit: Maximum recommendations
-        :param list[str] | None fields: API fields to return.
-        :param bool raise_on_unavailable: Whether exhausted operational retries
-            for the primary request raise instead of returning an empty list. An
-            unavailable optional ``all-cs`` widening request preserves a
-            successful empty primary result.
-        :return list[Paper]: Ranked recommendation papers.
+        Explicit field projections retain their direct-response behavior. Empty
+        recent-pool discovery requires a successful all-cs check before it can
+        be reported or persisted as empty.
+
+        :param str paper_id: S2 paper identifier.
+        :param int limit: Maximum recommendations, up to 500.
+        :param list[str] | None fields: Explicit API fields, or cached full records.
+        :param bool raise_on_unavailable: Raise on failed discovery/materialization
+            instead of returning an uncached empty result.
+        :return list[Paper]: Papers in the freshly checked recommendation order.
         """
+        custom_fields = fields is not None
         fields, cache_full_metadata = self._resolve_paper_fields(fields)
-        # Semantic Scholar's recommendations endpoint does not currently support
-        # requesting ``references`` in field lists (returns HTTP 400 with
-        # unsupported nested-reference field tokens). Keep the request field set
-        # endpoint-compatible and let callers hydrate references via dedicated
-        # reference-ID methods when needed.
-        if "references" in fields:
-            fields = [field for field in fields if field != "references"]
+        # Recommendations do not accept nested reference fields. Enrichment
+        # continues to use the independent, complete reference-ID cache.
+        fields = [field for field in fields if field != "references"]
         parsed_limit = payloads._validate_integer_limit(
-            limit,
-            "limit",
-            maximum=RECOMMENDATION_MAX_RESULTS,
+            limit, "limit", maximum=RECOMMENDATION_MAX_RESULTS
         )
-
         normalized_paper_id = normalize_paper_id(paper_id)
         encoded_paper_id = quote(normalized_paper_id, safe="")
-        base_params = {"fields": ",".join(fields), "limit": parsed_limit}
-        payload = self._request_json(
-            f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
-            base_params,
-            failure_domain=_FailureDomain.RECOMMENDATIONS,
-            raise_on_unavailable=raise_on_unavailable,
-            context=f"fetching recommendations for {normalized_paper_id}",
-        )
-        if payload is None:
-            return []
-        raw_recommendations = payload.get("recommendedPapers", [])
-        if not raw_recommendations:
-            # The default candidate pool ("recent") only covers recent papers
-            # and returns nothing for classic seeds (e.g. 2017 landmark
-            # papers). Fall back to the broader CS pool before giving up.
-            try:
-                fallback_payload = self._request_json(
+        context = f"recommendation discovery for {normalized_paper_id}"
+        snapshots: list[tuple[tuple[str, str, int, str], list[str]]] = []
+        checked_ids: list[str] = []
+        raw_recommendations: list[Any] = []
+        for pool in ("recent", "all-cs"):
+            key = ("recommendations", normalized_paper_id, parsed_limit, pool)
+            scoped_ids = (
+                None
+                if custom_fields
+                else self._candidate_operation.state.discovery_ids.get(key)
+            )
+            if scoped_ids is not None:
+                checked_ids = scoped_ids
+            else:
+                params: dict[str, Any] = {
+                    "fields": ",".join(fields) if custom_fields else "paperId",
+                    "limit": parsed_limit,
+                }
+                if pool != "recent":
+                    params["from"] = pool
+                response = self._request_json(
                     f"{RECOMMENDATION_BASE_URL}/{encoded_paper_id}",
-                    {**base_params, "from": "all-cs"},
+                    params,
                     failure_domain=_FailureDomain.RECOMMENDATIONS,
                     raise_on_unavailable=raise_on_unavailable,
-                    record_domain_failure=False,
-                    context=(
-                        f"fetching all-cs recommendations for {normalized_paper_id}"
-                    ),
+                    context=f"checking current {pool} recommendations for {normalized_paper_id}",
                 )
-            except (
-                SemanticScholarUnavailableError,
-                SemanticScholarRequestError,
-            ) as exc:
-                logger.warning(
-                    "The optional all-cs recommendation fallback failed "
-                    "for %s; preserving the successful empty recent-pool result: %s",
-                    normalized_paper_id,
-                    exc,
-                )
-                fallback_payload = None
-            raw_recommendations = (fallback_payload or {}).get("recommendedPapers", [])
-            if raw_recommendations:
-                logger.debug(
-                    "Recommendations for %s came from the all-cs pool "
-                    "(recent pool was empty).",
-                    normalized_paper_id,
-                )
+                if response is None:
+                    if raise_on_unavailable:
+                        raise SemanticScholarUnavailableError(
+                            f"Could not check current {pool} recommendations for "
+                            f"{normalized_paper_id}: HTTP 404 (paper not found). "
+                            "Previous discovery snapshot retained. Retry later or check the seed ID."
+                        )
+                    return []
+                if not isinstance(response, dict) or not isinstance(
+                    response.get("recommendedPapers"), list
+                ):
+                    raise _SemanticScholarResponseContractError(
+                        "Semantic Scholar returned malformed recommendation discovery."
+                    )
+                raw_recommendations = response["recommendedPapers"]
+                if custom_fields:
+                    if raw_recommendations:
+                        break
+                    continue
+                ids = [
+                    payloads._payload_get(record, "paperId")
+                    for record in raw_recommendations
+                ]
+                if any(
+                    not isinstance(value, str) or not value.strip() for value in ids
+                ):
+                    raise _SemanticScholarResponseContractError(
+                        "Semantic Scholar returned recommendation records without paper IDs."
+                    )
+                checked_ids = [normalize_paper_id(value) for value in ids]
+                snapshots.append((key, checked_ids))
+            if checked_ids:
+                break
 
-        return self._papers_from_records(
-            raw_recommendations, cache_full_metadata=cache_full_metadata
-        )
+        if custom_fields:
+            return self._papers_from_records(
+                raw_recommendations, cache_full_metadata=cache_full_metadata
+            )
+        try:
+            papers = self._materialize_discovery(checked_ids, context=context)
+        except SemanticScholarUnavailableError:
+            if raise_on_unavailable:
+                raise
+            logger.warning("Could not complete current %s; snapshot retained.", context)
+            return []
+        for key, ids in snapshots:
+            self._save_discovery(key, ids)
+        return papers
 
+    @_scoped_endpoint
     def search_papers(
         self,
         query: str,

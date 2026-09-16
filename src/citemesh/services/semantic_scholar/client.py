@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -18,6 +19,7 @@ import weakref
 from collections.abc import Callable, Iterator
 from functools import partial
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import requests
@@ -44,6 +46,8 @@ from .errors import (
     _CandidateOperationState,
     _FailureDomain,
     _RetryableRequestError,
+    _RetryDiagnostics,
+    _RetryExhaustedError,
     _SemanticScholarResponseContractError,
     _unwrap_sdk_retry_error,
 )
@@ -71,6 +75,7 @@ class SemanticScholarClient(_EndpointsMixin):
         *,
         api_key: str | None = None,
         refresh_paper_cache: bool = False,
+        retry_budget_seconds: float | None = None,
     ):
         """
         Initialize the API client.
@@ -79,9 +84,16 @@ class SemanticScholarClient(_EndpointsMixin):
         :param str | None api_key: Explicit API key, or ``None`` to read S2_API_KEY.
             An empty string explicitly selects anonymous access.
         :param bool refresh_paper_cache: Bypass persisted paper metadata on reads.
+        :param float | None retry_budget_seconds: Recovery-time cap in seconds. ``None``
+            uses the anonymous default or disables the cap for keyed access; ``0``
+            disables the cap for either access mode.
         """
         if api_key is None:
             api_key = os.getenv("S2_API_KEY") or None
+        if retry_budget_seconds is not None:
+            retry_budget_seconds = float(retry_budget_seconds)
+            if not math.isfinite(retry_budget_seconds) or retry_budget_seconds < 0:
+                raise ValueError("retry_budget_seconds must be finite and non-negative")
 
         self.client = SemanticScholar(timeout=timeout, api_key=api_key, retry=False)
         try:
@@ -95,6 +107,13 @@ class SemanticScholarClient(_EndpointsMixin):
             ) from exc
         self.refresh_paper_cache = refresh_paper_cache
         self.timeout = timeout
+        self.retry_budget_seconds = (
+            API_CONFIG.anonymous_retry_budget_seconds
+            if retry_budget_seconds is None and not api_key
+            else 0.0
+            if retry_budget_seconds is None
+            else float(retry_budget_seconds)
+        )
         self.last_request_time = 0.0
         self._candidate_operation = threading.local()
         self._session = requests.Session()
@@ -135,7 +154,9 @@ class SemanticScholarClient(_EndpointsMixin):
         state = getattr(self._candidate_operation, "state", None)
         owns_state = state is None
         if owns_state:
-            state = _CandidateOperationState()
+            state = _CandidateOperationState(
+                retry_budget_seconds=self.retry_budget_seconds
+            )
             self._candidate_operation.state = state
         state.depth += 1
         try:
@@ -143,6 +164,12 @@ class SemanticScholarClient(_EndpointsMixin):
         finally:
             state.depth -= 1
             if owns_state and state.depth == 0:
+                if state.reference_cache_hits:
+                    logger.info(
+                        "Reused cached reference enrichment for %d lookups "
+                        "(not refreshed).",
+                        state.reference_cache_hits,
+                    )
                 del self._candidate_operation.state
 
     def _candidate_operation_failure(
@@ -157,6 +184,8 @@ class SemanticScholarClient(_EndpointsMixin):
         state = getattr(self._candidate_operation, "state", None)
         if state is None:
             return None
+        if state.budget_failure is not None:
+            return state.budget_failure
         return state.failures.get(failure_domain)
 
     def _record_candidate_operation_failure(
@@ -175,6 +204,121 @@ class SemanticScholarClient(_EndpointsMixin):
             state.failures.setdefault(failure_domain, error)
 
     @staticmethod
+    def _active_recovery_seconds(state: _CandidateOperationState) -> float:
+        """Return recovery work in the active request not yet committed to the scope.
+
+        :param _CandidateOperationState state: Active candidate-collection state.
+        :return float: Elapsed active request time excluding charged pacing waits.
+        """
+        if (
+            not state.active_recovery_request
+            or state.recovery_request_started_at is None
+        ):
+            return 0.0
+        return max(
+            0.0,
+            monotonic()
+            - state.recovery_request_started_at
+            - state.current_recovery_wait_seconds,
+        )
+
+    @staticmethod
+    def _remaining_recovery_budget(state: _CandidateOperationState) -> float | None:
+        """Return the remaining shared recovery time, or ``None`` when uncapped.
+
+        :param _CandidateOperationState state: Active candidate-collection state.
+        :return float | None: Remaining recovery seconds, or ``None`` when uncapped.
+        """
+        if state.retry_budget_seconds == 0:
+            return None
+        return max(
+            0.0,
+            state.retry_budget_seconds
+            - state.recovery_seconds
+            - SemanticScholarClient._active_recovery_seconds(state),
+        )
+
+    @staticmethod
+    def _retry_diagnostics(
+        state: _CandidateOperationState,
+        attempts: int,
+        stop_reason: str,
+    ) -> _RetryDiagnostics:
+        """Build user-facing diagnostics from the active recovery scope.
+
+        :param _CandidateOperationState state: Active candidate-collection state.
+        :param int attempts: Requests started for the failed operation.
+        :param str stop_reason: Reason recovery stopped.
+        :return _RetryDiagnostics: Actual recovery details for an unavailable error.
+        """
+        return _RetryDiagnostics(
+            attempts=attempts,
+            recovery_seconds=(
+                state.recovery_seconds
+                + SemanticScholarClient._active_recovery_seconds(state)
+            ),
+            stop_reason=stop_reason,
+        )
+
+    def _retry_budget_error(
+        self,
+        state: _CandidateOperationState,
+        attempts: int,
+        stop_reason: str = "recovery budget exhausted",
+    ) -> _RetryExhaustedError:
+        """Create the terminal error used when no recovery time remains.
+
+        :param _CandidateOperationState state: Active candidate-collection state.
+        :param int attempts: Requests started for the failed operation.
+        :param str stop_reason: Reason recovery stopped.
+        :return _RetryExhaustedError: Terminal recovery-budget marker.
+        """
+        cause = state.last_recovery_error or RuntimeError("recovery budget exhausted")
+        return _RetryExhaustedError(
+            cause,
+            self._retry_diagnostics(state, attempts, stop_reason),
+        )
+
+    def _sleep_with_recovery_budget(
+        self,
+        state: _CandidateOperationState,
+        seconds: float,
+        attempts: int,
+    ) -> None:
+        """Sleep for recovery work without extending the shared budget.
+
+        :param _CandidateOperationState state: Current collection state.
+        :param float seconds: Requested sleep duration.
+        :param int attempts: Attempts made by this operation.
+        :raises _RetryExhaustedError: If the wait would overrun the recovery budget.
+        """
+        remaining = self._remaining_recovery_budget(state)
+        if remaining is not None and seconds > remaining:
+            raise self._retry_budget_error(
+                state,
+                attempts,
+                "next wait exceeds remaining recovery budget",
+            )
+        started_at = monotonic()
+        try:
+            time.sleep(seconds)
+        finally:
+            elapsed = max(0.0, monotonic() - started_at)
+            state.recovery_seconds += elapsed
+            if state.active_recovery_request:
+                state.current_recovery_wait_seconds += elapsed
+
+    def _request_timeout(self) -> float:
+        """Return the normal timeout or the remaining recovery allowance."""
+        state = getattr(self._candidate_operation, "state", None)
+        if state is None or not state.active_recovery_request:
+            return self.timeout
+        remaining = self._remaining_recovery_budget(state)
+        if remaining is None:
+            return self.timeout
+        return min(self.timeout, remaining)
+
+    @staticmethod
     def _skipped_candidate_operation_error(
         failure_domain: _FailureDomain,
         failure: SemanticScholarUnavailableError,
@@ -188,7 +332,7 @@ class SemanticScholarClient(_EndpointsMixin):
         """
         return _CandidateOperationSkippedError(
             f"Skipped Semantic Scholar {failure_domain.value} request after an "
-            f"earlier {failure_domain.value} outage: {failure}"
+            f"earlier Semantic Scholar outage: {failure}"
         )
 
     def __enter__(self) -> SemanticScholarClient:
@@ -264,7 +408,15 @@ class SemanticScholarClient(_EndpointsMixin):
         elapsed = time.time() - self.last_request_time
         min_interval = 1.0 / self.requests_per_second
         if elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
+            state = getattr(self._candidate_operation, "state", None)
+            if state is not None and state.active_recovery_request:
+                self._sleep_with_recovery_budget(
+                    state,
+                    min_interval - elapsed,
+                    state.current_attempt,
+                )
+            else:
+                time.sleep(min_interval - elapsed)
         self.last_request_time = time.time()
 
     def _run_with_retries(
@@ -301,38 +453,192 @@ class SemanticScholarClient(_EndpointsMixin):
             ``on_exhausted``; anything else propagates to the caller unchanged.
         :return Any: Result of ``operation``, or of one of the policy callbacks.
         """
+        if getattr(self._candidate_operation, "state", None) is None:
+            with self.candidate_operation_scope():
+                return self._run_with_retries(
+                    operation,
+                    failure_domain=failure_domain,
+                    predicate=predicate,
+                    on_skip=on_skip,
+                    on_retry=on_retry,
+                    on_exhausted=on_exhausted,
+                    caught=caught,
+                )
+
+        state: _CandidateOperationState = self._candidate_operation.state
         scope_failure = self._candidate_operation_failure(failure_domain)
+        if scope_failure is None:
+            remaining = self._remaining_recovery_budget(state)
+            if remaining is not None and remaining <= 0:
+                exhausted = self._retry_budget_error(
+                    state,
+                    state.recovery_attempts,
+                )
+                scope_failure = self._unavailable_error(
+                    "continuing the current candidate collection", exhausted
+                )
+                state.budget_failure = scope_failure
         if scope_failure is not None:
             return on_skip(
                 self._skipped_candidate_operation_error(failure_domain, scope_failure),
                 scope_failure,
             )
 
+        operation_attempts = 0
+        last_attempt_started_at = 0.0
+        retryable_attempts = 0
+
+        def _budgeted_operation() -> Any:
+            """Run one attempt and mark whether its request is recovery work.
+
+            :return Any: Value returned by the wrapped API operation.
+            :raises _RetryExhaustedError: If no recovery time remains before a retry.
+            """
+            nonlocal operation_attempts, last_attempt_started_at
+            next_attempt = operation_attempts + 1
+            is_recovery_attempt = next_attempt > 1
+            if is_recovery_attempt:
+                remaining = self._remaining_recovery_budget(state)
+                if remaining is not None and remaining <= 0:
+                    raise self._retry_budget_error(state, operation_attempts)
+            operation_attempts = next_attempt
+            state.current_attempt = operation_attempts
+            state.active_recovery_request = is_recovery_attempt
+            state.current_recovery_wait_seconds = 0.0
+            state.initial_attempt_success_seconds = 0.0
+            last_attempt_started_at = monotonic()
+            state.recovery_request_started_at = (
+                last_attempt_started_at if is_recovery_attempt else None
+            )
+            failed = False
+            try:
+                return operation()
+            except Exception:
+                failed = True
+                raise
+            finally:
+                state.active_recovery_request = False
+                state.recovery_request_started_at = None
+                if is_recovery_attempt and not failed:
+                    state.recovery_attempts += 1
+                    state.recovery_seconds += max(
+                        0.0,
+                        monotonic()
+                        - last_attempt_started_at
+                        - state.current_recovery_wait_seconds,
+                    )
+                    state.current_recovery_wait_seconds = 0.0
+
+        def _after_retryable_failure(retry_state: RetryCallState) -> None:
+            """Charge failed request time only after Tenacity selects a retry.
+
+            :param RetryCallState retry_state: Failed retry state selected for retry.
+            :return None: Updates the active collection's recovery accounting.
+            """
+            nonlocal retryable_attempts
+            retryable_attempts += 1
+            state.recovery_attempts += 1
+            elapsed = max(
+                0.0,
+                monotonic()
+                - last_attempt_started_at
+                - state.current_recovery_wait_seconds
+                - (
+                    state.initial_attempt_success_seconds
+                    if operation_attempts == 1
+                    else 0.0
+                ),
+            )
+            state.recovery_seconds += elapsed
+            state.current_recovery_wait_seconds = 0.0
+            state.initial_attempt_success_seconds = 0.0
+            if retry_state.outcome is not None:
+                failure = retry_state.outcome.exception()
+                if isinstance(failure, Exception):
+                    state.last_recovery_error = failure
+
         def _before_sleep(retry_state: RetryCallState) -> None:
             """Warn on outage-scale waits, then run the transport's own callback.
 
             :param RetryCallState retry_state: Failed attempt with its next action.
             :return None: Invokes ``on_retry``.
+            :raises _RetryExhaustedError: If the next wait exceeds the allowance.
             """
+            wait_seconds = (
+                retry_state.next_action.sleep if retry_state.next_action else 0.0
+            )
+            remaining = self._remaining_recovery_budget(state)
+            if remaining is not None and wait_seconds > remaining:
+                raise self._retry_budget_error(
+                    state,
+                    operation_attempts,
+                    "next wait exceeds remaining recovery budget",
+                )
             retry._warn_on_long_wait(retry_state)
             on_retry(
                 retry_state,
                 retry_state.outcome.exception() if retry_state.outcome else None,
-                retry_state.next_action.sleep if retry_state.next_action else 0.0,
+                wait_seconds,
             )
 
         retryer = Retrying(
             stop=stop_after_attempt(API_CONFIG.max_retries),
             wait=retry._S2BackoffWait(),
             retry=predicate,
+            after=_after_retryable_failure,
             before_sleep=_before_sleep,
-            sleep=lambda seconds: time.sleep(seconds),
+            sleep=lambda seconds: self._sleep_with_recovery_budget(
+                state, seconds, operation_attempts
+            ),
             reraise=True,
         )
         try:
-            return retryer(operation)
-        except caught as exc:
+            return retryer(_budgeted_operation)
+        except _RetryExhaustedError as exc:
             return on_exhausted(exc)
+        except caught as exc:
+            if retryable_attempts == operation_attempts:
+                exc = _RetryExhaustedError(
+                    exc,
+                    self._retry_diagnostics(
+                        state,
+                        operation_attempts,
+                        "maximum retry attempts reached",
+                    ),
+                )
+            return on_exhausted(exc)
+
+    def _unavailable_error(
+        self,
+        context: str,
+        exc: Exception,
+        *,
+        omit_rate_limited_detail: bool = False,
+    ) -> SemanticScholarUnavailableError:
+        """Build an availability error with observed retry diagnostics.
+
+        Endpoint callbacks use this helper so direct and SDK transports produce
+        the same actionable failure text.
+        """
+        diagnostics = getattr(exc, "retry_diagnostics", None)
+        cause = exc.cause if isinstance(exc, _RetryExhaustedError) else exc
+        rate_limited = retry._is_rate_limit_error(exc)
+        response = getattr(cause, "response", None)
+        status_code = getattr(response, "status_code", None)
+        failure_detail = str(cause)
+        if status_code is not None and f"HTTP {status_code}" not in failure_detail:
+            failure_detail = f"HTTP {status_code}" + (
+                f": {failure_detail}" if failure_detail else ""
+            )
+        detail = (
+            "" if rate_limited and omit_rate_limited_detail else f": {failure_detail}"
+        )
+        return payloads._unavailable_error(
+            context,
+            detail,
+            rate_limited=rate_limited,
+            retry_diagnostics=diagnostics,
+        )
 
     def _record_unavailable(
         self,
@@ -354,13 +660,25 @@ class SemanticScholarClient(_EndpointsMixin):
             calls to the same capability.
         :return SemanticScholarUnavailableError: Availability error to raise or log.
         """
-        rate_limited = retry._is_rate_limit_error(exc)
-        detail = "" if rate_limited and omit_rate_limited_detail else f": {exc}"
-        unavailable = payloads._unavailable_error(
-            context, detail, rate_limited=rate_limited
+        unavailable = self._unavailable_error(
+            context,
+            exc,
+            omit_rate_limited_detail=omit_rate_limited_detail,
         )
         if record_domain_failure:
             self._record_candidate_operation_failure(failure_domain, unavailable)
+        state = getattr(self._candidate_operation, "state", None)
+        if state is not None and state.retry_budget_seconds:
+            diagnostics = getattr(exc, "retry_diagnostics", None)
+            if (
+                diagnostics is not None
+                and diagnostics.stop_reason
+                in {
+                    "recovery budget exhausted",
+                    "next wait exceeds remaining recovery budget",
+                }
+            ) or state.recovery_seconds >= state.retry_budget_seconds:
+                state.budget_failure = unavailable
         return unavailable
 
     def _call_with_retries(
@@ -398,6 +716,8 @@ class SemanticScholarClient(_EndpointsMixin):
             """
             try:
                 return operation()
+            except _RetryExhaustedError:
+                raise
             except Exception as raw_exc:
                 raise _unwrap_sdk_retry_error(raw_exc)
 
@@ -409,12 +729,13 @@ class SemanticScholarClient(_EndpointsMixin):
             :raises Exception: Local contract failures propagate unchanged.
             """
             # SDK JSON decoding can fail on transient HTML/plain-text error bodies.
-            if not isinstance(exc, decode_failures):
+            cause = exc.cause if isinstance(exc, _RetryExhaustedError) else exc
+            if not isinstance(cause, decode_failures):
                 for error_type, handler in handled_exceptions:
-                    if isinstance(exc, error_type):
-                        return handler(exc)
-                if isinstance(exc, local_failures):
-                    raise exc
+                    if isinstance(cause, error_type):
+                        return handler(cause)
+                if isinstance(cause, local_failures):
+                    raise cause
             self._record_unavailable(
                 failure_context, exc, failure_domain=failure_domain
             )
@@ -428,6 +749,7 @@ class SemanticScholarClient(_EndpointsMixin):
                 & retry_if_not_exception_type(
                     local_failures
                     + tuple(kind for kind, _handler in handled_exceptions)
+                    + (_RetryExhaustedError,)
                 )
             )
             | retry_if_exception_type(decode_failures),
@@ -501,10 +823,17 @@ class SemanticScholarClient(_EndpointsMixin):
         :param dict[str, Any] | None payload: POST body, or ``None`` for GET.
         :return Any: Decoded JSON, or ``None`` for HTTP 404.
         """
-        kwargs: dict[str, Any] = {"params": params, "timeout": self.timeout}
+        kwargs: dict[str, Any] = {"params": params}
         if headers is not None:
             kwargs["headers"] = headers
+        request_started_at = monotonic()
         self._rate_limit()
+        state = getattr(self._candidate_operation, "state", None)
+        if state is not None and state.active_recovery_request:
+            remaining = self._remaining_recovery_budget(state)
+            if remaining is not None and remaining <= 0:
+                raise self._retry_budget_error(state, state.current_attempt)
+        kwargs["timeout"] = self._request_timeout()
         response = (
             self._session.get(url, **kwargs)
             if payload is None
@@ -530,7 +859,16 @@ class SemanticScholarClient(_EndpointsMixin):
                 f"(HTTP {response.status_code}). {remediation}"
             )
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        if (
+            state is not None
+            and not state.active_recovery_request
+            and state.current_attempt == 1
+        ):
+            state.initial_attempt_success_seconds += max(
+                0.0, monotonic() - request_started_at
+            )
+        return data
 
     def _request_json(
         self,
@@ -589,9 +927,8 @@ class SemanticScholarClient(_EndpointsMixin):
             if raise_on_unavailable:
                 raise skipped from scope_failure
             logger.warning(
-                "Skipped %s after an earlier Semantic Scholar %s outage: %s",
+                "Skipped %s after an earlier Semantic Scholar outage: %s",
                 url,
-                failure_domain.value,
                 scope_failure,
             )
             return None
@@ -636,12 +973,7 @@ class SemanticScholarClient(_EndpointsMixin):
             )
             if raise_on_unavailable:
                 raise unavailable from exc
-            logger.error(
-                "Failed to call %s after %s attempts: %s",
-                url,
-                API_CONFIG.max_retries,
-                exc,
-            )
+            logger.error("%s", unavailable)
             return None
 
         return self._run_with_retries(

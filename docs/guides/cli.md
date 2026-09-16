@@ -87,6 +87,7 @@ Build options are strategy-scoped: an explicit flag unsupported by the selected 
 | `--strategy`, `-s` | `recommendation`, `citation`, `embedding`, or `hybrid` | `recommendation` |
 | `--max-papers`, `-p` | Maximum nodes in the final graph, seed included | `40` (`hybrid`: implicit `45`) |
 | `--refresh-paper-cache` | Bypass [persisted paper metadata](caching.md#paper-metadata-and-reference-ids) for this run | disabled |
+| `--s2-retry-budget SECONDS` | Override the Semantic Scholar recovery-time limit. `0` keeps the 30-attempt limit but disables the elapsed cap. | `90` seconds anonymously; no elapsed cap with an API key |
 | `--spring-iterations`, `-i` | Iterations for the spring-layout fallback only | `100` |
 | `--dpi`, `-d` | PNG output resolution | `150` |
 | `--seed` | Seed for the layout shared by `png`, `plotly`, `dashboard`, `json` | deterministic built-in seed |
@@ -164,15 +165,17 @@ _`--theme light` with a paper selected. The theme is applied when the export is 
 - At least `1`: `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, `--batch-size` / `-bs`, `--candidate-pool-size`, `search --limit`.
 - `search --limit` is capped at `1000` only when the resolved mode uses Semantic Scholar relevance search; local search can request any positive count.
 - At least `0`: `--max-citations`, `--max-references`, `--cache-compression-level` (valid only with `--cache-compression gzip`).
+- `--s2-retry-budget` must be a finite float at least `0`; `0` disables its elapsed-time cap.
 - `--max-semantic` must satisfy `0 <= max-semantic <= max-papers - 1` (hybrid only).
 - `--similarity-threshold` and `--min-semantic-similarity` must be finite floats in `[0.0, 1.0]`.
 
 ## Appendix B: Troubleshooting
 
-Semantic Scholar calls retry with exponential full jitter: up to 30 attempts per operation, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, a numeric `Retry-After` honored as a floor up to 300 seconds per delay, and no elapsed-time deadline, since long retries favor finishing a resumable build. An outage can therefore take minutes to surface, though any wait of 30 seconds or more is logged and Ctrl+C interrupts. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
+Semantic Scholar calls retry with exponential full jitter: up to 30 attempts per operation, the wait ceiling doubling from 2 seconds (4 for HTTP 429) to 60, and a numeric `Retry-After` honored as a floor up to 300 seconds per delay. Anonymous builds have a shared 90-second recovery budget for a candidate collection; failed requests, retry attempts, and waits consume it, while healthy first requests, local embedding work, and rendering do not. Authenticated builds retain the attempt limit without an elapsed cap unless `--s2-retry-budget SECONDS` overrides it; pass `0` to remove the elapsed cap while keeping 30 attempts. An in-flight HTTP request cannot be cancelled at an exact recovery-budget boundary. HTTP 408 and server errors retry; bad parameters and rejected credentials fail immediately.
 
 - **No results / paper not found**: check the identifier format and S2 availability.
-- **Partial outage**: a build continues while at least one requested source completes or returns a valid empty result, skipping an exhausted capability for the rest of that collection and starting fresh on the next. Reference-ID and full-reference lookups share a `references` budget; citations, recommendations, search, and metadata each have their own. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a seed-only graph.
+- **Discovery check unavailable**: a seeded build cannot use a previous discovery snapshot as current data. Required acquisition failure exits nonzero without replacing prior outputs or the last successful discovery snapshot; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.
+- **Partial outage**: a build continues while at least one requested source completes or returns a valid empty result, skipping an exhausted capability for the rest of that collection and starting fresh on the next. Reference-ID enrichment and reference discovery share a `references` outage state; citations, recommendations, search, and metadata track their own outages. The elapsed recovery budget is shared across all of them: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a seed-only graph.
 - **Slow first embedding run**: the cold path downloads the checkpoint and encodes every candidate or corpus paper; later runs read the cache.
 - **A full-split run mentions an older corpus cap**: it extends the existing namespace; check the effective configuration for `split=...` and `corpus=all`.
 - **Missing exports**: unknown `--export` values are rejected.

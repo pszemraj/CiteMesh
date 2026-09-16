@@ -366,11 +366,16 @@ def _configured_client_kwargs(args: argparse.Namespace) -> dict[str, object]:
     """
     api_key = getattr(args, "_s2_api_key", None)
     refresh = bool(getattr(args, "refresh_paper_cache", False))
-    if api_key is None and not refresh:
+    retry_budget = getattr(args, "s2_retry_budget", None)
+    if api_key is None and not refresh and retry_budget is None:
         return {}
-    return {
-        "client": SemanticScholarClient(api_key=api_key, refresh_paper_cache=refresh)
+    client_kwargs: dict[str, object] = {
+        "api_key": api_key,
+        "refresh_paper_cache": refresh,
     }
+    if retry_budget is not None:
+        client_kwargs["retry_budget_seconds"] = retry_budget
+    return {"client": SemanticScholarClient(**client_kwargs)}
 
 
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:

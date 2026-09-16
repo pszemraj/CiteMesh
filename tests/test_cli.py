@@ -238,6 +238,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "similarity_threshold": 0.2,
         "no_references": False,
         "refresh_reference_cache": False,
+        "s2_retry_budget": None,
         "model": DEFAULT_EMBEDDING_MODEL_NAME,
         "model_profile": "auto",
         "model_revision": None,
@@ -2271,6 +2272,65 @@ def test_invalid_paper_id_fails_cleanly(
     assert result.returncode != 0
     assert not output.exists()
     assert "All requested Semantic Scholar sources" in str(error_mock.call_args)
+
+
+def test_required_discovery_failure_preserves_existing_exports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed current-discovery check must not replace completed exports.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces graph acquisition and logging.
+    :param Path tmp_path: Existing artifact directory.
+    :return None: Verifies failure wording and byte-for-byte output preservation.
+    """
+    output_dir = tmp_path / "existing-results"
+    output_dir.mkdir()
+    original_outputs = {
+        output_dir / "recommendation.png": b"previous png",
+        output_dir / "recommendation.json": b'{"previous": "json"}',
+        output_dir / "recommendation.html": b"<html>previous</html>",
+    }
+    for path, content in original_outputs.items():
+        path.write_bytes(content)
+
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    monkeypatch.setattr(
+        build_module,
+        "_build_strategy_graph",
+        MagicMock(
+            side_effect=CandidateAcquisitionError(
+                "Could not complete current recommendation discovery; "
+                "previous snapshot retained."
+            )
+        ),
+    )
+
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "png",
+            "--export",
+            "json",
+            "--export",
+            "html",
+            "--output",
+            str(output_dir),
+        ]
+    )
+
+    assert result.returncode == 1
+    assert {path: path.read_bytes() for path in original_outputs} == original_outputs
+    assert error_mock.call_count == 1
+    assert (
+        error_mock.call_args.args[0]
+        == "Build incomplete: current Semantic Scholar discovery could not be acquired. %s"
+    )
+    assert "current recommendation discovery" in str(error_mock.call_args.args[1])
 
 
 def test_cli_argument_validation_contracts() -> None:
@@ -4894,6 +4954,69 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         monkeypatch.delenv("S2_API_KEY")
 
 
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [("0", 0.0), ("37.5", 37.5)],
+)
+def test_build_s2_retry_budget_routes_explicit_override(
+    monkeypatch: pytest.MonkeyPatch, token: str, expected: float
+) -> None:
+    """An explicit S2 recovery budget should construct a configured client.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the S2 client constructor.
+    :param str token: CLI retry-budget token.
+    :param float expected: Parsed retry-budget value.
+    :return None: Assertions verify client routing and default behavior.
+    """
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    _, build_parser, _, _ = parser_module._create_parser()
+    default_args = build_parser.parse_args(["seed"])
+    factory = MagicMock()
+    monkeypatch.setattr(build_options_module, "SemanticScholarClient", factory)
+
+    assert build_options_module._configured_client_kwargs(default_args) == {}
+    factory.assert_not_called()
+
+    args = build_parser.parse_args(["seed", "--s2-retry-budget", token])
+    configured = build_options_module._configured_client_kwargs(args)
+
+    factory.assert_called_once_with(
+        api_key=None,
+        refresh_paper_cache=False,
+        retry_budget_seconds=expected,
+    )
+    assert configured == {"client": factory.return_value}
+
+
+@pytest.mark.parametrize("token", ["-1", "nan", "inf", "-inf"])
+def test_build_rejects_invalid_s2_retry_budget(token: str) -> None:
+    """The S2 recovery budget must be a finite non-negative float.
+
+    :param str token: Invalid CLI retry-budget token.
+    :return None: Assertions verify clean usage failure.
+    """
+    result = run_cli_command(["build", "seed", "--s2-retry-budget", token])
+
+    assert result.returncode == 2
+    assert "--s2-retry-budget" in result.stderr
+
+
+def test_graph_config_payload_records_explicit_s2_retry_budget() -> None:
+    """Graph sidecars should retain a caller-selected S2 recovery budget."""
+    _, build_parser, _, _ = parser_module._create_parser()
+    cli_args = build_parser.parse_args(["seed", "--s2-retry-budget", "37.5"])
+
+    payload = graph_config_module._build_graph_config_payload(
+        cli_args=cli_args,
+        seed_id="seed",
+        metadata={"strategy": "recommendation"},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/recommendation.json")},
+    )
+
+    assert payload["build"]["s2_retry_budget"] == 37.5
+
+
 @pytest.mark.parametrize("width", [60, 80, 120])
 def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every command should expose its help without color leaks or clipped lines.
@@ -4927,6 +5050,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "dashboard",
                 "--all-corpus",
                 "--refresh-paper-cache",
+                "--s2-retry-budget",
                 "--storage-precision",
                 "--binary-prefilter",
                 "--binary-rescore-multiplier",

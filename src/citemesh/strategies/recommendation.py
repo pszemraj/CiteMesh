@@ -124,7 +124,6 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         papers[seed.paper_id] = seed
         identity_aliases = IdentityRegistry()
         register_aliases(identity_aliases, seed.paper_id, seed)
-        self._hydrate_references(seed)
 
         logger.info("Fetching recommendations for %s", seed.paper_id)
         recommendation_result = fetch_candidate_source(
@@ -142,6 +141,10 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             [recommendation_result],
             context=f"recommendation acquisition for {seed.paper_id}",
         )
+
+        # Discovery is the primary acquisition path. Do it before optional seed
+        # enrichment, whose retries share the collection's S2 recovery budget.
+        self._hydrate_references(seed)
 
         for paper in recommendation_result.papers:
             # Recommendation payloads can include the seed paper itself.

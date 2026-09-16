@@ -24,6 +24,8 @@ import networkx as nx
 
 from citemesh.data.cache import atomic_write_json, path_exists
 from citemesh.data.user_config import UserConfig
+from citemesh.services import SemanticScholarUnavailableError
+from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.visualization import (
     GraphExporter,
     compute_layout,
@@ -624,6 +626,14 @@ def run_build_command(
     except DashboardPackageError as e:
         logger.error(
             "Failed to prepare dashboard collection: %s",
+            e,
+            exc_info=logging.getLogger().level == logging.DEBUG,
+        )
+        return 1
+    except (CandidateAcquisitionError, SemanticScholarUnavailableError) as e:
+        logger.error(
+            "Build incomplete: current Semantic Scholar discovery could not be "
+            "acquired. %s",
             e,
             exc_info=logging.getLogger().level == logging.DEBUG,
         )

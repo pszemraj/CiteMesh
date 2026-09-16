@@ -181,6 +181,12 @@ def test_candidate_operation_scope_records_tolerant_exhaustion(
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
         if first_endpoint == "sdk":
+            s2.disk_cache._persist_paper(
+                Paper(paper_id="healthy", title="Healthy", year=None), "healthy"
+            )
+            client._session.post = MagicMock(
+                side_effect=AssertionError("cached metadata")
+            )
             client.client.get_paper_citations = MagicMock(
                 side_effect=requests.ConnectionError("offline")
             )
@@ -615,27 +621,29 @@ def test_long_retry_waits_are_visible_at_default_log_level(
 
 
 def test_related_paper_retry_discards_partial_attempt_results() -> None:
-    """A failed relation conversion attempt must not duplicate earlier rows."""
+    """A failed relation page must not publish or duplicate earlier IDs."""
     client = SemanticScholarClient(timeout=1)
     client._rate_limit = lambda: None
     records = [
         SimpleNamespace(paper=SimpleNamespace(paperId="first")),
         SimpleNamespace(paper=SimpleNamespace(paperId="second")),
     ]
-    client.client.get_paper_references = MagicMock(return_value=records)
-    with (
-        patch.object(
-            s2.payloads,
-            "_convert_api_paper",
-            side_effect=[
-                Paper(paper_id="first", title="First", year=None),
-                RuntimeError("temporary conversion failure"),
-                Paper(paper_id="first", title="First", year=None),
-                Paper(paper_id="second", title="Second", year=None),
-            ],
-        ),
-        patch("time.sleep"),
-    ):
+    for paper_id in ("first", "second"):
+        s2.disk_cache._persist_paper(
+            Paper(paper_id=paper_id, title=paper_id, year=None), paper_id
+        )
+
+    def failed_page():
+        """Yield one record before a later-page outage.
+
+        :return Iterator[SimpleNamespace]: Partial relation attempt.
+        """
+        yield records[0]
+        raise requests.ConnectionError("temporary page failure")
+
+    client.client.get_paper_references = MagicMock(side_effect=[failed_page(), records])
+    client._session.post = MagicMock(side_effect=AssertionError("cached metadata"))
+    with patch("time.sleep"):
         papers = client.get_paper_references("seed", limit=2)
 
     assert [paper.paper_id for paper in papers] == ["first", "second"]
@@ -1129,7 +1137,9 @@ def test_direct_endpoint_conversion_and_validation_contracts() -> None:
         ]
     )
 
-    recommendations = client.get_recommended_papers("seed", limit=1)
+    recommendations = client.get_recommended_papers(
+        "seed", limit=1, fields=s2.payloads._default_paper_fields()
+    )
     search_results = client.search_papers("transformer", limit=1)
     assert [paper.paper_id for paper in recommendations] == ["rec1"]
     assert recommendations[0].references == ["r1", "r2", "r3"]
@@ -1283,6 +1293,18 @@ def test_related_papers_use_sdk_page_size_without_capping_total(
             ]
         )
 
+        def batch_response(_url: str, **kwargs: Any) -> _MockResponse:
+            """Serve full metadata only for the requested missing IDs.
+
+            :param str _url: Batch endpoint URL.
+            :param Any kwargs: Request payload and options.
+            :return _MockResponse: Positional batch response.
+            """
+            return _MockResponse(
+                200, [_paper_payload(paper_id=value) for value in kwargs["json"]["ids"]]
+            )
+
+        client._session.post = MagicMock(side_effect=batch_response)
         papers = getattr(client, method)("seed", limit=1001)
 
         assert [paper.paper_id for paper in papers] == [f"r{i}" for i in range(1001)]
@@ -1294,6 +1316,11 @@ def test_related_papers_use_sdk_page_size_without_capping_total(
             params = parse_qs(call.kwargs["params"])
             assert params["offset"] == [str(offset)]
             assert params["limit"] == ["1000"]
+            assert params["fields"] == ["paperId"]
+        assert [
+            len(call.kwargs["json"]["ids"])
+            for call in client._session.post.call_args_list
+        ] == [500, 500, 1]
 
 
 @pytest.mark.parametrize(
@@ -1316,6 +1343,8 @@ def test_full_relation_recommendation_and_search_records_populate_paper_cache(
     paper_id = f"{method}-paper"
     payload = _paper_payload(paper_id=paper_id, title="Discovered paper")
     with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client._session.post = MagicMock(return_value=_MockResponse(200, [payload]))
         if method in {"get_paper_citations", "get_paper_references"}:
             fetch = MagicMock(
                 return_value=[SimpleNamespace(paper=SimpleNamespace(**payload))]
@@ -1324,7 +1353,7 @@ def test_full_relation_recommendation_and_search_records_populate_paper_cache(
             results = getattr(client, method)("seed", limit=1)
             fetch.assert_called_once_with(
                 "seed",
-                fields=s2.payloads._default_paper_fields(),
+                fields=["paperId"],
                 limit=1,
             )
         elif method == "get_recommended_papers":
@@ -1337,6 +1366,9 @@ def test_full_relation_recommendation_and_search_records_populate_paper_cache(
             results = client.search_papers("discovered", limit=1)
 
         assert [paper.paper_id for paper in results] == [paper_id]
+        assert client._session.post.call_count == (
+            0 if method == "search_papers" else 1
+        )
         client._request_json = MagicMock(
             side_effect=AssertionError("unexpected metadata request after cache hit")
         )
@@ -2053,6 +2085,10 @@ def test_unconvertible_paper_payload_error_names_the_cause() -> None:
 def test_recommendations_fall_back_to_all_cs_pool() -> None:
     """Empty default-pool responses retry against the broader all-cs pool."""
     client = SemanticScholarClient(timeout=1)
+    s2.disk_cache._persist_paper(
+        Paper(paper_id="classic1", title="Classic Result", year=None), "classic1"
+    )
+    client._session.post = MagicMock(side_effect=AssertionError("cached metadata"))
     client._request_json = MagicMock(
         side_effect=[
             {"recommendedPapers": []},
@@ -2103,7 +2139,13 @@ def test_recommendations_fall_back_to_all_cs_pool() -> None:
         )
     assert client._request_json.call_count == 1
 
-    with SemanticScholarClient(timeout=1) as scoped_client:
+    with SemanticScholarClient(timeout=1, retry_budget_seconds=0) as scoped_client:
+        s2.disk_cache._persist_paper(
+            Paper(paper_id="later", title="Later", year=None), "later"
+        )
+        scoped_client._session.post = MagicMock(
+            side_effect=AssertionError("cached metadata")
+        )
         scoped_client._rate_limit = MagicMock()
         scoped_client._session.get = MagicMock(
             side_effect=[
@@ -2120,18 +2162,21 @@ def test_recommendations_fall_back_to_all_cs_pool() -> None:
             scoped_client.candidate_operation_scope(),
             patch("time.sleep") as sleep_mock,
         ):
-            assert (
+            with pytest.raises(SemanticScholarUnavailableError, match="all-cs"):
                 scoped_client.get_recommended_papers(
                     "seed", limit=5, raise_on_unavailable=True
                 )
-                == []
-            )
-            assert [
-                paper.paper_id
-                for paper in scoped_client.get_recommended_papers(
+            with pytest.raises(SemanticScholarUnavailableError, match="Skipped"):
+                scoped_client.get_recommended_papers(
                     "later-seed", limit=5, raise_on_unavailable=True
                 )
-            ] == ["later"]
+
+        assert [
+            paper.paper_id
+            for paper in scoped_client.get_recommended_papers(
+                "later-seed", limit=5, raise_on_unavailable=True
+            )
+        ] == ["later"]
 
         assert scoped_client._session.get.call_count == API_CONFIG.max_retries + 2
         assert sleep_mock.call_count == API_CONFIG.max_retries - 1
@@ -2215,7 +2260,7 @@ def test_server_retry_after_can_exceed_local_cap(endpoint: str) -> None:
     :return None: Checks Retry-After propagation through the actual retry engine.
     """
     response = _MockResponse(status_code=503, headers={"Retry-After": "120"})
-    with SemanticScholarClient(timeout=1) as client:
+    with SemanticScholarClient(timeout=1, retry_budget_seconds=0) as client:
         client._rate_limit = MagicMock()
         client.client.get_paper_references = MagicMock(
             side_effect=[
@@ -2455,10 +2500,10 @@ def test_all_unresolved_references_are_empty_and_cached(
         )
 
 
-def test_optional_all_cs_rejection_keeps_successful_empty_result() -> None:
-    """An optional widening request must not invalidate the successful primary call.
+def test_all_cs_rejection_is_not_a_successful_empty_result() -> None:
+    """A failed broader-pool check cannot establish empty discovery.
 
-    :return None: Checks request rejection tolerance without hiding primary errors.
+    :return None: Checks failure propagation and absence of a new snapshot.
     """
     with SemanticScholarClient(timeout=1) as client:
         client._request_json = MagicMock(
@@ -2467,8 +2512,12 @@ def test_optional_all_cs_rejection_keeps_successful_empty_result() -> None:
                 semantic_module.SemanticScholarRequestError("HTTP 400"),
             ]
         )
-        assert client.get_recommended_papers("p1", raise_on_unavailable=True) == []
+        with pytest.raises(SemanticScholarRequestError, match="HTTP 400"):
+            client.get_recommended_papers("p1", raise_on_unavailable=True)
         assert client._request_json.call_count == 2
+        assert not s2.disk_cache._discovery_cache_path(
+            ("recommendations", "p1", 50, "recent")
+        ).exists()
 
 
 def test_rate_limit_detection_uses_status_or_sdk_exception_contract() -> None:
@@ -2611,7 +2660,7 @@ def test_real_sdk_transport_preserves_outages_and_stops_failed_pagination(
             "data": [{relation_key: _paper_payload()}],
         }
     )
-    with SemanticScholarClient(timeout=1) as client:
+    with SemanticScholarClient(timeout=1, retry_budget_seconds=0) as client:
         client._rate_limit = MagicMock()
         response = _MockResponse(status, headers={"Retry-After": "120"})
         fetch = MagicMock(
@@ -2625,6 +2674,13 @@ def test_real_sdk_transport_preserves_outages_and_stops_failed_pagination(
             )
         else:
             client._session.get = fetch
+            client._session.post = MagicMock(
+                side_effect=AssertionError("unexpected metadata request")
+            )
+            if recovers and method in {"get_paper_references", "get_paper_citations"}:
+                s2.disk_cache._persist_paper(
+                    s2.payloads._convert_api_paper(_paper_payload()), "p1"
+                )
         args = ["p1"] if method == "get_papers" else "p1"
         kwargs = {} if method == "get_reference_ids" else {"raise_on_unavailable": True}
         with patch("time.sleep") as sleep_mock:
@@ -3115,3 +3171,815 @@ def test_client_finalization_under_client_lock_does_not_deadlock() -> None:
     with lock:
         gc.collect()
     assert finalized() is None
+
+
+@pytest.mark.parametrize("endpoint", ["recommendations", "references", "citations"])
+def test_discovery_rechecks_ordered_ids_and_fetches_only_missing_metadata(
+    endpoint: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Cold, immediate and later collections recheck IDs without repeating metadata.
+
+    :param str endpoint: Ordered discovery endpoint under test.
+    :param pytest.LogCaptureFixture caplog: Discovery comparison messages.
+    :return None: Verifies additions, removals, order and same-count replacement.
+    """
+    sequences = [["a", "b"], ["a", "b"], ["b", "a"], ["c", "a"], ["a"]]
+    batches: list[list[str]] = []
+
+    def batch(_url: str, **kwargs: Any) -> _MockResponse:
+        """Return complete metadata only for explicitly requested IDs.
+
+        :param str _url: Batch endpoint URL.
+        :param Any kwargs: Transport options including the requested IDs.
+        :return _MockResponse: Positional full metadata response.
+        """
+        ids = kwargs["json"]["ids"]
+        batches.append(ids)
+        return _MockResponse(200, [_paper_payload(paper_id=value) for value in ids])
+
+    with caplog.at_level(logging.INFO):
+        for ids in sequences:
+            with SemanticScholarClient(api_key="") as client:
+                client._rate_limit = MagicMock()
+                client._session.post = MagicMock(side_effect=batch)
+                if endpoint == "recommendations":
+                    fetch = MagicMock(
+                        return_value=_MockResponse(
+                            200,
+                            {
+                                "recommendedPapers": [
+                                    {"paperId": value} for value in ids
+                                ]
+                            },
+                        )
+                    )
+                    client._session.get = fetch
+                    result = client.get_recommended_papers("seed", limit=5)
+                    assert fetch.call_args.kwargs["params"]["fields"] == "paperId"
+                else:
+                    fetch = MagicMock(
+                        return_value=[_make_reference_record(value) for value in ids]
+                    )
+                    setattr(client.client, f"get_paper_{endpoint}", fetch)
+                    result = getattr(client, f"get_paper_{endpoint}")("seed", limit=5)
+                    assert fetch.call_args.kwargs["fields"] == ["paperId"]
+                fetch.assert_called_once()
+                assert [paper.paper_id for paper in result] == ids
+                key = (
+                    endpoint,
+                    "seed",
+                    5,
+                    "recent" if endpoint == "recommendations" else "",
+                )
+                snapshot = json.loads(
+                    s2.disk_cache._discovery_cache_path(key).read_text()
+                )
+                assert snapshot["paper_ids"] == ids
+                assert snapshot["checked_at"]
+    assert batches == [["a", "b"], ["c"]]
+    assert s2.disk_cache._load_cached_paper("b") is not None
+    assert "membership and order unchanged" in caplog.text
+    assert "discovery upstream" in caplog.text
+    assert "reused 2 cached paper records; fetched 0 missing records" in caplog.text
+
+
+def test_discovery_scope_limit_and_enrichment_caches_remain_distinct() -> None:
+    """In-scope reuse respects limits without truncating full references.
+
+    :return None: Checks normalized seed keys, scope lifetime and refresh controls.
+    """
+    seed = "arxiv:1706.03762"
+    s2.disk_cache._persist_paper(Paper(paper_id="a", title="Cached", year=2020), "a")
+    with SemanticScholarClient(api_key="") as client:
+        client._rate_limit = MagicMock()
+        client._persist_reference_cache_entry(
+            s2.disk_cache._reference_cache_path(seed), seed, ["a", "b", "c"]
+        )
+        references_before = s2.disk_cache._reference_cache_path(seed).read_bytes()
+        fetch = MagicMock(return_value=[_make_reference_record("a")])
+        client.client.get_paper_references = fetch
+        client._session.post = MagicMock(
+            side_effect=AssertionError("metadata already cached")
+        )
+        with client.candidate_operation_scope():
+            client.get_paper_references("https://arxiv.org/abs/1706.03762", limit=1)
+            client.get_paper_references(seed, limit=1)
+            assert fetch.call_count == 1
+            client.get_paper_references(seed, limit=2)
+            assert fetch.call_count == 2
+            assert client.get_reference_ids(seed) == ["a", "b", "c"]
+            assert fetch.call_count == 2
+            assert (
+                s2.disk_cache._reference_cache_path(seed).read_bytes()
+                == references_before
+            )
+        client.get_paper_references(seed, limit=1)
+        assert fetch.call_count == 3
+        for limit in (1, 2):
+            assert s2.disk_cache._discovery_cache_path(
+                ("references", seed, limit, "")
+            ).exists()
+        assert client.get_reference_ids(seed, force_refresh=True) == ["a"]
+        assert fetch.call_count == 4
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ["check", "fallback", "batch", "malformed", "malformed_batch", "missing_metadata"],
+)
+def test_failed_discovery_preserves_previous_successful_snapshots(failure: str) -> None:
+    """No acquisition failure may publish a new empty or partial discovery snapshot.
+
+    :param str failure: Acquisition stage that fails during the current check.
+    :return None: Verifies old snapshot bytes survive and stale IDs are not returned.
+    """
+    keys = [("recommendations", "seed", 5, pool) for pool in ("recent", "all-cs")]
+    for key in keys:
+        s2.disk_cache._persist_discovery(key, ["old"])
+    previous = {
+        key: s2.disk_cache._discovery_cache_path(key).read_bytes() for key in keys
+    }
+    unavailable = _MockResponse(503, headers={"Retry-After": "120"})
+    first = _MockResponse(200, {"recommendedPapers": [{"paperId": "new"}]})
+    if failure == "check":
+        responses = [unavailable]
+    elif failure == "fallback":
+        responses = [_MockResponse(200, {"recommendedPapers": []}), unavailable]
+    elif failure == "malformed":
+        responses = [
+            _MockResponse(200, {"recommendedPapers": [{"paperId": "new"}, {}]})
+        ]
+    else:
+        responses = [first]
+    with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=responses)
+        client._session.post = MagicMock(
+            return_value=(
+                _MockResponse(200, [None])
+                if failure == "missing_metadata"
+                else _MockResponse(200, [{"title": "Missing ID"}])
+                if failure == "malformed_batch"
+                else unavailable
+            )
+        )
+        with (
+            patch("time.sleep") as sleep_mock,
+            pytest.raises((SemanticScholarUnavailableError, TypeError)),
+        ):
+            client.get_recommended_papers("seed", limit=5, raise_on_unavailable=True)
+        sleep_mock.assert_not_called()
+    for key in keys:
+        assert s2.disk_cache._discovery_cache_path(key).read_bytes() == previous[key]
+
+
+def test_successful_empty_recommendations_check_both_pools_every_collection() -> None:
+    """Only successful recent and all-cs checks establish empty recommendations.
+
+    :return None: Checks successful empty snapshots and collection-local reuse.
+    """
+    with SemanticScholarClient(api_key="") as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, {"recommendedPapers": []})
+        )
+        client._session.post = MagicMock(
+            side_effect=AssertionError("no metadata needed")
+        )
+        with client.candidate_operation_scope():
+            assert client.get_recommended_papers("seed", limit=5) == []
+            assert client.get_recommended_papers("seed", limit=5) == []
+            assert client._session.get.call_count == 2
+        assert client.get_recommended_papers("seed", limit=5) == []
+        assert client._session.get.call_count == 4
+        assert [
+            call.kwargs["params"].get("from", "recent")
+            for call in client._session.get.call_args_list
+        ] == ["recent", "all-cs", "recent", "all-cs"]
+        for pool in ("recent", "all-cs"):
+            snapshot = json.loads(
+                s2.disk_cache._discovery_cache_path(
+                    ("recommendations", "seed", 5, pool)
+                ).read_text()
+            )
+            assert snapshot["paper_ids"] == []
+
+
+def test_failed_discovery_page_preserves_snapshot_and_enrichment() -> None:
+    """An outage after a successful relation page cannot replace either cache.
+
+    :return None: Verifies incomplete IDs never reach metadata hydration.
+    """
+    key = ("references", "seed", 5, "")
+    s2.disk_cache._persist_discovery(key, ["old"])
+    previous = s2.disk_cache._discovery_cache_path(key).read_bytes()
+
+    def pages(*_args: Any, **_kwargs: Any) -> Any:
+        """Yield one page, then a retryable outage exceeding the recovery allowance.
+
+        :param Any _args: SDK positional arguments.
+        :param Any _kwargs: SDK keyword arguments.
+        :return Any: Generator matching the SDK pagination interface.
+        """
+        yield _make_reference_record("new")
+        raise s2.errors._RetryableRequestError("HTTP 503 page two", retry_after=120)
+
+    with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
+        client.client.get_paper_references = MagicMock(side_effect=pages)
+        client._session.post = MagicMock(
+            side_effect=AssertionError("partial IDs must not hydrate")
+        )
+        with (
+            patch("time.sleep") as sleep_mock,
+            pytest.raises(SemanticScholarUnavailableError),
+        ):
+            client.get_paper_references("seed", limit=5, raise_on_unavailable=True)
+        sleep_mock.assert_not_called()
+        client._session.post.assert_not_called()
+    assert s2.disk_cache._discovery_cache_path(key).read_bytes() == previous
+    assert not s2.disk_cache._reference_cache_path("seed").exists()
+
+
+@pytest.mark.parametrize("relation", ["references", "citations"])
+def test_missing_relation_seed_is_not_successful_empty_discovery(relation: str) -> None:
+    """Strict revalidation cannot accept a 404 as evidence of no related papers.
+
+    :param str relation: Seeded relation endpoint to check.
+    :return None: Verifies the old snapshot is retained on a missing-seed response.
+    """
+    key = (relation, "seed", 5, "")
+    s2.disk_cache._persist_discovery(key, ["old"])
+    previous = s2.disk_cache._discovery_cache_path(key).read_bytes()
+    with SemanticScholarClient(api_key="") as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(return_value=_MockResponse(404))
+        with pytest.raises(SemanticScholarUnavailableError, match="current.*HTTP 404"):
+            getattr(client, f"get_paper_{relation}")(
+                "seed", limit=5, raise_on_unavailable=True
+            )
+        client._session.get.assert_called_once()
+    assert s2.disk_cache._discovery_cache_path(key).read_bytes() == previous
+
+
+def test_refresh_paper_cache_also_refreshes_discovery_metadata() -> None:
+    """Explicit metadata refresh bypasses records behind freshly checked IDs.
+
+    :return None: Checks the metadata batch and updated persisted record.
+    """
+    s2.disk_cache._persist_paper(Paper(paper_id="a", title="Old", year=2020), "a")
+    with SemanticScholarClient(api_key="", refresh_paper_cache=True) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, {"recommendedPapers": [{"paperId": "a"}]})
+        )
+        client._session.post = MagicMock(
+            return_value=_MockResponse(
+                200, [_paper_payload(paper_id="a", title="Updated")]
+            )
+        )
+        result = client.get_recommended_papers("seed")
+        assert result[0].title == "Updated"
+        client._session.post.assert_called_once()
+        assert s2.disk_cache._load_cached_paper("a").title == "Updated"
+
+
+def test_anonymous_recovery_budget_stops_before_a_long_retry_after(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anonymous 429 recovery must not sleep beyond the shared budget."""
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            return_value=_MockResponse(429, headers={"Retry-After": "120"})
+        )
+        with (
+            patch("time.sleep") as sleep_mock,
+            pytest.raises(
+                SemanticScholarUnavailableError,
+                match=r"after 1 attempts and 0\.0s recovery time \(next wait exceeds remaining recovery budget",
+            ),
+        ):
+            client.get_paper("budgeted", raise_on_unavailable=True)
+    client._session.get.assert_called_once()
+    sleep_mock.assert_not_called()
+
+
+def test_recovery_budget_is_shared_and_resets_for_a_new_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spent collection budget blocks later domains but not a new collection."""
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+
+    def sleep(seconds: float) -> None:
+        """Advance the monotonic test clock by a retry wait."""
+        clock[0] += seconds
+
+    call_timeouts: list[float] = []
+
+    def unavailable(*_args: object, **kwargs: Any) -> _MockResponse:
+        """Return a failed response after consuming request time."""
+        call_timeouts.append(kwargs["timeout"])
+        clock[0] += 2.0
+        return _MockResponse(503)
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=unavailable)
+        with (
+            patch("time.sleep", side_effect=sleep) as sleep_mock,
+            patch.object(semantic_module.retry.random, "uniform", return_value=2.0),
+            client.candidate_operation_scope(),
+        ):
+            assert (
+                client._request_json(
+                    "https://example.test/first",
+                    {},
+                    failure_domain=semantic_module.errors._FailureDomain.SEARCH,
+                )
+                is None
+            )
+            with pytest.raises(semantic_module.errors._CandidateOperationSkippedError):
+                client._request_json(
+                    "https://example.test/second",
+                    {},
+                    failure_domain=semantic_module.errors._FailureDomain.REFERENCES,
+                    raise_on_unavailable=True,
+                )
+        assert client._session.get.call_count == 2
+        assert call_timeouts == [30, 1]
+        sleep_mock.assert_called_once_with(2.0)
+
+        client._session.get = MagicMock(
+            return_value=_MockResponse(200, _paper_payload(paper_id="fresh"))
+        )
+        assert client.get_paper("fresh", raise_on_unavailable=True).paper_id == "fresh"
+        client._session.get.assert_called_once()
+
+
+def test_recovery_attempt_success_is_charged_but_slow_healthy_work_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recovery time covers retried requests while a slow initial success remains valid."""
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+
+    def sleep(seconds: float) -> None:
+        """Advance the monotonic test clock by the requested retry delay."""
+        clock[0] += seconds
+
+    response_timeouts: list[float] = []
+
+    def response(*_args: object, **kwargs: Any) -> _MockResponse:
+        """Fail once, then succeed while recording the shortened retry timeout."""
+        response_timeouts.append(kwargs["timeout"])
+        clock[0] += 1.0
+        if len(response_timeouts) == 1:
+            return _MockResponse(503)
+        return _MockResponse(200, _paper_payload(paper_id="recovered"))
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=response)
+        with (
+            patch("time.sleep", side_effect=sleep),
+            patch.object(semantic_module.retry.random, "uniform", return_value=2.0),
+        ):
+            assert (
+                client.get_paper("recovered", raise_on_unavailable=True).paper_id
+                == "recovered"
+            )
+        assert response_timeouts == [30, 2]
+
+    def slow_success(*_args: object, **kwargs: Any) -> _MockResponse:
+        """Simulate a healthy first response that takes longer than the budget."""
+        clock[0] += 120.0
+        return _MockResponse(200, _paper_payload(paper_id="slow"))
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=slow_success)
+        assert client.get_paper("slow", raise_on_unavailable=True).paper_id == "slow"
+        assert client._session.get.call_args.kwargs["timeout"] == 30
+
+
+def test_retry_budget_defaults_and_zero_opt_out() -> None:
+    """Anonymous access defaults to 90 seconds; keys and explicit zero are uncapped."""
+    assert SemanticScholarClient(api_key="").retry_budget_seconds == 90.0
+    assert SemanticScholarClient(api_key="test-key").retry_budget_seconds == 0.0
+    assert (
+        SemanticScholarClient(api_key="", retry_budget_seconds=0).retry_budget_seconds
+        == 0.0
+    )
+    with pytest.raises(ValueError, match="non-negative"):
+        SemanticScholarClient(api_key="", retry_budget_seconds=-1)
+
+
+def test_malformed_json_request_time_consumes_recovery_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An HTTP 200 with broken JSON is failed work, not an excluded healthy request.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture installing a monotonic clock.
+    :return None: Verifies failed response time stops recovery before another request.
+    """
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+
+    def response(*_args: Any, **_kwargs: Any) -> _BrokenJsonResponse:
+        """Spend the allowance receiving a body that cannot be decoded.
+
+        :param Any _args: Ignored transport arguments.
+        :param Any _kwargs: Ignored transport keyword arguments.
+        :return _BrokenJsonResponse: HTTP-success response with invalid JSON.
+        """
+        clock[0] += 5
+        return _BrokenJsonResponse(200)
+
+    with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=response)
+        with (
+            patch("time.sleep") as sleep_mock,
+            pytest.raises(SemanticScholarUnavailableError, match="5.0s recovery time"),
+        ):
+            client.get_paper("seed", raise_on_unavailable=True)
+        client._session.get.assert_called_once()
+        sleep_mock.assert_not_called()
+
+
+def test_recovery_budget_checks_each_sdk_transport_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paginated SDK retry cannot issue another request after its budget expires."""
+    clock = [5.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock()
+        with client.candidate_operation_scope():
+            state = client._candidate_operation.state
+            state.active_recovery_request = True
+            state.current_attempt = 2
+            state.recovery_seconds = 5.0
+            state.last_recovery_error = requests.ConnectionError("offline")
+            with pytest.raises(semantic_module.errors._RetryExhaustedError):
+                client._request_json_once(
+                    "https://example.test/page",
+                    {},
+                    context="testing pagination",
+                )
+        client._session.get.assert_not_called()
+
+
+def test_permanent_http_error_stays_immediate_after_a_recovery_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later 400 must remain a request error rather than an outage summary."""
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+
+    def sleep(seconds: float) -> None:
+        """Advance the recovery clock without pausing the test."""
+        clock[0] += seconds
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            side_effect=[_MockResponse(503), _MockResponse(400)]
+        )
+        with (
+            patch("time.sleep", side_effect=sleep),
+            patch.object(semantic_module.retry.random, "uniform", return_value=1.0),
+            pytest.raises(SemanticScholarRequestError, match="HTTP 400"),
+        ):
+            client.get_paper("permanent", raise_on_unavailable=True)
+        assert client._session.get.call_count == 2
+
+
+def test_sdk_retry_recomputes_timeout_for_each_pagination_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Later SDK pages receive only the recovery time remaining at their request."""
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+    timeouts: list[float] = []
+    responses = iter(
+        [
+            _MockResponse(503),
+            _MockResponse(
+                200,
+                {
+                    "offset": 0,
+                    "next": 100,
+                    "data": [{"citedPaper": {"paperId": "page-one"}}],
+                },
+            ),
+            _MockResponse(
+                200,
+                {
+                    "offset": 100,
+                    "data": [{"citedPaper": {"paperId": "page-two"}}],
+                },
+            ),
+        ]
+    )
+
+    def respond(*_args: object, **kwargs: Any) -> _MockResponse:
+        """Advance the test clock for one failed or paginated SDK request."""
+        timeouts.append(kwargs["timeout"])
+        clock[0] += (1.0, 2.0, 1.0)[len(timeouts) - 1]
+        return next(responses)
+
+    def sleep(seconds: float) -> None:
+        """Advance the test clock for the retry delay."""
+        clock[0] += seconds
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=respond)
+        with (
+            patch("time.sleep", side_effect=sleep),
+            patch.object(semantic_module.retry.random, "uniform", return_value=1.0),
+        ):
+            assert client.get_reference_ids("retry-pages") == ["page-one", "page-two"]
+    assert timeouts == [30, 3, 1]
+
+
+def test_spent_recovery_budget_blocks_later_network_but_not_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful retry that spends the budget stops later uncached requests."""
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+    responses = iter(
+        [
+            _MockResponse(503),
+            _MockResponse(200, _paper_payload(paper_id="budget-recovered")),
+        ]
+    )
+
+    def respond(*_args: object, **_kwargs: Any) -> _MockResponse:
+        """Spend one second on each response."""
+        clock[0] += 1.0
+        return next(responses)
+
+    def sleep(seconds: float) -> None:
+        """Spend one second on the deterministic retry wait."""
+        clock[0] += seconds
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=3) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=respond)
+        with (
+            patch("time.sleep", side_effect=sleep),
+            patch.object(semantic_module.retry.random, "uniform", return_value=1.0),
+            client.candidate_operation_scope(),
+        ):
+            assert (
+                client.get_paper("budget-recovered", raise_on_unavailable=True).paper_id
+                == "budget-recovered"
+            )
+            client._session.get = MagicMock(
+                side_effect=AssertionError("budget-spent request must not run")
+            )
+            assert client.get_paper("budget-recovered") is not None
+            with pytest.raises(
+                semantic_module.errors._CandidateOperationSkippedError,
+                match="earlier Semantic Scholar outage",
+            ):
+                client.get_paper("budget-later", raise_on_unavailable=True)
+        client._session.get.assert_not_called()
+
+
+def test_oversized_retry_after_reports_its_wait_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server cooldown above the allowance identifies the next wait as the stop."""
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            return_value=_MockResponse(429, headers={"Retry-After": "120"})
+        )
+        with pytest.raises(
+            SemanticScholarUnavailableError,
+            match="next wait exceeds remaining recovery budget",
+        ):
+            client.get_paper("oversized-wait", raise_on_unavailable=True)
+        client._session.get.assert_called_once()
+
+
+@pytest.mark.parametrize("budget", [float("inf"), float("-inf"), float("nan")])
+def test_retry_budget_rejects_nonfinite_values(budget: float) -> None:
+    """A recovery budget must be a finite non-negative duration."""
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        SemanticScholarClient(api_key="", retry_budget_seconds=budget)
+
+
+def test_oversized_retry_after_stops_every_discovery_domain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An oversized cooldown blocks later uncached calls in the same collection.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the monotonic clock.
+    :return None: Checks the global recovery breaker after an oversized wait.
+    """
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            return_value=_MockResponse(429, headers={"Retry-After": "120"})
+        )
+        with client.candidate_operation_scope():
+            assert (
+                client._request_json(
+                    "https://example.test/first",
+                    {},
+                    failure_domain=semantic_module.errors._FailureDomain.SEARCH,
+                )
+                is None
+            )
+            with pytest.raises(
+                semantic_module.errors._CandidateOperationSkippedError,
+                match="earlier Semantic Scholar outage",
+            ):
+                client._request_json(
+                    "https://example.test/second",
+                    {},
+                    failure_domain=semantic_module.errors._FailureDomain.REFERENCES,
+                    raise_on_unavailable=True,
+                )
+        client._session.get.assert_called_once()
+
+
+def test_budget_preflight_does_not_count_an_unstarted_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry blocked before its request reports only requests that started.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the monotonic clock.
+    :return None: Checks request counts and the no-network retry preflight.
+    """
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+
+    def respond(*_args: object, **_kwargs: Any) -> _MockResponse:
+        """Consume one second before returning a retryable response.
+
+        :param object _args: Transport positional arguments.
+        :param Any _kwargs: Transport keyword arguments.
+        :return _MockResponse: Retryable response with a two-second cooldown.
+        """
+        clock[0] += 1.0
+        return _MockResponse(503, headers={"Retry-After": "2"})
+
+    def sleep(seconds: float) -> None:
+        """Advance the fake clock by the scheduled backoff.
+
+        :param float seconds: Backoff duration.
+        :return None: Updates the fake clock.
+        """
+        clock[0] += seconds
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=3) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=respond)
+        with (
+            patch("time.sleep", side_effect=sleep),
+            patch.object(semantic_module.retry.random, "uniform", return_value=0.0),
+            pytest.raises(
+                SemanticScholarUnavailableError,
+                match=r"after 1 attempts and 3\.0s recovery time",
+            ),
+        ):
+            client.get_paper("no-unstarted-attempt", raise_on_unavailable=True)
+        client._session.get.assert_called_once()
+
+
+def test_sdk_budget_stop_is_terminal_and_reports_active_recovery_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A spent retry page stops without a new SDK retry and reports its elapsed time.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the monotonic clock.
+    :return None: Checks terminal handling and active-retry diagnostics.
+    """
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+    responses = iter(
+        [
+            _MockResponse(503, headers={"Retry-After": "1"}),
+            _MockResponse(
+                200,
+                {
+                    "offset": 0,
+                    "next": 100,
+                    "data": [{"citedPaper": {"paperId": "first-page"}}],
+                },
+            ),
+        ]
+    )
+
+    def respond(*_args: object, **_kwargs: Any) -> _MockResponse:
+        """Spend one second on the first call and four on the retry page.
+
+        :param object _args: Transport positional arguments.
+        :param Any _kwargs: Transport keyword arguments.
+        :return _MockResponse: Next mocked transport response.
+        """
+        clock[0] += 1.0 if clock[0] == 0.0 else 4.0
+        return next(responses)
+
+    def sleep(seconds: float) -> None:
+        """Advance the fake clock by the retry delay.
+
+        :param float seconds: Backoff duration.
+        :return None: Updates the fake clock.
+        """
+        clock[0] += seconds
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=respond)
+        with (
+            patch("time.sleep", side_effect=sleep),
+            patch.object(semantic_module.retry.random, "uniform", return_value=0.0),
+            pytest.raises(
+                SemanticScholarUnavailableError,
+                match=r"after 2 attempts and 6\.0s recovery time",
+            ),
+        ):
+            client.get_reference_ids("terminal-sdk-budget")
+        assert client._session.get.call_count == 2
+
+
+def test_first_attempt_successful_pages_do_not_consume_recovery_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the failed initial request is charged before a retry begins.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the monotonic clock.
+    :return None: Checks initial healthy pages are excluded and retry pages are charged.
+    """
+    clock = [0.0]
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
+    responses = iter(
+        [
+            _MockResponse(
+                200,
+                {
+                    "offset": 0,
+                    "next": 100,
+                    "data": [{"citedPaper": {"paperId": "initial-page"}}],
+                },
+            ),
+            _MockResponse(503, headers={"Retry-After": "1"}),
+            _MockResponse(
+                200,
+                {
+                    "offset": 0,
+                    "next": 100,
+                    "data": [{"citedPaper": {"paperId": "retry-page"}}],
+                },
+            ),
+            _MockResponse(503, headers={"Retry-After": "120"}),
+        ]
+    )
+
+    def respond(*_args: object, **_kwargs: Any) -> _MockResponse:
+        """Spend 120 seconds on each healthy page and one on each failure.
+
+        :param object _args: Transport positional arguments.
+        :param Any _kwargs: Transport keyword arguments.
+        :return _MockResponse: Next mocked transport response.
+        """
+        response = next(responses)
+        clock[0] += 120.0 if response.status_code == 200 else 1.0
+        return response
+
+    def sleep(seconds: float) -> None:
+        """Advance the fake clock by the requested retry delay.
+
+        :param float seconds: Backoff duration.
+        :return None: Updates the fake clock.
+        """
+        clock[0] += seconds
+
+    with SemanticScholarClient(timeout=30, retry_budget_seconds=150) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(side_effect=respond)
+        with (
+            patch("time.sleep", side_effect=sleep),
+            patch.object(semantic_module.retry.random, "uniform", return_value=0.0),
+            pytest.raises(
+                SemanticScholarUnavailableError,
+                match=r"after 2 attempts and 123\.0s recovery time",
+            ),
+        ):
+            client.get_reference_ids("initial-pages")
+        assert client._session.get.call_count == 4

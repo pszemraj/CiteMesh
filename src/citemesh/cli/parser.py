@@ -8,6 +8,7 @@ which builds the full command tree.
 from __future__ import annotations
 
 import argparse
+import math
 import shutil
 import sys
 from pathlib import Path
@@ -291,6 +292,24 @@ def _threshold_float(value: str) -> float:
         if exc.reason == "out_of_range":
             raise argparse.ArgumentTypeError("must be between 0.0 and 1.0") from exc
         raise argparse.ArgumentTypeError("must be a float") from exc
+
+
+def _non_negative_finite_float(value: str) -> float:
+    """Parse a finite CLI float constrained to zero or greater.
+
+    :param str value: Raw argparse value.
+    :return float: Parsed finite value greater than or equal to zero.
+    :raises argparse.ArgumentTypeError: If parsing fails or value is invalid.
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a float") from exc
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("must be a finite float")
+    if parsed < 0.0:
+        raise argparse.ArgumentTypeError("must be at least 0")
+    return parsed
 
 
 def _non_empty_str(value: str) -> str:
@@ -921,6 +940,16 @@ def _add_build_arguments(
         "--refresh-paper-cache",
         action="store_true",
         help="Fetch fresh S2 paper metadata and citation counts, retaining embedding caches.",
+    )
+    graph_group.add_argument(
+        "--s2-retry-budget",
+        type=_non_negative_finite_float,
+        metavar="SECONDS",
+        default=None,
+        help=(
+            "Override Semantic Scholar recovery time; 0 disables the elapsed cap "
+            "(default: 90 seconds for anonymous access, no cap with an API key)."
+        ),
     )
     export_group = build_parser.add_argument_group("Output")
     citation_group = build_parser.add_argument_group("Citations and references")

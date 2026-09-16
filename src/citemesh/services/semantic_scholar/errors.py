@@ -16,6 +16,29 @@ class SemanticScholarUnavailableError(RuntimeError):
     """Raised when the Semantic Scholar API stays unreachable after retries."""
 
 
+@dataclass(frozen=True)
+class _RetryDiagnostics:
+    """Observed recovery work used to explain an unavailable request."""
+
+    attempts: int
+    recovery_seconds: float
+    stop_reason: str
+
+
+class _RetryExhaustedError(RuntimeError):
+    """Attach retry diagnostics while preserving the original transport failure."""
+
+    def __init__(self, cause: Exception, diagnostics: _RetryDiagnostics) -> None:
+        """Store the final request error and retry bookkeeping.
+
+        :param Exception cause: Last retryable transport failure.
+        :param _RetryDiagnostics diagnostics: Actual retry stop details.
+        """
+        super().__init__(str(cause))
+        self.cause = cause
+        self.retry_diagnostics = diagnostics
+
+
 class _FailureDomain(str, Enum):
     """Semantic Scholar capabilities with independent collection retry budgets."""
 
@@ -34,6 +57,20 @@ class _CandidateOperationState:
     failures: dict[_FailureDomain, SemanticScholarUnavailableError] = field(
         default_factory=dict
     )
+    discovery_ids: dict[tuple[str, str, int, str], list[str]] = field(
+        default_factory=dict
+    )
+    reference_cache_hits: int = 0
+    retry_budget_seconds: float = 0.0
+    recovery_seconds: float = 0.0
+    recovery_attempts: int = 0
+    active_recovery_request: bool = False
+    current_attempt: int = 0
+    recovery_request_started_at: float | None = None
+    current_recovery_wait_seconds: float = 0.0
+    initial_attempt_success_seconds: float = 0.0
+    last_recovery_error: Exception | None = None
+    budget_failure: SemanticScholarUnavailableError | None = None
 
 
 class _CandidateOperationSkippedError(SemanticScholarUnavailableError):

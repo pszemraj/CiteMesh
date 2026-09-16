@@ -139,11 +139,11 @@ class APIConfig:
     # Timeout settings (seconds)
     default_timeout: float = 30.0
 
-    # Long waits are intentional for resumable builds: bound attempts, not total
-    # elapsed time. The service retry policy caps each delay (60s jitter ceiling,
-    # 300s honored Retry-After ceiling) but sets no aggregate deadline.
+    # Unauthenticated builds use a bounded recovery window after the first failed
+    # request. An explicit API key keeps the established attempt-only policy.
     max_retries: int = 30
     retry_delay: float = 2.0  # Initial delay, increases exponentially
+    anonymous_retry_budget_seconds: float = 90.0
 
     # Rate limiting: anonymous requests share a small public pool; authenticated
     # keys are granted 1 request/second by Semantic Scholar.

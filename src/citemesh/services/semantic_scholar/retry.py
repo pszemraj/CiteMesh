@@ -16,7 +16,11 @@ from tenacity.wait import wait_base
 
 from citemesh.core import API_CONFIG
 
-from .errors import _RetryableRequestError, _unwrap_sdk_retry_error
+from .errors import (
+    _RetryableRequestError,
+    _RetryExhaustedError,
+    _unwrap_sdk_retry_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +64,8 @@ def _is_rate_limit_error(error: Exception) -> bool:
     :param Exception error: Exception from request/client layer.
     :return bool: ``True`` when the error indicates HTTP 429.
     """
+    if isinstance(error, _RetryExhaustedError):
+        error = error.cause
     error = _unwrap_sdk_retry_error(error)
     if isinstance(error, _RetryableRequestError):
         return error.rate_limited

@@ -131,6 +131,16 @@ def _recommendation_payload(paper_id: str) -> dict[str, object]:
     }
 
 
+def _cache_full_papers(*papers: Paper) -> None:
+    """Persist complete paper records for real-client discovery tests.
+
+    :param Paper papers: Full metadata records whose IDs will be rechecked upstream.
+    :return None: Writes paper-cache entries through CiteMesh's cache helper.
+    """
+    for paper in papers:
+        s2.disk_cache._persist_paper(paper, paper.paper_id)
+
+
 def _identity_bridge_records() -> tuple[Paper, Paper, Paper]:
     """Build compatible S2/arXiv and DOI classes plus one bridging payload."""
     s2_id = "a" * 40
@@ -473,6 +483,8 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=seed)
+        _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
+        reference_id_calls = 0
 
         def fetch_references(paper_id: str, **kwargs: object) -> list[dict]:
             """Allow seed IDs only when full reference metadata is the failure path.
@@ -481,8 +493,15 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
             :param object kwargs: SDK request options, including selected fields.
             :return list[dict]: One successful seed reference-ID record.
             """
-            if failure_path == "reference_papers" and kwargs["fields"] == ["paperId"]:
+            nonlocal reference_id_calls
+            if (
+                failure_path == "reference_papers"
+                and paper_id == "scope-seed"
+                and kwargs["fields"] == ["paperId"]
+                and reference_id_calls == 0
+            ):
                 assert paper_id == "scope-seed"
+                reference_id_calls += 1
                 return [{"paperId": "seed-reference"}]
             raise requests.ConnectionError("offline")
 
@@ -562,6 +581,7 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=seed)
+        _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
         client.client.get_paper_references = MagicMock(
             side_effect=requests.ConnectionError("offline")
         )
@@ -622,6 +642,7 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=seed)
+        _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
         client.client.get_paper_references = MagicMock(
             side_effect=requests.ConnectionError("offline")
         )
@@ -696,6 +717,7 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
     monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
+        _cache_full_papers(_paper("healthy-recommendation"))
         client.get_paper_references = MagicMock(return_value=reference_papers)
         client.client.get_paper_citations = MagicMock(
             side_effect=requests.ConnectionError("offline")
@@ -763,6 +785,110 @@ def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_ref
     assert "missing" not in papers
     assert papers["valid"].references == ["r1", "r2"]
     mock_client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
+
+
+def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() -> None:
+    """Warm recommendation builds must honor live same-count membership changes.
+
+    :return None: Verifies live ID order, metadata batches, and reference reuse.
+    """
+    seed = _seed_paper()
+    first = _paper("first")
+    second = _paper("second")
+    calls: list[tuple[str, dict[str, object] | str, dict[str, object] | None]] = []
+    recommendation_ids = iter([["first", "second"], ["second", "third"]])
+
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        _cache_full_papers(seed, first, second)
+        for paper_id in ("seed", "first", "second", "third"):
+            client._persist_reference_cache_entry(
+                s2.disk_cache._reference_cache_path(paper_id), paper_id, []
+            )
+        client.client.get_paper_references = MagicMock(
+            side_effect=AssertionError("warm reference enrichment must stay cached")
+        )
+
+        def request_once(
+            url: str,
+            params: dict[str, object] | str,
+            *,
+            context: str,
+            headers: dict[str, str] | None = None,
+            payload: dict[str, object] | None = None,
+        ) -> object:
+            """Serve deterministic discovery IDs and one missing metadata batch.
+
+            :param str url: Requested Semantic Scholar endpoint URL.
+            :param dict[str, object] | str params: Query parameters sent to the endpoint.
+            :param str context: Request description, unused by this fixture.
+            :param dict[str, str] | None headers: Optional request headers, unused.
+            :param dict[str, object] | None payload: Optional batch request payload.
+            :return object: Fake endpoint response matching the requested endpoint.
+            """
+            del context, headers
+            calls.append((url, params, payload))
+            if url.endswith("/batch"):
+                assert payload == {"ids": ["third"]}
+                return [_recommendation_payload("third")]
+            assert params == {"fields": "paperId", "limit": 6}
+            return {
+                "recommendedPapers": [
+                    {"paperId": paper_id} for paper_id in next(recommendation_ids)
+                ]
+            }
+
+        client._request_json_once = MagicMock(side_effect=request_once)
+        builder = RecommendationGraphBuilder(max_papers=3, client=client)
+
+        first_run = builder.collect_papers("seed")
+        second_run = builder.collect_papers("seed")
+
+    assert list(first_run) == ["seed", "first", "second"]
+    assert list(second_run) == ["seed", "second", "third"]
+    discovery_calls = [call for call in calls if not call[0].endswith("/batch")]
+    batch_calls = [call for call in calls if call[0].endswith("/batch")]
+    assert len(discovery_calls) == 2
+    assert len(batch_calls) == 1
+    client.client.get_paper_references.assert_not_called()
+
+
+def test_recommendation_fetches_primary_discovery_before_seed_references() -> None:
+    """Recommendation acquisition must precede optional seed reference hydration.
+
+    :return None: Verifies the primary candidate fetch wins the shared budget.
+    """
+    client = MagicMock()
+    events: list[str] = []
+    client.get_paper.return_value = _seed_paper()
+
+    def fetch_recommendations(*_args: object, **_kwargs: object) -> list[Paper]:
+        """Record primary discovery before returning one candidate.
+
+        :param object _args: Positional client arguments, unused by this fixture.
+        :param object _kwargs: Keyword client arguments, unused by this fixture.
+        :return list[Paper]: One recommendation candidate.
+        """
+        events.append("recommendations")
+        return [_paper("candidate")]
+
+    def fetch_references(paper_id: str, *, force_refresh: bool) -> list[str]:
+        """Record reference hydration without making an upstream request.
+
+        :param str paper_id: Paper selected for reference enrichment.
+        :param bool force_refresh: Reference-cache bypass flag, expected disabled.
+        :return list[str]: Empty reference list for this fixture.
+        """
+        assert force_refresh is False
+        events.append(f"references:{paper_id}")
+        return []
+
+    client.get_recommended_papers.side_effect = fetch_recommendations
+    client.get_reference_ids.side_effect = fetch_references
+
+    RecommendationGraphBuilder(max_papers=2, client=client).collect_papers("seed")
+
+    assert events == ["recommendations", "references:seed", "references:candidate"]
 
 
 def test_recommendation_collect_clamps_endpoint_request_limit() -> None:
