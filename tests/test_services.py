@@ -542,7 +542,14 @@ def test_custom_projection_adds_paper_id_and_never_overwrites_complete_cache() -
         client._session.get = MagicMock(
             side_effect=[
                 _MockResponse(
-                    200, {"recommendedPapers": [{"paperId": "p1", "title": "Partial"}]}
+                    200,
+                    {
+                        "recommendedPapers": [
+                            None,
+                            "malformed",
+                            {"paperId": "p1", "title": "Partial"},
+                        ]
+                    },
                 ),
                 _MockResponse(200, {"data": [{"paperId": "p1", "title": "Search"}]}),
             ]

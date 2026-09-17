@@ -333,7 +333,7 @@ def _convert_recommendation(rec: dict[str, Any]) -> Paper | None:
         return _convert_payload_paper(
             rec,
             category_keys=("fieldsOfStudy", "fields"),
-            references=_extract_reference_ids(rec.get("references")),
+            references=_extract_reference_ids(_payload_get(rec, "references")),
         )
     except (TypeError, ValueError) as exc:
         logger.debug("Skipping malformed recommendation record: %s", exc)
