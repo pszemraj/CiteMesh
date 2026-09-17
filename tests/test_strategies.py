@@ -934,6 +934,35 @@ def test_citation_collect_populates_reference_cache_and_summary(
     assert "Hydrating reference lists for 3 papers..." in caplog.text
 
 
+def test_citation_reference_hydration_reports_interactive_progress() -> None:
+    """Long interactive reference hydration should expose per-paper progress.
+
+    :return None: Checks the hydration loop uses the shared progress iterator.
+    """
+    seed = _paper("seed", refs=["seed-ref"])
+    papers = {seed.paper_id: seed}
+    papers.update({_paper_id: _paper(_paper_id) for _paper_id in map(str, range(25))})
+    client = MagicMock()
+    client.get_reference_ids.return_value = []
+    progress = MagicMock(
+        side_effect=lambda iterable, **_kwargs: (item for item in iterable)
+    )
+    builder = CitationGraphBuilder(fetch_references=True, client=client)
+
+    with (
+        patch("citemesh.strategies.citation.stderr_isatty", return_value=True),
+        patch("citemesh.strategies.citation.progress_iterator", progress),
+    ):
+        builder.hydrate_collected_references(papers, seed)
+
+    progress.assert_called_once_with(
+        papers.items(),
+        description="Hydrating reference lists",
+        unit="papers",
+    )
+    assert client.get_reference_ids.call_count == 25
+
+
 def test_citation_collect_discovers_all_sources_before_reference_enrichment() -> None:
     """Optional reference hydration must not preempt requested candidate sources."""
     events: list[str] = []

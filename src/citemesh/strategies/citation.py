@@ -263,9 +263,24 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             self._ensure_paper_references(seed)
         elif provider_seed_id is not None:
             self._ensure_paper_references(seed, provider_lookup_id=provider_seed_id)
-        for paper_id, paper in papers.items():
-            if paper_id != seed.paper_id:
-                self._ensure_paper_references(paper)
+
+        progress_bar = None
+        paper_items = papers.items()
+        if self.fetch_references and stderr_isatty() and len(papers) > 25:
+            progress_bar = progress_iterator(
+                paper_items,
+                description="Hydrating reference lists",
+                unit="papers",
+            )
+            paper_items = progress_bar
+
+        try:
+            for paper_id, paper in paper_items:
+                if paper_id != seed.paper_id:
+                    self._ensure_paper_references(paper)
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
     def _get_references(
         self, paper_id: str, *, provider_lookup_id: str | None = None
