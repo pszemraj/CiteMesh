@@ -29,7 +29,7 @@ Every node carries the same attribute payload (`paper`, `title`, `year`, `author
 
 ### `services/semantic_scholar/` - Semantic Scholar transport
 
-`errors.py` (failure taxonomy, per-capability `_FailureDomain` budgets) · `retry.py` (Tenacity backoff, `Retry-After`) · `disk_cache.py` (persisted paper and reference-ID caches) · `payloads.py` (parsing into `Paper`) · `endpoints.py` (one method per capability) · `client.py` (transport, rate limiting, `candidate_operation_scope`, `get_client`).
+`errors.py` (failure taxonomy, per-capability `_FailureDomain` budgets) · `retry.py` (Tenacity backoff, `Retry-After`) · `disk_cache.py` (persisted discovery snapshots, paper metadata, and reference-ID caches) · `payloads.py` (parsing into `Paper`) · `endpoints.py` (one method per capability) · `client.py` (transport, rate limiting, `candidate_operation_scope`, `get_client`).
 
 ### `strategies/` - candidate acquisition and scoring
 

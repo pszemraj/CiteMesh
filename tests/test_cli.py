@@ -618,6 +618,65 @@ def test_cache_clear_refuses_active_s2_discovery_write(
     assert not snapshot.exists()
 
 
+def test_cache_clear_refuses_active_reference_cache_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache clear must not race a public cache-only normalization write.
+
+    :param pytest.MonkeyPatch monkeypatch: Pauses normalized reference persistence.
+    :return None: Checks clear reports busy until the reference lookup completes.
+    """
+    cache_path = s2.disk_cache._reference_cache_path("seed")
+    cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": "seed",
+                "references": ["ref", "ref"],
+                "version": s2.disk_cache.REFERENCE_CACHE_VERSION,
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_started = threading.Event()
+    release_write = threading.Event()
+    with SemanticScholarClient(api_key="") as client:
+        original_persist = client._persist_reference_cache_entry
+
+        def blocked_persist(
+            path: Path, paper_id: str, reference_ids: list[str]
+        ) -> None:
+            """Pause normalized persistence while the shared root lock is held.
+
+            :param Path path: Reference cache file being normalized.
+            :param str paper_id: Normalized paper identifier.
+            :param list[str] reference_ids: Deduplicated reference identifiers.
+            :return None: Persists after the test releases the writer.
+            """
+            write_started.set()
+            assert release_write.wait(timeout=5), "reference write was never released"
+            original_persist(path, paper_id, reference_ids)
+
+        monkeypatch.setattr(client, "_persist_reference_cache_entry", blocked_persist)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            lookup = executor.submit(client.get_cached_reference_ids, "seed")
+            assert write_started.wait(timeout=5), "reference write never started"
+            assert (
+                cache_ops_module._clear_cache_directory(
+                    assume_yes=True, clear_reason=None
+                )
+                == 1
+            )
+            release_write.set()
+            assert lookup.result(timeout=5) == ["ref"]
+
+    assert cache_path.is_file()
+    assert json.loads(cache_path.read_text())["references"] == ["ref"]
+    assert (
+        cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    )
+    assert not cache_path.exists()
+
+
 def test_cache_clear_reports_config_inspection_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

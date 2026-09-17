@@ -551,6 +551,7 @@ class _EndpointsMixin:
         self._save_discovery(key, checked_ids)
         return papers
 
+    @_scoped_endpoint
     def get_cached_reference_ids(self, paper_id: str) -> list[str] | None:
         """Read a validated persisted reference entry without making an API request.
 
