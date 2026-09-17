@@ -565,46 +565,37 @@ def test_cache_clear_refuses_active_embedding_encode() -> None:
     assert cache.h5_path.is_file()
 
 
-def test_cache_clear_refuses_active_s2_discovery_write(
+def test_cache_clear_refuses_active_s2_paper_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Cache clear must not race an active Semantic Scholar cache operation.
 
-    :param pytest.MonkeyPatch monkeypatch: Pauses discovery snapshot persistence.
+    :param pytest.MonkeyPatch monkeypatch: Pauses paper metadata persistence.
     :return None: Checks the shared root lock keeps the cache intact until completion.
     """
     write_started = threading.Event()
     release_write = threading.Event()
-    original_persist = s2.disk_cache._persist_discovery
+    original_persist = s2.disk_cache._persist_paper
 
-    def blocked_persist(
-        key: tuple[str, str, int, str],
-        paper_ids: list[str],
-        *,
-        checked_at: str | None = None,
-    ) -> str:
-        """Pause one discovery write while its operation lock remains held.
+    def blocked_persist(paper: Paper, requested_id: str) -> None:
+        """Pause one metadata write while its operation lock remains held.
 
-        :param tuple[str, str, int, str] key: Discovery snapshot key.
-        :param list[str] paper_ids: Ordered discovered paper IDs.
-        :param str | None checked_at: Original upstream-check time when reused.
-        :return str: Timestamp persisted after the test releases the writer.
+        :param Paper paper: Resolved paper metadata.
+        :param str requested_id: Identifier used for lookup.
+        :return None: Persists after the test releases the writer.
         """
         write_started.set()
-        assert release_write.wait(timeout=5), "discovery write was never released"
-        return original_persist(key, paper_ids, checked_at=checked_at)
+        assert release_write.wait(timeout=5), "paper write was never released"
+        original_persist(paper, requested_id)
 
-    monkeypatch.setattr(s2.disk_cache, "_persist_discovery", blocked_persist)
+    monkeypatch.setattr(s2.disk_cache, "_persist_paper", blocked_persist)
     with SemanticScholarClient(api_key="") as client:
         client._request_json = MagicMock(
-            side_effect=[
-                {"recommendedPapers": []},
-                {"recommendedPapers": []},
-            ]
+            return_value={"paperId": "seed", "title": "Seed"}
         )
         with ThreadPoolExecutor(max_workers=1) as executor:
-            write = executor.submit(client.get_recommended_papers, "seed", 1)
-            assert write_started.wait(timeout=5), "discovery write never started"
+            write = executor.submit(client.get_paper, "seed")
+            assert write_started.wait(timeout=5), "paper write never started"
             assert (
                 cache_ops_module._clear_cache_directory(
                     assume_yes=True, clear_reason=None
@@ -612,16 +603,14 @@ def test_cache_clear_refuses_active_s2_discovery_write(
                 == 1
             )
             release_write.set()
-            assert write.result(timeout=5) == []
+            assert write.result(timeout=5).paper_id == "seed"
 
-    snapshot = s2.disk_cache._discovery_cache_path(
-        ("recommendations", "seed", 1, "recent")
-    )
-    assert snapshot.is_file()
+    paper_path = s2.disk_cache._paper_cache_path("seed")
+    assert paper_path.is_file()
     assert (
         cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
     )
-    assert not snapshot.exists()
+    assert not paper_path.exists()
 
 
 def test_cache_clear_refuses_active_reference_cache_normalization(
@@ -931,7 +920,7 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
     saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     log_path = tmp_path / "logs" / "cli-debug.log"
     stderr = io.StringIO()
-    noisy_logger_names = ("filelock", "matplotlib", "urllib3", "semanticscholar")
+    noisy_logger_names = ("filelock", "matplotlib", "urllib3")
     saved_logger_levels = {
         name: logging.getLogger(name).level for name in noisy_logger_names
     }
@@ -953,7 +942,6 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
             assert logging.getLogger("filelock").level == logging.WARNING
             assert logging.getLogger("matplotlib").level == logging.WARNING
             assert logging.getLogger("urllib3").level == logging.WARNING
-            assert logging.getLogger("semanticscholar").level == logging.WARNING
     finally:
         for name, level in saved_logger_levels.items():
             logging.getLogger(name).setLevel(level)
@@ -2420,8 +2408,7 @@ def test_required_discovery_failure_preserves_existing_exports(
         "_build_strategy_graph",
         MagicMock(
             side_effect=CandidateAcquisitionError(
-                "Could not complete current recommendation discovery; "
-                "previous snapshot retained."
+                "Could not complete current recommendation discovery."
             )
         ),
     )
@@ -5276,7 +5263,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
         (["cache", "scan", "--help"], ["cache scan", "--log-level"]),
         (
             ["cache", "clear", "--help"],
-            ["cache clear", "--yes", "config.toml", "discovery snapshots"],
+            ["cache clear", "--yes", "config.toml", "cached papers"],
         ),
         (["config", "--help"], ["config", "set", "unset", "Examples"]),
         (["config", "list", "--help"], ["config list", "--log-level"]),

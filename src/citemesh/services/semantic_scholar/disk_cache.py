@@ -8,14 +8,12 @@ override consulted by every reference-cache path lookup.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from dataclasses import asdict
-from datetime import datetime, timezone
 from pathlib import Path
 
 from citemesh.core import Author, Paper
-from citemesh.core.paper_ids import paper_identifier_aliases
+from citemesh.core.paper_ids import normalize_paper_id, paper_identifier_aliases
 from citemesh.data import get_cache_dir
 from citemesh.data.cache import atomic_write_json, read_json_object
 
@@ -27,66 +25,6 @@ logger = logging.getLogger(__name__)
 REFERENCE_CACHE_DIR: Path | None = None
 REFERENCE_CACHE_VERSION = 1
 PAPER_CACHE_VERSION = 2
-DISCOVERY_CACHE_VERSION = 1
-
-
-def _discovery_cache_path(key: tuple[str, str, int, str]) -> Path:
-    """Locate a snapshot for one bounded discovery request.
-
-    :param tuple[str, str, int, str] key: Endpoint, normalized seed, limit and pool.
-    :return Path: JSON path independent of paper and reference enrichment caches.
-    """
-    digest = hashlib.sha1(json.dumps(key).encode("utf-8")).hexdigest()
-    return get_cache_dir("discovery") / f"{digest}.json"
-
-
-def _persist_discovery(
-    key: tuple[str, str, int, str],
-    paper_ids: list[str],
-    *,
-    checked_at: str | None = None,
-) -> str:
-    """Compare and save a successfully checked ordered discovery list.
-
-    :param tuple[str, str, int, str] key: Endpoint, normalized seed, limit and pool.
-    :param list[str] paper_ids: IDs in the order returned by Semantic Scholar.
-    :param str | None checked_at: Existing upstream-check time retained when a
-        same-scope metadata refresh changes the materialized membership.
-    :return str: Upstream-check time stored in the snapshot.
-    """
-    path = _discovery_cache_path(key)
-    previous = read_json_object(path)
-    unchanged = (
-        previous is not None
-        and previous.get("version") == DISCOVERY_CACHE_VERSION
-        and previous.get("paper_ids") == paper_ids
-    )
-    if checked_at is None:
-        checked_at = datetime.now(timezone.utc).isoformat()
-        logger.info(
-            "Checked %s discovery upstream for %s%s: %d IDs (%s).",
-            key[0],
-            key[1],
-            f", {key[3]} pool" if key[3] else "",
-            len(paper_ids),
-            "membership and order unchanged" if unchanged else "new or changed list",
-        )
-    try:
-        atomic_write_json(
-            path,
-            {
-                "version": DISCOVERY_CACHE_VERSION,
-                "endpoint": key[0],
-                "paper_id": key[1],
-                "limit": key[2],
-                "pool": key[3],
-                "paper_ids": paper_ids,
-                "checked_at": checked_at,
-            },
-        )
-    except OSError as exc:
-        logger.debug("Failed to persist discovery cache for %s: %s", key, exc)
-    return checked_at
 
 
 def _reference_cache_dir() -> Path:
@@ -103,7 +41,7 @@ def _reference_cache_dir() -> Path:
 
 
 def _paper_lookup_keys(paper: Paper) -> set[str]:
-    """Build normalized aliases for matching batch responses to requested IDs.
+    """Build current normalized identifiers for a paper cache entry.
 
     :param Paper paper: Converted paper payload from Semantic Scholar.
     :return set[str]: Normalized identifier aliases for the paper.
@@ -138,7 +76,7 @@ def _paper_cache_path(paper_id: str) -> Path:
 
 
 def _load_cached_paper(paper_id: str) -> Paper | None:
-    """Read current paper metadata, treating stale entries as cache misses.
+    """Read current paper metadata through one canonical cache lookup.
 
     :param str paper_id: Normalized requested paper identifier.
     :return Paper | None: Fresh paper instance, or ``None`` on a cache miss.
@@ -147,7 +85,23 @@ def _load_cached_paper(paper_id: str) -> Paper | None:
     if cached is None or cached.get("version") != PAPER_CACHE_VERSION:
         return None
     try:
+        canonical_paper_id = paper_id
+        if "canonical_paper_id" in cached:
+            canonical_paper_id = cached["canonical_paper_id"]
+            canonical = read_json_object(_paper_cache_path(canonical_paper_id))
+            if canonical is None or canonical.get("version") != PAPER_CACHE_VERSION:
+                return None
+            cached = canonical
+        elif cached["paper"]["paper_id"] != paper_id:
+            canonical_paper_id = cached["paper"]["paper_id"]
+            canonical = read_json_object(_paper_cache_path(canonical_paper_id))
+            if canonical is None or canonical.get("version") != PAPER_CACHE_VERSION:
+                return None
+            cached = canonical
+
         data = cached["paper"]
+        if data["paper_id"] != canonical_paper_id:
+            return None
         data["authors"] = [Author(**author) for author in data["authors"]]
         return Paper(**data)
     except (AttributeError, TypeError, ValueError, KeyError):
@@ -155,33 +109,40 @@ def _load_cached_paper(paper_id: str) -> Paper | None:
 
 
 def _persist_paper(paper: Paper, requested_id: str) -> None:
-    """Save successful metadata under the requested ID and known aliases.
+    """Save full metadata once and point current identifiers at it.
 
     :param Paper paper: Converted Semantic Scholar paper metadata.
     :param str requested_id: Normalized identifier used for the request.
     :return None: Writes metadata independently of embeddings and references.
     """
-    previous = _load_cached_paper(requested_id)
-    if previous is None or previous.paper_id != paper.paper_id:
-        canonical_previous = _load_cached_paper(paper.paper_id)
-        if (
-            canonical_previous is not None
-            and canonical_previous.paper_id == paper.paper_id
-        ):
-            previous = canonical_previous
-    aliases = _paper_lookup_keys(paper) | {requested_id}
-    if previous is not None and previous.paper_id == paper.paper_id:
-        for alias in _paper_lookup_keys(previous):
-            aliased = _load_cached_paper(alias)
-            if aliased is not None and aliased.paper_id == previous.paper_id:
-                aliases.add(alias)
-
     data = asdict(paper)
     data["references"] = []
     data["is_seed"] = False
-    cached = {"version": PAPER_CACHE_VERSION, "paper": data}
-    for alias in aliases:
+    canonical_paper_id = paper.paper_id
+    try:
+        atomic_write_json(
+            _paper_cache_path(canonical_paper_id),
+            {"version": PAPER_CACHE_VERSION, "paper": data},
+        )
+    except OSError as exc:
+        logger.debug(
+            "Failed to persist canonical paper cache for %s: %s",
+            canonical_paper_id,
+            exc,
+        )
+
+    aliases = {
+        normalize_paper_id(alias)
+        for alias in _paper_lookup_keys(paper) | {requested_id}
+    }
+    for alias in aliases - {canonical_paper_id}:
         try:
-            atomic_write_json(_paper_cache_path(alias), cached)
+            atomic_write_json(
+                _paper_cache_path(alias),
+                {
+                    "version": PAPER_CACHE_VERSION,
+                    "canonical_paper_id": canonical_paper_id,
+                },
+            )
         except OSError as exc:
             logger.debug("Failed to persist paper cache for %s: %s", alias, exc)

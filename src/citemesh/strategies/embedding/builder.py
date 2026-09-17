@@ -58,14 +58,11 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     DEFAULT_CANDIDATE_POOL_SIZE,
     SEMANTIC_SOURCE_CHOICES,
-    IdentityRegistry,
+    corpus_matches_s2,
     fetch_candidate_pool,
     merge_paper_metadata,
     paper_embedding_metadata,
     provider_lookup_identifier,
-    reconcile_paper_identity,
-    register_aliases,
-    resolve_aliases,
     scope_candidate_collection,
 )
 
@@ -904,23 +901,16 @@ class EmbeddingGraphBuilder(
         )
         papers[resolved_seed_paper.paper_id] = resolved_seed_paper
 
-        seed_identities = IdentityRegistry()
-        register_aliases(
-            seed_identities,
-            resolved_seed_paper.paper_id,
-            resolved_seed_paper,
-        )
         seed_embedding = self._encode_seed_embedding(resolved_seed_paper)
 
         if self.semantic_source != "arxiv-corpus":
             self._collect_candidate_pool_papers(
-                papers, seed_identities, seed_embedding, resolved_seed_paper
+                papers, seed_embedding, resolved_seed_paper
             )
             return papers
 
         self._collect_corpus_cache_papers(
             papers,
-            seed_identities,
             seed_embedding,
             resolved_seed_paper,
             corpus_prepared=corpus_prepared,
@@ -1124,14 +1114,12 @@ class EmbeddingGraphBuilder(
     def _collect_candidate_pool_papers(
         self,
         papers: dict[str, Paper],
-        seed_identities: IdentityRegistry,
         seed_embedding: np.ndarray,
         seed_paper: Paper,
     ) -> None:
         """Rank a Semantic Scholar candidate pool and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param IdentityRegistry seed_identities: Alias registry for the seed paper.
         :param np.ndarray seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Resolved seed paper used to fetch the pool.
         :return None: Extends ``papers`` and ``retrieval_embeddings`` in place.
@@ -1141,7 +1129,7 @@ class EmbeddingGraphBuilder(
         for paper_id, paper, embedding in pool_candidates:
             if len(papers) >= self.max_papers:
                 break
-            if paper_id in papers or resolve_aliases(seed_identities, paper):
+            if paper_id in papers:
                 continue
             papers[paper_id] = paper
             self.retrieval_embeddings[paper_id] = embedding
@@ -1149,7 +1137,6 @@ class EmbeddingGraphBuilder(
     def _collect_corpus_cache_papers(
         self,
         papers: dict[str, Paper],
-        seed_identities: IdentityRegistry,
         seed_embedding: np.ndarray,
         seed_paper: Paper,
         *,
@@ -1158,7 +1145,6 @@ class EmbeddingGraphBuilder(
         """Search the hydrated corpus cache and admit the closest papers.
 
         :param Dict[str, Paper] papers: Accumulating selection, seeded with the seed.
-        :param IdentityRegistry seed_identities: Alias registry for admitted papers.
         :param np.ndarray seed_embedding: Normalized seed embedding.
         :param Paper seed_paper: Canonical seed paper that always survives reconciliation.
         :param bool corpus_prepared: Whether lifecycle work finished before seed lookup.
@@ -1177,28 +1163,21 @@ class EmbeddingGraphBuilder(
             corpus_prepared=corpus_prepared,
         )
 
-        # Reconcile the complete bounded ranking before applying the graph cap. A
-        # later bridge record can collapse two earlier identity classes; retaining
-        # insertion order then keeps the highest-ranked unique papers.
         for paper_id, metadata, embedding in candidates:
             paper = self._paper_from_cached_metadata(paper_id, metadata)
-            reconciliation = reconcile_paper_identity(
-                seed_identities,
-                seed_paper,
-                papers,
-                paper,
-            )
-            if reconciliation.canonical_id is not None:
-                for collapsed_id in reconciliation.collapsed_ids:
-                    self.retrieval_embeddings.pop(collapsed_id, None)
+            if paper_id == seed_paper.paper_id:
+                merge_paper_metadata(seed_paper, paper)
                 continue
+            if not seed_paper.is_local_corpus and corpus_matches_s2(paper, seed_paper):
+                merge_paper_metadata(seed_paper, paper)
+                continue
+            if paper_id in papers:
+                merge_paper_metadata(papers[paper_id], paper)
+                continue
+            if len(papers) >= self.max_papers:
+                break
             papers[paper_id] = paper
             self.retrieval_embeddings[paper_id] = embedding
-            register_aliases(seed_identities, paper_id, paper)
-
-        for paper_id in list(papers)[self.max_papers :]:
-            papers.pop(paper_id)
-            self.retrieval_embeddings.pop(paper_id, None)
 
         self._update_citation_counts(papers)
 

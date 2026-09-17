@@ -16,11 +16,8 @@ from citemesh.strategies.base import (
     build_capped_undirected_graph,
 )
 from citemesh.strategies.candidates import (
-    IdentityRegistry,
     fetch_candidate_source,
     merge_paper_metadata,
-    reconcile_paper_identity,
-    register_aliases,
     require_available_candidate_source,
     scope_candidate_collection,
 )
@@ -122,8 +119,6 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
         # Seed role belongs to this build, not the client-owned metadata record.
         seed = replace(seed, is_seed=True)
         papers[seed.paper_id] = seed
-        identity_aliases = IdentityRegistry()
-        register_aliases(identity_aliases, seed.paper_id, seed)
 
         logger.info("Fetching recommendations for %s", seed.paper_id)
         recommendation_result = fetch_candidate_source(
@@ -150,20 +145,17 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             # Recommendation payloads can include the seed paper itself.
             # Preserve the original seed object so GraphBuilderStrategy can always
             # identify a node with ``is_seed=True``.
-            reconciliation = reconcile_paper_identity(
-                identity_aliases, seed, papers, paper
-            )
-            if reconciliation.seed_matched:
+            paper_id = str(paper.paper_id).strip()
+            if not paper_id:
                 continue
-
-            canonical_id = reconciliation.canonical_id
-            if canonical_id is not None:
-                existing = papers[canonical_id]
-                # Identity reconciliation already merged the incoming metadata.
-                # Only newly fetched reference enrichment needs another merge.
+            if paper_id == seed.paper_id:
+                merge_paper_metadata(seed, paper)
+                continue
+            existing = papers.get(paper_id)
+            if existing is not None:
                 if not existing.references:
                     self._hydrate_references(paper)
-                    merge_paper_metadata(existing, paper)
+                merge_paper_metadata(existing, paper)
                 continue
 
             if not paper.abstract or not paper.title:
@@ -173,8 +165,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
                 continue
 
             self._hydrate_references(paper)
-            papers[paper.paper_id] = paper
-            register_aliases(identity_aliases, paper.paper_id, paper)
+            papers[paper_id] = paper
 
         self._abstract_index.build(papers)
         self._set_collection_summary(

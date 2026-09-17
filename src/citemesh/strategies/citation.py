@@ -23,12 +23,10 @@ from citemesh.strategies.base import (
 )
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
-    IdentityRegistry,
     fetch_candidate_source,
+    merge_paper_metadata,
     merge_seed_relation,
     provider_lookup_identifier,
-    reconcile_paper_identity,
-    register_aliases,
     require_available_candidate_source,
     scope_candidate_collection,
 )
@@ -85,7 +83,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
         self.candidate_source_results: tuple[CandidateSourceResult, ...] = ()
-        self._identity_aliases = IdentityRegistry()
         self._abstract_index = AbstractSimilarityIndex()
         self._reference_source_unavailable = False
 
@@ -178,50 +175,19 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             raw_paper_id = str(paper.paper_id).strip()
             if not raw_paper_id:
                 continue
-            reconciliation = reconcile_paper_identity(
-                self._identity_aliases, seed, papers, paper
-            )
-            if reconciliation.seed_matched:
-                collapsed_ids = set(reconciliation.collapsed_ids)
-                for paper_id in reconciliation.collapsed_ids:
-                    cached_references = self.reference_cache.pop(paper_id, None)
-                    if cached_references is not None:
-                        self.reference_cache.setdefault(
-                            str(seed.paper_id), cached_references
-                        )
-                    self.seed_relations.pop(paper_id, None)
-                processed_ids[:] = [
-                    paper_id
-                    for paper_id in processed_ids
-                    if paper_id not in collapsed_ids
-                ]
+            if raw_paper_id == seed.paper_id:
+                merge_paper_metadata(seed, paper)
                 continue
-
-            canonical_id = reconciliation.canonical_id
-            if canonical_id is not None:
-                collapsed_ids = set(reconciliation.collapsed_ids)
-                for paper_id in reconciliation.collapsed_ids:
-                    cached_references = self.reference_cache.pop(paper_id, None)
-                    if cached_references is not None:
-                        self.reference_cache.setdefault(canonical_id, cached_references)
-                    merged_relation = merge_seed_relation(
-                        self.seed_relations.get(canonical_id, ""),
-                        self.seed_relations.pop(paper_id, ""),
-                    )
-                    if merged_relation:
-                        self.seed_relations[canonical_id] = merged_relation
-                processed_ids[:] = [
-                    canonical_id if paper_id in collapsed_ids else paper_id
-                    for paper_id in processed_ids
-                ]
-                processed_ids.append(canonical_id)
+            existing = papers.get(raw_paper_id)
+            if existing is not None:
+                merge_paper_metadata(existing, paper)
+                processed_ids.append(raw_paper_id)
                 continue
 
             if len(papers) >= self.max_papers:
                 continue
 
             papers[raw_paper_id] = paper
-            register_aliases(self._identity_aliases, raw_paper_id, paper)
             processed_ids.append(raw_paper_id)
 
         if progress_bar is not None:
@@ -335,7 +301,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.seed_relations = {}
         self.candidate_source_status = {}
         self.candidate_source_results = ()
-        self._identity_aliases = IdentityRegistry()
         papers = {}
         source_results: list[CandidateSourceResult] = []
 
@@ -359,7 +324,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
-        register_aliases(self._identity_aliases, seed.paper_id, seed)
 
         logger.info("Seed: %s", seed.title)
 

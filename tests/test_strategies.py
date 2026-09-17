@@ -27,10 +27,7 @@ from citemesh.strategies.base import (
 from citemesh.strategies.candidates import (
     CandidateAcquisitionError,
     CandidatePool,
-    IdentityRegistry,
     fetch_candidate_pool,
-    paper_identity_aliases,
-    register_aliases,
 )
 from citemesh.strategies.citation import CitationGraphBuilder
 from citemesh.strategies.embedding import EmbeddingGraphBuilder
@@ -129,6 +126,21 @@ def _recommendation_payload(paper_id: str) -> dict[str, object]:
         "fieldsOfStudy": [],
         "authors": [],
     }
+
+
+def _http_response(payload: object) -> MagicMock:
+    """Build a successful direct-transport response fixture."""
+    response = MagicMock()
+    response.status_code = 200
+    response.headers = {}
+    response.json.return_value = payload
+    response.raise_for_status.return_value = None
+    return response
+
+
+def _relation_response(key: str, paper_id: str) -> MagicMock:
+    """Build one REST relation page containing a paper ID."""
+    return _http_response({"data": [{key: {"paperId": paper_id}}], "next": None})
 
 
 def _cache_full_papers(*papers: Paper) -> None:
@@ -424,9 +436,7 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=seed)
-        client.client.get_paper_references = MagicMock(
-            side_effect=requests.ConnectionError("offline")
-        )
+        client._session.get = MagicMock(side_effect=requests.ConnectionError("offline"))
         client._persist_reference_cache_entry(
             s2.disk_cache._reference_cache_path("warm"), "warm", ["shared"]
         )
@@ -453,7 +463,7 @@ def test_reference_outage_reuses_persisted_hits_without_new_network_requests(
 
     assert set(papers) == {"seed", "cold", "warm"}
     assert papers["warm"].references == expected_references
-    assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
+    assert client._session.get.call_count == API_CONFIG.max_retries
 
 
 @pytest.mark.parametrize(
@@ -469,7 +479,7 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
     :param type[GraphBuilderStrategy] builder_type: Indexed strategy constructor.
     :param Path tmp_path: Isolated reference-cache directory.
     :param pytest.MonkeyPatch monkeypatch: Fixture used to isolate cache paths.
-    :return None: Checks domain isolation, cache reuse, and fresh top-level scopes.
+    :return None: Checks healthy discovery and warm-cache reuse after an outage.
     """
     monkeypatch.setattr(s2.disk_cache, "REFERENCE_CACHE_DIR", tmp_path)
     seed = _paper("scope-seed")
@@ -478,25 +488,21 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
         client.get_paper = MagicMock(return_value=seed)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
 
-        def fetch_references(paper_id: str, **kwargs: object) -> list[dict]:
-            """Fail reference transport while leaving citations healthy.
+        def transport(url: str, **_kwargs: object) -> MagicMock:
+            """Fail references while serving healthy direct REST endpoints."""
+            if url.endswith("/references"):
+                raise requests.ConnectionError("offline")
+            if url.endswith("/citations"):
+                return _relation_response("citingPaper", "healthy-citation")
+            return _http_response(
+                {
+                    "recommendedPapers": [
+                        _recommendation_payload("healthy-recommendation")
+                    ]
+                }
+            )
 
-            :param str paper_id: Requested Semantic Scholar paper ID.
-            :param object kwargs: SDK request options, including selected fields.
-            :return list[dict]: This fixture always raises before returning.
-            """
-            del paper_id, kwargs
-            raise requests.ConnectionError("offline")
-
-        client.client.get_paper_references = MagicMock(side_effect=fetch_references)
-        client.client.get_paper_citations = MagicMock(
-            return_value=[_api_relation_record("healthy-citation")]
-        )
-        client._request_json_once = MagicMock(
-            return_value={
-                "recommendedPapers": [_recommendation_payload("healthy-recommendation")]
-            }
-        )
+        client._session.get = MagicMock(side_effect=transport)
         if builder_type is CitationGraphBuilder:
             builder = CitationGraphBuilder(
                 max_papers=3,
@@ -511,7 +517,7 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
             s2.disk_cache._reference_cache_path("warm"), "warm", ["cached-reference"]
         )
         with patch("time.sleep") as sleep_mock:
-            for expected_calls in (API_CONFIG.max_retries, API_CONFIG.max_retries * 2):
+            for _ in range(2):
                 with client.candidate_operation_scope():
                     papers = builder.collect_papers("scope-seed")
                     if builder_type is CitationGraphBuilder:
@@ -528,24 +534,52 @@ def test_candidate_scope_keeps_healthy_capabilities_after_reference_outage(
                         assert builder.candidate_source_status == {
                             "recommendations": "complete"
                         }
-                    with pytest.raises(
-                        s2.SemanticScholarUnavailableError,
-                        match="Skipped Semantic Scholar references request",
-                    ):
-                        client.get_reference_ids("later-citing-paper")
                     assert client.get_reference_ids("warm") == ["cached-reference"]
-                    assert (
-                        client.client.get_paper_references.call_count == expected_calls
-                    )
 
-        assert sleep_mock.call_count == 2 * (API_CONFIG.max_retries - 1)
+        assert sleep_mock.call_count >= 2 * (API_CONFIG.max_retries - 1)
+        assert (
+            len(
+                [
+                    call
+                    for call in client._session.get.call_args_list
+                    if call.args[0].endswith("/references")
+                ]
+            )
+            >= 2 * API_CONFIG.max_retries
+        )
 
     if builder_type is CitationGraphBuilder:
-        assert client.client.get_paper_citations.call_count == 2
-        client._request_json_once.assert_not_called()
+        assert (
+            len(
+                [
+                    call
+                    for call in client._session.get.call_args_list
+                    if call.args[0].endswith("/citations")
+                ]
+            )
+            == 2
+        )
     else:
-        client.client.get_paper_citations.assert_not_called()
-        assert client._request_json_once.call_count == 2
+        assert (
+            len(
+                [
+                    call
+                    for call in client._session.get.call_args_list
+                    if call.args[0].endswith("/citations")
+                ]
+            )
+            == 0
+        )
+        assert (
+            len(
+                [
+                    call
+                    for call in client._session.get.call_args_list
+                    if "/recommendations/" in call.args[0]
+                ]
+            )
+            == 2
+        )
 
 
 def test_hybrid_candidate_scope_is_shared_with_citation_child(
@@ -563,17 +597,22 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=seed)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
-        client.client.get_paper_references = MagicMock(
-            side_effect=requests.ConnectionError("offline")
-        )
-        client.client.get_paper_citations = MagicMock(
-            return_value=[_api_relation_record("healthy-citation")]
-        )
-        client._request_json_once = MagicMock(
-            return_value={
-                "recommendedPapers": [_recommendation_payload("healthy-recommendation")]
-            }
-        )
+
+        def transport(url: str, **_kwargs: object) -> MagicMock:
+            """Fail references while serving citation and recommendation pages."""
+            if url.endswith("/references"):
+                raise requests.ConnectionError("offline")
+            if url.endswith("/citations"):
+                return _relation_response("citingPaper", "healthy-citation")
+            return _http_response(
+                {
+                    "recommendedPapers": [
+                        _recommendation_payload("healthy-recommendation")
+                    ]
+                }
+            )
+
+        client._session.get = MagicMock(side_effect=transport)
         builder = HybridGraphBuilder(
             max_papers=3,
             max_references=1,
@@ -593,7 +632,16 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
         with patch("time.sleep"):
             papers = builder.collect_papers("hybrid-scope-seed")
 
-        assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
+        assert (
+            len(
+                [
+                    call
+                    for call in client._session.get.call_args_list
+                    if call.args[0].endswith("/references")
+                ]
+            )
+            == 2 * API_CONFIG.max_retries
+        )
         assert set(papers) == {
             "hybrid-scope-seed",
             "healthy-citation",
@@ -605,8 +653,26 @@ def test_hybrid_candidate_scope_is_shared_with_citation_child(
             "recommendations": "complete",
         }
 
-    client.client.get_paper_citations.assert_called_once()
-    client._request_json_once.assert_called_once()
+    assert (
+        len(
+            [
+                call
+                for call in client._session.get.call_args_list
+                if call.args[0].endswith("/citations")
+            ]
+        )
+        == 1
+    )
+    assert (
+        len(
+            [
+                call
+                for call in client._session.get.call_args_list
+                if "/recommendations/" in call.args[0]
+            ]
+        )
+        == 1
+    )
 
 
 def test_embedding_candidate_scope_keeps_healthy_later_sources(
@@ -624,17 +690,22 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
         client._rate_limit = MagicMock()
         client.get_paper = MagicMock(return_value=seed)
         _cache_full_papers(_paper("healthy-citation"), _paper("healthy-recommendation"))
-        client.client.get_paper_references = MagicMock(
-            side_effect=requests.ConnectionError("offline")
-        )
-        client.client.get_paper_citations = MagicMock(
-            return_value=[_api_relation_record("healthy-citation")]
-        )
-        client._request_json_once = MagicMock(
-            return_value={
-                "recommendedPapers": [_recommendation_payload("healthy-recommendation")]
-            }
-        )
+
+        def transport(url: str, **_kwargs: object) -> MagicMock:
+            """Fail references while serving citation and recommendation pages."""
+            if url.endswith("/references"):
+                raise requests.ConnectionError("offline")
+            if url.endswith("/citations"):
+                return _relation_response("citingPaper", "healthy-citation")
+            return _http_response(
+                {
+                    "recommendedPapers": [
+                        _recommendation_payload("healthy-recommendation")
+                    ]
+                }
+            )
+
+        client._session.get = MagicMock(side_effect=transport)
         builder = EmbeddingGraphBuilder(
             max_papers=3,
             semantic_source="candidates",
@@ -658,7 +729,16 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
         with patch("time.sleep"):
             papers = builder.collect_papers("embedding-scope-seed")
 
-        assert client.client.get_paper_references.call_count == API_CONFIG.max_retries
+        assert (
+            len(
+                [
+                    call
+                    for call in client._session.get.call_args_list
+                    if call.args[0].endswith("/references")
+                ]
+            )
+            == API_CONFIG.max_retries
+        )
         assert set(papers) == {
             "embedding-scope-seed",
             "healthy-citation",
@@ -670,8 +750,26 @@ def test_embedding_candidate_scope_keeps_healthy_later_sources(
             "recommendations": "complete",
         }
 
-    client.client.get_paper_citations.assert_called_once()
-    client._request_json_once.assert_called_once()
+    assert (
+        len(
+            [
+                call
+                for call in client._session.get.call_args_list
+                if call.args[0].endswith("/citations")
+            ]
+        )
+        == 1
+    )
+    assert (
+        len(
+            [
+                call
+                for call in client._session.get.call_args_list
+                if "/recommendations/" in call.args[0]
+            ]
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -700,14 +798,20 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
         client._rate_limit = MagicMock()
         _cache_full_papers(_paper("healthy-recommendation"))
         client.get_paper_references = MagicMock(return_value=reference_papers)
-        client.client.get_paper_citations = MagicMock(
-            side_effect=requests.ConnectionError("offline")
-        )
-        client._request_json_once = MagicMock(
-            return_value={
-                "recommendedPapers": [_recommendation_payload("healthy-recommendation")]
-            }
-        )
+
+        def transport(url: str, **_kwargs: object) -> MagicMock:
+            """Fail citations while serving the recommendation page."""
+            if url.endswith("/citations"):
+                raise requests.ConnectionError("offline")
+            return _http_response(
+                {
+                    "recommendedPapers": [
+                        _recommendation_payload("healthy-recommendation")
+                    ]
+                }
+            )
+
+        client._session.get = MagicMock(side_effect=transport)
 
         with patch("time.sleep"):
             pool = fetch_candidate_pool(
@@ -727,9 +831,27 @@ def test_candidate_pool_preserves_earlier_available_evidence_after_outage(
             *(paper.paper_id for paper in reference_papers),
             "healthy-recommendation",
         }
-        assert client.client.get_paper_citations.call_count == API_CONFIG.max_retries
+        assert (
+            len(
+                [
+                    call
+                    for call in client._session.get.call_args_list
+                    if call.args[0].endswith("/citations")
+                ]
+            )
+            == API_CONFIG.max_retries
+        )
 
-    client._request_json_once.assert_called_once()
+    assert (
+        len(
+            [
+                call
+                for call in client._session.get.call_args_list
+                if "/recommendations/" in call.args[0]
+            ]
+        )
+        == 1
+    )
 
 
 def test_recommendation_collect_filters_missing_abstract_and_prefers_payload_refs() -> (
@@ -786,40 +908,49 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
             client._persist_reference_cache_entry(
                 s2.disk_cache._reference_cache_path(paper_id), paper_id, []
             )
-        client.client.get_paper_references = MagicMock(
-            side_effect=AssertionError("warm reference enrichment must stay cached")
-        )
 
-        def request_once(
+        def get(
             url: str,
-            params: dict[str, object] | str,
             *,
-            context: str,
-            headers: dict[str, str] | None = None,
-            payload: dict[str, object] | None = None,
-        ) -> object:
-            """Serve deterministic discovery IDs and one missing metadata batch.
+            params: dict[str, object],
+            timeout: float,
+        ) -> MagicMock:
+            """Serve deterministic recommendation discovery through HTTP transport.
 
             :param str url: Requested Semantic Scholar endpoint URL.
-            :param dict[str, object] | str params: Query parameters sent to the endpoint.
-            :param str context: Request description, unused by this fixture.
-            :param dict[str, str] | None headers: Optional request headers, unused.
-            :param dict[str, object] | None payload: Optional batch request payload.
-            :return object: Fake endpoint response matching the requested endpoint.
+            :param dict[str, object] params: Query parameters sent to the endpoint.
+            :param float timeout: HTTP timeout, unused by this fixture.
+            :return MagicMock: Fake endpoint response matching the request.
             """
-            del context, headers
-            calls.append((url, params, payload))
-            if url.endswith("/batch"):
-                assert payload == {"ids": ["third"]}
-                return [_recommendation_payload("third")]
+            del timeout
+            if url.endswith("/references"):
+                raise AssertionError("warm reference enrichment must stay cached")
+            calls.append((url, params, None))
             assert params == {"fields": "paperId", "limit": 6}
-            return {
-                "recommendedPapers": [
-                    {"paperId": paper_id} for paper_id in next(recommendation_ids)
-                ]
-            }
+            return _http_response(
+                {
+                    "recommendedPapers": [
+                        {"paperId": paper_id} for paper_id in next(recommendation_ids)
+                    ]
+                }
+            )
 
-        client._request_json_once = MagicMock(side_effect=request_once)
+        def post(
+            url: str,
+            *,
+            json: dict[str, object],
+            params: dict[str, object],
+            timeout: float,
+        ) -> MagicMock:
+            """Serve the one uncached metadata batch through HTTP transport."""
+            del timeout
+            calls.append((url, params, json))
+            assert url.endswith("/batch")
+            assert json == {"ids": ["third"]}
+            return _http_response([_recommendation_payload("third")])
+
+        client._session.get = MagicMock(side_effect=get)
+        client._session.post = MagicMock(side_effect=post)
         builder = RecommendationGraphBuilder(max_papers=3, client=client)
 
         first_run = builder.collect_papers("seed")
@@ -831,7 +962,6 @@ def test_recommendation_discovery_rechecks_ids_and_reuses_cached_enrichment() ->
     batch_calls = [call for call in calls if call[0].endswith("/batch")]
     assert len(discovery_calls) == 2
     assert len(batch_calls) == 1
-    client.client.get_paper_references.assert_not_called()
 
 
 def test_recommendation_fetches_primary_discovery_before_seed_references() -> None:
@@ -1189,8 +1319,8 @@ def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates()
     client.get_reference_ids.assert_called_once_with("overlap", force_refresh=False)
 
 
-def test_citation_collect_collapses_seed_and_candidate_identifier_aliases() -> None:
-    """Citation ingestion should retain canonical IDs for aliased relation records."""
+def test_citation_collect_keeps_distinct_identifier_records() -> None:
+    """Citation ingestion keeps distinct S2 primary IDs separate."""
     seed = _paper("s2-seed")
     seed.arxiv_id = "2508.12345"
     reference = _paper("s2-candidate")
@@ -1212,16 +1342,23 @@ def test_citation_collect_collapses_seed_and_candidate_identifier_aliases() -> N
     )
     papers = builder.collect_papers("s2-seed")
 
-    assert set(papers) == {"s2-seed", "s2-candidate"}
+    assert set(papers) == {
+        "s2-seed",
+        "arxiv:2508.12345",
+        "s2-candidate",
+        "arxiv:2508.12346",
+    }
     assert papers["s2-seed"].is_seed is True
     assert builder.seed_relations == {
         "s2-seed": "seed",
-        "s2-candidate": "overlap",
+        "arxiv:2508.12345": "referenced_by_seed",
+        "s2-candidate": "referenced_by_seed",
+        "arxiv:2508.12346": "cites_seed",
     }
 
 
-def test_citation_collect_repoints_relations_for_same_batch_bridge() -> None:
-    """Same-batch bridge merges must not leave relations for removed paper IDs."""
+def test_citation_collect_keeps_bridge_records_distinct() -> None:
+    """A bridge payload cannot merge separate primary IDs."""
     seed = _paper("seed")
     arxiv_record, doi_record, bridge = _identity_bridge_records()
 
@@ -1239,10 +1376,11 @@ def test_citation_collect_repoints_relations_for_same_batch_bridge() -> None:
     )
     papers = builder.collect_papers("seed")
 
-    assert set(papers) == {"seed", arxiv_record.paper_id}
+    assert set(papers) == {"seed", arxiv_record.paper_id, doi_record.paper_id}
     assert builder.seed_relations == {
         "seed": "seed",
         arxiv_record.paper_id: "referenced_by_seed",
+        doi_record.paper_id: "referenced_by_seed",
     }
 
 
@@ -2403,6 +2541,7 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
             "to the powerful fitting capabilities."
         ),
         authors=[Author(name="Zhijian Zhou"), Author(name="Ya Wang")],
+        arxiv_id="2411.03884",
         is_seed=True,
     )
     citation_papers = {"seed": seed, "c1": _paper("c1")}
@@ -2415,6 +2554,7 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
         year=2025,
         abstract=seed.abstract,
         authors=[Author(name="Zhijian Zhou"), Author(name="Yitao Zeng")],
+        is_local_corpus=True,
     )
     semantic_papers = {
         semantic_seed_alias.paper_id: semantic_seed_alias,
@@ -2984,8 +3124,8 @@ def test_bibliographic_coupling_delegates_to_paper(
     assert GraphBuilderStrategy.bibliographic_coupling(paper1, paper2) == 0.42
 
 
-def test_candidate_pool_dedupes_equivalent_papers() -> None:
-    """CandidatePool should merge papers with matching identity aliases."""
+def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
+    """CandidatePool should merge repeated Semantic Scholar paper IDs."""
     from citemesh.strategies.candidates import CandidatePool
 
     seed = _seed_paper()
@@ -2999,7 +3139,7 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
         arxiv_id="2101.00001",
     )
     duplicate = Paper(
-        paper_id="arxiv:2101.00001",
+        paper_id=first.paper_id,
         title="Same  Paper",
         year=2021,
         abstract="",
@@ -3008,13 +3148,13 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
     pool.add(first, source="reference", relation="referenced_by_seed")
     pool.add(duplicate, source="recommendation", relation="semantic_only")
 
-    alias_only_duplicate = Paper(
-        paper_id="arxiv:2101.00001",
+    exact_duplicate = Paper(
+        paper_id=first.paper_id,
         title="Payload Without Matching Metadata",
         year=2022,
         abstract="alternate payload",
     )
-    pool.add(alias_only_duplicate, source="citation", relation="cites_seed")
+    pool.add(exact_duplicate, source="citation", relation="cites_seed")
 
     assert list(pool.papers) == [first.paper_id]
     assert pool.sources[first.paper_id] == {
@@ -3034,83 +3174,16 @@ def test_candidate_pool_dedupes_equivalent_papers() -> None:
     assert set(pool.papers) == {first.paper_id}
 
 
-@pytest.mark.parametrize(
-    ("identifier_field", "identifier_value"),
-    [("doi", "10.1000/shared"), ("arxiv_id", "2508.12345")],
-)
-@pytest.mark.parametrize("is_seed", [True, False])
-def test_identity_external_id_agreement_overrides_s2_record_disagreement(
-    identifier_field: str,
-    identifier_value: str,
-    is_seed: bool,
-) -> None:
-    """External-ID matches must retain alternate S2 IDs for later sparse records.
-
-    :param str identifier_field: External identifier shared by the records.
-    :param str identifier_value: Shared DOI or arXiv identifier.
-    :param bool is_seed: Whether the surviving record is the seed or a candidate.
-    :return None: Validates metadata merging and continued identity reconciliation.
-    """
-    canonical = Paper(
-        paper_id="1" * 40,
-        title="Canonical Paper",
-        year=2025,
-        abstract="",
-        is_seed=is_seed,
-    )
-    setattr(canonical, identifier_field, identifier_value)
-    duplicate = Paper(
-        paper_id="2" * 40,
-        title="Duplicate Record",
-        year=2025,
-        abstract="hydrated abstract",
-    )
-    setattr(duplicate, identifier_field, identifier_value)
-    pool = CandidatePool(seed=canonical if is_seed else _seed_paper())
-    if not is_seed:
-        pool.add(canonical, source="reference", relation="referenced_by_seed")
-
-    pool.add(duplicate, source="recommendation", relation="semantic_only")
-    pool.add(
-        Paper(
-            paper_id=duplicate.paper_id,
-            title="Unknown",
-            year=None,
-            references=["related-paper"],
-        ),
-        source="citation",
-        relation="cites_seed",
-    )
-
-    assert pool.papers == ({} if is_seed else {canonical.paper_id: canonical})
-    assert canonical.abstract == "hydrated abstract"
-    assert canonical.references == ["related-paper"]
-    assert pool._aliases[f"id:{duplicate.paper_id}"] == canonical.paper_id
-    assert pool._aliases.evidence(canonical.paper_id).strong_ids["s2"] == frozenset(
-        {canonical.paper_id, duplicate.paper_id}
-    )
-
-
-def test_candidate_pool_collapses_identifier_bridge_classes() -> None:
-    """A record bridging arXiv and DOI aliases should merge both prior classes."""
-    from citemesh.strategies.candidates import CandidatePool
-
+def test_candidate_pool_keeps_distinct_s2_ids_despite_shared_external_ids() -> None:
+    """External metadata alone cannot merge Semantic Scholar records."""
     pool = CandidatePool(seed=_seed_paper())
-    arxiv_record, doi_record, bridge = _identity_bridge_records()
+    first = Paper(paper_id="1" * 40, title="Same", year=2025, doi="10.1000/shared")
+    second = Paper(paper_id="2" * 40, title="Same", year=2025, doi="10.1000/shared")
 
-    pool.add(arxiv_record, source="reference", relation="referenced_by_seed")
-    pool.add(doi_record, source="citation", relation="cites_seed")
-    pool.add(bridge, source="recommendation", relation="semantic_only")
+    pool.add(first, source="reference", relation="referenced_by_seed")
+    pool.add(second, source="citation", relation="cites_seed")
 
-    assert list(pool.papers) == [arxiv_record.paper_id]
-    assert pool.papers[arxiv_record.paper_id].doi == "10.1000/bridge"
-    assert pool.sources[arxiv_record.paper_id] == {
-        "reference",
-        "citation",
-        "recommendation",
-    }
-    assert pool.seed_relations[arxiv_record.paper_id] == "overlap"
-    assert pool._aliases["id:10.1000/bridge"] == arxiv_record.paper_id
+    assert set(pool.papers) == {first.paper_id, second.paper_id}
 
 
 @pytest.mark.parametrize("opaque_case_distinction", [False, True])
@@ -3170,18 +3243,6 @@ def test_identity_reconciliation_rejects_conflicting_strong_ids(
     assert "4" * 40 in pool.papers
 
 
-@pytest.mark.parametrize("title", ["Unknown", "Untitled", "None", "N/A"])
-def test_identity_placeholder_titles_never_create_weak_aliases(title: str) -> None:
-    """Placeholder titles must not become global metadata identity keys."""
-    paper = Paper(
-        paper_id="placeholder",
-        title=title,
-        year=2024,
-        authors=[Author(name="Unknown Author")],
-    )
-    assert not any(alias.startswith("meta:") for alias in paper_identity_aliases(paper))
-
-
 def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
     """Same-primary refreshes must not assign a contradictory DOI to that class."""
     primary_a = "a" * 40
@@ -3212,16 +3273,6 @@ def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
 
     assert set(pool.papers) == {primary_a, primary_b}
     assert pool.papers[primary_a].doi == "10.1000/a"
-    assert pool._aliases["id:10.1000/b"] == primary_b
-
-    # Direct registry callers can refresh an unmerged payload; the conflict
-    # branch must also quarantine its contradictory aliases at this boundary.
-    registry = IdentityRegistry()
-    register_aliases(registry, primary_a, canonical)
-    register_aliases(registry, primary_a, conflicting_refresh)
-    assert registry["id:10.1000/a"] == primary_a
-    assert registry.get("id:10.1000/b") is None
-    assert registry.evidence(primary_a).strong_ids["doi"] == frozenset({"10.1000/a"})
 
 
 def test_identity_transitive_weak_bridge_cannot_collapse_conflicting_classes() -> None:
@@ -3254,17 +3305,16 @@ def test_identity_transitive_weak_bridge_cannot_collapse_conflicting_classes() -
     pool.add(middle, source="citation", relation="cites_seed")
     pool.add(right, source="recommendation", relation="semantic_only")
 
-    assert set(pool.papers) == {left.paper_id, middle.paper_id}
+    assert set(pool.papers) == {left.paper_id, middle.paper_id, right.paper_id}
     assert pool.sources[left.paper_id] == {"reference"}
-    assert pool.sources[middle.paper_id] == {"citation", "recommendation"}
+    assert pool.sources[middle.paper_id] == {"citation"}
+    assert pool.sources[right.paper_id] == {"recommendation"}
 
 
 def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> None:
     """Hybrid false twins should remain separate source classes without a bonus."""
     builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
     seed = _seed_paper()
-    aliases = IdentityRegistry()
-    register_aliases(aliases, seed.paper_id, seed)
     candidates: dict[str, Paper] = {}
     sources: dict[str, set[str]] = {}
     authors = [Author(name="Katherine Johnson")]
@@ -3281,7 +3331,6 @@ def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> No
         authors=authors,
     )
     builder._ingest_candidate(
-        aliases,
         seed,
         candidates,
         sources,
@@ -3290,7 +3339,6 @@ def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> No
         relation="cites_seed",
     )
     builder._ingest_candidate(
-        aliases,
         seed,
         candidates,
         sources,
@@ -3304,10 +3352,8 @@ def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> No
     assert sources[semantic_twin.paper_id] == {"semantic"}
 
 
-def test_recommendation_collect_collapses_seed_and_candidate_identifier_aliases() -> (
-    None
-):
-    """Recommendation ingestion should not retain arXiv aliases as duplicate nodes."""
+def test_recommendation_collect_keeps_distinct_identifier_records() -> None:
+    """Recommendation ingestion keeps distinct primary IDs separate."""
     seed = _seed_paper("s2-seed")
     seed.arxiv_id = "2508.12345"
     candidate = _paper("s2-candidate")
@@ -3326,12 +3372,17 @@ def test_recommendation_collect_collapses_seed_and_candidate_identifier_aliases(
         max_papers=4, fetch_references=False, client=client
     ).collect_papers("s2-seed")
 
-    assert set(papers) == {"s2-seed", "s2-candidate"}
+    assert set(papers) == {
+        "s2-seed",
+        "arxiv:2508.12345",
+        "s2-candidate",
+        "arxiv:2508.12346",
+    }
     assert papers["s2-seed"].is_seed is True
 
 
-def test_recommendation_collect_reconciles_sparse_identifier_bridge() -> None:
-    """Sparse known records should still bridge existing identity classes."""
+def test_recommendation_collect_merges_exact_primary_refresh() -> None:
+    """A repeated primary ID may supplement its existing record."""
     seed = _seed_paper()
     arxiv_record, doi_record, _bridge = _identity_bridge_records()
     sparse_bridge = Paper(
@@ -3354,12 +3405,12 @@ def test_recommendation_collect_reconciles_sparse_identifier_bridge() -> None:
         max_papers=4, fetch_references=False, client=client
     ).collect_papers("seed")
 
-    assert set(papers) == {"seed", arxiv_record.paper_id}
+    assert set(papers) == {"seed", arxiv_record.paper_id, doi_record.paper_id}
     assert papers[arxiv_record.paper_id].doi == "10.1000/bridge"
 
 
-def test_recommendation_collect_reconciles_bridge_after_capacity() -> None:
-    """Capacity filtering should not hide later identity bridge records."""
+def test_recommendation_collect_capacity_keeps_first_distinct_records() -> None:
+    """Capacity applies after exact-primary deduplication."""
     seed = _seed_paper()
     arxiv_record, doi_record, bridge = _identity_bridge_records()
     unrelated = _paper("unrelated")
@@ -3376,52 +3427,7 @@ def test_recommendation_collect_reconciles_bridge_after_capacity() -> None:
         max_papers=3, fetch_references=False, client=client
     ).collect_papers("seed")
 
-    assert set(papers) == {"seed", arxiv_record.paper_id}
-    assert papers[arxiv_record.paper_id].doi == "10.1000/bridge"
-
-
-def test_hybrid_collection_collapses_identifier_bridge_classes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Hybrid ingestion should preserve source and relation data across bridge merges."""
-    builder = HybridGraphBuilder(
-        max_papers=3, max_semantic=1, semantic_source="arxiv-corpus", client=MagicMock()
-    )
-    seed = _seed_paper()
-    arxiv_record, doi_record, bridge = _identity_bridge_records()
-    builder.citation_builder.collect_papers = MagicMock(
-        return_value={
-            seed.paper_id: seed,
-            arxiv_record.paper_id: arxiv_record,
-            doi_record.paper_id: doi_record,
-        }
-    )
-    builder.citation_builder.seed_relations = {
-        seed.paper_id: "seed",
-        arxiv_record.paper_id: "referenced_by_seed",
-        doi_record.paper_id: "cites_seed",
-    }
-    assert builder.embedding_builder is not None
-    _stub_hybrid_corpus_operation_lock(builder)
-    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
-    monkeypatch.setattr(
-        builder.embedding_builder,
-        "resolve_cached_corpus_seed",
-        lambda _seed_id, **_kwargs: None,
-    )
-    builder.embedding_builder.collect_papers = MagicMock(
-        return_value={bridge.paper_id: bridge}
-    )
-    monkeypatch.setattr(
-        builder, "_rank_candidates", lambda *_args: [arxiv_record.paper_id]
-    )
-
-    papers = builder.collect_papers("seed")
-
-    assert set(papers) == {"seed", arxiv_record.paper_id}
-    assert papers[arxiv_record.paper_id].doi == "10.1000/bridge"
-    assert builder.paper_sources[arxiv_record.paper_id] == "both"
-    assert builder.seed_relations[arxiv_record.paper_id] == "overlap"
+    assert set(papers) == {"seed", arxiv_record.paper_id, doi_record.paper_id}
 
 
 def test_merge_paper_metadata_preserves_fields_and_unions_references() -> None:

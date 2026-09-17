@@ -13,7 +13,7 @@ pip install -e ".[all]"
 
 Versions come from git tags via setuptools-scm, so a shallow clone without tags reports `0.0.post1.devN` - run `git fetch --tags` first. Tests import the installed package from the `src/` layout, so rerun `pip install -e ".[all]"` after pulling a change that moves or renames modules.
 
-The Semantic Scholar SDK is pinned to `>=0.8.0,<0.13` because CiteMesh adapts its requester to preserve HTTP status codes; check the transport and pagination tests before widening that range.
+Semantic Scholar requests use the HTTP transport in `services/semantic_scholar/client.py`; endpoint pagination and payload conversion live alongside it. Transport and pagination tests use mocked HTTP responses and clocks.
 
 ## Before you open a PR
 

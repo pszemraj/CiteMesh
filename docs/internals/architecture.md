@@ -29,12 +29,12 @@ Every node carries the same attribute payload (`paper`, `title`, `year`, `author
 
 ### `services/semantic_scholar/` - Semantic Scholar transport
 
-`errors.py` (failure taxonomy, per-capability `_FailureDomain` budgets) · `retry.py` (Tenacity backoff, `Retry-After`) · `disk_cache.py` (persisted discovery snapshots, paper metadata, and reference-ID caches) · `payloads.py` (parsing into `Paper`) · `endpoints.py` (one method per capability) · `client.py` (transport, rate limiting, `candidate_operation_scope`, `get_client`).
+`errors.py` (request and availability errors) · `retry.py` (backoff and `Retry-After`) · `disk_cache.py` (canonical paper metadata, identifier lookups, and reference-ID caches) · `payloads.py` (parsing into `Paper`) · `endpoints.py` (fresh discovery, pagination, and cache-aware metadata acquisition) · `client.py` (HTTP requests, rate limiting, shared recovery budget, `get_client`). Each HTTP request owns its retry attempts; a collection shares the elapsed recovery allowance. Successful pages are not replayed when a later page fails.
 
 ### `strategies/` - candidate acquisition and scoring
 
 - `base.py` - `GraphBuilderStrategy`: the template method and its four hooks, the shared temporal/citation/bibliographic scorers, `deterministic_sort_key`, edge capping
-- `candidates.py` - pool budgets, `fetch_candidate_source` and its `complete`/`empty`/`unavailable` vocabulary, `IdentityRegistry`, `reconcile_paper_identity`, `scope_candidate_collection`
+- `candidates.py` - pool budgets, `fetch_candidate_source` and its `complete`/`empty`/`unavailable` vocabulary, exact paper-ID matching, explicit corpus/S2 identifier matching, `scope_candidate_collection`
 - `similarity.py` - `AbstractSimilarityIndex`, the TF-IDF scorer behind citation and recommendation topical similarity
 - `citation.py`, `recommendation.py`, `hybrid.py` - the concrete strategies
 - `embedding/` - `deps` (lazy dependency guards) · `runtime` (device resolution, probes) · `model_runtime` (load, fallback, precision validation, TF32 and compile guards) · `precision` · `text` (`EmbeddingTask`, formatters) · `records` · `config` · `fingerprint` · `hydration` (corpus selection, calibration, resume) · `builder`

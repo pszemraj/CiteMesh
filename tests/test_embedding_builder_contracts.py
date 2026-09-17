@@ -3848,11 +3848,7 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     :param bool restore_summary: Whether the old adapter discarded the summary text.
     :return None: Checks corrected identities, resumability and byte-identical HDF5.
     """
-    from citemesh.strategies.candidates import (
-        IdentityRegistry,
-        register_aliases,
-        resolve_aliases,
-    )
+    from citemesh.strategies.candidates import corpus_matches_s2
 
     source = "librarian-bots/arxiv-metadata-snapshot"
     builder = EmbeddingGraphBuilder(
@@ -3961,10 +3957,12 @@ def test_corpus_metadata_backfill_preserves_vectors_and_selection(
     assert result.metadata["venue"] == "Soft Matter 2013"
     assert result.metadata["abstract"] == "Original text"
     seed = Paper("a" * 40, "Confined polymers", 2013, doi="10.1039/c3sm27410a")
-    aliases = IdentityRegistry()
-    register_aliases(aliases, seed.paper_id, seed)
-    corpus_paper = Paper(paper_id=result.paper_id, **result.metadata)
-    assert resolve_aliases(aliases, corpus_paper) == [seed.paper_id]
+    corpus_paper = Paper(
+        paper_id=result.paper_id,
+        is_local_corpus=True,
+        **result.metadata,
+    )
+    assert corpus_matches_s2(corpus_paper, seed)
     load_dataset.reset_mock()
     builder._ensure_cache_hydrated(use_streaming=False)
     load_dataset.assert_not_called()
@@ -4229,6 +4227,7 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
         year=2026,
         abstract="Seed abstract",
         arxiv_id="2608.15411",
+        doi="10.1000/seed",
     )
     builder = EmbeddingGraphBuilder(
         max_papers=3,
@@ -4266,6 +4265,18 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
                 np.asarray([1.0, 0.0], dtype=np.float32),
             ),
             (
+                "arxiv:2608.15413",
+                {
+                    "title": "Conflicting record",
+                    "year": 2026,
+                    "abstract": "Conflicting metadata",
+                    "arxiv_id": "2608.15411",
+                    "doi": "10.1000/different",
+                    "authors": [],
+                },
+                np.asarray([0.9, 0.1], dtype=np.float32),
+            ),
+            (
                 "arxiv:2608.15412",
                 {
                     "title": "Neighbor",
@@ -4282,7 +4293,11 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
 
     papers = builder.collect_papers("arxiv:2608.15411")
 
-    assert list(papers) == [seed.paper_id, "arxiv:2608.15412"]
+    assert list(papers) == [
+        seed.paper_id,
+        "arxiv:2608.15413",
+        "arxiv:2608.15412",
+    ]
     assert "arxiv:2608.15411" not in builder.retrieval_embeddings
 
 
@@ -4293,17 +4308,17 @@ def test_collect_papers_excludes_corpus_alias_of_resolved_seed(
         ("arxiv_id", "2608.15412"),
     ],
 )
-def test_collect_papers_deduplicates_corpus_candidates_by_strong_identity(
+def test_collect_papers_keeps_corpus_primary_ids_stable(
     monkeypatch: pytest.MonkeyPatch,
     identifier_field: str,
     identifier_value: str,
 ) -> None:
-    """Strong aliases should merge ranked corpus rows and leave room for unique work.
+    """Corpus rows retain their primary IDs even with shared external metadata.
 
     :param pytest.MonkeyPatch monkeypatch: Replaces model and cache-search behavior.
     :param str identifier_field: External identifier metadata field shared by duplicates.
     :param str identifier_value: Strong identifier shared by distinct source rows.
-    :return None: Checks first-ranked identity/vector retention and capacity filling.
+    :return None: Checks source-primary IDs and bounded ranking retention.
     """
     seed = Paper(paper_id="seed", title="Seed", year=2025)
     builder = EmbeddingGraphBuilder(
@@ -4360,24 +4375,24 @@ def test_collect_papers_deduplicates_corpus_candidates_by_strong_identity(
 
     papers = builder.collect_papers(seed.paper_id)
 
-    assert list(papers) == [seed.paper_id, "source-a", "source-c"]
-    assert papers["source-a"].abstract == "Supplemental abstract"
-    assert "source-b" not in builder.retrieval_embeddings
+    assert list(papers) == [seed.paper_id, "source-a", "source-b"]
+    assert papers["source-a"].abstract == ""
+    assert papers["source-b"].abstract == "Supplemental abstract"
     np.testing.assert_array_equal(
         builder.retrieval_embeddings["source-a"], first_vector
     )
     np.testing.assert_array_equal(
-        builder.retrieval_embeddings["source-c"], unique_vector
+        builder.retrieval_embeddings["source-b"], duplicate_vector
     )
 
 
-def test_collect_papers_corpus_bridge_collapses_prior_alias_classes(
+def test_collect_papers_does_not_bridge_corpus_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A bridge row should collapse prior corpus classes and discard their vectors.
+    """Corpus metadata must not bridge locally identified rows.
 
     :param pytest.MonkeyPatch monkeypatch: Replaces model and cache-search behavior.
-    :return None: Checks bridge reconciliation and later capacity reuse.
+    :return None: Checks source-primary IDs remain separate under the graph cap.
     """
     seed = Paper(paper_id="seed", title="Seed", year=2025)
     builder = EmbeddingGraphBuilder(
@@ -4444,15 +4459,15 @@ def test_collect_papers_corpus_bridge_collapses_prior_alias_classes(
 
     papers = builder.collect_papers(seed.paper_id)
 
-    assert list(papers) == [seed.paper_id, "arxiv:2608.15412", "earlier-unique"]
-    assert "10.1000/bridge" not in builder.retrieval_embeddings
+    assert list(papers) == [seed.paper_id, "arxiv:2608.15412", "10.1000/bridge"]
+    assert "10.1000/bridge" in builder.retrieval_embeddings
     assert "bridge-source" not in builder.retrieval_embeddings
     assert "later-unique" not in builder.retrieval_embeddings
     np.testing.assert_array_equal(
         builder.retrieval_embeddings["arxiv:2608.15412"], first_vector
     )
     np.testing.assert_array_equal(
-        builder.retrieval_embeddings["earlier-unique"], earlier_unique_vector
+        builder.retrieval_embeddings["10.1000/bridge"], displaced_vector
     )
 
 

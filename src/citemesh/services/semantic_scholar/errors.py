@@ -1,137 +1,79 @@
-"""Exception taxonomy for the Semantic Scholar client.
-
-Owns the public failure types, the internal contract/retry markers, and the
-capability-scoped failure bookkeeping shared by a single discovery operation.
-"""
+"""Errors and request-local retry state for Semantic Scholar."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
-
-from tenacity import RetryError
+from dataclasses import dataclass
 
 
 class SemanticScholarUnavailableError(RuntimeError):
-    """Raised when the Semantic Scholar API stays unreachable after retries."""
+    """Raised when the Semantic Scholar API stays unavailable after retries."""
+
+
+class SemanticScholarRequestError(RuntimeError):
+    """Raised when Semantic Scholar rejects a non-retryable request."""
+
+
+class _SemanticScholarResponseContractError(TypeError):
+    """Raised when a successful response has an unusable shape."""
+
+
+@dataclass
+class _CandidateOperationState:
+    """Recovery budget shared by one outer candidate collection."""
+
+    retry_budget_seconds: float
+    depth: int = 0
+    recovery_seconds: float = 0.0
+    reference_cache_hits: int = 0
+    last_recovery_error: Exception | None = None
 
 
 @dataclass(frozen=True)
 class _RetryDiagnostics:
-    """Observed recovery work used to explain an unavailable request."""
+    """Observed work and stop condition for one failed HTTP request."""
 
+    operation: str
     attempts: int
     recovery_seconds: float
     stop_reason: str
+    status_code: int | None = None
 
 
 class _RetryExhaustedError(RuntimeError):
-    """Attach retry diagnostics while preserving the original transport failure."""
+    """Attach retry diagnostics to the final transport failure."""
 
     def __init__(self, cause: Exception, diagnostics: _RetryDiagnostics) -> None:
-        """Store the final request error and retry bookkeeping.
+        """Store the final failure and request-local diagnostics.
 
         :param Exception cause: Last retryable transport failure.
-        :param _RetryDiagnostics diagnostics: Actual retry stop details.
+        :param _RetryDiagnostics diagnostics: Request retry details.
+        :return None: Initializes the error.
         """
         super().__init__(str(cause))
         self.cause = cause
         self.retry_diagnostics = diagnostics
 
 
-class _FailureDomain(str, Enum):
-    """Semantic Scholar capabilities with independent collection retry budgets."""
-
-    REFERENCES = "references"
-    CITATIONS = "citations"
-    RECOMMENDATIONS = "recommendations"
-    SEARCH = "search"
-    PAPER_METADATA = "paper_metadata"
-
-
-@dataclass
-class _CandidateOperationState:
-    """Failures shared by nested calls in one thread-local collection."""
-
-    depth: int = 0
-    failures: dict[_FailureDomain, SemanticScholarUnavailableError] = field(
-        default_factory=dict
-    )
-    discovery_ids: dict[tuple[str, str, int, str], list[str]] = field(
-        default_factory=dict
-    )
-    discovery_checked_at: dict[tuple[str, str, int, str], str] = field(
-        default_factory=dict
-    )
-    reference_cache_hits: int = 0
-    retry_budget_seconds: float = 0.0
-    recovery_seconds: float = 0.0
-    recovery_attempts: int = 0
-    active_recovery_request: bool = False
-    current_attempt: int = 0
-    recovery_request_started_at: float | None = None
-    current_recovery_wait_seconds: float = 0.0
-    initial_attempt_excluded_seconds: float = 0.0
-    last_recovery_error: Exception | None = None
-    budget_failure: SemanticScholarUnavailableError | None = None
-
-
-class _CandidateOperationSkippedError(SemanticScholarUnavailableError):
-    """Raised when a scoped operation skips a request after an earlier outage."""
-
-
-class SemanticScholarRequestError(RuntimeError):
-    """Raised when Semantic Scholar rejects a non-retryable client request."""
-
-
-class _SemanticScholarResponseContractError(TypeError):
-    """Raised when a successful SDK response cannot satisfy CiteMesh's schema."""
-
-
-def _unwrap_sdk_retry_error(exc: Exception) -> Exception:
-    """Recover the original exception from the SDK's one-attempt retry wrapper.
-
-    :param Exception exc: Exception raised by the Semantic Scholar SDK.
-    :return Exception: Wrapped attempt failure when available, otherwise ``exc``.
-    """
-    if not isinstance(exc, RetryError):
-        return exc
-    wrapped = exc.last_attempt.exception()
-    return wrapped if isinstance(wrapped, Exception) else exc
-
-
-def _raise_request_error(exc: Exception, context: str) -> None:
-    """Surface a deterministic Semantic Scholar SDK request failure.
-
-    :param Exception exc: SDK exception caused by an HTTP 400 or 403.
-    :param str context: Human-readable request operation.
-    :raises SemanticScholarRequestError: Always.
-    """
-    if isinstance(exc, PermissionError):
-        remediation = "Check S2_API_KEY credentials and access permissions."
-    else:
-        remediation = "Check the paper ID and requested fields."
-    raise SemanticScholarRequestError(
-        f"Semantic Scholar rejected the request while {context}: {exc}. {remediation}"
-    ) from exc
-
-
 class _RetryableRequestError(RuntimeError):
-    """Internal marker for transient request failures worth retrying."""
+    """Internal marker for a transient HTTP response."""
 
     def __init__(
         self,
         message: str,
-        retry_after: float | None = None,
         *,
+        retry_after: float | None = None,
+        status_code: int | None = None,
         rate_limited: bool = False,
     ) -> None:
-        """Create a retryable request error.
+        """Create a retryable response error.
 
         :param str message: Failure description.
-        :param float | None retry_after: Parsed Retry-After header seconds.
-        :param bool rate_limited: Whether the failure was an HTTP 429.
+        :param float | None retry_after: Server-requested wait.
+        :param int | None status_code: HTTP response status when available.
+        :param bool rate_limited: Whether the response was HTTP 429.
+        :return None: Initializes the error.
         """
         super().__init__(message)
         self.retry_after = retry_after
+        self.status_code = status_code
         self.rate_limited = rate_limited

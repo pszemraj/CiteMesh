@@ -1184,7 +1184,7 @@ def _add_cache_arguments(
     cache_clear_parser = cache_subparsers.add_parser(
         "clear",
         help="Delete cached data; preserve config.toml",
-        description="Delete cached papers, references, discovery snapshots, and embeddings. config.toml is preserved. Prompts for confirmation; scripts require --yes.",
+        description="Delete cached papers, references, and embeddings. config.toml is preserved. Prompts for confirmation; scripts require --yes.",
     )
     cache_clear_parser.add_argument(
         "--yes",

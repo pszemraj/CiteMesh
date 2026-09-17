@@ -35,12 +35,11 @@ from citemesh.strategies.candidates import (
     SEMANTIC_SOURCE_CHOICES,
     CandidateAcquisitionError,
     CandidateSourceState,
-    IdentityRegistry,
+    corpus_matches_s2,
     fetch_candidate_source,
+    merge_paper_metadata,
     merge_seed_relation,
     provider_lookup_identifier,
-    reconcile_paper_identity,
-    register_aliases,
     require_available_candidate_source,
     scope_candidate_collection,
 )
@@ -274,7 +273,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
 
     def _ingest_candidate(
         self,
-        aliases: IdentityRegistry,
         seed: Paper,
         candidates: dict[str, Paper],
         candidate_sources: dict[str, set[str]],
@@ -283,9 +281,8 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         source: str,
         relation: str,
     ) -> str | None:
-        """Reconcile and tag one pre-ranking candidate.
+        """Add one pre-ranking candidate with bounded identity matching.
 
-        :param IdentityRegistry aliases: Identity registry.
         :param Paper seed: Canonical seed paper.
         :param Dict[str, Paper] candidates: Pre-ranking candidate map.
         :param Dict[str, Set[str]] candidate_sources: Candidate provenance map.
@@ -294,32 +291,45 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         :param str relation: Relation-to-seed label.
         :return Optional[str]: Candidate survivor, or ``None`` for a seed match.
         """
-        reconciliation = reconcile_paper_identity(aliases, seed, candidates, incoming)
-        if reconciliation.seed_matched:
-            for paper_id in reconciliation.collapsed_ids:
-                candidate_sources.pop(paper_id, None)
-                self.seed_relations.pop(paper_id, None)
-                self.paper_sources.pop(paper_id, None)
+        incoming_id = str(incoming.paper_id).strip()
+        if not incoming_id:
+            return None
+        if incoming_id == seed.paper_id:
+            merge_paper_metadata(seed, incoming)
+            return None
+        if corpus_matches_s2(incoming, seed) or corpus_matches_s2(seed, incoming):
+            merge_paper_metadata(seed, incoming)
             return None
 
-        canonical_id = reconciliation.canonical_id
-        if canonical_id is None:
-            canonical_id = str(incoming.paper_id)
-            candidates[canonical_id] = incoming
-            register_aliases(aliases, canonical_id, incoming)
-
-        for paper_id in reconciliation.collapsed_ids:
-            candidate_sources.setdefault(canonical_id, set()).update(
-                candidate_sources.pop(paper_id, set())
-            )
-            merged_relation = merge_seed_relation(
-                self.seed_relations.get(canonical_id, ""),
-                self.seed_relations.pop(paper_id, ""),
-            )
-            if merged_relation:
-                self.seed_relations[canonical_id] = merged_relation
-            if paper_id in self.paper_sources:
-                self.paper_sources[canonical_id] = self.paper_sources.pop(paper_id)
+        canonical_id = incoming_id
+        existing = candidates.get(incoming_id)
+        if existing is not None:
+            merge_paper_metadata(existing, incoming)
+        else:
+            corpus_matches = [
+                paper_id
+                for paper_id, candidate in candidates.items()
+                if corpus_matches_s2(incoming, candidate)
+                or corpus_matches_s2(candidate, incoming)
+            ]
+            if len(corpus_matches) == 1:
+                matched_id = corpus_matches[0]
+                existing = candidates[matched_id]
+                if incoming.is_local_corpus:
+                    canonical_id = incoming_id
+                    candidates.pop(matched_id)
+                    candidates[canonical_id] = merge_paper_metadata(incoming, existing)
+                    candidate_sources[canonical_id] = candidate_sources.pop(
+                        matched_id, set()
+                    )
+                    previous_relation = self.seed_relations.pop(matched_id, "")
+                    if previous_relation:
+                        self.seed_relations[canonical_id] = previous_relation
+                else:
+                    canonical_id = matched_id
+                    merge_paper_metadata(existing, incoming)
+            else:
+                candidates[canonical_id] = incoming
 
         candidate_sources.setdefault(canonical_id, set()).add(source)
         merged_relation = merge_seed_relation(
@@ -607,7 +617,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if self.embedding_builder is not None:
             self.embedding_builder.retrieval_embeddings = {}
             self.embedding_builder.embeddings = {}
-        alias_map = IdentityRegistry()
 
         if self.embedding_builder is None and is_local_corpus_paper_id(seed_id):
             raise ValueError(
@@ -670,7 +679,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             else "citation"
         )
         self.seed_relations[seed_paper.paper_id] = "seed"
-        register_aliases(alias_map, seed_paper.paper_id, seed_paper)
         citation_seed_relations = getattr(self.citation_builder, "seed_relations", {})
 
         candidate_pool: dict[str, Paper] = {}
@@ -679,7 +687,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if paper.paper_id == seed_paper.paper_id or paper.is_seed:
                 continue
             self._ingest_candidate(
-                alias_map,
                 seed_paper,
                 candidate_pool,
                 candidate_sources,
@@ -786,7 +793,6 @@ class HybridGraphBuilder(GraphBuilderStrategy):
             if paper.is_seed:
                 continue
             self._ingest_candidate(
-                alias_map,
                 seed_paper,
                 candidate_pool,
                 candidate_sources,

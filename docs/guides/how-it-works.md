@@ -15,7 +15,7 @@ The embedding and vector-cache stages run for `--strategy embedding` and for hyb
 
 ## 1. Seed resolution
 
-`normalize_paper_id` maps the [accepted identifiers](cli.md#accepted-identifiers) to canonical IDs before network access. `paper_identifier_aliases` supplies the metadata cache and candidate identity registry with equivalent identifiers, so one paper reached through several forms stays one node.
+`normalize_paper_id` normalizes the [accepted identifiers](cli.md#accepted-identifiers) before lookup. S2-backed records use the returned S2 `paperId` throughout collection and graph construction. Input arXiv IDs and DOIs resolve to that record in the metadata cache. Local corpus records retain their source IDs, including when S2 supplies supplemental metadata.
 
 The embedding strategy is the only one with a free-text path. A genuine HTTP 404 means S2 has no such paper, so the builder synthesizes a seed whose ID is `query:` plus the first 8 hex of `sha1(query_text)`. An *unavailable* endpoint (retries exhausted) raises instead - an outage is never silently reinterpreted as a search.
 
@@ -27,7 +27,7 @@ S2 candidate acquisition shares availability and identity handling in `strategie
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
-`IdentityRegistry` reconciles duplicate records across `arxiv`, `doi`, `s2`, and a weak title/year/author key. Two records conflict when a namespace on *both* sides has disjoint values - except when the sole disagreement is `s2` and the DOI or arXiv ID agree, which is the duplicate-record case. On a merge the seed wins.
+S2 candidate collection deduplicates exact paper IDs. Joining a local corpus record with an S2 record requires a shared normalized arXiv ID or DOI and no disagreement in an external-ID namespace present on both records. The corpus ID remains stable. Similar titles, years, authors, or abstracts do not establish identity; records without a shared explicit identifier remain separate. Two distinct S2 IDs also remain separate even when their metadata is similar.
 
 Acquisition follows the [source-failure and retry policy](cli.md#appendix-b-troubleshooting), recording availability in exported metadata.
 

@@ -135,7 +135,6 @@ def _configure_logging(
     logging.getLogger("PIL").setLevel(logging.WARNING)
     logging.getLogger("h5py").setLevel(logging.WARNING)
     logging.getLogger("fsspec").setLevel(logging.WARNING)
-    logging.getLogger("semanticscholar").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
     logging.getLogger("transformers").setLevel(logging.WARNING)
