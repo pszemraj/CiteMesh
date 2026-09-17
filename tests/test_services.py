@@ -346,6 +346,40 @@ def test_get_papers_splits_arbitrary_missing_count_at_500() -> None:
     ] == [500, 500, 1]
 
 
+def test_tolerant_get_papers_logs_records_skipped_after_unavailable_batch(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failed metadata batch reports the current and remaining skipped records.
+
+    :param pytest.MonkeyPatch monkeypatch: Makes retry waits unaffordable.
+    :param pytest.LogCaptureFixture caplog: Captured warning log.
+    :return None: Verifies partial metadata results remain attributable to an outage.
+    """
+    ids = [f"p{index}" for index in range(1001)]
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 120.0)
+    with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(
+            side_effect=[
+                _MockResponse(
+                    200, [_paper_payload(paper_id) for paper_id in ids[:500]]
+                ),
+                _MockResponse(503),
+            ]
+        )
+        with caplog.at_level(logging.WARNING):
+            papers = client.get_papers(ids)
+
+    assert list(papers) == ids[:500]
+    assert [
+        len(call.kwargs["json"]["ids"]) for call in client._session.post.call_args_list
+    ] == [500, 500]
+    assert (
+        "Paper metadata: stopped after an unavailable batch; 501 missing records "
+        "were not fetched." in caplog.text
+    )
+
+
 def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -502,6 +536,31 @@ def test_reference_cache_empty_legacy_normalization_corruption_and_failure(
         with pytest.raises(SemanticScholarUnavailableError):
             client.get_reference_ids("failed", force_refresh=True)
     assert not failed.exists()
+
+
+def test_get_paper_with_references_raises_when_reference_fetch_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reference hydration cannot represent an unavailable page as an empty list.
+
+    :param pytest.MonkeyPatch monkeypatch: Makes retry waits unaffordable.
+    :return None: Verifies the tolerant metadata default does not hide an outage.
+    """
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 120.0)
+    with SemanticScholarClient(
+        api_key="", refresh_paper_cache=True, retry_budget_seconds=5
+    ) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(200, _paper_payload("seed-with-unavailable-references")),
+                _MockResponse(503),
+            ]
+        )
+        with pytest.raises(
+            SemanticScholarUnavailableError, match="fetching references"
+        ):
+            client.get_paper("seed-with-unavailable-references", fetch_references=True)
 
 
 def test_recommendations_fallback_when_recent_cannot_materialize() -> None:
@@ -914,6 +973,61 @@ def test_malformed_json_retries_and_batch_404_is_transient(
             client.get_papers(["p2"], raise_on_unavailable=True)["p2"].title == "Paper"
         )
         assert client._session.post.call_count == 2
+
+
+def test_batch_404_retries_are_bounded_for_keyed_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persistent transient batch 404 stops before the general retry limit.
+
+    :param pytest.MonkeyPatch monkeypatch: Removes retry waits.
+    :return None: Verifies an API key cannot turn a persistent 404 into 30 retries.
+    """
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 0.0)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(return_value=_MockResponse(404))
+        with pytest.raises(
+            SemanticScholarUnavailableError,
+            match=(
+                r"batch fetching 1 papers.*after 3 attempts.*"
+                r"maximum transient not-found attempts reached.*HTTP 404"
+            ),
+        ):
+            client.get_papers(["p2"], raise_on_unavailable=True)
+
+    assert client._session.post.call_count == 3
+
+
+def test_batch_404_does_not_restart_retry_budget_after_other_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late 404 terminates recovery instead of starting 30 further retries.
+
+    :param pytest.MonkeyPatch monkeypatch: Removes retry waits.
+    :return None: Verifies the 404 ceiling still applies after other failures.
+    """
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 0.0)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.post = MagicMock(
+            side_effect=[
+                _MockResponse(503),
+                _MockResponse(503),
+                _MockResponse(503),
+                _MockResponse(404),
+            ]
+        )
+        with pytest.raises(
+            SemanticScholarUnavailableError,
+            match=(
+                r"batch fetching 1 papers.*after 4 attempts.*"
+                r"maximum transient not-found attempts reached.*HTTP 404"
+            ),
+        ):
+            client.get_papers(["p2"], raise_on_unavailable=True)
+
+    assert client._session.post.call_count == 4
 
 
 def test_tolerant_metadata_failure_keeps_warm_discovery_records(

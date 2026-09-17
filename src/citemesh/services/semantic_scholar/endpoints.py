@@ -69,7 +69,8 @@ class _EndpointsMixin:
         """Fetch one paper, reusing persisted metadata first.
 
         :param str paper_id: DOI, arXiv ID, or Semantic Scholar ID.
-        :param bool fetch_references: Populate complete reference IDs.
+        :param bool fetch_references: Populate complete reference IDs, raising if
+            those references cannot be retrieved.
         :param bool raise_on_unavailable: Raise when operational retries stop.
         :return Paper | None: Paper record or ``None`` when absent/unavailable.
         """
@@ -83,7 +84,7 @@ class _EndpointsMixin:
             )
             if paper is not None:
                 paper.references = self.get_reference_ids(
-                    normalized_id, raise_on_unavailable=raise_on_unavailable
+                    normalized_id, raise_on_unavailable=True
                 )
             return paper
 
@@ -155,6 +156,11 @@ class _EndpointsMixin:
                 retry_not_found=True,
             )
             if response is None:
+                logger.warning(
+                    "Paper metadata: stopped after an unavailable batch; %d "
+                    "missing records were not fetched.",
+                    len(missing) - offset,
+                )
                 break
             if not isinstance(response, list) or len(response) != len(batch_ids):
                 raise _SemanticScholarResponseContractError(

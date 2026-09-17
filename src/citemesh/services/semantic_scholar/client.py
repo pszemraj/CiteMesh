@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 _anonymous_pool_announced = False
 _MIN_REQUEST_TIMEOUT_SECONDS = 0.001
+_MAX_TRANSIENT_NOT_FOUND_ATTEMPTS = 3
 
 
 class SemanticScholarClient(_EndpointsMixin):
@@ -359,7 +360,8 @@ class SemanticScholarClient(_EndpointsMixin):
         :param str context: Human-readable operation.
         :param dict[str, Any] | None payload: Optional POST body.
         :param bool raise_on_unavailable: Raise after recovery stops.
-        :param bool retry_not_found: Treat HTTP 404 as transient.
+        :param bool retry_not_found: Treat HTTP 404 as transient only during the
+            first three request attempts.
         :return Any: Decoded payload or ``None`` for a tolerated failure/not-found.
         """
         if getattr(self._candidate_operation, "state", None) is None:
@@ -454,6 +456,20 @@ class SemanticScholarClient(_EndpointsMixin):
                 if recovery_started_at is not None:
                     self._charge_recovery(state, recovery_started_at)
                 return result
+
+            if (
+                isinstance(last_error, _RetryableRequestError)
+                and last_error.status_code == 404
+                and attempt >= _MAX_TRANSIENT_NOT_FOUND_ATTEMPTS
+            ):
+                exhausted = self._retry_exhausted(
+                    state,
+                    operation=context,
+                    attempts=attempt,
+                    reason="maximum transient not-found attempts reached",
+                    cause=last_error,
+                )
+                return self._handle_unavailable(exhausted, raise_on_unavailable)
 
             if attempt == API_CONFIG.max_retries:
                 exhausted = self._retry_exhausted(
