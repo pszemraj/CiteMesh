@@ -38,7 +38,7 @@ from citemesh.core import API_CONFIG
 from citemesh.data.cache import atomic_write_json
 
 from . import disk_cache, payloads, retry
-from .endpoints import _EndpointsMixin
+from .endpoints import PAPER_BASE_URL, _EndpointsMixin
 from .errors import (
     SemanticScholarRequestError,
     SemanticScholarUnavailableError,
@@ -825,7 +825,8 @@ class SemanticScholarClient(_EndpointsMixin):
         :param str context: Description included in request errors.
         :param dict[str, str] | None headers: Optional SDK authentication headers.
         :param dict[str, Any] | None payload: POST body, or ``None`` for GET.
-        :return Any: Decoded JSON, or ``None`` for HTTP 404.
+        :return Any: Decoded JSON, ``None`` for HTTP 404, or positional null rows
+            when the paper batch endpoint reports that every requested ID is unknown.
         """
         kwargs: dict[str, Any] = {"params": params}
         if headers is not None:
@@ -859,6 +860,18 @@ class SemanticScholarClient(_EndpointsMixin):
                 ),
                 rate_limited=True,
             )
+        batch_error = None
+        if response.status_code == 400 and url == f"{PAPER_BASE_URL}/batch":
+            with contextlib.suppress(ValueError):
+                batch_error = response.json()
+        if (
+            batch_error == {"error": "No valid paper ids given"}
+            and payload is not None
+            and isinstance(payload.get("ids"), list)
+        ):
+            # Mixed known/unknown batches encode misses as positional null rows,
+            # while an all-unknown batch reports this equivalent 400 response.
+            return [None] * len(payload["ids"])
         if 400 <= response.status_code < 500 and response.status_code != 408:
             if response.status_code in {401, 403}:
                 remediation = "Check S2_API_KEY credentials and access permissions."

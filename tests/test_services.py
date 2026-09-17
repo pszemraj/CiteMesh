@@ -3073,14 +3073,31 @@ def test_paper_lookup_preserves_slashes_in_prepared_path(
         )
 
 
-def test_all_null_batch_omits_missing_ids_without_negative_cache() -> None:
+@pytest.mark.parametrize(
+    ("status_code", "payload"),
+    [
+        pytest.param(200, [None, None], id="positional-nulls"),
+        pytest.param(
+            400,
+            {"error": "No valid paper ids given"},
+            id="all-unknown-error",
+        ),
+    ],
+)
+def test_all_null_batch_omits_missing_ids_without_negative_cache(
+    status_code: int, payload: object
+) -> None:
     """An authoritative all-null batch needs no individual lookup or persisted miss.
 
+    :param int status_code: Batch response status used for the missing IDs.
+    :param object payload: Positional nulls or the equivalent all-unknown error body.
     :return None: Checks one POST, zero GETs, and no cached missing paper records.
     """
     with SemanticScholarClient(timeout=1) as client:
         client._rate_limit = MagicMock()
-        client._session.post = MagicMock(return_value=_MockResponse(200, [None, None]))
+        client._session.post = MagicMock(
+            return_value=_MockResponse(status_code, payload)
+        )
         client._session.get = MagicMock(
             side_effect=AssertionError("unexpected individual lookup")
         )
@@ -3089,6 +3106,22 @@ def test_all_null_batch_omits_missing_ids_without_negative_cache() -> None:
         client._session.get.assert_not_called()
         assert not s2.disk_cache._paper_cache_path("missing-one").exists()
         assert not s2.disk_cache._paper_cache_path("missing-two").exists()
+
+
+def test_batch_parameter_error_is_not_treated_as_unknown_papers() -> None:
+    """A genuine batch request error must retain the public request-error contract.
+
+    :return None: Checks the all-unknown exception is matched by exact response body.
+    """
+    with SemanticScholarClient(timeout=1) as client:
+        client._rate_limit = MagicMock()
+        client._session.post = MagicMock(
+            return_value=_MockResponse(400, {"error": "Unrecognized fields"})
+        )
+        with pytest.raises(SemanticScholarRequestError, match="HTTP 400"):
+            client.get_papers(["missing-one"])
+
+        client._session.post.assert_called_once()
 
 
 @pytest.mark.parametrize("payload", [{}, [], [_paper_payload(), None]])
@@ -3463,6 +3496,66 @@ def test_discovery_skips_unresolvable_batch_records(
         "paper_ids"
     ] == ["resolved"]
     assert "Skipping malformed batch paper for malformed." in caplog.text
+    assert "skipping 2 checked IDs without resolvable paper metadata" in caplog.text
+
+
+@pytest.mark.parametrize("endpoint", ["recommendations", "references", "citations"])
+def test_discovery_treats_all_unknown_batch_as_successful_empty(
+    endpoint: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An all-unknown metadata batch should not turn discovery into a request error.
+
+    :param str endpoint: Discovery endpoint that returns unknown candidate IDs.
+    :param pytest.LogCaptureFixture caplog: Captured unresolved-record warning.
+    :return None: Checks tolerant discovery and its snapshot remain successfully empty.
+    """
+    paper_ids = ["missing-one", "missing-two"]
+    with SemanticScholarClient(api_key="") as client:
+        client._rate_limit = MagicMock()
+        client._session.post = MagicMock(
+            return_value=_MockResponse(400, {"error": "No valid paper ids given"})
+        )
+        if endpoint == "recommendations":
+            client._session.get = MagicMock(
+                return_value=_MockResponse(
+                    200,
+                    {
+                        "recommendedPapers": [
+                            {"paperId": paper_id} for paper_id in paper_ids
+                        ]
+                    },
+                )
+            )
+            key = ("recommendations", "seed", len(paper_ids), "recent")
+        else:
+            relation_fetch = MagicMock(
+                return_value=[
+                    _make_reference_record(paper_id) for paper_id in paper_ids
+                ]
+            )
+            setattr(client.client, f"get_paper_{endpoint}", relation_fetch)
+            key = (endpoint, "seed", len(paper_ids), "")
+
+        with (
+            caplog.at_level(
+                logging.WARNING, logger="citemesh.services.semantic_scholar"
+            ),
+            client.candidate_operation_scope(),
+        ):
+            if endpoint == "recommendations":
+                papers = client.get_recommended_papers(
+                    "seed", limit=len(paper_ids), raise_on_unavailable=False
+                )
+            else:
+                papers = getattr(client, f"get_paper_{endpoint}")(
+                    "seed", limit=len(paper_ids), raise_on_unavailable=False
+                )
+
+    assert papers == []
+    assert (
+        json.loads(s2.disk_cache._discovery_cache_path(key).read_text())["paper_ids"]
+        == []
+    )
     assert "skipping 2 checked IDs without resolvable paper metadata" in caplog.text
 
 
