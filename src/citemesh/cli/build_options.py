@@ -375,7 +375,9 @@ def _configured_client_kwargs(args: argparse.Namespace) -> dict[str, object]:
     }
     if retry_budget is not None:
         client_kwargs["retry_budget_seconds"] = retry_budget
-    return {"client": SemanticScholarClient(**client_kwargs)}
+    client = SemanticScholarClient(**client_kwargs)
+    args._s2_client = client
+    return {"client": client}
 
 
 def _hybrid_semantic_branch_enabled(cli_args: argparse.Namespace) -> bool:

@@ -24,7 +24,7 @@ import networkx as nx
 
 from citemesh.data.cache import atomic_write_json, path_exists
 from citemesh.data.user_config import UserConfig
-from citemesh.services import SemanticScholarUnavailableError
+from citemesh.services import SemanticScholarUnavailableError, get_client
 from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.visualization import (
     GraphExporter,
@@ -587,6 +587,9 @@ def run_build_command(
             metadata=metadata,
             selected_formats=plan.selected_formats,
             output_paths=config_output_paths,
+            s2_retry_budget=(
+                getattr(args, "_s2_client", None) or get_client()
+            ).retry_budget_seconds,
         )
         graph_config_path = _write_run_sidecar(
             args,

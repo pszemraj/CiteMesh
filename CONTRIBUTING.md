@@ -23,7 +23,7 @@ ruff check .
 ruff format --check .
 ```
 
-CI runs Ruff and the full network-free test suite in one Python 3.12 job (`ubuntu-latest`, CPU torch). Markdown-only changes skip CI, and new runs cancel older runs for the same branch or PR ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Python-version matrices, distribution builds, and installation smoke tests are not part of CI. Real CUDA embedding checks stay opt-in; they may download the EmbeddingGemma checkpoint and need a GPU: `python -m pytest -m "slow and cuda"`.
+CI runs Ruff and the full network-free test suite in one Python 3.12 job (`ubuntu-latest`, CPU torch). Markdown-only changes skip CI, and new PR runs cancel older runs for that PR while every push to `main` completes ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Python-version matrices, distribution builds, and installation smoke tests are not part of CI. Real CUDA embedding checks stay opt-in; they may download the EmbeddingGemma checkpoint and need a GPU: `python -m pytest -m "slow and cuda"`.
 
 Clear stale output before building locally (`rm -rf build dist && python -m build`): setuptools reuses `build/lib`, so a wheel built over an old tree can silently ship modules you deleted.
 

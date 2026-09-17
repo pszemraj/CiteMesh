@@ -20,6 +20,7 @@ from citemesh.cli import build_options as build_options_module
 from citemesh.cli import cache_ops as cache_ops_module
 from citemesh.cli import graph_config as graph_config_module
 from citemesh.cli import parser as parser_module
+from citemesh.core import API_CONFIG
 from citemesh.core.config import EmbeddingStorageConfig
 from citemesh.data import cache as cache_module
 from citemesh.data import user_config as user_config_module
@@ -821,7 +822,12 @@ def test_configured_corpus_cap_and_full_split_override(
         "corpus_size"
     ] == (expected_corpus_size)
     payload = graph_config_module._build_graph_config_payload(
-        args, "seed", {}, ["json"], {"json": Path("graph.json")}
+        args,
+        "seed",
+        {},
+        ["json"],
+        {"json": Path("graph.json")},
+        API_CONFIG.anonymous_retry_budget_seconds,
     )
     embedding = payload["build"]["embedding"]
     assert embedding.get("corpus_size") == expected_corpus_size
@@ -1130,7 +1136,12 @@ def test_candidate_mode_announces_ignored_corpus_config_defaults(
     assert "defaults.streaming" in messages
     assert "defaults.semantic_source='arxiv-corpus'" in messages
     payload = graph_config_module._build_graph_config_payload(
-        args, "seed", {}, ["json"], {"json": Path("graph.json")}
+        args,
+        "seed",
+        {},
+        ["json"],
+        {"json": Path("graph.json")},
+        API_CONFIG.anonymous_retry_budget_seconds,
     )
     embedding = payload["build"]["embedding"]
     assert embedding["semantic_source"] == "candidates"
@@ -1159,11 +1170,11 @@ def test_config_api_key_resolved_without_environment_export(
     assert "S2_API_KEY" not in os.environ
     factory = MagicMock()
     monkeypatch.setattr(build_options_module, "SemanticScholarClient", factory)
-    kwargs = build_options_module._configured_client_kwargs(
-        argparse.Namespace(_s2_api_key=key, refresh_paper_cache=True)
-    )
+    args = argparse.Namespace(_s2_api_key=key, refresh_paper_cache=True)
+    kwargs = build_options_module._configured_client_kwargs(args)
     factory.assert_called_once_with(api_key="config-key", refresh_paper_cache=True)
     assert kwargs["client"] is factory.return_value
+    assert args._s2_client is factory.return_value
     assert "S2_API_KEY" not in os.environ
 
 

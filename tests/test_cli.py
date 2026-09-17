@@ -4732,6 +4732,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
         metadata={"strategy": "recommendation"},
         selected_formats=["json"],
         output_paths={"json": Path("out/recommendation.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
 
     citation_config = payload["build"]["citation"]
@@ -5048,6 +5049,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         else:
             assert "top_k" not in build_config.get("embedding", {})
         client_factory = MagicMock()
+        client_factory.return_value.retry_budget_seconds = 0.0
         monkeypatch.setattr(
             build_options_module, "SemanticScholarClient", client_factory
         )
@@ -5093,6 +5095,7 @@ def test_build_s2_retry_budget_routes_explicit_override(
         retry_budget_seconds=expected,
     )
     assert configured == {"client": factory.return_value}
+    assert args._s2_client is factory.return_value
 
 
 @pytest.mark.parametrize("token", ["-1", "nan", "inf", "-inf"])
@@ -5109,23 +5112,23 @@ def test_build_rejects_invalid_s2_retry_budget(token: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("token", "api_key", "expected"),
+    ("token", "api_key", "selected_client_budget"),
     [
         (None, None, API_CONFIG.anonymous_retry_budget_seconds),
         (None, "configured-key", 0.0),
         ("0", None, 0.0),
-        ("37.5", "configured-key", 37.5),
+        ("37.5", "configured-key", 12.5),
     ],
 )
 def test_graph_config_payload_records_effective_s2_retry_budget(
-    token: str | None, api_key: str | None, expected: float
+    token: str | None, api_key: str | None, selected_client_budget: float
 ) -> None:
-    """Graph sidecars should retain the effective S2 recovery budget.
+    """Graph sidecars should retain the selected client's S2 recovery budget.
 
     :param str | None token: Optional explicit CLI budget token.
     :param str | None api_key: Resolved key presence used for the default policy.
-    :param float expected: Effective budget recorded in the graph sidecar.
-    :return None: Checks anonymous, keyed, and explicit budget policies.
+    :param float selected_client_budget: Effective budget from the selected client.
+    :return None: Checks the sidecar does not recalculate client policy.
     """
     _, build_parser, _, _ = parser_module._create_parser()
     argv = ["seed"]
@@ -5140,9 +5143,10 @@ def test_graph_config_payload_records_effective_s2_retry_budget(
         metadata={"strategy": "recommendation"},
         selected_formats=["json"],
         output_paths={"json": Path("out/recommendation.json")},
+        s2_retry_budget=selected_client_budget,
     )
 
-    assert payload["build"]["s2_retry_budget"] == expected
+    assert payload["build"]["s2_retry_budget"] == selected_client_budget
 
 
 def test_in_process_cli_sidecar_matches_reconfigured_shared_client(
@@ -5627,6 +5631,7 @@ def test_graph_config_payload_records_device() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
 
     assert payload["build"]["embedding"]["device"] == "cpu"
@@ -5664,6 +5669,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         metadata={"strategy": "embedding", "embedding": metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
     replay = sidecar["build"]["embedding"]
     assert replay["model"] == active_model
@@ -5706,6 +5712,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         metadata={"strategy": "embedding", "embedding": selector_metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
     assert selector_metadata["effective_model_revision"] == resolved_revision
     assert selector_sidecar["build"]["embedding"]["model_revision"] == "main"
@@ -5766,6 +5773,7 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
     assert payload["build"]["embedding"]["dataset_source"] == dataset_source
 
@@ -5780,5 +5788,6 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
     assert "dataset_source" not in candidate_payload["build"]["embedding"]
