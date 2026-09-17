@@ -435,6 +435,8 @@ def test_relation_discovery_uses_fresh_rest_pages_and_complete_batch_enrichment(
         papers = getattr(client, method)("seed", limit=2, raise_on_unavailable=True)
     assert [paper.paper_id for paper in papers] == ["a", "b"]
     assert client._session.get.call_count == 2
+    for call in client._session.get.call_args_list:
+        assert call.kwargs["params"]["fields"] == "paperId"
     assert client._session.post.call_args.kwargs["json"] == {"ids": ["a", "b"]}
     assert client._session.get.call_args_list[1].kwargs["params"]["offset"] == 2
     assert f"/{relation}" in client._session.get.call_args_list[0].args[0]
@@ -527,6 +529,7 @@ def test_reference_cache_empty_legacy_normalization_corruption_and_failure(
             return_value=_MockResponse(200, _relation_payload([], "citedPaper"))
         )
         assert client.get_reference_ids("seed") == []
+        assert client._session.get.call_args.kwargs["params"]["fields"] == "paperId"
 
     monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 120.0)
     failed = s2.disk_cache._reference_cache_path("failed")

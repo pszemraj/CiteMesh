@@ -260,7 +260,7 @@ class _EndpointsMixin:
             response = self._request_json(
                 f"{PAPER_BASE_URL}/{quote(paper_id, safe='')}/{relation}",
                 {
-                    "fields": f"{nested_key}.paperId",
+                    "fields": "paperId",
                     "limit": page_limit,
                     "offset": offset,
                 },
