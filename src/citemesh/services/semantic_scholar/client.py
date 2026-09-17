@@ -617,6 +617,12 @@ class SemanticScholarClient(_EndpointsMixin):
 
         Endpoint callbacks use this helper so direct and SDK transports produce
         the same actionable failure text.
+
+        :param str context: Human-readable request context.
+        :param Exception exc: Final operational failure.
+        :param bool omit_rate_limited_detail: Whether a rate-limited failure drops
+            the trailing exception text.
+        :return SemanticScholarUnavailableError: Availability error to raise or log.
         """
         diagnostics = getattr(exc, "retry_diagnostics", None)
         cause = exc.cause if isinstance(exc, _RetryExhaustedError) else exc
