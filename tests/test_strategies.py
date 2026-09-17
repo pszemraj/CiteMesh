@@ -1319,8 +1319,8 @@ def test_citation_collect_preserves_hydrated_references_for_overlap_duplicates()
     client.get_reference_ids.assert_called_once_with("overlap", force_refresh=False)
 
 
-def test_citation_collect_keeps_distinct_identifier_records() -> None:
-    """Citation ingestion keeps distinct S2 primary IDs separate."""
+def test_citation_collect_merges_external_primary_aliases() -> None:
+    """Citation ingestion collapses external primary aliases into S2 records."""
     seed = _paper("s2-seed")
     seed.arxiv_id = "2508.12345"
     reference = _paper("s2-candidate")
@@ -1342,18 +1342,40 @@ def test_citation_collect_keeps_distinct_identifier_records() -> None:
     )
     papers = builder.collect_papers("s2-seed")
 
-    assert set(papers) == {
-        "s2-seed",
-        "arxiv:2508.12345",
-        "s2-candidate",
-        "arxiv:2508.12346",
-    }
+    assert set(papers) == {"s2-seed", "s2-candidate"}
     assert papers["s2-seed"].is_seed is True
     assert builder.seed_relations == {
         "s2-seed": "seed",
-        "arxiv:2508.12345": "referenced_by_seed",
-        "s2-candidate": "referenced_by_seed",
-        "arxiv:2508.12346": "cites_seed",
+        "s2-candidate": "overlap",
+    }
+
+
+def test_citation_collect_merges_s2_duplicates_with_shared_external_id() -> None:
+    """Citation ingestion collapses S2 records with one agreed external ID."""
+    seed = _paper("seed")
+    first = _paper("1" * 40)
+    first.doi = "10.1000/shared"
+    second = _paper("2" * 40)
+    second.doi = "10.1000/shared"
+
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_paper_references.return_value = [first]
+    client.get_paper_citations.return_value = [second]
+
+    builder = CitationGraphBuilder(
+        max_papers=3,
+        max_references=1,
+        max_citations=1,
+        fetch_references=False,
+        client=client,
+    )
+    papers = builder.collect_papers("seed")
+
+    assert set(papers) == {"seed", first.paper_id}
+    assert builder.seed_relations == {
+        "seed": "seed",
+        first.paper_id: "overlap",
     }
 
 
@@ -1713,6 +1735,55 @@ def test_hybrid_corpus_defers_optional_seed_enrichment(
         "provider seed enrichment",
         "reference enrichment",
     ]
+
+
+def test_hybrid_deferred_reference_hydration_failure_keeps_candidates(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Reference hydration outages must not discard already discovered papers."""
+    from citemesh.services import SemanticScholarUnavailableError
+
+    seed = _seed_paper()
+    citation_candidate = _paper("citation")
+    semantic_candidate = _paper("semantic")
+    client = MagicMock()
+    client.get_reference_ids.side_effect = SemanticScholarUnavailableError("offline")
+    builder = HybridGraphBuilder(
+        max_papers=4,
+        max_semantic=1,
+        semantic_source="arxiv-corpus",
+        fetch_references=True,
+        client=client,
+    )
+    assert builder.embedding_builder is not None
+    _stub_hybrid_corpus_operation_lock(builder)
+    builder.embedding_builder._prepare_corpus_for_build = MagicMock()
+    builder.embedding_builder.resolve_cached_corpus_seed = MagicMock(return_value=None)
+    builder.citation_builder.collect_papers = MagicMock(
+        return_value={
+            seed.paper_id: seed,
+            citation_candidate.paper_id: citation_candidate,
+        }
+    )
+    builder.embedding_builder.collect_papers = MagicMock(
+        return_value={semantic_candidate.paper_id: semantic_candidate}
+    )
+    monkeypatch.setattr(
+        builder,
+        "_rank_candidates",
+        lambda _seed, candidates, _sources: list(candidates),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        papers = builder.collect_papers(seed.paper_id)
+
+    assert set(papers) == {
+        seed.paper_id,
+        citation_candidate.paper_id,
+        semantic_candidate.paper_id,
+    }
+    client.get_reference_ids.assert_called_once_with("seed", force_refresh=False)
+    assert "Reference IDs unavailable for related paper seed" in caplog.text
 
 
 def test_query_candidate_bootstrap_shares_the_total_pool_budget() -> None:
@@ -3174,8 +3245,8 @@ def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
     assert set(pool.papers) == {first.paper_id}
 
 
-def test_candidate_pool_keeps_distinct_s2_ids_despite_shared_external_ids() -> None:
-    """External metadata alone cannot merge Semantic Scholar records."""
+def test_candidate_pool_merges_s2_ids_with_shared_external_ids() -> None:
+    """Agreed DOI metadata identifies duplicate Semantic Scholar records."""
     pool = CandidatePool(seed=_seed_paper())
     first = Paper(paper_id="1" * 40, title="Same", year=2025, doi="10.1000/shared")
     second = Paper(paper_id="2" * 40, title="Same", year=2025, doi="10.1000/shared")
@@ -3183,7 +3254,9 @@ def test_candidate_pool_keeps_distinct_s2_ids_despite_shared_external_ids() -> N
     pool.add(first, source="reference", relation="referenced_by_seed")
     pool.add(second, source="citation", relation="cites_seed")
 
-    assert set(pool.papers) == {first.paper_id, second.paper_id}
+    assert set(pool.papers) == {first.paper_id}
+    assert pool.sources[first.paper_id] == {"reference", "citation"}
+    assert pool.seed_relations[first.paper_id] == "overlap"
 
 
 @pytest.mark.parametrize("opaque_case_distinction", [False, True])
@@ -3275,8 +3348,8 @@ def test_identity_same_primary_quarantines_conflicting_secondary_ids() -> None:
     assert pool.papers[primary_a].doi == "10.1000/a"
 
 
-def test_identity_transitive_weak_bridge_cannot_collapse_conflicting_classes() -> None:
-    """A metadata bridge must not transitively unite contradictory strong IDs."""
+def test_identity_shared_external_identifier_merges_compatible_records() -> None:
+    """An agreed DOI merges compatible records without touching other classes."""
     authors = [Author(name="Grace Hopper")]
     pool = CandidatePool(seed=_seed_paper())
     left = Paper(
@@ -3305,10 +3378,9 @@ def test_identity_transitive_weak_bridge_cannot_collapse_conflicting_classes() -
     pool.add(middle, source="citation", relation="cites_seed")
     pool.add(right, source="recommendation", relation="semantic_only")
 
-    assert set(pool.papers) == {left.paper_id, middle.paper_id, right.paper_id}
+    assert set(pool.papers) == {left.paper_id, middle.paper_id}
     assert pool.sources[left.paper_id] == {"reference"}
-    assert pool.sources[middle.paper_id] == {"citation"}
-    assert pool.sources[right.paper_id] == {"recommendation"}
+    assert pool.sources[middle.paper_id] == {"citation", "recommendation"}
 
 
 def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> None:
@@ -3352,8 +3424,78 @@ def test_hybrid_identity_conflicts_do_not_manufacture_overlap_provenance() -> No
     assert sources[semantic_twin.paper_id] == {"semantic"}
 
 
-def test_recommendation_collect_keeps_distinct_identifier_records() -> None:
-    """Recommendation ingestion keeps distinct primary IDs separate."""
+def test_hybrid_ingest_merges_s2_duplicates_with_shared_external_id() -> None:
+    """Hybrid ingestion keeps one canonical S2 record for matching DOI metadata."""
+    builder = HybridGraphBuilder(max_papers=4, max_semantic=0, client=MagicMock())
+    seed = _seed_paper()
+    candidates: dict[str, Paper] = {}
+    sources: dict[str, set[str]] = {}
+    first = _paper("1" * 40)
+    first.doi = "10.1000/shared"
+    second = _paper("2" * 40)
+    second.doi = "10.1000/shared"
+
+    builder._ingest_candidate(
+        seed,
+        candidates,
+        sources,
+        first,
+        source="citation",
+        relation="cites_seed",
+    )
+    builder._ingest_candidate(
+        seed,
+        candidates,
+        sources,
+        second,
+        source="semantic",
+        relation="semantic_only",
+    )
+
+    assert set(candidates) == {first.paper_id}
+    assert sources[first.paper_id] == {"citation", "semantic"}
+    assert builder.seed_relations[first.paper_id] == "cites_seed"
+
+
+def test_hybrid_ingest_keeps_ambiguous_corpus_matches_separate() -> None:
+    """An S2 paper must not collapse two matching local-corpus records."""
+    builder = HybridGraphBuilder(max_papers=5, max_semantic=0, client=MagicMock())
+    seed = _seed_paper()
+    candidates: dict[str, Paper] = {}
+    sources: dict[str, set[str]] = {}
+    corpus_first = _paper("local-first")
+    corpus_first.is_local_corpus = True
+    corpus_first.doi = "10.1000/shared"
+    corpus_second = _paper("local-second")
+    corpus_second.is_local_corpus = True
+    corpus_second.doi = "10.1000/shared"
+    s2_candidate = _paper("1" * 40)
+    s2_candidate.doi = "10.1000/shared"
+
+    for paper, source in (
+        (corpus_first, "citation"),
+        (corpus_second, "citation"),
+        (s2_candidate, "semantic"),
+    ):
+        builder._ingest_candidate(
+            seed,
+            candidates,
+            sources,
+            paper,
+            source=source,
+            relation="semantic_only",
+        )
+
+    assert set(candidates) == {
+        corpus_first.paper_id,
+        corpus_second.paper_id,
+        s2_candidate.paper_id,
+    }
+    assert sources[s2_candidate.paper_id] == {"semantic"}
+
+
+def test_recommendation_collect_merges_external_primary_aliases() -> None:
+    """Recommendation ingestion collapses external primary aliases into S2 records."""
     seed = _seed_paper("s2-seed")
     seed.arxiv_id = "2508.12345"
     candidate = _paper("s2-candidate")
@@ -3372,13 +3514,26 @@ def test_recommendation_collect_keeps_distinct_identifier_records() -> None:
         max_papers=4, fetch_references=False, client=client
     ).collect_papers("s2-seed")
 
-    assert set(papers) == {
-        "s2-seed",
-        "arxiv:2508.12345",
-        "s2-candidate",
-        "arxiv:2508.12346",
-    }
+    assert set(papers) == {"s2-seed", "s2-candidate"}
     assert papers["s2-seed"].is_seed is True
+
+
+def test_recommendation_collect_merges_s2_seed_duplicate_by_external_id() -> None:
+    """A recommended S2 duplicate of the seed must not become a graph node."""
+    seed = _seed_paper("1" * 40)
+    seed.arxiv_id = "2508.12345"
+    duplicate = _paper("2" * 40)
+    duplicate.arxiv_id = "2508.12345"
+    client = MagicMock()
+    client.get_paper.return_value = seed
+    client.get_recommended_papers.return_value = [duplicate]
+
+    papers = RecommendationGraphBuilder(
+        max_papers=3, fetch_references=False, client=client
+    ).collect_papers(seed.paper_id)
+
+    assert set(papers) == {seed.paper_id}
+    assert papers[seed.paper_id].is_seed is True
 
 
 def test_recommendation_collect_merges_exact_primary_refresh() -> None:

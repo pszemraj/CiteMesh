@@ -35,7 +35,7 @@ from citemesh.strategies.candidates import (
     SEMANTIC_SOURCE_CHOICES,
     CandidateAcquisitionError,
     CandidateSourceState,
-    corpus_matches_s2,
+    candidate_records_match,
     fetch_candidate_source,
     merge_paper_metadata,
     merge_seed_relation,
@@ -297,7 +297,7 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if incoming_id == seed.paper_id:
             merge_paper_metadata(seed, incoming)
             return None
-        if corpus_matches_s2(incoming, seed) or corpus_matches_s2(seed, incoming):
+        if candidate_records_match(incoming, seed):
             merge_paper_metadata(seed, incoming)
             return None
 
@@ -306,14 +306,13 @@ class HybridGraphBuilder(GraphBuilderStrategy):
         if existing is not None:
             merge_paper_metadata(existing, incoming)
         else:
-            corpus_matches = [
+            matching_ids = [
                 paper_id
                 for paper_id, candidate in candidates.items()
-                if corpus_matches_s2(incoming, candidate)
-                or corpus_matches_s2(candidate, incoming)
+                if candidate_records_match(incoming, candidate)
             ]
-            if len(corpus_matches) == 1:
-                matched_id = corpus_matches[0]
+            if len(matching_ids) == 1:
+                matched_id = matching_ids[0]
                 existing = candidates[matched_id]
                 if incoming.is_local_corpus:
                     canonical_id = incoming_id

@@ -23,6 +23,7 @@ from citemesh.strategies.base import (
 )
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
+    candidate_records_match,
     fetch_candidate_source,
     merge_paper_metadata,
     merge_seed_relation,
@@ -175,20 +176,31 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             raw_paper_id = str(paper.paper_id).strip()
             if not raw_paper_id:
                 continue
-            if raw_paper_id == seed.paper_id:
+            if raw_paper_id == seed.paper_id or candidate_records_match(seed, paper):
                 merge_paper_metadata(seed, paper)
                 continue
-            existing = papers.get(raw_paper_id)
+            canonical_id = raw_paper_id
+            existing = papers.get(canonical_id)
+            if existing is None:
+                matching_ids = [
+                    paper_id
+                    for paper_id, candidate in papers.items()
+                    if paper_id != seed.paper_id
+                    and candidate_records_match(candidate, paper)
+                ]
+                if len(matching_ids) == 1:
+                    canonical_id = matching_ids[0]
+                    existing = papers[canonical_id]
             if existing is not None:
                 merge_paper_metadata(existing, paper)
-                processed_ids.append(raw_paper_id)
+                processed_ids.append(canonical_id)
                 continue
 
             if len(papers) >= self.max_papers:
                 continue
 
-            papers[raw_paper_id] = paper
-            processed_ids.append(raw_paper_id)
+            papers[canonical_id] = paper
+            processed_ids.append(canonical_id)
 
         if progress_bar is not None:
             progress_bar.close()

@@ -162,6 +162,35 @@ def _external_identifiers(paper: Paper) -> dict[str, str]:
     }
 
 
+def candidate_records_match(left: Paper, right: Paper) -> bool:
+    """Return whether two candidate records explicitly identify one work.
+
+    Matching requires a shared normalized arXiv or DOI identifier. Any namespace
+    supplied by both records must agree, so partial metadata cannot bridge two
+    contradictory records. Two local-corpus rows remain separate because their
+    source-primary keys can represent distinct corpus entries.
+
+    :param Paper left: First candidate record.
+    :param Paper right: Second candidate record.
+    :return bool: Whether both records explicitly identify the same work.
+    """
+    if left.is_local_corpus and right.is_local_corpus:
+        return False
+    left_ids = _external_identifiers(left)
+    right_ids = _external_identifiers(right)
+    shared = {
+        namespace
+        for namespace in left_ids.keys() & right_ids.keys()
+        if left_ids[namespace] == right_ids[namespace]
+    }
+    if not shared:
+        return False
+    return all(
+        left_ids[namespace] == right_ids[namespace]
+        for namespace in left_ids.keys() & right_ids.keys()
+    )
+
+
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
     """Return whether a corpus row and S2 paper explicitly identify one work.
 
@@ -175,19 +204,7 @@ def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
     """
     if not corpus_paper.is_local_corpus or s2_paper.is_local_corpus:
         return False
-    corpus_ids = _external_identifiers(corpus_paper)
-    s2_ids = _external_identifiers(s2_paper)
-    shared = {
-        namespace
-        for namespace in corpus_ids.keys() & s2_ids.keys()
-        if corpus_ids[namespace] == s2_ids[namespace]
-    }
-    if not shared:
-        return False
-    return all(
-        corpus_ids[namespace] == s2_ids[namespace]
-        for namespace in corpus_ids.keys() & s2_ids.keys()
-    )
+    return candidate_records_match(corpus_paper, s2_paper)
 
 
 def fetch_candidate_source(
@@ -380,20 +397,30 @@ class CandidatePool:
         paper_id = str(paper.paper_id).strip()
         if paper.is_seed or not paper_id:
             return
-        if paper_id == self.seed.paper_id:
+        if paper_id == self.seed.paper_id or candidate_records_match(self.seed, paper):
             merge_paper_metadata(self.seed, paper)
             return
-        existing = self.papers.get(paper_id)
+        canonical_id = paper_id
+        existing = self.papers.get(canonical_id)
         if existing is None:
-            self.papers[paper_id] = paper
+            matching_ids = [
+                candidate_id
+                for candidate_id, candidate in self.papers.items()
+                if candidate_records_match(candidate, paper)
+            ]
+            if len(matching_ids) == 1:
+                canonical_id = matching_ids[0]
+                existing = self.papers[canonical_id]
+        if existing is None:
+            self.papers[canonical_id] = paper
         else:
             merge_paper_metadata(existing, paper)
-        self.sources.setdefault(paper_id, set()).add(source)
+        self.sources.setdefault(canonical_id, set()).add(source)
         merged_relation = merge_seed_relation(
-            self.seed_relations.get(paper_id, ""), relation
+            self.seed_relations.get(canonical_id, ""), relation
         )
         if merged_relation:
-            self.seed_relations[paper_id] = merged_relation
+            self.seed_relations[canonical_id] = merged_relation
 
 
 def fetch_candidate_pool(

@@ -16,6 +16,7 @@ from citemesh.strategies.base import (
     build_capped_undirected_graph,
 )
 from citemesh.strategies.candidates import (
+    candidate_records_match,
     fetch_candidate_source,
     merge_paper_metadata,
     require_available_candidate_source,
@@ -148,10 +149,21 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
             paper_id = str(paper.paper_id).strip()
             if not paper_id:
                 continue
-            if paper_id == seed.paper_id:
+            if paper_id == seed.paper_id or candidate_records_match(seed, paper):
                 merge_paper_metadata(seed, paper)
                 continue
-            existing = papers.get(paper_id)
+            canonical_id = paper_id
+            existing = papers.get(canonical_id)
+            if existing is None:
+                matching_ids = [
+                    candidate_id
+                    for candidate_id, candidate in papers.items()
+                    if candidate_id != seed.paper_id
+                    and candidate_records_match(candidate, paper)
+                ]
+                if len(matching_ids) == 1:
+                    canonical_id = matching_ids[0]
+                    existing = papers[canonical_id]
             if existing is not None:
                 if not existing.references:
                     self._hydrate_references(paper)
@@ -165,7 +177,7 @@ class RecommendationGraphBuilder(GraphBuilderStrategy):
                 continue
 
             self._hydrate_references(paper)
-            papers[paper_id] = paper
+            papers[canonical_id] = paper
 
         self._abstract_index.build(papers)
         self._set_collection_summary(
