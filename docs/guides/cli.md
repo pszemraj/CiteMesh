@@ -48,7 +48,7 @@ Search modes:
 
 Local search derives its namespace from the [saved embedding settings](configuration.md#supported-keys). Override them with `--model`, `--model-profile`, `--model-revision`, `--device`, `--semantic-source`, `--dataset-source`, `--truncate-dim`, `--storage-precision`, or `--calibration-sample-size`. A selector implies local mode unless `--mode auto` is explicit; selectors conflict with `--mode s2`. Invalid explicit option combinations fail as usage errors instead of triggering fallback.
 
-Match the [namespace used by the build](caching.md#embedding-namespaces). `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; the command is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#appendix-b-troubleshooting) apply whenever search uses S2.
+Match the [namespace used by the build](caching.md#embedding-namespaces). `--dataset-source` implies `arxiv-corpus` unless paired with a conflicting explicit source. Local results include the searched count and a copyable build command using the active model and recorded corpus scope; the command is omitted with a warning if the cache has no recorded split. [API-key configuration](configuration.md#api-key) and [retries](#appendix-b-troubleshooting) apply whenever search uses S2; `--s2-retry-budget` overrides the recovery-time cap for an S2 search or `auto` fallback.
 
 ### View a saved dashboard
 

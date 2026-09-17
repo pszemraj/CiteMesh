@@ -1030,23 +1030,41 @@ def test_search_command_prints_results_to_stdout(
     assert plain_stdout.index("12,345") < plain_stdout.index("Full paper IDs:")
 
 
-def test_s2_search_forwards_paginated_result_count(
+def test_s2_search_forwards_result_count_and_retry_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The CLI should allow service-level paging beyond one S2 request.
+    """S2 search should route its result count and recovery budget.
 
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to inject the API client.
-    :return None: Checks ``-n 101`` reaches the paginating service unchanged.
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the S2 client factory.
+    :return None: Checks search-specific client settings and request arguments.
     """
+    monkeypatch.delenv("S2_API_KEY", raising=False)
     mock_client = MagicMock()
     mock_client.search_papers.return_value = [
         Paper(paper_id="result", title="Result", year=None, abstract="Abstract")
     ]
-    monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
+    client_factory = MagicMock(return_value=mock_client)
+    monkeypatch.setattr(build_options_module, "SemanticScholarClient", client_factory)
 
-    result = run_cli_command(["search", "attention", "--mode", "s2", "-n", "101"])
+    result = run_cli_command(
+        [
+            "search",
+            "attention",
+            "--mode",
+            "s2",
+            "-n",
+            "101",
+            "--s2-retry-budget",
+            "37.5",
+        ]
+    )
 
     assert result.returncode == 0
+    client_factory.assert_called_once_with(
+        api_key=None,
+        refresh_paper_cache=False,
+        retry_budget_seconds=37.5,
+    )
     mock_client.search_papers.assert_called_once_with(
         "attention",
         limit=101,

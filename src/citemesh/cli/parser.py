@@ -1071,6 +1071,17 @@ def _add_search_arguments(
         ),
     )
     search_parser.add_argument(
+        "--s2-retry-budget",
+        type=_non_negative_finite_float,
+        metavar="SECONDS",
+        default=None,
+        help=(
+            "Override Semantic Scholar recovery time when search uses S2; 0 "
+            "disables the elapsed cap (default: 90 seconds for anonymous access, "
+            "no cap with an API key)."
+        ),
+    )
+    search_parser.add_argument(
         "--model",
         "-m",
         type=_non_empty_str,
