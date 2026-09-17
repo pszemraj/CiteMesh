@@ -3348,7 +3348,9 @@ def test_discovery_scope_limit_and_enrichment_caches_remain_distinct() -> None:
         assert fetch.call_count == 4
 
 
-@pytest.mark.parametrize("failure", ["check", "fallback", "batch", "malformed"])
+@pytest.mark.parametrize(
+    "failure", ["check", "fallback", "batch", "batch_not_found", "malformed"]
+)
 def test_failed_discovery_preserves_previous_successful_snapshots(failure: str) -> None:
     """No acquisition failure may publish a new empty or partial discovery snapshot.
 
@@ -3379,8 +3381,13 @@ def test_failed_discovery_preserves_previous_successful_snapshots(failure: str) 
     with SemanticScholarClient(api_key="", retry_budget_seconds=5) as client:
         client._rate_limit = MagicMock()
         client._session.get = MagicMock(side_effect=responses)
-        client._session.post = MagicMock(return_value=unavailable)
+        client._session.post = MagicMock(
+            return_value=(
+                _MockResponse(404) if failure == "batch_not_found" else unavailable
+            )
+        )
         with (
+            patch.object(s2.retry, "_jittered_backoff", return_value=10),
             patch("time.sleep") as sleep_mock,
             pytest.raises(expected_error),
         ):

@@ -40,6 +40,7 @@ from .errors import (
     _CandidateOperationSkippedError,
     _FailureDomain,
     _raise_request_error,
+    _RetryableRequestError,
     _SemanticScholarResponseContractError,
 )
 
@@ -206,7 +207,10 @@ class _EndpointsMixin:
                 payload={"ids": normalized_ids},
             )
             if api_papers is None:
-                return {}
+                # Missing individual papers are positional null rows. A 404 for
+                # the fixed batch endpoint is therefore an availability failure,
+                # not an authoritative result for every requested ID.
+                raise _RetryableRequestError(f"HTTP 404 from {PAPER_BASE_URL}/batch")
             if not isinstance(api_papers, list) or len(api_papers) != len(
                 normalized_ids
             ):
