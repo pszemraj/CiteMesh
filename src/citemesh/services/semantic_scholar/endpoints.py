@@ -828,6 +828,7 @@ class _EndpointsMixin:
         snapshots: list[tuple[tuple[str, str, int, str], list[str]]] = []
         checked_ids: list[str] = []
         raw_recommendations: list[Any] = []
+        papers: list[Paper] = []
         for pool in ("recent", "all-cs"):
             key = ("recommendations", normalized_paper_id, parsed_limit, pool)
             scoped_ids = (
@@ -884,20 +885,24 @@ class _EndpointsMixin:
                     dict.fromkeys(normalize_paper_id(value) for value in ids)
                 )
                 snapshots.append((key, checked_ids))
-            if checked_ids:
+            if not checked_ids:
+                continue
+            try:
+                papers = self._materialize_discovery(checked_ids, context=context)
+            except SemanticScholarUnavailableError:
+                if raise_on_unavailable:
+                    raise
+                logger.warning(
+                    "Could not complete current %s; snapshot retained.", context
+                )
+                return []
+            if papers:
                 break
 
         if custom_fields:
             return self._papers_from_records(
                 raw_recommendations, cache_full_metadata=cache_full_metadata
             )
-        try:
-            papers = self._materialize_discovery(checked_ids, context=context)
-        except SemanticScholarUnavailableError:
-            if raise_on_unavailable:
-                raise
-            logger.warning("Could not complete current %s; snapshot retained.", context)
-            return []
         for key, ids in snapshots:
             self._save_discovery(key, ids)
         return papers
@@ -935,6 +940,7 @@ class _EndpointsMixin:
         fields, cache_full_metadata = self._resolve_paper_fields(fields)
 
         raw_results: list[Any] = []
+        seen_ids: set[str] = set()
         offset = 0
         while len(raw_results) < parsed_limit:
             page_limit = min(SEARCH_PAGE_SIZE, parsed_limit - len(raw_results))
@@ -957,7 +963,17 @@ class _EndpointsMixin:
             page_records = payload.get("data", [])
             if not page_records:
                 break
-            raw_results.extend(page_records)
+            for record in page_records:
+                paper_id = payloads._payload_get(record, "paperId")
+                if not isinstance(paper_id, str) or not paper_id.strip():
+                    continue
+                normalized_id = normalize_paper_id(paper_id)
+                if normalized_id in seen_ids:
+                    continue
+                seen_ids.add(normalized_id)
+                raw_results.append(record)
+                if len(raw_results) >= parsed_limit:
+                    break
 
             next_offset = payload.get("next")
             if (

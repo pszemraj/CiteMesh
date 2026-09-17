@@ -151,11 +151,19 @@ def _persist_paper(paper: Paper, requested_id: str) -> None:
     :param str requested_id: Normalized identifier used for the request.
     :return None: Writes metadata independently of embeddings and references.
     """
+    previous = _load_cached_paper(requested_id)
+    aliases = _paper_lookup_keys(paper) | {requested_id}
+    if previous is not None and previous.paper_id == paper.paper_id:
+        for alias in _paper_lookup_keys(previous):
+            aliased = _load_cached_paper(alias)
+            if aliased is not None and aliased.paper_id == previous.paper_id:
+                aliases.add(alias)
+
     data = asdict(paper)
     data["references"] = []
     data["is_seed"] = False
     cached = {"version": PAPER_CACHE_VERSION, "paper": data}
-    for alias in _paper_lookup_keys(paper) | {requested_id}:
+    for alias in aliases:
         try:
             atomic_write_json(_paper_cache_path(alias), cached)
         except OSError as exc:

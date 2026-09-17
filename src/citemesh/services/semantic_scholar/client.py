@@ -35,7 +35,7 @@ from tenacity import (
 from tenacity.retry import retry_base
 
 from citemesh.core import API_CONFIG
-from citemesh.data.cache import atomic_write_json
+from citemesh.data.cache import atomic_write_json, cache_operation_lock, get_cache_dir
 
 from . import disk_cache, payloads, retry
 from .endpoints import PAPER_BASE_URL, _EndpointsMixin
@@ -154,24 +154,30 @@ class SemanticScholarClient(_EndpointsMixin):
         """
         state = getattr(self._candidate_operation, "state", None)
         owns_state = state is None
-        if owns_state:
-            state = _CandidateOperationState(
-                retry_budget_seconds=self.retry_budget_seconds
-            )
-            self._candidate_operation.state = state
-        state.depth += 1
-        try:
-            yield
-        finally:
-            state.depth -= 1
-            if owns_state and state.depth == 0:
-                if state.reference_cache_hits:
-                    logger.info(
-                        "Reused cached reference enrichment for %d lookups "
-                        "(not refreshed).",
-                        state.reference_cache_hits,
-                    )
-                del self._candidate_operation.state
+        operation_lock = (
+            cache_operation_lock(get_cache_dir())
+            if owns_state
+            else contextlib.nullcontext()
+        )
+        with operation_lock:
+            if owns_state:
+                state = _CandidateOperationState(
+                    retry_budget_seconds=self.retry_budget_seconds
+                )
+                self._candidate_operation.state = state
+            state.depth += 1
+            try:
+                yield
+            finally:
+                state.depth -= 1
+                if owns_state and state.depth == 0:
+                    if state.reference_cache_hits:
+                        logger.info(
+                            "Reused cached reference enrichment for %d lookups "
+                            "(not refreshed).",
+                            state.reference_cache_hits,
+                        )
+                    del self._candidate_operation.state
 
     def _candidate_operation_failure(
         self, failure_domain: _FailureDomain
@@ -508,16 +514,12 @@ class SemanticScholarClient(_EndpointsMixin):
             state.recovery_request_started_at = (
                 last_attempt_started_at if is_recovery_attempt else None
             )
-            failed = False
             try:
                 return operation()
-            except Exception:
-                failed = True
-                raise
             finally:
                 state.active_recovery_request = False
                 state.recovery_request_started_at = None
-                if is_recovery_attempt and not failed:
+                if is_recovery_attempt:
                     state.recovery_attempts += 1
                     state.recovery_seconds += max(
                         0.0,
@@ -535,19 +537,16 @@ class SemanticScholarClient(_EndpointsMixin):
             """
             nonlocal retryable_attempts
             retryable_attempts += 1
-            state.recovery_attempts += 1
-            elapsed = max(
-                0.0,
-                monotonic()
-                - last_attempt_started_at
-                - state.current_recovery_wait_seconds
-                - (
-                    state.initial_attempt_excluded_seconds
-                    if operation_attempts == 1
-                    else 0.0
-                ),
-            )
-            state.recovery_seconds += elapsed
+            if operation_attempts == 1:
+                state.recovery_attempts += 1
+                elapsed = max(
+                    0.0,
+                    monotonic()
+                    - last_attempt_started_at
+                    - state.current_recovery_wait_seconds
+                    - state.initial_attempt_excluded_seconds,
+                )
+                state.recovery_seconds += elapsed
             state.current_recovery_wait_seconds = 0.0
             state.initial_attempt_excluded_seconds = 0.0
             if retry_state.outcome is not None:

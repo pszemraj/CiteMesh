@@ -49,11 +49,13 @@ from citemesh.cli import parser as parser_module
 from citemesh.cli.commands import build as build_module
 from citemesh.cli.commands import search as search_module
 from citemesh.cli.outputs import _is_standalone_dashboard_output
-from citemesh.core import Author, Paper
+from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
 from citemesh.data.user_config import UserConfig
+from citemesh.services import SemanticScholarClient
+from citemesh.services import semantic_scholar as s2
 from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
@@ -561,6 +563,59 @@ def test_cache_clear_refuses_active_embedding_encode() -> None:
     )
     assert set(repopulated) == {"paper-after-clear"}
     assert cache.h5_path.is_file()
+
+
+def test_cache_clear_refuses_active_s2_discovery_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache clear must not race an active Semantic Scholar cache operation.
+
+    :param pytest.MonkeyPatch monkeypatch: Pauses discovery snapshot persistence.
+    :return None: Checks the shared root lock keeps the cache intact until completion.
+    """
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_persist = s2.disk_cache._persist_discovery
+
+    def blocked_persist(key: tuple[str, str, int, str], paper_ids: list[str]) -> None:
+        """Pause one discovery write while its operation lock remains held.
+
+        :param tuple[str, str, int, str] key: Discovery snapshot key.
+        :param list[str] paper_ids: Ordered discovered paper IDs.
+        :return None: Persists after the test releases the writer.
+        """
+        write_started.set()
+        assert release_write.wait(timeout=5), "discovery write was never released"
+        original_persist(key, paper_ids)
+
+    monkeypatch.setattr(s2.disk_cache, "_persist_discovery", blocked_persist)
+    with SemanticScholarClient(api_key="") as client:
+        client._request_json = MagicMock(
+            side_effect=[
+                {"recommendedPapers": []},
+                {"recommendedPapers": []},
+            ]
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            write = executor.submit(client.get_recommended_papers, "seed", 1)
+            assert write_started.wait(timeout=5), "discovery write never started"
+            assert (
+                cache_ops_module._clear_cache_directory(
+                    assume_yes=True, clear_reason=None
+                )
+                == 1
+            )
+            release_write.set()
+            assert write.result(timeout=5) == []
+
+    snapshot = s2.disk_cache._discovery_cache_path(
+        ("recommendations", "seed", 1, "recent")
+    )
+    assert snapshot.is_file()
+    assert (
+        cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    )
+    assert not snapshot.exists()
 
 
 def test_cache_clear_reports_config_inspection_failure(
@@ -5001,10 +5056,31 @@ def test_build_rejects_invalid_s2_retry_budget(token: str) -> None:
     assert "--s2-retry-budget" in result.stderr
 
 
-def test_graph_config_payload_records_explicit_s2_retry_budget() -> None:
-    """Graph sidecars should retain a caller-selected S2 recovery budget."""
+@pytest.mark.parametrize(
+    ("token", "api_key", "expected"),
+    [
+        (None, None, API_CONFIG.anonymous_retry_budget_seconds),
+        (None, "configured-key", 0.0),
+        ("0", None, 0.0),
+        ("37.5", "configured-key", 37.5),
+    ],
+)
+def test_graph_config_payload_records_effective_s2_retry_budget(
+    token: str | None, api_key: str | None, expected: float
+) -> None:
+    """Graph sidecars should retain the effective S2 recovery budget.
+
+    :param str | None token: Optional explicit CLI budget token.
+    :param str | None api_key: Resolved key presence used for the default policy.
+    :param float expected: Effective budget recorded in the graph sidecar.
+    :return None: Checks anonymous, keyed, and explicit budget policies.
+    """
     _, build_parser, _, _ = parser_module._create_parser()
-    cli_args = build_parser.parse_args(["seed", "--s2-retry-budget", "37.5"])
+    argv = ["seed"]
+    if token is not None:
+        argv.extend(["--s2-retry-budget", token])
+    cli_args = build_parser.parse_args(argv)
+    cli_args._s2_api_key = api_key
 
     payload = graph_config_module._build_graph_config_payload(
         cli_args=cli_args,
@@ -5014,7 +5090,7 @@ def test_graph_config_payload_records_explicit_s2_retry_budget() -> None:
         output_paths={"json": Path("out/recommendation.json")},
     )
 
-    assert payload["build"]["s2_retry_budget"] == 37.5
+    assert payload["build"]["s2_retry_budget"] == expected
 
 
 @pytest.mark.parametrize("width", [60, 80, 120])
@@ -5073,7 +5149,10 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
         (["search", "--help"], ["search", "--limit"]),
         (["cache", "--help"], ["clear", "scan", "Examples"]),
         (["cache", "scan", "--help"], ["cache scan", "--log-level"]),
-        (["cache", "clear", "--help"], ["cache clear", "--yes", "config.toml"]),
+        (
+            ["cache", "clear", "--help"],
+            ["cache clear", "--yes", "config.toml", "discovery snapshots"],
+        ),
         (["config", "--help"], ["config", "set", "unset", "Examples"]),
         (["config", "list", "--help"], ["config list", "--log-level"]),
         (["config", "get", "--help"], ["config get KEY", "Dotted config key"]),

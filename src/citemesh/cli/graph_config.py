@@ -10,6 +10,7 @@ import argparse
 from pathlib import Path
 from typing import Any
 
+from citemesh.core import API_CONFIG
 from citemesh.core.paper_ids import canonicalize_or_none
 
 from .build_options import (
@@ -86,6 +87,14 @@ def _build_graph_config_payload(
     """
     strategy = str(cli_args.strategy)
     semantic_enabled = _embedding_branch_enabled(cli_args)
+    configured_retry_budget = getattr(cli_args, "s2_retry_budget", None)
+    effective_retry_budget = (
+        float(configured_retry_budget)
+        if configured_retry_budget is not None
+        else 0.0
+        if bool(getattr(cli_args, "_s2_api_key", None))
+        else API_CONFIG.anonymous_retry_budget_seconds
+    )
     embedding_config: dict[str, Any] | None = None
     if semantic_enabled:
         embedding_config = {
@@ -156,7 +165,7 @@ def _build_graph_config_payload(
             "refresh_paper_cache": bool(
                 getattr(cli_args, "refresh_paper_cache", False)
             ),
-            "s2_retry_budget": getattr(cli_args, "s2_retry_budget", None),
+            "s2_retry_budget": effective_retry_budget,
             "citation": _build_citation_config_payload(cli_args, strategy=strategy),
             "hybrid": (
                 {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}
