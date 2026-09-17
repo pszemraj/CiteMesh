@@ -107,6 +107,7 @@ class SemanticScholarClient(_EndpointsMixin):
                 "Install semanticscholar>=0.8.0,<0.13 with CiteMesh's dependencies."
             ) from exc
         self.refresh_paper_cache = refresh_paper_cache
+        self._api_key = api_key or None
         self.timeout = timeout
         self.retry_budget_seconds = (
             API_CONFIG.anonymous_retry_budget_seconds
@@ -115,7 +116,8 @@ class SemanticScholarClient(_EndpointsMixin):
             if retry_budget_seconds is None
             else float(retry_budget_seconds)
         )
-        self.last_request_time = 0.0
+        self._next_request_time = 0.0
+        self._rate_limit_lock = threading.Lock()
         self._candidate_operation = threading.local()
         self._session = requests.Session()
         # SDK 0.8-0.12 has no public transport hook and discards unrecognized HTTP
@@ -402,26 +404,27 @@ class SemanticScholarClient(_EndpointsMixin):
 
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests (key-aware pace)."""
-        elapsed = time.time() - self.last_request_time
         min_interval = 1.0 / self.requests_per_second
-        if elapsed < min_interval:
-            state = getattr(self._candidate_operation, "state", None)
-            if state is not None and state.active_recovery_request:
-                self._sleep_with_recovery_budget(
-                    state,
-                    min_interval - elapsed,
-                    state.current_attempt,
-                )
-            else:
-                started_at = monotonic()
-                try:
-                    time.sleep(min_interval - elapsed)
-                finally:
-                    if state is not None and state.current_attempt == 1:
-                        state.initial_attempt_excluded_seconds += max(
-                            0.0, monotonic() - started_at
-                        )
-        self.last_request_time = time.time()
+        with self._rate_limit_lock:
+            wait_seconds = max(0.0, self._next_request_time - monotonic())
+            if wait_seconds:
+                state = getattr(self._candidate_operation, "state", None)
+                if state is not None and state.active_recovery_request:
+                    self._sleep_with_recovery_budget(
+                        state,
+                        wait_seconds,
+                        state.current_attempt,
+                    )
+                else:
+                    started_at = monotonic()
+                    try:
+                        time.sleep(wait_seconds)
+                    finally:
+                        if state is not None and state.current_attempt == 1:
+                            state.initial_attempt_excluded_seconds += max(
+                                0.0, monotonic() - started_at
+                            )
+            self._next_request_time = monotonic() + min_interval
 
     def _run_with_retries(
         self,
@@ -1023,11 +1026,19 @@ def get_client() -> SemanticScholarClient:
     :return SemanticScholarClient: Process-wide singleton client.
     """
     global _client_instance
+    desired_api_key = os.getenv("S2_API_KEY") or None
     client = _client_instance
-    if client is None or client._closed:
+    if client is None or client._closed or client._api_key != desired_api_key:
         with _client_lock:
-            if _client_instance is None or _client_instance._closed:
-                _client_instance = SemanticScholarClient()
+            desired_api_key = os.getenv("S2_API_KEY") or None
+            if (
+                _client_instance is None
+                or _client_instance._closed
+                or _client_instance._api_key != desired_api_key
+            ):
+                _client_instance = SemanticScholarClient(
+                    api_key=desired_api_key if desired_api_key is not None else ""
+                )
             # Return the instance observed under the lock: re-reading the
             # global outside it could observe a concurrent reset_client().
             client = _client_instance

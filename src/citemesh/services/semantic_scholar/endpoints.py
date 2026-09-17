@@ -415,7 +415,9 @@ class _EndpointsMixin:
         context = f"{relation_label} discovery for {normalized_paper_id}"
         checked_ids = self._candidate_operation.state.discovery_ids.get(key)
         if checked_ids is not None:
-            return self._materialize_discovery(checked_ids, context=context)
+            papers = self._materialize_discovery(checked_ids, context=context)
+            self._save_discovery(key, checked_ids)
+            return papers
         paper_not_found = False
 
         def _operation() -> list[str]:
@@ -838,6 +840,7 @@ class _EndpointsMixin:
             )
             if scoped_ids is not None:
                 checked_ids = scoped_ids
+                snapshots.append((key, checked_ids))
             else:
                 params: dict[str, Any] = {
                     "fields": ",".join(fields) if custom_fields else "paperId",

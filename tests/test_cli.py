@@ -5093,6 +5093,66 @@ def test_graph_config_payload_records_effective_s2_retry_budget(
     assert payload["build"]["s2_retry_budget"] == expected
 
 
+def test_in_process_cli_sidecar_matches_reconfigured_shared_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A prior keyed singleton must not change a later anonymous build policy.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the builder and credential state.
+    :param Path tmp_path: Isolated output directory for the config sidecar.
+    :return None: Checks the builder client and sidecar report the same budget.
+    """
+    keyed_client: SemanticScholarClient | None = None
+    captured: dict[str, object] = {}
+    try:
+        s2.reset_client()
+        monkeypatch.setenv("S2_API_KEY", "configured-key")
+        keyed_client = s2.get_client()
+        assert keyed_client.retry_budget_seconds == 0.0
+        monkeypatch.delenv("S2_API_KEY")
+
+        def builder_factory(**kwargs: object) -> SimpleNamespace:
+            """Capture the client selected by normal recommendation dispatch.
+
+            :param object kwargs: Recommendation builder keyword arguments.
+            :return SimpleNamespace: Builder stub returning a seed-only graph.
+            """
+            client = kwargs.get("client") or s2.get_client()
+            captured["client"] = client
+            return SimpleNamespace(
+                build_graph=lambda _paper_id: (build_seed_graph("seed"), "seed")
+            )
+
+        monkeypatch.setattr(
+            build_options_module, "RecommendationGraphBuilder", builder_factory
+        )
+        monkeypatch.setattr(
+            build_module,
+            "GraphExporter",
+            _make_exporter_stub({}, methods=("to_json",)),
+        )
+        output = tmp_path / "graph.json"
+
+        result = run_cli_command(
+            ["build", "seed", "--export", "json", "--output", str(output)]
+        )
+
+        assert result.returncode == 0, result.stderr
+        selected_client = captured["client"]
+        assert isinstance(selected_client, SemanticScholarClient)
+        payload = json.loads(output.with_suffix(".config.json").read_text())
+        assert (
+            selected_client.retry_budget_seconds == payload["build"]["s2_retry_budget"]
+        )
+        assert payload["build"]["s2_retry_budget"] == (
+            API_CONFIG.anonymous_retry_budget_seconds
+        )
+    finally:
+        s2.reset_client()
+        if keyed_client is not None:
+            keyed_client.close()
+
+
 @pytest.mark.parametrize("width", [60, 80, 120])
 def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every command should expose its help without color leaks or clipped lines.

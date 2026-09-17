@@ -9,6 +9,7 @@ import logging
 import os
 import random
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -1992,6 +1993,36 @@ def test_get_client_replaces_closed_singleton() -> None:
         semantic_module.client.SemanticScholar = previous_client
 
 
+def test_get_client_replaces_singleton_when_environment_key_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared client must track the current environment credential policy.
+
+    :param pytest.MonkeyPatch monkeypatch: Changes the key between client lookups.
+    :return None: Checks a keyed singleton cannot leak into an anonymous run.
+    """
+    keyed: SemanticScholarClient | None = None
+    try:
+        reset_client()
+        monkeypatch.setenv("S2_API_KEY", "test-key")
+        keyed = get_client()
+        assert keyed.retry_budget_seconds == 0.0
+
+        monkeypatch.delenv("S2_API_KEY")
+        anonymous = get_client()
+
+        assert anonymous is not keyed
+        assert (
+            anonymous.retry_budget_seconds == API_CONFIG.anonymous_retry_budget_seconds
+        )
+        assert anonymous.requests_per_second == API_CONFIG.requests_per_second
+        assert "x-api-key" not in anonymous._session.headers
+    finally:
+        reset_client()
+        if keyed is not None:
+            keyed.close()
+
+
 def test_rate_limit_pace_is_key_aware(monkeypatch: pytest.MonkeyPatch) -> None:
     """Authenticated clients pace at the faster keyed rate; anonymous stays slow."""
     monkeypatch.delenv("S2_API_KEY", raising=False)
@@ -2010,6 +2041,59 @@ def test_rate_limit_pace_is_key_aware(monkeypatch: pytest.MonkeyPatch) -> None:
     explicit_anonymous = SemanticScholarClient(timeout=1)
     assert explicit_anonymous.requests_per_second == API_CONFIG.requests_per_second
     assert "x-api-key" not in explicit_anonymous._session.headers
+
+
+def test_rate_limit_serializes_concurrent_request_slots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent callers on one client must receive distinct pacing slots.
+
+    :param pytest.MonkeyPatch monkeypatch: Tracks rate-limit sleep concurrency.
+    :return None: Checks waits serialize and request releases remain spaced.
+    """
+    real_sleep = semantic_module.client.time.sleep
+    sleep_guard = threading.Lock()
+    active_sleeps = 0
+    maximum_active_sleeps = 0
+
+    def tracked_sleep(seconds: float) -> None:
+        """Track overlapping pace waits while retaining real scheduling.
+
+        :param float seconds: Requested pacing delay.
+        :return None: Sleeps for the requested duration.
+        """
+        nonlocal active_sleeps, maximum_active_sleeps
+        with sleep_guard:
+            active_sleeps += 1
+            maximum_active_sleeps = max(maximum_active_sleeps, active_sleeps)
+        try:
+            real_sleep(seconds)
+        finally:
+            with sleep_guard:
+                active_sleeps -= 1
+
+    monkeypatch.setattr(semantic_module.client.time, "sleep", tracked_sleep)
+    barrier = threading.Barrier(2)
+    with SemanticScholarClient(api_key="") as client:
+        client.requests_per_second = 100.0
+        client._next_request_time = semantic_module.client.monotonic() + 0.02
+
+        def reserve_slot() -> float:
+            """Enter the rate limiter concurrently and record release time.
+
+            :return float: Monotonic time when this caller may send its request.
+            """
+            barrier.wait()
+            client._rate_limit()
+            return semantic_module.client.monotonic()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            release_times = sorted(
+                executor.map(lambda _index: reserve_slot(), range(2))
+            )
+
+    assert maximum_active_sleeps == 1
+    assert release_times[1] - release_times[0] >= 0.005
 
 
 def test_anonymous_pool_notice_logged_once(
@@ -2910,6 +2994,7 @@ def test_real_sdk_transport_keeps_relation_pagination(
         "time",
         SimpleNamespace(time=lambda: clock[0], sleep=sleep),
     )
+    monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
     responses = iter(
         [
             _MockResponse(
@@ -3738,6 +3823,85 @@ def test_recommendation_fallback_runs_when_recent_ids_cannot_materialize(
             ).read_text()
         )
         assert snapshot["paper_ids"] == expected_ids
+
+
+@pytest.mark.parametrize("relation", ["references", "citations"])
+def test_scoped_relation_refresh_updates_reduced_discovery_snapshot(
+    relation: str,
+) -> None:
+    """A same-scope metadata refresh must keep relation snapshots synchronized.
+
+    :param str relation: Related-paper endpoint under test.
+    :return None: Checks refreshed results, scoped IDs, and disk snapshot agree.
+    """
+    key = (relation, "seed", 1, "")
+    with SemanticScholarClient(api_key="", refresh_paper_cache=True) as client:
+        client._rate_limit = MagicMock()
+        relation_fetch = MagicMock(return_value=[_make_reference_record("a")])
+        setattr(client.client, f"get_paper_{relation}", relation_fetch)
+        client._session.post = MagicMock(
+            side_effect=[
+                _MockResponse(200, [_paper_payload(paper_id="a")]),
+                _MockResponse(200, [None]),
+            ]
+        )
+
+        with client.candidate_operation_scope():
+            first = getattr(client, f"get_paper_{relation}")(
+                "seed", limit=1, raise_on_unavailable=True
+            )
+            second = getattr(client, f"get_paper_{relation}")(
+                "seed", limit=1, raise_on_unavailable=True
+            )
+            scoped_ids = list(client._candidate_operation.state.discovery_ids[key])
+
+    assert [paper.paper_id for paper in first] == ["a"]
+    assert second == []
+    assert scoped_ids == []
+    assert relation_fetch.call_count == 1
+    snapshot = json.loads(s2.disk_cache._discovery_cache_path(key).read_text())
+    assert snapshot["paper_ids"] == []
+
+
+def test_scoped_recommendation_refresh_updates_reduced_discovery_snapshot() -> None:
+    """A same-scope metadata refresh must keep recommendation snapshots synchronized.
+
+    :return None: Checks recent-pool reuse, fallback, and persisted IDs agree.
+    """
+    recent_key = ("recommendations", "seed", 1, "recent")
+    with SemanticScholarClient(api_key="", refresh_paper_cache=True) as client:
+        client._rate_limit = MagicMock()
+        client._session.get = MagicMock(
+            side_effect=[
+                _MockResponse(200, {"recommendedPapers": [{"paperId": "a"}]}),
+                _MockResponse(200, {"recommendedPapers": []}),
+            ]
+        )
+        client._session.post = MagicMock(
+            side_effect=[
+                _MockResponse(200, [_paper_payload(paper_id="a")]),
+                _MockResponse(200, [None]),
+            ]
+        )
+
+        with client.candidate_operation_scope():
+            first = client.get_recommended_papers(
+                "seed", limit=1, raise_on_unavailable=True
+            )
+            second = client.get_recommended_papers(
+                "seed", limit=1, raise_on_unavailable=True
+            )
+            scoped_ids = list(
+                client._candidate_operation.state.discovery_ids[recent_key]
+            )
+
+    assert [paper.paper_id for paper in first] == ["a"]
+    assert second == []
+    assert scoped_ids == []
+    assert client._session.get.call_count == 2
+    assert client._session.post.call_count == 2
+    snapshot = json.loads(s2.disk_cache._discovery_cache_path(recent_key).read_text())
+    assert snapshot["paper_ids"] == []
 
 
 def test_recovery_request_uses_one_positive_remaining_timeout(
