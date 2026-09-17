@@ -2597,8 +2597,13 @@ def test_hybrid_rerank_enforces_semantic_cap_and_overlap_labels(
 
 def test_hybrid_collection_dedupes_semantic_seed_aliases(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Hybrid collection should collapse semantic seed aliases into the citation seed."""
+    """Hybrid should collapse and report a corpus alias of the citation seed.
+
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing collection internals.
+    :param pytest.LogCaptureFixture caplog: Captured identity reconciliation trace.
+    """
     builder = HybridGraphBuilder(
         max_papers=5, max_semantic=2, semantic_source="arxiv-corpus", client=MagicMock()
     )
@@ -2647,12 +2652,17 @@ def test_hybrid_collection_dedupes_semantic_seed_aliases(
         lambda *_args, **_kwargs: ["c1", "s1"],
     )
 
-    papers = builder.collect_papers("arXiv:2411.03884")
+    with caplog.at_level(logging.DEBUG, logger="citemesh.strategies.candidates"):
+        papers = builder.collect_papers("arXiv:2411.03884")
 
     assert set(papers) == {seed.paper_id, "c1", "s1"}
     assert "arXiv:2411.03884v2" not in papers
     assert papers[seed.paper_id].year == 2024
     assert builder.paper_sources[seed.paper_id] == "citation"
+    assert (
+        f"Merged record {semantic_seed_alias.paper_id} into {seed.paper_id} "
+        "via shared arxiv identifier"
+    ) in caplog.messages
 
 
 def test_hybrid_build_graph_skips_pruning_when_disabled(
@@ -3264,7 +3274,7 @@ def test_candidate_pool_merges_s2_ids_with_shared_external_ids(
     assert pool.sources[first.paper_id] == {"reference", "citation"}
     assert pool.seed_relations[first.paper_id] == "overlap"
     assert (
-        f"Merged S2 record {second.paper_id} into {first.paper_id} "
+        f"Merged record {second.paper_id} into {first.paper_id} "
         "via shared doi identifier"
     ) in caplog.messages
 

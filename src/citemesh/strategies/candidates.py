@@ -325,15 +325,11 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     :param Paper incoming: Supplemental paper record to merge.
     :return Paper: ``preferred`` with missing metadata hydrated.
     """
-    if (
-        preferred.paper_id != incoming.paper_id
-        and not preferred.is_local_corpus
-        and not incoming.is_local_corpus
-    ):
+    if preferred.paper_id != incoming.paper_id:
         matching_namespaces = _candidate_match_namespaces(preferred, incoming)
         if matching_namespaces:
             logger.debug(
-                "Merged S2 record %s into %s via shared %s identifier%s",
+                "Merged record %s into %s via shared %s identifier%s",
                 incoming.paper_id,
                 preferred.paper_id,
                 ", ".join(matching_namespaces),
