@@ -4483,20 +4483,23 @@ def test_retry_budget_rejects_nonfinite_values(budget: float) -> None:
         SemanticScholarClient(api_key="", retry_budget_seconds=budget)
 
 
-def test_oversized_retry_after_stops_every_discovery_domain(
+def test_oversized_retry_after_only_stops_its_discovery_domain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An oversized cooldown blocks later uncached calls in the same collection.
+    """An unaffordable cooldown leaves other discovery domains available.
 
     :param pytest.MonkeyPatch monkeypatch: Replaces the monotonic clock.
-    :return None: Checks the global recovery breaker after an oversized wait.
+    :return None: Checks domain-local failure before recovery time is spent.
     """
     clock = [0.0]
     monkeypatch.setattr(semantic_module.client, "monotonic", lambda: clock[0])
     with SemanticScholarClient(timeout=30, retry_budget_seconds=5) as client:
         client._rate_limit = MagicMock()
         client._session.get = MagicMock(
-            return_value=_MockResponse(429, headers={"Retry-After": "120"})
+            side_effect=[
+                _MockResponse(429, headers={"Retry-After": "120"}),
+                _MockResponse(200, {"data": "available"}),
+            ]
         )
         with client.candidate_operation_scope():
             assert (
@@ -4507,17 +4510,13 @@ def test_oversized_retry_after_stops_every_discovery_domain(
                 )
                 is None
             )
-            with pytest.raises(
-                semantic_module.errors._CandidateOperationSkippedError,
-                match="earlier Semantic Scholar outage",
-            ):
-                client._request_json(
-                    "https://example.test/second",
-                    {},
-                    failure_domain=semantic_module.errors._FailureDomain.REFERENCES,
-                    raise_on_unavailable=True,
-                )
-        client._session.get.assert_called_once()
+            assert client._request_json(
+                "https://example.test/second",
+                {},
+                failure_domain=semantic_module.errors._FailureDomain.REFERENCES,
+                raise_on_unavailable=True,
+            ) == {"data": "available"}
+        assert client._session.get.call_count == 2
 
 
 def test_budget_preflight_does_not_count_an_unstarted_retry(

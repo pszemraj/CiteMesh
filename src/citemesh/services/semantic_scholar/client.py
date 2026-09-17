@@ -405,26 +405,32 @@ class SemanticScholarClient(_EndpointsMixin):
     def _rate_limit(self) -> None:
         """Enforce rate limiting between requests (key-aware pace)."""
         min_interval = 1.0 / self.requests_per_second
-        with self._rate_limit_lock:
-            wait_seconds = max(0.0, self._next_request_time - monotonic())
-            if wait_seconds:
-                state = getattr(self._candidate_operation, "state", None)
-                if state is not None and state.active_recovery_request:
-                    self._sleep_with_recovery_budget(
-                        state,
-                        wait_seconds,
-                        state.current_attempt,
-                    )
-                else:
-                    started_at = monotonic()
-                    try:
+        state = getattr(self._candidate_operation, "state", None)
+        initial_pacing_started_at = (
+            monotonic()
+            if state is not None
+            and state.current_attempt == 1
+            and not state.active_recovery_request
+            else None
+        )
+        try:
+            with self._rate_limit_lock:
+                wait_seconds = max(0.0, self._next_request_time - monotonic())
+                if wait_seconds:
+                    if state is not None and state.active_recovery_request:
+                        self._sleep_with_recovery_budget(
+                            state,
+                            wait_seconds,
+                            max(0, state.current_attempt - 1),
+                        )
+                    else:
                         time.sleep(wait_seconds)
-                    finally:
-                        if state is not None and state.current_attempt == 1:
-                            state.initial_attempt_excluded_seconds += max(
-                                0.0, monotonic() - started_at
-                            )
-            self._next_request_time = monotonic() + min_interval
+                self._next_request_time = monotonic() + min_interval
+        finally:
+            if initial_pacing_started_at is not None:
+                state.initial_attempt_excluded_seconds += max(
+                    0.0, monotonic() - initial_pacing_started_at
+                )
 
     def _run_with_retries(
         self,
@@ -678,11 +684,7 @@ class SemanticScholarClient(_EndpointsMixin):
             diagnostics = getattr(exc, "retry_diagnostics", None)
             if (
                 diagnostics is not None
-                and diagnostics.stop_reason
-                in {
-                    "recovery budget exhausted",
-                    "next wait exceeds remaining recovery budget",
-                }
+                and diagnostics.stop_reason == "recovery budget exhausted"
             ) or state.recovery_seconds >= state.retry_budget_seconds:
                 state.budget_failure = unavailable
         return unavailable
@@ -840,7 +842,7 @@ class SemanticScholarClient(_EndpointsMixin):
         if state is not None and state.active_recovery_request:
             remaining = self._remaining_recovery_budget(state)
             if remaining is not None and remaining <= 0:
-                raise self._retry_budget_error(state, state.current_attempt)
+                raise self._retry_budget_error(state, max(0, state.current_attempt - 1))
             if remaining is not None:
                 timeout = max(
                     _MIN_RECOVERY_REQUEST_TIMEOUT_SECONDS,

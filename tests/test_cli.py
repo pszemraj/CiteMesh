@@ -577,16 +577,22 @@ def test_cache_clear_refuses_active_s2_discovery_write(
     release_write = threading.Event()
     original_persist = s2.disk_cache._persist_discovery
 
-    def blocked_persist(key: tuple[str, str, int, str], paper_ids: list[str]) -> None:
+    def blocked_persist(
+        key: tuple[str, str, int, str],
+        paper_ids: list[str],
+        *,
+        checked_at: str | None = None,
+    ) -> str:
         """Pause one discovery write while its operation lock remains held.
 
         :param tuple[str, str, int, str] key: Discovery snapshot key.
         :param list[str] paper_ids: Ordered discovered paper IDs.
-        :return None: Persists after the test releases the writer.
+        :param str | None checked_at: Original upstream-check time when reused.
+        :return str: Timestamp persisted after the test releases the writer.
         """
         write_started.set()
         assert release_write.wait(timeout=5), "discovery write was never released"
-        original_persist(key, paper_ids)
+        return original_persist(key, paper_ids, checked_at=checked_at)
 
     monkeypatch.setattr(s2.disk_cache, "_persist_discovery", blocked_persist)
     with SemanticScholarClient(api_key="") as client:

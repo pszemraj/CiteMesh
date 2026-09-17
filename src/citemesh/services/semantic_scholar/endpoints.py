@@ -374,16 +374,26 @@ class _EndpointsMixin:
         return [papers[paper_id] for paper_id in paper_ids]
 
     def _save_discovery(
-        self, key: tuple[str, str, int, str], paper_ids: list[str]
+        self,
+        key: tuple[str, str, int, str],
+        paper_ids: list[str],
+        *,
+        scoped_reuse: bool = False,
     ) -> None:
         """Publish a successful discovery snapshot and reuse it within this scope.
 
         :param tuple[str, str, int, str] key: Endpoint, seed, limit and pool.
         :param list[str] paper_ids: Successfully checked, ordered candidate IDs.
+        :param bool scoped_reuse: Preserve the original upstream-check time when
+            reused IDs are rematerialized without another provider request.
         :return None: Saves only after required acquisition has completed.
         """
-        self._candidate_operation.state.discovery_ids[key] = list(paper_ids)
-        disk_cache._persist_discovery(key, paper_ids)
+        state = self._candidate_operation.state
+        checked_at = state.discovery_checked_at.get(key) if scoped_reuse else None
+        state.discovery_ids[key] = list(paper_ids)
+        state.discovery_checked_at[key] = disk_cache._persist_discovery(
+            key, paper_ids, checked_at=checked_at
+        )
 
     @_scoped_endpoint
     def _get_related_papers(
@@ -416,7 +426,7 @@ class _EndpointsMixin:
         checked_ids = self._candidate_operation.state.discovery_ids.get(key)
         if checked_ids is not None:
             papers = self._materialize_discovery(checked_ids, context=context)
-            self._save_discovery(key, checked_ids)
+            self._save_discovery(key, checked_ids, scoped_reuse=True)
             return papers
         paper_not_found = False
 
@@ -828,7 +838,7 @@ class _EndpointsMixin:
         normalized_paper_id = normalize_paper_id(paper_id)
         encoded_paper_id = quote(normalized_paper_id, safe="")
         context = f"recommendation discovery for {normalized_paper_id}"
-        snapshots: list[tuple[tuple[str, str, int, str], list[str]]] = []
+        snapshots: list[tuple[tuple[str, str, int, str], list[str], bool]] = []
         checked_ids: list[str] = []
         raw_recommendations: list[Any] = []
         papers: list[Paper] = []
@@ -841,7 +851,7 @@ class _EndpointsMixin:
             )
             if scoped_ids is not None:
                 checked_ids = scoped_ids
-                snapshots.append((key, checked_ids))
+                snapshots.append((key, checked_ids, True))
             else:
                 params: dict[str, Any] = {
                     "fields": ",".join(fields) if custom_fields else "paperId",
@@ -888,7 +898,7 @@ class _EndpointsMixin:
                 checked_ids = list(
                     dict.fromkeys(normalize_paper_id(value) for value in ids)
                 )
-                snapshots.append((key, checked_ids))
+                snapshots.append((key, checked_ids, False))
             if not checked_ids:
                 continue
             try:
@@ -907,8 +917,8 @@ class _EndpointsMixin:
             return self._papers_from_records(
                 raw_recommendations, cache_full_metadata=cache_full_metadata
             )
-        for key, ids in snapshots:
-            self._save_discovery(key, ids)
+        for key, ids, scoped_reuse in snapshots:
+            self._save_discovery(key, ids, scoped_reuse=scoped_reuse)
         return papers
 
     @_scoped_endpoint

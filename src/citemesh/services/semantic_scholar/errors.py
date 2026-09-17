@@ -60,6 +60,9 @@ class _CandidateOperationState:
     discovery_ids: dict[tuple[str, str, int, str], list[str]] = field(
         default_factory=dict
     )
+    discovery_checked_at: dict[tuple[str, str, int, str], str] = field(
+        default_factory=dict
+    )
     reference_cache_hits: int = 0
     retry_budget_seconds: float = 0.0
     recovery_seconds: float = 0.0
