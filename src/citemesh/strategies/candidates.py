@@ -162,6 +162,30 @@ def _external_identifiers(paper: Paper) -> dict[str, str]:
     }
 
 
+def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...]:
+    """Return shared, conflict-free identifier namespaces for two records.
+
+    Matching requires a shared normalized arXiv or DOI identifier. Any namespace
+    supplied by both records must agree, so partial metadata cannot bridge two
+    contradictory records. Two local-corpus rows remain separate because their
+    source-primary keys can represent distinct corpus entries.
+
+    :param Paper left: First candidate record.
+    :param Paper right: Second candidate record.
+    :return tuple[str, ...]: Matching namespaces, or empty when records differ.
+    """
+    if left.is_local_corpus and right.is_local_corpus:
+        return ()
+    left_ids = _external_identifiers(left)
+    right_ids = _external_identifiers(right)
+    shared_namespaces = left_ids.keys() & right_ids.keys()
+    if not shared_namespaces or any(
+        left_ids[namespace] != right_ids[namespace] for namespace in shared_namespaces
+    ):
+        return ()
+    return tuple(sorted(shared_namespaces))
+
+
 def candidate_records_match(left: Paper, right: Paper) -> bool:
     """Return whether two candidate records explicitly identify one work.
 
@@ -174,21 +198,7 @@ def candidate_records_match(left: Paper, right: Paper) -> bool:
     :param Paper right: Second candidate record.
     :return bool: Whether both records explicitly identify the same work.
     """
-    if left.is_local_corpus and right.is_local_corpus:
-        return False
-    left_ids = _external_identifiers(left)
-    right_ids = _external_identifiers(right)
-    shared = {
-        namespace
-        for namespace in left_ids.keys() & right_ids.keys()
-        if left_ids[namespace] == right_ids[namespace]
-    }
-    if not shared:
-        return False
-    return all(
-        left_ids[namespace] == right_ids[namespace]
-        for namespace in left_ids.keys() & right_ids.keys()
-    )
+    return bool(_candidate_match_namespaces(left, right))
 
 
 def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
@@ -316,6 +326,20 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     :return Paper: ``preferred`` with missing metadata hydrated.
     """
     if (
+        preferred.paper_id != incoming.paper_id
+        and not preferred.is_local_corpus
+        and not incoming.is_local_corpus
+    ):
+        matching_namespaces = _candidate_match_namespaces(preferred, incoming)
+        if matching_namespaces:
+            logger.debug(
+                "Merged S2 record %s into %s via shared %s identifier%s",
+                incoming.paper_id,
+                preferred.paper_id,
+                ", ".join(matching_namespaces),
+                "" if len(matching_namespaces) == 1 else "s",
+            )
+    if (
         (not preferred.title or preferred.title == "Unknown")
         and incoming.title
         and incoming.title != "Unknown"
@@ -387,7 +411,7 @@ class CandidatePool:
     source_status: dict[str, str] = field(default_factory=dict)
 
     def add(self, paper: Paper, *, source: str, relation: str) -> None:
-        """Add a paper to the pool, merging exact S2 paper IDs.
+        """Add a paper, reconciling exact IDs and unambiguous external IDs.
 
         :param Paper paper: Candidate paper payload.
         :param str source: Provenance tag (``reference``/``citation``/``recommendation``).

@@ -27,7 +27,7 @@ S2 candidate acquisition shares availability and identity handling in `strategie
 
 A free-text seed starts with keyword search capped at 20 hits and the total source budget. If slots remain, recommendations expand only the top hit. Corpus mode instead follows [hydration and selection](caching.md#corpus-hydration-and-resume).
 
-S2 candidate collection deduplicates exact paper IDs. Joining a local corpus record with an S2 record requires a shared normalized arXiv ID or DOI and no disagreement in an external-ID namespace present on both records. The corpus ID remains stable. Similar titles, years, authors, or abstracts do not establish identity; records without a shared explicit identifier remain separate. Two distinct S2 IDs also remain separate even when their metadata is similar.
+S2 candidate collection reconciles exact paper IDs or a unique, conflict-free normalized DOI/arXiv match; ambiguous matches remain separate. Joining a local corpus record with an S2 record requires the same explicit identifier agreement, and the corpus ID remains stable. Similar titles, years, authors, or abstracts do not establish identity; records without a shared explicit identifier remain separate.
 
 Acquisition follows the [source-failure and retry policy](cli.md#appendix-b-troubleshooting), recording availability in exported metadata.
 

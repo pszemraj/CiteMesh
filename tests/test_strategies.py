@@ -3245,18 +3245,28 @@ def test_candidate_pool_dedupes_exact_s2_paper_ids() -> None:
     assert set(pool.papers) == {first.paper_id}
 
 
-def test_candidate_pool_merges_s2_ids_with_shared_external_ids() -> None:
-    """Agreed DOI metadata identifies duplicate Semantic Scholar records."""
+def test_candidate_pool_merges_s2_ids_with_shared_external_ids(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Agreed DOI metadata identifies and reports duplicate S2 records.
+
+    :param pytest.LogCaptureFixture caplog: Captured identity reconciliation trace.
+    """
     pool = CandidatePool(seed=_seed_paper())
     first = Paper(paper_id="1" * 40, title="Same", year=2025, doi="10.1000/shared")
     second = Paper(paper_id="2" * 40, title="Same", year=2025, doi="10.1000/shared")
 
     pool.add(first, source="reference", relation="referenced_by_seed")
-    pool.add(second, source="citation", relation="cites_seed")
+    with caplog.at_level(logging.DEBUG, logger="citemesh.strategies.candidates"):
+        pool.add(second, source="citation", relation="cites_seed")
 
     assert set(pool.papers) == {first.paper_id}
     assert pool.sources[first.paper_id] == {"reference", "citation"}
     assert pool.seed_relations[first.paper_id] == "overlap"
+    assert (
+        f"Merged S2 record {second.paper_id} into {first.paper_id} "
+        "via shared doi identifier"
+    ) in caplog.messages
 
 
 @pytest.mark.parametrize("opaque_case_distinction", [False, True])
