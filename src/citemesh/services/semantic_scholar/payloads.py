@@ -11,7 +11,7 @@ import logging
 import numbers
 from typing import Any
 
-from citemesh.core import API_CONFIG, Author, Paper
+from citemesh.core import Author, Paper
 from citemesh.core.paper_fields import (
     coerce_author_name,
     coerce_categories,
@@ -19,14 +19,9 @@ from citemesh.core.paper_fields import (
 )
 from citemesh.core.paper_ids import external_ids_from_canonical_paper_id
 
-from .errors import SemanticScholarUnavailableError
-
 logger = logging.getLogger(__name__)
 
 
-# semanticscholar 0.11 raises this when S2 encodes an empty relation page as
-# ``{"data": null}`` instead of ``{"data": []}``.
-_SDK_NULL_RELATION_PAGE_ERROR = "'NoneType' object is not iterable"
 DEFAULT_PAPER_FIELDS = (
     "paperId",
     "title",
@@ -42,15 +37,6 @@ DEFAULT_PAPER_FIELDS = (
 )
 
 
-def _is_sdk_null_relation_page(error: TypeError) -> bool:
-    """Identify the SDK failure used for a valid empty relation page.
-
-    :param TypeError error: Exception raised while the SDK decodes a relation page.
-    :return bool: Whether the exception represents an S2 ``data: null`` response.
-    """
-    return str(error) == _SDK_NULL_RELATION_PAGE_ERROR
-
-
 def _default_paper_fields() -> list[str]:
     """Return a mutable default field list for paper-like API endpoints.
 
@@ -62,8 +48,7 @@ def _default_paper_fields() -> list[str]:
 def _reference_id_candidate(raw_value: Any) -> str | None:
     """Extract a paper ID from accepted reference payload shapes.
 
-    Supports current cache entries, legacy mixed-format cache entries, and
-    Semantic Scholar relation objects returned by the SDK.
+    Supports current cache entries and legacy mixed-format cache entries.
 
     :param Any raw_value: Raw reference-like entry.
     :return str | None: Candidate paper ID string, or ``None`` when absent.
@@ -97,24 +82,6 @@ def _reference_id_candidate(raw_value: Any) -> str | None:
             return candidate
 
     return None
-
-
-def _is_unresolved_reference(record: Any) -> bool:
-    """Recognize a valid relation record with an explicitly null paper identifier.
-
-    :param Any record: SDK relation record or equivalent mapping.
-    :return bool: Whether a paper ID is present and null on the relation's paper.
-    """
-    paper = (
-        record.get("paper", record)
-        if isinstance(record, dict)
-        else getattr(record, "paper", record)
-    )
-    # SDK properties default to None even when the response omits the field.
-    paper = getattr(paper, "raw_data", paper)
-    if isinstance(paper, dict):
-        return "paperId" in paper and paper["paperId"] is None
-    return hasattr(paper, "paperId") and paper.paperId is None
 
 
 def _coerce_cached_reference_ids(payload: Any) -> list[str] | None:
@@ -366,32 +333,8 @@ def _convert_recommendation(rec: dict[str, Any]) -> Paper | None:
         return _convert_payload_paper(
             rec,
             category_keys=("fieldsOfStudy", "fields"),
-            references=_extract_reference_ids(rec.get("references")),
+            references=_extract_reference_ids(_payload_get(rec, "references")),
         )
     except (TypeError, ValueError) as exc:
         logger.debug("Skipping malformed recommendation record: %s", exc)
         return None
-
-
-def _unavailable_error(
-    context: str,
-    detail: str,
-    *,
-    rate_limited: bool,
-    issue_hint: str = "This is a service availability issue",
-) -> SemanticScholarUnavailableError:
-    """Build the availability error raised when retries are exhausted.
-
-    :param str context: Human-readable request context (e.g. ``"searching for 'x'"``).
-    :param str detail: Trailing detail appended after the attempt count.
-    :param bool rate_limited: Whether the final failure was an HTTP 429.
-    :param str issue_hint: Explanation placed before retry guidance.
-    :return SemanticScholarUnavailableError: Flavored availability error.
-    """
-    flavor = "rate-limited (HTTP 429)" if rate_limited else "unreachable"
-    return SemanticScholarUnavailableError(
-        f"Semantic Scholar API {flavor} while {context} "
-        f"(after {API_CONFIG.max_retries} attempts{detail}). "
-        f"{issue_hint} - retry shortly, or set "
-        f"S2_API_KEY for a dedicated rate limit."
-    )

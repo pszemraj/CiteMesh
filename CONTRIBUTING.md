@@ -13,7 +13,7 @@ pip install -e ".[all]"
 
 Versions come from git tags via setuptools-scm, so a shallow clone without tags reports `0.0.post1.devN` - run `git fetch --tags` first. Tests import the installed package from the `src/` layout, so rerun `pip install -e ".[all]"` after pulling a change that moves or renames modules.
 
-The Semantic Scholar SDK is pinned to `>=0.8.0,<0.13` because CiteMesh adapts its requester to preserve HTTP status codes; check the transport and pagination tests before widening that range.
+Semantic Scholar requests use the HTTP transport in `services/semantic_scholar/client.py`; endpoint pagination and payload conversion live alongside it. Transport and pagination tests use mocked HTTP responses and clocks.
 
 ## Before you open a PR
 
@@ -23,7 +23,7 @@ ruff check .
 ruff format --check .
 ```
 
-CI runs the test suite on Python 3.10-3.13 (`ubuntu-latest`, CPU torch), runs Ruff once on Python 3.12, and adds a build job - `python -m build`, `twine check --strict dist/*`, wheel package-data checks, and a base-install CLI smoke test ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Real CUDA embedding checks stay opt-in; they may download the EmbeddingGemma checkpoint and need a GPU: `python -m pytest -m "slow and cuda"`.
+CI runs Ruff and the full network-free test suite in one Python 3.12 job (`ubuntu-latest`, CPU torch). Markdown-only changes skip CI, and new PR runs cancel older runs for that PR while every push to `main` completes ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)). Python-version matrices, distribution builds, and installation smoke tests are not part of CI. Real CUDA embedding checks stay opt-in; they may download the EmbeddingGemma checkpoint and need a GPU: `python -m pytest -m "slow and cuda"`.
 
 Clear stale output before building locally (`rm -rf build dist && python -m build`): setuptools reuses `build/lib`, so a wheel built over an old tree can silently ship modules you deleted.
 

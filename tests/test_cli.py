@@ -49,11 +49,13 @@ from citemesh.cli import parser as parser_module
 from citemesh.cli.commands import build as build_module
 from citemesh.cli.commands import search as search_module
 from citemesh.cli.outputs import _is_standalone_dashboard_output
-from citemesh.core import Author, Paper
+from citemesh.core import API_CONFIG, Author, Paper
 from citemesh.data import DEFAULT_EMBEDDING_MODEL_NAME
 from citemesh.data.cache import CACHE_COORDINATION_DIRNAME
 from citemesh.data.embedding_cache import EmbeddingCache
 from citemesh.data.user_config import UserConfig
+from citemesh.services import SemanticScholarClient
+from citemesh.services import semantic_scholar as s2
 from citemesh.strategies.candidates import CandidateAcquisitionError
 from citemesh.strategies.embedding import (
     DEFAULT_DATASET_SOURCE,
@@ -238,6 +240,7 @@ def _dispatch_namespace(**overrides: object) -> argparse.Namespace:
         "similarity_threshold": 0.2,
         "no_references": False,
         "refresh_reference_cache": False,
+        "s2_retry_budget": None,
         "model": DEFAULT_EMBEDDING_MODEL_NAME,
         "model_profile": "auto",
         "model_revision": None,
@@ -562,6 +565,113 @@ def test_cache_clear_refuses_active_embedding_encode() -> None:
     assert cache.h5_path.is_file()
 
 
+def test_cache_clear_refuses_active_s2_paper_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache clear must not race an active Semantic Scholar cache operation.
+
+    :param pytest.MonkeyPatch monkeypatch: Pauses paper metadata persistence.
+    :return None: Checks the shared root lock keeps the cache intact until completion.
+    """
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_persist = s2.disk_cache._persist_paper
+
+    def blocked_persist(paper: Paper, requested_id: str) -> None:
+        """Pause one metadata write while its operation lock remains held.
+
+        :param Paper paper: Resolved paper metadata.
+        :param str requested_id: Identifier used for lookup.
+        :return None: Persists after the test releases the writer.
+        """
+        write_started.set()
+        assert release_write.wait(timeout=5), "paper write was never released"
+        original_persist(paper, requested_id)
+
+    monkeypatch.setattr(s2.disk_cache, "_persist_paper", blocked_persist)
+    with SemanticScholarClient(api_key="") as client:
+        client._request_json = MagicMock(
+            return_value={"paperId": "seed", "title": "Seed"}
+        )
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            write = executor.submit(client.get_paper, "seed")
+            assert write_started.wait(timeout=5), "paper write never started"
+            assert (
+                cache_ops_module._clear_cache_directory(
+                    assume_yes=True, clear_reason=None
+                )
+                == 1
+            )
+            release_write.set()
+            assert write.result(timeout=5).paper_id == "seed"
+
+    paper_path = s2.disk_cache._paper_cache_path("seed")
+    assert paper_path.is_file()
+    assert (
+        cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    )
+    assert not paper_path.exists()
+
+
+def test_cache_clear_refuses_active_reference_cache_normalization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache clear must not race a public cache-only normalization write.
+
+    :param pytest.MonkeyPatch monkeypatch: Pauses normalized reference persistence.
+    :return None: Checks clear reports busy until the reference lookup completes.
+    """
+    cache_path = s2.disk_cache._reference_cache_path("seed")
+    cache_path.write_text(
+        json.dumps(
+            {
+                "paper_id": "seed",
+                "references": ["ref", "ref"],
+                "version": s2.disk_cache.REFERENCE_CACHE_VERSION,
+            }
+        ),
+        encoding="utf-8",
+    )
+    write_started = threading.Event()
+    release_write = threading.Event()
+    with SemanticScholarClient(api_key="") as client:
+        original_persist = client._persist_reference_cache_entry
+
+        def blocked_persist(
+            path: Path, paper_id: str, reference_ids: list[str]
+        ) -> None:
+            """Pause normalized persistence while the shared root lock is held.
+
+            :param Path path: Reference cache file being normalized.
+            :param str paper_id: Normalized paper identifier.
+            :param list[str] reference_ids: Deduplicated reference identifiers.
+            :return None: Persists after the test releases the writer.
+            """
+            write_started.set()
+            assert release_write.wait(timeout=5), "reference write was never released"
+            original_persist(path, paper_id, reference_ids)
+
+        monkeypatch.setattr(client, "_persist_reference_cache_entry", blocked_persist)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            lookup = executor.submit(client.get_cached_reference_ids, "seed")
+            assert write_started.wait(timeout=5), "reference write never started"
+            assert (
+                cache_ops_module._clear_cache_directory(
+                    assume_yes=True, clear_reason=None
+                )
+                == 1
+            )
+            release_write.set()
+            assert lookup.result(timeout=5) == ["ref"]
+
+    assert cache_path.is_file()
+    assert json.loads(cache_path.read_text())["references"] == ["ref"]
+    assert (
+        cache_ops_module._clear_cache_directory(assume_yes=True, clear_reason=None) == 0
+    )
+    assert not cache_path.exists()
+
+
 def test_cache_clear_reports_config_inspection_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -810,7 +920,7 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
     saved_handlers, saved_level, saved_configured = _reset_cli_logging_state()
     log_path = tmp_path / "logs" / "cli-debug.log"
     stderr = io.StringIO()
-    noisy_logger_names = ("filelock", "matplotlib", "urllib3", "semanticscholar")
+    noisy_logger_names = ("filelock", "matplotlib", "urllib3")
     saved_logger_levels = {
         name: logging.getLogger(name).level for name in noisy_logger_names
     }
@@ -832,7 +942,6 @@ def test_configure_logging_honors_debug_console_with_plaintext_log_file(
             assert logging.getLogger("filelock").level == logging.WARNING
             assert logging.getLogger("matplotlib").level == logging.WARNING
             assert logging.getLogger("urllib3").level == logging.WARNING
-            assert logging.getLogger("semanticscholar").level == logging.WARNING
     finally:
         for name, level in saved_logger_levels.items():
             logging.getLogger(name).setLevel(level)
@@ -921,23 +1030,41 @@ def test_search_command_prints_results_to_stdout(
     assert plain_stdout.index("12,345") < plain_stdout.index("Full paper IDs:")
 
 
-def test_s2_search_forwards_paginated_result_count(
+def test_s2_search_forwards_result_count_and_retry_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The CLI should allow service-level paging beyond one S2 request.
+    """S2 search should route its result count and recovery budget.
 
-    :param pytest.MonkeyPatch monkeypatch: Fixture used to inject the API client.
-    :return None: Checks ``-n 101`` reaches the paginating service unchanged.
+    :param pytest.MonkeyPatch monkeypatch: Fixture replacing the S2 client factory.
+    :return None: Checks search-specific client settings and request arguments.
     """
+    monkeypatch.delenv("S2_API_KEY", raising=False)
     mock_client = MagicMock()
     mock_client.search_papers.return_value = [
         Paper(paper_id="result", title="Result", year=None, abstract="Abstract")
     ]
-    monkeypatch.setattr(search_module, "get_client", lambda: mock_client)
+    client_factory = MagicMock(return_value=mock_client)
+    monkeypatch.setattr(build_options_module, "SemanticScholarClient", client_factory)
 
-    result = run_cli_command(["search", "attention", "--mode", "s2", "-n", "101"])
+    result = run_cli_command(
+        [
+            "search",
+            "attention",
+            "--mode",
+            "s2",
+            "-n",
+            "101",
+            "--s2-retry-budget",
+            "37.5",
+        ]
+    )
 
     assert result.returncode == 0
+    client_factory.assert_called_once_with(
+        api_key=None,
+        refresh_paper_cache=False,
+        retry_budget_seconds=37.5,
+    )
     mock_client.search_papers.assert_called_once_with(
         "attention",
         limit=101,
@@ -2271,6 +2398,64 @@ def test_invalid_paper_id_fails_cleanly(
     assert result.returncode != 0
     assert not output.exists()
     assert "All requested Semantic Scholar sources" in str(error_mock.call_args)
+
+
+def test_required_discovery_failure_preserves_existing_exports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed current-discovery check must not replace completed exports.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces graph acquisition and logging.
+    :param Path tmp_path: Existing artifact directory.
+    :return None: Verifies failure wording and byte-for-byte output preservation.
+    """
+    output_dir = tmp_path / "existing-results"
+    output_dir.mkdir()
+    original_outputs = {
+        output_dir / "recommendation.png": b"previous png",
+        output_dir / "recommendation.json": b'{"previous": "json"}',
+        output_dir / "recommendation.html": b"<html>previous</html>",
+    }
+    for path, content in original_outputs.items():
+        path.write_bytes(content)
+
+    error_mock = MagicMock()
+    monkeypatch.setattr(cli_module.logger, "error", error_mock)
+    monkeypatch.setattr(
+        build_module,
+        "_build_strategy_graph",
+        MagicMock(
+            side_effect=CandidateAcquisitionError(
+                "Could not complete current recommendation discovery."
+            )
+        ),
+    )
+
+    result = run_cli_command(
+        [
+            "build",
+            "arxiv:1706.03762",
+            "--strategy",
+            "recommendation",
+            "--export",
+            "png",
+            "--export",
+            "json",
+            "--export",
+            "html",
+            "--output",
+            str(output_dir),
+        ]
+    )
+
+    assert result.returncode == 1
+    assert {path: path.read_bytes() for path in original_outputs} == original_outputs
+    assert error_mock.call_count == 1
+    assert (
+        error_mock.call_args.args[0]
+        == "Build incomplete: current Semantic Scholar discovery could not be acquired. %s"
+    )
+    assert "current recommendation discovery" in str(error_mock.call_args.args[1])
 
 
 def test_cli_argument_validation_contracts() -> None:
@@ -4565,6 +4750,7 @@ def test_graph_config_payload_omits_citation_budgets_for_recommendation() -> Non
         metadata={"strategy": "recommendation"},
         selected_formats=["json"],
         output_paths={"json": Path("out/recommendation.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
 
     citation_config = payload["build"]["citation"]
@@ -4881,6 +5067,7 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         else:
             assert "top_k" not in build_config.get("embedding", {})
         client_factory = MagicMock()
+        client_factory.return_value.retry_budget_seconds = 0.0
         monkeypatch.setattr(
             build_options_module, "SemanticScholarClient", client_factory
         )
@@ -4892,6 +5079,152 @@ def test_strategy_dispatches_to_matching_builder_kwargs(
         )
         assert captured == {**expected_kwargs, "client": client_factory.return_value}
         monkeypatch.delenv("S2_API_KEY")
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [("0", 0.0), ("37.5", 37.5)],
+)
+def test_build_s2_retry_budget_routes_explicit_override(
+    monkeypatch: pytest.MonkeyPatch, token: str, expected: float
+) -> None:
+    """An explicit S2 recovery budget should construct a configured client.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the S2 client constructor.
+    :param str token: CLI retry-budget token.
+    :param float expected: Parsed retry-budget value.
+    :return None: Assertions verify client routing and default behavior.
+    """
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    _, build_parser, _, _ = parser_module._create_parser()
+    default_args = build_parser.parse_args(["seed"])
+    factory = MagicMock()
+    monkeypatch.setattr(build_options_module, "SemanticScholarClient", factory)
+
+    assert build_options_module._configured_client_kwargs(default_args) == {}
+    factory.assert_not_called()
+
+    args = build_parser.parse_args(["seed", "--s2-retry-budget", token])
+    configured = build_options_module._configured_client_kwargs(args)
+
+    factory.assert_called_once_with(
+        api_key=None,
+        refresh_paper_cache=False,
+        retry_budget_seconds=expected,
+    )
+    assert configured == {"client": factory.return_value}
+    assert args._s2_client is factory.return_value
+
+
+@pytest.mark.parametrize("token", ["-1", "nan", "inf", "-inf"])
+def test_build_rejects_invalid_s2_retry_budget(token: str) -> None:
+    """The S2 recovery budget must be a finite non-negative float.
+
+    :param str token: Invalid CLI retry-budget token.
+    :return None: Assertions verify clean usage failure.
+    """
+    result = run_cli_command(["build", "seed", "--s2-retry-budget", token])
+
+    assert result.returncode == 2
+    assert "--s2-retry-budget" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("token", "api_key", "selected_client_budget"),
+    [
+        (None, None, API_CONFIG.anonymous_retry_budget_seconds),
+        (None, "configured-key", 0.0),
+        ("0", None, 0.0),
+        ("37.5", "configured-key", 12.5),
+    ],
+)
+def test_graph_config_payload_records_effective_s2_retry_budget(
+    token: str | None, api_key: str | None, selected_client_budget: float
+) -> None:
+    """Graph sidecars should retain the selected client's S2 recovery budget.
+
+    :param str | None token: Optional explicit CLI budget token.
+    :param str | None api_key: Resolved key presence used for the default policy.
+    :param float selected_client_budget: Effective budget from the selected client.
+    :return None: Checks the sidecar does not recalculate client policy.
+    """
+    _, build_parser, _, _ = parser_module._create_parser()
+    argv = ["seed"]
+    if token is not None:
+        argv.extend(["--s2-retry-budget", token])
+    cli_args = build_parser.parse_args(argv)
+    cli_args._s2_api_key = api_key
+
+    payload = graph_config_module._build_graph_config_payload(
+        cli_args=cli_args,
+        seed_id="seed",
+        metadata={"strategy": "recommendation"},
+        selected_formats=["json"],
+        output_paths={"json": Path("out/recommendation.json")},
+        s2_retry_budget=selected_client_budget,
+    )
+
+    assert payload["build"]["s2_retry_budget"] == selected_client_budget
+
+
+def test_in_process_cli_sidecar_matches_reconfigured_shared_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A prior keyed singleton must not change a later anonymous build policy.
+
+    :param pytest.MonkeyPatch monkeypatch: Replaces the builder and credential state.
+    :param Path tmp_path: Isolated output directory for the config sidecar.
+    :return None: Checks the builder client and sidecar report the same budget.
+    """
+    keyed_client: SemanticScholarClient | None = None
+    captured: dict[str, object] = {}
+    try:
+        s2.reset_client()
+        monkeypatch.setenv("S2_API_KEY", "configured-key")
+        keyed_client = s2.get_client()
+        assert keyed_client.retry_budget_seconds == 0.0
+        monkeypatch.delenv("S2_API_KEY")
+
+        def builder_factory(**kwargs: object) -> SimpleNamespace:
+            """Capture the client selected by normal recommendation dispatch.
+
+            :param object kwargs: Recommendation builder keyword arguments.
+            :return SimpleNamespace: Builder stub returning a seed-only graph.
+            """
+            client = kwargs.get("client") or s2.get_client()
+            captured["client"] = client
+            return SimpleNamespace(
+                build_graph=lambda _paper_id: (build_seed_graph("seed"), "seed")
+            )
+
+        monkeypatch.setattr(
+            build_options_module, "RecommendationGraphBuilder", builder_factory
+        )
+        monkeypatch.setattr(
+            build_module,
+            "GraphExporter",
+            _make_exporter_stub({}, methods=("to_json",)),
+        )
+        output = tmp_path / "graph.json"
+
+        result = run_cli_command(
+            ["build", "seed", "--export", "json", "--output", str(output)]
+        )
+
+        assert result.returncode == 0, result.stderr
+        selected_client = captured["client"]
+        assert isinstance(selected_client, SemanticScholarClient)
+        payload = json.loads(output.with_suffix(".config.json").read_text())
+        assert (
+            selected_client.retry_budget_seconds == payload["build"]["s2_retry_budget"]
+        )
+        assert payload["build"]["s2_retry_budget"] == (
+            API_CONFIG.anonymous_retry_budget_seconds
+        )
+    finally:
+        s2.reset_client()
+        if keyed_client is not None:
+            keyed_client.close()
 
 
 @pytest.mark.parametrize("width", [60, 80, 120])
@@ -4927,6 +5260,7 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
                 "dashboard",
                 "--all-corpus",
                 "--refresh-paper-cache",
+                "--s2-retry-budget",
                 "--storage-precision",
                 "--binary-prefilter",
                 "--binary-rescore-multiplier",
@@ -4949,7 +5283,10 @@ def test_cli_help_contracts(width: int, monkeypatch: pytest.MonkeyPatch) -> None
         (["search", "--help"], ["search", "--limit"]),
         (["cache", "--help"], ["clear", "scan", "Examples"]),
         (["cache", "scan", "--help"], ["cache scan", "--log-level"]),
-        (["cache", "clear", "--help"], ["cache clear", "--yes", "config.toml"]),
+        (
+            ["cache", "clear", "--help"],
+            ["cache clear", "--yes", "config.toml", "cached papers"],
+        ),
         (["config", "--help"], ["config", "set", "unset", "Examples"]),
         (["config", "list", "--help"], ["config list", "--log-level"]),
         (["config", "get", "--help"], ["config get KEY", "Dotted config key"]),
@@ -5312,6 +5649,7 @@ def test_graph_config_payload_records_device() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
 
     assert payload["build"]["embedding"]["device"] == "cpu"
@@ -5349,6 +5687,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         metadata={"strategy": "embedding", "embedding": metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
     replay = sidecar["build"]["embedding"]
     assert replay["model"] == active_model
@@ -5391,6 +5730,7 @@ def test_export_metadata_records_effective_embedding_runtime() -> None:
         metadata={"strategy": "embedding", "embedding": selector_metadata},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
     assert selector_metadata["effective_model_revision"] == resolved_revision
     assert selector_sidecar["build"]["embedding"]["model_revision"] == "main"
@@ -5451,6 +5791,7 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
     assert payload["build"]["embedding"]["dataset_source"] == dataset_source
 
@@ -5465,5 +5806,6 @@ def test_dataset_source_implies_corpus_mode_and_reaches_sidecar() -> None:
         metadata={"strategy": "embedding"},
         selected_formats=["json"],
         output_paths={"json": Path("out/embedding.json")},
+        s2_retry_budget=API_CONFIG.anonymous_retry_budget_seconds,
     )
     assert "dataset_source" not in candidate_payload["build"]["embedding"]

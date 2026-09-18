@@ -74,6 +74,7 @@ def _build_graph_config_payload(
     metadata: dict[str, Any],
     selected_formats: list[str],
     output_paths: dict[str, Path],
+    s2_retry_budget: float,
 ) -> dict[str, Any]:
     """Build sidecar graph-config payload for reproducibility and auditability.
 
@@ -82,6 +83,7 @@ def _build_graph_config_payload(
     :param Dict[str, Any] metadata: Run metadata payload used by exporters.
     :param List[str] selected_formats: Formats requested for export.
     :param Dict[str, Path] output_paths: Resolved export artifact paths.
+    :param float s2_retry_budget: Effective recovery-time cap from the selected S2 client.
     :return Dict[str, Any]: JSON-safe run configuration payload.
     """
     strategy = str(cli_args.strategy)
@@ -156,6 +158,7 @@ def _build_graph_config_payload(
             "refresh_paper_cache": bool(
                 getattr(cli_args, "refresh_paper_cache", False)
             ),
+            "s2_retry_budget": s2_retry_budget,
             "citation": _build_citation_config_payload(cli_args, strategy=strategy),
             "hybrid": (
                 {"max_semantic": _resolved_hybrid_max_semantic(cli_args)}

@@ -13,7 +13,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from citemesh.core import Author, Paper
-from citemesh.core.paper_ids import paper_identifier_aliases
+from citemesh.core.paper_ids import normalize_paper_id, paper_identifier_aliases
 from citemesh.data import get_cache_dir
 from citemesh.data.cache import atomic_write_json, read_json_object
 
@@ -41,7 +41,7 @@ def _reference_cache_dir() -> Path:
 
 
 def _paper_lookup_keys(paper: Paper) -> set[str]:
-    """Build normalized aliases for matching batch responses to requested IDs.
+    """Build current normalized identifiers for a paper cache entry.
 
     :param Paper paper: Converted paper payload from Semantic Scholar.
     :return set[str]: Normalized identifier aliases for the paper.
@@ -76,7 +76,7 @@ def _paper_cache_path(paper_id: str) -> Path:
 
 
 def _load_cached_paper(paper_id: str) -> Paper | None:
-    """Read current paper metadata, treating stale entries as cache misses.
+    """Read current paper metadata through one canonical cache lookup.
 
     :param str paper_id: Normalized requested paper identifier.
     :return Paper | None: Fresh paper instance, or ``None`` on a cache miss.
@@ -85,7 +85,23 @@ def _load_cached_paper(paper_id: str) -> Paper | None:
     if cached is None or cached.get("version") != PAPER_CACHE_VERSION:
         return None
     try:
+        canonical_paper_id = paper_id
+        if "canonical_paper_id" in cached:
+            canonical_paper_id = cached["canonical_paper_id"]
+            canonical = read_json_object(_paper_cache_path(canonical_paper_id))
+            if canonical is None or canonical.get("version") != PAPER_CACHE_VERSION:
+                return None
+            cached = canonical
+        elif cached["paper"]["paper_id"] != paper_id:
+            canonical_paper_id = cached["paper"]["paper_id"]
+            canonical = read_json_object(_paper_cache_path(canonical_paper_id))
+            if canonical is None or canonical.get("version") != PAPER_CACHE_VERSION:
+                return None
+            cached = canonical
+
         data = cached["paper"]
+        if data["paper_id"] != canonical_paper_id:
+            return None
         data["authors"] = [Author(**author) for author in data["authors"]]
         return Paper(**data)
     except (AttributeError, TypeError, ValueError, KeyError):
@@ -93,7 +109,7 @@ def _load_cached_paper(paper_id: str) -> Paper | None:
 
 
 def _persist_paper(paper: Paper, requested_id: str) -> None:
-    """Save successful metadata under the requested ID and known aliases.
+    """Save full metadata once and point current identifiers at it.
 
     :param Paper paper: Converted Semantic Scholar paper metadata.
     :param str requested_id: Normalized identifier used for the request.
@@ -102,9 +118,32 @@ def _persist_paper(paper: Paper, requested_id: str) -> None:
     data = asdict(paper)
     data["references"] = []
     data["is_seed"] = False
-    cached = {"version": PAPER_CACHE_VERSION, "paper": data}
-    for alias in _paper_lookup_keys(paper) | {requested_id}:
+    canonical_paper_id = paper.paper_id
+    try:
+        atomic_write_json(
+            _paper_cache_path(canonical_paper_id),
+            {"version": PAPER_CACHE_VERSION, "paper": data},
+        )
+    except OSError as exc:
+        logger.debug(
+            "Failed to persist canonical paper cache for %s: %s",
+            canonical_paper_id,
+            exc,
+        )
+        return
+
+    aliases = {
+        normalize_paper_id(alias)
+        for alias in _paper_lookup_keys(paper) | {requested_id}
+    }
+    for alias in aliases - {canonical_paper_id}:
         try:
-            atomic_write_json(_paper_cache_path(alias), cached)
+            atomic_write_json(
+                _paper_cache_path(alias),
+                {
+                    "version": PAPER_CACHE_VERSION,
+                    "canonical_paper_id": canonical_paper_id,
+                },
+            )
         except OSError as exc:
             logger.debug("Failed to persist paper cache for %s: %s", alias, exc)

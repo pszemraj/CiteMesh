@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
@@ -27,7 +27,6 @@ from citemesh.core.paper_ids import (
     external_ids_from_canonical_paper_id,
     is_local_corpus_paper_id,
     normalize_paper_id,
-    paper_identifier_aliases,
     recognize_arxiv_identifier,
 )
 
@@ -40,15 +39,6 @@ DEFAULT_CANDIDATE_POOL_SIZE = 400
 QUERY_SEED_SEARCH_LIMIT = 20
 _DOI_PATTERN = re.compile(r"^10\.\d{4,9}/\S+$", re.IGNORECASE)
 _S2_PATTERN = re.compile(r"^(?:s2:)?[0-9a-f]{40}$", re.IGNORECASE)
-_PLACEHOLDER_TITLES = {
-    "n a",
-    "na",
-    "no title",
-    "none",
-    "not available",
-    "unknown",
-    "untitled",
-}
 
 
 class CandidateAcquisitionError(RuntimeError):
@@ -96,14 +86,6 @@ def scope_candidate_collection(
             return collector(builder, *args, **kwargs)
 
     return wrapped
-
-
-@dataclass(frozen=True)
-class IdentityEvidence:
-    """Namespaced strong identifiers and conservative weak metadata evidence."""
-
-    strong_ids: Mapping[str, frozenset[str]]
-    weak_keys: frozenset[str]
 
 
 def _normalized_doi(raw_identifier: object) -> str:
@@ -156,260 +138,87 @@ def provider_lookup_identifier(paper_id: str, paper: Paper) -> str | None:
     return primary_doi or None
 
 
-def _strong_identifier_evidence(paper: Paper) -> dict[str, frozenset[str]]:
-    """Build namespaced strong identifier evidence for one paper.
+def _external_identifiers(paper: Paper) -> dict[str, str]:
+    """Return explicit normalized arXiv and DOI identifiers for one paper.
 
-    :param Paper paper: Paper payload to inspect.
-    :return Dict[str, frozenset[str]]: Stable identifier sets by namespace.
+    :param Paper paper: Paper metadata supplying canonical and field identifiers.
+    :return dict[str, str]: Valid, internally consistent identifiers by namespace.
     """
-    identifiers: dict[str, set[str]] = {}
-
-    primary = str(paper.paper_id or "").strip()
-    primary_arxiv = recognize_arxiv_identifier(primary, allow_bare=True)
-    primary_doi = _normalized_doi(primary)
-    if primary_arxiv:
-        identifiers.setdefault("arxiv", set()).add(primary_arxiv.lower())
-    elif primary_doi:
-        identifiers.setdefault("doi", set()).add(primary_doi)
-    elif primary:
-        # Semantic Scholar IDs are normally 40 hexadecimal characters. Treat
-        # opaque primary IDs as the same authoritative namespace too: exact
-        # equality may reconcile, but metadata must not override disagreement.
-        # Only recognized S2 IDs are case-insensitive. Dataset-local opaque
-        # IDs may differ solely in case and must retain their source identity.
-        normalized_primary = primary
-        if _S2_PATTERN.fullmatch(primary):
-            normalized_primary = primary.lower().removeprefix("s2:")
-        identifiers.setdefault("s2", set()).add(normalized_primary)
-
-    arxiv_identifier = recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)
-    if arxiv_identifier:
-        identifiers.setdefault("arxiv", set()).add(arxiv_identifier.lower())
-    doi_identifier = _normalized_doi(paper.doi)
-    if doi_identifier:
-        identifiers.setdefault("doi", set()).add(doi_identifier)
-
+    primary_arxiv, primary_doi = external_ids_from_canonical_paper_id(paper.paper_id)
+    primary_arxiv_id = (
+        recognize_arxiv_identifier(primary_arxiv, allow_bare=True) or ""
+    ).lower()
+    field_arxiv_id = (
+        recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True) or ""
+    ).lower()
+    primary_doi_id = _normalized_doi(primary_doi)
+    field_doi_id = _normalized_doi(paper.doi)
+    if (primary_arxiv_id and field_arxiv_id and primary_arxiv_id != field_arxiv_id) or (
+        primary_doi_id and field_doi_id and primary_doi_id != field_doi_id
+    ):
+        return {}
+    arxiv_id = field_arxiv_id or primary_arxiv_id
+    doi = field_doi_id or primary_doi_id
     return {
-        namespace: frozenset(sorted(values))
-        for namespace, values in sorted(identifiers.items())
-        if values
+        namespace: identifier
+        for namespace, identifier in (("arxiv", arxiv_id), ("doi", doi))
+        if identifier
     }
 
 
-def _weak_identity_keys(paper: Paper) -> frozenset[str]:
-    """Build metadata evidence only when title, year, and authors are meaningful.
+def _candidate_match_namespaces(left: Paper, right: Paper) -> tuple[str, ...]:
+    """Return shared, conflict-free identifier namespaces for two records.
 
-    :param Paper paper: Paper payload to inspect.
-    :return frozenset[str]: Conservative weak identity keys.
+    Matching requires a shared normalized arXiv or DOI identifier. Any namespace
+    supplied by both records must agree, so partial metadata cannot bridge two
+    contradictory records. Two local-corpus rows remain separate because their
+    source-primary keys can represent distinct corpus entries.
+
+    :param Paper left: First candidate record.
+    :param Paper right: Second candidate record.
+    :return tuple[str, ...]: Matching namespaces, or empty when records differ.
     """
-    title = normalize_identity_text(paper.title or "")
-    if not title or title in _PLACEHOLDER_TITLES:
-        return frozenset()
-    if not isinstance(paper.year, int) or paper.year <= 0:
-        return frozenset()
-    author_tokens = tuple(
-        token
-        for token in (
-            normalize_identity_text(author.name)
-            for author in paper.authors[:3]
-            if getattr(author, "name", None)
-        )
-        if token
-    )
-    if not author_tokens:
-        return frozenset()
-    base = f"meta:{title}|{paper.year}|{'|'.join(author_tokens)}"
-    keys = {base}
-    abstract = normalize_identity_text(paper.abstract or "")
-    if abstract:
-        keys.add(f"{base}|abs:{abstract[:256]}")
-    return frozenset(sorted(keys))
+    if left.is_local_corpus and right.is_local_corpus:
+        return ()
+    left_ids = _external_identifiers(left)
+    right_ids = _external_identifiers(right)
+    shared_namespaces = left_ids.keys() & right_ids.keys()
+    if not shared_namespaces or any(
+        left_ids[namespace] != right_ids[namespace] for namespace in shared_namespaces
+    ):
+        return ()
+    return tuple(sorted(shared_namespaces))
 
 
-def paper_identity_evidence(paper: Paper) -> IdentityEvidence:
-    """Return namespaced strong and conservative weak identity evidence.
+def candidate_records_match(left: Paper, right: Paper) -> bool:
+    """Return whether two candidate records explicitly identify one work.
 
-    :param Paper paper: Paper payload to inspect.
-    :return IdentityEvidence: Evidence used by the reconciliation registry.
+    Matching requires a shared normalized arXiv or DOI identifier. Any namespace
+    supplied by both records must agree, so partial metadata cannot bridge two
+    contradictory records. Two local-corpus rows remain separate because their
+    source-primary keys can represent distinct corpus entries.
+
+    :param Paper left: First candidate record.
+    :param Paper right: Second candidate record.
+    :return bool: Whether both records explicitly identify the same work.
     """
-    return IdentityEvidence(
-        strong_ids=_strong_identifier_evidence(paper),
-        weak_keys=_weak_identity_keys(paper),
-    )
+    return bool(_candidate_match_namespaces(left, right))
 
 
-def _merge_identity_evidence(
-    left: IdentityEvidence,
-    right: IdentityEvidence,
-) -> IdentityEvidence:
-    """Union compatible identity evidence.
+def corpus_matches_s2(corpus_paper: Paper, s2_paper: Paper) -> bool:
+    """Return whether a corpus row and S2 paper explicitly identify one work.
 
-    :param IdentityEvidence left: Existing class evidence.
-    :param IdentityEvidence right: Incoming class evidence.
-    :return IdentityEvidence: Accumulated evidence.
+    Matching requires a shared normalized arXiv or DOI identifier. Any namespace
+    supplied by both records must agree, so partial metadata cannot bridge two
+    contradictory records.
+
+    :param Paper corpus_paper: Locally sourced corpus record.
+    :param Paper s2_paper: Semantic Scholar record.
+    :return bool: Whether both records explicitly identify the same work.
     """
-    namespaces = set(left.strong_ids) | set(right.strong_ids)
-    strong_ids = {
-        namespace: frozenset(
-            set(left.strong_ids.get(namespace, frozenset()))
-            | set(right.strong_ids.get(namespace, frozenset()))
-        )
-        for namespace in sorted(namespaces)
-    }
-    return IdentityEvidence(
-        strong_ids=strong_ids,
-        weak_keys=frozenset(set(left.weak_keys) | set(right.weak_keys)),
-    )
-
-
-def has_strong_identifier_conflict(
-    left: IdentityEvidence,
-    right: IdentityEvidence,
-) -> bool:
-    """Return whether strong-ID evidence contains an irreconcilable conflict.
-
-    Exact DOI/arXiv agreement identifies one work even when Semantic Scholar
-    assigned duplicate opaque records. Conflicting external identifiers remain
-    irreconcilable.
-
-    :param IdentityEvidence left: First evidence set.
-    :param IdentityEvidence right: Second evidence set.
-    :return bool: ``True`` when the evidence cannot describe one work.
-    """
-    shared_namespaces = set(left.strong_ids) & set(right.strong_ids)
-    disagreements = {
-        namespace
-        for namespace in shared_namespaces
-        if set(left.strong_ids[namespace]).isdisjoint(right.strong_ids[namespace])
-    }
-    if not disagreements:
+    if not corpus_paper.is_local_corpus or s2_paper.is_local_corpus:
         return False
-
-    agreeing_external_ids = any(
-        namespace in shared_namespaces
-        and not set(left.strong_ids[namespace]).isdisjoint(right.strong_ids[namespace])
-        for namespace in ("doi", "arxiv")
-    )
-    if disagreements == {"s2"} and agreeing_external_ids:
-        # Semantic Scholar may assign multiple opaque records to one work. A
-        # shared DOI/arXiv identifier is authoritative evidence that those S2
-        # records describe the same paper; contradictory external IDs remain a
-        # hard conflict.
-        return False
-    return True
-
-
-class IdentityRegistry:
-    """Alias ownership and accumulated evidence for reconciled paper classes."""
-
-    def __init__(self) -> None:
-        """Initialize an empty identity registry."""
-        self._owners: dict[str, set[str]] = {}
-        self._evidence: dict[str, IdentityEvidence] = {}
-
-    def __getitem__(self, alias: str) -> str:
-        """Return one unambiguous alias owner.
-
-        :param str alias: Alias key.
-        :return str: Sole canonical owner.
-        :raises KeyError: If the alias is absent or contested.
-        """
-        owner = self.get(alias)
-        if owner is None:
-            raise KeyError(alias)
-        return owner
-
-    def get(self, alias: str) -> str | None:
-        """Return the sole owner of an alias, ignoring contested aliases.
-
-        :param str alias: Alias key.
-        :return Optional[str]: Canonical owner when unambiguous.
-        """
-        owners = self._owners.get(alias, set())
-        if len(owners) != 1:
-            return None
-        return next(iter(owners))
-
-    def owners(self, alias: str) -> set[str]:
-        """Return every current owner of an alias.
-
-        :param str alias: Alias key.
-        :return Set[str]: Copy of canonical owners.
-        """
-        return set(self._owners.get(alias, set()))
-
-    def evidence(self, canonical_id: str) -> IdentityEvidence | None:
-        """Return accumulated evidence for one canonical class.
-
-        :param str canonical_id: Canonical paper ID.
-        :return Optional[IdentityEvidence]: Registered evidence, if present.
-        """
-        return self._evidence.get(canonical_id)
-
-    def canonical_ids(self) -> Iterator[str]:
-        """Iterate canonical class IDs in insertion order.
-
-        :return Iterator[str]: Canonical ID iterator.
-        """
-        return iter(self._evidence)
-
-    def register(self, canonical_id: str, paper: Paper) -> None:
-        """Register aliases and evidence for a canonical paper payload.
-
-        :param str canonical_id: Canonical paper ID.
-        :param Paper paper: Canonical paper payload.
-        :return None: Registry is updated in place.
-        """
-        evidence = paper_identity_evidence(paper)
-        existing = self._evidence.get(canonical_id)
-        if existing is not None and has_strong_identifier_conflict(existing, evidence):
-            # Exact primary-ID equality remains authoritative, but contradictory
-            # secondary IDs are not allowed to contaminate future alias lookups.
-            retained_strong = dict(existing.strong_ids)
-            for namespace, values in evidence.strong_ids.items():
-                if namespace not in retained_strong:
-                    retained_strong[namespace] = values
-            evidence = IdentityEvidence(
-                strong_ids=retained_strong,
-                weak_keys=frozenset(set(existing.weak_keys) | set(evidence.weak_keys)),
-            )
-        elif existing is not None:
-            evidence = _merge_identity_evidence(existing, evidence)
-        self._evidence[canonical_id] = evidence
-
-        conflicting_refresh = existing is not None and has_strong_identifier_conflict(
-            existing, paper_identity_evidence(paper)
-        )
-        for alias in paper_identity_aliases(paper):
-            if conflicting_refresh:
-                # Existing aliases already describe the retained payload; do not
-                # add any aliases from a contradictory direct-register refresh.
-                continue
-            self._owners.setdefault(alias, set()).add(canonical_id)
-
-    def repoint(self, canonical_id: str, replaced_ids: set[str]) -> None:
-        """Collapse compatible classes into one survivor.
-
-        :param str canonical_id: Surviving canonical ID.
-        :param Set[str] replaced_ids: IDs folded into the survivor.
-        :return None: Owners and accumulated evidence are updated.
-        """
-        accumulated = self._evidence.get(
-            canonical_id,
-            IdentityEvidence(strong_ids={}, weak_keys=frozenset()),
-        )
-        for replaced_id in replaced_ids:
-            evidence = self._evidence.get(replaced_id)
-            if evidence is not None and replaced_id != canonical_id:
-                accumulated = _merge_identity_evidence(accumulated, evidence)
-        self._evidence[canonical_id] = accumulated
-        for replaced_id in replaced_ids:
-            if replaced_id != canonical_id:
-                self._evidence.pop(replaced_id, None)
-        for owners in self._owners.values():
-            if owners & replaced_ids:
-                owners.difference_update(replaced_ids)
-                owners.add(canonical_id)
+    return candidate_records_match(corpus_paper, s2_paper)
 
 
 def fetch_candidate_source(
@@ -482,122 +291,6 @@ def require_available_candidate_source(
         )
 
 
-def normalize_identity_text(raw_text: str) -> str:
-    """Normalize free-form text for deterministic paper identity matching.
-
-    :param str raw_text: Raw user/content text.
-    :return str: Lowercased alphanumeric text with compact spacing.
-    """
-    compact = re.sub(r"[^0-9a-z]+", " ", str(raw_text).strip().lower())
-    return " ".join(compact.split())
-
-
-def paper_identity_aliases(paper: Paper) -> list[str]:
-    """Return strong aliases plus conservative metadata corroboration keys.
-
-    :param Paper paper: Paper candidate to alias.
-    :return List[str]: Stable sorted alias keys.
-    """
-    aliases: set[str] = set()
-    for identifier in paper_identifier_aliases(
-        paper_id=paper.paper_id,
-        arxiv_id=paper.arxiv_id,
-        doi=paper.doi,
-    ):
-        aliases.add(f"id:{identifier.lower()}")
-
-    aliases.update(_weak_identity_keys(paper))
-
-    return sorted(aliases)
-
-
-def resolve_aliases(aliases: IdentityRegistry, paper: Paper) -> list[str]:
-    """Resolve every canonical paper ID matched by an incoming payload.
-
-    A record may bridge two previously distinct identifier classes (for
-    example, one payload supplies an arXiv ID and a later one supplies both
-    that arXiv ID and a DOI). Callers reconcile all returned classes before
-    registering the incoming aliases.
-
-    :param IdentityRegistry aliases: Identity registry.
-    :param Paper paper: Incoming paper payload.
-    :return List[str]: Distinct matching canonical IDs in alias-key order.
-    """
-    incoming_evidence = paper_identity_evidence(paper)
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for alias in paper_identity_aliases(paper):
-        for canonical_id in aliases.owners(alias):
-            if canonical_id in seen:
-                continue
-            seen.add(canonical_id)
-            candidates.append(canonical_id)
-
-    exact_primary = str(paper.paper_id)
-    exact_match = (
-        exact_primary if exact_primary in set(aliases.canonical_ids()) else None
-    )
-    compatible: list[str] = []
-    for canonical_id in candidates:
-        if canonical_id == exact_match:
-            compatible.append(canonical_id)
-            continue
-        registered = aliases.evidence(canonical_id)
-        if registered is None or has_strong_identifier_conflict(
-            registered, incoming_evidence
-        ):
-            continue
-        compatible.append(canonical_id)
-
-    if exact_match is not None and exact_match not in compatible:
-        compatible.insert(0, exact_match)
-    if exact_match is not None:
-        compatible.sort(key=lambda item: item != exact_match)
-
-    for idx, left_id in enumerate(compatible):
-        left = aliases.evidence(left_id)
-        if left is None:
-            continue
-        for right_id in compatible[idx + 1 :]:
-            right = aliases.evidence(right_id)
-            if right is not None and has_strong_identifier_conflict(left, right):
-                # A contested weak/external alias must not arbitrarily choose a
-                # survivor. Exact-primary matches may still update that class,
-                # but cannot use the contested alias to absorb the other class.
-                return [exact_match] if exact_match is not None else []
-    return compatible
-
-
-def register_aliases(
-    aliases: IdentityRegistry,
-    canonical_id: str,
-    paper: Paper,
-) -> None:
-    """Register identity aliases for a canonical paper ID.
-
-    :param IdentityRegistry aliases: Identity registry to mutate.
-    :param str canonical_id: Canonical paper identifier.
-    :param Paper paper: Paper payload providing alias candidates.
-    :return None: Alias map is mutated in place.
-    """
-    aliases.register(canonical_id, paper)
-
-
-def repoint_aliases(
-    aliases: IdentityRegistry,
-    canonical_id: str,
-    replaced_ids: set[str],
-) -> None:
-    """Point aliases owned by reconciled records at their surviving paper.
-
-    :param IdentityRegistry aliases: Identity registry to mutate.
-    :param str canonical_id: Surviving canonical paper ID.
-    :param Set[str] replaced_ids: Canonical IDs collapsed into the survivor.
-    :return None: Alias map is mutated in place.
-    """
-    aliases.repoint(canonical_id, replaced_ids)
-
-
 def merge_seed_relation(existing: str, incoming: str) -> str:
     """Merge two seed-relation labels conservatively.
 
@@ -636,6 +329,16 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     :param Paper incoming: Supplemental paper record to merge.
     :return Paper: ``preferred`` with missing metadata hydrated.
     """
+    if preferred.paper_id != incoming.paper_id:
+        matching_namespaces = _candidate_match_namespaces(preferred, incoming)
+        if matching_namespaces:
+            logger.debug(
+                "Merged record %s into %s via shared %s identifier%s",
+                incoming.paper_id,
+                preferred.paper_id,
+                ", ".join(matching_namespaces),
+                "" if len(matching_namespaces) == 1 else "s",
+            )
     if (
         (not preferred.title or preferred.title == "Unknown")
         and incoming.title
@@ -679,68 +382,6 @@ def merge_paper_metadata(preferred: Paper, incoming: Paper) -> Paper:
     return preferred
 
 
-@dataclass(frozen=True)
-class IdentityReconciliation:
-    """Result of reconciling one paper against known identity classes."""
-
-    canonical_id: str | None
-    collapsed_ids: tuple[str, ...] = ()
-    seed_matched: bool = False
-
-
-def reconcile_paper_identity(
-    aliases: IdentityRegistry,
-    seed: Paper,
-    papers: dict[str, Paper],
-    incoming: Paper,
-) -> IdentityReconciliation:
-    """Merge an incoming payload into its seed or candidate identity class.
-
-    The seed always survives. Otherwise the first candidate insertion wins,
-    keeping graph order stable. Callers remain responsible for folding any
-    sidecar state associated with ``collapsed_ids``.
-
-    :param IdentityRegistry aliases: Identity registry to update.
-    :param Paper seed: Canonical seed paper.
-    :param Dict[str, Paper] papers: Candidate mapping to reconcile in place.
-    :param Paper incoming: Newly observed paper payload.
-    :return IdentityReconciliation: Survivor and collapsed candidate IDs.
-    """
-    matched_ids = resolve_aliases(aliases, incoming)
-    seed_id = str(seed.paper_id)
-    if seed_id in matched_ids:
-        collapsed_ids = tuple(
-            paper_id
-            for paper_id in papers
-            if paper_id != seed_id and paper_id in matched_ids
-        )
-        for paper_id in collapsed_ids:
-            merge_paper_metadata(seed, papers.pop(paper_id))
-        merge_paper_metadata(seed, incoming)
-        repoint_aliases(aliases, seed_id, set(collapsed_ids) | {seed_id})
-        register_aliases(aliases, seed_id, seed)
-        register_aliases(aliases, seed_id, incoming)
-        return IdentityReconciliation(seed_id, collapsed_ids, True)
-
-    matched_candidates = [
-        paper_id
-        for paper_id in papers
-        if paper_id != seed_id and paper_id in matched_ids
-    ]
-    if not matched_candidates:
-        return IdentityReconciliation(None)
-
-    canonical_id = matched_candidates[0]
-    collapsed_ids = tuple(matched_candidates[1:])
-    for paper_id in collapsed_ids:
-        merge_paper_metadata(papers[canonical_id], papers.pop(paper_id))
-    merge_paper_metadata(papers[canonical_id], incoming)
-    repoint_aliases(aliases, canonical_id, set(matched_candidates))
-    register_aliases(aliases, canonical_id, papers[canonical_id])
-    register_aliases(aliases, canonical_id, incoming)
-    return IdentityReconciliation(canonical_id, collapsed_ids)
-
-
 def paper_embedding_metadata(paper: Paper) -> dict[str, object]:
     """Build embedding-cache metadata payload for a paper.
 
@@ -770,52 +411,40 @@ class CandidatePool:
     source_status: dict[str, str] = field(default_factory=dict)
 
     def add(self, paper: Paper, *, source: str, relation: str) -> None:
-        """Add a paper to the pool, merging duplicates by identity aliases.
+        """Add a paper, reconciling exact IDs and unambiguous external IDs.
 
         :param Paper paper: Candidate paper payload.
         :param str source: Provenance tag (``reference``/``citation``/``recommendation``).
         :param str relation: Seed-relation label for this provenance.
         :return None: Pool state is mutated in place.
         """
-        if paper.is_seed:
+        paper_id = str(paper.paper_id).strip()
+        if paper.is_seed or not paper_id:
             return
-        reconciliation = reconcile_paper_identity(
-            self._aliases, self.seed, self.papers, paper
-        )
-        if reconciliation.seed_matched:
-            for paper_id in reconciliation.collapsed_ids:
-                self.sources.pop(paper_id, None)
-                self.seed_relations.pop(paper_id, None)
+        if paper_id == self.seed.paper_id or candidate_records_match(self.seed, paper):
+            merge_paper_metadata(self.seed, paper)
             return
-
-        canonical_id = reconciliation.canonical_id
-        if canonical_id is not None:
-            for paper_id in reconciliation.collapsed_ids:
-                self.sources.setdefault(canonical_id, set()).update(
-                    self.sources.pop(paper_id, set())
-                )
-                merged_relation = merge_seed_relation(
-                    self.seed_relations.get(canonical_id, ""),
-                    self.seed_relations.pop(paper_id, ""),
-                )
-                if merged_relation:
-                    self.seed_relations[canonical_id] = merged_relation
-        else:
-            canonical_id = str(paper.paper_id)
+        canonical_id = paper_id
+        existing = self.papers.get(canonical_id)
+        if existing is None:
+            matching_ids = [
+                candidate_id
+                for candidate_id, candidate in self.papers.items()
+                if candidate_records_match(candidate, paper)
+            ]
+            if len(matching_ids) == 1:
+                canonical_id = matching_ids[0]
+                existing = self.papers[canonical_id]
+        if existing is None:
             self.papers[canonical_id] = paper
+        else:
+            merge_paper_metadata(existing, paper)
         self.sources.setdefault(canonical_id, set()).add(source)
         merged_relation = merge_seed_relation(
             self.seed_relations.get(canonical_id, ""), relation
         )
         if merged_relation:
             self.seed_relations[canonical_id] = merged_relation
-        if reconciliation.canonical_id is None:
-            register_aliases(self._aliases, canonical_id, paper)
-
-    def __post_init__(self) -> None:
-        """Initialize alias map with seed identity."""
-        self._aliases = IdentityRegistry()
-        register_aliases(self._aliases, self.seed.paper_id, self.seed)
 
 
 def fetch_candidate_pool(

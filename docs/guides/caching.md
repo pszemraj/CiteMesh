@@ -18,7 +18,7 @@ citemesh cache root
 │   ├── cache_<hash>.lock      # namespace mutation lock
 │   └── hydration_<hash>.lock  # hydration and consuming-search lock
 ├── papers/
-│   └── <sha1>.json            # S2 paper metadata
+│   └── <sha1>.json            # canonical S2 metadata and identifier lookups
 └── references/
     └── <sha1>.json            # S2 reference IDs
 ```
@@ -27,13 +27,23 @@ citemesh cache root
 
 ## Paper metadata and reference IDs
 
-Successful Semantic Scholar lookups persist paper metadata under `papers/`, keyed by the requested ID and known S2, arXiv, and DOI aliases. Later lookups check disk first, seed resolution included, and batch requests send only the IDs still missing. Failed and malformed responses are not cached.
+Successful Semantic Scholar lookups persist one full metadata record under `papers/`, keyed by the returned S2 `paperId`. Requested identifiers and known arXiv/DOI identifiers point directly to that record. Refreshing metadata updates the canonical record; identifiers do not hold separate metadata copies. Later lookups check disk first, seed resolution included, and batch requests send only the IDs still missing. Failed and malformed responses are not cached.
 
-Paper entries have no TTL. `--refresh-paper-cache` bypasses persisted reads and replaces metadata, including citation counts, from successful responses; a failed fetch preserves the old entry. Unchanged title and abstract text reuses its embedding. Paper-cache schema version 2 is required; older entries are treated as misses.
+Paper entries have no TTL. `--refresh-paper-cache` bypasses persisted reads and replaces metadata, including citation counts, from successful responses; a failed fetch preserves the old entry. Unchanged title and abstract text reuses its embedding. Version 2 paper caches remain readable: an older alias copy supplies its canonical paper ID, and lookups read the canonical record. No cache rebuild is required.
 
 Reference IDs live in `references/` under the same no-TTL policy with their own `--refresh-reference-cache`, since cached metadata does not imply its references were fetched. Empty reference lists are cached explicitly so those papers stop costing requests; a first-page `paper not found` returns empty *without* caching, so a later lookup can recover. Corrupt or unusable payloads are rebuilt from the API.
 
 Caching does not make a build offline: citation, reference, recommendation, and search calls still need the network.
+
+## Discovery checks
+
+A normal build always checks the ordered upstream IDs for the requested recommendations, citations, or references with the minimal `paperId` projection; immediate reruns behave the same way. Discovery lists are not cached. Each endpoint invocation checks upstream and uses the returned order directly.
+
+The check preserves upstream membership and ordering among resolvable papers. CiteMesh rebuilds candidates in that order from `papers/`, batch-fetching only missing IDs in batches of at most 500. Cached full records avoid metadata fetches when every returned ID is already present. If the metadata service returns a null or malformed record for one discovered ID, CiteMesh warns and omits that ID while retaining the other papers. IDs removed upstream leave the current candidate list but remain in the paper cache for other builds.
+
+A failed page, failed required metadata batch, or failed `all-cs` fallback stops the required acquisition without replacing existing outputs. When the recent recommendation pool yields no resolvable papers, CiteMesh checks `all-cs`; both checks must succeed before returning an empty recommendation list. A bounded reference-discovery response never overwrites the complete reference-ID enrichment cache.
+
+Normal build output reports that discovery IDs were rechecked upstream separately from reused paper metadata and reference IDs. `--refresh-paper-cache` and `--refresh-reference-cache` still control those two enrichment caches; neither suppresses the discovery check.
 
 ## Embedding namespaces
 

@@ -23,12 +23,11 @@ from citemesh.strategies.base import (
 )
 from citemesh.strategies.candidates import (
     CandidateSourceResult,
-    IdentityRegistry,
+    candidate_records_match,
     fetch_candidate_source,
+    merge_paper_metadata,
     merge_seed_relation,
     provider_lookup_identifier,
-    reconcile_paper_identity,
-    register_aliases,
     require_available_candidate_source,
     scope_candidate_collection,
 )
@@ -85,7 +84,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.seed_relations: dict[str, str] = {}
         self.candidate_source_status: dict[str, str] = {}
         self.candidate_source_results: tuple[CandidateSourceResult, ...] = ()
-        self._identity_aliases = IdentityRegistry()
         self._abstract_index = AbstractSimilarityIndex()
         self._reference_source_unavailable = False
 
@@ -147,7 +145,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         progress_enabled: bool,
         progress_description: str,
     ) -> list[str]:
-        """Add related papers and hydrate references while respecting graph limits.
+        """Add related papers while respecting graph limits.
 
         :param Dict[str, Paper] papers: Collected paper mapping updated in-place.
         :param Paper seed: Canonical seed paper in ``papers``.
@@ -178,53 +176,31 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             raw_paper_id = str(paper.paper_id).strip()
             if not raw_paper_id:
                 continue
-            reconciliation = reconcile_paper_identity(
-                self._identity_aliases, seed, papers, paper
-            )
-            if reconciliation.seed_matched:
-                collapsed_ids = set(reconciliation.collapsed_ids)
-                for paper_id in reconciliation.collapsed_ids:
-                    cached_references = self.reference_cache.pop(paper_id, None)
-                    if cached_references is not None:
-                        self.reference_cache.setdefault(
-                            str(seed.paper_id), cached_references
-                        )
-                    self.seed_relations.pop(paper_id, None)
-                processed_ids[:] = [
-                    paper_id
-                    for paper_id in processed_ids
-                    if paper_id not in collapsed_ids
-                ]
+            if raw_paper_id == seed.paper_id or candidate_records_match(seed, paper):
+                merge_paper_metadata(seed, paper)
                 continue
-
-            canonical_id = reconciliation.canonical_id
-            if canonical_id is not None:
-                collapsed_ids = set(reconciliation.collapsed_ids)
-                for paper_id in reconciliation.collapsed_ids:
-                    cached_references = self.reference_cache.pop(paper_id, None)
-                    if cached_references is not None:
-                        self.reference_cache.setdefault(canonical_id, cached_references)
-                    merged_relation = merge_seed_relation(
-                        self.seed_relations.get(canonical_id, ""),
-                        self.seed_relations.pop(paper_id, ""),
-                    )
-                    if merged_relation:
-                        self.seed_relations[canonical_id] = merged_relation
-                self._ensure_paper_references(papers[canonical_id])
-                processed_ids[:] = [
-                    canonical_id if paper_id in collapsed_ids else paper_id
-                    for paper_id in processed_ids
+            canonical_id = raw_paper_id
+            existing = papers.get(canonical_id)
+            if existing is None:
+                matching_ids = [
+                    paper_id
+                    for paper_id, candidate in papers.items()
+                    if paper_id != seed.paper_id
+                    and candidate_records_match(candidate, paper)
                 ]
+                if len(matching_ids) == 1:
+                    canonical_id = matching_ids[0]
+                    existing = papers[canonical_id]
+            if existing is not None:
+                merge_paper_metadata(existing, paper)
                 processed_ids.append(canonical_id)
                 continue
 
             if len(papers) >= self.max_papers:
                 continue
 
-            papers[raw_paper_id] = paper
-            register_aliases(self._identity_aliases, raw_paper_id, paper)
-            self._ensure_paper_references(paper)
-            processed_ids.append(raw_paper_id)
+            papers[canonical_id] = paper
+            processed_ids.append(canonical_id)
 
         if progress_bar is not None:
             progress_bar.close()
@@ -247,6 +223,42 @@ class CitationGraphBuilder(GraphBuilderStrategy):
             )
             if merged_relation:
                 self.seed_relations[normalized_id] = merged_relation
+
+    def hydrate_collected_references(
+        self, papers: dict[str, Paper], seed: Paper
+    ) -> None:
+        """Hydrate optional reference IDs after required candidate acquisition.
+
+        :param Dict[str, Paper] papers: Collected citation papers.
+        :param Paper seed: Canonical seed paper in ``papers``.
+        :return None: Updates paper records and the in-memory reference cache.
+        """
+        if self.fetch_references:
+            logger.info("Hydrating reference lists for %d papers...", len(papers))
+
+        provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
+        if seed.references:
+            self._ensure_paper_references(seed)
+        elif provider_seed_id is not None:
+            self._ensure_paper_references(seed, provider_lookup_id=provider_seed_id)
+
+        progress_bar = None
+        paper_items = papers.items()
+        if self.fetch_references and stderr_isatty() and len(papers) > 25:
+            progress_bar = progress_iterator(
+                paper_items,
+                description="Hydrating reference lists",
+                unit="papers",
+            )
+            paper_items = progress_bar
+
+        try:
+            for paper_id, paper in paper_items:
+                if paper_id != seed.paper_id:
+                    self._ensure_paper_references(paper)
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
 
     def _get_references(
         self, paper_id: str, *, provider_lookup_id: str | None = None
@@ -277,6 +289,7 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         seed_id: str,
         *,
         validate_source_availability: bool = True,
+        hydrate_references: bool = True,
         seed_paper: Paper | None = None,
         **kwargs: Any,
     ) -> dict[str, Paper]:
@@ -286,6 +299,8 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         :param str seed_id: Seed paper identifier
         :param bool validate_source_availability: Whether to fail when every
             requested relation source is unavailable.
+        :param bool hydrate_references: Whether to perform optional reference-ID
+            enrichment before returning.
         :param Optional[Paper] seed_paper: Pre-resolved seed metadata. When its
             primary identifier is local, only an external alias is sent upstream.
         :param Any kwargs: Strategy-specific options (currently unused).
@@ -298,7 +313,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         self.seed_relations = {}
         self.candidate_source_status = {}
         self.candidate_source_results = ()
-        self._identity_aliases = IdentityRegistry()
         papers = {}
         source_results: list[CandidateSourceResult] = []
 
@@ -322,12 +336,6 @@ class CitationGraphBuilder(GraphBuilderStrategy):
         provider_seed_id = provider_lookup_identifier(seed.paper_id, seed)
         papers[seed.paper_id] = seed
         self.seed_relations[seed.paper_id] = "seed"
-        register_aliases(self._identity_aliases, seed.paper_id, seed)
-
-        if seed.references:
-            self._ensure_paper_references(seed)
-        elif provider_seed_id is not None:
-            self._ensure_paper_references(seed, provider_lookup_id=provider_seed_id)
 
         logger.info("Seed: %s", seed.title)
 
@@ -393,6 +401,12 @@ class CitationGraphBuilder(GraphBuilderStrategy):
                 source_results,
                 context=f"citation acquisition for {seed.paper_id}",
             )
+
+        # Candidate discovery is required acquisition. Complete every requested
+        # source before optional reference enrichment can spend the shared S2
+        # recovery budget.
+        if hydrate_references:
+            self.hydrate_collected_references(papers, seed)
 
         reference_lists = len(self.reference_cache)
         summary = (
