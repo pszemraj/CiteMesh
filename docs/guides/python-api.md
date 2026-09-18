@@ -22,9 +22,7 @@ collect_papers(seed_id: str, **kwargs) -> dict[str, Paper]
 
 `GraphExporter(graph, seed_id, metadata=None, theme_name="dark", layout=None)` exposes `graph_payload()`, the versioned graph dictionary used by JSON and dashboard consumers, plus `to_json`, `to_csv`, `to_bibtex`, `to_graphml`, `to_plotly_html`, `to_dashboard_html`, and `to_interactive_html`. Each writer takes a `pathlib.Path` and creates missing parent directories before publishing the artifact by atomic replacement. `layout` is optional: omit it and the exporter computes one lazily, or pass one to make several exporters or runs share identical geometry. `to_interactive_html` is Pyvis and ignores `layout`. Format contents are in [Output Artifacts](../reference/output-artifacts.md).
 
-Graphs supplied by callers must follow the [graph-input contract](../reference/output-artifacts.md#graph-input).
-
-Because graph JSON is designed for dashboard import, `graph_payload()` and `to_json()` require `seed_id` to identify a node present in the graph. Empty graphs remain valid for the tabular `to_csv()` and bibliography `to_bibtex()` writers.
+Graphs supplied by callers must follow the [graph-input contract](../reference/output-artifacts.md#graph-input) and the writer's requirements for [JSON](../reference/output-artifacts.md#graph-json-strategyjson), [CSV](../reference/output-artifacts.md#csv-strategycsv), or [BibTeX](../reference/output-artifacts.md#bibtex-strategybib).
 
 The collection-package machinery behind `out/dashboard.html` is **not** part of this surface: from Python, write standalone dashboards; use the CLI when you want a collection.
 
@@ -62,7 +60,7 @@ visualize_graph(
 ## Before you build on this
 
 - **Credentials.** Set `S2_API_KEY` before the first builder creates the shared API client. Saved `api.s2_api_key` values are applied by the CLI, not by direct builder construction. The [API request policy](cli.md#appendix-b-troubleshooting) also applies to Python calls.
-- **S2 recovery budget.** `from citemesh.services import SemanticScholarClient` exposes `SemanticScholarClient(retry_budget_seconds=...)`, with the same recovery-time policy as CLI `--s2-retry-budget`: `None` uses 90 seconds anonymously and no elapsed cap with an API key; `0` disables the elapsed cap while retaining 30 attempts per HTTP request. A failed page is retried without replaying earlier pages. Pass the client to a builder when you need an override; builders do not read this setting from `config.toml`.
+- **S2 recovery budget.** Import `SemanticScholarClient` from `citemesh.services` and pass `SemanticScholarClient(retry_budget_seconds=...)` to a builder to override its shared recovery-time allowance. It follows the CLI's [API request policy](cli.md#appendix-b-troubleshooting).
 - **Configuration and caches.** Builders take constructor arguments and built-in defaults; they do not load `[defaults]` from `config.toml`. They share the CLI's [cache root and namespaces](caching.md), so Python runs can reuse or extend those caches.
 - **Constructor keywords mirror CLI flags** (`max_semantic=` is `--max-semantic`, `truncate_dim=` is `--truncate-dim`), but the CLI's cross-flag validation does not run here, so callers can construct combinations the CLI would reject. Builders still check their own invariants - `0 <= max_semantic <= max_papers - 1`, `top_k >= 1`, `max_papers >= 1` - and raise `ValueError`.
 - **Failures are exceptions, not empty graphs.** A total candidate-source outage raises `CandidateAcquisitionError`, semantic inference that cannot produce a complete ranking space raises `EmbeddingInferenceError`, and an unavailable explicit device raises `ValueError`.

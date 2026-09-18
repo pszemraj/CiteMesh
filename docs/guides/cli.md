@@ -72,7 +72,7 @@ See [User Configuration](configuration.md) for saved defaults and [cache mainten
 
 ### Help and console output
 
-Every command takes `-h`/`--help`, listing built-in defaults; `citemesh config list` shows your saved overrides. `--log-width` sizes result tables and logs but never help, `NO_COLOR=1` drops color, and `config get`/`config path` write raw values to stdout for shell substitution while logs go to stderr.
+Every command takes `-h`/`--help`, listing built-in defaults; [user configuration](configuration.md) shows how to inspect saved overrides. `--log-width` sizes result tables and logs but never help; [environment variables](../reference/environment.md#other-respected-variables) control color. Logs go to stderr.
 
 `--log-level debug --log-file out/run.log` adds option routing, effective embedding configuration, retry attempts, model provenance, and namespace decisions. `info` keeps phase progress and one-time runtime summaries; warnings mark degraded operations, recovery, and material cache clears.
 
@@ -87,19 +87,19 @@ Build options are strategy-scoped: an explicit flag unsupported by the selected 
 | `--strategy`, `-s` | `recommendation`, `citation`, `embedding`, or `hybrid` | `recommendation` |
 | `--max-papers`, `-p` | Maximum nodes in the final graph, seed included | `40` (`hybrid`: implicit `45`) |
 | `--refresh-paper-cache` | Bypass [persisted paper metadata](caching.md#paper-metadata-and-reference-ids) for this run | disabled |
-| `--s2-retry-budget SECONDS` | Override the Semantic Scholar recovery-time limit. `0` keeps the 30-attempt limit but disables the elapsed cap. | `90` seconds anonymously; no elapsed cap with an API key |
+| `--s2-retry-budget SECONDS` | Override the [Semantic Scholar recovery budget](#appendix-b-troubleshooting) | `90` seconds anonymously; no elapsed cap with an API key |
 | `--spring-iterations`, `-i` | Iterations for the spring-layout fallback only | `100` |
 | `--dpi`, `-d` | PNG output resolution | `150` |
 | `--seed` | Seed for the layout shared by `png`, `plotly`, `dashboard`, `json` | deterministic built-in seed |
 | `--include-timestamp` | Include generation time in output metadata | disabled |
-| `--export`, `-e` | `png`, `html`, `plotly`, `dashboard`, `json`, `csv`, `bibtex`, `graphml`, `all`; repeat for multiple | `png` |
+| `--export`, `-e` | Select an [export format](../reference/output-artifacts.md); repeat for multiple, or use `all` | `png` |
 | `--theme` | `light`, `dark`, `solarized`, `auto`; `auto` checks environment hints before macOS appearance | `dark` |
-| `--output`, `-o` | Output path, or collection root for dashboard exports. An existing directory receives artifacts inside it; an explicit `*.dashboard.html` path requests standalone mode | `out/` collection root for dashboard, else a per-paper folder |
+| `--output`, `-o` | File or directory, following the [output-location rules](../reference/output-artifacts.md#output-location) | automatic |
 | `--log-level` | `debug`, `info`, `warning`, `error` | `info` |
 | `--log-width` | Console wrap width in columns; `0` means terminal width on a TTY, a stable fallback when redirected | `0` |
 | `--log-file` | Plain-text log file path, overwriting an existing file | disabled |
 
-The logging flags work on every command, including nested `cache` and `config` subcommands. Pyvis `html` exports run vis.js physics and ignore the precomputed `--seed` layout.
+The logging flags work on every command, including nested `cache` and `config` subcommands.
 
 ### Cross-strategy behavior
 
@@ -157,16 +157,14 @@ Formats, dashboard collection and standalone behavior, package schemas, sidecars
 
 ![CiteMesh dashboard built with --theme light, with a paper selected](../../assets/ui-dashboard-light-theme.png)
 
-_`--theme light` with a paper selected. The theme is applied when the export is written; the dashboard has no toggle._
+_`--theme light` with a paper selected._
 
 ## Appendix A: Validation rules
 
 - `build <paper-id>` and `search <query>` require non-empty strings.
 - At least `1`: `--max-papers`, `--spring-iterations`, `--dpi`, `--corpus-size`, `--top-k`, `--truncate-dim`, `--binary-rescore-multiplier`, `--calibration-sample-size`, `--batch-size` / `-bs`, `--candidate-pool-size`, `search --limit`.
-- `search --limit` is capped at `1000` only when the resolved mode uses Semantic Scholar relevance search; local search can request any positive count.
 - At least `0`: `--max-citations`, `--max-references`, `--cache-compression-level` (valid only with `--cache-compression gzip`).
-- `--s2-retry-budget` must be a finite float at least `0`; `0` disables its elapsed-time cap.
-- `--max-semantic` must satisfy `0 <= max-semantic <= max-papers - 1` (hybrid only).
+- `--s2-retry-budget` must be a finite float at least `0`.
 - `--similarity-threshold` and `--min-semantic-similarity` must be finite floats in `[0.0, 1.0]`.
 
 ## Appendix B: Troubleshooting
@@ -176,7 +174,4 @@ Semantic Scholar calls retry with exponential full jitter: up to 30 attempts per
 - **No results / paper not found**: check the identifier format and S2 availability.
 - **Discovery check unavailable**: required acquisition failure exits nonzero without replacing prior outputs; retry later, [configure an API key](configuration.md#api-key), or use the local `arxiv-corpus` semantic source, which requires the embeddings extras and a downloaded, embedded corpus. The error identifies the operation, HTTP failure when available, attempts, recovery time, and stopping reason.
 - **Partial outage**: citation and hybrid builds can continue while at least one requested source completes or returns a valid empty result. A failed source does not by itself prevent checking another source. The recovery budget is shared across all requests: when it is spent, further uncached S2 calls stop for that collection. Export metadata marks every source `complete`, `empty`, or `unavailable`, and a total outage exits nonzero rather than emitting a seed-only graph. Optional reference enrichment stops further network lookups after an outage while still reusing available cached reference lists.
-- **Slow first embedding run**: the cold path downloads the checkpoint and encodes every candidate or corpus paper; later runs read the cache.
-- **A full-split run mentions an older corpus cap**: it extends the existing namespace; check the effective configuration for `split=...` and `corpus=all`.
-- **Missing exports**: unknown `--export` values are rejected.
-- **Rate limits**: configure `S2_API_KEY` ([Environment Variables](../reference/environment.md)). Retry detail appears at `--log-level debug`.
+- **Slow first embedding run or an older corpus cap in the logs**: see [hydration and resume](caching.md#corpus-hydration-and-resume).

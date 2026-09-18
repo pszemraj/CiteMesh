@@ -4,6 +4,8 @@ CiteMesh turns one paper you already know into a graph of the research around it
 
 Run it locally with recommendation, citation, embedding, or hybrid discovery, then export an interactive dashboard, graph data, bibliography, or image.
 
+**[Explore the live demo](https://pszemraj.github.io/CiteMesh/)** to try the Megalodon dashboard in your browser without installing anything.
+
 ![CiteMesh dashboard showing a Megalodon hybrid graph with LM-Infinite selected](assets/ui.png)
 
 _A hybrid graph seeded by "Megalodon" over a full arXiv corpus index, with "LM-Infinite" selected to expose its semantic relation and shortest path to the seed (45 papers, 108 links)._
@@ -18,6 +20,7 @@ Install PyTorch for your hardware first with the [official selector](https://pyt
 
 ```bash
 pip install "citemesh[recommended] @ git+https://github.com/pszemraj/CiteMesh.git"
+citemesh --help
 ```
 
 Extras: `embeddings` (embedding and hybrid strategies), `viz` (HTML/Plotly exports), `recommended` (both), `all` (adds dev tooling). Omit the extra for the citation/recommendation-only CLI. Editable installs: [Contributing](CONTRIBUTING.md).
@@ -52,6 +55,8 @@ Follow the pipeline in [How CiteMesh builds a graph](docs/guides/how-it-works.md
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports and feature requests are welcome via [issues](https://github.com/pszemraj/CiteMesh/issues).
+
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/pszemraj/CiteMesh)
 
 ## License
 

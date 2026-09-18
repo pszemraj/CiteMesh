@@ -9,6 +9,7 @@ citemesh config list
 citemesh config get defaults.semantic_source
 citemesh config set defaults.semantic_source arxiv-corpus
 citemesh config unset defaults.semantic_source
+# config file path, raw on stdout
 citemesh config path
 ```
 

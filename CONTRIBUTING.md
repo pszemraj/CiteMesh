@@ -11,9 +11,7 @@ git clone https://github.com/pszemraj/CiteMesh.git && cd CiteMesh
 pip install -e ".[all]"
 ```
 
-Versions come from git tags via setuptools-scm, so a shallow clone without tags reports `0.0.post1.devN` - run `git fetch --tags` first. Tests import the installed package from the `src/` layout, so rerun `pip install -e ".[all]"` after pulling a change that moves or renames modules.
-
-Semantic Scholar requests use the HTTP transport in `services/semantic_scholar/client.py`; endpoint pagination and payload conversion live alongside it. Transport and pagination tests use mocked HTTP responses and clocks.
+Versions come from Git tags via setuptools-scm. Use a checkout with release tags (`git fetch --tags`); shallow history can report an incorrect development version. Tests import the installed package from the `src/` layout, so rerun `pip install -e ".[all]"` after pulling a change that moves or renames modules.
 
 ## Before you open a PR
 
@@ -30,7 +28,7 @@ Clear stale output before building locally (`rm -rf build dist && python -m buil
 ## Code conventions
 
 - Prefer explicit code over clever shortcuts.
-- Add or update tests for changed behavior. Tests are network-free and isolate the cache directory per test.
+- Add or update tests for changed behavior. Tests are network-free and isolate the cache directory per test; Semantic Scholar transport and pagination tests use mocked HTTP responses and clocks.
 - Patch names where they are used: `patch("citemesh.strategies.recommendation.get_client")` replaces the strategy's binding; patching `citemesh.services.get_client` after import does not.
 - Use reST field docstrings (`:param type name:`, `:return type:`) on every function, including test helpers. Comments explain constraints rather than narrating changes.
 - Follow the [dependency rules](docs/internals/architecture.md#rules), including lazy imports for optional dependencies.
@@ -39,6 +37,10 @@ Clear stale output before building locally (`rm -rf build dist && python -m buil
 - Use release notes for change history; do not maintain a separate changelog.
 
 Agent environment and Git instructions: [AGENTS.md](AGENTS.md).
+
+## Pages demo
+
+The [Pages workflow](.github/workflows/pages.yml) publishes the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) and its [collection package](assets/examples/megalodon/dashboard.citemesh.json) to the [live demo](https://pszemraj.github.io/CiteMesh/). It copies these files without rebuilding them, so update the saved HTML alongside dashboard template or style changes and review it in a browser. Pushes to public `main` redeploy automatically; manual workflow runs must also target `main`.
 
 ## Bugs, features, and scope
 
