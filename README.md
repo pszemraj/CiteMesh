@@ -4,7 +4,7 @@ CiteMesh turns one paper you already know into a graph of the research around it
 
 Run it locally with recommendation, citation, embedding, or hybrid discovery, then export an interactive dashboard, graph data, bibliography, or image.
 
-**[Explore the live demo](https://pszemraj.github.io/CiteMesh/)** — try the Megalodon dashboard in your browser without installing anything.
+**[Explore the live demo](https://pszemraj.github.io/CiteMesh/)** to try the Megalodon dashboard in your browser without installing anything.
 
 ![CiteMesh dashboard showing a Megalodon hybrid graph with LM-Infinite selected](assets/ui.png)
 

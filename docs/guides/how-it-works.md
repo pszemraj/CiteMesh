@@ -35,15 +35,13 @@ Implementation: [candidates.py](../../src/citemesh/strategies/candidates.py).
 
 ## 3. Embedding
 
-Prompt-conditioned embeddings answer different questions in different task spaces: "does this document answer this query?" and "are these two papers about the same thing?" use separate representations. CiteMesh ranks candidates in the retrieval space and scores selected pairs in the symmetric space.
-
-The [runtime policy](../reference/embedding-runtime.md) defines the model, task prompts, dimensions, precision, device selection, and compilation.
+CiteMesh ranks candidates in a retrieval space and scores selected pairs in a symmetric space, using [task-specific prompts](../reference/embedding-runtime.md#task-specific-vector-spaces).
 
 Implementation: [precision.py](../../src/citemesh/strategies/embedding/precision.py) and [model_runtime.py](../../src/citemesh/strategies/embedding/model_runtime.py).
 
 ## 4. The cache
 
-Encoding results are persisted in separate [embedding namespaces](caching.md#embedding-namespaces). A hit reuses the vector while updating bibliographic metadata; a new or changed input is encoded. [Corpus hydration](caching.md#corpus-hydration-and-resume) fills and extends the retrieval cache before ranking.
+The build reuses [cached vectors](caching.md#embedding-namespaces) or [hydrates the corpus](caching.md#corpus-hydration-and-resume) before ranking.
 
 Implementation: [embedding_cache](../../src/citemesh/data/embedding_cache/) and [fingerprint.py](../../src/citemesh/strategies/embedding/fingerprint.py).
 

@@ -7,7 +7,7 @@ CiteMesh stores paper metadata, reference lists, and embeddings on disk for reus
 The [environment settings](../reference/environment.md#platform-variables-used-for-cache-root-resolution) determine the cache root. `citemesh cache scan` prints its path and usage, including a migration hint if the older macOS cache still exists.
 
 ```text
-citemesh cache root
+<cache_root>/
 ├── config.toml                # persistent user configuration
 ├── config.toml.lock           # config write coordination
 ├── .locks/
@@ -23,7 +23,7 @@ citemesh cache root
     └── <sha1>.json            # S2 reference IDs
 ```
 
-`config.toml` is configuration, not cache: it survives `citemesh cache clear` along with its lock and `.locks/` ([User Configuration](configuration.md)). Dashboard collection locks live beside their output packages, not here. HuggingFace keeps checkpoints and datasets in its own cache (`~/.cache/huggingface`, relocatable with `HF_HOME`), which CiteMesh does not touch.
+Dashboard collection locks live beside their output packages, not here. Hugging Face downloads stay outside CiteMesh's cache ([`HF_HOME`](../reference/environment.md#other-respected-variables)).
 
 ## Paper metadata and reference IDs
 
@@ -47,11 +47,11 @@ Normal build output reports that discovery IDs were rechecked upstream separatel
 
 ## Embedding namespaces
 
-A namespace combines model, artifact identity, representation, dimension, formatter, and storage settings. The artifact identity is a resolved commit SHA or a digest of the inference-artifact manifest, so changing a checkpoint selects a different cache. SQLite and HDF5 store each namespace as a pair; [physical layout](../internals/embedding-cache.md#physical-layout) describes the files.
+A namespace combines model, artifact identity, [representation](../reference/embedding-runtime.md#task-specific-vector-spaces), dimension, formatter, and storage settings. The artifact identity is a resolved commit SHA or a digest of the inference-artifact manifest, so changing a checkpoint selects a different cache. SQLite and HDF5 store each namespace as a pair; [physical layout](../internals/embedding-cache.md#physical-layout) describes the files.
 
 Local custom model fingerprints include declared Python modules, their package initializers, and transitive relative imports. Changing those files selects a new namespace. Fingerprinting parses the code without executing it.
 
-- The [retrieval-document and graph-similarity roles](../reference/embedding-runtime.md#task-specific-vector-spaces) have separate namespaces. Candidate mode additionally tags its retrieval namespace `mode=candidates` so S2 candidates never mix with corpus hydration.
+- Candidate mode additionally tags its retrieval namespace `mode=candidates` so S2 candidates never mix with corpus hydration.
 - No device or compute-dtype token in the namespace: CPU, CUDA, and MPS resolve the same one whenever the other contracts match, so a corpus built on a bf16 GPU is read directly by an fp32 host rather than re-encoded. An auto-resolved compute dtype is provenance rather than identity - like the attention backend, TF32, and `--torch-compile`, it shifts numerics slightly without changing what a vector means. The dtype that created a namespace is still recorded, but it does not decide compatibility on reopen.
 - Changing model, revision, profile, dimension, storage precision, or int8 calibration size selects a different namespace. Switching back to the earlier settings reopens the original vectors.
 - The binary prefilter is not part of the namespace: toggling it reuses the same vectors, ranges, and hydration state, rebuilding or dropping only the derived index.
@@ -98,8 +98,7 @@ Hydration compatibility uses dataset source, split, and cap rather than an immut
 
 Corpus storage uses per-dimension affine int8 values. The optional Hamming prefilter keeps `top_k * binary_rescore_multiplier` rows for exact vector rescoring. Calibration ranges come from a reservoir sample and are persisted before the first int8 write.
 
-An int8 write outside those ranges warns once per run. Existing rows need the original ranges for decoding, so recalibration requires a forced rebuild; changing the calibration sample size selects a new namespace. Candidates use float32 without calibration. Flag defaults are in the [CLI storage options](cli.md#graph-edges-and-cache-storage).
-
+An int8 write outside those ranges warns once per run. Existing rows need the original ranges for decoding, so recalibration requires a forced rebuild. Candidates use float32 without calibration. Flag defaults are in the [CLI storage options](cli.md#graph-edges-and-cache-storage).
 
 ## Inspecting and clearing
 

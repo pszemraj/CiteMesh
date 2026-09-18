@@ -4,7 +4,7 @@ Measurements and tradeoffs behind CiteMesh's semantic threshold, embedding dimen
 
 ## Semantic edge threshold (September 2026)
 
-Use **0.74** as the default semantic eligibility threshold for EmbeddingGemma's symmetric STS embeddings at 512 dimensions. The development set selects it by maximum F1 on a fixed 0.65-0.80 grid in 0.01 increments, breaking ties by precision and then higher threshold. A separate validation set assesses the selected value.
+The development set selected a semantic eligibility threshold of **0.74** for EmbeddingGemma's symmetric STS embeddings at 512 dimensions by maximum F1 on a fixed 0.65-0.80 grid in 0.01 increments, breaking ties by precision and then higher threshold. A separate validation set assesses the selected value.
 
 Two independent fixture evaluations used full primary-source arXiv abstracts, with pair labels fixed before inspecting scores. Development has 14 papers from translation, pretrained language models, dense retrieval, graph learning, diffusion, and residual vision networks. Its 81 included pairs contain 13 positives and 68 negatives; 16 negatives deliberately share a nearby ML topic. Ten ambiguous attention/efficiency/representation-lineage pairs are excluded and listed explicitly in the fixture. Transformer/BERT and Transformer/RoBERTa are positives because architectural lineage matters for discovery even across tasks.
 
@@ -35,9 +35,9 @@ python -m pytest -m slow tests/test_semantic_quality.py
 
 ### Decision
 
-Use **512 dimensions** by default for EmbeddingGemma. The previous 256-dimensional default reduced vector storage, but the paired corpus study below found a substantial loss of the full model's nearest neighbors. Moving to 512 recovered more of those neighbors with essentially the same GPU corpus encoding time and an 11.4% increase in complete cache size. Local search became slower.
+The paired corpus study below compares the previous 256-dimensional default with 512 dimensions. The smaller space reduced vector storage but lost a substantial share of the full model's nearest neighbors. Moving to 512 recovered more of those neighbors with essentially the same GPU corpus encoding time and an 11.4% increase in complete cache size. Local search became slower.
 
-The [EmbeddingGemma profile](embedding-runtime.md#embeddinggemma-profile) applies the dimension default. This experiment directly measured CUDA corpus retrieval; it did not measure every build or runtime path.
+The [EmbeddingGemma profile](embedding-runtime.md#embeddinggemma-profile) controls the dimension default. This experiment directly measured CUDA corpus retrieval; it did not measure every build or runtime path.
 
 ### Paired corpus and runtime
 
@@ -118,7 +118,7 @@ Two GPT-5.6 Sol reviewers each assessed six different established seeds using bl
 
 Both saved caches reopened with 100,000 rows and reused hydration without loading the dataset. CiteMesh's actual graph candidate search reproduced all 60 ranked lists exactly. The evaluation did not measure the full 3.15-million-paper corpus, Semantic Scholar fusion, graph topology, or real CPU/MPS execution. The 11.4% complete-cache increase applies to these INT8 corpus caches; it is not an estimate for FP32 candidate or graph-similarity stores.
 
-The decision favors retention of the full model's retrieval behavior over the lowest storage and search cost. The measured gain supports 512d as the common default, while explicit 256d remains available when those costs matter more.
+The decision favors retention of the full model's retrieval behavior over the lowest storage and search cost. Explicit 256d remains available when those costs matter more.
 
 ## Hybrid defaults (February 2026)
 

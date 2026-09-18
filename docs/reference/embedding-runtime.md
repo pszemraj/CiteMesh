@@ -62,7 +62,7 @@ EmbeddingGemma compute dtype: bfloat16 on `cuda` and `cpu` when native support i
 
 ## Dependency floor
 
-The `embeddings` extra provides `torch>=2.9.0` (`>=2.13.0` on macOS, the release verified for MPS bf16), `transformers>=5.2.0`, `sentence-transformers>=5.7.0`, `datasets>=2.14.0`, and `huggingface_hub>=0.24.0`. The automatic-dtype contract comes from Transformers - Sentence Transformers only forwards it, so its floor is the oldest release verified against this stack.
+The [`embeddings` extra](../../pyproject.toml) declares the dependency floor. The automatic-dtype contract comes from Transformers - Sentence Transformers only forwards it, so its floor is the oldest release verified against this stack.
 
 The default suite covers prompt routing, cache separation, and complete vector sets. Run real-model checks as described in [Contributing](../../CONTRIBUTING.md#before-you-open-a-pr).
 

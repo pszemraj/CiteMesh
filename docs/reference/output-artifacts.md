@@ -45,7 +45,7 @@ The sidecar follows the resolved output: `<strategy>.config.json` beside strateg
 
 ## Collection package (`dashboard.citemesh.json`)
 
-UTF-8 JSON with `kind: "citemesh-dashboard-collection"`, `schema_version: 1`, `current_result_id`, and `results` ordered most-recently-updated first. Each result holds its stable identity, a seed/title/strategy summary, an `updated_at` timestamp, the graph payload (`kind: "citemesh-graph"`, `schema_version: 1`), and portable `build` settings. Machine-local output paths are excluded, so the package moves between machines as one file.
+UTF-8 JSON with `kind: "citemesh-dashboard-collection"`, `schema_version: 1`, `current_result_id`, and `results` ordered most-recently-updated first. Each result holds its stable identity, a seed/title/strategy summary, an `updated_at` timestamp, the graph payload, and portable `build` settings. Machine-local output paths are excluded, so the package moves between machines as one file.
 
 Results are keyed by `(strategy, seed_id)`: a new seed adds a result, the same seed under a different strategy adds a separate one, and the same seed and strategy replaces that slot even when model or build settings changed - collections keep no history of reruns. A refresh also drops optional formats for that strategy that an earlier run produced and this one did not select; other strategies' and unrelated user files are untouched.
 
@@ -96,6 +96,7 @@ _**Prior works** active with a paper selected: the graph and paper list narrow t
 
 Toolbar controls and data actions:
 
+- **CiteMesh / GitHub / Docs / Issues** - open the repository, [documentation](../README.md), or issue tracker in a new tab
 - **Prior works / Derivative works** - scope the graph and list by citation direction relative to the seed - papers it references, or papers that cite it - falling back to publication year at or before (or at or after) the seed only for papers the citation graph gives no direction, so the seed, `overlap` papers, and papers without a usable year stay in both
 - **List view** - scroll the paper list pane into view; shown only on the stacked layout at 1100px and below, where the list sits under the graph
 - **Filters** - text search, sort, year range, provenance chips (citation/semantic/both), `Saved` chip
@@ -118,7 +119,7 @@ Node color is a publication-year gradient shared with the legend and year timeli
 
 The run contract for reproducibility and audit trails: `schema_version`, `build`, `outputs` (resolved artifact paths), and `metadata`.
 
-`build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record citation-expansion budgets), `hybrid` for the resolved `max_semantic`, `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. `build.refresh_paper_cache` records whether fresh metadata was requested. `build.s2_retry_budget` records the effective recovery-time cap in seconds; `0.0` means the elapsed cap was disabled while the 30-attempt ceiling remained active.
+`build` carries strategy-specific sections: `citation` for collection knobs (citation and recommendation record `similarity_threshold` and the shared reference-hydration settings; citation and hybrid also record citation-expansion budgets), `hybrid` for the resolved `max_semantic`, `embedding` for semantic settings including the requested `device`, `model_profile`, and model-revision selector plus `top_k`, the per-node edge cap. Its model and truncate dimension are replaced with the runtime-active checkpoint and effective dimension so the saved settings replay a fallback or profile default. The original revision selector stays in `build` because it is part of the cache namespace; the immutable resolved revision is recorded as metadata. Inactive options are omitted: candidate runs record no corpus-hydration flags, corpus runs no candidate-pool budgets, FP32 storage no INT8 calibration or prefilter settings. `build.refresh_paper_cache` records whether fresh metadata was requested. `build.s2_retry_budget` records the effective recovery-time cap in seconds; `0.0` disables the elapsed cap (see the [API request policy](../guides/cli.md#appendix-b-troubleshooting)).
 
 `metadata` carries:
 
