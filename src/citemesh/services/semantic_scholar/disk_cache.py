@@ -130,6 +130,7 @@ def _persist_paper(paper: Paper, requested_id: str) -> None:
             canonical_paper_id,
             exc,
         )
+        return
 
     aliases = {
         normalize_paper_id(alias)

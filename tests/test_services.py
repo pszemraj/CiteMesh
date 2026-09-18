@@ -7,6 +7,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -271,6 +272,39 @@ def test_reassigned_alias_is_not_reclaimed_by_later_old_canonical_refresh() -> N
         "old",
     )
     assert s2.disk_cache._load_cached_paper("10.1/shared").paper_id == "new"
+
+
+def test_failed_canonical_write_preserves_existing_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed metadata write must not redirect aliases to a missing record.
+
+    :param pytest.MonkeyPatch monkeypatch: Injects a canonical cache write failure.
+    :return None: Verifies the previously cached paper remains reachable.
+    """
+    alias = "10.1000/shared"
+    old = Paper(paper_id="old", title="Old", year=2020, doi=alias)
+    new = Paper(paper_id="new", title="New", year=2024, doi=alias)
+    s2.disk_cache._persist_paper(old, alias)
+    new_path = s2.disk_cache._paper_cache_path(new.paper_id)
+    write_json = s2.disk_cache.atomic_write_json
+
+    def fail_canonical_write(path: Path, payload: dict[str, Any]) -> None:
+        """Fail the new record write while allowing alias writes.
+
+        :param Path path: Destination cache file.
+        :param dict[str, Any] payload: Cache payload to write.
+        :return None: Writes all files except the new canonical record.
+        """
+        if path == new_path:
+            raise OSError("canonical cache write failed")
+        write_json(path, payload)
+
+    monkeypatch.setattr(s2.disk_cache, "atomic_write_json", fail_canonical_write)
+    s2.disk_cache._persist_paper(new, alias)
+
+    assert not new_path.exists()
+    assert s2.disk_cache._load_cached_paper(alias) == old
 
 
 def test_get_paper_cache_not_found_refresh_and_reference_enrichment() -> None:
