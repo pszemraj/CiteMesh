@@ -434,13 +434,12 @@ class SemanticScholarClient(_EndpointsMixin):
                         reason=exhausted.retry_diagnostics.stop_reason,
                     )
                 return self._handle_unavailable(exhausted, raise_on_unavailable)
-            except (SemanticScholarRequestError, TypeError):
-                if recovery_started_at is not None:
-                    self._charge_recovery(state, recovery_started_at)
-                raise
             except (
-                requests.RequestException,
-                ValueError,
+                requests.Timeout,
+                requests.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError,
+                requests.exceptions.JSONDecodeError,
                 _RetryableRequestError,
             ) as exc:
                 charged_from = (
@@ -452,6 +451,15 @@ class SemanticScholarClient(_EndpointsMixin):
                     self._charge_recovery(state, charged_from)
                 state.last_recovery_error = exc
                 last_error = exc
+            except (
+                SemanticScholarRequestError,
+                requests.RequestException,
+                TypeError,
+                ValueError,
+            ):
+                if recovery_started_at is not None:
+                    self._charge_recovery(state, recovery_started_at)
+                raise
             else:
                 if recovery_started_at is not None:
                     self._charge_recovery(state, recovery_started_at)

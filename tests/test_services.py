@@ -67,12 +67,12 @@ class _BrokenJsonResponse(_MockResponse):
     """Response whose JSON body cannot be decoded."""
 
     def json(self) -> Any:
-        """Raise a decoder-like value error.
+        """Raise the decoder error emitted by Requests.
 
-        :raises ValueError: Always.
+        :raises requests.exceptions.JSONDecodeError: Always.
         :return Any: Does not return successfully.
         """
-        raise ValueError("malformed JSON")
+        raise requests.exceptions.JSONDecodeError("malformed JSON", "invalid", 0)
 
 
 class _Clock:
@@ -764,6 +764,63 @@ def test_retry_attempt_count_status_and_nonretryable_4xx(
         with pytest.raises(SemanticScholarRequestError, match="S2_API_KEY"):
             client.get_paper("forbidden", raise_on_unavailable=True)
         client._session.get.assert_called_once()
+
+
+@pytest.mark.parametrize("error_type", [ValueError, requests.exceptions.InvalidHeader])
+@pytest.mark.parametrize("strict", [False, True])
+def test_request_configuration_errors_fail_without_retry(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[Exception], strict: bool
+) -> None:
+    """Invalid request settings surface once for strict and tolerant callers.
+
+    :param pytest.MonkeyPatch monkeypatch: Removes retry waits to expose replay.
+    :param type[Exception] error_type: Local timeout or header validation error.
+    :param bool strict: Whether service unavailability would normally raise.
+    :return None: Verifies the original error escapes without repeated requests.
+    """
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 0.0)
+    error = error_type("invalid request configuration")
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(side_effect=error)
+
+        with pytest.raises(error_type) as caught:
+            client.get_paper("p1", raise_on_unavailable=strict)
+
+        assert caught.value is error
+        client._session.get.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "error_type",
+    [
+        requests.Timeout,
+        requests.ConnectionError,
+        requests.exceptions.ChunkedEncodingError,
+        requests.exceptions.ContentDecodingError,
+    ],
+)
+def test_transient_transport_errors_retry(
+    monkeypatch: pytest.MonkeyPatch, error_type: type[Exception]
+) -> None:
+    """Transient sends and response transfer failures can recover on retry.
+
+    :param pytest.MonkeyPatch monkeypatch: Removes retry waits.
+    :param type[Exception] error_type: Retryable transport or response error.
+    :return None: Verifies one retry returns the successful paper.
+    """
+    monkeypatch.setattr(s2.retry, "_jittered_backoff", lambda *_a, **_k: 0.0)
+    with SemanticScholarClient(api_key="test", retry_budget_seconds=0) as client:
+        _disable_pacing(client)
+        client._session.get = MagicMock(
+            side_effect=[
+                error_type("transient transport failure"),
+                _MockResponse(200, _paper_payload("p1")),
+            ]
+        )
+
+        assert client.get_paper("p1", raise_on_unavailable=True).paper_id == "p1"
+        assert client._session.get.call_count == 2
 
 
 def test_retry_after_cap_and_nonfinite_values() -> None:
