@@ -406,6 +406,14 @@ def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
 
 
 @pytest.mark.parametrize(
+    ("paper_id", "url_id"),
+    [
+        ("seed", "seed"),
+        ("DOI:10.1000/example", "10.1000/example"),
+        ("arXiv:hep-th/9901001", "arxiv%3Ahep-th/9901001"),
+    ],
+)
+@pytest.mark.parametrize(
     ("method", "relation", "nested"),
     [
         ("get_paper_references", "references", "citedPaper"),
@@ -413,13 +421,15 @@ def test_batch_mixed_null_malformed_all_unknown_and_bad_request(
     ],
 )
 def test_relation_discovery_uses_fresh_rest_pages_and_complete_batch_enrichment(
-    method: str, relation: str, nested: str
+    method: str, relation: str, nested: str, paper_id: str, url_id: str
 ) -> None:
     """Relation discovery pages, deduplicates, and bulk-loads full records.
 
     :param str method: Public relation method.
     :param str relation: Relation endpoint segment.
     :param str nested: Nested response paper key.
+    :param str paper_id: Seed identifier, including slash-bearing DOI/arXiv IDs.
+    :param str url_id: Expected normalized and quoted identifier in the URL.
     :return None: Verifies discovery and enrichment.
     """
     pages = [
@@ -432,14 +442,14 @@ def test_relation_discovery_uses_fresh_rest_pages_and_complete_batch_enrichment(
         client._session.post = MagicMock(
             return_value=_MockResponse(200, [_paper_payload("a"), _paper_payload("b")])
         )
-        papers = getattr(client, method)("seed", limit=2, raise_on_unavailable=True)
+        papers = getattr(client, method)(paper_id, limit=2, raise_on_unavailable=True)
     assert [paper.paper_id for paper in papers] == ["a", "b"]
     assert client._session.get.call_count == 2
     for call in client._session.get.call_args_list:
+        assert call.args[0] == f"{s2.endpoints.PAPER_BASE_URL}/{url_id}/{relation}"
         assert call.kwargs["params"]["fields"] == "paperId"
     assert client._session.post.call_args.kwargs["json"] == {"ids": ["a", "b"]}
     assert client._session.get.call_args_list[1].kwargs["params"]["offset"] == 2
-    assert f"/{relation}" in client._session.get.call_args_list[0].args[0]
 
 
 def test_relation_retries_only_failed_page_and_every_invocation_is_fresh(

@@ -258,7 +258,7 @@ class _EndpointsMixin:
             if limit is not None:
                 page_limit = min(page_limit, max(1, limit - len(ordered_ids)))
             response = self._request_json(
-                f"{PAPER_BASE_URL}/{quote(paper_id, safe='')}/{relation}",
+                f"{PAPER_BASE_URL}/{quote(paper_id, safe='/')}/{relation}",
                 {
                     "fields": "paperId",
                     "limit": page_limit,
