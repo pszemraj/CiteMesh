@@ -3279,6 +3279,35 @@ def test_candidate_pool_merges_s2_ids_with_shared_external_ids(
     ) in caplog.messages
 
 
+@pytest.mark.parametrize("primary_id", ["1" * 40, "arxiv:HEP-TH/9901001"])
+def test_candidate_pool_merges_legacy_arxiv_case_variants(primary_id: str) -> None:
+    """arXiv case and version variants retain one node and combined provenance.
+
+    :param str primary_id: Opaque S2 ID or an arXiv primary with mixed field casing.
+    :return None: Verifies normalized identity and merged relation metadata.
+    """
+    pool = CandidatePool(seed=_seed_paper())
+    first = Paper(
+        paper_id=primary_id,
+        title="Same work",
+        year=1999,
+        arxiv_id="hep-th/9901001v1",
+    )
+    second = Paper(
+        paper_id="2" * 40,
+        title="Same work",
+        year=1999,
+        arxiv_id="HEP-TH/9901001v2",
+    )
+
+    pool.add(first, source="reference", relation="referenced_by_seed")
+    pool.add(second, source="citation", relation="cites_seed")
+
+    assert list(pool.papers) == [primary_id]
+    assert pool.sources[primary_id] == {"reference", "citation"}
+    assert pool.seed_relations[primary_id] == "overlap"
+
+
 @pytest.mark.parametrize("opaque_case_distinction", [False, True])
 def test_identity_reconciliation_rejects_conflicting_strong_ids(
     opaque_case_distinction: bool,

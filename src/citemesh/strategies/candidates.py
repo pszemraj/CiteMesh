@@ -145,8 +145,12 @@ def _external_identifiers(paper: Paper) -> dict[str, str]:
     :return dict[str, str]: Valid, internally consistent identifiers by namespace.
     """
     primary_arxiv, primary_doi = external_ids_from_canonical_paper_id(paper.paper_id)
-    primary_arxiv_id = recognize_arxiv_identifier(primary_arxiv, allow_bare=True)
-    field_arxiv_id = recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True)
+    primary_arxiv_id = (
+        recognize_arxiv_identifier(primary_arxiv, allow_bare=True) or ""
+    ).lower()
+    field_arxiv_id = (
+        recognize_arxiv_identifier(paper.arxiv_id, allow_bare=True) or ""
+    ).lower()
     primary_doi_id = _normalized_doi(primary_doi)
     field_doi_id = _normalized_doi(paper.doi)
     if (primary_arxiv_id and field_arxiv_id and primary_arxiv_id != field_arxiv_id) or (
