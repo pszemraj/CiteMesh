@@ -1640,16 +1640,21 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     for css_token in [
         "html, body {\n      margin: 0;\n      height: 100%;\n      overflow: hidden;",
         "#dashboard-root {\n      display: grid;\n      gap: 12px;\n      padding: 12px;\n      flex: 1 1 auto;",
+        "min-width: 0;\n      max-width: 100%;\n      height: 100%;",
         "#paper-list {\n      margin: 0;\n      padding: 0;\n      list-style: none;\n      overflow-y: auto;",
         "#detail-content {\n      padding: 14px 13px 12px;\n      flex: 1;\n      min-height: 0;\n      display: flex;\n      flex-direction: column;\n      gap: 16px;\n      overflow-y: auto;",
         "#graph-pane .pane-header .muted {\n      max-width: 72%;\n      font-size: 12px;",
         "min-height: 160px;\n      flex: 1 0 160px;",
         "#detail-pane { grid-area: detail; min-height: 620px; }",
         ".toolbar-row.secondary { grid-template-columns: 140px 140px 1fr auto; }",
-        "@media (max-width: 640px) {\n      #dashboard-toolbar { position: static; }",
+        "@media (max-width: 640px) {\n      #dashboard-toolbar {\n        position: static;\n        margin: 8px 8px 0;",
         ".nav-btn[disabled] {\n      opacity: 0.45;\n      cursor: default;",
         "@media (min-width: 1101px) {\n      #list-view-btn {\n        display: none;",
         ".toolbar-row.primary,\n      .toolbar-row.secondary {\n        grid-template-columns: minmax(0, 1fr);",
+        "#global-nav,\n      #global-nav .nav-group {\n        align-items: stretch;\n        width: 100%;",
+        "#result-select {\n        width: 100%;\n        min-width: 0;\n        max-width: none;",
+        "input,\n      select,\n      button {\n        min-height: 44px;\n        font-size: 16px;",
+        "#year-timeline {\n        width: 100%;\n        grid-template-columns: auto minmax(0, 1fr) auto;",
         ".toolbar-row.primary #search-input,\n      #provenance-filters {\n        grid-column: auto;",
         ".js-plotly-plot .modebar-btn path {\n      fill: var(--text-muted) !important;",
         ".js-plotly-plot .modebar-btn:focus-visible {\n      outline: 2px solid var(--accent);",
@@ -1723,6 +1728,7 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert neighborhood_trace["line"]["width"] == pytest.approx(2.0)
     marker = node_trace["marker"]
     assert marker["showscale"] is False
+
     assert marker["sizemode"] == "area"
     assert marker["sizeref"] > 0
     assert marker["sizemin"] == 4
@@ -1756,6 +1762,69 @@ def test_exporter_dashboard_contracts(tmp_path: Path) -> None:
     assert "seed paper" in seed_hover
     # Hover cards use the dashboard panel chrome, not the marker color.
     assert node_trace["hoverlabel"]["bgcolor"] == "#171d25"
+
+
+def test_pages_demo_assets_and_metadata_are_staged() -> None:
+    """Pages staging keeps demo branding out of ordinary dashboard exports."""
+    repository = Path(__file__).resolve().parents[1]
+    demo_dir = repository / "assets" / "examples" / "megalodon"
+    template = (
+        repository
+        / "src"
+        / "citemesh"
+        / "visualization"
+        / "dashboard"
+        / "assets"
+        / "template.html"
+    ).read_text(encoding="utf-8")
+    demo_html = (demo_dir / "dashboard.html").read_text(encoding="utf-8")
+    workflow = (repository / ".github" / "workflows" / "pages.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CiteMesh — Interactive Research Map" not in template
+    assert "favicon.ico" not in template
+    assert "<title>CiteMesh Dashboard</title>" in template
+    for metadata in [
+        "<title>CiteMesh — Interactive Research Map</title>",
+        '<link rel="canonical" href="https://pszemraj.github.io/CiteMesh/" />',
+        '<link rel="icon" href="favicon.ico" sizes="any" />',
+        '<meta property="og:image" content="https://pszemraj.github.io/CiteMesh/og-image.png" />',
+        '<meta name="twitter:card" content="summary_large_image" />',
+        "grid-template-columns: minmax(0, 1fr);",
+        "min-height: 44px;",
+    ]:
+        assert metadata in demo_html
+    package = json.loads(
+        (demo_dir / "dashboard.citemesh.json").read_text(encoding="utf-8")
+    )
+    embedded_collection = _extract_dashboard_script_json(
+        demo_html, "citemesh-dashboard-collection"
+    )
+    embedded_graph = _extract_dashboard_script_json(
+        demo_html, "citemesh-dashboard-data"
+    )
+    assert embedded_collection == package
+    current_graph = next(
+        result["payload"]
+        for result in package["results"]
+        if result["result_id"] == package["current_result_id"]
+    )
+    assert {node["id"] for node in embedded_graph["nodes"]} == {
+        node["id"] for node in current_graph["nodes"]
+    }
+    assert {(edge["source"], edge["target"]) for edge in embedded_graph["edges"]} == {
+        (edge["source"], edge["target"]) for edge in current_graph["edges"]
+    }
+    for asset in ["favicon.ico", "og-image.png"]:
+        assert (
+            f'cp assets/examples/megalodon/{asset} "$RUNNER_TEMP/citemesh-pages/{asset}"'
+            in workflow
+        )
+    with (demo_dir / "favicon.ico").open("rb") as icon:
+        assert icon.read(4) == b"\x00\x00\x01\x00"
+    with (demo_dir / "og-image.png").open("rb") as social_image:
+        assert social_image.read(8) == b"\x89PNG\r\n\x1a\n"
 
 
 @pytest.mark.parametrize("theme_name", ["dark", "light", "solarized", "auto"])

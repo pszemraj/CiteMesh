@@ -41,7 +41,9 @@ Agent environment and Git instructions: [AGENTS.md](AGENTS.md).
 
 ## Pages demo
 
-The [Pages workflow](.github/workflows/pages.yml) publishes the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html) and its [collection package](assets/examples/megalodon/dashboard.citemesh.json) to the [live demo](https://pszemraj.github.io/CiteMesh/). It copies these files without rebuilding them, so update the saved HTML alongside dashboard template or style changes and review it in a browser. Pushes to public `main` redeploy automatically; manual workflow runs must also target `main`.
+The [Pages workflow](.github/workflows/pages.yml) publishes the [saved Megalodon dashboard](assets/examples/megalodon/dashboard.html), its [collection package](assets/examples/megalodon/dashboard.citemesh.json), and demo-only [`favicon.ico`](assets/examples/megalodon/favicon.ico) and [`og-image.png`](assets/examples/megalodon/og-image.png) assets to the [live demo](https://pszemraj.github.io/CiteMesh/). It copies these files without rebuilding them.
+
+When dashboard template, style, or script assets change, refresh `assets/examples/megalodon/dashboard.html` from the Megalodon collection, preserving its embedded graph data and the demo-only head metadata (canonical URL, favicon, Open Graph, and Twitter card). Keep the generic dashboard template unbranded, leave `dashboard.citemesh.json` untouched unless the example graph itself changes, and review the saved viewer in a browser. Pushes to public `main` redeploy automatically; manual workflow runs must also target `main`.
 
 ## Bugs, features, and scope
 
